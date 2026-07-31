@@ -27,6 +27,8 @@ import jwt as pyjwt
 from .core.config import (
     JWT_EXPIRY_MINUTES,
     JWT_REFRESH_EXPIRY_DAYS,
+    REFRESH_ADOPT_RECORDLESS,
+    REFRESH_ROTATION_GRACE_SECONDS,
     SSO_SESSION_MAX_AGE_SECONDS,
 )
 from backend.common.identity_provenance import asserted_fields, build_snapshot
@@ -37,6 +39,7 @@ from .core.tokens import (
     create_refresh_token,
     decode_token,
     decode_refresh_token,
+    is_foreign_token_error,
 )
 from .app_auth_config import (
     AuthConfigProvider,
@@ -97,6 +100,33 @@ class SsoDecision:
     deny_reasons: tuple[str, ...] = ()
     has_existing_identity: bool = False
     email_verified: bool = False
+
+
+class _RefreshRejected(Exception):
+    """Carries a refresh rejection out of the DB session scope.
+
+    Everything a rejection still has to do — revoke the family, kill live
+    access tokens, write the audit row — has to happen on a connection
+    the request scope is no longer holding, and after that scope has
+    rolled back. Raising this instead of the caller-facing error lets
+    ``refresh`` unwind the session first and settle the consequences
+    afterwards. It never escapes ``refresh``.
+    """
+
+    def __init__(
+        self,
+        error: Exception,
+        *,
+        kill_sessions_for: Optional[str] = None,
+        audit: Optional[tuple[str, dict]] = None,
+    ):
+        super().__init__(str(error))
+        #: The error to re-raise at the caller once cleanup is done.
+        self.error = error
+        #: User id whose live access tokens should be tombstoned, if any.
+        self.kill_sessions_for = kill_sessions_for
+        #: ``(event_type, payload)`` to emit in its own transaction.
+        self.audit = audit
 
 
 class LocalIdentityService:
@@ -270,8 +300,20 @@ class LocalIdentityService:
                     {"user_id": orm.id, "email": orm.email, "provider": "local"},
                 )
 
+            # Inside the scope, so the token and its record commit or fail
+            # together. ``auth_time`` is None: this is a local password
+            # login, and the SSO re-auth ceiling does not apply to it.
+            refresh_token = await self._mint_recorded_refresh(
+                session, user_id=orm.id, family_id=None, auth_time=None,
+            )
+
         user = _orm_to_user(orm, role=_primary_role(roles))
-        tokens = self._issue_tokens(user, family_id=None, claims_extra=claims_extra)
+        tokens = self._issue_tokens(
+            user,
+            family_id=None,
+            claims_extra=claims_extra,
+            refresh_token=refresh_token,
+        )
         return user, tokens
 
     async def logout(self, refresh_token: Optional[str]) -> None:
@@ -295,29 +337,129 @@ class LocalIdentityService:
         try:
             claims = decode_refresh_token(refresh_token)
         except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError) as exc:
-            raise InvalidRefreshToken(str(exc)) from exc
+            raise InvalidRefreshToken(
+                str(exc), foreign=is_foreign_token_error(exc),
+            ) from exc
+
+        # Every rejection below has to revoke the family durably, and the
+        # request session is rolled back on the way out — so the revocation
+        # cannot ride on it. It also must not run *inside* this block:
+        # opening a second connection while the first is still held is a
+        # deadlock against SQLite's single writer and, on Postgres, a way
+        # to exhaust the pool under load waiting for a connection that only
+        # frees when this scope exits. So rejections are carried out of the
+        # scope by ``_RefreshRejected`` and settled once it has closed.
+        try:
+            return await self._refresh_within_session(claims)
+        except _RefreshRejected as rejection:
+            await self._revoke_family_committed(claims.family_id)
+            if rejection.kill_sessions_for is not None and self._session_killer:
+                try:
+                    await self._session_killer(rejection.kill_sessions_for)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "session_killer failed during refresh rejection "
+                        "(user=%s): %s", rejection.kill_sessions_for, exc,
+                    )
+            if rejection.audit is not None:
+                await self._emit_audit(*rejection.audit)
+            raise rejection.error from None
+
+    async def _refresh_within_session(self, claims) -> tuple[User, SessionTokens]:
+        # Mint the candidate successor before claiming. Its identity has
+        # to be recorded in the same statement that consumes the
+        # presented token, so a concurrent refresh that loses the race
+        # can read it back instead of being treated as a thief. Minting
+        # is pure CPU; if we lose, this one is simply discarded.
+        successor_token, successor = create_refresh_token(
+            user_id=claims.sub,
+            family_id=claims.family_id,
+            auth_time=claims.auth_time,
+        )
 
         claims_extra: dict = {}
         async with self._session_factory() as session:
             store = self._refresh_store_factory(session)
-            err = await check_and_record_rotation(
+            outcome = await check_and_record_rotation(
                 store,
                 presented_jti=claims.jti,
                 presented_family=claims.family_id,
                 presented_exp=claims.exp,
+                presented_user_id=claims.sub,
+                presented_auth_time=claims.auth_time,
+                presented_mint_ms=claims.mint_ms,
+                successor_jti=successor.jti,
+                successor_exp=successor.exp,
+                successor_mint_ms=successor.mint_ms,
+                grace_seconds=REFRESH_ROTATION_GRACE_SECONDS,
+                adopt_recordless=REFRESH_ADOPT_RECORDLESS,
             )
-            if err is not None:
+            if outcome.status == "unknown":
+                # Allow-by-record: no row, no session. Reached only once
+                # adoption is off, and then it means the token was
+                # forged, restored from a backup taken before its row
+                # existed, or minted by a deployment whose writes were
+                # rolled back. Refuse without killing the family — there
+                # is no family here to speak of.
                 logger.warning(
-                    "Refresh rejected (%s) for user=%s family=%s",
-                    err, claims.sub, claims.family_id,
+                    "Refresh rejected (no_record) for user=%s family=%s",
+                    claims.sub, claims.family_id,
                 )
-                raise InvalidRefreshToken(err)
+                raise InvalidRefreshToken("no_record")
+            if outcome.status == "family_revoked":
+                # Already dead — nothing to revoke, don't pay for a
+                # second connection just to re-mark rows that are marked.
+                logger.warning(
+                    "Refresh rejected (family_revoked) for user=%s family=%s",
+                    claims.sub, claims.family_id,
+                )
+                raise InvalidRefreshToken("family_revoked")
+            if outcome.status == "reuse":
+                logger.warning(
+                    "Refresh rejected (reuse_detected) for user=%s family=%s",
+                    claims.sub, claims.family_id,
+                )
+                raise _RefreshRejected(InvalidRefreshToken("reuse_detected"))
+
+            # The server's own account of when this session authenticated,
+            # in preference to what the token says about itself. See the
+            # SSO ceiling below for why that distinction is the point;
+            # everything downstream — the ceiling, the replay re-mint, the
+            # successor's own record — reads this one value so they cannot
+            # disagree. Falls back to the claim only when there is no
+            # record at all, which the ``unknown`` branch above has
+            # already ruled out except under adoption.
+            auth_time = (
+                outcome.record.auth_time if outcome.record is not None
+                else claims.auth_time
+            )
+
+            is_replay = outcome.status == "replay"
+            if is_replay:
+                # Someone beat us to this token moments ago. Hand back
+                # what they minted rather than a competing successor:
+                # the refresh cookie is per-browser, so two live
+                # successors would leave one of them orphaned in the
+                # chain — unconsumable, and indistinguishable from theft
+                # if it ever surfaced.
+                logger.info(
+                    "Refresh replayed inside the grace window for user=%s "
+                    "family=%s — returning the successor already issued",
+                    claims.sub, claims.family_id,
+                )
+                successor_token, successor = create_refresh_token(
+                    user_id=claims.sub,
+                    family_id=claims.family_id,
+                    auth_time=auth_time,
+                    jti=outcome.successor.successor_jti,
+                    expires_at_epoch=outcome.successor.successor_exp,
+                    mint_ms=outcome.successor.successor_mint_ms,
+                )
 
             orm = await self._user_repo.get_user_by_id(session, claims.sub)
             if orm is None or orm.deleted_at is not None or orm.status != "active":
                 # User no longer eligible — kill the family and bail.
-                await store.revoke_family(claims.family_id)
-                raise InvalidRefreshToken("user_inactive")
+                raise _RefreshRejected(InvalidRefreshToken("user_inactive"))
 
             # ── Session revocation cutoff ────────────────────────────
             # Revoking sessions tombstones live access-token ``sid``s in
@@ -334,56 +476,56 @@ class LocalIdentityService:
             if _refresh_predates_cutoff(
                 claims.mint_ms, getattr(orm, "sessions_valid_from", None),
             ):
-                await store.revoke_family(claims.family_id)
                 logger.info(
                     "Refresh rejected (sessions_revoked) for user=%s family=%s",
                     claims.sub, claims.family_id,
                 )
-                raise InvalidRefreshToken("sessions_revoked")
+                raise _RefreshRejected(InvalidRefreshToken("sessions_revoked"))
 
             # ── SSO daily re-auth ceiling ────────────────────────────
-            # The presence of ``auth_time`` in the refresh JWT means
-            # "this session was minted by an SSO login" — we don't need
-            # to look at any user column for that. We DO ask the
-            # identity repo for the user's most recent identity to pick
-            # which provider slug to bounce to. Local password sessions
-            # have ``auth_time IS NULL`` and skip this entire block.
-            is_sso_session = claims.auth_time is not None
+            # ``auth_time`` present means "this session was minted by an
+            # SSO login" — no user column is consulted for that. We DO
+            # ask the identity repo for the user's most recent identity
+            # to pick which provider slug to bounce to. Local password
+            # sessions have ``auth_time IS NULL`` and skip this block.
+            #
+            # Read from the SERVER'S record, not from the token. As a
+            # claim it was something the token asserted about itself, and
+            # a token that simply omitted it read as a local session and
+            # skipped this ceiling entirely — which is exactly the bug
+            # fixed earlier in this work, there by defaulting the value
+            # at mint. Sourcing it here makes the whole class impossible:
+            # the row cannot be absent for a token we just accepted, and
+            # it cannot be edited by whoever holds the cookie.
+            is_sso_session = auth_time is not None
             sso_age = (
-                int(time.time()) - claims.auth_time
+                int(time.time()) - auth_time
                 if is_sso_session else 0
             )
             if is_sso_session and sso_age > SSO_SESSION_MAX_AGE_SECONDS:
                 # Kill the family + every live access token across all
                 # tabs so the next request from any browser surface
-                # bounces to the IdP. Best-effort outbox audit.
-                await store.revoke_family(claims.family_id)
-                if self._session_killer is not None:
-                    try:
-                        await self._session_killer(orm.id)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "session_killer failed during SSO expiry "
-                            "(user=%s): %s", orm.id, exc,
-                        )
+                # bounces to the IdP. The slug lookup needs the session,
+                # so resolve it here; the revocation, the session-killer
+                # (Redis) and the audit event all happen after this scope
+                # closes — see ``refresh``.
                 provider_slug = await self._latest_identity_slug(session, orm.id)
-                if self._outbox_emit is not None:
-                    await self._outbox_emit(
-                        session, "user.sso_session_expired",
-                        {
-                            "user_id": orm.id,
-                            "provider_slug": provider_slug,
-                            "auth_time": claims.auth_time,
-                            "elapsed_seconds": sso_age,
-                        },
-                    )
                 logger.info(
                     "SSO session expired (user=%s, slug=%s, age=%ds)",
                     orm.id, provider_slug, sso_age,
                 )
-                raise SsoReauthRequired(
-                    _build_reauth_url(provider_slug, next_path="/"),
-                    provider=provider_slug or "sso",
+                raise _RefreshRejected(
+                    SsoReauthRequired(
+                        _build_reauth_url(provider_slug, next_path="/"),
+                        provider=provider_slug or "sso",
+                    ),
+                    kill_sessions_for=orm.id,
+                    audit=("user.sso_session_expired", {
+                        "user_id": orm.id,
+                        "provider_slug": provider_slug,
+                        "auth_time": auth_time,
+                        "elapsed_seconds": sso_age,
+                    }),
                 )
 
             # ── Continuous group->target reconciliation ──────────────
@@ -392,7 +534,10 @@ class LocalIdentityService:
             # update on the next rotation rather than waiting for the
             # next full SSO login. The cached ``idp_groups`` snapshot
             # is set by ``set_user_idp_metadata`` at SSO login.
-            if is_sso_session and self._sso_role_reconciler is not None:
+            # Skipped on a replay: the refresh we are echoing reconciled
+            # moments ago, and repeating the write would only lengthen
+            # the transaction every other racer is blocked behind.
+            if is_sso_session and self._sso_role_reconciler and not is_replay:
                 cached_groups = _load_cached_idp_groups(orm)
                 latest_provider_id = await self._latest_identity_provider_id(
                     session, orm.id,
@@ -439,7 +584,8 @@ class LocalIdentityService:
             user,
             family_id=claims.family_id,
             claims_extra=claims_extra,
-            auth_time=claims.auth_time,
+            auth_time=auth_time,
+            refresh_token=successor_token,
         )
         return user, tokens
 
@@ -513,9 +659,26 @@ class LocalIdentityService:
         email_verified = _claims_email_verified(identity.raw_claims)
         idp_groups: list[str] = list(getattr(identity, "groups", ()) or ())
         attributes: dict = dict(getattr(identity, "attributes", {}) or {})
+        # The 24h re-auth ceiling measures from the instant the IdP says
+        # the user actually authenticated. When the IdP does not say, we
+        # substitute now — which quietly converts the ceiling into "24h
+        # since this login", a weaker guarantee than the one it claims
+        # to enforce. That is the right fallback (refusing the login
+        # would be worse) but it must not be silent: an IdP that never
+        # asserts auth_time is a misconfiguration an operator can fix,
+        # and until now nothing surfaced it.
         auth_time = getattr(identity, "auth_time", None)
-        if not isinstance(auth_time, int) or auth_time <= 0:
+        auth_time_asserted = isinstance(auth_time, int) and auth_time > 0
+        if not auth_time_asserted:
             auth_time = int(time.time())
+            logger.warning(
+                "IdP provider_id=%s released no usable auth_time; the SSO "
+                "re-auth ceiling will measure from this login instead of "
+                "from the IdP authentication. The authorize request already "
+                "sends max_age, which obliges a compliant OIDC provider to "
+                "return auth_time — check the provider's claim mapping.",
+                provider_id,
+            )
 
         claims_extra: dict = {}
         async with self._session_factory() as session:
@@ -631,12 +794,15 @@ class LocalIdentityService:
             # Only fields this login actually carried are touched. An IdP
             # that releases no ``given_name`` leaves the field alone
             # instead of blanking it, and leaves it editable — see
-            # ``identity_provenance``.
+            # ``identity_provenance``. Nor does a name we split out of a
+            # full name count: it is populated at provisioning either way,
+            # but we do not lock a person out of correcting our own guess.
             #
             # Best-effort, like the metadata write below: a profile that
             # failed to re-sync must not cost somebody their sign-in.
             owned = asserted_fields(
                 first_name=identity.first_name, last_name=identity.last_name,
+                derived=identity.names_derived_from is not None,
             )
             if owned:
                 try:
@@ -735,6 +901,12 @@ class LocalIdentityService:
                     "provider_id": provider_id,
                     "provider_slug": provider_slug,
                     "auth_time": auth_time,
+                    # False means the IdP did not release auth_time and
+                    # this is our own clock — so the re-auth ceiling for
+                    # this session measures from the login, not from the
+                    # IdP authentication. Recorded per-login so the
+                    # question is answerable per provider after the fact.
+                    "auth_time_asserted": auth_time_asserted,
                     "groups": idp_groups,
                     # How well we actually knew this person. Recorded on the
                     # login itself so the question is answerable later without
@@ -766,9 +938,22 @@ class LocalIdentityService:
                         provider_id, exc,
                     )
 
+            # Same reason as the local login: the record is the token's
+            # licence, so both commit together. ``auth_time`` is the
+            # IdP's authentication instant, and putting it on the row is
+            # what stops the 24h re-auth ceiling depending on a claim the
+            # token asserts about itself.
+            refresh_token = await self._mint_recorded_refresh(
+                session, user_id=orm.id, family_id=None, auth_time=auth_time,
+            )
+
         user = _orm_to_user(orm, role=_primary_role(roles))
         tokens = self._issue_tokens(
-            user, family_id=None, claims_extra=claims_extra, auth_time=auth_time,
+            user,
+            family_id=None,
+            claims_extra=claims_extra,
+            auth_time=auth_time,
+            refresh_token=refresh_token,
         )
         return user, tokens
 
@@ -967,6 +1152,32 @@ class LocalIdentityService:
             except Exception:  # noqa: BLE001 — best-effort by design
                 pass
 
+    async def _revoke_family_committed(self, family_id: str) -> None:
+        """Revoke a refresh family in its own committed transaction.
+
+        Same shape as ``_emit_audit`` above, and for the same reason:
+        every caller raises straight after, and the request-scoped
+        session is rolled back on the way out — so a revocation written
+        into that session never reached the database. Reuse detection,
+        the inactive-user check, the sessions_valid_from cutoff and the
+        SSO daily ceiling all revoked into thin air.
+
+        Unlike ``_emit_audit`` a commit failure is NOT swallowed: a lost
+        audit row is regrettable, a lost revocation leaves a stolen
+        token family live. We log it loudly and let the caller raise its
+        own auth error so the client still gets a clean 401.
+        """
+        async with self._session_factory() as session:
+            store = self._refresh_store_factory(session)
+            await store.revoke_family(family_id)
+            try:
+                await session.commit()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "FAILED to revoke refresh family=%s — the family is "
+                    "still live: %s", family_id, exc,
+                )
+
     async def resolve_email_domain(self, domain: str):
         """Which provider claims *domain*, or None. See the injected
         resolver above; returns None when nothing is wired so the
@@ -1016,6 +1227,43 @@ class LocalIdentityService:
 
     # ── Internals ─────────────────────────────────────────────────────
 
+    async def _mint_recorded_refresh(
+        self,
+        session,
+        *,
+        user_id: str,
+        family_id: Optional[str],
+        auth_time: Optional[int],
+    ) -> str:
+        """Mint a refresh token and write the row that makes it usable.
+
+        Under allow-by-record the row is not bookkeeping — it is the
+        token's licence to exist. A token minted without one is refused
+        at its first rotation, which the user meets as being signed out
+        roughly one access lifetime after signing in. So the two happen
+        together, in the caller's transaction: if the record cannot be
+        written the login fails outright, rather than handing back a
+        session that is already doomed.
+
+        Called inside the session scope for that reason. Everything else
+        about minting is pure CPU and deliberately stays outside it.
+        """
+        token, claims = create_refresh_token(
+            user_id=user_id, family_id=family_id, auth_time=auth_time,
+        )
+        store = self._refresh_store_factory(session)
+        await store.record_mint(
+            jti=claims.jti,
+            family_id=claims.family_id,
+            user_id=user_id,
+            auth_time=claims.auth_time,
+            mint_ms=claims.mint_ms,
+            expires_at_iso=datetime.fromtimestamp(
+                claims.exp, tz=timezone.utc,
+            ).isoformat(),
+        )
+        return token
+
     def _issue_tokens(
         self,
         user: User,
@@ -1023,6 +1271,7 @@ class LocalIdentityService:
         family_id: Optional[str],
         claims_extra: Optional[dict] = None,
         auth_time: Optional[int] = None,
+        refresh_token: Optional[str] = None,
     ) -> SessionTokens:
         """Mint a fresh (access, refresh, csrf) triple.
 
@@ -1031,6 +1280,12 @@ class LocalIdentityService:
         and propagated through every rotation. The 24h SSO re-auth
         check reads it on the next refresh. ``None`` for local
         password sessions.
+
+        ``refresh_token`` supplies an already-minted refresh JWT. The
+        rotation path mints its successor before consuming the presented
+        token — the successor's identity has to be recorded atomically
+        with that consumption — so it passes the token it committed to
+        rather than letting a second one be generated here.
         """
         extra = dict(claims_extra or {})
         if user.must_change_password:
@@ -1039,15 +1294,24 @@ class LocalIdentityService:
             # ``sid``, so enforcing the rotation costs one more dict
             # lookup instead of a database round-trip on every call.
             extra["mcp"] = True
+        # No size decision here. The claims resolver does not put
+        # per-workspace grants in the token at all — see ``_resolve_claims``
+        # in ``app/main.py`` — so what arrives is bounded by construction
+        # and there is nothing to shed. This used to embed-while-it-fits,
+        # which meant a user's authorization travelled differently
+        # depending on how many workspaces they happened to hold, and the
+        # store path that served the largest tenants was the one least
+        # exercised. ``_warn_if_oversized`` in ``cookies.py`` remains as a
+        # tripwire in case something ever puts an unbounded claim back.
         access = create_access_token(
             user_id=user.id,
             email=user.email,
             role=user.role,
             extra=extra or None,
         )
-        refresh, _ = create_refresh_token(
+        refresh = refresh_token or create_refresh_token(
             user_id=user.id, family_id=family_id, auth_time=auth_time,
-        )
+        )[0]
         return SessionTokens(
             access_token=access,
             access_max_age_seconds=JWT_EXPIRY_MINUTES * 60,

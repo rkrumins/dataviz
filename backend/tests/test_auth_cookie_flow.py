@@ -20,6 +20,8 @@ from backend.auth_service.cookies import (
     CSRF_COOKIE_NAME,
     REFRESH_COOKIE_NAME,
 )
+from backend.auth_service.core.config import JWT_AUDIENCE, JWT_ISSUER
+from backend.auth_service.core.tokens import create_access_token
 
 
 _PASSWORD = "C0mpl3x!Passw0rd#"
@@ -130,14 +132,23 @@ async def test_refresh_rotates_tokens(
 
 
 async def test_refresh_replay_kills_family(
-    test_client: AsyncClient, db_session: AsyncSession
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch
 ):
     """A replayed refresh token revokes the entire family — defence
     against a stolen refresh cookie being used in parallel.
 
+    Grace pinned to 0 so this exercises strict rotation. With the
+    shipped window a replay this fast is read as a concurrent refresh
+    and answered with the successor instead; that path is covered by
+    ``test_refresh_replay_inside_grace_returns_same_token`` below and,
+    against real transactions, in ``test_auth_rotation_grace.py``.
+
     Done with explicit per-request cookies so the test isn't sensitive
     to httpx's cookie-jar layering rules.
     """
+    monkeypatch.setattr(
+        "backend.auth_service.service.REFRESH_ROTATION_GRACE_SECONDS", 0,
+    )
     await _seed(db_session)
     login = await test_client.post(
         "/api/v1/auth/login",
@@ -171,6 +182,47 @@ async def test_refresh_replay_kills_family(
         cookies={REFRESH_COOKIE_NAME: rotated_rt},
     )
     assert third.status_code == 401
+
+
+async def test_refresh_replay_inside_grace_returns_same_token(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    """Two refreshes on one cookie converge instead of signing you out.
+
+    This is the everyday case the strict rule got wrong: a second tab,
+    a retried POST, or a rotation whose Set-Cookie never landed. Both
+    callers must end up holding the same successor, and the family must
+    survive.
+    """
+    await _seed(db_session, email="grace@example.com")
+    login = await test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "grace@example.com", "password": _PASSWORD},
+    )
+    captured_rt = login.cookies.get(REFRESH_COOKIE_NAME)
+
+    first = await test_client.post(
+        "/api/v1/auth/refresh", cookies={REFRESH_COOKIE_NAME: captured_rt},
+    )
+    replay = await test_client.post(
+        "/api/v1/auth/refresh", cookies={REFRESH_COOKIE_NAME: captured_rt},
+    )
+    assert first.status_code == 200
+    assert replay.status_code == 200
+
+    # Same successor identity, so whichever response the browser keeps,
+    # the next rotation consumes the same token.
+    from backend.auth_service.core.tokens import decode_refresh_token
+    first_jti = decode_refresh_token(first.cookies.get(REFRESH_COOKIE_NAME)).jti
+    replay_jti = decode_refresh_token(replay.cookies.get(REFRESH_COOKIE_NAME)).jti
+    assert first_jti == replay_jti
+
+    # The family is alive: the successor still rotates.
+    third = await test_client.post(
+        "/api/v1/auth/refresh",
+        cookies={REFRESH_COOKIE_NAME: replay.cookies.get(REFRESH_COOKIE_NAME)},
+    )
+    assert third.status_code == 200
 
 
 async def test_refresh_without_cookie_returns_401(test_client: AsyncClient):
@@ -208,3 +260,117 @@ async def test_logout_is_idempotent(test_client: AsyncClient):
     test_client.cookies.delete(REFRESH_COOKIE_NAME)
     resp = await test_client.post("/api/v1/auth/logout")
     assert resp.status_code == 200
+
+
+# ── foreign sessions (cross-environment / rotated key) ───────────────
+#
+# The reported production failure: a cookie minted by a DIFFERENT
+# deployment reaches this one. Because both used identical cookie names
+# and identical iss/aud, the receiving side could only report
+# "Signature verification failed" — and, crucially, never evicted the
+# cookie, so the browser re-presented it on every request and the user
+# ping-ponged between the app and /login forever.
+
+def _foreign_token(audience_suffix: str = "") -> str:
+    """A structurally valid token signed by a key we do not hold."""
+    import jwt as pyjwt
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    return pyjwt.encode(
+        {
+            "sub": "someone-from-another-environment",
+            "email": "a@b.c",
+            "role": "user",
+            "iss": JWT_ISSUER,
+            "aud": JWT_AUDIENCE + audience_suffix,
+            "iat": now,
+            "exp": now + timedelta(hours=1),
+        },
+        "a-completely-different-signing-key-" + "z" * 32,
+        algorithm="HS256",
+        headers={"kid": "deadbeef"},
+    )
+
+
+async def test_foreign_access_cookie_is_evicted_not_looped(
+    test_client: AsyncClient,
+):
+    """A foreign access cookie must be cleared, not merely rejected.
+
+    Rejecting without evicting is what makes the login loop permanent:
+    the cookie survives, so the very next request repeats the 401.
+    """
+    test_client.cookies.clear()
+    resp = await test_client.get(
+        "/api/v1/auth/me", cookies={ACCESS_COOKIE_NAME: _foreign_token()}
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"] == "session_foreign"
+
+    set_cookies = resp.headers.get_list("set-cookie")
+    assert any(h.startswith(f"{ACCESS_COOKIE_NAME}=") for h in set_cookies), set_cookies
+    # Deleted, not re-set: an eviction carries an immediate expiry.
+    evictions = [h for h in set_cookies if h.startswith(f"{ACCESS_COOKIE_NAME}=")]
+    assert all(
+        "Max-Age=0" in h or "01 Jan 1970" in h for h in evictions
+    ), evictions
+
+
+async def test_foreign_refresh_cookie_reports_session_foreign(
+    test_client: AsyncClient,
+):
+    """/refresh must tell the client to stop refreshing.
+
+    Without the marker the frontend keeps retrying a token that can
+    never verify here.
+    """
+    test_client.cookies.clear()
+    resp = await test_client.post(
+        "/api/v1/auth/refresh",
+        cookies={REFRESH_COOKIE_NAME: _foreign_token(":refresh")},
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"] == "session_foreign"
+
+
+async def test_expired_cookie_is_not_treated_as_foreign(
+    test_client: AsyncClient,
+):
+    """Ordinary expiry must keep the silent-refresh path.
+
+    If expiry were classified as foreign, every user would be forced to
+    re-login each time the 5-minute access token lapsed.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    # Mint through the app's own signing path and just backdate ``exp``
+    # (``extra`` is merged last, so it overrides). Signing by hand here
+    # would need the secret, and reading it at call time can pick up a
+    # module another test reloaded — making this test fail for a reason
+    # that has nothing to do with expiry.
+    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    stale = create_access_token(
+        "u1", "a@b.c", "user", extra={"exp": past},
+    )
+    test_client.cookies.clear()
+    resp = await test_client.get(
+        "/api/v1/auth/me", cookies={ACCESS_COOKIE_NAME: stale}
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Not authenticated"
+
+
+async def test_diagnostics_reports_a_foreign_cookie(test_client: AsyncClient):
+    """The operator-facing explanation of the failure."""
+    test_client.cookies.clear()
+    resp = await test_client.get(
+        "/api/v1/auth/diagnostics",
+        cookies={ACCESS_COOKIE_NAME: _foreign_token()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "foreign" in body["sessionCookiesPresented"]["access"]
+    assert body["activeKid"] in body["acceptedKids"]
+    # No key material is ever exposed.
+    assert "secret" not in resp.text.lower()

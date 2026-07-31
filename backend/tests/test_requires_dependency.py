@@ -11,6 +11,7 @@ import pytest
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from backend.app.auth import dependencies as deps
 from backend.app.auth.dependencies import requires
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.revocation_service import (
@@ -18,6 +19,7 @@ from backend.app.services.revocation_service import (
     RevocationBackendError,
     RevocationService,
     configure_revocation_service,
+    get_revocation_service,
 )
 from backend.auth_service.core.tokens import create_access_token
 from backend.auth_service.cookies import ACCESS_COOKIE_NAME
@@ -39,12 +41,33 @@ _ALICE = User(
 
 
 def _make_token(claims: PermissionClaims) -> str:
-    """Mint a real access JWT carrying the given claims."""
+    """Mint a real access JWT carrying the given claims.
+
+    Only ``sid`` and the global grants fit in a token; the per-workspace
+    grants go to the session store. So any test asserting on workspace
+    scope must also call ``_record`` — see there.
+    """
     return create_access_token(
         user_id=_ALICE.id,
         email=_ALICE.email,
         role=_ALICE.role,
         extra=claims.to_jwt_dict(),
+    )
+
+
+async def _record(claims: PermissionClaims) -> None:
+    """Put the workspace half where the read path looks for it.
+
+    Login and rotation both mint *and* record (``_resolve_claims`` in
+    ``app/main.py``); a test that only mints is describing a session that
+    never signed in, and would 403 on every workspace route for a reason
+    that has nothing to do with what it is testing.
+
+    Must be called **after** ``_build_app``, which installs the service
+    this writes through.
+    """
+    await get_revocation_service().record_session(
+        _ALICE.id, claims.sid, claims=claims.to_session_dict(),
     )
 
 
@@ -112,6 +135,7 @@ async def test_requires_403_when_global_permission_missing():
     claims = PermissionClaims(sid="sess_a", global_perms=("workspace:view:read",))
     token = _make_token(claims)
     app = _build_app("system:workspaces:create")
+    await _record(claims)
     async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
         r = await c.get("/widget")
         assert r.status_code == 403
@@ -133,6 +157,7 @@ async def test_requires_403_when_workspace_permission_missing():
     )
     token = _make_token(claims)
     app = _build_app("workspace:view:edit", workspace="ws_id")
+    await _record(claims)
     async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
         # ws_a does NOT grant edit — expect 403.
         r = await c.get("/widget/ws_a")
@@ -146,6 +171,7 @@ async def test_requires_200_with_global_permission():
     claims = PermissionClaims(sid="sess_a", global_perms=("system:workspaces:create",))
     token = _make_token(claims)
     app = _build_app("system:workspaces:create")
+    await _record(claims)
     async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
         r = await c.get("/widget")
         assert r.status_code == 200
@@ -160,6 +186,7 @@ async def test_requires_200_with_workspace_wildcard():
     )
     token = _make_token(claims)
     app = _build_app("workspace:view:edit", workspace="ws_id")
+    await _record(claims)
     async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
         r = await c.get("/widget/ws_a")
         assert r.status_code == 200
@@ -170,6 +197,7 @@ async def test_requires_200_for_global_admin_implicit_allow():
     claims = PermissionClaims(sid="sess_a", global_perms=("system:admin",))
     token = _make_token(claims)
     app = _build_app("workspace:view:delete", workspace="ws_id")
+    await _record(claims)
     async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
         r = await c.get("/widget/ws_anywhere")
         assert r.status_code == 200
@@ -186,6 +214,7 @@ async def test_requires_401_when_session_in_revocation_set():
     token = _make_token(claims)
 
     app = _build_app("system:workspaces:create", backend=backend)
+    await _record(claims)
     async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
         r = await c.get("/widget")
         assert r.status_code == 401
@@ -208,23 +237,134 @@ async def test_requires_503_on_redis_outage_for_fail_closed_perm():
         assert r.status_code == 503
 
 
-@pytest.mark.asyncio
-async def test_requires_200_on_redis_outage_for_fail_open_perm():
-    class BrokenBackend(InMemoryBackend):
-        async def exists(self, key):
-            raise RevocationBackendError("redis is down")
+class _BrokenBackend(InMemoryBackend):
+    """A Redis that is *entirely* gone.
 
+    Both methods, deliberately. Overriding only ``exists`` models a Redis
+    that has forgotten how to answer one question, which is not a thing
+    that happens — and it would leave the claim read below working, so the
+    escalation these tests exist to check would never fire.
+    """
+    async def exists(self, key):
+        raise RevocationBackendError("redis is down")
+
+    async def exists_and_get(self, flag_key, value_key):
+        raise RevocationBackendError("redis is down")
+
+
+def _break_the_database(monkeypatch) -> None:
+    """Make the Postgres fallback fail the way a real outage makes it fail.
+
+    At the *query*, not at session construction. Patching
+    ``get_session_factory`` instead looks equivalent and is not: ``requires``
+    also takes a session for its audit write, so breaking the factory 500s
+    the request before the authorisation check runs and the 403-vs-503
+    distinction under test never gets evaluated. A session object is cheap
+    and connects lazily, which is why an unreachable database surfaces here
+    and not there.
+    """
+    async def _boom(session, user_id, **kwargs):
+        raise RuntimeError("postgres is down")
+
+    monkeypatch.setattr(
+        "backend.app.services.permission_service.resolve", _boom,
+    )
+    deps.reset_db_fallback_cache()
+
+
+@pytest.mark.asyncio
+async def test_requires_200_on_redis_outage_for_fail_open_perm(monkeypatch):
+    """A store outage must cost revocation latency and nothing else.
+
+    Two independent things ride on the store now, and both have to survive
+    it: the revocation probe (fail-open for read permissions, so the JWT is
+    honoured) and the workspace grants (which escalate to Postgres). If
+    either one degraded to "deny", a Redis blip would read to every user as
+    losing access to their workspaces.
+    """
     claims = PermissionClaims(
         sid="sess_a",
         ws_perms={"ws_a": ("workspace:view:read",)},
     )
     token = _make_token(claims)
 
+    async def _from_db(user_id):
+        assert user_id == _ALICE.id
+        return {"ws_a": ("workspace:view:read",)}
+
+    monkeypatch.setattr(deps, "_workspace_grants_from_db", _from_db)
+
     # workspace:view:read is fail-open: outage allows the request.
-    app = _build_app("workspace:view:read", workspace="ws_id", backend=BrokenBackend())
+    app = _build_app("workspace:view:read", workspace="ws_id", backend=_BrokenBackend())
     async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
         r = await c.get("/widget/ws_a")
         assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_requires_503_not_403_when_no_grant_source_can_answer(monkeypatch):
+    """"I don't know" must not be reported as "you may not".
+
+    With both the store and the database unreachable the server has no
+    idea what this user is allowed to do. Resolving that to an empty grant
+    map would make ``requires`` answer 403 ``Missing permission:
+    workspace:view:read`` — stating as fact something it never
+    established, and reproducing the "you don't have permissions" flash
+    this work started from. 503 is the honest answer and the one the
+    fail-closed path already gives when authorisation cannot be
+    established.
+
+    Reintroduce ``return {}`` in ``_workspace_grants_from_db`` and this
+    test goes 403.
+    """
+    claims = PermissionClaims(
+        sid="sess_a",
+        ws_perms={"ws_a": ("workspace:view:read",)},
+    )
+    token = _make_token(claims)
+
+    _break_the_database(monkeypatch)
+
+    app = _build_app("workspace:view:read", workspace="ws_id", backend=_BrokenBackend())
+    async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
+        r = await c.get("/widget/ws_a")
+        assert r.status_code == 503, (
+            f"got {r.status_code}: a 403 here tells the user they lack a "
+            "permission the server never checked"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_global_permission_is_unaffected_by_the_same_outage(monkeypatch):
+    """The 503 above must be scoped to checks that needed the missing half.
+
+    Global grants are in the token, so the same total outage decides a
+    global permission with complete information. Escalating it to 503 —
+    which is what raising from the read path instead of from the check
+    would do — would turn a Redis blip into an outage for every
+    authenticated route in the product, including the ones that never look
+    at a workspace.
+    """
+    _break_the_database(monkeypatch)
+
+    # A *fail-open* global permission: the fail-closed ones answer 503 on a
+    # store outage by their own separate design (see the test above), which
+    # would mask what this one is checking.
+    claims = PermissionClaims(sid="sess_a", global_perms=("system:audit:read",))
+    token = _make_token(claims)
+
+    app = _build_app("system:audit:read", backend=_BrokenBackend())
+    async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
+        r = await c.get("/widget")
+        assert r.status_code == 200
+
+    # And a global permission the user does not hold is still a plain 403 —
+    # "unknown workspaces" is not a licence to stop answering questions the
+    # token settles on its own.
+    app = _build_app("system:providers:manage", backend=_BrokenBackend())
+    async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
+        r = await c.get("/widget")
+        assert r.status_code == 403
 
 
 # Reset the singleton service after the module so other tests aren't
@@ -234,6 +374,10 @@ def _restore_revocation_singleton():
     yield
     # Replace with a fresh in-memory instance (good default for tests).
     configure_revocation_service(RevocationService(InMemoryBackend()))
+    # The Postgres-fallback cache is process-global and outlives the
+    # service, so a grant map resolved during one test's simulated outage
+    # would otherwise still be answering in the next one.
+    deps.reset_db_fallback_cache()
 
 
 __all__: list[str] = []  # silence "imported but unused" in linters

@@ -21,7 +21,8 @@ REPO_ROOT    := $(shell cd ../.. && pwd)
 # variables leaves everything else verbatim. Add a var here when a manifest needs
 # a new deploy-time value.
 ENVSUBST_VARS := '$$DB_HOST $$REDIS_COORD_HOST $$REDIS_CACHE_HOST $$POSTGRES_PASSWORD \
-                  $$JWT_SECRET_KEY $$CREDENTIAL_ENCRYPTION_KEY $$AGGREGATION_INTERNAL_TOKEN \
+                  $$JWT_SECRET_KEY $$JWT_SECRET_KEY_PREVIOUS \
+                  $$CREDENTIAL_ENCRYPTION_KEY $$AGGREGATION_INTERNAL_TOKEN \
                   $$ADMIN_EMAIL $$ADMIN_PASSWORD $$FALKORDB_BACKUP_BUCKET \
                   $$REDIS_STREAMS_PASSWORD $$REDIS_CACHE_PASSWORD \
                   $$REDIS_STREAMS_TLS_ENABLED $$REDIS_CACHE_TLS_ENABLED'

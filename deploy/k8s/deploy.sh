@@ -318,6 +318,7 @@ cmd_deploy() {
     kubectl create secret generic app-secrets \
         --namespace=synodic \
         --from-literal=JWT_SECRET_KEY="${JWT_SECRET_KEY}" \
+        --from-literal=JWT_SECRET_KEY_PREVIOUS="${JWT_SECRET_KEY_PREVIOUS:-}" \
         --from-literal=CREDENTIAL_ENCRYPTION_KEY="${CREDENTIAL_ENCRYPTION_KEY}" \
         --from-literal=ADMIN_EMAIL="${ADMIN_EMAIL}" \
         --from-literal=ADMIN_PASSWORD="${ADMIN_PASSWORD}" \

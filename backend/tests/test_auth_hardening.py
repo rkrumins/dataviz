@@ -35,6 +35,7 @@ from backend.auth_service.providers.registry import (
     configure_registry,
 )
 from backend.auth_service.service import LocalIdentityService
+from tests.common.refresh_store import InMemoryRefreshStore
 
 
 
@@ -180,20 +181,11 @@ async def test_sso_reauth_resolves_the_provider_slug_from_the_real_orm(
     async def _factory():
         yield db_session
 
-    class _Store:
-        """Minimal in-memory RefreshStore — the rotation bookkeeping is not
-        what's under test here, the provider-slug lookup is."""
-        async def is_family_revoked(self, *a, **k):
-            return False
-
-        async def is_jti_revoked(self, *a, **k):
-            return False
-
-        async def revoke_jti(self, *a, **k):
-            return None
-
-        async def revoke_family(self, *a, **k):
-            return None
+    # The rotation bookkeeping is not what's under test here, the
+    # provider-slug lookup is — but allow-by-record means a store that
+    # answers "no row" refuses the rotation before the lookup happens, so
+    # this has to be a store that stores.
+    _Store = InMemoryRefreshStore
 
     svc = LocalIdentityService(
         session_factory=_factory,

@@ -154,7 +154,7 @@ Beyond the defaults, for a production deployment:
 
 1. **TLS termination** — put Caddy/Nginx/Traefik in front. {brand} binds to 0.0.0.0 — close it off via a firewall except for the reverse proxy.
 2. **Firewall** — only expose the frontend port (3080) externally; keep Postgres (5432), FalkorDB (6379), Redis (6380) bound to localhost or the Docker network only. Edit `docker-compose.yml` to change `"5432:5432"` → `"127.0.0.1:5432:5432"` etc.
-3. **Strong secrets** — `JWT_SECRET_KEY` should be at least 256 bits. `openssl rand -hex 48` is good.
+3. **Strong secrets** — `JWT_SECRET_KEY` should be at least 256 bits. `openssl rand -hex 48` is good. Treat it as long-lived: changing it logs every user out at once unless you stage the old value through `JWT_SECRET_KEY_PREVIOUS` first — see the [rotation runbook](MULTI_ENVIRONMENT_SESSIONS.md#4-rotating-the-signing-key-without-logging-everyone-out).
 4. **CREDENTIAL_ENCRYPTION_KEY** — don't skip in production. Provider credentials are stored in the management DB and protected by this Fernet key.
 5. **CORS** — set `CORS_ALLOWED_ORIGINS` to only your actual domain(s), not `localhost`.
 6. **Rotate the admin password** immediately after first login.
@@ -183,5 +183,6 @@ cd .. && rm -rf synodic
 
 ## Related
 
+- [Running several environments side by side](MULTI_ENVIRONMENT_SESSIONS.md) — required reading before standing up a second instance: cookie scoping, signing-key rotation, and the `/auth/diagnostics` endpoint.
 - [FalkorDB Deployment](/docs/falkordb-deployment) — the graph read layer's topology, memory sizing, AOF durability, and engine-upgrade procedure.
 - [FalkorDB DR Runbook](/docs/falkordb-dr) — backup/restore and region-loss recovery for the graph layer.

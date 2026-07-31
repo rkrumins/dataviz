@@ -26,6 +26,11 @@ import {
     readUserCache,
     writeUserCache,
 } from '@/store/userCache'
+import {
+    ensureCsrfToken,
+    resetSessionLostLatch,
+    setAuthEnvironmentId,
+} from '@/services/fetchWithTimeout'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
 import { ROLE_NAMES, type RoleName } from '@/lib/roleNames'
 import { useNavCatalogueStore } from '@/store/navCatalogue'
@@ -33,6 +38,27 @@ import { useNavCatalogueStore } from '@/store/navCatalogue'
 export type { PermissionClaims }
 
 export type AuthStatus = 'idle' | 'loading' | 'authenticated' | 'unauthenticated'
+
+/**
+ * Do we yet know what this identity is allowed to do?
+ *
+ * Orthogonal to ``status``, which only answers "do we have an identity".
+ * ``status`` flips to ``authenticated`` from the sessionStorage user
+ * cache before any claim has been fetched (see ``store/userCache.ts`` —
+ * refusing to cache permissions is deliberate), so a guard reading only
+ * the claims slice cannot tell an un-hydrated claim set from a real
+ * denial, and flashes "You don't have access" before the content loads.
+ *
+ *   * ``unknown`` — nothing has been asked yet (also: logged out).
+ *   * ``loading`` — a hydrate is in flight. Only ever entered FROM
+ *     ``unknown``: a background re-hydrate must never blank a UI that
+ *     already knows its claims.
+ *   * ``ready``   — we have a definitive answer. Reached on ANY final
+ *     one, including a legitimately empty claim set (a real state a
+ *     user can hold) and a hydrate that failed after its one recovery
+ *     rotation. That is what stops this becoming an eternal spinner.
+ */
+export type PermissionsStatus = 'unknown' | 'loading' | 'ready'
 
 /**
  * The frontend treats permission claims as **advisory** — the backend
@@ -171,6 +197,9 @@ interface AuthState {
     isAuthenticated: boolean
     user: AuthUser | null
     permissions: PermissionClaims
+    /** Whether ``permissions`` is a known answer yet. Route guards MUST
+     *  consult this before rendering a denial — see the type doc. */
+    permissionsStatus: PermissionsStatus
     error: string | null
     isLoading: boolean
 
@@ -219,6 +248,7 @@ const _unauthenticated = {
     isAuthenticated: false,
     user: null,
     permissions: EMPTY_CLAIMS,
+    permissionsStatus: 'unknown' as const,
 }
 
 const _authenticated = (user: AuthUser) => ({
@@ -232,6 +262,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     isAuthenticated: false,
     user: null,
     permissions: EMPTY_CLAIMS,
+    permissionsStatus: 'unknown',
     error: null,
     isLoading: false,
 
@@ -248,13 +279,38 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         // UI to a now-non-admin user.
         const cached = readUserCache()
         if (cached !== null) {
-            set({ ..._authenticated(cached), error: null })
+            // ``permissionsStatus`` rides in the SAME set as the status
+            // flip. Split across two sets there would be one frame where
+            // guards see an identity and 'unknown' claims — which is the
+            // flash this exists to remove. Safe to assert 'loading'
+            // outright: the early return above means we only get here
+            // from 'idle' / 'unauthenticated', both of which are
+            // 'unknown'.
+            set({
+                ..._authenticated(cached),
+                permissionsStatus: 'loading',
+                error: null,
+            })
         } else {
             set({ status: 'loading' })
         }
 
         try {
-            const { user } = await authService.me()
+            const { user, environment_id } = await authService.me()
+            // Before anything schedules a rotation: the keepalive reads
+            // an environment-suffixed cookie by name, and reading a
+            // sibling deployment's copy would schedule this tab past its
+            // own token's expiry. Safe to do here because the keepalive
+            // only starts once status flips to 'authenticated', below.
+            setAuthEnvironmentId(environment_id)
+            // A session can be holding no CSRF cookie — evicted by a
+            // sibling deployment's sign-out, cleared by hand, expired —
+            // and only a rotation re-mints it. Bootstrap is the one place
+            // that knows a session exists before any write is attempted,
+            // so repairing here is what makes reloading the page fix it:
+            // a reload otherwise changes nothing, because it issues only
+            // GETs and no GET needs a CSRF token.
+            void ensureCsrfToken()
             // Re-apply with the server's freshly-returned DTO so
             // role/status updates from the backend overwrite the
             // optimistic copy.
@@ -282,8 +338,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     login: async (email, password) => {
         set({ error: null, isLoading: true })
         resetClaimRecovery()
+        resetSessionLostLatch()
         try {
-            const { user } = await authService.login({ email, password })
+            const { user, environment_id } = await authService.login({ email, password })
+            setAuthEnvironmentId(environment_id)
             set({ ..._authenticated(user), error: null, isLoading: false })
             writeUserCache(user)
             await hydratePermissions(set)
@@ -301,6 +359,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     loginWithBrowserProfile: async (providerSlug, payload) => {
         set({ error: null, isLoading: true })
         resetClaimRecovery()
+        resetSessionLostLatch()
         try {
             const { user } = await authService.loginWithBrowserProfile(
                 providerSlug, payload,
@@ -330,6 +389,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             // holding a valid session it does not know about.
             if (resp.autoSignedIn && resp.user) {
                 resetClaimRecovery()
+                resetSessionLostLatch()
                 set({ ..._authenticated(resp.user), error: null, isLoading: false })
                 writeUserCache(resp.user)
                 await hydratePermissions(set)
@@ -362,6 +422,17 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         clearUserCache()
         resetClaimRecovery()
         set({ ..._unauthenticated, error: null, isLoading: false })
+        // Other tabs share the cookie jar, so their session is gone too —
+        // they just don't know it yet. Told directly, they sign out now
+        // instead of discovering it on their next request.
+        void (async () => {
+            try {
+                const mod = await import('@/store/permissionChangeBus')
+                mod.notifySignedOut()
+            } catch {
+                // best-effort
+            }
+        })()
     },
 
     handleSessionLost: () => {
@@ -370,7 +441,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         set({ ..._unauthenticated, error: null })
     },
 
-    setPermissions: (permissions) => set({ permissions }),
+    setPermissions: (permissions) =>
+        set({ permissions, permissionsStatus: 'ready' }),
 
     applyProfile: (fields) => {
         const user = get().user
@@ -445,6 +517,13 @@ async function hydratePermissions(
     set: (partial: Partial<AuthState>) => void,
     opts?: { skipAuthRefresh?: boolean },
 ): Promise<void> {
+    // Only ever 'unknown' → 'loading'. A background re-hydrate on a
+    // session that already knows its claims must not send the guards
+    // back to a skeleton — same principle as the catch block below and
+    // as permissionPoller's empty-claims guard.
+    if (useAuthStore.getState().permissionsStatus === 'unknown') {
+        set({ permissionsStatus: 'loading' })
+    }
     try {
         let claims = await authService.myPermissions(opts)
 
@@ -480,8 +559,13 @@ async function hydratePermissions(
             }
         }
 
-        set({ permissions: claims })
+        set({ permissions: claims, permissionsStatus: 'ready' })
     } catch {
+        // 'ready' even here: this is the final answer available for this
+        // page load (the one recovery rotation above is already spent),
+        // and a guard that waits forever for an answer that is not
+        // coming is an eternal spinner, not a safer UI.
+        set({ permissionsStatus: 'ready' })
         // Keep the previous claims on a transient failure. Zeroing them
         // to EMPTY here used to defeat the silent-refresh before/after
         // guard (empty !== real), firing a blanket cache invalidation on
@@ -506,6 +590,14 @@ export function usePermission(
     workspaceId?: string | null,
 ): boolean {
     return useAuthStore((s) => checkPermission(s.permissions, permission, workspaceId))
+}
+
+/**
+ * True once the claims are a known answer. Route guards render a
+ * skeleton until this flips — an un-hydrated claim set is not a denial.
+ */
+export function usePermissionsReady(): boolean {
+    return useAuthStore((s) => s.permissionsStatus === 'ready')
 }
 
 /** Read the raw claims slice — useful for components that need to

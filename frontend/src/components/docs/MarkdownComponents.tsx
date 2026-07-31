@@ -33,6 +33,7 @@ export const filenameMap: Record<string, string> = {
   'README-index.md': 'versioning-deep-dives',
   'RBAC.md': 'rbac',
   'SSO.md': 'sso',
+  'MULTI_ENVIRONMENT_SESSIONS.md': 'multi-environment-sessions',
   'SSO_INTEGRATION.md': 'sso-integration',
   'DEPLOYMENT.md': 'deployment',
   'FALKORDB_DEPLOYMENT.md': 'falkordb-deployment',

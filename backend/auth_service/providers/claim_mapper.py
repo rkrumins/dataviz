@@ -185,6 +185,23 @@ def _first_non_empty(claims: dict, paths: Iterable[str]) -> Any:
     return None
 
 
+def _winning_path(claims: dict, paths: Any) -> str | None:
+    """Which candidate in *paths* actually supplied a value.
+
+    The companion to ``_first_non_empty``: same walk, same emptiness rules,
+    reporting the path instead of the value. Both the preview's provenance
+    and the display-name fallback need to name a claim rather than read
+    one, and a second walk that disagreed about "empty" would report a
+    source the login does not use.
+    """
+    if not isinstance(paths, (list, tuple)):
+        return None
+    for p in paths:
+        if isinstance(p, str) and _first_non_empty(claims, [p]) is not None:
+            return p
+    return None
+
+
 # ── Field normalisers ────────────────────────────────────────────────
 
 
@@ -229,6 +246,42 @@ def _to_bool(v: Any) -> bool:
     if isinstance(v, str):
         return v.strip().lower() in {"true", "1", "yes", "t"}
     return False
+
+
+def split_display_name(display_name: str) -> tuple[str, str]:
+    """Best-effort ``(first_name, last_name)`` from one full-name string.
+
+    Plenty of directories release a single name claim and nothing else —
+    ``name`` on OIDC, ``fullName`` on a corporate portal — so without this
+    those people arrive with no name at all.
+
+    Two orders, because Active Directory's ``cn`` convention is
+    *Last, First* and it is common enough that a naive whitespace split
+    puts the surname in the first-name box with a comma still attached:
+
+    * A comma separates the two halves, family name first, so
+      ``"Doe, Alice"`` is Alice Doe. Only when both halves survive
+      stripping — a trailing comma is punctuation, not a structure.
+    * Otherwise the first whitespace-delimited token is the given name and
+      the remainder is the family name, so ``"Maria del Carmen García"``
+      keeps the particle with the surname where it belongs.
+
+    Nothing here is more than a guess, which is precisely why a name that
+    came out of this function is not treated as IdP-owned — see
+    ``identity_provenance``. A single token (``"Prince"``) and a script
+    that does not delimit at all (``"山田太郎"``) both land whole in the
+    first name, because inventing a division would be worse than leaving
+    one field empty.
+    """
+    text = (display_name or "").strip()
+    if not text:
+        return "", ""
+    if "," in text:
+        family, _, given = text.partition(",")
+        if family.strip() and given.strip():
+            return given.strip(), family.strip()
+    parts = text.split(None, 1)
+    return parts[0], parts[1].strip() if len(parts) > 1 else ""
 
 
 def _to_int(v: Any) -> int | None:
@@ -292,19 +345,17 @@ def resolved_sources(
     configured extra under ``extras.<name>``. A field nothing resolved is
     present with ``None`` — absent would be indistinguishable from a field
     we forgot to report.
+
+    ``first_name``/``last_name`` report ``None`` when the IdP released only
+    a full name, because no candidate of theirs supplied anything — the
+    names were split out of the display name afterwards. That derivation is
+    reported separately, by ``ProviderIdentity.names_derived_from``; folding
+    it in here would claim a candidate fired when none did.
     """
     mapping = merge_mapping(kind, override)
 
-    def winner(paths: Any) -> str | None:
-        if not isinstance(paths, (list, tuple)):
-            return None
-        for p in paths:
-            if isinstance(p, str) and _first_non_empty(claims, [p]) is not None:
-                return p
-        return None
-
     out: dict[str, str | None] = {
-        field: winner(mapping.get(field))
+        field: _winning_path(claims, mapping.get(field))
         for field in (
             "external_id", "email", "email_verified",
             "first_name", "last_name", "display_name",
@@ -313,7 +364,7 @@ def resolved_sources(
     }
     for name, paths in (mapping.get("extras") or {}).items():
         if isinstance(name, str) and name:
-            out[f"extras.{name}"] = winner(paths)
+            out[f"extras.{name}"] = _winning_path(claims, paths)
     return out
 
 
@@ -356,12 +407,16 @@ def apply_claim_mapping(
     first_name = _to_str(_first_non_empty(claims, mapping.get("first_name") or []))
     last_name = _to_str(_first_non_empty(claims, mapping.get("last_name") or []))
     display_name = _to_str(_first_non_empty(claims, mapping.get("display_name") or []))
+    # Which claim the names came out of, when they came out of the full
+    # name rather than from the IdP naming the halves itself. Carried
+    # through to the login so a guess is never locked onto the profile,
+    # and to the preview so the mapping screen can say where it came from.
+    names_derived_from: str | None = None
     if not first_name and not last_name and display_name:
-        # Best-effort split: "Alice Doe" -> ("Alice", "Doe").
-        parts = display_name.split(None, 1)
-        first_name = parts[0]
-        if len(parts) > 1:
-            last_name = parts[1]
+        first_name, last_name = split_display_name(display_name)
+        names_derived_from = _winning_path(
+            claims, mapping.get("display_name") or [],
+        )
 
     groups = _to_groups(_first_non_empty(claims, mapping.get("groups") or []))
     auth_time = _to_int(_first_non_empty(claims, mapping.get("auth_time") or []))
@@ -400,6 +455,7 @@ def apply_claim_mapping(
         groups=groups,
         auth_time=auth_time,
         attributes=extras,
+        names_derived_from=names_derived_from,
     )
 
 

@@ -28,13 +28,13 @@ import { presetById } from './vendorPresets'
 function LifecycleChip({ lifecycle }: { lifecycle?: string }) {
     if (lifecycle === 'draft') {
         return (
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30">
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-600 dark:text-amber-300 border border-amber-500/30">
                 Draft — not visible to anyone
             </span>
         )
     }
     return (
-        <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+        <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30">
             Live
         </span>
     )
@@ -50,11 +50,11 @@ function HealthLine({ health, kind }: { health?: IdpHealth; kind: string }) {
     }
     const days = health.certDaysRemaining
     const dot = {
-        ok: 'bg-emerald-400',
-        warning: 'bg-yellow-400',
-        unavailable: 'bg-red-400',
-        unknown: 'bg-gray-500',
-    }[health.status] ?? 'bg-gray-500'
+        ok: 'bg-emerald-500',
+        warning: 'bg-amber-500',
+        unavailable: 'bg-red-500',
+        unknown: 'bg-ink-muted/50',
+    }[health.status] ?? 'bg-ink-muted/50'
 
     let label: string
     if (days !== null && days !== undefined) {
@@ -76,8 +76,8 @@ function HealthLine({ health, kind }: { health?: IdpHealth; kind: string }) {
             <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', dot)} />
             <span className={cn(
                 'truncate',
-                health.status === 'unavailable' && 'text-red-400',
-                health.status === 'warning' && 'text-yellow-400',
+                health.status === 'unavailable' && 'text-red-600 dark:text-red-400',
+                health.status === 'warning' && 'text-amber-600 dark:text-amber-400',
                 (health.status === 'ok' || health.status === 'unknown') && 'text-ink-muted',
             )}>
                 {label}
@@ -103,10 +103,10 @@ function IconAction({
             aria-label={label}
             title={label}
             className={cn(
-                'p-2 rounded-lg border border-white/10 transition-colors disabled:opacity-40',
+                'p-2 rounded-lg border border-glass-border transition-colors duration-150 disabled:opacity-40',
                 tone === 'danger'
-                    ? 'text-red-400 hover:bg-red-500/10'
-                    : 'text-ink-muted hover:text-ink hover:bg-white/5',
+                    ? 'text-red-500 hover:bg-red-500/10 hover:border-red-500/30'
+                    : 'text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/5',
             )}
         >
             <Icon className="w-4 h-4" />
@@ -139,8 +139,10 @@ export function IdpProviderCard({
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: (index ?? 0) * 0.04 }}
             className={cn(
-                'p-4 rounded-xl border bg-white/[0.02] transition-colors',
-                isDraft ? 'border-amber-500/25' : 'border-white/10',
+                'p-4 rounded-xl border transition-colors duration-150',
+                isDraft
+                    ? 'border-amber-500/25 bg-amber-500/[0.03]'
+                    : 'border-glass-border bg-canvas-elevated',
                 !provider.enabled && 'opacity-60',
             )}
         >
@@ -218,7 +220,7 @@ export function IdpProviderCard({
                 claims nothing has vouched for. */}
             {!isDraft && provider.assurance === 'unverified' && (
                 <div className="mt-3 flex items-start gap-2 p-2.5 rounded-lg border border-amber-500/25 bg-amber-500/5">
-                    <ShieldAlert className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-400" />
+                    <ShieldAlert className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-500" />
                     <p className="text-[11px] text-ink-muted">
                         This connection is live and unverified — anyone who can
                         write its payload can sign in as anyone. Privileged roles

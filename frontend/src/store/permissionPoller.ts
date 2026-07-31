@@ -83,6 +83,17 @@ function isEmptyClaims(claims: PermissionClaims | undefined | null): boolean {
 
 async function pollOnce(): Promise<void> {
     try {
+        // This used to be load-bearing for sessions as well as
+        // permissions, and it no longer is. Renewal now has its own
+        // scheduler (`store/sessionKeepalive.ts`), which rotates ahead of
+        // the published expiry instead of relying on this poll happening
+        // to be the request that takes the 401.
+        //
+        // Still do not pass `skipAuthRefresh` here: reactive refresh
+        // remains the fallback whenever the keepalive has nothing to
+        // schedule against — a session predating the expiry cookie, or a
+        // tab whose timers were frozen — and this call is a normal
+        // authenticated request that should recover like any other.
         const claims = await authService.myPermissions()
 
         // NEVER downgrade a real claim set to nothing on the strength of a 200.
@@ -168,11 +179,20 @@ function startChain(): void {
  *  poll still diffs against the seed and invalidates. */
 export function enablePermissionPolling(): void {
     authReady = true
-    if (typeof document !== 'undefined' && document.hidden) return
     // Idempotent: the app shell calls this from an effect that can re-run (and
     // re-runs on every remount), so a second chain must never be spawned.
+    // Checked before seeding — a chain already running owns the snapshot, and
+    // overwriting it would make its next poll diff against the wrong baseline.
     if (running) return
+    // Seed BEFORE the visibility check, not after. A tab that boots hidden —
+    // session restore, cmd-click, opened in the background — used to return
+    // here with ``lastSnapshot`` still ``''``, so its first poll after focus
+    // compared against the empty string, "detected" a change that had not
+    // happened, and ran the unfiltered invalidateAllQueries + cross-tab
+    // broadcast. Restoring a window of ten tabs paid that on every one.
+    // Seeding is pure state, safe to do while hidden; only the chain waits.
     lastSnapshot = claimsSnapshot(useAuthStore.getState().permissions)
+    if (typeof document !== 'undefined' && document.hidden) return
     startChain()
 }
 

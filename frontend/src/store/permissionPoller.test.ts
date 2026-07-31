@@ -212,3 +212,65 @@ describe('pollOnce — never blanks a user who has permissions', () => {
         expect(setPermissionsMock).toHaveBeenCalledTimes(1)
     })
 })
+
+
+describe('seeding when the tab boots hidden', () => {
+    /**
+     * A tab that is hidden at mount — session restore, cmd-click, opened
+     * in the background — used to return from ``enablePermissionPolling``
+     * before ``lastSnapshot`` was seeded, because the visibility check sat
+     * above the assignment. Its first poll after focus then diffed a real
+     * claim set against ``''``, "detected" a change that had not happened,
+     * and ran the unfiltered invalidate plus the cross-tab broadcast.
+     * Restoring a window of ten tabs paid that on every one.
+     */
+    it('does not report a change on the first poll after focus', async () => {
+        const claims: PermissionClaims = {
+            sid: 's1', global: ['system:admin'], ws: {},
+        }
+        currentClaims = claims
+        myPermissionsMock.mockResolvedValue(claims)
+
+        const hidden = vi.spyOn(document, 'hidden', 'get')
+        hidden.mockReturnValue(true)
+
+        const mod = (await import('./permissionPoller')) as unknown as {
+            enablePermissionPolling: () => void
+            __pollOnce__: () => Promise<void>
+        }
+        mod.enablePermissionPolling()
+
+        hidden.mockReturnValue(false)
+        await mod.__pollOnce__()
+
+        expect(invalidateQueriesMock).not.toHaveBeenCalled()
+        expect(notifyPermissionsChangedMock).not.toHaveBeenCalled()
+        hidden.mockRestore()
+    })
+
+    it('still reports a genuine change made while the tab was hidden', async () => {
+        // The seed must not blind the poller. If an admin changes a role
+        // while the tab is backgrounded, the first poll after focus has
+        // to diff against the seeded baseline and fire.
+        currentClaims = { sid: 's1', global: ['system:admin'], ws: {} }
+        myPermissionsMock.mockResolvedValue({
+            sid: 's1', global: ['system:org-admin'], ws: {},
+        })
+
+        const hidden = vi.spyOn(document, 'hidden', 'get')
+        hidden.mockReturnValue(true)
+
+        const mod = (await import('./permissionPoller')) as unknown as {
+            enablePermissionPolling: () => void
+            __pollOnce__: () => Promise<void>
+        }
+        mod.enablePermissionPolling()
+
+        hidden.mockReturnValue(false)
+        await mod.__pollOnce__()
+
+        expect(invalidateQueriesMock).toHaveBeenCalled()
+        expect(notifyPermissionsChangedMock).toHaveBeenCalled()
+        hidden.mockRestore()
+    })
+})

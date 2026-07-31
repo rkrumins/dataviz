@@ -49,6 +49,7 @@ except ImportError:  # pragma: no cover - joserfc ships with Authlib 1.7+
 # which the retry loop resolves by force-refetching the key set.
 _VERIFY_ERRORS = (_AuthlibJoseError, _JoseRfcError, ValueError, KeyError)
 
+from ..core.config import CLOCK_SKEW_LEEWAY_SECONDS
 from .base import ProviderCredentials, ProviderIdentity
 from .claim_mapper import apply_claim_mapping, ClaimMappingError
 from .registry import ProviderConfigSnapshot
@@ -56,7 +57,10 @@ from .registry import ProviderConfigSnapshot
 logger = logging.getLogger(__name__)
 
 # Bounded clock skew for ID-token exp/iat/nbf validation (seconds).
-_CLOCK_SKEW_LEEWAY = 60
+# Shared with our own token verification in ``core.tokens`` so the
+# tolerance we extend to an IdP and the one we extend to ourselves
+# cannot drift apart.
+_CLOCK_SKEW_LEEWAY = CLOCK_SKEW_LEEWAY_SECONDS
 # JWKS / discovery cache lifetime (seconds).
 _METADATA_TTL = 3600
 _HTTP_TIMEOUT = 10.0
@@ -260,11 +264,17 @@ class OidcProvider:
         the route signs it into the ``nx_oidc`` cookie via
         :mod:`core.tokens`.
 
-        ``force_reauth`` is set by the daily-SSO-re-auth path: it
-        pins ``max_age=SSO_SESSION_MAX_AGE_SECONDS`` so the IdP itself
-        refuses to short-circuit when its own session is older than
-        our ceiling, and requests ``prompt=login`` so the IdP shows
-        the login form even when its session is still warm.
+        ``max_age=SSO_SESSION_MAX_AGE_SECONDS`` is sent on EVERY
+        authorization request, not only the re-auth bounce. It stops the
+        IdP short-circuiting a session older than our ceiling, and —
+        just as importantly — obliges a compliant provider to return
+        ``auth_time``, which is what the ceiling measures from. Without
+        it many providers omit the claim and the ceiling silently falls
+        back to timing from our own login instead.
+
+        ``force_reauth`` is set by the daily-SSO-re-auth path and adds
+        ``prompt=login`` so the IdP shows the login form even when its
+        session is still warm.
         """
         if not self.enabled:
             raise OidcError("OIDC is not enabled/configured")

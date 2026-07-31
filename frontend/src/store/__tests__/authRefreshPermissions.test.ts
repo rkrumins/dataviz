@@ -27,13 +27,41 @@ describe('refreshPermissions', () => {
         myPermissions.mockReset()
         refresh.mockReset()
         resetClaimRecovery()
-        useAuthStore.setState({ permissions: REAL_CLAIMS })
+        // A session that already knows its claims — which is what every
+        // re-hydrate is, by definition.
+        useAuthStore.setState({
+            permissions: REAL_CLAIMS, permissionsStatus: 'ready',
+        })
     })
 
     it('keeps existing claims when the permissions fetch fails (no storm amplifier)', async () => {
         myPermissions.mockRejectedValueOnce(new Error('401'))
         await useAuthStore.getState().refreshPermissions()
         expect(useAuthStore.getState().permissions).toEqual(REAL_CLAIMS)
+    })
+
+    it('stays ready when the fetch fails, instead of spinning forever', async () => {
+        // 'ready' means "this is the best answer available", not "the
+        // request succeeded". A guard waiting on an answer that is never
+        // coming is an eternal skeleton, not a safer UI.
+        myPermissions.mockRejectedValueOnce(new Error('boom'))
+        await useAuthStore.getState().refreshPermissions()
+        expect(useAuthStore.getState().permissionsStatus).toBe('ready')
+    })
+
+    it('never sends a hydrated session back to loading', async () => {
+        // The poller and the post-refresh re-hydrate both call this in
+        // the background. Dropping to 'loading' there would blank a
+        // working UI on every routine token rotation.
+        let resolveClaims: (v: unknown) => void = () => {}
+        myPermissions.mockReturnValueOnce(new Promise((r) => { resolveClaims = r }))
+
+        const pending = useAuthStore.getState().refreshPermissions()
+        expect(useAuthStore.getState().permissionsStatus).toBe('ready')
+
+        resolveClaims(REAL_CLAIMS)
+        await pending
+        expect(useAuthStore.getState().permissionsStatus).toBe('ready')
     })
 
     it('still applies a genuine revocation (200 with reduced claims)', async () => {
@@ -66,7 +94,10 @@ describe('a claimless access token self-heals', () => {
         myPermissions.mockReset()
         refresh.mockReset()
         resetClaimRecovery()
-        useAuthStore.setState({ permissions: { sid: '', global: [], ws: {} } })
+        useAuthStore.setState({
+            permissions: { sid: '', global: [], ws: {} },
+            permissionsStatus: 'unknown',
+        })
     })
 
     it('rotates the token when the JWT carries no claims, instead of stranding the user', async () => {

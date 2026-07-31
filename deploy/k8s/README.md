@@ -2,6 +2,13 @@
 
 Deploy the full Synodic platform (6 microservices + 3 infrastructure dependencies) to any GKE cluster with TLS Ingress.
 
+
+> **Two environments on one cluster (or reachable from one browser)?** Each overlay
+> carries its own `AUTH_ENVIRONMENT_ID` (`patches/auth-environment.yaml`), which scopes
+> the session cookie names and JWT issuer so instances cannot evict each other's
+> sessions. Do not reuse an id across environments. See
+> [Running several environments side by side](../../docs/MULTI_ENVIRONMENT_SESSIONS.md).
+
 ## Architecture
 
 ```

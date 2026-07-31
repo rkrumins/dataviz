@@ -24,6 +24,101 @@ import { useFeature } from '@/store/features'
 // exception: only JS can read the key, so those POST it instead.
 // The catalog comes from /api/v1/auth/providers — only enabled
 // providers are returned, no client-side fan-out.
+/**
+ * One SSO button, visible on both themes.
+ *
+ * These carried `border-white/20 … hover:bg-white/5`, which is a border
+ * on a light card that is the same colour as the card. On the light
+ * theme the control was not faint — it was gone, and the only evidence
+ * an SSO option existed at all was a lone icon floating under "Or sign
+ * in with".
+ *
+ * The page states both themes explicitly rather than leaning on a
+ * semantic token (see the inputs above: `bg-white/50 dark:bg-black/20`),
+ * so these match that. A fill as well as a border, because this sits
+ * directly under the password field and reads as a peer control.
+ */
+const SSO_BUTTON = [
+    'group relative flex items-center justify-center w-full h-12',
+    'rounded-xl border text-sm font-semibold transition-all duration-200',
+    'text-ink bg-white/60 dark:bg-white/[0.04]',
+    'border-black/10 dark:border-white/15',
+    'hover:bg-white dark:hover:bg-white/[0.09]',
+    'hover:border-accent-lineage/40 hover:shadow-md hover:shadow-accent-lineage/5',
+    'hover:-translate-y-px active:translate-y-0',
+    'focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50',
+].join(' ')
+
+/** The dev-login and `custom`-kind buttons, which say "not production"
+ *  in amber. `text-yellow-300` on a white card is unreadable. */
+const SSO_BUTTON_DEV = [
+    'group relative flex items-center justify-center w-full h-12',
+    'rounded-xl border text-sm font-semibold transition-all duration-200',
+    'border-yellow-500/40 text-yellow-700 dark:text-yellow-300',
+    'bg-yellow-500/[0.06] hover:bg-yellow-500/10',
+    'hover:-translate-y-px active:translate-y-0',
+    'focus:outline-none focus-visible:ring-2 focus-visible:ring-yellow-500/50',
+].join(' ')
+
+/**
+ * What to call the connection.
+ *
+ * The operator's own ``buttonLabel`` wins outright — they wrote it to be
+ * read. Otherwise the display name, which is what Admin → SSO asks for
+ * and is required to be non-blank at both create and update.
+ *
+ * The slug is the floor and should never be reached. It exists because a
+ * control with no accessible name is unusable, and for a while every
+ * button had one: the API served the catalog snake_case while this file
+ * read camelCase, so ``displayName`` arrived undefined. Presented rather
+ * than raw — ``corporate-portal`` is an identifier, "Corporate Portal"
+ * is a name, and if we are down to the last resort it should still look
+ * like something a person chose.
+ */
+function ssoName(p: SsoProviderSummary): string {
+    const chosen = p.displayName?.trim()
+    if (chosen) return chosen
+    return p.slug
+        .split(/[-_.]+/)
+        .filter(Boolean)
+        .map(w => w[0].toUpperCase() + w.slice(1))
+        .join(' ')
+}
+
+/** The full string on the button. "Continue with X" is the phrasing every
+ *  SSO button on the web uses, and it reads as an invitation rather than
+ *  as a bare noun sitting in a box. An operator-set label is used
+ *  verbatim — they may well have written "Continue with" themselves. */
+function ssoLabel(p: SsoProviderSummary): string {
+    return p.buttonLabel?.trim() || `Continue with ${ssoName(p)}`
+}
+
+/**
+ * The provider's mark, or a stand-in for it.
+ *
+ * A leading mark is what makes this read as a real sign-in option rather
+ * than a secondary link — it is the shape people recognise from every
+ * other "Continue with" button. Most connections have no uploaded icon,
+ * so the initial in a tinted tile stands in: still an anchor for the eye,
+ * still identifiable at a glance when two connections are listed.
+ */
+function SsoMark({ p }: { p: SsoProviderSummary }) {
+    if (p.buttonIcon) {
+        return (
+            <img src={p.buttonIcon} alt="" aria-hidden
+                 className="w-5 h-5 shrink-0 object-contain" />
+        )
+    }
+    return (
+        <span
+            aria-hidden="true"
+            className="flex items-center justify-center w-7 h-7 shrink-0 rounded-lg bg-gradient-to-br from-violet-500/20 to-indigo-500/10 text-[11px] font-bold text-accent-lineage"
+        >
+            {ssoName(p).charAt(0).toUpperCase()}
+        </span>
+    )
+}
+
 function SsoButtons({
     providers,
     failed,
@@ -73,7 +168,7 @@ function SsoButtons({
         // no explanation. Muted rather than alarming — it isn't the user's
         // fault, and the password form may still work.
         return (
-            <div className="mt-6 pt-6 border-t border-white/10 text-center">
+            <div className="mt-6 pt-6 border-t border-black/10 dark:border-white/10 text-center">
                 <p className="text-xs text-ink-muted">
                     Couldn't load single sign-on options.{' '}
                     <button
@@ -103,7 +198,7 @@ function SsoButtons({
     return (
         <div className={cn(
             "space-y-3",
-            showDivider && "mt-6 pt-6 border-t border-white/10",
+            showDivider && "mt-6 pt-6 border-t border-black/10 dark:border-white/10",
         )}>
             {showDivider && (
                 <p className="text-[11px] text-center uppercase tracking-widest text-ink-muted">
@@ -118,39 +213,39 @@ function SsoButtons({
                         disabled={busySlug === p.slug}
                         onClick={() => { void signInWithPortal(p) }}
                         className={cn(
-                            "flex items-center justify-center gap-2 w-full text-center py-2.5",
-                            "rounded-xl border text-sm font-medium transition-colors",
-                            "border-white/20 text-ink hover:bg-white/5",
+                            SSO_BUTTON,
                             busySlug === p.slug && "opacity-70 cursor-not-allowed",
                         )}
                     >
-                        {p.buttonIcon && (
-                            <img src={p.buttonIcon} alt="" aria-hidden
-                                 className="w-4 h-4 shrink-0 object-contain" />
-                        )}
-                        {p.buttonLabel || p.displayName}
-                        {busySlug === p.slug
-                            ? <div className="w-3.5 h-3.5 border-2 border-ink-muted/30 border-t-ink rounded-full animate-spin" />
-                            : <ChevronRight className="w-3.5 h-3.5 opacity-50" />}
+                        {/* Mark and affordance are pinned to the edges so
+                            the label stays optically centred however long
+                            the provider's name is. */}
+                        <span className="absolute left-3 flex items-center">
+                            <SsoMark p={p} />
+                        </span>
+                        <span className="px-12 truncate">{ssoLabel(p)}</span>
+                        <span className="absolute right-3.5 flex items-center">
+                            {busySlug === p.slug
+                                ? <div className="w-3.5 h-3.5 border-2 border-ink-muted/30 border-t-ink rounded-full animate-spin" />
+                                : <ChevronRight className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:translate-x-0.5" />}
+                        </span>
                     </button>
                 ) : (
                     <a
                         key={p.id}
                         href={`/api/v1/auth/${encodeURIComponent(p.slug)}/login?next=${next}`}
-                        className={cn(
-                            "flex items-center justify-center gap-2 w-full text-center py-2.5",
-                            "rounded-xl border text-sm font-medium transition-colors",
-                            p.kind === 'custom'
-                                ? "border-yellow-500/40 text-yellow-300 hover:bg-yellow-500/5"
-                                : "border-white/20 text-ink hover:bg-white/5",
-                        )}
+                        className={p.kind === 'custom' ? SSO_BUTTON_DEV : SSO_BUTTON}
                     >
-                        {p.buttonIcon && (
-                            <img src={p.buttonIcon} alt="" aria-hidden
-                                 className="w-4 h-4 shrink-0 object-contain" />
-                        )}
-                        {p.buttonLabel || p.displayName}
-                        <ExternalLink className="w-3.5 h-3.5 opacity-50" />
+                        <span className="absolute left-3 flex items-center">
+                            <SsoMark p={p} />
+                        </span>
+                        <span className="px-12 truncate">{ssoLabel(p)}</span>
+                        {/* ExternalLink rather than a chevron: this one
+                            leaves the page for the IdP, and saying so is
+                            worth more than a consistent glyph. */}
+                        <span className="absolute right-3.5 flex items-center">
+                            <ExternalLink className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:-translate-y-px group-hover:translate-x-0.5" />
+                        </span>
                     </a>
                 )
             ))}
@@ -160,7 +255,7 @@ function SsoButtons({
             {customEnabled && !providers?.some((p) => p.kind === 'custom') && (
                 <a
                     href={`/dev-login?next=${next}`}
-                    className="block w-full text-center py-2.5 rounded-xl border border-yellow-500/40 text-sm font-medium text-yellow-300 hover:bg-yellow-500/5 transition-colors"
+                    className={SSO_BUTTON_DEV}
                 >
                     Dev Login (mock IdP) — non-production
                 </a>
@@ -282,6 +377,67 @@ function SsoFailureBanner({ reference, onDismiss }: {
     )
 }
 
+/**
+ * Shown when someone lands on /login and the session turns out to still
+ * be valid.
+ *
+ * That case used to resolve itself silently — a straight bounce into the
+ * app. Combined with the silent refresh-on-401 (now exempt on this
+ * route), even an EXPIRED access cookie signed people back in without a
+ * keystroke. Either way there was no way to sign in as somebody else,
+ * which is a thing people genuinely need: a shared machine, a second
+ * tenant, an admin account alongside a normal one.
+ */
+function AlreadySignedIn({ email }: { email: string }) {
+    const navigate = useNavigate()
+    const logout = useAuthStore((s) => s.logout)
+    const [switching, setSwitching] = useState(false)
+
+    async function switchAccount() {
+        setSwitching(true)
+        // Drop the server session FIRST. Without this, "someone else"
+        // would be typing their password on a page still holding the
+        // previous user's cookies. ``logout`` swallows its own errors
+        // and clears local state either way, so this component always
+        // unmounts — no need to unwind ``switching``.
+        await logout()
+    }
+
+    return (
+        <div className="min-h-screen w-full flex items-center justify-center bg-canvas font-sans p-6">
+            <div className="glass-panel w-full max-w-[420px] p-8 rounded-[2rem] border-white/20 dark:border-white/5 shadow-2xl text-center">
+                <div className="w-14 h-14 mb-5 mx-auto rounded-2xl bg-gradient-to-br from-accent-lineage to-accent-lineage/80 flex items-center justify-center shadow-lg shadow-accent-lineage/30">
+                    <ShieldCheck className="w-7 h-7 text-white" />
+                </div>
+                <h1 className="text-lg font-bold text-ink">
+                    You're already signed in as {email}
+                </h1>
+                <div className="mt-6 space-y-3">
+                    <button
+                        type="button"
+                        onClick={() => navigate('/', { replace: true })}
+                        className="w-full h-12 rounded-xl bg-accent-lineage text-white font-semibold shadow-lg shadow-accent-lineage/20 transition-all active:scale-[0.98] hover:brightness-110 flex items-center justify-center gap-2"
+                    >
+                        Continue
+                        <ChevronRight className="w-4 h-4" />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => { void switchAccount() }}
+                        disabled={switching}
+                        className={cn(
+                            "w-full h-12 rounded-xl border border-white/20 text-sm font-medium text-ink transition-colors",
+                            switching ? "opacity-70 cursor-not-allowed" : "hover:bg-white/5",
+                        )}
+                    >
+                        {switching ? 'Signing out…' : 'Sign in as someone else'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    )
+}
+
 /** Session-scoped guard so a rejected auto-attempt can't relaunch on
  *  every render or on a bounce back to /login. A fresh tab retries. */
 const AUTO_PORTAL_SENTINEL = 'nx_portal_autologin_tried'
@@ -312,7 +468,7 @@ export function LoginPage() {
     const [params] = useSearchParams()
 
     const {
-        login, error, clearError, isLoading, isAuthenticated, status,
+        login, error, clearError, isLoading, isAuthenticated, status, user,
         loginWithBrowserProfile,
     } = useAuthStore()
 
@@ -381,11 +537,6 @@ export function LoginPage() {
         }
     }, [errorCode, collisionEmail])
 
-    // If already authenticated, redirect to dashboard
-    useEffect(() => {
-        if (isAuthenticated) navigate('/', { replace: true })
-    }, [isAuthenticated, navigate])
-
     useEffect(() => {
         clearError()
     }, [clearError])
@@ -438,14 +589,20 @@ export function LoginPage() {
         if (ok) navigate('/', { replace: true })
     }
 
-    // Avoid flashing the form to a user who's about to be redirected to
-    // the dashboard because their cookie is still valid.
+    // Avoid flashing the form to a user whose cookie is still being
+    // checked.
     if (status === 'idle' || status === 'loading') {
         return (
             <div className="min-h-screen w-full flex items-center justify-center bg-canvas">
                 <div className="w-8 h-8 border-2 border-ink-muted/30 border-t-accent-lineage rounded-full animate-spin" />
             </div>
         )
+    }
+
+    // A live session, on the one page whose job is to ask who you are.
+    // Say so and let them choose — do not decide for them.
+    if (isAuthenticated && user) {
+        return <AlreadySignedIn email={user.email} />
     }
 
     return (
@@ -613,10 +770,13 @@ export function LoginPage() {
                     {routed && (
                         <a
                             href={`/api/v1/auth/${encodeURIComponent(routed.slug)}/login?next=${encodeURIComponent('/dashboard')}`}
-                            className="mt-4 flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-accent-lineage text-white text-sm font-semibold hover:brightness-110 transition-all"
+                            className="group mt-4 flex items-center justify-center gap-2 w-full h-12 rounded-xl bg-accent-lineage text-white text-sm font-semibold shadow-sm shadow-accent-lineage/25 hover:brightness-110 hover:shadow-md hover:shadow-accent-lineage/30 hover:-translate-y-px active:translate-y-0 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50"
                         >
-                            Continue with {routed.buttonLabel || routed.displayName}
-                            <ChevronRight className="w-4 h-4" />
+                            {/* Through ssoLabel, so a connection with no
+                                display name cannot render "Continue with
+                                undefined" here either. */}
+                            {ssoLabel(routed)}
+                            <ChevronRight className="w-4 h-4 transition-transform duration-200 group-hover:translate-x-0.5" />
                         </a>
                     )}
 

@@ -13,6 +13,12 @@ data:
   FALKORDB_GRAPH_NAME: {{ .Values.config.falkordb.graphName | quote }}
   FALKORDB_SERVER_TIMEOUT_MAX_MS: {{ .Values.config.falkordb.serverTimeoutMaxMs | quote }}
   JWT_ALGORITHM: {{ .Values.config.jwt.algorithm | quote }}
+{{- with .Values.config.jwt.environmentId }}
+  # Scopes session cookie names and binds the JWT issuer to this
+  # environment, so two deployments open in one browser cannot evict each
+  # other's session. Omitted when empty -> unchanged single-env behaviour.
+  AUTH_ENVIRONMENT_ID: {{ . | quote }}
+{{- end }}
   JWT_EXPIRY_MINUTES: {{ .Values.config.jwt.expiryMinutes | quote }}
   ADMIN_EMAIL: {{ .Values.config.adminEmail | quote }}
   AGGREGATION_DISPATCH_MODE: "redis"

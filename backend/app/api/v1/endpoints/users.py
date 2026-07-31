@@ -20,7 +20,7 @@ import re
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy import desc, select
@@ -41,6 +41,7 @@ from backend.app.api.v1.endpoints.auth import (
     INVITE_LINKS_FAIL_OPEN,
 )
 from backend.app.api.v1.feature_gate import feature_disabled
+from backend.auth_service.cookies import clear_session_cookies
 from backend.auth_service.core.tokens import invite_expiry
 from backend.app.services.feature_flags import feature_flags
 from backend.app.db.engine import get_db_session
@@ -291,6 +292,7 @@ async def update_my_identity(
 @limiter.limit("5/minute")
 async def change_my_password(
     request: Request,
+    response: Response,
     body: ChangeMyPasswordRequest,
     current_user=Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
@@ -342,7 +344,10 @@ async def change_my_password(
     await user_repo.update_password(
         session, current_user.id, hash_password(body.new_password),
     )
-    await _revoke_every_session(session, current_user.id, reason="password_changed")
+    await _revoke_my_every_session(
+        session, current_user.id, reason="password_changed",
+        response=response, request=request,
+    )
 
     await user_repo.create_outbox_event(
         session,
@@ -358,6 +363,8 @@ async def change_my_password(
 
 @router.post("/me/sessions/revoke-all", status_code=status.HTTP_200_OK)
 async def revoke_my_sessions(
+    response: Response,
+    request: Request,
     current_user=Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -367,9 +374,17 @@ async def revoke_my_sessions(
     alive would mean re-issuing its cookies past the cutoff, which needs
     session-minting surface on ``IdentityService`` that does not exist
     and that the extraction plan does not want.
+
+    "This device included" has to mean the cookies as well. Revoking
+    server-side alone left the caller's browser holding a full set of
+    session cookies for a session that no longer exists — so the SPA
+    still believed it was signed in, the login page offered "You're
+    already signed in as …", and reloading re-read the same cookies and
+    said it again. The user could not get out of their own sign-out.
     """
-    await _revoke_every_session(
+    await _revoke_my_every_session(
         session, current_user.id, reason="revoked_by_user",
+        response=response, request=request,
     )
     await user_repo.create_outbox_event(
         session,
@@ -448,21 +463,41 @@ async def my_account_activity(
     return out
 
 
-async def _revoke_every_session(
-    session: AsyncSession, user_id: str, *, reason: str,
+async def _revoke_my_every_session(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    reason: str,
+    response: Response,
+    request: Request,
 ) -> None:
-    """Kill a user's sessions, both halves.
+    """Kill the CALLER's sessions — all three halves.
 
     ``revoke_subject_sessions`` tombstones the ``sid``s that are live
     right now; ``revoke_sessions_from_now`` stamps the cutoff that stops
     a refresh minting a fresh, untombstoned one. Neither is sufficient
     alone — the first expires with the access token, and the second only
     bites at the next rotation.
+
+    And neither clears the caller's cookies, which is the third half and
+    the one that kept getting forgotten. Leaving them behind hands the
+    browser a full set of session cookies for a session that no longer
+    exists: the SPA keeps believing it is signed in, the login page
+    offers "You're already signed in as …", and reloading re-reads the
+    same cookies and says it again. Both self-service callers — sign out
+    everywhere, and change password — shipped that bug independently.
+
+    ``response`` and ``request`` are REQUIRED rather than optional so a
+    third caller cannot repeat it. Revoking somebody else's sessions is a
+    different operation with a different helper
+    (``revoke_subject_sessions``), and it must not touch the caller's
+    cookies at all.
     """
     from backend.app.services.revocation_service import revoke_subject_sessions
 
     await user_repo.revoke_sessions_from_now(session, user_id)
     await revoke_subject_sessions("user", user_id, session=session, reason=reason)
+    clear_session_cookies(response, request)
 
 
 # ── Admin routes ───────────────────────────────────────────────────────

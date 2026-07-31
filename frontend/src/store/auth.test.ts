@@ -48,6 +48,7 @@ function _resetStore() {
         isAuthenticated: false,
         user: null,
         permissions: { sid: '', global: [], ws: {} },
+        permissionsStatus: 'unknown',
         error: null,
         isLoading: false,
     })
@@ -84,6 +85,10 @@ describe('useAuthStore.bootstrap with sessionStorage cache', () => {
         expect(seeded.status).toBe('authenticated')
         expect(seeded.isAuthenticated).toBe(true)
         expect(seeded.user?.id).toBe('usr_1')
+        // …and the claims say so in the SAME breath. A frame where the
+        // guards see an identity and 'unknown' claims is a frame where
+        // they render "You don't have access" at a legitimate user.
+        expect(seeded.permissionsStatus).toBe('loading')
 
         // Finish /me with an upgraded role; the store updates +
         // cache refreshes with the new role.
@@ -91,6 +96,19 @@ describe('useAuthStore.bootstrap with sessionStorage cache', () => {
         await bootstrapPromise
         expect(useAuthStore.getState().user?.role).toBe('admin')
         expect(readUserCache()?.role).toBe('admin')
+        expect(useAuthStore.getState().permissionsStatus).toBe('ready')
+    })
+
+    it('reaches ready on a cold boot with a legitimately empty claim set', async () => {
+        // Holding nothing is a real state, not a pending one — the
+        // guards must be allowed to render their denial.
+        vi.mocked(authService.me).mockResolvedValue({ user: _user() })
+        vi.mocked(authService.myPermissions).mockResolvedValue({
+            sid: 's1', global: [], ws: {},
+        })
+
+        await useAuthStore.getState().bootstrap()
+        expect(useAuthStore.getState().permissionsStatus).toBe('ready')
     })
 
     it('does not seed when the cache is cold (preserves loading state)', () => {
@@ -144,6 +162,9 @@ describe('useAuthStore.bootstrap with sessionStorage cache', () => {
         await useAuthStore.getState().logout()
         expect(readUserCache()).toBeNull()
         expect(useAuthStore.getState().status).toBe('unauthenticated')
+        // Back to knowing nothing — not to "confirmed empty", which
+        // would let the next session's guards deny before it hydrates.
+        expect(useAuthStore.getState().permissionsStatus).toBe('unknown')
     })
 
     it('clears the cache on handleSessionLost', () => {
@@ -151,6 +172,7 @@ describe('useAuthStore.bootstrap with sessionStorage cache', () => {
         useAuthStore.getState().handleSessionLost()
         expect(readUserCache()).toBeNull()
         expect(useAuthStore.getState().status).toBe('unauthenticated')
+        expect(useAuthStore.getState().permissionsStatus).toBe('unknown')
     })
 
     it('does not seed permissions from the cache (gates stay closed)', async () => {

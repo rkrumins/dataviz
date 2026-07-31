@@ -22,7 +22,35 @@ async def test_post_without_csrf_header_is_403(test_client: AsyncClient):
     test_client.headers.pop(CSRF_HEADER_NAME, None)
     resp = await test_client.post(_ANY_PROTECTED_POST, json={})
     assert resp.status_code == 403
-    assert "csrf" in resp.json()["detail"].lower()
+    assert "csrf" in resp.json()["detail"]["message"].lower()
+
+
+async def test_the_failure_is_distinguishable_from_a_permission_denial(
+    test_client: AsyncClient,
+):
+    """A client has to be able to tell these two 403s apart.
+
+    They call for opposite responses. A missing permission is final —
+    show the user the access-denied modal and stop. A missing CSRF cookie
+    is repairable, because every rotation re-mints ``nx_csrf``, so the
+    right move is to refresh once and retry the write.
+
+    Collapsing them is not hypothetical: the cookie can go missing while
+    the session stays live (``clear_session_cookies`` evicts across the
+    parent domain two sibling deployments share), and the SPA then
+    reported a permission failure for a delete the user was entitled to
+    perform — with no path back short of signing in again.
+    """
+    test_client.headers.pop(CSRF_HEADER_NAME, None)
+    resp = await test_client.post(_ANY_PROTECTED_POST, json={})
+
+    detail = resp.json()["detail"]
+    assert detail["error"] == "csrf_failed"
+    # Which half was missing, because "cookie absent" and "header absent"
+    # have different causes and only the first is the server's doing.
+    assert detail["cookie_present"] is True
+    # The original prose survives for anything matching on it.
+    assert detail["message"] == "CSRF token missing or invalid"
 
 
 async def test_post_without_csrf_cookie_is_403(test_client: AsyncClient):

@@ -1,0 +1,20 @@
+# Names this deployment so its session cookies cannot collide with another
+# environment's in the same browser.
+#
+# Cookie jars are keyed by DOMAIN, not by cluster: without this, every
+# environment writes the same nx_access / nx_refresh / nx_csrf cookies, so
+# signing into one silently evicts the other's session — even across
+# separate clusters. Tokens also carried an identical issuer, so the
+# receiving side could not tell a foreign session from its own and reported
+# only "Signature verification failed".
+#
+# The value becomes a cookie-name suffix (nx_access_production) and is bound into
+# the JWT issuer. It must be UNIQUE per environment and stable over time —
+# changing it logs that environment's users out once, by design.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: viz-config
+  namespace: synodic
+data:
+  AUTH_ENVIRONMENT_ID: "production"

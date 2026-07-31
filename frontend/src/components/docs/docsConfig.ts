@@ -363,6 +363,14 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/SSO_INTEGRATION.md?raw'),
   },
   {
+    slug: 'multi-environment-sessions',
+    section: 'security-identity',
+    title: 'Multi-Environment Sessions',
+    description:
+      'Running two deployments in one browser, and rotating the signing key without signing everyone out',
+    importFn: () => import('@docs/MULTI_ENVIRONMENT_SESSIONS.md?raw'),
+  },
+  {
     slug: 'signup-service',
     section: 'security-identity',
     title: 'User & Sign-up Service',

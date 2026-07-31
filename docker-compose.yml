@@ -247,6 +247,15 @@ services:
     ports:
       - "${VIZ_PORT:-8000}:8000"
     environment:
+      # The frontend container's nginx proxies /api here, so the peer is
+      # never loopback and gunicorn would otherwise discard the
+      # X-Forwarded-For nginx sets — putting every user in one
+      # rate-limit bucket keyed on the proxy. Only the compose network
+      # can reach this port.
+      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-*}"
+      # Shared rate-limit storage. Without it each of the 4 gunicorn
+      # workers keeps its own in-memory counters.
+      RATELIMIT_STORAGE_URI: "${RATELIMIT_STORAGE_URI:-redis://redis:6379/1}"
       # Graph provider bootstrap (used if management DB is empty)
       GRAPH_PROVIDER: ${GRAPH_PROVIDER:-falkordb}
       FALKORDB_HOST: falkordb

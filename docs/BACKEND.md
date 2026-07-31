@@ -609,8 +609,15 @@ graph TB
 | `GRAPH_PROVIDER` | `falkordb` | No | Provider type: mock, falkordb, neo4j, datahub |
 | `MANAGEMENT_DB_URL` | SQLite path | No | PostgreSQL URL for production |
 | `CREDENTIAL_ENCRYPTION_KEY` | _(none)_ | Prod | Fernet key for credential encryption |
-| `JWT_SECRET_KEY` | _(random)_ | Prod | HS256 signing key |
-| `JWT_EXPIRY_MINUTES` | `60` | No | Token lifetime |
+| `JWT_SECRET_KEY` | _(none — required)_ | **All** | HS256 signing key, ≥32 chars. There is no fallback: the process refuses to start without it, in every environment — nor with one of the placeholder values this repo publishes in its example files |
+| `JWT_SECRET_KEY_PREVIOUS` | _(none)_ | No | Comma-separated retired keys, verification only. Set this **before** rotating `JWT_SECRET_KEY`, or every live session dies the instant the new value lands — and during a rolling update, pods on the old and new key flip the same user between authenticated and 401 |
+| `AUTH_ENVIRONMENT_ID` | _(none)_ | No | Scopes the session cookie names (`nx_access_uat`) and binds the JWT issuer. Set it when two deployments can be open in the same browser — cookie jars are keyed by domain, not by cluster, so identically-named cookies overwrite each other |
+| `JWT_REFRESH_EXPIRY_DAYS` | `7` | No | Refresh-cookie lifetime — how long "stay signed in" lasts. The window slides on every rotation |
+| `REFRESH_ROTATION_GRACE_SECONDS` | `30` | No | How long a re-presented refresh token reads as a concurrent refresh rather than a stolen chain. `0` = strict rotation, which signs users out of every tab when two rotate at once |
+| `REFRESH_ADOPT_RECORDLESS` | `true` | No | Migration ramp for allow-by-record. Refresh tokens are refused unless a row in `refresh_tokens` says otherwise, and every session live at the deploy holds one with no row — so this accepts such a token once and writes the row it should have had. **Set to `false` once `JWT_REFRESH_EXPIRY_DAYS` have passed since the deploy**; adoptions log at INFO, so watch them drain to zero first. Leaving it on indefinitely keeps the old deny-by-exception behaviour available to anything holding a pre-deploy token |
+| `JWT_CLOCK_SKEW_LEEWAY_SECONDS` | `60` | No | How far outside its stated validity a token we issued is still honoured, absorbing clock drift between replicas — every pod both mints and verifies, so `exp`/`iat`/`nbf` are compared across two clocks. The OIDC path always allowed the same for an IdP. Raising it widens the window a revoked token survives by the same amount, which is why the revocation TTL derives from it |
+| `RBAC_REVOCATION_TTL_SECONDS` | _(derived)_ | No | Leave unset. Derived from `JWT_EXPIRY_MINUTES` + `JWT_CLOCK_SKEW_LEEWAY_SECONDS` + 60s; a value below the window in which an access token is still accepted makes forced revocation stop taking effect before the token does, and startup refuses it |
+| `JWT_EXPIRY_MINUTES` | `5` (code) | No | Access-token lifetime. Global permission claims ride in the token, so this is also how long a revoked or demoted session keeps its old rights. **The shipped configs disagree — check yours:** `.env.dev`, `.env.prod.example` and the k8s configmap set `15`; both `docker-compose.yml` and `docker-compose.quickstart.yml` default to `60`. On Compose you are running an hour of staleness unless you override it. The Redis revocation TTL derives from this value, so raising it does not silently break forced sign-out — it just lengthens the window |
 | `ADMIN_EMAIL` | `admin@nexuslineage.local` | No | Bootstrap admin email |
 | `ADMIN_PASSWORD` | `admin123` | No | Bootstrap admin password (from `.env.example`) |
 | `CORS_ALLOWED_ORIGINS` | `localhost:3000,5173` | No | Comma-separated origins |
@@ -620,7 +627,18 @@ graph TB
 | `FALKORDB_SEED_FILE` | _(none)_ | No | JSON path for seeding graph data |
 | `DB_ECHO` | `false` | No | SQLAlchemy SQL logging |
 
-> **Warning:** In production, set `CREDENTIAL_ENCRYPTION_KEY` and a stable `JWT_SECRET_KEY`, and override the bootstrap `ADMIN_PASSWORD`. Without the encryption key, provider credentials are stored in plaintext; an auto-generated JWT key rotates on every restart and invalidates all tokens. See the [Developer Setup — Production Environment Checklist](/docs/setup).
+> **Warning:** In production, set `CREDENTIAL_ENCRYPTION_KEY` and override the bootstrap
+> `ADMIN_PASSWORD`. Without the encryption key, provider credentials are stored in
+> plaintext. `JWT_SECRET_KEY` is mandatory everywhere — the process will not start without
+> one, so there is no auto-generated key to worry about. The strength check is still a
+> **length** check, which cannot tell a weak secret from a strong one; what it does now
+> catch is the case that actually happens, a placeholder copied forward from one of this
+> repo's example files. Those three literals are rejected by name and the error says which
+> file the value came from. Generate yours with
+> `python -c 'import secrets; print(secrets.token_urlsafe(48))'`.
+> See the [Developer Setup — Production Environment Checklist](/docs/setup) and
+> [Multi-Environment Sessions](/docs/multi-environment-sessions) for rotating the key
+> without signing everyone out.
 
 ---
 

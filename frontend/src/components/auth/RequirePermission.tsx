@@ -19,7 +19,7 @@
  */
 import type { ReactNode } from 'react'
 import { ShieldOff } from 'lucide-react'
-import { useAuthStore } from '@/store/auth'
+import { useAuthStore, usePermissionsReady } from '@/store/auth'
 
 
 interface RequirePermissionProps {
@@ -36,11 +36,15 @@ interface RequirePermissionProps {
 
 
 export function RequirePermission({ perm, anyOf, fallback, children }: RequirePermissionProps) {
+    const ready = usePermissionsReady()
     const allowed = useAuthStore((s) => {
         if (anyOf && anyOf.length > 0) return s.canAny(anyOf)
         if (perm) return s.can(perm)
         return false
     })
+    // Claims not in yet: "we don't know" is not "you may not". Denying
+    // here is how the access-denied panel came to flash before content.
+    if (!ready) return <GuardSkeleton />
     if (allowed) return <>{children}</>
     const displayPerm = perm ?? (anyOf && anyOf.length > 0 ? anyOf.join(' or ') : 'unknown')
     return <>{fallback ?? <DeniedPanel permission={displayPerm} />}</>
@@ -61,9 +65,34 @@ export function RequireWorkspacePermission({
     fallback,
     children,
 }: RequireWorkspacePermissionProps) {
+    const ready = usePermissionsReady()
     const allowed = useAuthStore((s) => s.can(perm, ws))
+    if (!ready) return <GuardSkeleton />
     if (allowed) return <>{children}</>
     return <>{fallback ?? <DeniedPanel permission={perm} workspace={ws} />}</>
+}
+
+
+// ── Waiting on claims ───────────────────────────────────────────────
+
+/**
+ * Placeholder for a guard whose claims haven't landed. Deliberately the
+ * same ``min-h-[60vh]`` footprint as ``DeniedPanel`` below (and as
+ * ``RequireNav``'s and ``RequireFeature``'s panels) so resolving to
+ * either outcome doesn't shift the page. Shared with those guards
+ * rather than copied four times.
+ */
+export function GuardSkeleton() {
+    return (
+        <div className="flex items-center justify-center min-h-[60vh] p-8">
+            <div className="w-full max-w-sm space-y-4" aria-hidden>
+                <div className="w-16 h-16 rounded-2xl bg-black/5 dark:bg-white/10 animate-pulse mx-auto" />
+                <div className="h-4 w-40 bg-black/5 dark:bg-white/10 rounded animate-pulse mx-auto" />
+                <div className="h-3 w-full bg-black/5 dark:bg-white/10 rounded animate-pulse" />
+                <div className="h-3 w-2/3 bg-black/5 dark:bg-white/10 rounded animate-pulse mx-auto" />
+            </div>
+        </div>
+    )
 }
 
 

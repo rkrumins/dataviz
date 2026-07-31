@@ -345,6 +345,15 @@ All env vars are pre-configured in `.env.dev` (for local dev) and `docker-compos
 source .env.dev
 ```
 
+One exception: `JWT_SECRET_KEY` ships **empty**, because `.env.dev` is tracked and a
+signing key committed to the repo is one every clone shares. `./dev.sh` generates a
+per-machine value on first run. If you start services by hand without ever running it,
+the backend will refuse to boot until you fill it in:
+
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+```
+
 ### Core
 
 | Variable | Default | Description |
@@ -359,7 +368,9 @@ source .env.dev
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `JWT_SECRET_KEY` | auto-generated | Secret for JWT signing (set in production) |
+| `JWT_SECRET_KEY` | none — required | Secret for JWT signing. Fails fast at startup if unset or under 32 chars |
+| `JWT_SECRET_KEY_PREVIOUS` | empty | Retired signing keys (comma-separated), verify-only — set during a rotation |
+| `AUTH_ENVIRONMENT_ID` | empty | Names this deployment; scopes cookie names + JWT issuer so environments don't collide in one browser |
 | `JWT_ALGORITHM` | `HS256` | JWT algorithm |
 | `JWT_EXPIRY_MINUTES` | `60` | Token lifetime |
 | `ADMIN_EMAIL` | `admin@nexuslineage.local` | Bootstrap admin email |

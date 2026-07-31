@@ -43,6 +43,20 @@ if [ ! -f "$ENV_FILE" ]; then
     fi
 fi
 
+# ── Mint a signing secret if there isn't one ───────────────────────
+# Both .env.example and the tracked .env.dev ship JWT_SECRET_KEY empty:
+# a value committed to the repo is a value every clone shares, and the
+# backend now refuses to start on the placeholders this repo used to
+# publish. Generating per-machine here keeps first-run a single command.
+if grep -qE '^JWT_SECRET_KEY=$' "$ENV_FILE"; then
+    echo "[dev] generating JWT_SECRET_KEY in $ENV_FILE"
+    secret="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+    # A temp file + mv rather than `sed -i`, whose in-place flag differs
+    # between GNU and BSD sed and silently creates a backup file on macOS.
+    awk -v s="$secret" '/^JWT_SECRET_KEY=$/ {print "JWT_SECRET_KEY=" s; next} {print}' \
+        "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+fi
+
 usage() { sed -n '4,21p' "$0" | sed 's/^# //; s/^#//'; }
 
 # ── Postgres preflight ─────────────────────────────────────────────
