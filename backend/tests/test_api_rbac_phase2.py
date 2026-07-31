@@ -453,8 +453,11 @@ async def test_update_and_delete_lifecycle_guards(
 # ── view three-layer evaluator (unit-level) ─────────────────────────
 
 @pytest.mark.asyncio
-async def test_view_access_evaluator_layer1_workspace_member(db_session):
-    """Layer 1: workspace binding is sufficient for read."""
+async def test_private_view_hidden_from_workspace_member(db_session):
+    """Private means private: a plain workspace member (holder of
+    ``workspace:view:read``) must NOT read another user's private view.
+    The original membership-first evaluator granted this — that was the
+    private-view leak; this test pins the inversion."""
     from backend.app.services import view_access
     from backend.app.services.permission_service import PermissionClaims
 
@@ -478,8 +481,34 @@ async def test_view_access_evaluator_layer1_workspace_member(db_session):
         select(ViewORM).where(ViewORM.id == view_id)
     )).scalar_one()
 
-    # Private + not creator + not workspace admin → Layer 2 fails.
-    # But Layer 1 grants read because the user is a workspace member.
+    assert not await view_access.can_read_view(db_session, ctx, view)
+
+
+@pytest.mark.asyncio
+async def test_workspace_tier_readable_by_workspace_member(db_session):
+    """The same member claims DO read a workspace-tier view — the
+    inversion above must not overshoot."""
+    from backend.app.services import view_access
+    from backend.app.services.permission_service import PermissionClaims
+
+    ws_id = await _seed_workspace(db_session)
+    view_id = await _seed_view(
+        db_session, workspace_id=ws_id, visibility="workspace",
+        created_by="usr_someone_else",
+    )
+
+    claims = PermissionClaims(
+        sid="sess_a",
+        ws_perms={ws_id: ("workspace:view:read",)},
+    )
+    user = type("U", (), {"id": "usr_caller"})()
+    ctx = await view_access.ViewerContext.build(db_session, user=user, claims=claims)
+
+    from sqlalchemy import select
+    view = (await db_session.execute(
+        select(ViewORM).where(ViewORM.id == view_id)
+    )).scalar_one()
+
     assert await view_access.can_read_view(db_session, ctx, view)
 
 

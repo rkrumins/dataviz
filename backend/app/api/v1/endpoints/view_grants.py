@@ -36,10 +36,8 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.models import GroupORM, UserORM, ViewORM
 from backend.app.db.repositories import grant_repo, group_repo, user_repo
 from backend.app.db.repositories import view_activity_repo
-from backend.app.services.permission_service import (
-    PermissionClaims,
-    has_permission,
-)
+from backend.app.services import view_access
+from backend.app.services.permission_service import PermissionClaims
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
     ViewGrantCreateRequest,
@@ -82,17 +80,14 @@ def _ensure_can_manage_grants(
     """Permit only the creator OR a workspace admin of the view's
     workspace. Raises 403 otherwise.
 
-    Pure-function variant of ``can_manage_view_grants`` kept for
-    callers that already have the view in hand (e.g. the handler
-    body, which loaded the view to attach workspace metadata to the
-    outbox event). Both paths agree by construction — there's one
-    rule, two callsites.
+    The rule itself lives in ``view_access.can_manage_grants`` (one
+    rule, one place); this wrapper adapts it to the HTTP layer. Group
+    ids aren't needed — the rule never consults grants.
     """
-    if view.created_by == user.id:
-        return
-    if has_permission(claims, "workspace:admin", workspace_id=view.workspace_id):
-        return
-    if has_permission(claims, "system:admin"):
+    ctx = view_access.ViewerContext(
+        user_id=user.id, claims=claims, group_ids=(),
+    )
+    if view_access.can_manage_grants(ctx, view):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
