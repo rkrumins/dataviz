@@ -508,8 +508,10 @@ async def update_view(
         row.view_type = req.view_type
     if req.config is not None:
         row.config = json.dumps(req.config)
-    if req.visibility is not None:
-        row.visibility = req.visibility
+    # visibility is NOT written here: it is a security field with its own
+    # authorization (publish gate) — see update_visibility. The endpoint
+    # 422s before reaching this function; skipping it here keeps a direct
+    # repo caller from bypassing that rule too.
     if req.tags is not None:
         row.tags = json.dumps(req.tags)
     if req.is_pinned is not None:
