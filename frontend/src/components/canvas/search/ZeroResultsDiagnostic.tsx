@@ -498,7 +498,7 @@ function DiscoverTable({ result }: { result: SearchDiscoverResult }) {
                     <PropertyMappingLink
                         wsId={activeView?.workspaceId}
                         dataSourceId={activeView?.dataSourceId}
-                        label="Configure property mapping"
+                        label="Unpack them"
                         className="text-[10.5px]"
                     />
                 </div>

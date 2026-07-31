@@ -82,12 +82,14 @@ function Harness({
   readOnly,
   searchable,
   groupByPath,
+  hideToolbar,
 }: {
   initial: Record<string, unknown>
   onChange?: (next: unknown) => void
   readOnly?: boolean
   searchable?: boolean
   groupByPath?: boolean
+  hideToolbar?: boolean
 }) {
   const [value, setValue] = useState<unknown>(initial)
   return (
@@ -97,6 +99,7 @@ function Harness({
       readOnly={readOnly}
       searchable={searchable}
       groupByPath={groupByPath}
+      hideToolbar={hideToolbar}
       bare
     />
   )
@@ -286,6 +289,35 @@ describe('PropertyEditor — path grouping', () => {
     // Leaves render by their last segment, expanded by default at depth 0
     expect(screen.getByText('x')).toBeInTheDocument()
     expect(screen.getByText('y')).toBeInTheDocument()
+  })
+
+  it('drops the mode toggles when the embed asks for no toolbar', () => {
+    // Six of these render side by side in the mapping preview; a Tree/Flat and
+    // a Formatted/Markdown pill per pane is more chrome than content there.
+    const { rerender } = render(<Harness initial={PATHS} groupByPath readOnly />)
+    expect(screen.getByText('Tree')).toBeInTheDocument()
+    expect(screen.getByText('Formatted')).toBeInTheDocument()
+
+    rerender(<Harness initial={PATHS} groupByPath readOnly hideToolbar />)
+    expect(screen.queryByText('Tree')).toBeNull()
+    expect(screen.queryByText('Formatted')).toBeNull()
+    // The tree itself is untouched — only the controls around it go.
+    expect(screen.getByText('A')).toBeInTheDocument()
+  })
+
+  it('honours `bare` on the grouped root, as it does on every other root', () => {
+    const chrome = 'rounded-lg border border-glass-border/40'
+    const { container, rerender } = render(<Harness initial={PATHS} groupByPath />)
+    expect(container.querySelector(`.${CSS.escape('border-glass-border/40')}`)).toBeTruthy()
+
+    // `bare` was accepted and documented on PropertyEditor but never forwarded
+    // to the grouped branch, so the one root that ignored it was the one the
+    // entity drawer and the mapping preview both use.
+    rerender(
+      <PropertyEditor value={PATHS} onChange={() => {}} groupByPath bare />,
+    )
+    const root = document.body.querySelector('div > div') as HTMLElement
+    expect(root.className).not.toContain(chrome)
   })
 
   it('collapses and expands a folder', async () => {

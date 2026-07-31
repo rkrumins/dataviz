@@ -87,6 +87,10 @@ export interface PropertyEditorProps {
    *  (e.g. "Technical/Physical Path" → folder "Technical" → leaf "Physical Path").
    *  Pure presentation: the stored object stays a flat string→value map. */
   groupByPath?: boolean
+  /** Drop the grouped view's toolbar (Formatted/Markdown + Tree/Flat toggles).
+   *  For narrow embeds that show several trees at once — side-by-side preview
+   *  panes — where a toggle row per pane costs more than it gives. */
+  hideToolbar?: boolean
 }
 
 const MAX_DEPTH = 6
@@ -124,6 +128,7 @@ export function PropertyEditor({
   readOnly,
   searchable,
   groupByPath,
+  hideToolbar,
 }: PropertyEditorProps) {
   const rootKind = kindOf(value)
 
@@ -139,8 +144,10 @@ export function PropertyEditor({
         value={value as Record<string, unknown>}
         onChange={onChange as (v: Record<string, unknown>) => void}
         readOnlyKeys={readOnlyKeys}
+        bare={bare}
         readOnly={readOnly}
         searchable={searchable}
+        hideToolbar={hideToolbar}
       />
     )
   }
@@ -1429,14 +1436,18 @@ function GroupedObjectRoot({
   value,
   onChange,
   readOnlyKeys,
+  bare,
   readOnly,
   searchable,
+  hideToolbar,
 }: {
   value: Record<string, unknown>
   onChange: (next: Record<string, unknown>) => void
   readOnlyKeys?: string[]
+  bare?: boolean
   readOnly?: boolean
   searchable?: boolean
+  hideToolbar?: boolean
 }) {
   const [flat, setFlat] = useState(false)
   const [display, setDisplay] = useState<DisplayMode>('formatted')
@@ -1470,8 +1481,9 @@ function GroupedObjectRoot({
   return (
     <DisplayModeContext.Provider value={readOnly ? display : 'source'}>
     <EditTextModeContext.Provider value={editTextMode}>
-    <div>
+    <div className={cn(!bare && "rounded-lg border border-glass-border/40 bg-black/5 dark:bg-white/[0.02] px-3 py-3")}>
       {/* Toolbar: search + Formatted/Source (view) or Rich/Source (edit) + Tree/Flat toggles */}
+      {!hideToolbar && (
       <div className="flex items-center gap-2 mb-2 flex-wrap">
         {searchable && (
           <div className="flex-1 min-w-[8rem]">
@@ -1498,6 +1510,7 @@ function GroupedObjectRoot({
           <ModalTab active={flat} onClick={() => setFlat(true)} label="Flat" />
         </div>
       </div>
+      )}
 
       {flat ? (
         <ObjectBody

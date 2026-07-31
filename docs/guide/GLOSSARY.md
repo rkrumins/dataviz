@@ -27,6 +27,23 @@ return whenever a word trips you up.
 
 ---
 
+## Property storage terms
+
+Graphs built outside {brand} usually store node properties differently. These
+terms appear on a data source's **Mapping** tab and in the onboarding wizards.
+
+| Term | Meaning |
+| --- | --- |
+| **Native property** | A property stored as its own field on the node. Only these can be indexed, so only these are searchable. |
+| **Nested properties** | Properties packed into one dictionary on the node instead of each having a field. They display fine, but Advanced Search can't filter on them. |
+| **Container key** | The name of the property holding that dictionary — commonly `properties`, `attributes` or `metadata`. |
+| **Property mapping** | How {brand} *reads* a source: which container key to look inside, and how to name what comes out. Changing it never touches the graph. |
+| **Unpack** | The background run that *rewrites* the graph so every nested property becomes a native field. Batched, cancellable, and resumable. |
+| **Path separator** | The character joining a nested path into one key — `technical` + `format` becomes `technical/format`. Only `/` renders as a folder tree. |
+| **Name collision** | A source field sharing a name {brand} reserves for its own (`urn`, `name`, `level`…). Remap it to keep it. |
+
+---
+
 ## Exploration terms
 
 | Term | Meaning |

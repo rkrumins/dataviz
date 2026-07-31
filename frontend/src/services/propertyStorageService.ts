@@ -203,6 +203,20 @@ export async function savePropertyMapping(
     )
 }
 
+/**
+ * True when the operator actually changed the mapping.
+ *
+ * Both onboarding wizards use this to decide whether to issue a PUT at all —
+ * a source left on the defaults should not be marked as having a customised
+ * mapping, and a review screen should list decisions, not defaults.
+ */
+export function isCustomisedMapping(mapping: PropertyMapping): boolean {
+    return mapping.containerKey !== DEFAULT_PROPERTY_MAPPING.containerKey
+        || mapping.separator !== DEFAULT_PROPERTY_MAPPING.separator
+        || mapping.collectUnmapped !== DEFAULT_PROPERTY_MAPPING.collectUnmapped
+        || Object.keys(mapping.propertyOverrides).length > 0
+}
+
 /** Report -> the mapping currently in force, for seeding the editor. */
 export function mappingFromReport(report: PropertyStorageReport): PropertyMapping {
     return {

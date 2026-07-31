@@ -1,4 +1,5 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { render as rtlRender, screen, waitFor, within } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
@@ -31,7 +32,25 @@ vi.mock('@/components/ui/toast', () => ({
     useToast: () => ({ showToast: vi.fn() }),
 }))
 
+// jsdom has no EventSource. The live-progress panel's SSE subscription is
+// covered by useJob's own tests; here it only needs to mount without throwing.
+vi.mock('@/hooks/useJob', () => ({
+    useJob: () => ({ connected: true, needsResync: false, terminal: false, snapshot: {} }),
+}))
+
 import { PropertyMappingTab } from '../PropertyMappingTab'
+
+/** The tab reads the report through React Query so the Alignment panel's
+ *  finding shares one cache entry with it. A fresh client per test keeps the
+ *  cases isolated. */
+function render(ui: React.ReactElement) {
+    const client = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    })
+    return rtlRender(
+        <QueryClientProvider client={client}>{ui}</QueryClientProvider>,
+    )
+}
 
 const CONTAINER_ENVELOPE: StorageEnvelope = {
     meta: { status: 'fresh', age_seconds: 120 },
@@ -93,7 +112,7 @@ describe('PropertyMappingTab', () => {
     it('leads with how many nodes are affected and why it matters', async () => {
         render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit />)
 
-        expect(await screen.findByText(/12,043 nodes.*store properties in a container/i))
+        expect(await screen.findByText(/12,043 nodes.*keep properties nested/i))
             .toBeInTheDocument()
         // The consequence, not just the count — this is the reason to act.
         expect(screen.getByText(/Advanced Search can't filter on them/i))
@@ -120,8 +139,8 @@ describe('PropertyMappingTab', () => {
     it('renders the before/after preview through the real property editor', async () => {
         render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit />)
 
-        expect(await screen.findByText('Now')).toBeInTheDocument()
-        const afterColumn = screen.getByText('With this mapping').parentElement!
+        expect(await screen.findByText('Nested today')).toBeInTheDocument()
+        const afterColumn = screen.getByText('After unpacking').parentElement!
 
         // The point of the whole preview: groupByPath turns the flat key
         // `technical/format` into a folder named `technical` holding `format`
@@ -130,7 +149,7 @@ describe('PropertyMappingTab', () => {
             expect(within(afterColumn).getByText('technical')).toBeInTheDocument())
         expect(within(afterColumn).getByText('format')).toBeInTheDocument()
         // …and `before` shows the raw container instead.
-        const beforeColumn = screen.getByText('Now').parentElement!
+        const beforeColumn = screen.getByText('Nested today').parentElement!
         expect(within(beforeColumn).getByText('properties')).toBeInTheDocument()
 
         expect(screen.getByText(/1 become searchable/)).toBeInTheDocument()
@@ -148,7 +167,7 @@ describe('PropertyMappingTab', () => {
         })
         render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit />)
 
-        expect(await screen.findByText('Now')).toBeInTheDocument()
+        expect(await screen.findByText('Nested today')).toBeInTheDocument()
         expect(screen.queryByText(/become searchable/)).toBeNull()
     })
 
@@ -175,7 +194,7 @@ describe('PropertyMappingTab', () => {
         expect(await screen.findByText(/Every property is a native field/i))
             .toBeInTheDocument()
         // …and nothing invites a rewrite that would do nothing.
-        expect(screen.queryByRole('button', { name: /Align properties/ })).toBeNull()
+        expect(screen.queryByRole('button', { name: /Unpack properties/ })).toBeNull()
     })
 
     it('only offers to save once the mapping actually changes', async () => {
@@ -290,21 +309,40 @@ describe('PropertyMappingTab', () => {
         render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit />)
 
         expect(await screen.findByText(/only the proportions are/i)).toBeInTheDocument()
-        expect(screen.getByText(/Some nodes store properties in a container/i))
+        expect(screen.getByText(/Some nodes keep properties nested/i))
             .toBeInTheDocument()
     })
 
     // ── The align action ─────────────────────────────────────────────
 
-    it('offers the durable fix, and starts it', async () => {
+    it('states what the run will change before starting it', async () => {
         const user = userEvent.setup()
         render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit />)
 
-        await user.click(await screen.findByRole('button', { name: /Align properties/ }))
+        await user.click(await screen.findByRole('button', { name: /Unpack properties/ }))
+
+        // A rewrite of the graph is not a one-click action: the pre-flight has
+        // to say what appears, what is removed, and how big the run is.
+        expect(await screen.findByText(/Before you start/i)).toBeInTheDocument()
+        expect(screen.getByText(/preserved and\s+counted/i)).toBeInTheDocument()
+        expect(alignProperties).not.toHaveBeenCalled()
+
+        await user.click(screen.getByRole('button', { name: /Yes, unpack now/ }))
         await waitFor(() => expect(alignProperties).toHaveBeenCalledWith('ds_1'))
     })
 
-    it('blocks aligning against an unsaved mapping', async () => {
+    it('backs out of the pre-flight without starting anything', async () => {
+        const user = userEvent.setup()
+        render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit />)
+
+        await user.click(await screen.findByRole('button', { name: /Unpack properties/ }))
+        await user.click(await screen.findByRole('button', { name: /Not yet/ }))
+
+        expect(screen.queryByText(/Before you start/i)).toBeNull()
+        expect(alignProperties).not.toHaveBeenCalled()
+    })
+
+    it('blocks unpacking against an unsaved mapping', async () => {
         const user = userEvent.setup()
         render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit />)
 
@@ -313,7 +351,7 @@ describe('PropertyMappingTab', () => {
 
         // Running against the saved mapping while the editor shows another one
         // would rewrite the graph to something the operator never previewed.
-        expect(await screen.findByRole('button', { name: /Align properties/ }))
+        expect(await screen.findByRole('button', { name: /Unpack properties/ }))
             .toBeDisabled()
     })
 
@@ -321,7 +359,87 @@ describe('PropertyMappingTab', () => {
         render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit={false} />)
 
         await screen.findByText('dataset')
-        expect(screen.queryByRole('button', { name: /Align properties/ })).toBeNull()
+        expect(screen.queryByRole('button', { name: /Unpack properties/ })).toBeNull()
         expect(screen.queryByRole('button', { name: /Save Mapping/ })).toBeNull()
+        // Re-scan enqueues a job — the server rejects it without manage rights,
+        // so showing the button only buys a viewer a 403.
+        expect(screen.queryByRole('button', { name: /Re-scan/ })).toBeNull()
+    })
+
+    // ── Honest numbers ───────────────────────────────────────────────
+
+    it('reports an unsampled graph as unknown, not as fully unpacked', async () => {
+        getPropertyStorage.mockResolvedValue({
+            meta: { status: 'fresh', age_seconds: 10 },
+            data: {
+                ...CONTAINER_ENVELOPE.data!,
+                labels: {},
+                totals: { labels: 0, affectedEstimate: null, newPaths: 0, needsAlignment: [] },
+            },
+        })
+        render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit />)
+
+        // A full green ring here would read as "all clear" for a graph we
+        // never looked at.
+        expect(await screen.findByText(/Nothing sampled yet/i)).toBeInTheDocument()
+        expect(screen.getByText(/not a clean bill of health/i)).toBeInTheDocument()
+        expect(screen.queryByText('100%')).toBeNull()
+    })
+
+    it('weights the headline by real node totals, not by sample count', async () => {
+        getPropertyStorage.mockResolvedValue({
+            meta: { status: 'fresh', age_seconds: 10 },
+            data: {
+                ...CONTAINER_ENVELOPE.data!,
+                labels: {
+                    // 20 nodes, fully nested — a rounding error in this source.
+                    lookup: {
+                        ...CONTAINER_ENVELOPE.data!.labels.dataset,
+                        sampled: 20, containerSampled: 20, labelTotal: 20,
+                        collisions: [], inferredPaths: [],
+                    },
+                    // 1,000,000 nodes, all native.
+                    asset: {
+                        ...CONTAINER_ENVELOPE.data!.labels.dataset,
+                        sampled: 200, containerSampled: 0, labelTotal: 1_000_000,
+                        storage: 'native', collisions: [], inferredPaths: [],
+                    },
+                },
+                totals: {
+                    labels: 2, affectedEstimate: 20, newPaths: 2,
+                    needsAlignment: ['lookup'],
+                },
+            },
+        })
+        render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit />)
+
+        // Averaging the two samples gives 50%. Weighted by real totals it is
+        // ~100% — which is the number that describes this graph.
+        await screen.findByText('lookup')
+        expect(screen.getByText('100%')).toBeInTheDocument()
+    })
+
+    it('says the profile age is unknown rather than claiming it is fresh', async () => {
+        getPropertyStorage.mockResolvedValue({
+            ...CONTAINER_ENVELOPE,
+            meta: { status: 'stale', age_seconds: null },
+        })
+        render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit />)
+
+        expect(await screen.findByText(/age unknown/i)).toBeInTheDocument()
+    })
+
+    it('refreshes the report after a re-scan is queued', async () => {
+        const user = userEvent.setup()
+        render(<PropertyMappingTab wsId="ws_1" dataSourceId="ds_1" canEdit />)
+
+        await screen.findByText('dataset')
+        const before = getPropertyStorage.mock.calls.length
+        await user.click(screen.getByRole('button', { name: /Re-scan/ }))
+
+        // Without the invalidation the button enqueues a job and the tab
+        // visibly does nothing.
+        await waitFor(() =>
+            expect(getPropertyStorage.mock.calls.length).toBeGreaterThan(before))
     })
 })

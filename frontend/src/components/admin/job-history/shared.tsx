@@ -8,7 +8,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
     CheckCircle2, AlertCircle, Loader2, Clock, XCircle,
     Search, X, ChevronDown, Check,
-    Settings, Zap, Calendar, Activity, Trash2,
+    Settings, Zap, Calendar, Activity, Trash2, PackageOpen,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WorkspaceResponse } from '@/services/workspaceService'
@@ -119,6 +119,7 @@ export const TRIGGER_SOURCES = [
     { key: 'purge', label: 'Purge', icon: Trash2 },
     { key: 'post_purge', label: 'Post-purge', icon: Zap },
     { key: 'auto', label: 'Auto backfill', icon: Activity },
+    { key: 'property_alignment', label: 'Property unpack', icon: PackageOpen },
 ] as const
 
 // Friendly labels for every trigger source the backend emits. Raw
@@ -132,6 +133,7 @@ const TRIGGER_LABELS: Record<string, string> = {
     purge: 'Purge',
     post_purge: 'Post-purge',
     auto: 'Auto backfill',
+    property_alignment: 'Property unpack',
 }
 
 export function triggerLabel(source: string | undefined | null): string {

@@ -124,7 +124,7 @@ export function PropertyBrowser({
             // configurable now, not a one-way migration — and a dead end: it
             // named a problem with no way to reach the fix.
             out.push({
-                text: `${blob.length} type${blob.length === 1 ? '' : 's'} store properties in a container`,
+                text: `${blob.length} type${blob.length === 1 ? '' : 's'} keep properties nested`,
                 href: propertyMappingHref(
                     activeView?.workspaceId, activeView?.dataSourceId,
                 ) ?? undefined,
@@ -133,7 +133,9 @@ export function PropertyBrowser({
         const truncated = Object.values(raw.labels ?? {}).some((l) => l?.truncatedProperties)
         if (truncated) out.push({ text: 'Some rare properties may be sampled out' })
         return out
-    }, [disc.discovery])
+        // `activeView` builds the href — leaving it out froze the link on
+        // whichever source happened to be active when discovery first landed.
+    }, [disc.discovery, activeView?.workspaceId, activeView?.dataSourceId])
 
     const q = query.trim().toLowerCase()
     const sortKeys = useMemo(() => {

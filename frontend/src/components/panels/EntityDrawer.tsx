@@ -31,7 +31,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
-import { PropertyMappingLink } from '@/components/dataSource/mappingLink'
+import { EmptyPropertiesHint } from '@/components/dataSource/mappingLink'
 import {
   useSchemaStore,
   useActiveView,
@@ -1283,18 +1283,7 @@ function ViewModeContent({
             <p className="text-xs text-ink-muted italic">
               No properties yet. Switch to Edit to add metadata.
             </p>
-            {wsId && (
-              <p className="text-[11px] text-ink-muted leading-relaxed">
-                If this source nests its properties under a container key,
-                they stay hidden until it's mapped.{' '}
-                <PropertyMappingLink
-                  wsId={wsId}
-                  dataSourceId={dataSourceId}
-                  label="Check property mapping"
-                  className="text-[11px]"
-                />
-              </p>
-            )}
+            {wsId && <EmptyPropertiesHint wsId={wsId} dataSourceId={dataSourceId} />}
           </div>
         )}
       </Section>

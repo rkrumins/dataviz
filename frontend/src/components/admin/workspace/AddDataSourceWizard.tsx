@@ -32,32 +32,14 @@ import type { OntologyMatchResult } from '@/services/ontologyDefinitionService'
 import { useQuery } from '@tanstack/react-query'
 import { workspaceService } from '@/services/workspaceService'
 import { NodeIdentityField, isIdentityOverridden, isNameOverridden } from '@/components/dataSource/NodeIdentity'
-import { PropertyMappingForm } from '@/components/admin/shared/PropertyMappingForm'
+import { useToast } from '@/components/ui/toast'
+import { PropertyShapeField } from '@/components/admin/shared/PropertyShapeField'
 import {
     DEFAULT_PROPERTY_MAPPING,
+    isCustomisedMapping,
     savePropertyMapping,
     type PropertyMapping,
 } from '@/services/propertyStorageService'
-
-/** Persist the mapping only when the operator actually changed it, and never
- *  let that failure lose them the source they just attached. */
-async function _saveMappingIfCustomised(
-    wsId: string, dsId: string | undefined, mapping: PropertyMapping,
-): Promise<void> {
-    if (!dsId) return
-    const unchanged =
-        mapping.containerKey === DEFAULT_PROPERTY_MAPPING.containerKey
-        && mapping.separator === DEFAULT_PROPERTY_MAPPING.separator
-        && mapping.collectUnmapped === DEFAULT_PROPERTY_MAPPING.collectUnmapped
-        && Object.keys(mapping.propertyOverrides).length === 0
-    if (unchanged) return
-    try {
-        await savePropertyMapping(wsId, dsId, mapping)
-    } catch {
-        // The source is attached and usable; the mapping is editable from its
-        // Mapping tab. Failing the whole wizard here would be worse.
-    }
-}
 import { catalogService } from '@/services/catalogService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -102,6 +84,7 @@ export function AddDataSourceWizard({
 
     const [phase, setPhase] = useState<'steps' | 'adding' | 'success'>('steps')
     const [error, setError] = useState<string | null>(null)
+    const { showToast } = useToast()
 
     // OWNERSHIP, not permission. The page's catalog list is filtered by
     // `permittedWorkspaces` — who MAY use an item — which says nothing about who
@@ -213,6 +196,20 @@ export function AddDataSourceWizard({
         onClose()
     }, [phase, reset, onClose])
 
+    /** Persist the mapping only when the operator actually changed it. A failure
+     *  must not lose them the source they just attached — but it must not pass
+     *  silently either, or they'll wonder later why the mapping never took. */
+    const saveMapping = useCallback(async (dsId: string | undefined) => {
+        if (!dsId || !isCustomisedMapping(propertyMapping)) return
+        try {
+            await savePropertyMapping(workspaceId, dsId, propertyMapping)
+        } catch {
+            showToast('warning',
+                "The source is attached, but its property mapping didn't save"
+                + ' — set it from the source\'s Mapping tab.')
+        }
+    }, [workspaceId, propertyMapping, showToast])
+
     const handleSubmit = useCallback(async () => {
         setPhase('adding')
         setError(null)
@@ -235,9 +232,7 @@ export function AddDataSourceWizard({
                         nameProperty: nameProperty || undefined,
                     })
                 }
-                await _saveMappingIfCustomised(
-                    workspaceId, selected.boundDataSourceId, propertyMapping,
-                )
+                await saveMapping(selected.boundDataSourceId)
             } else {
                 const created = await workspaceService.addDataSource(workspaceId, {
                     catalogItemId,
@@ -246,9 +241,7 @@ export function AddDataSourceWizard({
                     identityProperty: identityProperty || undefined,
                     nameProperty: nameProperty || undefined,
                 })
-                await _saveMappingIfCustomised(
-                    workspaceId, created?.id, propertyMapping,
-                )
+                await saveMapping(created?.id)
             }
             setPhase('success')
         } catch (err) {
@@ -258,7 +251,7 @@ export function AddDataSourceWizard({
             setPhase('steps')
             setStep('review')
         }
-    }, [workspaceId, catalogItemId, label, ontologyId, identityProperty, nameProperty, isMove, selected])
+    }, [workspaceId, catalogItemId, label, ontologyId, identityProperty, nameProperty, isMove, selected, saveMapping])
 
     if (!isOpen) return null
 
@@ -528,23 +521,13 @@ export function AddDataSourceWizard({
 
                     {/* Where this source keeps its properties. Set at attach
                         time so the first read is already correct — otherwise
-                        the drawer shows an empty bag until someone notices.
-                        No detected keys or collisions to offer yet: the graph
-                        isn't attached, so there is nothing to sample. */}
-                    <details className="group">
-                        <summary className="cursor-pointer text-[11px] font-semibold text-ink-muted hover:text-ink transition-colors select-none">
-                            Property mapping
-                            <span className="ml-1.5 font-normal text-ink-muted/70">
-                                — only if this source nests its properties
-                            </span>
-                        </summary>
-                        <div className="mt-3 pl-3 border-l border-glass-border">
-                            <PropertyMappingForm
-                                value={propertyMapping}
-                                onChange={setPropertyMapping}
-                            />
-                        </div>
-                    </details>
+                        the drawer shows an empty bag until someone notices. */}
+                    <PropertyShapeField
+                        value={propertyMapping}
+                        onChange={setPropertyMapping}
+                        providerId={selected?.providerId}
+                        graphName={selected?.sourceIdentifier || selected?.name}
+                    />
                 </div>
             )}
 

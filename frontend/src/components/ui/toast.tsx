@@ -224,6 +224,11 @@ function ToastItem({ toast }: { toast: Toast }) {
   return (
     <motion.div
       layout
+      // Toasts are the app's only feedback for a great many actions; without
+      // these they are invisible to assistive tech. Errors interrupt, everything
+      // else waits its turn.
+      role="status"
+      aria-live={toast.type === 'error' ? 'assertive' : 'polite'}
       initial={{ opacity: 0, y: 24, scale: 0.95 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: 12, scale: 0.95 }}

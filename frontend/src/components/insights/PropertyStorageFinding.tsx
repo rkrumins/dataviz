@@ -11,7 +11,7 @@
  * work and stays consistent with what the tab will show.
  */
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, CheckCircle2 } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, HelpCircle, Loader2 } from 'lucide-react'
 
 import {
     getPropertyStorage,
@@ -22,12 +22,35 @@ export function PropertyStorageFinding({ wsId, dataSourceId, onFix }: {
     dataSourceId: string
     onFix?: () => void
 }) {
-    const { data } = useQuery({
+    const { data, isLoading, isError } = useQuery({
+        // Shared with PropertyMappingTab so a save or re-scan there refreshes
+        // this line rather than leaving two views of one profile to drift.
         queryKey: ['property-storage', wsId, dataSourceId],
         queryFn: () => getPropertyStorage(wsId, dataSourceId),
         enabled: Boolean(wsId && dataSourceId),
         staleTime: 30_000,
     })
+
+    // Rendering nothing while loading or on error is indistinguishable from
+    // "all clear" — the one reading this panel could take away is the one
+    // thing we don't know yet.
+    if (isLoading) {
+        return (
+            <p className="flex items-center gap-1.5 text-[11px] text-ink-muted">
+                <Loader2 className="w-3.5 h-3.5 flex-shrink-0 animate-spin" />
+                Checking how properties are stored…
+            </p>
+        )
+    }
+
+    if (isError) {
+        return (
+            <p className="flex items-center gap-1.5 text-[11px] text-ink-muted">
+                <HelpCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                Couldn't read the property profile — this check is unknown, not clear.
+            </p>
+        )
+    }
 
     const report = data?.data
     // Not profiled yet, or profiled before this existed. Saying nothing beats
@@ -53,7 +76,7 @@ export function PropertyStorageFinding({ wsId, dataSourceId, onFix }: {
                 {needs.length} type{needs.length === 1 ? '' : 's'}
                 {' '}({needs.slice(0, 3).join(', ')}
                 {needs.length > 3 ? `, +${needs.length - 3}` : ''}) keep their
-                properties in a nested container, so Advanced Search can't
+                properties nested inside one field, so Advanced Search can't
                 filter on them.
                 {affected != null && affected > 0 && (
                     <span className="ml-1 text-ink-muted tabular-nums">
@@ -67,7 +90,7 @@ export function PropertyStorageFinding({ wsId, dataSourceId, onFix }: {
                             onClick={onFix}
                             className="font-semibold text-indigo-500 hover:text-indigo-600 transition-colors"
                         >
-                            Configure property mapping
+                            Unpack them
                         </button>
                     </>
                 )}
