@@ -9,9 +9,11 @@
  *
  * This hook fetches each VISITED focal node's true 1-hop lineage (both
  * directions) plus partner entity names straight from the provider the
- * first time that node appears in the lens stack, and fetches an
+ * first time that node appears in the focus history, fetches an
  * aggregated row's underlying connections when the user drills it
- * (same provider query the canvas's expandEdge uses). Results are held
+ * (same provider query the canvas's expandEdge uses), and exposes
+ * ensureFetched for the graph mode's frontier (⊕) hop expansion — the
+ * same once-per-session fetch for an arbitrary node. Results are held
  * lens-locally and merged into the Lens's derivation — nothing is
  * written to the canvas store, so exploring in the lens never mutates a
  * curated view's scope (same invariant as the external preview).
@@ -59,6 +61,9 @@ export interface LensLineageData {
   /** Fetch an aggregated edge's underlying connections (idempotent per
    *  edge id; a failed fetch may be re-kicked by calling again). */
   fetchDrill: (edge: LineageEdge) => void
+  /** Fetch a node's 1-hop lineage if not already started — the graph
+   *  mode's frontier expansion (idempotent; retry() re-kicks errors). */
+  ensureFetched: (nodeId: string) => void
 }
 
 interface FetchState {
@@ -78,7 +83,9 @@ const emptyState = (): FetchState => ({
 })
 
 export function useLensLineage(
-  lensStack: string[],
+  /** Every node whose 1-hop lineage the lens needs — the focus
+   *  history's entries (fetched once each per lens session). */
+  visitedIds: string[],
   /** Null = no provider reachable — the hook degrades to a no-op and
    *  consumers keep rendering store-only data. */
   provider: GraphDataProvider | null,
@@ -260,9 +267,9 @@ export function useLensLineage(
     })()
   }, [provider, lineageEdgeTypes, resolveNames])
 
-  // Session lifecycle: fetch every stack entry once; clear on close.
+  // Session lifecycle: fetch every visited node once; clear on close.
   useEffect(() => {
-    if (lensStack.length === 0) {
+    if (visitedIds.length === 0) {
       if (startedRef.current.size > 0 || drillStartedRef.current.size > 0) {
         sessionRef.current += 1
         startedRef.current.clear()
@@ -272,12 +279,15 @@ export function useLensLineage(
       }
       return
     }
-    for (const id of lensStack) {
+    for (const id of visitedIds) {
       if (!startedRef.current.has(id)) void fetchNode(id)
     }
-  }, [lensStack, fetchNode])
+  }, [visitedIds, fetchNode])
 
   const retry = useCallback((nodeId: string) => void fetchNode(nodeId), [fetchNode])
+  const ensureFetched = useCallback((nodeId: string) => {
+    if (!startedRef.current.has(nodeId)) void fetchNode(nodeId)
+  }, [fetchNode])
 
   const supplementalEdges = useMemo(() => {
     const all: LineageEdge[] = []
@@ -307,5 +317,6 @@ export function useLensLineage(
     drillEdges: state.drillEdges,
     drillStatus: state.drillStatus,
     fetchDrill,
+    ensureFetched,
   }
 }

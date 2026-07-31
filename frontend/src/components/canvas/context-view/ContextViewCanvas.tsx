@@ -3826,6 +3826,8 @@ export function ContextViewCanvas({
           drillEdges={lensLineage.drillEdges}
           drillStatus={lensLineage.drillStatus}
           onDrillFetch={lensLineage.fetchDrill}
+          onEnsureFetched={lensLineage.ensureFetched}
+          degreeHints={externalDegrees}
           externalPreview={externalPreview && lensFocalOf(lensHistory) === externalPreview.nodeId ? externalPreview : null}
           onRecenter={lensRecenter}
           onBack={lensBack}

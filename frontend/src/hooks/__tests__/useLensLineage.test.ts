@@ -65,6 +65,25 @@ describe('useLensLineage', () => {
     expect(getEdges).toHaveBeenCalledTimes(4)
   })
 
+  it('ensureFetched fetches an arbitrary node once — frontier expansion contract', async () => {
+    const { provider, getEdges } = makeProvider(() => [])
+    const { result } = renderHook(() => useLensLineage(['a'], provider, []))
+    await waitFor(() => expect(result.current.status.get('a')).toBe('done'))
+    expect(getEdges).toHaveBeenCalledTimes(2)
+
+    // Expanding a frontier node that was never a focal fetches it…
+    act(() => result.current.ensureFetched('frontier-x'))
+    await waitFor(() => expect(result.current.status.get('frontier-x')).toBe('done'))
+    expect(getEdges).toHaveBeenCalledTimes(4)
+
+    // …exactly once: repeat expansions and already-visited ids no-op.
+    act(() => {
+      result.current.ensureFetched('frontier-x')
+      result.current.ensureFetched('a')
+    })
+    expect(getEdges).toHaveBeenCalledTimes(4)
+  })
+
   it('does not cache URNs getNodes failed to return (they stay retryable)', async () => {
     // getNodes returns ONLY 'x', never 'z' — 'z' must not be marked as
     // resolved, so a later fetch can try again instead of stranding it

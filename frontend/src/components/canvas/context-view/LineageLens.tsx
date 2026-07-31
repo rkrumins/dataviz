@@ -827,6 +827,15 @@ export function LineageLens({
               <span>Large neighborhood — showing the first {EDGE_FETCH_LIMIT} connections per direction from the data source. Use the filter to narrow.</span>
             </div>
           )}
+          {/* Frontier fetches can hit the same cap — say so rather than
+              letting an expanded hop read as complete. */}
+          {lensViewMode === 'graph' && fetchTruncatedIds
+            && [...graphCur.expandedFrontier].some(k => fetchTruncatedIds.has(k.replace(/^(in|out):/, ''))) && (
+            <div className="flex items-center gap-2 px-4 py-1.5 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] text-[10.5px] text-ink-muted">
+              <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
+              <span>Some expanded entities have very large neighborhoods — showing the first {EDGE_FETCH_LIMIT} connections per direction for each.</span>
+            </div>
+          )}
 
           {/* ── Body — the SAME layout at every depth: re-centering
               swaps the focal in place instead of flipping to a
