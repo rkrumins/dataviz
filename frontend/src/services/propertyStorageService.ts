@@ -25,7 +25,14 @@ export interface PropertyCollision {
 }
 
 export interface LabelStorage {
+    /** Nodes examined for this label (capped — never the whole label). */
     sampled: number
+    /** How many of those carried a populated container. */
+    containerSampled: number
+    /** Total nodes with this label, from the cached counts. Null = not known
+     *  yet, in which case the ratio is still meaningful but the absolute
+     *  isn't. */
+    labelTotal: number | null
     /**
      * `container` — everything nested, nothing native (needs alignment).
      * `mixed`     — some of each: mid-migration or an inconsistent source.
@@ -37,8 +44,13 @@ export interface LabelStorage {
     containerKeys: string[]
     /** Property paths unpacking would produce, e.g. "technical/format". */
     inferredPaths: string[]
-    /** Exact count (not sampled) of nodes carrying the container. */
-    affectedNodes: number
+    /**
+     * Nodes carrying a container, EXTRAPOLATED from the sample against
+     * `labelTotal`. Never an exact count: counting means a non-indexable full
+     * scan that a multi-million-node graph can't afford. Null when the totals
+     * aren't cached — say "unknown", never zero.
+     */
+    affectedEstimate: number | null
     /** Nodes whose container could not be parsed — preserved, never stripped. */
     unparseable: number
     collisions: PropertyCollision[]
@@ -52,12 +64,32 @@ export interface PropertyStorageReport {
     labels: Record<string, LabelStorage>
     totals: {
         labels: number
-        affectedNodes: number
+        affectedEstimate: number | null
         newPaths: number
         /** Labels in `container` or `mixed` state. */
         needsAlignment: string[]
     }
+    /** Sample size per label, so the UI can qualify the estimates. */
+    samplePerLabel: number
+    /** False when no cached totals were available to size the estimates. */
+    sizedFromCache: boolean
     elapsedMs: number
+}
+
+/**
+ * Cache envelope. The report is profiled out-of-band by the stats service and
+ * served from cache, so a cold data source answers `computing` with a job to
+ * poll rather than making the caller wait on a scan.
+ */
+export interface StorageEnvelope {
+    data: PropertyStorageReport | null
+    meta: {
+        status: 'fresh' | 'stale' | 'computing' | 'partial' | 'error'
+        age_seconds: number | null
+        updated_at?: string
+        job_id?: string
+        refreshing?: boolean
+    }
 }
 
 /** The property half of the source's schema mapping — what this tab edits. */
@@ -112,10 +144,32 @@ function url(wsId: string, path: string, dataSourceId: string, extra = ''): stri
 export async function getPropertyStorage(
     wsId: string,
     dataSourceId: string,
-    samplePerLabel = 200,
-): Promise<PropertyStorageReport> {
-    return authFetch<PropertyStorageReport>(
-        url(wsId, 'storage', dataSourceId, `&samplePerLabel=${samplePerLabel}`),
+): Promise<StorageEnvelope> {
+    return authFetch<StorageEnvelope>(url(wsId, 'storage', dataSourceId))
+}
+
+/** Queue a fresh profile. The report refreshes on its own cadence otherwise,
+ *  which is too slow a loop for someone who just changed the mapping. */
+export async function rescanPropertyStorage(
+    wsId: string,
+    dataSourceId: string,
+): Promise<{ jobId: string | null }> {
+    return authFetch<{ jobId: string | null }>(
+        url(wsId, 'storage/rescan', dataSourceId), { method: 'POST' },
+    )
+}
+
+/** Queue the run that actually unpacks the containers into native fields.
+ *  Lives on the admin router with the other per-data-source jobs, so it
+ *  shares Job History, cancel and the SSE progress stream. */
+export async function alignProperties(
+    dataSourceId: string,
+    opts?: { dryRun?: boolean },
+): Promise<{ jobId: string; status: string; dryRun: boolean }> {
+    return authFetch<{ jobId: string; status: string; dryRun: boolean }>(
+        `/api/v1/admin/data-sources/${encodeURIComponent(dataSourceId)}`
+        + `/property-alignment?dryRun=${opts?.dryRun ? 'true' : 'false'}`,
+        { method: 'POST' },
     )
 }
 
