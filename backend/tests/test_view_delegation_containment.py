@@ -211,34 +211,51 @@ async def test_a_wholly_unconstrained_view_is_still_expandable():
 # ── the bridge reaches the routes a canvas actually calls ────────────
 
 @pytest.mark.asyncio
-async def test_delegate_reaches_a_canvas_read_route(
+async def test_the_graph_router_is_not_delegable(
     test_client: AsyncClient, db_session,
 ):
-    """`/metadata/entity-types` is one of the four reads a view's canvas
-    issues. Before wiring, an outsider naming a public view still got the
-    typed 403 and painted nothing."""
-    from backend.app.api.v1.endpoints.graph import get_context_engine
-    from backend.app.main import app
-    from backend.app.services.context_engine import ContextEngine
+    """Access without containment is a wider grant than the tier intends.
 
+    Delegation only confines where a handler *implements* confinement, and
+    only ``canvas.py`` does — it reads ``get_delegation`` and clamps entity
+    types, roots and the expand frontier. Nothing in ``graph.py`` clamps
+    anything, so opening even its read routes would give a delegate the view's
+    whole data source: the workspace's entire top level, arbitrary children,
+    aggregation across everything. For a curated view over a large source that
+    is far more than the view.
+
+    This test exists so that "the canvas is empty for delegates" is never
+    fixed by adding entries to an allow-list here. The fix is either to render
+    saved views through the scope-aware canvas contract, or to teach these
+    handlers to honour the delegation — access follows containment, not the
+    other way round.
+    """
     await _seed(db_session)
+    with _as("usr_outsider", OUTSIDER):
+        resp = await test_client.get(
+            f"/api/v1/{WS}/graph/metadata/entity-types",
+            params={"viewId": "view_public"},
+        )
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["error"] == "missing_permission"
 
-    class _Provider:
-        async def get_distinct_values(self, prop, **kw):
-            return ["Table"]
 
-    async def _engine():
-        return ContextEngine(provider=_Provider())
+@pytest.mark.asyncio
+async def test_the_canvas_router_is_delegable(
+    test_client: AsyncClient, db_session,
+):
+    """The scope-aware surface stays open — that is where containment lives.
 
-    app.dependency_overrides[get_context_engine] = _engine
-    try:
-        with _as("usr_outsider", OUTSIDER):
-            resp = await test_client.get(
-                f"/api/v1/{WS}/graph/metadata/entity-types",
-                params={"viewId": "view_public"},
-            )
-    finally:
-        app.dependency_overrides.pop(get_context_engine, None)
+    Driven through the context-models router, which is DB-only; the canvas
+    router itself needs a live graph provider and is covered by the clamp
+    tests above plus the integration suite.
+    """
+    await _seed(db_session)
+    with _as("usr_outsider", OUTSIDER):
+        resp = await test_client.get(
+            f"/api/v1/{WS}/context-models/templates",
+            params={"viewId": "view_public"},
+        )
     assert resp.status_code == 200, resp.text
 
 

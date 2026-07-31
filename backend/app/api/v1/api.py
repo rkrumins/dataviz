@@ -285,29 +285,31 @@ api_router.include_router(
 # ── Workspace-scoped data routers ───────────────────────────────────
 # Graph endpoints: /api/v1/{ws_id}/graph/trace, /api/v1/{ws_id}/graph/nodes, etc.
 # (api_router is already mounted at /api/v1, so prefix is just /{ws_id}/graph)
-# PARTIALLY DELEGABLE. The four reads below are what a saved view's canvas
-# actually calls; without them a delegate opened a view and painted nothing,
-# which is the exact failure view_delegation.py was written to remove.
+# NOT DELEGABLE, deliberately — and this is not an oversight to fix by adding
+# an allow-list here.
 #
-# The allow-list is explicit and default-closed because this router is not
-# read-only: it also carries /save, /resync, /nodes/create, /edges,
-# /commands/batch and /introspection/refresh. Mounting it wholesale would sell
-# the workspace's entire write surface for the price of a ?viewId=. A route
-# added here later is non-delegable until someone adds it to this set on
-# purpose.
-_CANVAS_READS = frozenset({
-    "/nodes/top-level",
-    "/nodes/{urn}/children",
-    "/nodes/{urn}/children-with-edges",
-    "/nodes/{urn}/ancestors",
-    "/edges/aggregated",
-    "/metadata/entity-types",
-})
+# Delegation grants route ACCESS; it does not by itself confine anything. The
+# confinement lives in the handlers, and only ``canvas.py`` implements it: it
+# reads ``get_delegation(request)`` and clamps entity types, roots and the
+# expand frontier to the view's resolved scope. Every handler in ``graph.py``
+# clamps nothing at all.
+#
+# So opening even the read routes here would hand a delegate the view's whole
+# DATA SOURCE rather than the view: /nodes/top-level returns the workspace's
+# entire top level, /nodes/{urn}/children walks anywhere, /edges/aggregated
+# aggregates across everything. For a curated view of a dozen nodes over a
+# large source that is a vastly wider grant than the tier intends — worse than
+# the empty canvas it would be fixing.
+#
+# Making the canvas renderable for a delegate is therefore a question about
+# WHICH surface renders it, not about which routes to list. Either the client
+# renders saved views through the scope-aware canvas contract (bootstrap /
+# expand, which is what that router was built for), or every graph read route
+# it needs learns to honour ``get_delegation``. Until one of those is done,
+# this router stays members-only.
 api_router.include_router(
     graph.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
-    dependencies=[Depends(requires_ws_read_or_view_delegate(
-        workspace="ws_id", delegable_routes=_CANVAS_READS,
-    ))],
+    dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
 )
 # Assignment compute (workspace-scoped)
 api_router.include_router(
