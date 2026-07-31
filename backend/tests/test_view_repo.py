@@ -85,6 +85,18 @@ async def test_update_view(db_session: AsyncSession):
 
     assert updated is not None
     assert updated.name == "Renamed View"
+    # Visibility is a security field with its own authorization (the
+    # publish gate) — the generic update never writes it, even when a
+    # caller smuggles it into the request. update_visibility is the
+    # only writer.
+    assert updated.visibility == "private"
+
+
+async def test_update_visibility_is_the_only_visibility_writer(db_session: AsyncSession):
+    ws = await _create_workspace(db_session)
+    created = await view_repo.create_view(db_session, _make_create_req(ws.id))
+    updated = await view_repo.update_visibility(db_session, created.id, "enterprise")
+    assert updated is not None
     assert updated.visibility == "enterprise"
 
 
