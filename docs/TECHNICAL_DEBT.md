@@ -131,6 +131,90 @@ SQLite is the default if `MANAGEMENT_DB_URL` is not set. SQLite cannot handle:
 
 Schema versioning now runs through **Alembic** (`backend/alembic/versions/`) as the source of schema truth, applied by a dedicated `synodic-upgrade` service under a `pg_advisory_lock`. The API process only verifies `alembic_version` is at head at startup; it never mutates the schema itself. See [DATA_ARCHITECTURE.md §8](DATA_ARCHITECTURE.md) for the full migration strategy.
 
+### 2.4 ORM vs migration disagreement on column defaults (LOW — enumerated, gated)
+
+`0001_baseline` is `Base.metadata.create_all()` against the **live** ORM, so a database has always
+had two possible origins — `create_all` on a fresh install, the migration chain everywhere else —
+with nothing comparing the results. They had drifted.
+
+The structural half of that drift is fixed and now gated: `synodic-upgrade verify-schema` runs in
+CI against all three install routes (`.github/workflows/schema.yml`) and fails if the ORM declares
+a table or column the database lacks. It found one — `context_models.visibility`, declared in the
+ORM, added by no migration, therefore present only on databases created after it entered the ORM —
+fixed by `20260731_1200_ctxmodel_vis`.
+
+What remains is **column defaults**, in 44 places. Migrations write `server_default=`; the ORM
+declares only a Python-side `default=`. So a migrated database has a real `DEFAULT` and a fresh one
+does not, for the same column.
+
+This is deliberately **not** failing CI. Every write through SQLAlchemy supplies the value from the
+Python-side default, so the application behaves identically either way; the difference is visible
+only to raw SQL that omits the column, and to `alembic revision --autogenerate`, which will keep
+proposing these until they are reconciled. `verify-schema` reports them as warnings and
+`--strict-defaults` turns them into failures for anyone working through the list.
+
+Fixing one means adding `server_default=` to the ORM column with the value the migration used —
+mechanical, but each literal has to be checked against the migration that set it, because a wrong
+one silently changes what a fresh install writes.
+
+Two further columns exist on migrated databases and in no ORM model at all —
+`resource_grants.expires_at` and `views.display_rules` — leftovers from migrations whose ORM
+counterpart was later removed. They are absent on fresh installs, harmless on old ones, and
+dropping them is a deliberate act rather than a CI job's decision. `verify-schema` lists them and
+does not fail.
+
+<details>
+<summary>All 44 default differences</summary>
+
+| Column | Default on migrated databases | Direction |
+|---|---|---|
+| `aggregation.aggregation_jobs.last_sequence` | `0` | migration set one, ORM does not |
+| `aggregation.job_event_log.id` | `—` | ORM declares one, database has none |
+| `public.access_requests.status` | `'pending'::text` | migration set one, ORM does not |
+| `public.app_auth_config.allow_jit_provisioning` | `true` | migration set one, ORM does not |
+| `public.app_auth_config.allow_local_login` | `true` | migration set one, ORM does not |
+| `public.app_auth_config.email_first_login` | `false` | migration set one, ORM does not |
+| `public.app_auth_config.id` | `'singleton'::text` | migration set one, ORM does not |
+| `public.app_auth_config.sso_enabled` | `true` | migration set one, ORM does not |
+| `public.app_auth_config.version` | `1` | migration set one, ORM does not |
+| `public.application_branding.id` | `'singleton'::text` | migration set one, ORM does not |
+| `public.application_branding.version` | `1` | migration set one, ORM does not |
+| `public.asset_discovery_cache.asset_name` | `''::text` | migration set one, ORM does not |
+| `public.asset_discovery_cache.payload` | `'{}'::text` | migration set one, ORM does not |
+| `public.asset_discovery_cache.status` | `'fresh'::text` | migration set one, ORM does not |
+| `public.auth_audit_log.payload` | `'{}'::text` | migration set one, ORM does not |
+| `public.group_members.source` | `'local'::text` | migration set one, ORM does not |
+| `public.groups.is_protected` | `false` | migration set one, ORM does not |
+| `public.groups.source` | `'local'::text` | migration set one, ORM does not |
+| `public.idp_group_role_mappings.target_type` | `'role_binding'::text` | migration set one, ORM does not |
+| `public.idp_providers.claim_mapping` | `'{}'::text` | migration set one, ORM does not |
+| `public.idp_providers.enabled` | `true` | migration set one, ORM does not |
+| `public.idp_providers.linking_policy` | `'strict'::text` | migration set one, ORM does not |
+| `public.idp_providers.priority` | `100` | migration set one, ORM does not |
+| `public.idp_providers.settings` | `'{}'::text` | migration set one, ORM does not |
+| `public.invites.group_ids` | `'[]'::text` | migration set one, ORM does not |
+| `public.invites.shareable_groups_override` | `false` | migration set one, ORM does not |
+| `public.invites.token_version` | `1` | migration set one, ORM does not |
+| `public.invites.use_count` | `0` | migration set one, ORM does not |
+| `public.provider_admission_config.bucket_capacity` | `8` | migration set one, ORM does not |
+| `public.provider_admission_config.circuit_fail_max` | `5` | migration set one, ORM does not |
+| `public.provider_admission_config.circuit_window_secs` | `30` | migration set one, ORM does not |
+| `public.provider_admission_config.half_open_after_secs` | `60` | migration set one, ORM does not |
+| `public.provider_admission_config.refill_per_sec` | `2` | migration set one, ORM does not |
+| `public.provider_health_window.consecutive_failures` | `0` | migration set one, ORM does not |
+| `public.provider_health_window.failure_count` | `0` | migration set one, ORM does not |
+| `public.provider_health_window.success_count` | `0` | migration set one, ORM does not |
+| `public.role_bindings.source` | `'local'::text` | migration set one, ORM does not |
+| `public.roles.is_system` | `false` | migration set one, ORM does not |
+| `public.roles.scope_type` | `'global'::text` | migration set one, ORM does not |
+| `public.user_identities.metadata` | `'{}'::text` | migration set one, ORM does not |
+| `public.users.signup_source` | `'local_signup'::text` | migration set one, ORM does not |
+| `public.view_layout_overlays.fork_base_layout` | `'{}'::text` | migration set one, ORM does not |
+| `public.view_layout_overlays.reference_layout` | `'{}'::text` | migration set one, ORM does not |
+| `public.workspace_data_sources.write_back_enabled` | `false` | migration set one, ORM does not |
+
+</details>
+
 ### 2.3 Versioning merge field-loss + draft read model (RESOLVED — change control shipped)
 
 The original bug: a draft `update` op was applied as a **wholesale replace**, so a partial edit (the

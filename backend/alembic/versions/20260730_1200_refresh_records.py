@@ -81,14 +81,30 @@ def upgrade() -> None:
         sa.Column("consumed_at", sa.Text(), nullable=True),
         sa.Column("successor_jti", sa.Text(), nullable=True),
         sa.Column("revoked_at", sa.Text(), nullable=True),
+        if_not_exists=True,
     )
-    op.create_index("idx_refresh_tokens_family", "refresh_tokens", ["family_id"])
-    op.create_index("idx_refresh_tokens_user", "refresh_tokens", ["user_id"])
-    op.create_index("idx_refresh_tokens_expires", "refresh_tokens", ["expires_at"])
+    op.create_index(
+        "idx_refresh_tokens_family", "refresh_tokens", ["family_id"],
+        if_not_exists=True,
+    )
+    op.create_index(
+        "idx_refresh_tokens_user", "refresh_tokens", ["user_id"],
+        if_not_exists=True,
+    )
+    op.create_index(
+        "idx_refresh_tokens_expires", "refresh_tokens", ["expires_at"],
+        if_not_exists=True,
+    )
 
 
 def downgrade() -> None:
-    op.drop_index("idx_refresh_tokens_expires", table_name="refresh_tokens")
-    op.drop_index("idx_refresh_tokens_user", table_name="refresh_tokens")
-    op.drop_index("idx_refresh_tokens_family", table_name="refresh_tokens")
-    op.drop_table("refresh_tokens")
+    op.drop_index(
+        "idx_refresh_tokens_expires", table_name="refresh_tokens", if_exists=True,
+    )
+    op.drop_index(
+        "idx_refresh_tokens_user", table_name="refresh_tokens", if_exists=True,
+    )
+    op.drop_index(
+        "idx_refresh_tokens_family", table_name="refresh_tokens", if_exists=True,
+    )
+    op.drop_table("refresh_tokens", if_exists=True)

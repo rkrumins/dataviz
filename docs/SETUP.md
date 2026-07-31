@@ -253,7 +253,8 @@ Before deploying to production, ensure these **mandatory** settings are configur
 | `Postgres.app running on port 5432` | Local Postgres intercepts Docker | Stop Postgres.app via menubar / `brew services stop postgresql` |
 | `password authentication failed` | `.env.dev` password doesn't match volume | `./dev.sh reset` (wipes data) or edit `.env.dev` to match |
 | Backend starts in degraded mode | DB unreachable at lifespan start — app stays up but DB endpoints 503 | `./dev.sh doctor` → follow hints; `/api/v1/health` reports `"status": "degraded"` |
-| Alembic "Can't locate revision" | Old migration chain | Handled automatically by `_reset_stale_alembic_version` |
+| Alembic "Can't locate revision" | The DB was migrated by newer code, or by a branch this image lacks | Deploy the image that owns that revision. If the schema really is at head and only the pointer is behind, `synodic-upgrade repair`. See [MIGRATIONS.md](MIGRATIONS.md) |
+| Alembic `DuplicateColumn` / `DuplicateTable` on upgrade | Pointer trails the physical schema, so applied migrations replay | `synodic-upgrade repair` — it stamps only after verifying nothing is actually missing |
 | Frontend shows a blank page or API errors | Backend isn't running/healthy, or a proxy target is misconfigured | Ensure `viz-service` is running and healthy. In Docker mode, check that `frontend/nginx.conf` proxies to `viz-service`. In local dev, check that `vite.config.ts` proxies to `localhost:8000`. |
 | Docker Compose fails with port conflicts | Another process is using one of the required ports (6379, 5432, 8000, 3080) | Stop the conflicting process or change the port mapping in `docker-compose.yml` |
 | "No data source for workspace" error | The workspace was created without a data source binding | `docker compose down -v` to clear stale data, then rebuild for a clean bootstrap |

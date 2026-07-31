@@ -25,15 +25,26 @@ _ACTIONS_OLD = (
 )
 
 
-def upgrade() -> None:
-    op.drop_constraint("ck_val_action_enum", "view_activity_log", type_="check")
-    op.create_check_constraint(
-        "ck_val_action_enum", "view_activity_log", f"action IN ({_ACTIONS_NEW})",
+def _swap_constraint(actions: str) -> None:
+    """Drop-then-recreate the CHECK, tolerating an absent constraint.
+
+    ``op.drop_constraint`` has no ``if_exists``, so a database where the
+    constraint is missing — a fresh one built by ``create_all``, or one whose
+    pointer was replayed — died here on ``ConstraintDoesNotExist``. Same
+    ``DROP … IF EXISTS`` idiom as ``20260703_1200_graph_kind_blank``.
+    """
+    op.execute(
+        "ALTER TABLE view_activity_log "
+        "DROP CONSTRAINT IF EXISTS ck_val_action_enum"
     )
+    op.create_check_constraint(
+        "ck_val_action_enum", "view_activity_log", f"action IN ({actions})",
+    )
+
+
+def upgrade() -> None:
+    _swap_constraint(_ACTIONS_NEW)
 
 
 def downgrade() -> None:
-    op.drop_constraint("ck_val_action_enum", "view_activity_log", type_="check")
-    op.create_check_constraint(
-        "ck_val_action_enum", "view_activity_log", f"action IN ({_ACTIONS_OLD})",
-    )
+    _swap_constraint(_ACTIONS_OLD)

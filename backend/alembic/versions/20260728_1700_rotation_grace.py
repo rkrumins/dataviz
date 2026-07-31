@@ -44,19 +44,24 @@ def upgrade() -> None:
     op.add_column(
         "revoked_refresh_jti",
         sa.Column("successor_jti", sa.Text(), nullable=True),
+        if_not_exists=True,
     )
     op.add_column(
         "revoked_refresh_jti",
         sa.Column("successor_exp", sa.Integer(), nullable=True),
+        if_not_exists=True,
     )
     op.add_column(
         "revoked_refresh_jti",
         # Epoch milliseconds overflows int4 — this must be int8.
         sa.Column("successor_mint_ms", sa.BigInteger(), nullable=True),
+        if_not_exists=True,
     )
 
 
 def downgrade() -> None:
-    op.drop_column("revoked_refresh_jti", "successor_mint_ms")
-    op.drop_column("revoked_refresh_jti", "successor_exp")
-    op.drop_column("revoked_refresh_jti", "successor_jti")
+    # ``op.drop_column`` has no ``if_exists`` (alembic 1.18); raw DDL instead.
+    for column in ("successor_mint_ms", "successor_exp", "successor_jti"):
+        op.execute(
+            f"ALTER TABLE revoked_refresh_jti DROP COLUMN IF EXISTS {column}"
+        )

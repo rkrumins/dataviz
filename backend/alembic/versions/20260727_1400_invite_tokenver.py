@@ -37,8 +37,10 @@ def upgrade() -> None:
         sa.Column(
             "token_version", sa.Integer(), nullable=False, server_default="1",
         ),
+        if_not_exists=True,
     )
 
 
 def downgrade() -> None:
-    op.drop_column("invites", "token_version")
+    # ``op.drop_column`` has no ``if_exists`` (alembic 1.18); raw DDL instead.
+    op.execute("ALTER TABLE invites DROP COLUMN IF EXISTS token_version")

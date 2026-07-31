@@ -148,21 +148,26 @@ def _ensure_wide_alembic_version_column(connection) -> None:
     connection.commit()
 
 
-def _reset_stale_alembic_version(connection) -> None:
-    """If alembic_version points to a deleted revision, stamp to baseline.
+def _translate_renamed_alembic_version(connection) -> None:
+    """Map a stamped OLD revision id onto its current one.
 
-    Migrations 0002-0007 were consolidated into 0001_baseline. Existing
-    databases that ran those old migrations carry a version_num that
-    Alembic cannot locate on disk, causing 'Can't locate revision' on
-    every startup.
+    Three revisions were renamed to fit the 32-char ``version_num``
+    column. A database stamped with the old id cannot resolve it, so it
+    is rewritten here before Alembic reads the chain.
 
-    Only resets when the recorded revision is genuinely missing from
-    the on-disk script chain — a valid in-chain revision is left alone
-    and Alembic resumes from there normally. Previously this function
-    treated any version != '0001_baseline' as stale, which silently
-    reset valid pointers and forced every run to re-walk the whole
-    chain, masking real failures behind the noise of re-applied
-    migrations.
+    This function used to do a second thing: any revision it could not
+    find on disk at all, it stamped back to ``0001_baseline``. That was
+    the single most destructive line in the migration path. It never
+    touched the schema, so the "recovery" was to replay ~70 revisions
+    over a fully-populated production database — and since
+    ``0001_baseline`` is ``create_all`` of the live ORM, the replay was
+    guaranteed to hit an ``ALTER`` for something already present and die
+    partway through, leaving the pointer somewhere in the middle.
+
+    An unresolvable revision means the database was migrated by code
+    newer than this image, or by a branch this image does not have.
+    Neither is repairable by guessing, and both are made worse by
+    replaying. So it now raises and names the fix.
     """
     from sqlalchemy import inspect as sa_inspect, text
     from alembic.script import ScriptDirectory
@@ -177,11 +182,10 @@ def _reset_stale_alembic_version(connection) -> None:
 
     current_version = row[0]
 
-    # Renamed revisions: translate a stamped OLD id to its new id BEFORE
-    # the unknown-revision reset below — otherwise a database stamped
-    # with the old id (possible wherever the widen above ran before the
-    # rename shipped) would be reset to baseline and re-walk the entire
-    # chain against live data.
+    # Renamed revisions: translate a stamped OLD id to its new id before
+    # the resolvability check below, so a database stamped with the old id
+    # (possible wherever the widen above ran before the rename shipped)
+    # resolves normally instead of being treated as unknown.
     _RENAMED_REVISIONS = {
         # 34 chars — over the default VARCHAR(32); shortened 2026-07-10.
         "20260707_1400_view_layout_overlays": "20260707_1400_view_layout_ovl",
@@ -209,20 +213,20 @@ def _reset_stale_alembic_version(connection) -> None:
     try:
         script.get_revision(current_version)
         return  # Revision is in the on-disk chain — nothing to fix.
-    except Exception:
+    except Exception as exc:
         # ScriptDirectory raises ResolutionError (a subclass of
-        # CommandError) for unknown revisions. Catch broadly because
-        # the exact exception type varies across alembic versions and
-        # the recovery action is the same regardless.
-        logger.warning(
-            "Stale alembic_version detected: '%s' (not in script chain) — "
-            "resetting to '0001_baseline'.",
-            current_version,
-        )
-        connection.execute(text(
-            "UPDATE alembic_version SET version_num = '0001_baseline'"
-        ))
-        connection.commit()
+        # CommandError) for unknown revisions. Catch broadly because the
+        # exact exception type varies across alembic versions.
+        raise RuntimeError(
+            f"alembic_version records '{current_version}', which this image's "
+            "migration chain does not contain. That means the database was "
+            "migrated by newer code, or by a branch this image was not built "
+            "from — deploy the image that owns that revision. Do NOT stamp "
+            "back to a baseline: the schema would be left untouched and the "
+            "whole chain would replay over live data. If the schema really is "
+            "at head and only the pointer is wrong, run "
+            "`synodic-upgrade repair`, which verifies that before stamping."
+        ) from exc
 
 
 def run_migrations_online() -> None:
@@ -249,8 +253,9 @@ def run_migrations_online() -> None:
         # rolls back the migration. Creates the table on a fresh DB so
         # the safety net covers new installs, not just migrated ones.
         _ensure_wide_alembic_version_column(connection)
-        # Fix stale revision pointers BEFORE Alembic reads the chain.
-        _reset_stale_alembic_version(connection)
+        # Resolve renamed revision ids BEFORE Alembic reads the chain,
+        # and fail loudly on one that cannot be resolved at all.
+        _translate_renamed_alembic_version(connection)
 
         context.configure(
             connection=connection,
