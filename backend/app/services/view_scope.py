@@ -57,7 +57,9 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, Iterable, List, Literal, Optional, Tuple
+from typing import (
+    TYPE_CHECKING, Any, Dict, FrozenSet, Iterable, List, Literal, Optional, Tuple,
+)
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,6 +68,9 @@ from backend.app.db.models import ViewORM
 from backend.app.db.repositories.view_repo import effective_view_config
 from backend.app.services.layout_config import parse_reference_layout
 from backend.common.models.search import SearchScope
+
+if TYPE_CHECKING:
+    from backend.app.services.view_access import ViewerContext
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +307,7 @@ class ViewScopeResolver:
         *,
         workspace_id: str,
         requested: SearchScope,
+        viewer: "ViewerContext",
         data_source_id: Optional[str] = None,
         branch_id: Optional[str] = None,
     ) -> EffectiveViewScope:
@@ -309,6 +315,16 @@ class ViewScopeResolver:
 
         Notes
         -----
+        - ``viewer`` is REQUIRED and the caller cannot opt out. This resolver
+          used to authorize nothing beyond tenancy, so naming any view id in
+          the same workspace returned that view's ``effectiveRootUrns`` and
+          entity-type allow-list — which, for a curated view, is its entire
+          content. Anyone holding plain data-source read could read a
+          colleague's ``private`` view's composition through
+          ``/search/explain``, and run real queries confined to it through
+          ``/search/advanced``.
+          The check lives here rather than at each endpoint on purpose: there
+          were two call sites and only one of them remembered.
         - ``workspace_id`` is the route's path workspace; cross-workspace
           access is rejected as ``ViewNotFound`` to avoid leaking the
           existence of views in other tenants.
@@ -335,6 +351,14 @@ class ViewScopeResolver:
             raise ViewNotFound(
                 f"view '{requested.view_id}' has been deleted"
             )
+
+        # Same answer as cross-tenant and not-found, deliberately: a caller
+        # who cannot read the view must not be able to tell "no such view"
+        # from "exists but not yours".
+        from backend.app.services import view_access
+
+        if not await view_access.can_read_view(self._session, viewer, view):
+            raise ViewNotFound(f"view '{requested.view_id}' not found")
 
         # Branch-effective read: base config when no branch/overlay, else
         # base ⊕ the branch's layout overlay (see view_repo).

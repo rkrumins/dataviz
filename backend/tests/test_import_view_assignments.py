@@ -171,7 +171,8 @@ async def test_hook_adds_root_preserving_existing_and_other_config(
 
     created = [_node("root", "urn:new-root"), _node("child", "urn:new-child")]
     edges = [("root", "child", "CONTAINS")]
-    result = await _write_view_import_assignments("ws", "ds", view.id, created, edges)
+    result = await _write_view_import_assignments(
+        view.workspace_id, "ds", view.id, created, edges)
     assert result == {"added": 1}, result
 
     refreshed = await db_session.get(ViewORM, view.id)
@@ -199,7 +200,7 @@ async def test_hook_noop_when_view_has_no_layers(
     before = (await db_session.get(ViewORM, view.id)).config
 
     result = await _write_view_import_assignments(
-        "ws", "ds", view.id, [_node("r", "urn:r")], [])
+        view.workspace_id, "ds", view.id, [_node("r", "urn:r")], [])
     assert result == {"added": 0}
     after = (await db_session.get(ViewORM, view.id)).config
     assert after == before                                          # config untouched

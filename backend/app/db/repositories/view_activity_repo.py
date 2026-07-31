@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -23,6 +23,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models import ViewActivityLogORM, ViewORM
 from backend.app.db.repositories import outbox_event_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
+from backend.app.services.view_access import readable_views_predicate
+
+if TYPE_CHECKING:
+    from backend.app.services.view_access import ViewReadScope
 
 logger = logging.getLogger(__name__)
 
@@ -159,14 +163,30 @@ async def get_workspace_activity(
     session: AsyncSession,
     workspace_id: str,
     *,
+    scope: "ViewReadScope",
     limit: int = 30,
     offset: int = 0,
 ) -> list[ViewActivityEntry]:
-    """Recent activity across ALL of a workspace's views, newest first, with
-    the view name resolved for each entry. Powers the governance-tab feed."""
+    """Recent activity across the workspace's views the caller can READ.
+
+    ``scope`` is required, not optional, for the same reason every other
+    multi-view read takes one: this used to return activity for *all* of a
+    workspace's views to anyone holding ``workspace:view:read`` there, so a
+    ``workspace_viewer`` could read the timeline of a colleague's ``private``
+    view — its name, its renames, and ``Shared with alice@acme.com (editor)``
+    lines — while ``GET /views/{id}`` on the same view correctly 404'd them.
+
+    Filtered in SQL rather than after the query so ``limit``/``offset`` page
+    over the authorized rows; trimming afterwards would return short pages and
+    let the caller infer how much they were denied.
+    """
     rows = (await session.execute(
         select(ViewActivityLogORM)
-        .where(ViewActivityLogORM.workspace_id == workspace_id)
+        .join(ViewORM, ViewORM.id == ViewActivityLogORM.view_id)
+        .where(
+            ViewActivityLogORM.workspace_id == workspace_id,
+            readable_views_predicate(scope),
+        )
         .order_by(ViewActivityLogORM.created_at.desc())
         .limit(limit).offset(offset)
     )).scalars().all()

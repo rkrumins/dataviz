@@ -131,6 +131,20 @@ async def can_manage_view_grants(
     creator carve-out.
     """
     view = await _load_view(session, view_id)
+    # Read access first, and a 404 when it's absent.
+    #
+    # The 403 below is informative by design — it names the workspace so an
+    # admin knows where to ask for rights. That is fine for someone who can
+    # already see the view, and an oracle for someone who cannot: walking ids
+    # against this route, 404 meant "no such view" and 403 meant "exists, and
+    # here is its workspace". An account with no bindings anywhere could
+    # confirm every private view on the platform and map it to a tenant, while
+    # ``GET /views/{id}`` correctly 404'd the same ids.
+    from backend.app.services import view_access
+
+    ctx = await view_access.ViewerContext.build(session, user=user, claims=claims)
+    if not await view_access.can_read_view(session, ctx, view):
+        raise HTTPException(status_code=404, detail="View not found")
     _ensure_can_manage_grants(view=view, user=user, claims=claims)
     return view
 

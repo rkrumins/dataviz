@@ -210,6 +210,7 @@ def requires_ws_read_or_view_delegate(
         scope = await _resolve_scope(
             session,
             view=view,
+            viewer=ctx,
             workspace_id=workspace_id,
             branch_id=branch_id,
         )
@@ -237,6 +238,7 @@ async def _resolve_scope(
     session: AsyncSession,
     *,
     view: ViewORM,
+    viewer: "view_access.ViewerContext",
     workspace_id: str,
     branch_id: Optional[str],
 ) -> EffectiveViewScope:
@@ -244,6 +246,12 @@ async def _resolve_scope(
 
     A view whose scope cannot be resolved must not fall back to
     "unrestricted" — that would turn a resolver bug into a data leak.
+
+    ``viewer`` is re-checked by the resolver even though the caller has
+    already established read access a few lines above. The duplication is
+    deliberate: the resolver is reachable from advanced search too, and
+    making the check its own precondition is what stops the next call site
+    from forgetting it.
     """
     from backend.common.models.search import SearchScope
 
@@ -252,6 +260,7 @@ async def _resolve_scope(
         return await resolver.resolve(
             workspace_id=workspace_id,
             requested=SearchScope(view_id=view.id),
+            viewer=viewer,
             data_source_id=view.data_source_id,
             branch_id=branch_id,
         )

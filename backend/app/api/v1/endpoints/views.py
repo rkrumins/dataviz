@@ -937,6 +937,25 @@ async def preview_visibility(
     ctx = await _viewer_context(session, user, claims)
     if not await view_access.can_read_view(session, ctx, view_orm):
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    # Reading the view is NOT enough to see who is in its workspace.
+    #
+    # This route answers "who gains access if I promote this?", and the only
+    # person with a reason to ask is the person who can perform the promotion.
+    # Gating it on read meant anyone who could open a single ``public`` view —
+    # which, by definition, is every account on the platform, holding no
+    # binding anywhere — got the workspace's member headcount and five member
+    # labels back. ``resolve_user_ids`` falls back to the email address when a
+    # user has no name set, so those labels are frequently live addresses.
+    # Repeated across the public views they can reach, that enumerates the
+    # organisation's directory one workspace at a time.
+    #
+    # 403 rather than 404: they legitimately see the view, they just cannot
+    # preview a change they are not allowed to make.
+    if not view_access.can_change_visibility(ctx, view_orm):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the view's creator or a workspace admin can preview a visibility change.",
+        )
 
     current = view_orm.visibility or DEFAULT_VISIBILITY
     order = VISIBILITY_VALUES
@@ -1069,13 +1088,23 @@ async def get_workspace_view_activity(
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Recent activity across all of a workspace's views (each entry carries the
-    view name). Powers the governance-tab feed. Gated by workspace view-read."""
+    """Recent activity across the workspace's views the caller can READ.
+
+    Holding ``workspace:view:read`` gets you through the door; it does not
+    decide which views' history you then see. It used to be the only check,
+    which made this feed a way to read a colleague's ``private`` view — its
+    name, its rename diffs, who it was shared with — from an account that
+    ``GET /views/{id}`` correctly 404s. The per-view timeline route above has
+    always been gated on ``can_read_view``; only this workspace-wide feed was
+    left on bare membership.
+    """
     from backend.app.services.permission_service import has_permission
     if not has_permission(claims, "workspace:view:read", workspace_id=workspace_id):
         raise HTTPException(status_code=403, detail="Missing permission: workspace:view:read")
+    ctx = await _viewer_context(session, user, claims)
+    scope = await _read_scope(session, ctx)
     return await view_activity_repo.get_workspace_activity(
-        session, workspace_id, limit=limit, offset=offset,
+        session, workspace_id, scope=scope, limit=limit, offset=offset,
     )
 
 
