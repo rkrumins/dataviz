@@ -206,10 +206,17 @@ export function useLayerAssignment({
       ? sortedLayers.find(l => l.showUnassigned === true)?.id
       : undefined
 
-    // Iterative top-down traversal (prevents stack overflow on deep hierarchies)
-    // HARD RULE: Containment children ALWAYS inherit parent's layer (no override).
-    // Root-level nodes use the priority chain below, with closed-scope
-    // semantics when the view has explicit assignments.
+    // Iterative top-down traversal (prevents stack overflow on deep hierarchies).
+    // Per-node precedence — an EXPLICIT per-entity assignment wins at ANY depth:
+    //   1. instanceAssignments (live user drag in this session)
+    //   2. the node's OWN canonical entry (referenceLayout.assignments)
+    //   3. containment inheritance (parent's effective layer, gated by the
+    //      parent's `inheritsChildren` when children are pushed below)
+    //   4. scope-specific fallbacks (closed-scope drop / open-scope chain)
+    // A child placed on a DIFFERENT layer than its parent splits out of the
+    // parent's subtree and renders as a visual root of its own column (the
+    // wizard writes exactly such placements); entry-less children still
+    // inherit, so type rules never break a nested subtree apart.
     const roots = nodes.filter((n: any) => !parentMap.has(n.id))
     const stack: Array<{ nodeId: string; inheritedLayerId?: string }> = []
     // Push roots in reverse so first root is processed first
@@ -224,20 +231,36 @@ export function useLayerAssignment({
 
       let myLayerId: string | undefined
 
-      // HARD RULE: containment children ALWAYS inherit the parent's layer, so a
-      // nested subtree renders together under its parent and the containment tree
-      // stays intact. Only root-level nodes (no containment parent) use the
-      // priority chain below.
+      // 1. instanceAssignments (live user drag in this session) — always
+      //    wins. The user just dropped this onto a layer; respect that
+      //    immediately regardless of view config or backend state.
+      const instanceAssignment = instanceAssignments.get(nodeId)
+      // 2a. Canonical per-node assignment (referenceLayout.assignments) — AUTHORITATIVE in BOTH
+      //     scopes and at ANY depth. A user's explicit placement overrides containment
+      //     inheritance, type rules and backend state, which is what makes the canvas mirror
+      //     the wizard's flat "it renders where you placed it" model. An entry naming a layer
+      //     that no longer exists in this view is treated as absent (falls through to
+      //     inheritance/rules) rather than stranding the node. A child whose entry names the
+      //     SAME layer it would inherit resolves identically and stays a nested child —
+      //     ensureSiblingOrderKeys mints exactly such carrier entries to hold orderKeys.
+      const rawExplicit = explicitAssignments.get(nodeId)
+      const explicitLayerId = rawExplicit && validLayerIds.has(rawExplicit) ? rawExplicit : undefined
+      // 3. Containment inheritance: an entry-less child follows its parent, so a
+      //    nested subtree renders together and type rules never break it apart.
       const hasContainmentParent = parentMap.has(nodeId)
 
-      if (hasContainmentParent && inheritedLayerId) {
+      if (instanceAssignment) {
+        myLayerId = instanceAssignment.layerId
+      } else if (explicitLayerId) {
+        myLayerId = explicitLayerId
+      } else if (hasContainmentParent && inheritedLayerId) {
         myLayerId = inheritedLayerId
       } else {
-        // Root-level node priority chain — see resolveRootLayer for full
-        // semantics (instance drag → explicit → curated (stamped, only if
-        // branch-created) → open (backend → stamped → rule → inherited →
-        // showUnassigned fallback); '__UNASSIGNED__' sentinel → undefined).
-        const instanceAssignment = instanceAssignments.get(nodeId)
+        // 4. Scope-specific fallback chain — see resolveRootLayer for full
+        //    semantics (instance drag -> explicit -> curated (stamped, only if
+        //    branch-created) -> open (backend -> stamped -> rule -> inherited ->
+        //    showUnassigned fallback); '__UNASSIGNED__' sentinel -> undefined).
+        //    `instanceAssignment` is already resolved as step 1 above.
         // Explicit, per-entity layer the app stamped on the node itself — on
         // create (creation layer) and on an explicit move (EntityDrawer "Layer"
         // field → an `update_entity` that rewrites `layerAssignment`). It is the
@@ -256,8 +279,11 @@ export function useLayerAssignment({
           nodeId,
           nodeUrn,
           nodeLayerProp: nodeLayerId,
-          instanceAssignment: instanceAssignment?.layerId,
-          explicitAssignment: explicitAssignments.get(nodeId),
+          // Both are provably absent on this branch — steps 1 and 2 above
+          // already claimed the node when either could answer. Passed so the
+          // helper's own precedence stays readable next to the chain here.
+          instanceAssignment: undefined,
+          explicitAssignment: undefined,
           viewIsCurated,
           branchCreated: branchCreatedDelta.has(nodeUrn),
           backendAssignment: backendAssignment?.layerId,
@@ -429,12 +455,17 @@ export function useLayerAssignment({
     // rendered while the session's drag was still in memory and quietly came
     // apart once the canonical record was the only thing left.
     //
-    // It is AUTHORITATIVE for every entity it covers: naming a group puts the
-    // entity in it, and omitting one takes the entity out — otherwise a
-    // legacy array could hold an entity in a group it had been moved out of.
+    // A canonical entry that NAMES a group wins over the legacy array. One
+    // that omits `logicalNodeId` is deliberately left alone rather than
+    // treated as "not in a group": `normalizeReferenceLayout` strips the
+    // legacy array from persisted views, so a view holding BOTH is
+    // transitional — and there the grouping the user can actually see came
+    // from the legacy entry. Clearing it on load would dissolve a visible
+    // group without being asked to. (The cost is the mirror case: in such a
+    // transitional view, moving an entity OUT of a group does not take
+    // effect until the legacy entry is gone.)
     for (const [urn, entry] of Object.entries(assignments)) {
-      if (entry.logicalNodeId) entityLogicalMap.set(urn, entry.logicalNodeId)
-      else entityLogicalMap.delete(urn)
+      if (entry?.logicalNodeId) entityLogicalMap.set(urn, entry.logicalNodeId)
     }
     // Also check instanceAssignments (user drag in current session)
     instanceAssignments.forEach((a, entityId) => {

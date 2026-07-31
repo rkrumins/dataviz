@@ -1175,10 +1175,6 @@ export function ContextViewCanvas({
   const builderLayerId = useHierarchyBuilderStore(s => s.layerId)
   const builderParentUrn = useHierarchyBuilderStore(s => s.parentUrn)
 
-  // Assignment warning state (shown when user tries to assign child to different layer)
-  const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
-  const assignmentWarningTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
   const handleAssignToLayer = useCallback((entityId: string, layerId: string) => {
     // Drop-to-assign is a layout WRITE; a trace is read-only. (The columns
     // also render the overlay's lanes, so the drop target isn't the browse
@@ -1187,15 +1183,6 @@ export function ContextViewCanvas({
     const before = currentLayout()
     // Live containment map (from useContainmentHierarchy, exposed via the forward-ref set during render).
     const parentMap = duplicateWiringRef.current?.parentMap ?? new Map<string, string>()
-
-    // Containment hard rule: a child cannot be placed in a different layer than its parent subtree.
-    const conflict = assignmentOps.checkAssignmentConflict(parentMap, before.assignments, entityId, layerId)
-    if (conflict?.type === 'containment_locked') {
-      setAssignmentWarning(conflict.message)
-      if (assignmentWarningTimer.current) clearTimeout(assignmentWarningTimer.current)
-      assignmentWarningTimer.current = setTimeout(() => setAssignmentWarning(null), 5000)
-      return
-    }
 
     const entity = nodesRef.current.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
     const entityName = (entity?.data?.label as string) ?? entityId
@@ -2592,15 +2579,6 @@ export function ContextViewCanvas({
     }
 
     const before = currentLayout()
-    const conflict = assignmentOps.checkAssignmentConflict(parentMap, before.assignments, entity.urn, layerId)
-    if (conflict?.type === 'containment_locked') {
-      setAssignmentWarning(conflict.message)
-      if (assignmentWarningTimer.current) clearTimeout(assignmentWarningTimer.current)
-      assignmentWarningTimer.current = setTimeout(() => setAssignmentWarning(null), 5000)
-      interactions.closeContextMenu()
-      return
-    }
-
     const targetLayer = before.layers.find(l => l.id === layerId)
     const prevLayerId = before.assignments[entity.urn]?.layerId
     const clearDescendants = explicitDescendants(entity.urn, parentMap, before.assignments)
@@ -5022,19 +5000,6 @@ export function ContextViewCanvas({
           <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 text-xs flex items-center gap-2 z-20">
             <span className="font-medium">No containment types configured.</span>
             <span className="text-amber-600 dark:text-amber-500">Hierarchy is disabled — all nodes appear flat. Configure your ontology to enable parent-child nesting.</span>
-          </div>
-        )}
-        {/* Warning: containment inheritance violation attempt */}
-        {assignmentWarning && (
-          <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-xs flex items-center gap-2 z-20">
-            <span className="font-medium">Assignment blocked.</span>
-            <span className="text-red-600 dark:text-red-500">{assignmentWarning}</span>
-            <button
-              className="ml-auto text-red-400 hover:text-red-600 dark:hover:text-red-300"
-              onClick={() => setAssignmentWarning(null)}
-            >
-              &times;
-            </button>
           </div>
         )}
         {/* Bulk import — uploads a file onto the current draft (server-side), then
