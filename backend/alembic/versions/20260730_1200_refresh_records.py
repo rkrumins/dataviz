@@ -68,6 +68,10 @@ depends_on: Union[str, None] = None
 
 
 def upgrade() -> None:
+    # Guarded for the same reason as the revisions around it: this chain has
+    # met databases whose schema was already ahead of ``alembic_version``, and
+    # DDL uses transactional DDL — so one duplicate rolls back the whole
+    # upgrade, not just the offending statement.
     op.create_table(
         "refresh_tokens",
         sa.Column("jti", sa.Text(), primary_key=True),
@@ -81,10 +85,17 @@ def upgrade() -> None:
         sa.Column("consumed_at", sa.Text(), nullable=True),
         sa.Column("successor_jti", sa.Text(), nullable=True),
         sa.Column("revoked_at", sa.Text(), nullable=True),
+        if_not_exists=True,
     )
-    op.create_index("idx_refresh_tokens_family", "refresh_tokens", ["family_id"])
-    op.create_index("idx_refresh_tokens_user", "refresh_tokens", ["user_id"])
-    op.create_index("idx_refresh_tokens_expires", "refresh_tokens", ["expires_at"])
+    op.create_index(
+        "idx_refresh_tokens_family", "refresh_tokens", ["family_id"], if_not_exists=True,
+    )
+    op.create_index(
+        "idx_refresh_tokens_user", "refresh_tokens", ["user_id"], if_not_exists=True,
+    )
+    op.create_index(
+        "idx_refresh_tokens_expires", "refresh_tokens", ["expires_at"], if_not_exists=True,
+    )
 
 
 def downgrade() -> None:

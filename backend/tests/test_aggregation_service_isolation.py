@@ -137,7 +137,12 @@ def test_a_service_that_signs_nothing_needs_no_signing_secret():
         import backend.app.services.aggregation.controlplane
         from backend.app.db.repositories.stats_repo import get_data_source_stats
         import backend.auth_service.core.config as cfg
-        import backend.auth_service.providers.assurance
+        # The providers PACKAGE, not a module inside it. ``assurance`` used to
+        # live here and was the concrete example — it has since moved to
+        # ``backend.common.assurance`` precisely so the repositories no longer
+        # drag auth_service in at all. What this test guards is unchanged: the
+        # package's ``__init__`` must still import without a signing key.
+        import backend.auth_service.providers
         print('imported')
         """,
         env_secret=None,

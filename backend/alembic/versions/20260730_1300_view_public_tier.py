@@ -49,7 +49,13 @@ _OLD = "'private', 'workspace', 'enterprise'"
 
 
 def upgrade() -> None:
-    op.drop_constraint("ck_views_visibility", "views", type_="check")
+    # ``if_exists`` so the drop cannot fail on a database where the constraint
+    # was never created (or was already replaced). Drop-then-create is then
+    # idempotent whatever the starting state: the CHECK ends up with this
+    # revision's definition either way.
+    op.drop_constraint(
+        "ck_views_visibility", "views", type_="check", if_exists=True,
+    )
     op.create_check_constraint(
         "ck_views_visibility", "views", f"visibility IN ({_NEW})",
     )

@@ -41,18 +41,26 @@ depends_on: Union[str, None] = None
 
 
 def upgrade() -> None:
+    # ``if_not_exists`` throughout: this revision has met databases whose
+    # physical schema was already ahead of ``alembic_version``, where a bare
+    # ADD COLUMN dies on DuplicateColumn and takes the whole transactional
+    # upgrade chain with it. Adding a column that is already there is a no-op
+    # worth having; failing the deploy over it is not.
     op.add_column(
         "revoked_refresh_jti",
         sa.Column("successor_jti", sa.Text(), nullable=True),
+        if_not_exists=True,
     )
     op.add_column(
         "revoked_refresh_jti",
         sa.Column("successor_exp", sa.Integer(), nullable=True),
+        if_not_exists=True,
     )
     op.add_column(
         "revoked_refresh_jti",
         # Epoch milliseconds overflows int4 — this must be int8.
         sa.Column("successor_mint_ms", sa.BigInteger(), nullable=True),
+        if_not_exists=True,
     )
 
 
