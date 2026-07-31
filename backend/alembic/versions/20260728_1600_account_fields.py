@@ -35,6 +35,8 @@ from __future__ import annotations
 from typing import Union
 
 from alembic import op
+
+from backend.common.schema_drift import has_column
 import sqlalchemy as sa
 
 revision: str = "20260728_1600_account_fields"
@@ -44,31 +46,28 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "users",
-        sa.Column("display_name", sa.Text(), nullable=True),
-        if_not_exists=True,
-    )
-    op.add_column(
-        "users",
-        sa.Column(
-            "must_change_password",
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.false(),
-        ),
-        if_not_exists=True,
-    )
-    op.add_column(
-        "users",
-        sa.Column("avatar_id", sa.Text(), nullable=True),
-        if_not_exists=True,
-    )
-    op.add_column(
-        "users",
-        sa.Column("sessions_valid_from", sa.Text(), nullable=True),
-        if_not_exists=True,
-    )
+    # Guarded by introspection, not ``if_not_exists``: Postgres accepts
+    # ALTER TABLE … ADD COLUMN IF NOT EXISTS, SQLite does not, and the
+    # migration chain is replayed against SQLite by the test suite.
+    bind = op.get_bind()
+    if not has_column(bind, "users", "display_name"):
+        op.add_column("users", sa.Column("display_name", sa.Text(), nullable=True))
+    if not has_column(bind, "users", "must_change_password"):
+        op.add_column(
+            "users",
+            sa.Column(
+                "must_change_password",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.false(),
+            ),
+        )
+    if not has_column(bind, "users", "avatar_id"):
+        op.add_column("users", sa.Column("avatar_id", sa.Text(), nullable=True))
+    if not has_column(bind, "users", "sessions_valid_from"):
+        op.add_column(
+            "users", sa.Column("sessions_valid_from", sa.Text(), nullable=True),
+        )
 
 
 def downgrade() -> None:

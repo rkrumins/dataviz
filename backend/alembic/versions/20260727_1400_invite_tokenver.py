@@ -23,6 +23,8 @@ from __future__ import annotations
 from typing import Union
 
 from alembic import op
+
+from backend.common.schema_drift import has_column
 import sqlalchemy as sa
 
 revision: str = "20260727_1400_invite_tokenver"
@@ -32,13 +34,17 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "invites",
-        sa.Column(
-            "token_version", sa.Integer(), nullable=False, server_default="1",
-        ),
-        if_not_exists=True,
-    )
+    # Guarded by introspection, not ``if_not_exists``: Postgres accepts
+    # ALTER TABLE … ADD COLUMN IF NOT EXISTS, SQLite does not, and the
+    # migration chain is replayed against SQLite by the test suite.
+    bind = op.get_bind()
+    if not has_column(bind, "invites", "token_version"):
+        op.add_column(
+            "invites",
+            sa.Column(
+                "token_version", sa.Integer(), nullable=False, server_default="1",
+            ),
+        )
 
 
 def downgrade() -> None:

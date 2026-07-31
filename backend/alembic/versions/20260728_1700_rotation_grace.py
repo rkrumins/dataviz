@@ -32,6 +32,8 @@ from __future__ import annotations
 from typing import Union
 
 from alembic import op
+
+from backend.common.schema_drift import has_column
 import sqlalchemy as sa
 
 revision: str = "20260728_1700_rotation_grace"
@@ -41,27 +43,22 @@ depends_on: Union[str, None] = None
 
 
 def upgrade() -> None:
-    # ``if_not_exists`` throughout: this revision has met databases whose
-    # physical schema was already ahead of ``alembic_version``, where a bare
-    # ADD COLUMN dies on DuplicateColumn and takes the whole transactional
-    # upgrade chain with it. Adding a column that is already there is a no-op
-    # worth having; failing the deploy over it is not.
-    op.add_column(
-        "revoked_refresh_jti",
-        sa.Column("successor_jti", sa.Text(), nullable=True),
-        if_not_exists=True,
-    )
-    op.add_column(
-        "revoked_refresh_jti",
-        sa.Column("successor_exp", sa.Integer(), nullable=True),
-        if_not_exists=True,
-    )
-    op.add_column(
-        "revoked_refresh_jti",
+    # Guarded by introspection, not ``if_not_exists``: Postgres accepts
+    # ALTER TABLE … ADD COLUMN IF NOT EXISTS, SQLite does not, and the
+    # migration chain is replayed against SQLite by the test suite.
+    bind = op.get_bind()
+    # This revision has met databases whose physical schema was already ahead
+    # of ``alembic_version``, where a bare ADD COLUMN dies on DuplicateColumn
+    # and — DDL being transactional — takes the whole upgrade chain with it.
+    for name, col in (
+        ("successor_jti", sa.Column("successor_jti", sa.Text(), nullable=True)),
+        ("successor_exp", sa.Column("successor_exp", sa.Integer(), nullable=True)),
         # Epoch milliseconds overflows int4 — this must be int8.
-        sa.Column("successor_mint_ms", sa.BigInteger(), nullable=True),
-        if_not_exists=True,
-    )
+        ("successor_mint_ms",
+         sa.Column("successor_mint_ms", sa.BigInteger(), nullable=True)),
+    ):
+        if not has_column(bind, "revoked_refresh_jti", name):
+            op.add_column("revoked_refresh_jti", col)
 
 
 def downgrade() -> None:

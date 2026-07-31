@@ -18,6 +18,8 @@ from typing import Union
 import sqlalchemy as sa
 from alembic import op
 
+from backend.common.schema_drift import has_column
+
 revision: str = "20260730_1400_grant_expiry"
 down_revision: Union[str, None] = "20260730_1300_view_public_tier"
 branch_labels = None
@@ -25,11 +27,14 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "resource_grants",
-        sa.Column("expires_at", sa.Text(), nullable=True),
-        if_not_exists=True,
-    )
+    # Guarded by introspection, not ``if_not_exists``: Postgres accepts
+    # ALTER TABLE … ADD COLUMN IF NOT EXISTS, SQLite does not, and the
+    # migration chain is replayed against SQLite by the test suite.
+    bind = op.get_bind()
+    if not has_column(bind, "resource_grants", "expires_at"):
+        op.add_column(
+            "resource_grants", sa.Column("expires_at", sa.Text(), nullable=True),
+        )
 
 
 def downgrade() -> None:
