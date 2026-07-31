@@ -1,0 +1,221 @@
+name: Schema
+
+# The gate that was missing. Until this workflow existed, `alembic upgrade head` had NEVER run
+# in CI — there was no Postgres in CI at all. `alembic-guards.yml` parses revision ids with `ast`
+# and deliberately touches no database, and `backend-tests.yml` has no database service either.
+#
+# What that cost: `0001_baseline` is `Base.metadata.create_all()` against the LIVE ORM, so a fresh
+# database is born holding today's schema and then replays ~70 revisions of `ALTER`s that are
+# already applied. Every migration had to be written defensively to survive that. Fifty-one of
+# them were, one at a time, each after a breakage. The ones that weren't — `invites`,
+# `account_fields`, `rotation_grace`, `refresh_records` — meant a brand-new environment simply
+# could not be built, while every already-migrated database kept working, so nothing local caught
+# it. It surfaced as the upgrade Job exiting 1 and, because every service gates on that Job
+# completing, the whole deployment staying down.
+#
+# Three jobs, because there are three ways a database comes into existence and they had drifted
+# apart with nothing comparing them:
+#
+#   fresh-install   — the virgin fast path a new deployment takes.
+#   forward-migrate — an existing database moving onto this PR's code. The real gate.
+#   chain-replay    — the legacy path, kept covered while live databases are still on it.
+#
+# All three then run `verify-schema`, which fails if the ORM declares a table or column the
+# database lacks. That check is what would have caught `context_models.visibility`: declared in
+# the ORM, added by no migration, so it existed only on databases created after it entered the
+# ORM and nowhere else — with both reporting themselves at head.
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: schema-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PGPASSWORD: synodic
+
+jobs:
+  fresh-install:
+    name: A fresh database installs at head
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16.14-alpine
+        env:
+          POSTGRES_USER: synodic
+          POSTGRES_PASSWORD: synodic
+          POSTGRES_DB: synodic
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U synodic"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      MANAGEMENT_DB_URL: postgresql+asyncpg://synodic:synodic@localhost:5432/synodic
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install dependencies
+        run: pip install --disable-pip-version-check -r backend/requirements.txt
+
+      - name: Install
+        run: python -m backend.scripts.upgrade upgrade
+
+      - name: Schema is at head
+        run: python -m backend.scripts.upgrade check
+
+      - name: Schema matches the ORM
+        run: python -m backend.scripts.upgrade verify-schema
+
+      # create_all builds tables and writes no rows. The RBAC rows have only ever existed as
+      # INSERTs inside migrations, which the fast path skips — so a fresh install seeds them from
+      # `app/config/rbac_seed.py` instead. A database with no permissions and no roles cannot
+      # authorise anybody, and it would come up looking perfectly healthy.
+      - name: Reference data was seeded
+        run: |
+          set -euo pipefail
+          q() { psql -h localhost -U synodic -d synodic -v ON_ERROR_STOP=1 -Atc "$1"; }
+          perms=$(q "SELECT count(*) FROM permissions")
+          roles=$(q "SELECT count(*) FROM roles WHERE is_system")
+          grants=$(q "SELECT count(*) FROM role_permissions")
+          echo "permissions=$perms roles=$roles grants=$grants"
+          if [ "$perms" -eq 0 ] || [ "$roles" -eq 0 ] || [ "$grants" -eq 0 ]; then
+            echo "::error::Fresh install has no RBAC reference data — it would come up healthy and authorise nobody."
+            exit 1
+          fi
+
+  forward-migrate:
+    name: An existing database moves onto this PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16.14-alpine
+        env:
+          POSTGRES_USER: synodic
+          POSTGRES_PASSWORD: synodic
+          POSTGRES_DB: synodic
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U synodic"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      MANAGEMENT_DB_URL: postgresql+asyncpg://synodic:synodic@localhost:5432/synodic
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: pr
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.before }}
+          path: base
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: pr/backend/requirements.txt
+      - name: Install dependencies
+        run: pip install --disable-pip-version-check -r pr/backend/requirements.txt
+
+      # Build the database the way the BASE branch builds it, then move it forward with this
+      # PR's code. That is what production does, and it is the only way a migration is genuinely
+      # exercised: on the fast path a fresh install is `create_all` of today's ORM, so a new
+      # migration finds its column already present and no-ops. A green "upgrade head on an empty
+      # database" proves the chain doesn't crash — not that any migration in it does anything.
+      #
+      # This step tolerates failure ON PURPOSE, and only for one transitional reason: a base
+      # commit that predates the virgin fast path cannot build a database at all — that is the
+      # bug this workflow exists to prevent, and failing here would report the bug against the
+      # commit that fixes it. Once the base branch contains the fix the step succeeds, and any
+      # later failure of the PR-side upgrade below is a hard failure.
+      - name: Build a database at the base branch's head
+        id: base_install
+        continue-on-error: true
+        working-directory: base
+        run: python -m backend.scripts.upgrade upgrade
+
+      - name: Base branch could not build a database
+        if: steps.base_install.outcome == 'failure'
+        run: |
+          echo "::warning title=Base ref cannot build a database::The base commit's migration \
+          chain failed against an empty Postgres, so the forward-migration test has nothing to \
+          migrate from. This is the condition this workflow exists to catch; it is expected only \
+          while the base branch predates the fix."
+
+      - name: Apply this PR's migrations to it
+        if: steps.base_install.outcome == 'success'
+        working-directory: pr
+        run: python -m backend.scripts.upgrade upgrade
+
+      - name: Schema is at head
+        if: steps.base_install.outcome == 'success'
+        working-directory: pr
+        run: python -m backend.scripts.upgrade check
+
+      - name: Schema matches the ORM
+        if: steps.base_install.outcome == 'success'
+        working-directory: pr
+        run: python -m backend.scripts.upgrade verify-schema
+
+  chain-replay:
+    name: The migration chain still replays from empty
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16.14-alpine
+        env:
+          POSTGRES_USER: synodic
+          POSTGRES_PASSWORD: synodic
+          POSTGRES_DB: synodic
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U synodic"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      MANAGEMENT_DB_URL: postgresql+asyncpg://synodic:synodic@localhost:5432/synodic
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install dependencies
+        run: pip install --disable-pip-version-check -r backend/requirements.txt
+
+      # `--no-fast-path` forces the legacy route: baseline's create_all, then every revision
+      # replayed on top of it. Live databases predating the fast path are still on this route, so
+      # it has to keep working — this is the job that fails when a migration is written without
+      # tolerating the state create_all already left behind, which is exactly how
+      # `20260727_1200_invites` took the stack down.
+      - name: Replay the whole chain
+        run: python -m backend.scripts.upgrade upgrade --no-fast-path
+
+      - name: Schema is at head
+        run: python -m backend.scripts.upgrade check
+
+      - name: Schema matches the ORM
+        run: python -m backend.scripts.upgrade verify-schema

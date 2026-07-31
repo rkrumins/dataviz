@@ -76,5 +76,6 @@ Start here, then follow the trail for whatever you're doing.
 | [docs/SETUP.md](docs/SETUP.md) | Environment setup reference |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Self-host operator guide |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System overview |
+| [docs/MIGRATIONS.md](docs/MIGRATIONS.md) | How the schema is built, and the rules for a new migration |
 | [docs/BACKEND.md](docs/BACKEND.md) | Backend internals |
 | [docs/FRONTEND.md](docs/FRONTEND.md) | Frontend internals |
