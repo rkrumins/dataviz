@@ -111,7 +111,7 @@ from ..providers import (
     ProviderNotFound,
     get_registry,
 )
-from ..providers.assurance import assurance_for
+from backend.common.assurance import assurance_for
 from ..providers.custom import CustomIdentityError, CustomIdentityProvider
 from ..providers.custom_profile import (
     BROWSER_STORAGE_SOURCES,

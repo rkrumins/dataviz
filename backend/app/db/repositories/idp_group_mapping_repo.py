@@ -43,7 +43,7 @@ from backend.app.db.models import (
     RoleORM,
 )
 from backend.app.db.repositories.idp_provider_repo import decrypt_settings
-from backend.auth_service.providers.assurance import (
+from backend.common.assurance import (
     ASSURANCE_DESCRIPTIONS,
     VERIFIED,
     assurance_for,

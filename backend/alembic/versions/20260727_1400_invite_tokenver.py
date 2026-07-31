@@ -37,6 +37,7 @@ def upgrade() -> None:
         sa.Column(
             "token_version", sa.Integer(), nullable=False, server_default="1",
         ),
+        if_not_exists=True,
     )
 
 
