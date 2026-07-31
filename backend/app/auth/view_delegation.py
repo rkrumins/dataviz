@@ -124,12 +124,26 @@ def requires_ws_read_or_view_delegate(
     permission: str = "workspace:datasource:read",
     *,
     workspace: str = "ws_id",
+    delegable_routes: Optional[frozenset[str]] = None,
 ) -> Callable:
     """Router dependency: workspace read, or a view the caller can open.
 
     Drop-in replacement for
     ``requires(permission, workspace=workspace)`` on read routes that a
     non-member should be able to reach *through a view*.
+
+    ``delegable_routes`` is an allow-list of route-path suffixes. A request
+    whose route is not on it falls through to the plain permission check, so
+    delegation reaches exactly the named routes and **a route added later is
+    non-delegable until someone puts it here on purpose**. That matters on a
+    router like ``graph``, which mixes the four reads needed to paint a canvas
+    in with ``/save``, ``/nodes/create``, ``/edges``, ``/resync`` and
+    ``/commands/batch`` — mounting it wholesale would hand a delegate the
+    workspace's entire write surface for the price of a ``?viewId=``.
+
+    ``None`` means every route on the router is delegable, which is only
+    correct for a router that is read-only end to end (``canvas``,
+    ``context_models``). Prefer the explicit set.
     """
 
     async def _dependency(
@@ -159,6 +173,33 @@ def requires_ws_read_or_view_delegate(
         # 1. Members take the fast path, unchanged and unconfined.
         if has_permission(claims, permission, workspace_id=workspace_id):
             return user
+
+        # 1a. Is this route delegable at all? Checked against the route
+        #     TEMPLATE, not the concrete path, so it cannot be spoofed by a
+        #     urn that happens to contain a delegable suffix.
+        if delegable_routes is not None:
+            route = request.scope.get("route")
+            route_path = getattr(route, "path", "") or ""
+            if not any(route_path.endswith(s) for s in delegable_routes):
+                raise _denied(permission, workspace_id)
+
+        # 1b. That check consulted the per-workspace grants, which live in
+        #     the session store — so a store *and* database outage makes it
+        #     answer False for a genuine member. Falling through to
+        #     delegation there would confine a full member to one view's
+        #     scope and paint a partial canvas with a 200: a wrong answer
+        #     dressed as a successful one, which is worse than a refusal.
+        #     ``requires()`` answers 503 for exactly this; so does this.
+        if not claims.ws_available:
+            logger.warning(
+                "Cannot establish workspace grants for user=%s ws=%s; "
+                "answering 503 rather than delegating",
+                getattr(user, "id", None), workspace_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authorization temporarily unavailable",
+            )
 
         # 2. Delegation requires an explicit view context. Without one
         #    there is nothing to scope the request to.
@@ -192,6 +233,7 @@ def requires_ws_read_or_view_delegate(
         scope = await _resolve_scope(
             session,
             view=view,
+            viewer=ctx,
             workspace_id=workspace_id,
             branch_id=branch_id,
         )
@@ -219,6 +261,7 @@ async def _resolve_scope(
     session: AsyncSession,
     *,
     view: ViewORM,
+    viewer: "view_access.ViewerContext",
     workspace_id: str,
     branch_id: Optional[str],
 ) -> EffectiveViewScope:
@@ -226,6 +269,12 @@ async def _resolve_scope(
 
     A view whose scope cannot be resolved must not fall back to
     "unrestricted" — that would turn a resolver bug into a data leak.
+
+    ``viewer`` is re-checked by the resolver even though the caller has
+    already established read access a few lines above. The duplication is
+    deliberate: the resolver is reachable from advanced search too, and
+    making the check its own precondition is what stops the next call site
+    from forgetting it.
     """
     from backend.common.models.search import SearchScope
 
@@ -234,6 +283,7 @@ async def _resolve_scope(
         return await resolver.resolve(
             workspace_id=workspace_id,
             requested=SearchScope(view_id=view.id),
+            viewer=viewer,
             data_source_id=view.data_source_id,
             branch_id=branch_id,
         )

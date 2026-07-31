@@ -1,19 +1,23 @@
 """PermissionService — resolve a user's effective permissions.
 
-The resolver runs once per login and produces a compact claim payload
-that is embedded in the access JWT. Every subsequent request
-authorizes against those claims instead of going back to the DB.
+The resolver runs once per login and produces a compact claim payload.
+Every subsequent request authorizes against those claims instead of
+going back to the DB.
 
-The shape returned matches the JWT claim schema agreed in the design:
+It travels in two halves, because only one of them is bounded. The
+access JWT carries::
 
-    {
-        "sid": "<session id>",
-        "global": ["workspaces:create", "users:manage", ...],
-        "ws": {
-            "ws_finance":   ["workspace:admin", "workspace:view:*", ...],
-            "ws_marketing": ["workspace:view:read", ...]
-        }
-    }
+    {"sid": "<session id>", "global": ["workspaces:create", ...]}
+
+and the session store, keyed by ``sid``, carries the per-workspace
+grants — deduplicated, since every workspace a user holds the same role
+on resolves to the same permission list::
+
+    {"ws": {"ws_finance": 0, "ws_marketing": 1}, "psets": [[...], [...]]}
+
+The store half is unbounded in workspace count and a cookie stops at
+4096 bytes, which is the whole reason for the split; see
+``PermissionClaims``.
 
 Wildcards (e.g. ``workspace:view:*``) are expanded by the resolver
 when every action under a domain is granted, keeping the token small
@@ -75,33 +79,220 @@ _WILDCARD_PREFIXES = (
 )
 
 
+#: Key under which the per-workspace grants travel.
+#:
+#: Owned here because this module is now the only producer and the only
+#: consumer: the grants go to the session store, and ``auth_service`` — the
+#: layer that mints the token — has no say in the matter and no reason to
+#: know the name. It briefly did, when the mint chose per token whether to
+#: embed them, and the constant lived on the boundary for that reason.
+#:
+#: Its **presence** in a token payload remains load-bearing: absent means
+#: "read the grants from the session store". A token minted before the
+#: split carries its own and has no store entry, which is what keeps an
+#: already-open tab working across the deploy.
+WS_CLAIM = "ws"
+
+#: Companion table that ``WS_CLAIM``'s values index into.
+#:
+#: The grants used to be written out in full once per workspace, and in
+#: practice they are the *same* list every time — a user bound as
+#: workspace_admin on 150 workspaces produced 150 verbatim copies of one
+#: 8-permission array, 29 KB of JSON of which about 99% was repetition.
+#: Storing each distinct set once and pointing at it by index is a ~9x
+#: reduction with no loss and no lookup: everything needed to expand it
+#: travels in the same payload.
+WS_SETS_CLAIM = "psets"
+
+
 @dataclass(frozen=True)
 class PermissionClaims:
-    """The permission claim shape embedded in the access JWT.
+    """The resolved permission set for one session.
 
     Frozen so the resolver caller cannot accidentally mutate the
     structure between resolution and serialization.
+
+    This splits across two carriers, and the split is the whole point.
+    ``sid`` and the global grants are bounded — global permissions are a
+    fixed vocabulary — so they ride in the access JWT. The per-workspace
+    grants are **not** bounded: they grow ~200 bytes per workspace a user
+    is bound to, and past roughly 18 workspaces the access cookie crosses
+    the 4096-byte limit and the browser discards it *silently*. Login
+    answers 200, the next request is anonymous, and nothing logs a thing.
+
+    So the workspace half lives in the session store keyed by ``sid`` —
+    read on every request already, for revocation — and never in the
+    token. See ``to_jwt_dict`` and ``to_session_dict``.
     """
     sid: str                                 # session id (random, used for revocation)
     global_perms: tuple[str, ...] = ()
     ws_perms: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
+    #: Whether ``ws_perms`` is an *answer*. ``False`` means no source could
+    #: be reached, so the empty map above says nothing about the user.
+    #:
+    #: Without this the two states are indistinguishable, and the one that
+    #: gets reported is the wrong one: "we could not find out" is rendered
+    #: as "you have no workspace access" — a 403 asserting a fact the
+    #: server never established, which is precisely the "you don't have
+    #: permissions" flash this design set out to remove. Consumers that
+    #: read ``ws_perms`` must decide what to do when this is ``False``;
+    #: ``requires`` answers 503 and ``GET /me/permissions`` does the same
+    #: rather than handing the SPA an authoritative-looking empty map.
+    #:
+    #: Defaults to ``True`` so a claim set built from a resolution or a
+    #: token is trustworthy unless the read path says otherwise. Never
+    #: serialized: it is a fact about this request, not about the session.
+    ws_available: bool = True
+
     def to_jwt_dict(self) -> dict:
-        """Serialize to the JWT claim layout. Field names must stay
-        stable — they are a wire contract with the FastAPI dependency."""
+        """Serialize the half that travels in the access JWT.
+
+        Field names must stay stable — they are a wire contract with the
+        FastAPI dependency.
+
+        **Per-workspace grants are deliberately not here, and there is no
+        option to include them.** They are unbounded in tenant size, and a
+        cookie over 4096 bytes is discarded by the browser with no error at
+        all — login answers 200, the next request is anonymous, nothing is
+        logged. Anything that grows with customer data has no business in a
+        cookie.
+
+        This started as a flag (embed while it fits, shed above a budget).
+        That was worse than it looked: a user with 99 workspaces and one
+        with 101 exercised different authorization machinery, and the store
+        path serving the largest tenants was the one nothing routinely
+        tested. Removing the parameter rather than defaulting it is the
+        point — there is no call site left that can get it wrong, and the
+        invariant is enforced by the signature instead of by review.
+
+        The grants live in ``to_session_dict``. Reading old tokens that
+        embedded them still works; see ``_decode_ws``.
+        """
         return {
             "sid": self.sid,
             "global": list(self.global_perms),
-            "ws": {ws: list(perms) for ws, perms in self.ws_perms.items()},
         }
+
+    def to_session_dict(self) -> dict:
+        """The half held in the session store, always written in full.
+
+        Written unconditionally even when the token also carries it, so
+        the store never has to be reconciled with a decision made later
+        at mint time — and so a token that omits it always has somewhere
+        to read it from.
+        """
+        return self._encode_ws()
+
+    def _encode_ws(self) -> dict:
+        """Workspace grants, deduplicated by permission set.
+
+        Every workspace a user holds the same role on resolves to the
+        *same* permission list, and the old layout wrote that list out in
+        full for each one: 150 workspaces as workspace_admin came to 150
+        verbatim copies of one 8-permission array — 29 KB of JSON, about
+        99% of it repetition, inflated another third by base64url on the
+        way into the token.
+
+        Here each distinct set is stored once in ``psets`` and each
+        workspace maps to its index, which is roughly a 9x reduction. The
+        table travels with the map, so expansion needs no lookup and no
+        knowledge of the role catalogue — deliberately, because a read
+        path that had to consult the database to interpret a token would
+        put a query on every authenticated request.
+
+        Ordering is by first appearance rather than sorted: it keeps the
+        common single-set case at index 0 and makes the payload stable
+        for a given resolution, which matters when diffing two tokens.
+        """
+        sets: list[list[str]] = []
+        index_of: dict[tuple[str, ...], int] = {}
+        mapping: dict[str, int] = {}
+        for ws, perms in self.ws_perms.items():
+            key = tuple(perms)
+            if key not in index_of:
+                index_of[key] = len(sets)
+                sets.append(list(perms))
+            mapping[ws] = index_of[key]
+        return {WS_CLAIM: mapping, WS_SETS_CLAIM: sets}
 
     @classmethod
     def from_jwt_dict(cls, payload: dict) -> "PermissionClaims":
         sid = payload.get("sid", "")
         global_perms = tuple(payload.get("global", ()) or ())
-        raw_ws = payload.get("ws", {}) or {}
-        ws_perms = {ws: tuple(perms) for ws, perms in raw_ws.items()}
-        return cls(sid=sid, global_perms=global_perms, ws_perms=ws_perms)
+        return cls(
+            sid=sid,
+            global_perms=global_perms,
+            ws_perms=cls._decode_ws(payload),
+        )
+
+    @staticmethod
+    def _decode_ws(payload: dict) -> dict[str, tuple[str, ...]]:
+        """Expand workspace grants from either layout.
+
+        Both are accepted on purpose and the check is per value, not per
+        payload. A token minted before the dedup carries inline lists; one
+        minted after carries indices into ``psets``. A tab that was
+        already open when this deployed is holding the former, and it has
+        to keep working without a reload — so the reader cannot assume a
+        layout, only recognise one.
+
+        Self-draining: after one access TTL every live token has rotated
+        through the new encoder, and after one refresh TTL no inline token
+        can exist. The list branch is removable then.
+
+        An index with no matching entry in ``psets`` yields no grants for
+        that workspace rather than raising. A malformed token should cost
+        access to what it cannot describe, not 500 the request.
+        """
+        raw_ws = payload.get(WS_CLAIM, {}) or {}
+        sets = payload.get(WS_SETS_CLAIM) or []
+        out: dict[str, tuple[str, ...]] = {}
+        for ws, value in raw_ws.items():
+            if isinstance(value, int) and not isinstance(value, bool):
+                if 0 <= value < len(sets):
+                    out[ws] = tuple(sets[value])
+                else:
+                    logger.warning(
+                        "Workspace %s references permission set %d but only "
+                        "%d were published; treating as no grants.",
+                        ws, value, len(sets),
+                    )
+                    out[ws] = ()
+            else:
+                # Pre-dedup inline list. See the note above.
+                out[ws] = tuple(value)
+        return out
+
+    @staticmethod
+    def token_carries_ws(payload: dict) -> bool:
+        """Whether this token embeds its own workspace grants.
+
+        The read path's entire compatibility story turns on this. A token
+        minted before the split carries ``ws`` and has no store entry at
+        all, so a tab that was already open when the split deployed must
+        be answered from the token. Absence — not emptiness — is what
+        means "ask the store": a user with genuinely no workspace grants
+        still gets an embedded empty map.
+        """
+        return WS_CLAIM in payload
+
+    def with_ws(
+        self,
+        ws_perms: dict[str, tuple[str, ...]] | None,
+    ) -> "PermissionClaims":
+        """Copy carrying workspace grants from elsewhere (the store).
+
+        ``None`` means no source could answer, and produces a claim set
+        that says so — an empty map flagged unavailable — rather than one
+        that quietly claims the user holds nothing.
+        """
+        return PermissionClaims(
+            sid=self.sid,
+            global_perms=self.global_perms,
+            ws_perms=ws_perms if ws_perms is not None else {},
+            ws_available=ws_perms is not None,
+        )
 
 
 def new_session_id() -> str:

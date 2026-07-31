@@ -24,6 +24,23 @@ export interface View {
     workspaceName?: string
     dataSourceId?: string
     dataSourceName?: string
+    /**
+     * Provider behind this view's data source. The canvas cannot execute a
+     * query without it, and it must come from the server: resolving it from
+     * the workspaces store yields null for anyone who is not a member of the
+     * view's workspace — which is every reader of an `enterprise` or `public`
+     * view, by definition.
+     */
+    providerId?: string | null
+    workspaceIsActive?: boolean
+    dataSourceIsActive?: boolean
+    /**
+     * Resolved server-side from the view's OWN workspace and data source, so
+     * two callers get the same answer for the same view. Never recompute this
+     * from caller-scoped state — see `hooks/useViewHealth.ts`.
+     */
+    healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
+    healthReason?: string | null
     viewType: string
     /**
      * Top-level projection of `config.layoutType` — lets metadata-only

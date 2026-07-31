@@ -42,9 +42,22 @@ HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
 # projector is single-flight per graph via a Postgres advisory lock
 # (services/versioning/projection.py:project_graph), so extra workers
 # don't duplicate background projection work.
+# FORWARDED_ALLOW_IPS names the peers whose X-Forwarded-For we believe.
+# Gunicorn defaults it to 127.0.0.1; behind an ingress or an nginx in a
+# different container the peer is never loopback, so the forwarding
+# header nginx.conf carefully sets was discarded and every request
+# looked like it came from the proxy. That collapsed all rate limiting
+# onto a single client address — one shared bucket for the entire
+# deployment — and made the access log useless for tracing a caller.
+#
+# Left at the safe default. Set it to the proxy's address (or "*" when
+# nothing but a trusted proxy can reach this port) in the deployment
+# that actually has one; trusting the header when the port is directly
+# reachable would let a caller name its own address.
 ENV GUNICORN_WORKERS=4 \
     GUNICORN_TIMEOUT=120 \
-    GUNICORN_GRACEFUL_TIMEOUT=30
+    GUNICORN_GRACEFUL_TIMEOUT=30 \
+    FORWARDED_ALLOW_IPS=127.0.0.1
 
 CMD ["sh", "-c", "exec gunicorn backend.app.main:app \
     --worker-class uvicorn.workers.UvicornWorker \
@@ -52,4 +65,5 @@ CMD ["sh", "-c", "exec gunicorn backend.app.main:app \
     --bind 0.0.0.0:8000 \
     --timeout ${GUNICORN_TIMEOUT} \
     --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT} \
+    --forwarded-allow-ips ${FORWARDED_ALLOW_IPS} \
     --access-logfile -"]

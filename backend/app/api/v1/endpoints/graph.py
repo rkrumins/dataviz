@@ -49,7 +49,8 @@ from backend.app.services.stats_cache import (
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.providers.manager import provider_manager
-from backend.app.auth.dependencies import get_optional_user
+from backend.app.auth.dependencies import get_optional_user, get_permission_claims
+from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.top_level_cache import try_serve_top_level
 from backend.insights_service.enqueue import (
     enqueue_stats_job_force,
@@ -1317,6 +1318,8 @@ async def search_advanced(
     engine: ContextEngine = Depends(get_context_engine),
     # R-H3 bulkhead: held across svc.search() → FalkorDB; isolate from WEB.
     session: AsyncSession = Depends(get_graph_read_db_session),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ):
     """Advanced server-side search, strictly scoped to ``scope.viewId``.
 
@@ -1348,10 +1351,15 @@ async def search_advanced(
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService, ValidationError,
     )
+    from backend.app.services import view_access
+    viewer = await view_access.ViewerContext.build(
+        session, user=user, claims=claims,
+    )
     svc = AdvancedSearchService(
         engine,
         session=session,
         workspace_id=ws_id,
+        viewer=viewer,
         data_source_id=dataSourceId,
         branch_id=branchId,
     )
@@ -1384,6 +1392,8 @@ async def search_explain(
     engine: ContextEngine = Depends(get_context_engine),
     # R-H3 bulkhead: held across svc.explain() → FalkorDB; isolate from WEB.
     session: AsyncSession = Depends(get_graph_read_db_session),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ):
     """Compile a SearchQuery without executing it.
 
@@ -1406,10 +1416,15 @@ async def search_explain(
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService, ValidationError,
     )
+    from backend.app.services import view_access
+    viewer = await view_access.ViewerContext.build(
+        session, user=user, claims=claims,
+    )
     svc = AdvancedSearchService(
         engine,
         session=session,
         workspace_id=ws_id,
+        viewer=viewer,
         data_source_id=dataSourceId,
         branch_id=branchId,
     )

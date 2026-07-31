@@ -64,10 +64,54 @@ did not carry access to the data they showed. Four reported problems, one root c
 - "Shared with me" reads actual shares instead of approximating them as a tier filter.
 - The tier vocabulary had 5 backend and ~15 frontend definitions, already drifted in wording and
   spelling. Both sides now have one.
+- View reads answer **503** rather than a filtered result when the per-workspace grants cannot be
+  established. Those grants moved out of the access token and into the session store, so
+  `ws_perms` can now be empty because nothing could answer rather than because the user holds
+  nothing — and every tier below `public` is decided against it. Reading the first as the second
+  would serve a 200 with rows missing and nothing to say so. `system:admin`, anonymous callers and
+  anyone reaching a View by grant or `public` are unaffected, since none of them need that half.
+
+### Fixed
+
+- **A Public view rendered as "Source deleted" to everyone it was published for.** View health and
+  the canvas's execution context were computed client-side by looking the view's workspace up in
+  the store behind `GET /workspaces` — which returns only the workspaces the caller is bound to.
+  `enterprise` and `public` exist for people with no such binding, so the lookup always missed for
+  their intended audience, and a miss was rendered as a deletion: a red badge on the card, a
+  full-screen "The workspace for this view no longer exists." over a view that had loaded fine, and
+  `providerId: null` so the canvas had nothing to query. Health, liveness and `providerId` are now
+  resolved server-side from the view's **own** workspace and data source and carried on
+  `ViewResponse`. Two callers get the same answer for the same view.
+- **The delegation bridge had never executed.** It was mounted on routers the frontend does not
+  call to render a view, and the client never sent the `?viewId=` it needs. Wired to the four graph
+  reads a canvas actually issues, via an explicit default-closed allow-list — that router also
+  carries `/save`, `/nodes/create` and `/commands/batch`, which must stay non-delegable.
+- Two delegation clamps widened instead of narrowing: a disjoint entity-type request produced `[]`,
+  which downstream means "no filter" and degraded to a full graph scan; and `expand` applied no
+  entity-type clamp at all, so one in-scope container was a doorway to the rest of the graph.
+
+### Security
+
+- `visibility-preview` returned a workspace's member headcount and sample member labels — often
+  live email addresses — to anyone who could read a single `public` view in it. Now gated on
+  `can_change_visibility`: you must be able to perform the change to preview its blast radius.
+- The workspace activity feed gated on `workspace:view:read` and returned every view's history, so
+  a `workspace_viewer` read private views' names, rename diffs and share lines. Now filtered by the
+  same SQL read predicate the list uses.
+- `ViewScopeResolver` authorized tenancy only, so `/search/explain` returned any view's root URNs
+  and entity-type allow-list — for a curated view, its entire content. A viewer context is now a
+  required argument and the check lives inside the resolver.
+- View-scoped import and export resolved `?viewId=` by raw primary key in a background worker with
+  no workspace check. Import was a **cross-tenant write**: a member of one workspace could merge
+  their URNs into a private view's layout in another. Checked at the route and again in the worker.
+- The view-grants router answered 404 for absent and 403-naming-the-workspace for forbidden, an
+  existence oracle over every private view on the platform. Both are 404 now.
 
 ### Removed
 
 - `context_models.visibility` — same column and CHECK as Views, no reader or writer anywhere.
+- `useViewHealth`'s client-side computation. A client cannot get this right by construction, so it
+  no longer has the code that pretends to — it now just shapes the server's verdict.
 - The `isPublic` boolean on the frontend View type. It collapsed the tier on the way in and
   expanded it back on the way out, so opening a Workspace View in the wizard silently promoted
   it to the whole organisation.
@@ -76,8 +120,8 @@ did not carry access to the data they showed. Four reported problems, one root c
 
 ### Upgrading
 
-Two migrations: `20260728_1700_view_public_tier` (widens the Views tier CHECK, drops the dead
-`context_models.visibility`) and `20260728_1800_grant_expiry`.
+Two migrations: `20260730_1300_view_public_tier` (widens the Views tier CHECK, drops the dead
+`context_models.visibility`) and `20260730_1400_grant_expiry`.
 
 **Users will lose access to Views they can see today.** This is the fix, but it is still an
 access removal. Run the read-only report first to see who is affected:
@@ -219,6 +263,77 @@ changing it is a re-link, not a text field.
 correctly but answered with the values from before the edit, because the write
 went around SQLAlchemy's identity map while the response read through it. The
 database was always right; the screen just did not show it until a reload.
+**Signing into one environment logged you out of another, and no session survived a
+redeploy.** Users bounced straight back to `/login` after signing in, got logged out on
+clicking any section, and saw `Refresh rejected: Signature verification failed` in the
+backend log. Moving between two deployments — `dataviz-dev.local` and `dataviz-uat.local`,
+even on separate clusters — logged them out of whichever one they left.
+
+Three causes, all in the app layer:
+
+* **Environments were indistinguishable.** Every deployment wrote the same cookie names
+  (`nx_access`, `nx_refresh`) and stamped tokens with the same issuer, so a token from one
+  was structurally identical to a token from another — only the signature differed. Since
+  cookie jars are keyed by *domain*, not by cluster, signing into one deployment simply
+  overwrote the other's cookies, and the receiving side could only report an opaque
+  signature failure. `AUTH_ENVIRONMENT_ID` now scopes the session cookie names
+  (`nx_access_uat`) and binds the environment into the JWT issuer, so the jars are disjoint
+  and a cross-environment token fails as a recognisable issuer mismatch. `nx_csrf` is
+  deliberately left unscoped — it is read from JavaScript by name, and the double-submit
+  check only ever compares it against the header on the same request.
+* **Verification accepted exactly one key.** Any change to `JWT_SECRET_KEY` invalidated
+  every live session the instant it landed, and because updating a Secret does not restart
+  pods, replicas on the old and new key served traffic side by side — with no session
+  affinity, the same user flipped between authenticated and 401 request-to-request. That is
+  the "click any section and get logged out" symptom. `JWT_SECRET_KEY_PREVIOUS` now holds
+  retired keys for verification only, and tokens carry a `kid` header so the right key is
+  selected directly.
+* **A rejected token was never evicted.** `get_current_user` answered 401 and left the bad
+  cookie in place, so the browser re-presented it on every request — and `clear_session_cookies`
+  only ever deleted using the *current* process's cookie domain, which cannot match a cookie
+  written under a different `AUTH_COOKIE_DOMAIN` or by a sibling environment sharing a parent
+  domain. That combination is what made the login loop permanent. Cookies that can never
+  verify here are now cleared across every plausible scope (configured domain, host-only, and
+  the parent domain), including the pre-scoping names, and the 401 carries a `session_foreign`
+  marker so the frontend stops retrying and starts one clean login instead of looping.
+
+Ordinary expiry is explicitly *not* treated this way, so the silent five-minute refresh is
+unchanged.
+
+### Added
+
+**`GET /api/v1/auth/diagnostics`** — unauthenticated and secret-free, because it is most
+needed exactly when nobody can authenticate. Reports the environment id, issuer, expected
+cookie names, active and accepted key fingerprints, whether the request actually arrived over
+TLS (honouring `X-Forwarded-Proto`), and for each session cookie presented whether it is
+valid, expired, or foreign. The backend also logs an auth fingerprint at startup, so two
+deployments can be compared from one `kubectl logs`.
+
+It warns at startup when `AUTH_COOKIE_SECURE=true`, which is worth checking on any `.local`
+host: browsers silently discard `Secure` cookies sent over plain HTTP, so login returns 200,
+nothing is stored, and the next request is anonymous — indistinguishable from this bug.
+
+### Upgrading
+
+Both new settings are optional and default to today's behaviour.
+
+* Set `AUTH_ENVIRONMENT_ID` per environment (`dev`, `uat`, …) if users can have two
+  environments open in one browser. The k8s overlays and the Helm chart now carry it. It must
+  be unique and stable — changing it logs that environment's users out once, by design.
+* To rotate `JWT_SECRET_KEY` without logging everyone out: copy the current value into
+  `JWT_SECRET_KEY_PREVIOUS`, set the new key, deploy, then drop the old entry after
+  `JWT_REFRESH_EXPIRY_DAYS`.
+
+### Known limitations
+
+Every k8s overlay still deploys into the same namespace with the same object names and the
+same static IP (`deploy/k8s/overlays/*/kustomization.yaml` set no `namespace`/`namePrefix`),
+so deploying one environment overwrites another's `app-secrets`, `viz-service`, and ingress.
+`deploy.sh setup` also re-mints `JWT_SECRET_KEY` into a per-operator `.env.deploy`, and
+applying a Secret does not restart pods. The key ring makes those survivable rather than
+session-ending, but they remain worth fixing separately.
+
+### Fixed
 
 **Shareable signup links were unusable.** Anyone who clicked one landed on the login page
 instead of the signup form, and the invite was discarded on the way. The `/signup` route was

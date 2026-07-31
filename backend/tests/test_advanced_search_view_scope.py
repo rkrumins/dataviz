@@ -36,6 +36,26 @@ from backend.app.services.view_scope import (
 )
 from backend.common.models.search import SearchScope
 
+from backend.app.services import view_access
+from backend.app.services.permission_service import PermissionClaims
+
+
+def _viewer() -> view_access.ViewerContext:
+    """A caller who can read every view.
+
+    These tests are about SCOPE resolution, not access: the resolver now
+    refuses a view the caller cannot read (it used to authorize nothing but
+    tenancy, which let anyone dump a private view's composition through
+    /search/explain). A system-admin viewer keeps each case testing the thing
+    it was written to test. Access itself is covered by
+    tests/test_view_leak_regressions.py.
+    """
+    return view_access.ViewerContext(
+        user_id="usr_admin",
+        claims=PermissionClaims(sid="s", global_perms=("system:admin",)),
+        group_ids=(),
+    )
+
 
 # ---------------------------------------------------------------------------
 # Pure-helper tests (no DB)
@@ -392,6 +412,7 @@ async def test_resolver_view_not_found(db_session: AsyncSession):
     resolver = ViewScopeResolver(db_session)
     with pytest.raises(ViewNotFound):
         await resolver.resolve(
+            viewer=_viewer(),
             workspace_id=ws.id,
             requested=SearchScope(view_id="does-not-exist"),
         )
@@ -409,6 +430,7 @@ async def test_resolver_cross_workspace_rejection(db_session: AsyncSession):
     resolver = ViewScopeResolver(db_session)
     with pytest.raises(ViewNotFound):
         await resolver.resolve(
+            viewer=_viewer(),
             workspace_id=ws_a.id,
             requested=SearchScope(view_id=view.id),
         )
@@ -421,6 +443,7 @@ async def test_resolver_rejects_deleted_view(db_session: AsyncSession):
     resolver = ViewScopeResolver(db_session)
     with pytest.raises(ViewNotFound):
         await resolver.resolve(
+            viewer=_viewer(),
             workspace_id=ws.id,
             requested=SearchScope(view_id=view.id),
         )
@@ -451,6 +474,7 @@ async def test_resolver_reference_view_extracts_roots(db_session: AsyncSession):
 
     resolver = ViewScopeResolver(db_session)
     eff = await resolver.resolve(
+            viewer=_viewer(),
         workspace_id=ws.id,
         requested=SearchScope(view_id=view.id),
     )
@@ -487,6 +511,7 @@ async def test_resolver_intersects_client_root_urns(db_session: AsyncSession):
 
     resolver = ViewScopeResolver(db_session)
     eff = await resolver.resolve(
+            viewer=_viewer(),
         workspace_id=ws.id,
         requested=SearchScope(
             view_id=view.id,
@@ -517,6 +542,7 @@ async def test_resolver_drops_out_of_view_urns(db_session: AsyncSession):
 
     resolver = ViewScopeResolver(db_session)
     eff = await resolver.resolve(
+            viewer=_viewer(),
         workspace_id=ws.id,
         requested=SearchScope(
             view_id=view.id,
@@ -540,6 +566,7 @@ async def test_resolver_rejects_out_of_view_entity_type(db_session: AsyncSession
     resolver = ViewScopeResolver(db_session)
     with pytest.raises(ViewScopeError) as exc:
         await resolver.resolve(
+            viewer=_viewer(),
             workspace_id=ws.id,
             requested=SearchScope(
                 view_id=view.id,
@@ -560,6 +587,7 @@ async def test_resolver_clamps_max_depth(db_session: AsyncSession):
 
     resolver = ViewScopeResolver(db_session)
     eff = await resolver.resolve(
+            viewer=_viewer(),
         workspace_id=ws.id,
         requested=SearchScope(view_id=view.id, max_depth=20),
     )
@@ -577,6 +605,7 @@ async def test_resolver_unconstrained_graph_view(db_session: AsyncSession):
 
     resolver = ViewScopeResolver(db_session)
     eff = await resolver.resolve(
+            viewer=_viewer(),
         workspace_id=ws.id,
         requested=SearchScope(view_id=view.id),
     )
@@ -664,7 +693,8 @@ async def test_service_short_circuits_when_all_client_urns_dropped(
     # Provider raises if called — proves the service short-circuited.
     engine = _FakeEngine(raise_on_provider_call=True)
     svc = AdvancedSearchService(
-        engine, session=db_session, workspace_id=ws.id,
+        engine,
+        viewer=_viewer(), session=db_session, workspace_id=ws.id,
     )
     query = SearchQuery(
         predicate=TagPredicate(values=["PII"]),
@@ -720,7 +750,8 @@ async def test_service_passes_resolved_scope_to_provider(
 
     engine = _FakeEngine(raise_on_provider_call=False)
     svc = AdvancedSearchService(
-        engine, session=db_session, workspace_id=ws.id,
+        engine,
+        viewer=_viewer(), session=db_session, workspace_id=ws.id,
     )
     query = SearchQuery(
         predicate=TagPredicate(values=["PII"]),
@@ -776,7 +807,8 @@ async def test_service_rejects_view_from_other_workspace(db_session: AsyncSessio
 
     engine = _FakeEngine(raise_on_provider_call=True)
     svc = AdvancedSearchService(
-        engine, session=db_session, workspace_id=ws_a.id,
+        engine,
+        viewer=_viewer(), session=db_session, workspace_id=ws_a.id,
     )
     query = SearchQuery(
         predicate=TagPredicate(values=["x"]),
@@ -798,6 +830,7 @@ async def test_resolver_scope_hash_changes_with_view_edit(db_session: AsyncSessi
 
     resolver = ViewScopeResolver(db_session)
     eff1 = await resolver.resolve(
+            viewer=_viewer(),
         workspace_id=ws.id,
         requested=SearchScope(view_id=view.id),
     )
@@ -809,6 +842,7 @@ async def test_resolver_scope_hash_changes_with_view_edit(db_session: AsyncSessi
     await db_session.flush()
 
     eff2 = await resolver.resolve(
+            viewer=_viewer(),
         workspace_id=ws.id,
         requested=SearchScope(view_id=view.id),
     )
@@ -859,16 +893,19 @@ async def test_resolver_branch_effective_config_and_distinct_hash(
     resolver = ViewScopeResolver(db_session)
 
     published = await resolver.resolve(
+            viewer=_viewer(),
         workspace_id=ws.id,
         requested=SearchScope(view_id=view.id),
     )
     draft = await resolver.resolve(
+            viewer=_viewer(),
         workspace_id=ws.id,
         requested=SearchScope(view_id=view.id),
         branch_id="br_draft",
     )
     # No overlay for this branch → base (identical to published).
     other_draft = await resolver.resolve(
+            viewer=_viewer(),
         workspace_id=ws.id,
         requested=SearchScope(view_id=view.id),
         branch_id="br_other",

@@ -15,19 +15,31 @@ interface PoolEntry {
 const providerPool = new Map<string, PoolEntry>()
 const POOL_MAX_SIZE = 8
 
-export function poolKey(wsId: string, dsId: string | null, branchId?: string | null): string {
+export function poolKey(
+  wsId: string,
+  dsId: string | null,
+  branchId?: string | null,
+  viewId?: string | null,
+): string {
   // A draft is a distinct read-context from main — keying on branchId gives it its
   // own provider instance (and response cache), so switching branches can't serve
   // stale cross-branch data.
-  return `${wsId}:${dsId ?? 'default'}:${branchId ?? 'main'}`
+  //
+  // viewId is part of the key for a sharper reason: a delegate's reads are
+  // CONFINED to their view's scope, so a provider carrying viewId=A returns a
+  // different (smaller) answer than one carrying viewId=B for the identical
+  // query. Sharing an instance between two views would serve one view's
+  // confined response cache to the other.
+  return `${wsId}:${dsId ?? 'default'}:${branchId ?? 'main'}:${viewId ?? 'none'}`
 }
 
 export function getOrCreateProvider(
   wsId: string,
   dsId: string | null,
   branchId?: string | null,
+  viewId?: string | null,
 ): RemoteGraphProvider {
-  const key = poolKey(wsId, dsId, branchId)
+  const key = poolKey(wsId, dsId, branchId, viewId)
   const existing = providerPool.get(key)
   if (existing) {
     existing.lastUsed = Date.now()
@@ -49,6 +61,7 @@ export function getOrCreateProvider(
     workspaceId: wsId,
     dataSourceId: dsId ?? undefined,
     branchId: branchId ?? undefined,
+    viewId: viewId ?? undefined,
   })
   providerPool.set(key, { provider, lastUsed: Date.now() })
   return provider

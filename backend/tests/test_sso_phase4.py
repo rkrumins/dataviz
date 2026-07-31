@@ -32,6 +32,7 @@ from backend.auth_service.interface import (
 )
 from backend.auth_service.providers.base import ProviderIdentity
 from backend.auth_service.service import LocalIdentityService
+from backend.app.db.repositories.refresh_token_repo import make_refresh_store
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────
@@ -98,7 +99,13 @@ def _svc(db_session, *, posture: dict | None = None):
         session_factory=factory,
         user_repo=user_repo,
         user_identity_repo=user_identity_repo,
-        refresh_store_factory=lambda s: None,
+        # A real store, not ``lambda s: None``. Every one of these
+        # fixtures used to pass None, so no test of an SSO login ever
+        # touched refresh persistence — and allow-by-record makes the
+        # record the token's licence to exist, so that gap now shows up
+        # as an AttributeError rather than as a session that quietly
+        # cannot be renewed.
+        refresh_store_factory=make_refresh_store,
         outbox_emit=outbox,
         claims_resolver=None,
         auth_config_provider=StaticAuthConfigProvider(snapshot),

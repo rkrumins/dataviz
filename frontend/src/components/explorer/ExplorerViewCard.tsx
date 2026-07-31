@@ -405,7 +405,11 @@ export function ExplorerViewCard({
               title={healthInfo.tooltip}
             >
               <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
-              {healthStatus === 'broken' ? 'Source deleted' : healthStatus === 'warning' ? 'Warning' : 'Stale'}
+              {/* "Broken" rather than "Source deleted": a broken view is more
+                  often a missing WORKSPACE than a missing data source, and
+                  naming the wrong noun sent people looking for a deletion that
+                  had not happened. The specific reason is on the tooltip. */}
+              {healthStatus === 'broken' ? 'Broken' : healthStatus === 'warning' ? 'Warning' : 'Stale'}
             </span>
           )}
           {isDeleted && (

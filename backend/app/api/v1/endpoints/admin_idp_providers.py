@@ -532,6 +532,11 @@ def _resolve_preview(
             "attributes": identity.attributes,
         },
         "resolvedFrom": resolved_sources(claims, kind=kind, override=override),
+        # Names the IdP did not name itself. `resolvedFrom` reports null
+        # for both in that case — truthfully, since no candidate of theirs
+        # fired — and without this the screen would show "nothing
+        # resolved" beside two populated values.
+        "namesDerivedFrom": identity.names_derived_from,
     }
 
 

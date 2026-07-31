@@ -268,12 +268,17 @@ class AdvancedSearchService:
         *,
         session: Optional[AsyncSession],
         workspace_id: Optional[str],
+        viewer: Optional["ViewerContext"] = None,
         data_source_id: Optional[str] = None,
         branch_id: Optional[str] = None,
     ) -> None:
         self._engine = engine
         self._session = session
         self._workspace_id = workspace_id
+        #: Who is asking. The resolver refuses to scope a search to a view
+        #: this caller cannot read; without it there is nobody to check
+        #: against, so ``_resolve_scope`` fails closed rather than widening.
+        self._viewer = viewer
         self._data_source_id = data_source_id
         self._branch_id = branch_id
 
@@ -462,9 +467,9 @@ class AdvancedSearchService:
 
     async def _resolve_scope(self, requested: SearchScope) -> EffectiveViewScope:
         """Run the ViewScopeResolver and map known failure modes to HTTP."""
-        if self._session is None or self._workspace_id is None:
+        if self._session is None or self._workspace_id is None or self._viewer is None:
             # Diagnostics-only constructor was used. search()/explain()
-            # require a real session + workspace for view-scope
+            # require a real session + workspace + viewer for view-scope
             # resolution — refuse loudly rather than silently widening.
             raise ValidationError(
                 "view_scope_unavailable: AdvancedSearchService was "
@@ -476,6 +481,7 @@ class AdvancedSearchService:
             return await resolver.resolve(
                 workspace_id=self._workspace_id,
                 requested=requested,
+                viewer=self._viewer,
                 data_source_id=self._data_source_id,
                 branch_id=self._branch_id,
             )

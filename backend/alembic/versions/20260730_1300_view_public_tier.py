@@ -39,8 +39,8 @@ from typing import Union
 
 from alembic import op
 
-revision: str = "20260728_1700_view_public_tier"
-down_revision: Union[str, None] = "20260728_1600_account_fields"
+revision: str = "20260730_1300_view_public_tier"
+down_revision: Union[str, None] = "20260730_1200_refresh_records"
 branch_labels = None
 depends_on = None
 

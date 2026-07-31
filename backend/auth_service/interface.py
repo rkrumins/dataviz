@@ -141,7 +141,18 @@ class InvalidCredentials(AuthError):
 
 
 class InvalidRefreshToken(AuthError):
-    """Refresh token is missing, malformed, expired, or reused."""
+    """Refresh token is missing, malformed, expired, or reused.
+
+    ``foreign`` marks the subset that can never become valid here: the
+    token verified against no key in our ring, or carries another
+    environment's issuer/audience. Those are unrecoverable in a way that
+    an expired or reused token is not, so the router evicts the cookie
+    rather than letting the browser re-present it forever.
+    """
+
+    def __init__(self, *args, foreign: bool = False) -> None:
+        super().__init__(*args)
+        self.foreign = foreign
 
 
 class SSOAuthError(AuthError):

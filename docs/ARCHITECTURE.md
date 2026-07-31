@@ -609,7 +609,11 @@ data:
   FALKORDB_PORT: "6379"
   MANAGEMENT_DB_URL: "postgresql+asyncpg://synodic:synodic@postgres:5432/synodic"
   JWT_ALGORITHM: "HS256"
-  JWT_EXPIRY_MINUTES: "60"
+  JWT_EXPIRY_MINUTES: "15"
+  # Trust the ingress's X-Forwarded-For. Without it gunicorn keeps its
+  # 127.0.0.1 default, discards the header, and every caller is recorded
+  # as the ingress — which puts the whole cluster in one rate-limit bucket.
+  FORWARDED_ALLOW_IPS: "*"
 ```
 
 #### Secrets

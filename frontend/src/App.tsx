@@ -15,6 +15,10 @@ import {
   enablePermissionPolling,
   disablePermissionPolling,
 } from '@/store/permissionPoller'
+import {
+  enableSessionKeepalive,
+  disableSessionKeepalive,
+} from '@/store/sessionKeepalive'
 import { usePreferencesStore } from '@/store/preferences'
 import { queryClient } from '@/lib/queryClient'
 
@@ -57,8 +61,13 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
       // Logout / session-lost: stop the permission poller so it
       // doesn't keep firing /me/permissions against an empty cookie.
       disablePermissionPolling()
+      disableSessionKeepalive()
       return
     }
+    // Renew the access token before it expires rather than after a 401.
+    // Started here, alongside the poller, because both need the same
+    // precondition — a resolved, authenticated session.
+    enableSessionKeepalive()
     // Public endpoint — every authenticated user.
     enableProviderHealthPolling()
     // Workspace-scoped read endpoint. Toggle in both directions so a

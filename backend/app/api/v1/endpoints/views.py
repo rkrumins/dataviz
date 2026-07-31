@@ -83,6 +83,36 @@ async def _viewer_context(
     return await view_access.ViewerContext.build(session, user=user, claims=claims)
 
 
+async def _read_scope(
+    session: AsyncSession,
+    ctx: view_access.ViewerContext,
+) -> view_access.ViewReadScope:
+    """The caller's read reach, or 503 if it cannot be established.
+
+    Every listing route goes through here rather than calling
+    ``build_read_scope`` directly, because the failure it guards against
+    is silent. Per-workspace grants live in the session store now; when it
+    and the database fallback both fail, ``ws_perms`` is empty but means
+    "unknown", and the SQL predicate built from it would return a **short
+    list with a 200** — an ordinary-looking page missing rows the caller
+    is entitled to. Refusing to answer is the only honest option.
+
+    503 with this wording because that is what ``requires()`` answers for
+    the same situation, and the SPA should see one behaviour whichever
+    gate refused.
+    """
+    scope = await view_access.build_read_scope(session, ctx)
+    if scope.indeterminate:
+        logger.warning(
+            "Cannot establish workspace grants for user=%s; answering 503 "
+            "rather than a filtered view list", ctx.user_id or "<anonymous>",
+        )
+        raise HTTPException(
+            status_code=503, detail="Authorization temporarily unavailable",
+        )
+    return scope
+
+
 async def _load_view_orm(session: AsyncSession, view_id: str) -> ViewORM:
     """Fetch the raw ORM row (the access predicates need it).
 
@@ -311,7 +341,7 @@ async def list_popular_views(
     different reach never share a cached result.
     """
     ctx = await _viewer_context(session, user, claims)
-    scope = await view_access.build_read_scope(session, ctx)
+    scope = await _read_scope(session, ctx)
     principal = normalised_principal(_user_id(user))
     key = ("popular", principal, limit)
     items = await read_views_sf.run(
@@ -346,7 +376,7 @@ async def get_view_facets(
     now, so a shared key would serve one user's facets to another.
     """
     ctx = await _viewer_context(session, user, claims)
-    scope = await view_access.build_read_scope(session, ctx)
+    scope = await _read_scope(session, ctx)
     return await read_views_sf.run(
         ("facets", normalised_principal(_user_id(user))),
         lambda: view_repo.get_view_facets(session, scope=scope),
@@ -396,7 +426,7 @@ async def get_view_stats(
     them) by probing ``?visibility=private&createdBy=<victim>``.
     """
     ctx = await _viewer_context(session, user, claims)
-    scope = await view_access.build_read_scope(session, ctx)
+    scope = await _read_scope(session, ctx)
     return await view_repo.get_view_stats(
         session,
         scope=scope,
@@ -499,7 +529,7 @@ async def list_views(
       so pagination stays accurate on large catalogs.
     """
     ctx = await _viewer_context(session, user, claims)
-    scope = await view_access.build_read_scope(session, ctx)
+    scope = await _read_scope(session, ctx)
     response = await view_repo.list_views_filtered(
         session,
         scope=scope,
@@ -907,6 +937,25 @@ async def preview_visibility(
     ctx = await _viewer_context(session, user, claims)
     if not await view_access.can_read_view(session, ctx, view_orm):
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    # Reading the view is NOT enough to see who is in its workspace.
+    #
+    # This route answers "who gains access if I promote this?", and the only
+    # person with a reason to ask is the person who can perform the promotion.
+    # Gating it on read meant anyone who could open a single ``public`` view —
+    # which, by definition, is every account on the platform, holding no
+    # binding anywhere — got the workspace's member headcount and five member
+    # labels back. ``resolve_user_ids`` falls back to the email address when a
+    # user has no name set, so those labels are frequently live addresses.
+    # Repeated across the public views they can reach, that enumerates the
+    # organisation's directory one workspace at a time.
+    #
+    # 403 rather than 404: they legitimately see the view, they just cannot
+    # preview a change they are not allowed to make.
+    if not view_access.can_change_visibility(ctx, view_orm):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the view's creator or a workspace admin can preview a visibility change.",
+        )
 
     current = view_orm.visibility or DEFAULT_VISIBILITY
     order = VISIBILITY_VALUES
@@ -1039,13 +1088,23 @@ async def get_workspace_view_activity(
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Recent activity across all of a workspace's views (each entry carries the
-    view name). Powers the governance-tab feed. Gated by workspace view-read."""
+    """Recent activity across the workspace's views the caller can READ.
+
+    Holding ``workspace:view:read`` gets you through the door; it does not
+    decide which views' history you then see. It used to be the only check,
+    which made this feed a way to read a colleague's ``private`` view — its
+    name, its rename diffs, who it was shared with — from an account that
+    ``GET /views/{id}`` correctly 404s. The per-view timeline route above has
+    always been gated on ``can_read_view``; only this workspace-wide feed was
+    left on bare membership.
+    """
     from backend.app.services.permission_service import has_permission
     if not has_permission(claims, "workspace:view:read", workspace_id=workspace_id):
         raise HTTPException(status_code=403, detail="Missing permission: workspace:view:read")
+    ctx = await _viewer_context(session, user, claims)
+    scope = await _read_scope(session, ctx)
     return await view_activity_repo.get_workspace_activity(
-        session, workspace_id, limit=limit, offset=offset,
+        session, workspace_id, scope=scope, limit=limit, offset=offset,
     )
 
 
@@ -1200,7 +1259,7 @@ async def list_my_recent_views(
     after the visit drops out too.
     """
     ctx = await _viewer_context(session, user, claims)
-    scope = await view_access.build_read_scope(session, ctx)
+    scope = await _read_scope(session, ctx)
     return await view_repo.list_recent_views(
         session, _user_id(user), scope=scope, limit=limit,
     )

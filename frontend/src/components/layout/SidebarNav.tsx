@@ -21,7 +21,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useWorkspaceContext } from '@/hooks/useWorkspaceContext'
 import { useIsClipped } from '@/hooks/useIsClipped'
 import { cn } from '@/lib/utils'
-import { useNavPermission } from '@/store/auth'
+import { useNavPermission, usePermissionsReady } from '@/store/auth'
 import { useSidebarSpec } from '@/store/navCatalogue'
 import { useHelpPanelStore } from '@/store/helpPanel'
 import { useOnboardingProgress } from '@/hooks/useOnboardingProgress'
@@ -98,6 +98,32 @@ function SidebarTooltip({
       </div>
     </div>,
     document.body,
+  )
+}
+
+/**
+ * Stand-in row for the window between "we have an identity" and "we know
+ * what they can do". Mirrors ``NavButton``'s box (same paddings, same
+ * 8×8 icon slot, same two text lines) so the rail keeps its width and
+ * height and the real rows swap in without a reflow.
+ */
+function NavSkeletonRow({ collapsed }: { collapsed: boolean }) {
+  return (
+    <div
+      aria-hidden
+      className={cn(
+        "w-full flex items-center rounded-lg",
+        collapsed ? "justify-center p-2" : "gap-3 px-2.5 py-2",
+      )}
+    >
+      <div className="w-8 h-8 rounded-lg shrink-0 bg-black/5 dark:bg-white/10 animate-pulse" />
+      {!collapsed && (
+        <div className="flex-1 min-w-0 space-y-1.5">
+          <div className="h-3 w-2/3 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+          <div className="h-2 w-5/6 rounded bg-black/5 dark:bg-white/10 animate-pulse" />
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -524,6 +550,11 @@ export function SidebarNav() {
     admin:      adminVisible,
   }
 
+  // Claims not in yet: every spec evaluates false, so filtering now
+  // would render an EMPTY rail and then reflow as the rows appear.
+  // Skeleton rows hold the shape instead.
+  const permissionsReady = usePermissionsReady()
+
   // Populate nav item badges and filter to permission-allowed items.
   const mainNavItems: NavItemConfig[] = NAV_ITEMS_CONFIG
     .filter((item) => visibility[item.id])
@@ -558,15 +589,19 @@ export function SidebarNav() {
               }
             </button>
           </div>
-          {mainNavItems.map((item) => (
-            <NavButton
-              key={item.id}
-              item={item}
-              collapsed={sidebarCollapsed}
-              active={activeTab === item.id}
-              onClick={() => handleNavClick(item.id)}
-            />
-          ))}
+          {permissionsReady
+            ? mainNavItems.map((item) => (
+                <NavButton
+                  key={item.id}
+                  item={item}
+                  collapsed={sidebarCollapsed}
+                  active={activeTab === item.id}
+                  onClick={() => handleNavClick(item.id)}
+                />
+              ))
+            : NAV_ITEMS_CONFIG.map((item) => (
+                <NavSkeletonRow key={item.id} collapsed={sidebarCollapsed} />
+              ))}
         </div>
       </nav>
 

@@ -128,6 +128,13 @@ def _delegate_entity_types(
     An empty allow-list on the view means "no constraint from the view",
     so the request passes through. Otherwise the result is the
     intersection — a delegate can narrow, never widen.
+
+    A **disjoint** request is refused rather than returned as ``[]``. The
+    two are opposite instructions that happen to share a representation:
+    downstream, an empty list means "no entity filter", so intersecting
+    ``["__nothing__"]`` with the view's allow-list produced an unfiltered
+    ``MATCH (n)`` across the whole graph — the clamp widening into a full
+    scan at exactly the input that should have narrowed it to nothing.
     """
     if delegation is None:
         return requested
@@ -136,7 +143,27 @@ def _delegate_entity_types(
         return requested
     if not requested:
         return sorted(allowed)
-    return sorted(set(requested) & set(allowed))
+    narrowed = sorted(set(requested) & set(allowed))
+    if not narrowed:
+        raise _outside_view_scope(
+            delegation,
+            "None of the requested entity types are in the view you have access to",
+        )
+    return narrowed
+
+
+def _outside_view_scope(
+    delegation: ViewDelegation, message: str,
+) -> HTTPException:
+    """The typed refusal for a delegate reaching past their view."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error": "outside_view_scope",
+            "view_id": delegation.view_id,
+            "message": message,
+        },
+    )
 
 
 def _delegate_cache_params(
@@ -161,29 +188,44 @@ async def _assert_expandable(
     """A delegate may only expand within the view they came in through.
 
     The view's scope is "these roots and what they contain", so a node
-    qualifies when it *is* a root or has one among its ancestors. Views
-    with no explicit roots derive their scope from entity types at query
-    time; there is no URN set to check against, and the entity-type clamp
-    is what bounds those.
+    qualifies when it *is* a root or has one among its ancestors.
+
+    When the view declares no roots its scope comes from its entity-type
+    allow-list instead, and this check used to return early — passing every
+    ``parentUrn`` unconditionally. The comment claimed the entity-type clamp
+    bounded those views, but ``expand`` never applied that clamp, so a view
+    restricted to (say) ``Table`` still let a delegate walk into a ``Column``
+    and onward through the workspace's graph from a single public-view
+    foothold. Both halves are checked here now.
+
+    A view with neither roots nor entity types genuinely *is* the whole data
+    source — that is what its author published — so it is allowed, and only
+    that case is unbounded.
 
     Costs one ancestors lookup, for delegates only.
     """
     if delegation is None:
         return
     roots = set(delegation.scope.root_urns)
-    if not roots or parent_urn in roots:
-        return
-    ancestors = await engine.get_ancestors(parent_urn)
-    if roots.intersection(a.urn for a in ancestors):
-        return
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail={
-            "error": "outside_view_scope",
-            "view_id": delegation.view_id,
-            "message": "That node is outside the view you have access to",
-        },
-    )
+    allowed_types = delegation.scope.entity_type_allow_list
+
+    if roots:
+        if parent_urn in roots:
+            return
+        ancestors = await engine.get_ancestors(parent_urn)
+        if roots.intersection(a.urn for a in ancestors):
+            return
+        raise _outside_view_scope(
+            delegation, "That node is outside the view you have access to",
+        )
+
+    if allowed_types:
+        node = await engine.get_node(parent_urn)
+        node_type = getattr(node, "entity_type", None) if node else None
+        if node_type not in allowed_types:
+            raise _outside_view_scope(
+                delegation, "That node is outside the view you have access to",
+            )
 
 
 @router.post("/canvas/bootstrap", response_model=CanvasBootstrapResult, response_model_by_alias=True)
@@ -320,6 +362,16 @@ async def canvas_expand(
             cursor=request.cursor,
             include_lineage_edges=True,
         )
+        # A delegate sees only the children their view admits. The parent
+        # check above establishes the *node* is in scope; without this, its
+        # children came back whatever their type, so one in-scope container
+        # was a doorway to everything under it.
+        if delegation is not None and delegation.scope.entity_type_allow_list:
+            allowed = delegation.scope.entity_type_allow_list
+            children.children = [
+                c for c in children.children
+                if getattr(c, "entity_type", None) in allowed
+            ]
         new_urns = [c.urn for c in children.children]
 
         aggregated: Optional[AggregatedEdgeResult] = None

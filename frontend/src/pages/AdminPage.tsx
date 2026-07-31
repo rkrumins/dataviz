@@ -12,7 +12,8 @@ import {
     UserCog, Users2, KeyRound, Network, History, Palette, Database, LineChart,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useNavPermission } from '@/store/auth'
+import { useNavPermission, usePermissionsReady } from '@/store/auth'
+import { GuardSkeleton } from '@/components/auth/RequirePermission'
 import { useAdminSectionSpec } from '@/store/navCatalogue'
 import { useBrand } from '@/store/branding'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
@@ -60,6 +61,7 @@ const adminGroups = [
 export function AdminPage() {
     const location = useLocation()
     const brand = useBrand()
+    const permissionsReady = usePermissionsReady()
     const isRoot = location.pathname === '/admin' || location.pathname === '/admin/'
 
     // Tab title for every admin sub-page, derived from the same label map that
@@ -119,7 +121,14 @@ export function AdminPage() {
     // actually see. A delegated groups admin (no system:admin) lands
     // on /admin/groups instead of bouncing off /admin/overview's
     // access-denied panel.
+    //
+    // NEVER redirect on claims we don't have yet. Unlike a render, this
+    // is a COMMITTED route change: with empty claims every section is
+    // filtered out, ``firstVisible`` falls back to 'overview', and the
+    // delegated groups admin is left permanently on a page they can't
+    // see. Waiting costs a skeleton; guessing costs the destination.
     if (isRoot) {
+        if (!permissionsReady) return <GuardSkeleton />
         const firstVisible = visibleGroups[0]?.items[0]?.path ?? 'overview'
         return <Navigate to={`/admin/${firstVisible}`} replace />
     }

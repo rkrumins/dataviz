@@ -100,7 +100,7 @@ describe('portal auto sign-in', () => {
     it('does nothing when the storage key is absent', async () => {
         renderLogin()
 
-        expect(await screen.findByText('Corporate Portal')).toBeInTheDocument()
+        expect(await screen.findByText(/Continue with Corporate Portal/)).toBeInTheDocument()
         expect(loginWithBrowserProfile).not.toHaveBeenCalled()
     })
 
@@ -116,7 +116,7 @@ describe('portal auto sign-in', () => {
         // re-fire — that's the loop this guards against.
         unmount()
         renderLogin()
-        await screen.findByText('Corporate Portal')
+        await screen.findByText(/Continue with Corporate Portal/)
         expect(loginWithBrowserProfile).toHaveBeenCalledTimes(1)
     })
 
@@ -128,7 +128,7 @@ describe('portal auto sign-in', () => {
         ])
         renderLogin()
 
-        expect(await screen.findByText('Other Portal')).toBeInTheDocument()
+        expect(await screen.findByText(/Continue with Other Portal/)).toBeInTheDocument()
         // Ambiguous which one the operator meant — let the user choose.
         expect(loginWithBrowserProfile).not.toHaveBeenCalled()
     })
@@ -139,7 +139,7 @@ describe('portal auto sign-in', () => {
         ])
         renderLogin()
 
-        const el = await screen.findByText('Corporate Portal')
+        const el = await screen.findByText(/Continue with Corporate Portal/)
         expect(el.closest('a')).toHaveAttribute(
             'href', '/api/v1/auth/corp-portal/login?next=%2Fdashboard',
         )
@@ -150,7 +150,7 @@ describe('portal auto sign-in', () => {
         const user = userEvent.setup()
         renderLogin()
 
-        await user.click(await screen.findByText('Corporate Portal'))
+        await user.click(await screen.findByText(/Continue with Corporate Portal/))
 
         expect(await screen.findByText(/No Corporate Portal session found/))
             .toBeInTheDocument()

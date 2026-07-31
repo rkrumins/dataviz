@@ -8,6 +8,7 @@ patches:
   - path: patches/replicas.yaml
   - path: patches/resource-limits.yaml
   - path: patches/ingress-patch.yaml
+  - path: patches/auth-environment.yaml
   # Override LOG_LEVEL to DEBUG
   - target:
       kind: ConfigMap

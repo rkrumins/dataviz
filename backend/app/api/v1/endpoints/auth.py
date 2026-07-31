@@ -51,7 +51,12 @@ router = APIRouter()
 # The dependency direction is forced — ``auth_service`` may not import
 # ``backend.app.*`` (enforced by test_auth_service_isolation), so the import
 # goes this way.
-from backend.auth_service.api.router import limiter  # noqa: E402
+from backend.auth_service.api.router import limiter
+from backend.auth_service.core.config import (
+    RATELIMIT_PASSWORD_RESET_PER_ACCOUNT,
+    RATELIMIT_SENSITIVE_PER_IP,
+)
+from backend.auth_service.ratelimit import get_account_limiter  # noqa: E402
 
 #: What to assume about ``inviteLinksEnabled`` when the flag cannot be read.
 #:
@@ -413,7 +418,7 @@ async def _grant_invite_role(
 # sixth person, and "the link stopped working" is indistinguishable from a bug.
 # The invite ledger (max_uses / expires_at / revoked_at) is the real control on
 # the invited path; this limit only blunts automated abuse of open registration.
-@limiter.limit("20/minute")
+@limiter.limit(RATELIMIT_SENSITIVE_PER_IP)
 async def signup(
     request: Request,
     response: Response,
@@ -654,8 +659,17 @@ async def signup(
 
 # ── POST /auth/forgot-password ──────────────────────────────────────
 
+# One constant, used by both the real path and the throttled one. If the
+# two ever diverged — different wording, different shape, a 429 on one —
+# the difference would answer "does this account exist?", which is the
+# question the identical-response design exists to refuse.
+_RESET_REQUEST_ACK = (
+    "If an account with that email exists, a password reset has been "
+    "initiated. Please contact your administrator for the reset token."
+)
+
 @router.post("/forgot-password")
-@limiter.limit("3/minute")
+@limiter.limit(RATELIMIT_SENSITIVE_PER_IP)
 async def forgot_password(
     request: Request,
     body: ForgotPasswordRequest,
@@ -666,6 +680,25 @@ async def forgot_password(
     If the user exists, a reset token is created and an outbox event is written
     so the admin panel can surface the request.
     """
+    # Per-account cap on top of the per-IP one. The per-IP limit is sized
+    # for a whole tenant behind one egress address, so it cannot bound
+    # what matters here: repeatedly requesting resets for ONE person to
+    # bury their inbox. Counted on every request rather than on failures,
+    # because the response is deliberately identical whether or not the
+    # account exists — there is no failure to count.
+    #
+    # Still returns 200 when throttled. A 429 here would answer the
+    # enumeration question the constant 200 exists to hide.
+    accounts = get_account_limiter()
+    if not await accounts.check(
+        "password_reset", body.email, RATELIMIT_PASSWORD_RESET_PER_ACCOUNT,
+    ):
+        logger.info("Password-reset request throttled for account")
+        return {"message": _RESET_REQUEST_ACK}
+    await accounts.record(
+        "password_reset", body.email, RATELIMIT_PASSWORD_RESET_PER_ACCOUNT,
+    )
+
     user = await user_repo.get_user_by_email(session, body.email)
     if user is not None and user.status in ("active", "pending"):
         # Flag the user as having requested a reset — do NOT generate a
@@ -679,15 +712,13 @@ async def forgot_password(
         )
         logger.info("Password reset requested for user %s", user.id)
     # Always return the same response regardless of whether the user exists
-    return {
-        "message": "If an account with that email exists, a password reset has been initiated. Please contact your administrator for the reset token.",
-    }
+    return {"message": _RESET_REQUEST_ACK}
 
 
 # ── POST /auth/reset-password ───────────────────────────────────────
 
 @router.post("/reset-password")
-@limiter.limit("5/minute")
+@limiter.limit(RATELIMIT_SENSITIVE_PER_IP)
 async def reset_password(
     request: Request,
     body: ResetPasswordRequest,
@@ -724,7 +755,7 @@ async def reset_password(
 # ── POST /auth/redeem-invite ─────────────────────────────────────────
 
 @router.post("/redeem-invite", response_model=RedeemInviteResponse)
-@limiter.limit("20/minute")
+@limiter.limit(RATELIMIT_SENSITIVE_PER_IP)
 async def redeem_invite(
     request: Request,
     body: RedeemInviteRequest,

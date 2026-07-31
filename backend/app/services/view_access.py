@@ -78,12 +78,37 @@ class ReadDecision:
     """Outcome of a read check, with the branch that allowed it."""
     allowed: bool
     reason: Optional[ReadReason] = None
+    #: A denial reached by consulting workspace grants that no source
+    #: could supply — an unanswered question, not a refusal. Callers that
+    #: turn this into HTTP must answer 503; see ``_denied`` below.
+    indeterminate: bool = False
 
     def __bool__(self) -> bool:  # lets callers keep using it as a predicate
         return self.allowed
 
 
 DENIED = ReadDecision(allowed=False)
+
+
+def _denied(ctx: ViewerContext) -> ReadDecision:
+    """A refusal — or an admission that we could not tell.
+
+    Per-workspace grants live in the session store rather than the access
+    token, so ``PermissionClaims.ws_available`` is ``False`` when neither
+    Redis nor the database could answer. An empty ``ws_perms`` then says
+    nothing about the caller, and every tier below ``public`` is decided
+    against it. Reporting that as a plain denial states as fact something
+    the server never established.
+
+    Deliberately blunt: any denial for a signed-in caller with unreadable
+    grants is indeterminate, rather than tracking which branch of the
+    ladder happened to consult the map. It over-reports only during a real
+    store *and* database outage, where "ask again" is the honest answer
+    anyway, and it cannot be wrong in the direction that leaks a view.
+    """
+    if ctx.is_anonymous or ctx.claims.ws_available:
+        return DENIED
+    return ReadDecision(allowed=False, indeterminate=True)
 
 
 # ── Caller context ───────────────────────────────────────────────────
@@ -294,7 +319,7 @@ async def read_decision(
         return ReadDecision(True, reason)
     if await _has_explicit_grant(session, ctx, view):
         return ReadDecision(True, "grant")
-    return DENIED
+    return _denied(ctx)
 
 
 async def can_read_view(
@@ -385,6 +410,15 @@ class ViewReadScope:
     """
     ctx: ViewerContext
     grant_view_ids: tuple[str, ...] = ()
+    #: The workspace half of this scope could not be established, so the
+    #: predicate below would silently narrow the list rather than filter
+    #: it. See ``_denied`` — the same distinction, on the SQL surface.
+    #:
+    #: This one matters more than the single-view case. A denial at least
+    #: tells the caller something happened; a list quietly missing rows
+    #: renders as an ordinary, successful, wrong page. Endpoints must
+    #: answer 503 rather than serve it.
+    indeterminate: bool = False
 
 
 async def build_read_scope(
@@ -392,9 +426,12 @@ async def build_read_scope(
 ) -> ViewReadScope:
     """Resolve ``ctx`` into a scope, loading explicit grants once."""
     if ctx.is_anonymous or not ctx.user_id:
+        # No workspace reach to lose, so nothing unknown was needed.
         return ViewReadScope(ctx=ctx)
     if has_permission(ctx.claims, "system:admin"):
         # The predicate short-circuits to TRUE; skip the query entirely.
+        # Decided by the token's global claims alone, so an unreachable
+        # session store cannot make this answer wrong.
         return ViewReadScope(ctx=ctx)
     grants = await grant_repo.list_grants_for_user_with_groups(
         session,
@@ -405,6 +442,7 @@ async def build_read_scope(
     return ViewReadScope(
         ctx=ctx,
         grant_view_ids=tuple({g.resource_id for g in grants}),
+        indeterminate=not ctx.claims.ws_available,
     )
 
 

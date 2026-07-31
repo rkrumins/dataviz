@@ -2291,6 +2291,19 @@ async def _resolve_export_view_scope(workspace_id, data_source_id, view_id, bran
             view = await session.get(ViewORM, view_id)
             if view is None:
                 return None
+            # Tenancy, for the same reason the import writer checks it: this
+            # runs in the worker with no caller, having opened the view by raw
+            # id. A view in another workspace must not be able to shape this
+            # workspace's export scope. Returning None means "no view scope"
+            # (whole data source), which is this function's documented
+            # fail-open — not an escalation.
+            if view.workspace_id != workspace_id:
+                logger.warning(
+                    "export view-scope refused cross-workspace view: "
+                    "view=%s lives in ws=%s, export ran in ws=%s",
+                    view_id, view.workspace_id, workspace_id,
+                )
+                return None
             # Branch-effective export scope: a draft export scopes to the draft's
             # own layer assignments (base ⊕ overlay); no branch/overlay → base.
             config = await effective_view_config(session, view, branch_id)
@@ -2332,6 +2345,52 @@ async def _resolve_ontology_types(workspace_id, data_source_id):
         return None
 
 
+async def _assert_scope_view_usable(
+    session: AsyncSession,
+    *,
+    view_id: Optional[str],
+    workspace_id: str,
+    user,
+    claims: PermissionClaims,
+    need_edit: bool,
+) -> None:
+    """Refuse a ``?viewId=`` the caller may not use, at request time.
+
+    Import and export both accept a view id that scopes what they touch, and
+    both resolved it in the worker by raw primary key — no workspace check, no
+    view-access check. Holding ``manage`` in *your* workspace was enough to
+    name a private view in *someone else's*: export shaped its entity set from
+    that view, and import merged your URNs into its stored layout.
+
+    ``need_edit`` distinguishes the two: import writes to the view's config, so
+    it demands ``can_edit_view``; export only reads the view's shape, so
+    ``can_read_view`` is the right bar.
+
+    404 rather than 403 throughout — a caller who cannot read the view must not
+    learn it exists, which is the same rule ``GET /views/{id}`` follows.
+    """
+    if not view_id:
+        return
+    from backend.app.db.models import ViewORM
+    from backend.app.services import view_access
+
+    view = await session.get(ViewORM, view_id)
+    if (
+        view is None
+        or view.workspace_id != workspace_id
+        or view.deleted_at is not None
+    ):
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    ctx = await view_access.ViewerContext.build(session, user=user, claims=claims)
+    allowed = (
+        await view_access.can_edit_view(session, ctx, view)
+        if need_edit
+        else await view_access.can_read_view(session, ctx, view)
+    )
+    if not allowed:
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
+
 async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_edges):
     """Layout-writer hook (injected into ImportExportService): after a view-scoped import creates new
     top-level entities, add canonical ``assignments`` entries (``assignedBy: 'import'``) to the view's
@@ -2352,6 +2411,21 @@ async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_e
     async with get_async_session() as session:
         view = await session.get(ViewORM, view_id)
         if view is None:
+            return {"added": 0}
+        # Tenancy is checked HERE, not only at the route, because this hook
+        # runs in the worker's background context where there is no caller to
+        # authorize against — and it opened the view by raw id. Without this a
+        # member of workspace A could POST an import against their own graph
+        # with ?viewId=<a private view in workspace B> and have the writer
+        # below merge workspace A's URNs into workspace B's view config. The
+        # request-time ``can_edit_view`` check is the primary gate; this one
+        # cannot be bypassed by any future caller of the hook.
+        if view.workspace_id != ws:
+            logger.warning(
+                "import layout-writer refused cross-workspace view: "
+                "view=%s lives in ws=%s, import ran in ws=%s",
+                view_id, view.workspace_id, ws,
+            )
             return {"added": 0}
         config = json.loads(view.config or "{}")
         raw = (config.get("layout") or {}).get("referenceLayout")
@@ -2404,6 +2478,8 @@ async def create_import(
     view_id: Optional[str] = Query(None, alias="viewId"),
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
     meta: dict = Depends(graph_in_workspace),
     ie=Depends(get_import_export_service),
 ):
@@ -2417,6 +2493,12 @@ async def create_import(
         get_adapter(format)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    # Import WRITES to the named view's stored layout, so edit rights on it —
+    # not merely manage rights on this workspace — are what authorize it.
+    await _assert_scope_view_usable(
+        session, view_id=view_id, workspace_id=ws_id, user=user, claims=claims,
+        need_edit=True,
+    )
     with _domain_errors():
         created = await ie.create_import_job(
             workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
@@ -2512,6 +2594,8 @@ async def create_export(
     types: Optional[str] = Query(None, description="Comma-separated entity types — export only these"),
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
     user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
     meta: dict = Depends(graph_in_workspace),
     ie=Depends(get_import_export_service),
 ):
@@ -2522,6 +2606,13 @@ async def create_export(
         get_adapter(format)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    # Export only READS the view's shape, so read access is the right bar —
+    # but it must be view access, not just data-source read, or a private
+    # view's curated entity set shapes an export for someone who cannot open it.
+    await _assert_scope_view_usable(
+        session, view_id=view_id, workspace_id=ws_id, user=user, claims=claims,
+        need_edit=False,
+    )
     _split = lambda v: [x.strip() for x in (v or "").split(",") if x.strip()]  # noqa: E731
     with _domain_errors():
         created = await ie.create_export_job(

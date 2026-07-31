@@ -20,7 +20,7 @@ Backend/frontend from source with hot-reload; infra in Docker.
 
 ```bash
 cp .env.example .env.dev
-./dev.sh              # starts infra + prints next steps
+./dev.sh              # generates a signing key, starts infra, prints next steps
 ```
 
 Full guide: [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md).

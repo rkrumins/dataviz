@@ -133,6 +133,79 @@ bindings or large `ws_perms` claims.
 `has_permission` returns `True` unconditionally when `system:admin` ∈
 `claims.global_perms`. The `super_admin` tier holds it.
 
+## How claims reach a request
+
+Resolution is unchanged by any of the below — what changed is how the result travels.
+
+`sid` and `global_perms` ride in the access JWT. They are bounded: global permissions are a
+fixed vocabulary, so the token does not grow with tenant size.
+
+`ws_perms` is **not** bounded — it grows with every workspace a user is bound to — so it
+does **not** travel in the cookie at all. `to_jwt_dict()` has no option to include it; the
+invariant is enforced by the signature rather than by review.
+
+The grants live in the session store, keyed by `sid` — the same entry already read on every
+request for revocation, fetched in the same pipelined round trip, so reading them costs
+nothing extra. `get_permission_claims` resolves **Redis → Postgres → "unknown"**, in that
+order. It never degrades to "global perms only": that is a denial dressed as a 200, and the
+whole point is to stop authorization failing silently.
+
+**"Unknown" is not "none".** When neither source can answer, the claims come back with
+`ws_available=False` rather than an empty map, and that distinction is load-bearing. An empty
+map is a *claim about the user*: hand it to `requires` and it produces 403 `Missing
+permission: …`, stating as fact something the server never established. So:
+
+| State | Workspace-scoped check | Global check | `GET /me/permissions` |
+|---|---|---|---|
+| Grants resolved | 200 / 403 on the grants | 200 / 403 | 200 |
+| User genuinely has none | 403 | 200 / 403 | 200, empty `ws` |
+| Neither source could answer | **503** | 200 / 403, unaffected | **503** |
+
+The 503 decision is made in `requires`, not in `get_permission_claims`, because only there is
+it known whether the missing half was needed — a global permission is settled entirely by the
+token, so a Redis outage must not touch it. `GET /me/permissions` refuses for a different
+reason: the SPA store installs whatever it returns, so a 200 with an empty `ws` would
+overwrite a known-good claim set and blank every workspace-gated control; an error leaves the
+previous claims in place.
+
+**View reads are the third consumer**, and the only one where the wrong answer is silent.
+`requires` and `GET /me/permissions` both decide a single yes/no; the View list routes build a
+*SQL predicate* out of `ws_perms`, so an empty-because-unknown map narrows the query instead of
+failing it — 200 OK, correct-looking page, rows missing, nothing in the response to say so.
+`view_access` therefore marks such an outcome `indeterminate` (on both `ReadDecision` and
+`ViewReadScope`) and the endpoints answer 503 with the same body `requires` uses. Callers
+settled by the token alone are untouched: `system:admin`, anonymous callers, and anyone
+reaching a View through `public` or an explicit grant. `view_delegation` refuses for a sharper
+reason — its fast path is a bare `has_permission`, and falling through it does not deny but
+*delegates*, so a member with unreadable grants would be confined to one View's scope and
+served a partial graph with a 200.
+
+In practice `ws_available=False` requires Redis *and* Postgres to be unreachable at once — a
+Redis outage alone is answered from Postgres (cached 30s per user, so an outage does not turn
+into a permission query per request).
+
+Stored payloads are deduplicated: `{"ws": {ws_id: index}, "psets": [[perms]]}`. Every
+workspace a user holds the same role on resolves to the *same* permission set, so storing
+each distinct set once and pointing at it by index is roughly a ninefold reduction — 150
+workspaces used to be 150 verbatim copies of one array.
+
+**Why it matters.** A cookie over 4096 bytes is discarded by the browser *silently*: login
+answers 200, the `Set-Cookie` goes out, the next request is anonymous, and nothing is
+logged. Before this, ~18 workspace bindings crossed that line, so the most heavily bound
+accounts hit unexplained sign-outs that nobody else could reproduce.
+
+An intermediate version embedded the grants while they fitted and shed them above a byte
+budget. It worked, and it was still wrong: a user with 99 bindings and one with 101
+exercised different authorization machinery, and the store path — the one serving the
+largest tenants — was the one almost nothing routinely tested. There is now one path for
+every session.
+
+**Reading old tokens still works.** A token minted before this carries inline permission
+lists and has no store entry, and the reader recognises the layout per value rather than
+assuming one — so a tab open across the deploy keeps every permission it had, with no
+reload. Self-draining: after one refresh TTL no such token can exist and the compatibility
+branch in `_decode_ws` is removable.
+
 ## 403 body
 
 When a check fails, the endpoint raises a structured 403:
@@ -269,6 +342,36 @@ private branch checks `workspace:admin`.
 > `private` and `workspace` the same tier for anyone inside it.
 > Membership is now the implementation of the `workspace` tier rather
 > than a parallel path around it.
+
+#### The corollary: never derive a fact about a view from the caller's scope
+
+`enterprise` and `public` readers hold **no binding** in the view's workspace.
+That is what those tiers are for, and it makes an entire class of code wrong:
+anything that answers a question about a view by consulting state scoped to
+the *caller* gets the right answer for members and a confidently wrong one for
+everybody the tier was written to serve.
+
+It bit twice, in both directions:
+
+* **Client.** View health and the canvas's `providerId` were computed by
+  looking the view's workspace up in the store behind `GET /workspaces`, which
+  is filtered to the caller's bindings. For a non-member the lookup missed, and
+  a miss was rendered as a deletion — a red badge and a full-screen "the
+  workspace no longer exists" over a healthy view, while its owner saw it as
+  fine. Health is a property of the view, so it is resolved server-side from
+  the view's own workspace and data source and carried on `ViewResponse`
+  (`health_status`, `health_reason`, `provider_id`, the `*_is_active` flags).
+* **Server.** Routes that had already loaded a view by id kept their own rule —
+  bare workspace membership, or nothing at all — and leaked `private` views
+  through the workspace activity feed, `visibility-preview`, the scope resolver
+  behind `/search/explain`, view-scoped import/export, and a 403-vs-404 split
+  on the grants router. All of them now go through `read_decision` /
+  `can_edit_view`.
+
+The rule, for anything added later: **a fact about a view is resolved from the
+view, and authorized with `view_access`.** If a code path answers "is this view
+broken / who is in its workspace / what is its scope" using the caller's
+workspaces, it is wrong for the tiers that matter most.
 
 Enforcement is a **SQL predicate** (`view_access.readable_views_predicate`),
 applied by `view_repo._apply_view_filters` to every listing. It used to be

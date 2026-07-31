@@ -1,10 +1,12 @@
-import { lazy, Suspense } from 'react'
+import { Suspense } from 'react'
 import { createBrowserRouter, Navigate, useParams } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { CanvasLayout } from '@/components/layout/CanvasLayout'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 import { RequireNav } from '@/components/auth/RequireNav'
 import { RequireFeature } from '@/components/RequireFeature'
+import { lazyWithRetry } from '@/lib/lazyWithRetry'
+import { RouteErrorBoundary } from '@/components/RouteErrorBoundary'
 
 // The standalone workspace-views page was retired; view management now lives
 // in the workspace-detail "Views" tab. Redirect any old link there.
@@ -15,58 +17,58 @@ function WorkspaceViewsRedirect() {
 
 // Lazy-load all page-level components so their module code and hooks only
 // run when the user actually navigates to that route.
-const Dashboard = lazy(() => import('@/components/dashboard/Dashboard').then(m => ({ default: m.Dashboard })))
-const ViewPage = lazy(() => import('@/pages/ViewPage').then(m => ({ default: m.ViewPage })))
-const ViewsGallery = lazy(() => import('@/pages/ViewsGallery').then(m => ({ default: m.ViewsGallery })))
-const ExplorerPage = lazy(() => import('@/pages/ExplorerPage').then(m => ({ default: m.ExplorerPage })))
-const AdminPage = lazy(() => import('@/pages/AdminPage').then(m => ({ default: m.AdminPage })))
-const AdminOverview = lazy(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
-const AdminInfrastructure = lazy(() => import('@/components/admin/AdminInfrastructure').then(m => ({ default: m.AdminInfrastructure })))
-const AdminRedis = lazy(() => import('@/components/admin/AdminRedis').then(m => ({ default: m.AdminRedis })))
-const AdminBranding = lazy(() => import('@/components/admin/AdminBranding').then(m => ({ default: m.AdminBranding })))
-const AdminFeatures = lazy(() => import('@/components/admin/AdminFeatures/index').then(m => ({ default: m.AdminFeatures })))
-const AdminUsers = lazy(() => import('@/components/admin/AdminUsers').then(m => ({ default: m.AdminUsers })))
-const AdminGroups = lazy(() => import('@/components/admin/AdminGroups').then(m => ({ default: m.AdminGroups })))
-const AdminPermissions = lazy(() => import('@/components/admin/AdminPermissions').then(m => ({ default: m.AdminPermissions })))
-const AdminAnnouncements = lazy(() => import('@/components/admin/AdminAnnouncements/index').then(m => ({ default: m.AdminAnnouncements })))
-const AdminSso = lazy(() => import('@/components/admin/AdminSso').then(m => ({ default: m.AdminSso })))
-const AdminAudit = lazy(() => import('@/components/admin/AdminAudit').then(m => ({ default: m.AdminAudit })))
-const AdminTelemetry = lazy(() => import('@/components/admin/AdminTelemetry/index').then(m => ({ default: m.AdminTelemetry })))
-const IngestionPage = lazy(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
-const DataSourceOverviewPage = lazy(() => import('@/pages/DataSourceOverviewPage').then(m => ({ default: m.DataSourceOverviewPage })))
-const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
-const WorkspaceDetailPage = lazy(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
-const WorkspaceReviewsPage = lazy(() => import('@/pages/WorkspaceReviewsPage').then(m => ({ default: m.WorkspaceReviewsPage })))
-const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
-const MyAccessPage = lazy(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
-const MyIdentitiesPage = lazy(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
-const AccountSettingsPage = lazy(() => import('@/pages/AccountSettingsPage').then(m => ({ default: m.AccountSettingsPage })))
-const PasswordChangeRequired = lazy(() => import('@/pages/PasswordChangeRequired').then(m => ({ default: m.PasswordChangeRequired })))
+const Dashboard = lazyWithRetry(() => import('@/components/dashboard/Dashboard').then(m => ({ default: m.Dashboard })))
+const ViewPage = lazyWithRetry(() => import('@/pages/ViewPage').then(m => ({ default: m.ViewPage })))
+const ViewsGallery = lazyWithRetry(() => import('@/pages/ViewsGallery').then(m => ({ default: m.ViewsGallery })))
+const ExplorerPage = lazyWithRetry(() => import('@/pages/ExplorerPage').then(m => ({ default: m.ExplorerPage })))
+const AdminPage = lazyWithRetry(() => import('@/pages/AdminPage').then(m => ({ default: m.AdminPage })))
+const AdminOverview = lazyWithRetry(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
+const AdminInfrastructure = lazyWithRetry(() => import('@/components/admin/AdminInfrastructure').then(m => ({ default: m.AdminInfrastructure })))
+const AdminRedis = lazyWithRetry(() => import('@/components/admin/AdminRedis').then(m => ({ default: m.AdminRedis })))
+const AdminBranding = lazyWithRetry(() => import('@/components/admin/AdminBranding').then(m => ({ default: m.AdminBranding })))
+const AdminFeatures = lazyWithRetry(() => import('@/components/admin/AdminFeatures/index').then(m => ({ default: m.AdminFeatures })))
+const AdminUsers = lazyWithRetry(() => import('@/components/admin/AdminUsers').then(m => ({ default: m.AdminUsers })))
+const AdminGroups = lazyWithRetry(() => import('@/components/admin/AdminGroups').then(m => ({ default: m.AdminGroups })))
+const AdminPermissions = lazyWithRetry(() => import('@/components/admin/AdminPermissions').then(m => ({ default: m.AdminPermissions })))
+const AdminAnnouncements = lazyWithRetry(() => import('@/components/admin/AdminAnnouncements/index').then(m => ({ default: m.AdminAnnouncements })))
+const AdminSso = lazyWithRetry(() => import('@/components/admin/AdminSso').then(m => ({ default: m.AdminSso })))
+const AdminAudit = lazyWithRetry(() => import('@/components/admin/AdminAudit').then(m => ({ default: m.AdminAudit })))
+const AdminTelemetry = lazyWithRetry(() => import('@/components/admin/AdminTelemetry/index').then(m => ({ default: m.AdminTelemetry })))
+const IngestionPage = lazyWithRetry(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
+const DataSourceOverviewPage = lazyWithRetry(() => import('@/pages/DataSourceOverviewPage').then(m => ({ default: m.DataSourceOverviewPage })))
+const WorkspacesPage = lazyWithRetry(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
+const WorkspaceDetailPage = lazyWithRetry(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
+const WorkspaceReviewsPage = lazyWithRetry(() => import('@/pages/WorkspaceReviewsPage').then(m => ({ default: m.WorkspaceReviewsPage })))
+const OntologySchemaPage = lazyWithRetry(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
+const MyAccessPage = lazyWithRetry(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
+const MyIdentitiesPage = lazyWithRetry(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
+const AccountSettingsPage = lazyWithRetry(() => import('@/pages/AccountSettingsPage').then(m => ({ default: m.AccountSettingsPage })))
+const PasswordChangeRequired = lazyWithRetry(() => import('@/pages/PasswordChangeRequired').then(m => ({ default: m.PasswordChangeRequired })))
 
 // Auth pages (unauthenticated)
-const LoginPage = lazy(() => import('@/components/auth/LoginPage').then(m => ({ default: m.LoginPage })))
-const SignUpPage = lazy(() => import('@/components/auth/SignUpPage').then(m => ({ default: m.SignUpPage })))
-const InviteAcceptPage = lazy(() => import('@/components/auth/InviteAcceptPage').then(m => ({ default: m.InviteAcceptPage })))
+const LoginPage = lazyWithRetry(() => import('@/components/auth/LoginPage').then(m => ({ default: m.LoginPage })))
+const SignUpPage = lazyWithRetry(() => import('@/components/auth/SignUpPage').then(m => ({ default: m.SignUpPage })))
+const InviteAcceptPage = lazyWithRetry(() => import('@/components/auth/InviteAcceptPage').then(m => ({ default: m.InviteAcceptPage })))
 
 // Docs (public, self-contained layout)
-const DocsPage = lazy(() => import('@/pages/DocsPage').then(m => ({ default: m.DocsPage })))
-const DocsHome = lazy(() => import('@/components/docs/DocsHome').then(m => ({ default: m.DocsHome })))
-const DocsContent = lazy(() => import('@/components/docs/DocsContent').then(m => ({ default: m.DocsContent })))
-const DocsFAQ = lazy(() => import('@/components/docs/DocsFAQ').then(m => ({ default: m.DocsFAQ })))
+const DocsPage = lazyWithRetry(() => import('@/pages/DocsPage').then(m => ({ default: m.DocsPage })))
+const DocsHome = lazyWithRetry(() => import('@/components/docs/DocsHome').then(m => ({ default: m.DocsHome })))
+const DocsContent = lazyWithRetry(() => import('@/components/docs/DocsContent').then(m => ({ default: m.DocsContent })))
+const DocsFAQ = lazyWithRetry(() => import('@/components/docs/DocsFAQ').then(m => ({ default: m.DocsFAQ })))
 
 // User Guide (public, self-contained premium layout)
-const GuidePage = lazy(() => import('@/pages/GuidePage').then(m => ({ default: m.GuidePage })))
-const GuideHome = lazy(() => import('@/components/guide/GuideHome').then(m => ({ default: m.GuideHome })))
-const GuideContent = lazy(() => import('@/components/guide/GuideContent').then(m => ({ default: m.GuideContent })))
-const ForgotPasswordPage = lazy(() => import('@/components/auth/ForgotPasswordPage').then(m => ({ default: m.ForgotPasswordPage })))
-const ResetPasswordPage = lazy(() => import('@/components/auth/ResetPasswordPage').then(m => ({ default: m.ResetPasswordPage })))
+const GuidePage = lazyWithRetry(() => import('@/pages/GuidePage').then(m => ({ default: m.GuidePage })))
+const GuideHome = lazyWithRetry(() => import('@/components/guide/GuideHome').then(m => ({ default: m.GuideHome })))
+const GuideContent = lazyWithRetry(() => import('@/components/guide/GuideContent').then(m => ({ default: m.GuideContent })))
+const ForgotPasswordPage = lazyWithRetry(() => import('@/components/auth/ForgotPasswordPage').then(m => ({ default: m.ForgotPasswordPage })))
+const ResetPasswordPage = lazyWithRetry(() => import('@/components/auth/ResetPasswordPage').then(m => ({ default: m.ResetPasswordPage })))
 // Dev-only mock IdP login page. Gated by VITE_AUTH_CUSTOM_PROVIDER_ENABLED
 // inside the component (renders a "disabled" banner otherwise).
-const DevLogin = lazy(() => import('@/pages/DevLogin').then(m => ({ default: m.DevLogin })))
+const DevLogin = lazyWithRetry(() => import('@/pages/DevLogin').then(m => ({ default: m.DevLogin })))
 
 // Landing page for a custom_profile provider whose payload lives in
 // browser storage — the backend 302s here from /auth/{slug}/login.
-const PortalLogin = lazy(() => import('@/pages/PortalLogin').then(m => ({ default: m.PortalLogin })))
+const PortalLogin = lazyWithRetry(() => import('@/pages/PortalLogin').then(m => ({ default: m.PortalLogin })))
 
 // Thin suspense wrapper used for each lazy route — shows a centred spinner.
 function PageLoader() {
@@ -77,8 +79,21 @@ function PageLoader() {
   )
 }
 
+/**
+ * Suspense for the pending import, an error boundary for the rejected
+ * one. The boundary is the half that was missing: without it a chunk
+ * that fails to download unmounts the tree to a blank page, which is how
+ * a transient network drop turned into a dead tab.
+ *
+ * Outside the Suspense on purpose — a boundary nested inside it would be
+ * torn down along with the subtree it is meant to catch for.
+ */
 function Lazy({ children }: { children: React.ReactNode }) {
-  return <Suspense fallback={<PageLoader />}>{children}</Suspense>
+  return (
+    <RouteErrorBoundary>
+      <Suspense fallback={<PageLoader />}>{children}</Suspense>
+    </RouteErrorBoundary>
+  )
 }
 
 export const router = createBrowserRouter([

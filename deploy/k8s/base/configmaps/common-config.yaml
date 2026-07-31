@@ -34,6 +34,19 @@ data:
   # caching/state. DB index 1 segregates this traffic from REDIS_URL
   # (DB 0) on the same dedicated Redis service.
   CACHE_REDIS_URL: "redis://redis:6379/1"
+  # RATELIMIT_STORAGE_URI is deliberately NOT set here. Rate-limit
+  # counters resolve through the central Redis resolver on the STREAMS
+  # role — the same path revocation and the providers take — so they
+  # follow whatever each environment configures, including the
+  # production overlay, which deletes the in-cluster redis Service and
+  # addresses Memorystore by role-prefixed vars with its own AUTH
+  # password and TLS CA.
+  #
+  # A literal coordinate here would survive that overlay and point every
+  # production pod at a Service that no longer exists — silently, since
+  # the limiter swallows storage errors, leaving the per-worker counting
+  # a shared store exists to eliminate. Set this only to override the
+  # resolver.
   LOG_LEVEL: "INFO"
   DB_POOL_TIMEOUT_SECS: "10"
   DB_POOL_RECYCLE_SECS: "1800"
@@ -42,3 +55,10 @@ data:
   DB_STARTUP_RETRY_TIMEOUT_SECS: "60"
   JWT_ALGORITHM: "HS256"
   JWT_EXPIRY_MINUTES: "15"
+  # Trust X-Forwarded-For from the ingress. The ingress pod's address is
+  # not stable enough to enumerate, and the container port is only
+  # reachable inside the cluster, so "*" is the workable value here.
+  # Without it gunicorn keeps its 127.0.0.1 default, discards the header,
+  # and every caller is recorded as the ingress — which put the whole
+  # cluster in one rate-limit bucket.
+  FORWARDED_ALLOW_IPS: "*"

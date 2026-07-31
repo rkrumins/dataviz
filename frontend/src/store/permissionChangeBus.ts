@@ -92,7 +92,46 @@ if (broadcastChannel) {
         // the same origin posts to the same channel name.
         if (event?.data?.kind === 'changed') {
             void notifyPermissionsChangedLocal()
+        } else if (event?.data?.kind === 'signed-out') {
+            void signOutLocal()
         }
+    }
+}
+
+/** Tear this tab's session state down without calling the server.
+ *
+ *  The tab that signed out already did — the cookies are gone from the
+ *  shared jar, so a /logout from here would be an unauthenticated POST,
+ *  and the store transition is the entire point. Dynamic import for the
+ *  same circular-dependency reason as the reload above. */
+async function signOutLocal(): Promise<void> {
+    try {
+        const mod = await import('@/store/auth')
+        mod.useAuthStore.getState().handleSessionLost()
+    } catch {
+        // Best-effort. Without it this tab keeps rendering a signed-in
+        // shell until its next request 401s — which is the behaviour
+        // this replaces, not a new failure.
+    }
+}
+
+/** Tell every other tab the session has ended.
+ *
+ *  Without this a second tab keeps rendering a signed-in shell until
+ *  its next request 401s: up to a poll interval if it is visible, and
+ *  indefinitely if it is hidden. It would then reach /login through the
+ *  session-lost path, which reads to the user as an error rather than
+ *  as the sign-out they performed a moment ago in another tab.
+ *
+ *  Deliberately one-directional. Broadcasting sign-IN would navigate a
+ *  tab sitting on /login into the app, which is the auto-restore
+ *  behaviour this app has decided against. */
+export function notifySignedOut(): void {
+    if (!broadcastChannel) return
+    try {
+        broadcastChannel.postMessage({ kind: 'signed-out' })
+    } catch {
+        // best-effort — single-tab usage is unaffected.
     }
 }
 
