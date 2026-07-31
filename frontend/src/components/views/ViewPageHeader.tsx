@@ -23,7 +23,7 @@
  */
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { History, Pencil, X } from 'lucide-react'
+import { Eye, History, Pencil, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta, viewTypeLabel } from '@/lib/viewUtils'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
@@ -57,6 +57,13 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     const meta = viewTypeMeta(view.viewType)
     const icon = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
 
+    // The caller's capability envelope rides on the same response. Without
+    // it (older backend), keep the legacy always-visible behavior — the
+    // backend still enforces on save.
+    const access = view.access ?? null
+    const canEditDetails = access ? access.canEdit : true
+    const readOnly = access?.dataAccess === 'readonly'
+
     const handleSaved = (updated: View) => {
         setDetailsOpen(false)
         queryClient.invalidateQueries({ queryKey: [...VIEW_QUERY_KEY, viewId] })
@@ -82,18 +89,29 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                     <span className="text-[11px] text-ink-muted truncate hidden sm:inline">
                         {workspaceName ? `${workspaceName} · ` : ''}{viewTypeLabel(view.viewType)}
                     </span>
+                    {readOnly && (
+                        <span
+                            className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-semibold text-sky-600 dark:text-sky-400 shrink-0"
+                            title="You can explore everything in this view — expanding, tracing and searching — but nothing can be changed."
+                        >
+                            <Eye className="w-3 h-3" />
+                            Shared with you · read-only
+                        </span>
+                    )}
                 </div>
 
                 <div className="ml-auto flex items-center gap-1.5 shrink-0">
-                    <button
-                        type="button"
-                        onClick={() => setDetailsOpen(true)}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                        title="Rename, describe, tag, or change who can see this view"
-                    >
-                        <Pencil className="w-3.5 h-3.5" />
-                        <span className="hidden sm:inline">Details</span>
-                    </button>
+                    {canEditDetails && (
+                        <button
+                            type="button"
+                            onClick={() => setDetailsOpen(true)}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                            title="Rename, describe, tag, or change who can see this view"
+                        >
+                            <Pencil className="w-3.5 h-3.5" />
+                            <span className="hidden sm:inline">Details</span>
+                        </button>
+                    )}
 
                     <button
                         type="button"

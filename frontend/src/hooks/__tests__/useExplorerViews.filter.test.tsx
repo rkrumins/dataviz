@@ -96,3 +96,21 @@ describe('useExplorerViews — filter/sort refetch', () => {
     )
   })
 })
+
+describe('useExplorerViews — shared-with-me is a server category', () => {
+  beforeEach(() => {
+    mockListViews.mockReset()
+    mockListViews.mockResolvedValue(ENVELOPE as never)
+  })
+
+  it('sends category=shared-with-me and never the old visibilityIn fake', async () => {
+    renderHook(({ filters }) => useExplorerViews(filters), {
+      wrapper: makeWrapper(),
+      initialProps: { filters: baseFilters({ category: 'shared-with-me' }) },
+    })
+    await waitFor(() => expect(mockListViews).toHaveBeenCalled())
+    const params = mockListViews.mock.calls.at(-1)![0] as ViewListParams
+    expect(params.category).toBe('shared-with-me')
+    expect(params.visibilityIn).toBeUndefined()
+  })
+})

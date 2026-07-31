@@ -3,7 +3,9 @@
  * lifecycle actions: Delete, Change Visibility, Share.
  */
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { MoreHorizontal, Pencil, Trash2, Share2, Globe, Users, Lock, Eye, History, Settings2 } from 'lucide-react'
+import { MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2 } from 'lucide-react'
+import { VISIBILITY_ICON, VISIBILITY_ORDER, visibilityLabel } from '@/lib/viewVisibility'
+import { useToast } from '@/components/ui/toast'
 import { cn } from '@/lib/utils'
 import { updateViewVisibility } from '@/services/viewApiService'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
@@ -34,6 +36,7 @@ export function ViewCardOverflowMenu({
 }: ViewCardOverflowMenuProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [visibilitySubmenu, setVisibilitySubmenu] = useState(false)
+  const { showToast } = useToast()
   const [activityOpen, setActivityOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -55,17 +58,22 @@ export function ViewCardOverflowMenu({
       await updateViewVisibility(viewId, newVisibility)
       onVisibilityChange?.(newVisibility)
     } catch (err) {
-      console.error('Failed to update visibility:', err)
+      // A silent console.error left the menu claiming success on a 403.
+      const detail = err instanceof Error ? err.message : 'Failed to update visibility'
+      showToast(
+        'error',
+        detail.includes('workspace:view:publish')
+          ? 'Publishing to everyone needs the "Publish views" permission — ask a workspace admin.'
+          : detail,
+      )
     }
     setIsOpen(false)
     setVisibilitySubmenu(false)
-  }, [viewId, onVisibilityChange])
+  }, [viewId, onVisibilityChange, showToast])
 
-  const VISIBILITY_OPTIONS = [
-    { id: 'private' as const, label: 'Private', icon: Lock },
-    { id: 'workspace' as const, label: 'Workspace', icon: Users },
-    { id: 'enterprise' as const, label: 'Enterprise', icon: Globe },
-  ]
+  const VISIBILITY_OPTIONS = VISIBILITY_ORDER.map(id => ({
+    id, label: visibilityLabel(id), icon: VISIBILITY_ICON[id],
+  }))
 
   return (
     <div ref={menuRef} className="relative">
