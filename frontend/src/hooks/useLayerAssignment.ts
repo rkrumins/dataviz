@@ -263,10 +263,17 @@ export function useLayerAssignment({
       ? sortedLayers.find(l => l.showUnassigned === true)?.id
       : undefined
 
-    // Iterative top-down traversal (prevents stack overflow on deep hierarchies)
-    // HARD RULE: Containment children ALWAYS inherit parent's layer (no override).
-    // Root-level nodes use the priority chain below, with closed-scope
-    // semantics when the view has explicit assignments.
+    // Iterative top-down traversal (prevents stack overflow on deep hierarchies).
+    // Per-node precedence — an EXPLICIT per-entity assignment wins at ANY depth:
+    //   1. instanceAssignments (live user drag in this session)
+    //   2. the node's OWN canonical entry (referenceLayout.assignments)
+    //   3. containment inheritance (parent's effective layer, gated by the
+    //      parent's `inheritsChildren` when children are pushed below)
+    //   4. scope-specific fallbacks (closed-scope drop / open-scope chain)
+    // A child placed on a DIFFERENT layer than its parent splits out of the
+    // parent's subtree and renders as a visual root of its own column (the
+    // wizard writes exactly such placements); entry-less children still
+    // inherit, so type rules never break a nested subtree apart.
     const roots = nodes.filter((n: any) => !parentMap.has(n.id))
     const stack: Array<{ nodeId: string; inheritedLayerId?: string }> = []
     // Push roots in reverse so first root is processed first
@@ -281,21 +288,33 @@ export function useLayerAssignment({
 
       let myLayerId: string | undefined
 
-      // HARD RULE: containment children ALWAYS inherit the parent's layer, so a
-      // nested subtree renders together under its parent and the containment tree
-      // stays intact. Only root-level nodes (no containment parent) use the
-      // priority chain below.
+      // 1. instanceAssignments (live user drag in this session) — always
+      //    wins. The user just dropped this onto a layer; respect that
+      //    immediately regardless of view config or backend state.
+      const instanceAssignment = instanceAssignments.get(nodeId)
+      // 2a. Canonical per-node assignment (referenceLayout.assignments) — AUTHORITATIVE in BOTH
+      //     scopes and at ANY depth. A user's explicit placement overrides containment
+      //     inheritance, type rules and backend state, which is what makes the canvas mirror
+      //     the wizard's flat "it renders where you placed it" model. An entry naming a layer
+      //     that no longer exists in this view is treated as absent (falls through to
+      //     inheritance/rules) rather than stranding the node. A child whose entry names the
+      //     SAME layer it would inherit resolves identically and stays a nested child —
+      //     ensureSiblingOrderKeys mints exactly such carrier entries to hold orderKeys.
+      const rawExplicit = explicitAssignments.get(nodeId)
+      const explicitLayerId = rawExplicit && validLayerIds.has(rawExplicit) ? rawExplicit : undefined
+      // 3. Containment inheritance: an entry-less child follows its parent, so a
+      //    nested subtree renders together and type rules never break it apart.
       const hasContainmentParent = parentMap.has(nodeId)
 
-      if (hasContainmentParent && inheritedLayerId) {
+      if (instanceAssignment) {
+        myLayerId = instanceAssignment.layerId
+      } else if (explicitLayerId) {
+        myLayerId = explicitLayerId
+      } else if (hasContainmentParent && inheritedLayerId) {
         myLayerId = inheritedLayerId
       } else {
-        // Root-level node priority chain.
+        // 4. Scope-specific fallback chain.
         //
-        // 1. instanceAssignments (live user drag in this session) — always
-        //    wins. The user just dropped this onto a layer; respect that
-        //    immediately regardless of view config or backend state.
-        const instanceAssignment = instanceAssignments.get(nodeId)
         // Explicit, per-entity layer the app stamped on the node itself — on
         // create (creation layer) and on an explicit move (EntityDrawer "Layer"
         // field → an `update_entity` that rewrites `layerAssignment`). It is the
@@ -308,17 +327,8 @@ export function useLayerAssignment({
         // reload). Validated so a stale layer id can't strand the node.
         const rawNodeLayer = nodeMap.get(nodeId)?.data?.layerAssignment as string | undefined
         const nodeLayerId = rawNodeLayer && validLayerIds.has(rawNodeLayer) ? rawNodeLayer : undefined
-        if (instanceAssignment) {
-          myLayerId = instanceAssignment.layerId
-        } else if (explicitAssignments.has(nodeId)) {
-          // 2a. Canonical per-node assignment (referenceLayout.assignments) — AUTHORITATIVE in BOTH
-          //     scopes. A user's explicit placement overrides type rules / backend even in an open
-          //     ('all') view, and is the closed-scope authority. This is what lets a canvas assign
-          //     render WITHOUT flipping the view's scope (scope is pinned per the persist path), and
-          //     it makes the canvas mirror the wizard's "if you didn't place it, it's not here" model.
-          myLayerId = explicitAssignments.get(nodeId)
-        } else if (viewIsCurated) {
-          // 2b. Curated (closed-scope): an unlisted root drops out, EXCEPT a branch-created node
+        if (viewIsCurated) {
+          // 4a. Curated (closed-scope): an unlisted root drops out, EXCEPT a branch-created node
           //     placed by its own durable, view-valid `layerAssignment` (leak-safe delta exception —
           //     only delta nodes qualify, so no arbitrary global-property node leaks in). We do NOT
           //     otherwise consult the node's global `layerAssignment` in curated scope.
@@ -327,7 +337,7 @@ export function useLayerAssignment({
             if (branchCreatedDelta.has(nodeUrn)) myLayerId = nodeLayerId
           }
         } else {
-          // 2c. Open-scope ('all'): fall back to backend → node property → rules → inheritance so
+          // 4b. Open-scope ('all'): fall back to backend → node property → rules → inheritance so
           //     the user has data to start from (canonical assignments already handled above).
           const backendAssignment = effectiveAssignments.get(nodeId)
           if (backendAssignment?.layerId) {
@@ -459,6 +469,12 @@ export function useLayerAssignment({
         if (a.logicalNodeId) entityLogicalMap.set(a.entityId, a.logicalNodeId)
       })
     })
+    // Canonical referenceLayout.assignments wins over legacy per-layer
+    // entityAssignments (which normalizeReferenceLayout strips from persisted
+    // views — wizard-written logical placements only exist here).
+    for (const [urn, entry] of Object.entries(assignments)) {
+      if (entry?.logicalNodeId) entityLogicalMap.set(urn, entry.logicalNodeId)
+    }
     // Also check instanceAssignments (user drag in current session)
     instanceAssignments.forEach((a, entityId) => {
       if ('logicalNodeId' in a && (a as { logicalNodeId?: string }).logicalNodeId) {
