@@ -695,6 +695,39 @@ async def test_revoke_my_sessions_clears_this_devices_cookies(
         )
 
 
+async def test_changing_my_password_clears_this_devices_cookies(
+    test_client: AsyncClient, db_session,
+):
+    """The same defect, found by sweeping for it rather than by report.
+
+    Changing your own password revokes every session — the endpoint says
+    so and the UI toast says "Sign in again" — and it left the caller's
+    cookies in place exactly as revoke-all did. Both self-service
+    callers shipped the bug independently, which is why the clearing now
+    lives inside ``_revoke_my_every_session`` where it cannot be
+    forgotten by a third one.
+    """
+    from backend.auth_service.cookies import (
+        ACCESS_COOKIE_NAME,
+        CSRF_COOKIE_NAME,
+        REFRESH_COOKIE_NAME,
+    )
+
+    await _set_my_password(db_session, "Old!Passw0rd#2026")
+    resp = await test_client.post(
+        "/api/v1/users/me/password",
+        json={
+            "currentPassword": "Old!Passw0rd#2026",
+            "newPassword": _STRONG,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    cleared = "\n".join(resp.headers.get_list("set-cookie"))
+    for name in (ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME, CSRF_COOKIE_NAME):
+        assert name in cleared, f"{name} survived a password change"
+
+
 async def test_activity_lists_my_own_events(test_client: AsyncClient):
     """Own security history, newest first."""
     await test_client.patch("/api/v1/users/me", json={"firstName": "Active"})
