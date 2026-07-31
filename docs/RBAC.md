@@ -168,6 +168,18 @@ reason: the SPA store installs whatever it returns, so a 200 with an empty `ws` 
 overwrite a known-good claim set and blank every workspace-gated control; an error leaves the
 previous claims in place.
 
+**View reads are the third consumer**, and the only one where the wrong answer is silent.
+`requires` and `GET /me/permissions` both decide a single yes/no; the View list routes build a
+*SQL predicate* out of `ws_perms`, so an empty-because-unknown map narrows the query instead of
+failing it — 200 OK, correct-looking page, rows missing, nothing in the response to say so.
+`view_access` therefore marks such an outcome `indeterminate` (on both `ReadDecision` and
+`ViewReadScope`) and the endpoints answer 503 with the same body `requires` uses. Callers
+settled by the token alone are untouched: `system:admin`, anonymous callers, and anyone
+reaching a View through `public` or an explicit grant. `view_delegation` refuses for a sharper
+reason — its fast path is a bare `has_permission`, and falling through it does not deny but
+*delegates*, so a member with unreadable grants would be confined to one View's scope and
+served a partial graph with a 200.
+
 In practice `ws_available=False` requires Redis *and* Postgres to be unreachable at once — a
 Redis outage alone is answered from Postgres (cached 30s per user, so an outage does not turn
 into a permission query per request).
