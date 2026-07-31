@@ -160,6 +160,24 @@ def requires_ws_read_or_view_delegate(
         if has_permission(claims, permission, workspace_id=workspace_id):
             return user
 
+        # 1b. That check consulted the per-workspace grants, which live in
+        #     the session store — so a store *and* database outage makes it
+        #     answer False for a genuine member. Falling through to
+        #     delegation there would confine a full member to one view's
+        #     scope and paint a partial canvas with a 200: a wrong answer
+        #     dressed as a successful one, which is worse than a refusal.
+        #     ``requires()`` answers 503 for exactly this; so does this.
+        if not claims.ws_available:
+            logger.warning(
+                "Cannot establish workspace grants for user=%s ws=%s; "
+                "answering 503 rather than delegating",
+                getattr(user, "id", None), workspace_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authorization temporarily unavailable",
+            )
+
         # 2. Delegation requires an explicit view context. Without one
         #    there is nothing to scope the request to.
         if not view_id:

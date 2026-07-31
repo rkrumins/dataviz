@@ -64,6 +64,12 @@ did not carry access to the data they showed. Four reported problems, one root c
 - "Shared with me" reads actual shares instead of approximating them as a tier filter.
 - The tier vocabulary had 5 backend and ~15 frontend definitions, already drifted in wording and
   spelling. Both sides now have one.
+- View reads answer **503** rather than a filtered result when the per-workspace grants cannot be
+  established. Those grants moved out of the access token and into the session store, so
+  `ws_perms` can now be empty because nothing could answer rather than because the user holds
+  nothing — and every tier below `public` is decided against it. Reading the first as the second
+  would serve a 200 with rows missing and nothing to say so. `system:admin`, anonymous callers and
+  anyone reaching a View by grant or `public` are unaffected, since none of them need that half.
 
 ### Removed
 

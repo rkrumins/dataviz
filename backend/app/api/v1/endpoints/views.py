@@ -83,6 +83,36 @@ async def _viewer_context(
     return await view_access.ViewerContext.build(session, user=user, claims=claims)
 
 
+async def _read_scope(
+    session: AsyncSession,
+    ctx: view_access.ViewerContext,
+) -> view_access.ViewReadScope:
+    """The caller's read reach, or 503 if it cannot be established.
+
+    Every listing route goes through here rather than calling
+    ``build_read_scope`` directly, because the failure it guards against
+    is silent. Per-workspace grants live in the session store now; when it
+    and the database fallback both fail, ``ws_perms`` is empty but means
+    "unknown", and the SQL predicate built from it would return a **short
+    list with a 200** — an ordinary-looking page missing rows the caller
+    is entitled to. Refusing to answer is the only honest option.
+
+    503 with this wording because that is what ``requires()`` answers for
+    the same situation, and the SPA should see one behaviour whichever
+    gate refused.
+    """
+    scope = await view_access.build_read_scope(session, ctx)
+    if scope.indeterminate:
+        logger.warning(
+            "Cannot establish workspace grants for user=%s; answering 503 "
+            "rather than a filtered view list", ctx.user_id or "<anonymous>",
+        )
+        raise HTTPException(
+            status_code=503, detail="Authorization temporarily unavailable",
+        )
+    return scope
+
+
 async def _load_view_orm(session: AsyncSession, view_id: str) -> ViewORM:
     """Fetch the raw ORM row (the access predicates need it).
 
@@ -311,7 +341,7 @@ async def list_popular_views(
     different reach never share a cached result.
     """
     ctx = await _viewer_context(session, user, claims)
-    scope = await view_access.build_read_scope(session, ctx)
+    scope = await _read_scope(session, ctx)
     principal = normalised_principal(_user_id(user))
     key = ("popular", principal, limit)
     items = await read_views_sf.run(
@@ -346,7 +376,7 @@ async def get_view_facets(
     now, so a shared key would serve one user's facets to another.
     """
     ctx = await _viewer_context(session, user, claims)
-    scope = await view_access.build_read_scope(session, ctx)
+    scope = await _read_scope(session, ctx)
     return await read_views_sf.run(
         ("facets", normalised_principal(_user_id(user))),
         lambda: view_repo.get_view_facets(session, scope=scope),
@@ -396,7 +426,7 @@ async def get_view_stats(
     them) by probing ``?visibility=private&createdBy=<victim>``.
     """
     ctx = await _viewer_context(session, user, claims)
-    scope = await view_access.build_read_scope(session, ctx)
+    scope = await _read_scope(session, ctx)
     return await view_repo.get_view_stats(
         session,
         scope=scope,
@@ -499,7 +529,7 @@ async def list_views(
       so pagination stays accurate on large catalogs.
     """
     ctx = await _viewer_context(session, user, claims)
-    scope = await view_access.build_read_scope(session, ctx)
+    scope = await _read_scope(session, ctx)
     response = await view_repo.list_views_filtered(
         session,
         scope=scope,
@@ -1200,7 +1230,7 @@ async def list_my_recent_views(
     after the visit drops out too.
     """
     ctx = await _viewer_context(session, user, claims)
-    scope = await view_access.build_read_scope(session, ctx)
+    scope = await _read_scope(session, ctx)
     return await view_repo.list_recent_views(
         session, _user_id(user), scope=scope, limit=limit,
     )
