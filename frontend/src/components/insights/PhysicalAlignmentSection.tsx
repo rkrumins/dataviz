@@ -21,6 +21,7 @@ import { cn } from '@/lib/utils'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import type { AdoptionDimension } from '@/services/ontologyDefinitionService'
 import { DimBreakdown } from '@/features/ontology/components/panels/AdoptionMatchSection'
+import { PropertyStorageFinding } from './PropertyStorageFinding'
 
 export interface AlignmentFinding {
   severity: 'critical' | 'warning' | 'info'
@@ -79,9 +80,13 @@ function timeAgo(iso: string | null | undefined): string {
   return `${Math.floor(diff / 86400)}d ago`
 }
 
-export function PhysicalAlignmentSection({ wsId, dataSourceId }: {
+export function PhysicalAlignmentSection({ wsId, dataSourceId, onOpenMapping }: {
   wsId: string
   dataSourceId: string
+  /** Switch the host drawer to its Mapping tab. When absent the finding
+   *  still renders, just without an action — this section is also mounted
+   *  outside that drawer. */
+  onOpenMapping?: () => void
 }) {
   const { data, isLoading } = useQuery({
     queryKey: ['alignment-analysis', wsId, dataSourceId],
@@ -158,12 +163,30 @@ export function PhysicalAlignmentSection({ wsId, dataSourceId }: {
                 return (
                   <li key={`${f.code}-${i}`} className="flex items-start gap-2 text-[11px] text-ink-secondary leading-relaxed">
                     <Icon className={cn('w-3.5 h-3.5 mt-0.5 flex-shrink-0', cls)} />
-                    <span>{f.message}</span>
+                    <span>
+                      {f.message}
+                      {/* Fetched all along, never rendered — and it's the
+                          number that tells you whether a finding is a footnote
+                          or the whole problem. */}
+                      {f.instances != null && f.instances > 0 && (
+                        <span className="ml-1 text-ink-muted tabular-nums">
+                          ({f.instances.toLocaleString()} instances)
+                        </span>
+                      )}
+                    </span>
                   </li>
                 )
               })}
             </ul>
           )}
+
+          {/* Property storage — the same problem on the sibling axis. This
+              panel grades LABEL alignment (is the type index-backed?); a
+              property nested inside a container is unqueryable for exactly the
+              same reason, and was missing from the picture entirely. */}
+          <PropertyStorageFinding
+            wsId={wsId} dataSourceId={dataSourceId} onFix={onOpenMapping}
+          />
 
           {/* Per-dimension chips — same semantics as the ontology Health tab */}
           {data.adoption && (

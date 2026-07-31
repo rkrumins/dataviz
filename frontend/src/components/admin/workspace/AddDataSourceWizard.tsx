@@ -32,6 +32,32 @@ import type { OntologyMatchResult } from '@/services/ontologyDefinitionService'
 import { useQuery } from '@tanstack/react-query'
 import { workspaceService } from '@/services/workspaceService'
 import { NodeIdentityField, isIdentityOverridden, isNameOverridden } from '@/components/dataSource/NodeIdentity'
+import { PropertyMappingForm } from '@/components/admin/shared/PropertyMappingForm'
+import {
+    DEFAULT_PROPERTY_MAPPING,
+    savePropertyMapping,
+    type PropertyMapping,
+} from '@/services/propertyStorageService'
+
+/** Persist the mapping only when the operator actually changed it, and never
+ *  let that failure lose them the source they just attached. */
+async function _saveMappingIfCustomised(
+    wsId: string, dsId: string | undefined, mapping: PropertyMapping,
+): Promise<void> {
+    if (!dsId) return
+    const unchanged =
+        mapping.containerKey === DEFAULT_PROPERTY_MAPPING.containerKey
+        && mapping.separator === DEFAULT_PROPERTY_MAPPING.separator
+        && mapping.collectUnmapped === DEFAULT_PROPERTY_MAPPING.collectUnmapped
+        && Object.keys(mapping.propertyOverrides).length === 0
+    if (unchanged) return
+    try {
+        await savePropertyMapping(wsId, dsId, mapping)
+    } catch {
+        // The source is attached and usable; the mapping is editable from its
+        // Mapping tab. Failing the whole wizard here would be worse.
+    }
+}
 import { catalogService } from '@/services/catalogService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -67,6 +93,12 @@ export function AddDataSourceWizard({
     const [ontologyId, setOntologyId] = useState('')
     const [identityProperty, setIdentityProperty] = useState('')
     const [nameProperty, setNameProperty] = useState('')
+    // Property mapping is saved AFTER the source exists, through the same
+    // narrow endpoint the Mapping tab uses — the create request has no
+    // extraConfig, and giving it one would put the client back in the
+    // business of round-tripping a blob whose secrets come back redacted.
+    const [propertyMapping, setPropertyMapping] =
+        useState<PropertyMapping>(DEFAULT_PROPERTY_MAPPING)
 
     const [phase, setPhase] = useState<'steps' | 'adding' | 'success'>('steps')
     const [error, setError] = useState<string | null>(null)
@@ -203,14 +235,20 @@ export function AddDataSourceWizard({
                         nameProperty: nameProperty || undefined,
                     })
                 }
+                await _saveMappingIfCustomised(
+                    workspaceId, selected.boundDataSourceId, propertyMapping,
+                )
             } else {
-                await workspaceService.addDataSource(workspaceId, {
+                const created = await workspaceService.addDataSource(workspaceId, {
                     catalogItemId,
                     label: label.trim() || undefined,
                     ontologyId: ontologyId || undefined,
                     identityProperty: identityProperty || undefined,
                     nameProperty: nameProperty || undefined,
                 })
+                await _saveMappingIfCustomised(
+                    workspaceId, created?.id, propertyMapping,
+                )
             }
             setPhase('success')
         } catch (err) {
@@ -487,6 +525,26 @@ export function AddDataSourceWizard({
                         nameValue={nameProperty}
                         onNameChange={setNameProperty}
                     />
+
+                    {/* Where this source keeps its properties. Set at attach
+                        time so the first read is already correct — otherwise
+                        the drawer shows an empty bag until someone notices.
+                        No detected keys or collisions to offer yet: the graph
+                        isn't attached, so there is nothing to sample. */}
+                    <details className="group">
+                        <summary className="cursor-pointer text-[11px] font-semibold text-ink-muted hover:text-ink transition-colors select-none">
+                            Property mapping
+                            <span className="ml-1.5 font-normal text-ink-muted/70">
+                                — only if this source nests its properties
+                            </span>
+                        </summary>
+                        <div className="mt-3 pl-3 border-l border-glass-border">
+                            <PropertyMappingForm
+                                value={propertyMapping}
+                                onChange={setPropertyMapping}
+                            />
+                        </div>
+                    </details>
                 </div>
             )}
 

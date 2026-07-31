@@ -436,6 +436,7 @@ export function DataSourceDetailPanel({
                                         context={{ wsId, dataSourceId: ds.id, ontologyId, ontologyName, identityProperty: ds.identityProperty, nameProperty: ds.nameProperty } satisfies DataSourceProfileContext}
                                         embedded
                                         onNavigate={onClose}
+                                        onOpenMapping={() => setActiveTab('mapping')}
                                     />
                                 ) : (
                                     <p className="text-sm text-ink-muted">This data source isn't linked to a catalog item.</p>

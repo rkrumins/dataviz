@@ -26,6 +26,9 @@ import {
 } from '@/store/propertyDraftStore'
 import type { Predicate } from '@/types/search'
 
+import { useActiveView } from '@/store/schema'
+import { propertyMappingHref } from '@/components/dataSource/mappingLink'
+
 import { useDiscovery } from '../search/builder/useDiscovery'
 import { fieldClass } from '../search/builder/editors/shared'
 
@@ -65,6 +68,9 @@ export function PropertyBrowser({
         }
     }, [onSearchPredicate, showToast])
 
+    // The active view knows its workspace + source, so a warning can link to
+    // the fix without threading ids through the drawer.
+    const activeView = useActiveView()
     const disc = useDiscovery(viewId)
     const { allKeys, keysByEntityType, tagValues, getValueSamples, isInitialLoading, error } = disc
     const [query, setQuery] = useState('')
@@ -109,13 +115,23 @@ export function PropertyBrowser({
     // Catalogue-level guidance from discovery (0-cost).
     const warnings = useMemo(() => {
         const raw = disc.discovery
-        const out: string[] = []
+        const out: { text: string; href?: string }[] = []
         if (!raw) return out
-        if (raw.missingContainment) out.push('No containment edges — hierarchy insights limited')
+        if (raw.missingContainment) out.push({ text: 'No containment edges — hierarchy insights limited' })
         const blob = raw.blobOnlyLabels ?? []
-        if (blob.length > 0) out.push(`${blob.length} type${blob.length === 1 ? '' : 's'} not yet migrated — limited analytics`)
+        if (blob.length > 0) {
+            // "Not yet migrated" was both stale vocabulary — mapping is
+            // configurable now, not a one-way migration — and a dead end: it
+            // named a problem with no way to reach the fix.
+            out.push({
+                text: `${blob.length} type${blob.length === 1 ? '' : 's'} store properties in a container`,
+                href: propertyMappingHref(
+                    activeView?.workspaceId, activeView?.dataSourceId,
+                ) ?? undefined,
+            })
+        }
         const truncated = Object.values(raw.labels ?? {}).some((l) => l?.truncatedProperties)
-        if (truncated) out.push('Some rare properties may be sampled out')
+        if (truncated) out.push({ text: 'Some rare properties may be sampled out' })
         return out
     }, [disc.discovery])
 
