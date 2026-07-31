@@ -415,10 +415,16 @@ def _collapse_wildcards(perms: set[str]) -> tuple[str, ...]:
 # code: it's defined in the migration and the Phase 1 plan, and any
 # change to it ships in the same commit as a code update.
 _SEED_LEAVES: dict[str, frozenset[str]] = {
+    # NB: ``workspace:view:publish`` MUST live in this set. If it were
+    # missing, a role holding the four legacy leaves would still
+    # collapse to ``workspace:view:*``, and the wildcard expansion in
+    # ``has_permission`` would silently satisfy publish checks for
+    # every workspace_member.
     "workspace:view": frozenset({
         "workspace:view:create",
         "workspace:view:edit",
         "workspace:view:delete",
+        "workspace:view:publish",
         "workspace:view:read",
     }),
     "workspace:datasource": frozenset({
@@ -461,6 +467,7 @@ _WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
     "workspace:view:create",
     "workspace:view:edit",
     "workspace:view:delete",
+    "workspace:view:publish",
     "workspace:view:read",
     "workspace:ontology:read",
     "workspace:ontology:manage",
