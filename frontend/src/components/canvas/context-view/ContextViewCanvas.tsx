@@ -93,6 +93,15 @@ import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom } from './fitZoom'
 import { LineageLens } from './LineageLens'
+import {
+  EMPTY_LENS_HISTORY,
+  lensFocalOf,
+  lensPush,
+  lensBackward,
+  lensForwardStep,
+  lensJump,
+  type LensHistory,
+} from './lens/lensHistory'
 import { useLensLineage } from '@/hooks/useLensLineage'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
@@ -3037,25 +3046,26 @@ export function ContextViewCanvas({
     aggDetailStatus.truncatedIds.forEach(id => { void loadMoreAggregatedDetail(id) })
   }, [aggDetailStatus.truncatedIds, loadMoreAggregatedDetail])
 
-  // ── Lineage Lens — ego-graph overlay (focal stack; empty = closed) ────
-  const [lensStack, setLensStack] = useState<string[]>([])
-  const openLens = useCallback((nodeId: string) => setLensStack([nodeId]), [])
-  const lensRecenter = useCallback((nodeId: string) => setLensStack(prev => [...prev, nodeId]), [])
-  const lensBack = useCallback(() => setLensStack(prev => prev.slice(0, -1)), [])
-  // Walk-trail jump: truncate the walk back to hop i (spatial Back).
-  const lensJumpTo = useCallback((index: number) => setLensStack(prev => prev.slice(0, index + 1)), [])
-  // Miller-column branch: truncate to hop i, then step into nodeId.
-  const lensWalkTo = useCallback((index: number, nodeId: string) =>
-    setLensStack(prev => [...prev.slice(0, index + 1), nodeId]), [])
-  const lensClose = useCallback(() => setLensStack([]), [])
+  // ── Lineage Lens — ego-graph overlay (focus history; empty = closed).
+  // Browser-style back/forward: moving the cursor never drops entries;
+  // focusing a NEW node truncates the forward side first (the same
+  // invariant as the staged-changes undo/redo).
+  const [lensHistory, setLensHistory] = useState<LensHistory>(EMPTY_LENS_HISTORY)
+  const openLens = useCallback((nodeId: string) => setLensHistory({ entries: [nodeId], cursor: 0 }), [])
+  const lensRecenter = useCallback((nodeId: string) => setLensHistory(h => lensPush(h, nodeId)), [])
+  const lensBack = useCallback(() => setLensHistory(lensBackward), [])
+  const lensForward = useCallback(() => setLensHistory(lensForwardStep), [])
+  // Path-trail jump: move the cursor to hop i without dropping the trail.
+  const lensJumpTo = useCallback((index: number) => setLensHistory(h => lensJump(h, index)), [])
+  const lensClose = useCallback(() => setLensHistory(EMPTY_LENS_HISTORY), [])
   // On-demand lineage for every visited focal node — the lens tells the
   // truth about the DATA SOURCE, not just what's hydrated on the canvas.
   // Lens-local (never written to the canvas store), cached per session.
-  const lensLineage = useLensLineage(lensStack, provider, lineageEdgeTypes)
+  const lensLineage = useLensLineage(lensHistory.entries, provider, lineageEdgeTypes)
   useEffect(() => {
     focusLensRef.current = () => {
       const target = selectedNodeId ?? drawerNodeId
-      if (target) setLensStack([target])
+      if (target) setLensHistory({ entries: [target], cursor: 0 })
     }
   }, [selectedNodeId, drawerNodeId])
 
@@ -3807,7 +3817,7 @@ export function ContextViewCanvas({
 
         {/* Lineage Lens — ego-graph overlay (portal to body). */}
         <LineageLens
-          lensStack={lensStack}
+          history={lensHistory}
           supplementalEdges={lensLineage.supplementalEdges}
           supplementalNodes={lensLineage.supplementalNodes}
           fetchStatus={lensLineage.status}
@@ -3816,11 +3826,11 @@ export function ContextViewCanvas({
           drillEdges={lensLineage.drillEdges}
           drillStatus={lensLineage.drillStatus}
           onDrillFetch={lensLineage.fetchDrill}
-          externalPreview={externalPreview && lensStack[lensStack.length - 1] === externalPreview.nodeId ? externalPreview : null}
+          externalPreview={externalPreview && lensFocalOf(lensHistory) === externalPreview.nodeId ? externalPreview : null}
           onRecenter={lensRecenter}
           onBack={lensBack}
+          onForward={lensForward}
           onJumpTo={lensJumpTo}
-          onWalkTo={lensWalkTo}
           onShowPathOnCanvas={(ids) => {
             // Presenting a walk IS a frame action — same chrome, same exit.
             const focal = ids[ids.length - 1]
@@ -3841,7 +3851,7 @@ export function ContextViewCanvas({
             // the canvas focus matches what the lens was showing (guarded:
             // selectNode toggles OFF when re-selecting the current
             // selection).
-            const focal = lensStack[lensStack.length - 1]
+            const focal = lensFocalOf(lensHistory)
             if (focal) {
               const { selectedNodeIds, selectNode } = useCanvasStore.getState()
               if (!(selectedNodeIds.length === 1 && selectedNodeIds[0] === focal)) selectNode(focal)

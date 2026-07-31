@@ -43,14 +43,15 @@ describe('deriveNeighborRecords (shared with LineageNeighbors)', () => {
 
 const renderLens = (
   stack: string[],
-  handlers: Partial<Record<'onRecenter' | 'onBack' | 'onClose', () => void>> = {},
+  handlers: Partial<Record<'onRecenter' | 'onBack' | 'onForward' | 'onClose', () => void>> = {},
   extra: Partial<ComponentProps<typeof LineageLens>> = {},
 ) =>
   render(
     <LineageLens
-      lensStack={stack}
+      history={{ entries: stack, cursor: stack.length - 1 }}
       onRecenter={handlers.onRecenter ?? vi.fn()}
       onBack={handlers.onBack ?? vi.fn()}
+      onForward={handlers.onForward ?? vi.fn()}
       onClose={handlers.onClose ?? vi.fn()}
       {...extra}
     />,
@@ -301,7 +302,7 @@ describe('LineageLens on-demand fetch merge', () => {
     }
   })
 
-  it('walk frontier groups partners under their parent; header walks into the parent', () => {
+  it('renders the SAME body at depth > 1: partners grouped under their parent, re-center on its button', () => {
     const prevSchema = useSchemaStore.getState().schema
     useSchemaStore.setState({
       schema: { ...(prevSchema ?? {}), containmentEdgeTypes: ['CONTAINS'] },
@@ -314,7 +315,6 @@ describe('LineageLens on-demand fetch merge', () => {
       } as never)
       const onRecenter = vi.fn()
       renderLens(['a', 'b'], { onRecenter }, {
-        onWalkTo: vi.fn(),
         onJumpTo: vi.fn(),
         supplementalEdges: [
           edge('f1', 'b', 'kid1'),
@@ -328,19 +328,20 @@ describe('LineageLens on-demand fetch merge', () => {
           ['pd', node('pd')],
         ]),
       })
-      // Frontier rows grouped under their parent dataset.
+      // Depth 2 renders the standard columns — no layout flip: partners
+      // grouped under their parent dataset, exactly like depth 1.
       expect(screen.getByText('label-pd')).toBeTruthy()
       expect(screen.getByText('label-kid1')).toBeTruthy()
-      // The header row toggles collapse; walking into the parent lives
-      // on the dedicated arrow button beside it.
-      fireEvent.click(screen.getByTitle('Walk into label-pd'))
+      // The header row toggles collapse; navigation lives on the
+      // dedicated re-center button beside it.
+      fireEvent.click(screen.getByTitle('Re-center on label-pd'))
       expect(onRecenter).toHaveBeenCalledWith('pd')
     } finally {
       useSchemaStore.setState({ schema: prevSchema } as never)
     }
   })
 
-  it('walk trail and headers carry the focal node\'s parent context', () => {
+  it('path trail and headers carry the focal node\'s parent context', () => {
     const prevSchema = useSchemaStore.getState().schema
     useSchemaStore.setState({
       schema: { ...(prevSchema ?? {}), containmentEdgeTypes: ['CONTAINS'] },
@@ -352,7 +353,6 @@ describe('LineageLens on-demand fetch merge', () => {
         visibleEdges: [],
       } as never)
       renderLens(['a', 'kid'], {}, {
-        onWalkTo: vi.fn(),
         onJumpTo: vi.fn(),
         supplementalEdges: [
           // P contains kid; P is NOT the previous hop, so the breadcrumb
@@ -366,6 +366,55 @@ describe('LineageLens on-demand fetch merge', () => {
     } finally {
       useSchemaStore.setState({ schema: prevSchema } as never)
     }
+  })
+
+  it('Forward appears when the cursor is mid-path and steps forward without dropping hops', () => {
+    useCanvasStore.setState({
+      nodes: [node('a'), node('b'), node('c')],
+      edges: [edge('e1', 'a', 'b'), edge('e2', 'b', 'c')],
+      visibleEdges: [],
+    } as never)
+    const onForward = vi.fn()
+    renderLens(['a'], { onForward }, {
+      history: { entries: ['a', 'b', 'c'], cursor: 1 },
+      onJumpTo: vi.fn(),
+    })
+    fireEvent.click(screen.getByText('Forward'))
+    expect(onForward).toHaveBeenCalled()
+  })
+
+  it('ArrowRight steps forward; ignored while typing in the filter input', () => {
+    useCanvasStore.setState({
+      nodes: [node('a'), node('b'), node('c')],
+      edges: [edge('e1', 'a', 'b'), edge('e2', 'b', 'c')],
+      visibleEdges: [],
+    } as never)
+    const onForward = vi.fn()
+    renderLens(['a'], { onForward }, {
+      history: { entries: ['a', 'b', 'c'], cursor: 1 },
+      onJumpTo: vi.fn(),
+    })
+    fireEvent.keyDown(screen.getByPlaceholderText('Filter connections…'), { key: 'ArrowRight' })
+    expect(onForward).not.toHaveBeenCalled()
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(onForward).toHaveBeenCalledTimes(1)
+  })
+
+  it('a forward trail chip stays visible and jumps the cursor there non-destructively', () => {
+    useCanvasStore.setState({
+      nodes: [node('a'), node('b'), node('c')],
+      edges: [edge('e1', 'a', 'b'), edge('e2', 'b', 'c')],
+      visibleEdges: [],
+    } as never)
+    const onJumpTo = vi.fn()
+    renderLens(['a'], {}, {
+      history: { entries: ['a', 'b', 'c'], cursor: 1 },
+      onJumpTo,
+    })
+    // 'c' is AHEAD of the cursor — the old destructive stack would have
+    // dropped it; the history keeps it visible and clickable.
+    fireEvent.click(screen.getByTitle('Jump to label-c'))
+    expect(onJumpTo).toHaveBeenCalledWith(2)
   })
 
   it('renders a walkable Contains group for a container focal (containment ≠ flow)', () => {

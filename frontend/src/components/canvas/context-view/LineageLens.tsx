@@ -5,10 +5,13 @@
  * The focal entity sits centered; upstream neighbors (data sources) list
  * on the LEFT, downstream (data consumers) on the RIGHT, grouped by
  * entity type with counts. Data flow reads left → right throughout:
- * every connector arrow points toward the consumer side. Clicking a
- * neighbor re-centers the lens on it (breadcrumb trail returns);
- * per-row actions reveal the neighbor on the canvas or open its
- * details; the footer escalates to full Trace.
+ * every connector arrow points toward the consumer side. Re-centering
+ * on a neighbor is a WALK recorded in a browser-style focus history
+ * (Back/Forward buttons, ←/→ keys, clickable Path trail — moving the
+ * cursor never drops a hop); the SAME body renders at every depth, so
+ * a walk never flips the layout. Per-row actions reveal the neighbor
+ * on the canvas or open its details; the footer escalates to full
+ * Trace.
  *
  * Data comes from the canvas store (visibleEdges with raw-edges
  * fallback, via the shared deriveNeighborRecords helper) MERGED with
@@ -26,7 +29,7 @@
  * Lens-local ESC handling runs in the capture phase so canvas keyboard
  * shortcuts don't fire underneath.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
@@ -43,20 +46,21 @@ import { EDGE_FETCH_LIMIT } from '@/hooks/useLensLineage'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
+import { lensFocalOf, type LensHistory } from './lens/lensHistory'
 
 const ROWS_CAP = 200
 const EMPTY_TYPE_SET: ReadonlySet<string> = new Set()
 
 export interface LineageLensProps {
-  /** Focal-node stack; last entry is the current focal. Empty = closed. */
-  lensStack: string[]
+  /** Focus history; entries[cursor] is the current focal. Empty = closed. */
+  history: LensHistory
   onRecenter: (nodeId: string) => void
+  /** Step the focus history back one hop (non-destructive). */
   onBack: () => void
-  /** Jump the walk back to stack index i (truncates the trail there). */
+  /** Step the focus history forward one hop (non-destructive). */
+  onForward: () => void
+  /** Move the history cursor to entry i without dropping the trail. */
   onJumpTo?: (index: number) => void
-  /** Branch the walk: truncate to hop i, then step into nodeId — lets
-   *  any earlier column change route without restarting the walk. */
-  onWalkTo?: (index: number, nodeId: string) => void
   /** Frame the walked path on the canvas (closes the lens). */
   onShowPathOnCanvas?: (ids: string[]) => void
   onClose: () => void
@@ -92,11 +96,11 @@ export interface LineageLensProps {
 }
 
 export function LineageLens({
-  lensStack,
+  history,
   onRecenter,
   onBack,
+  onForward,
   onJumpTo,
-  onWalkTo,
   onShowPathOnCanvas,
   onClose,
   onRevealOnCanvas,
@@ -113,7 +117,10 @@ export function LineageLens({
   drillStatus,
   onDrillFetch,
 }: LineageLensProps) {
-  const nodeId = lensStack[lensStack.length - 1] ?? null
+  const { entries, cursor } = history
+  const nodeId = lensFocalOf(history)
+  const canBack = cursor > 0
+  const canForward = cursor < entries.length - 1
 
   const rawEdges = useCanvasStore((s) => s.edges)
   const visibleEdges = useCanvasStore((s) => s.visibleEdges)
@@ -137,24 +144,25 @@ export function LineageLens({
         onClose()
         return
       }
-      // Keyboard walking: ← steps the walk back one hop (never while
-      // typing in the filter input).
-      if (e.key === 'ArrowLeft' && lensStack.length > 1) {
+      // Keyboard walking: ← back one hop, → forward one hop — browser
+      // history semantics (never while typing in the filter input).
+      if ((e.key === 'ArrowLeft' && canBack) || (e.key === 'ArrowRight' && canForward)) {
         const t = e.target as HTMLElement | null
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
         e.preventDefault()
         e.stopPropagation()
-        onBack()
+        if (e.key === 'ArrowLeft') onBack()
+        else onForward()
       }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [nodeId, onClose, lensStack.length, onBack])
+  }, [nodeId, onClose, canBack, canForward, onBack, onForward])
 
   // Open gate for every canvas-scale memo below: this component is
   // always mounted, and a closed lens must cost nothing when the
   // (potentially very large) node/edge sets churn.
-  const lensOpen = lensStack.length > 0
+  const lensOpen = entries.length > 0
 
   const nodeMap = useMemo(() => {
     const m = new Map<string, LineageNode>()
@@ -207,9 +215,9 @@ export function LineageLens({
   // connecting edge not loaded (fall back to a neutral separator).
   const hopMeta = useMemo(() => {
     const meta: Array<{ downstream: boolean; edgeType: string } | null> = []
-    for (let i = 1; i < lensStack.length; i++) {
-      const prev = lensStack[i - 1]
-      const curr = lensStack[i]
+    for (let i = 1; i < entries.length; i++) {
+      const prev = entries[i - 1]
+      const curr = entries[i]
       let found: { downstream: boolean; edgeType: string } | null = null
       for (const e of edgesByEndpoint.get(curr) ?? []) {
         if (e.source === prev && e.target === curr) {
@@ -224,52 +232,31 @@ export function LineageLens({
       meta.push(found)
     }
     return meta
-  }, [lensStack, edgesByEndpoint])
+  }, [entries, edgesByEndpoint])
 
-  // Deep walks middle-truncate so the endpoints (the part people care
-  // about) stay visible; the gap chip expands the full trail.
+  // Deep walks middle-truncate so the cursor's neighborhood (the part
+  // people care about) stays visible; the gap chips expand the full trail.
   const [showFullTrail, setShowFullTrail] = useState(false)
   const TRAIL_CAP = 6
-  const collapseTrail = lensStack.length > TRAIL_CAP && !showFullTrail
+  const collapseTrail = entries.length > TRAIL_CAP && !showFullTrail
 
-  // ── Miller-walk state ──────────────────────────────────────────────
-  // Direction LOCK: a walk follows one flow direction (mixing
-  // directions mid-path makes the trail ambiguous). Locked to the
-  // first hop's direction, overridable via the flip control.
-  const [directionOverride, setDirectionOverride] = useState<'incoming' | 'outgoing' | null>(null)
-  const walkDirection: 'incoming' | 'outgoing' =
-    directionOverride ?? (hopMeta[0] ? (hopMeta[0].downstream ? 'outgoing' : 'incoming') : 'outgoing')
-
-  // Frontier records per hop — the columns' contents. Walk length is
-  // short and this recomputes only when the walk or edge set changes.
-  const hopRecords = useMemo(
-    // Indexed: each hop scans only its own incident edges, not the
-    // whole edge set (deriveNeighborRecords filters by endpoint anyway).
-    () => lensStack.map(id => deriveNeighborRecords(id, edgesByEndpoint.get(id) ?? [], nodeMap, containmentEdgeTypes)),
-    [lensStack, edgesByEndpoint, nodeMap, containmentEdgeTypes],
-  )
-
-  // Containment per hop — a container's relationships often live at
-  // CHILD level, so a walk into one would dead-end on flow edges alone.
-  // Children (containment edges are parent → child) render as a
-  // walkable "Contains" group; O(degree) via the endpoint index.
-  const containmentByHop = useMemo(() => {
-    const m = new Map<string, string[]>()
-    for (const id of lensStack) {
-      if (m.has(id)) continue
-      const children: string[] = []
-      const seen = new Set<string>()
-      for (const e of edgesByEndpoint.get(id) ?? []) {
-        if (!isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) continue
-        if (e.source === id && e.target !== id && !seen.has(e.target)) {
-          seen.add(e.target)
-          children.push(e.target)
-        }
+  // Containment children of the focal — a container's relationships
+  // often live at CHILD level, so focusing one would dead-end on flow
+  // edges alone. Children (containment edges are parent → child) render
+  // as a walkable "Contains" group; O(degree) via the endpoint index.
+  const focalChildren = useMemo(() => {
+    if (!nodeId) return []
+    const children: string[] = []
+    const seen = new Set<string>()
+    for (const e of edgesByEndpoint.get(nodeId) ?? []) {
+      if (!isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) continue
+      if (e.source === nodeId && e.target !== nodeId && !seen.has(e.target)) {
+        seen.add(e.target)
+        children.push(e.target)
       }
-      m.set(id, children)
     }
-    return m
-  }, [lensStack, edgesByEndpoint, containmentEdgeTypes])
+    return children
+  }, [nodeId, edgesByEndpoint, containmentEdgeTypes])
 
   // ── Grain machinery — data-driven from the schema's entity-type
   // hierarchy. closure(T) = every type T can transitively contain; a
@@ -354,16 +341,6 @@ export function LineageLens({
     toggleDrill(key)
   }
 
-  // Auto-advance: when a hop is pushed, glide the column strip to the
-  // frontier so the newest column is always in view.
-  const walkStripRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    const el = walkStripRef.current
-    if (!el) return
-    const raf = requestAnimationFrame(() => el.scrollTo({ left: el.scrollWidth, behavior: 'smooth' }))
-    return () => cancelAnimationFrame(raf)
-  }, [lensStack.length])
-
   const { incomingRecords, outgoingRecords } = useMemo(
     () => (nodeId
       ? deriveNeighborRecords(nodeId, edgesByEndpoint.get(nodeId) ?? [], nodeMap, containmentEdgeTypes)
@@ -378,7 +355,6 @@ export function LineageLens({
   const focalType = (focalNode?.data?.type as string) ?? 'entity'
   const focalColor = generateColorFromType(focalType)
   const focalFetch = fetchStatus?.get(nodeId)
-  const focalChildren = containmentByHop.get(nodeId) ?? []
   const focalChildTotal = Math.max(
     focalChildren.length,
     (focalNode?.data?.childCount as number | undefined) ?? 0,
@@ -388,7 +364,7 @@ export function LineageLens({
   // hop already is the parent (saying it twice reads as noise).
   const focalParentId = resolveParent(nodeId)
   const focalParentLabel = focalParentId ? labelOf(focalParentId, nodeMap.get(focalParentId)) : null
-  const focalParentInHeader = focalParentId && focalParentId !== lensStack[lensStack.length - 2]
+  const focalParentInHeader = focalParentId && focalParentId !== entries[cursor - 1]
     ? focalParentLabel
     : null
 
@@ -448,23 +424,39 @@ export function LineageLens({
               </div>
               <p className="flex items-center gap-1.5 text-[10.5px] text-ink-muted leading-tight">
                 <span>
-                  {lensStack.length > 1
-                    ? `Walking ${walkDirection === 'outgoing' ? 'downstream' : 'upstream'} · ${lensStack.length - 1} hop${lensStack.length === 2 ? '' : 's'} · ${(walkDirection === 'outgoing' ? outgoingRecords : incomingRecords).length} at the frontier`
-                    : `${focalDirectTotal} direct connection${focalDirectTotal === 1 ? '' : 's'}${focalRollupTotal > 0 ? ` · ${focalRollupTotal} rolled-up` : ''}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
+                  {`${focalDirectTotal} direct connection${focalDirectTotal === 1 ? '' : 's'}${focalRollupTotal > 0 ? ` · ${focalRollupTotal} rolled-up` : ''}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
                 </span>
                 {focalFetch === 'loading' && (
                   <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
                 )}
               </p>
             </div>
-            {lensStack.length > 1 && (
+            {/* History navigation — browser semantics: Back/Forward move
+                the cursor along the walked path without dropping hops.
+                Forward appears only when there is a forward side. */}
+            {canBack && (
               <button
                 type="button"
                 onClick={onBack}
+                title="Step back one hop (←)"
                 className="ml-2 flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
               >
                 <LucideIcons.ArrowLeft className="w-3 h-3" />
                 Back
+              </button>
+            )}
+            {canForward && (
+              <button
+                type="button"
+                onClick={onForward}
+                title="Step forward one hop (→)"
+                className={cn(
+                  'flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                  canBack ? 'ml-1' : 'ml-2',
+                )}
+              >
+                Forward
+                <LucideIcons.ArrowRight className="w-3 h-3" />
               </button>
             )}
             <div className="ml-auto flex items-center gap-2">
@@ -498,106 +490,114 @@ export function LineageLens({
             </div>
           </div>
 
-          {/* ── Walk trail — the lens stack as a visible, clickable path.
-              Re-centering is a WALK; this makes the walked route a
-              first-class object: every hop is a chip, clicking an
-              earlier hop jumps the walk back to that point (the spatial
-              generalization of Back). Increment 1 of the Miller-column
-              walk — the current frontier renders below as today's
-              single-focal body. ── */}
-          {lensStack.length > 1 && onJumpTo && (
+          {/* ── Path trail — the focus history as a visible, clickable
+              path. Every visited hop is a chip; the cursor's chip is
+              highlighted and hops AHEAD of the cursor stay visible
+              (dimmed) — clicking any chip moves the cursor there
+              without dropping the trail (browser history, not a
+              destructive stack). ── */}
+          {entries.length > 1 && onJumpTo && (
             <div className="flex items-center gap-1 px-4 py-2 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] overflow-x-auto custom-scrollbar whitespace-nowrap">
               <span className="flex-shrink-0 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ink-muted/60 mr-1">
-                Walk
+                Path
               </span>
-              {(collapseTrail
-                ? [0, -1, ...Array.from({ length: 4 }, (_, k) => lensStack.length - 4 + k)]
-                : lensStack.map((_, i) => i)
-              ).map((i, pos) => {
-                if (i === -1) {
-                  const hidden = lensStack.slice(1, lensStack.length - 4)
+              {(() => {
+                // Middle-truncation window anchored on the CURSOR (not
+                // the tail — after Back the tail is the forward side).
+                let visible: number[]
+                if (!collapseTrail) {
+                  visible = entries.map((_, i) => i)
+                } else {
+                  const start = Math.max(1, cursor - 3)
+                  const end = Math.min(entries.length - 1, cursor + 1)
+                  visible = [0]
+                  if (start > 1) visible.push(-1)
+                  for (let i = start; i <= end; i++) visible.push(i)
+                  if (end < entries.length - 1) visible.push(-2)
+                }
+                return visible.map((i, pos) => {
+                  if (i === -1 || i === -2) {
+                    const hidden = i === -1
+                      ? entries.slice(1, Math.max(1, cursor - 3))
+                      : entries.slice(Math.min(entries.length - 1, cursor + 1) + 1)
+                    return (
+                      <div key={i === -1 ? 'trail-gap' : 'trail-gap-fwd'} className="flex items-center gap-1 flex-shrink-0">
+                        <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />
+                        <button
+                          type="button"
+                          onClick={() => setShowFullTrail(true)}
+                          title={`Show ${hidden.length} hidden hop${hidden.length === 1 ? '' : 's'}: ${hidden.map(id => labelOf(id, nodeMap.get(id))).join(' → ')}`}
+                          className="px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-dashed border-ink-muted/30 transition-colors"
+                        >
+                          … {hidden.length} hop{hidden.length === 1 ? '' : 's'}
+                        </button>
+                      </div>
+                    )
+                  }
+                  const id = entries[i]
+                  const isCurrent = i === cursor
+                  const isForward = i > cursor
+                  const label = labelOf(id, nodeMap.get(id))
+                  const chipColor = generateColorFromType((nodeMap.get(id)?.data?.type as string) ?? 'entity')
+                  const meta = i > 0 ? hopMeta[i - 1] : null
+                  // Direction arrows only between ADJACENT hops — after a
+                  // gap chip the transition shown isn't the real one.
+                  const adjacent = pos > 0 && visible[pos - 1] === i - 1
+                  // Parent context — "ticket_key · fact_support" — except
+                  // when the previous hop already IS the parent.
+                  const chipParent = resolveParent(id)
+                  const chipParentLabel = chipParent && chipParent !== entries[i - 1]
+                    ? labelOf(chipParent, nodeMap.get(chipParent))
+                    : null
                   return (
-                    <div key="trail-gap" className="flex items-center gap-1 flex-shrink-0">
-                      <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />
+                    <div key={`${id}-${i}`} className="flex items-center gap-1 flex-shrink-0">
+                      {i > 0 && (
+                        meta && adjacent ? (
+                          <span
+                            className="flex items-center"
+                            title={`${meta.edgeType || 'connection'} — walked ${meta.downstream ? 'downstream' : 'upstream'}`}
+                          >
+                            {meta.downstream
+                              ? <LucideIcons.MoveRight className={cn('w-3.5 h-3.5 text-accent-lineage/70', isForward && 'opacity-50')} />
+                              : <LucideIcons.MoveLeft className={cn('w-3.5 h-3.5 text-amber-500/80', isForward && 'opacity-50')} />}
+                          </span>
+                        ) : (
+                          <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />
+                        )
+                      )}
                       <button
                         type="button"
-                        onClick={() => setShowFullTrail(true)}
-                        title={`Show ${hidden.length} hidden hop${hidden.length === 1 ? '' : 's'}: ${hidden.map(id => labelOf(id, nodeMap.get(id))).join(' → ')}`}
-                        className="px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-dashed border-ink-muted/30 transition-colors"
+                        disabled={isCurrent}
+                        onClick={() => onJumpTo(i)}
+                        title={`${isCurrent ? label : `Jump to ${label}`}${chipParentLabel ? ` — in ${chipParentLabel}` : ''}`}
+                        className={cn(
+                          isCurrent
+                            ? 'flex items-center gap-1.5 max-w-[230px] px-2 py-0.5 rounded-md text-[11px] font-semibold text-accent-lineage bg-accent-lineage/12 border border-accent-lineage/30'
+                            : 'flex items-center gap-1.5 max-w-[210px] px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent transition-colors',
+                          // The forward side of the history — where
+                          // Forward leads — dimmed but fully clickable.
+                          isForward && 'opacity-55 hover:opacity-100',
+                        )}
                       >
-                        … {hidden.length} hop{hidden.length === 1 ? '' : 's'}
+                        <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: chipColor }} />
+                        <span className="truncate">{label}</span>
+                        {chipParentLabel && (
+                          <span className="flex-shrink min-w-0 max-w-[90px] truncate text-[9px] font-normal text-ink-muted/60">
+                            · {chipParentLabel}
+                          </span>
+                        )}
                       </button>
                     </div>
                   )
-                }
-                const id = lensStack[i]
-                const isCurrent = i === lensStack.length - 1
-                const label = labelOf(id, nodeMap.get(id))
-                const chipColor = generateColorFromType((nodeMap.get(id)?.data?.type as string) ?? 'entity')
-                const meta = i > 0 ? hopMeta[i - 1] : null
-                const afterGap = collapseTrail && pos === 2
-                // Parent context — "ticket_key · fact_support" — except
-                // when the previous hop already IS the parent.
-                const chipParent = resolveParent(id)
-                const chipParentLabel = chipParent && chipParent !== lensStack[i - 1]
-                  ? labelOf(chipParent, nodeMap.get(chipParent))
-                  : null
-                return (
-                  <div key={`${id}-${i}`} className="flex items-center gap-1 flex-shrink-0">
-                    {i > 0 && (
-                      meta && !afterGap ? (
-                        <span
-                          className="flex items-center"
-                          title={`${meta.edgeType || 'connection'} — walked ${meta.downstream ? 'downstream' : 'upstream'}`}
-                        >
-                          {meta.downstream
-                            ? <LucideIcons.MoveRight className="w-3.5 h-3.5 text-accent-lineage/70" />
-                            : <LucideIcons.MoveLeft className="w-3.5 h-3.5 text-amber-500/80" />}
-                        </span>
-                      ) : (
-                        <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />
-                      )
-                    )}
-                    <button
-                      type="button"
-                      disabled={isCurrent}
-                      onClick={() => onJumpTo(i)}
-                      title={`${isCurrent ? label : `Jump back to ${label}`}${chipParentLabel ? ` — in ${chipParentLabel}` : ''}`}
-                      className={
-                        isCurrent
-                          ? 'flex items-center gap-1.5 max-w-[230px] px-2 py-0.5 rounded-md text-[11px] font-semibold text-accent-lineage bg-accent-lineage/12 border border-accent-lineage/30'
-                          : 'flex items-center gap-1.5 max-w-[210px] px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent transition-colors'
-                      }
-                    >
-                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: chipColor }} />
-                      <span className="truncate">{label}</span>
-                      {chipParentLabel && (
-                        <span className="flex-shrink min-w-0 max-w-[90px] truncate text-[9px] font-normal text-ink-muted/60">
-                          · {chipParentLabel}
-                        </span>
-                      )}
-                    </button>
-                  </div>
-                )
-              })}
-              {/* The walk as a deliverable: present it on the canvas, or
-                  copy it as text for a ticket/finding. */}
+                })
+              })()}
+              {/* The walked path (up to the cursor) as a deliverable:
+                  present it on the canvas, or copy it as text. */}
               <div className="ml-auto flex items-center gap-1 pl-2 flex-shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setDirectionOverride(walkDirection === 'outgoing' ? 'incoming' : 'outgoing')}
-                  title={`Walking ${walkDirection === 'outgoing' ? 'downstream (data consumers)' : 'upstream (data sources)'} — click to flip the walk direction`}
-                  className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold border transition-colors border-black/10 dark:border-white/10 text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
-                >
-                  {walkDirection === 'outgoing'
-                    ? <LucideIcons.MoveRight className="w-3 h-3 text-accent-lineage" />
-                    : <LucideIcons.MoveLeft className="w-3 h-3 text-amber-500" />}
-                  {walkDirection === 'outgoing' ? 'Downstream' : 'Upstream'}
-                </button>
                 {onShowPathOnCanvas && (
                   <button
                     type="button"
-                    onClick={() => { onClose(); onShowPathOnCanvas(lensStack) }}
+                    onClick={() => { onClose(); onShowPathOnCanvas(entries.slice(0, cursor + 1)) }}
                     title="Frame this walked path on the canvas"
                     className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
                   >
@@ -612,9 +612,9 @@ export function LineageLens({
                     // pasted path carries full context; the qualifier is
                     // dropped when the previous hop already is the parent.
                     void navigator.clipboard?.writeText(
-                      lensStack.map((id, idx) => {
+                      entries.slice(0, cursor + 1).map((id, idx, path) => {
                         const p = resolveParent(id)
-                        const qualified = p && p !== lensStack[idx - 1]
+                        const qualified = p && p !== path[idx - 1]
                         return qualified
                           ? `${labelOf(p, nodeMap.get(p))}.${labelOf(id, nodeMap.get(id))}`
                           : labelOf(id, nodeMap.get(id))
@@ -656,422 +656,14 @@ export function LineageLens({
             </div>
           )}
 
-          {/* ── Walk body (Miller columns) — one column per hop, oldest
-              on the left, the current frontier widest on the right. Each
-              column lists its hop's frontier in the LOCKED direction;
-              the row you walked into is highlighted, and clicking a row
-              in an earlier column BRANCHES the walk from that hop.
-              Complexity stays constant: path + frontier, never a tree. ── */}
-          {lensStack.length > 1 && onWalkTo ? (
-            <div ref={walkStripRef} className="flex-1 flex min-h-0 overflow-x-auto custom-scrollbar divide-x divide-black/[0.06] dark:divide-white/[0.06]">
-              {lensStack.map((hopId, i) => {
-                const recsAll = walkDirection === 'outgoing'
-                  ? hopRecords[i].outgoingRecords
-                  : hopRecords[i].incomingRecords
-                // Dedupe per neighbor (multiple edge types bundle to ×N).
-                const byNeighbor = new Map<string, { rec: NeighborRecord; n: number }>()
-                for (const r of recsAll) {
-                  const cur = byNeighbor.get(r.neighborId)
-                  if (cur) cur.n += 1
-                  else byNeighbor.set(r.neighborId, { rec: r, n: 1 })
-                }
-                const isLast = i === lensStack.length - 1
-                const walkedInto = !isLast ? lensStack[i + 1] : null
-                const hopType = (nodeMap.get(hopId)?.data?.type as string) ?? 'entity'
-                // Finer/peer rows first; coarser-grain rollups demoted to
-                // the end (visible, badged — never silently dropped).
-                const rowsFiner: Array<{ rec: NeighborRecord; n: number; coarser: boolean }> = []
-                const rowsCoarser: Array<{ rec: NeighborRecord; n: number; coarser: boolean }> = []
-                for (const { rec, n } of byNeighbor.values()) {
-                  if (isLast && !filterFn(rec)) continue
-                  const coarser = isCoarserThan(rec.neighborNode?.data?.type as string | undefined, hopType)
-                  ;(coarser ? rowsCoarser : rowsFiner).push({ rec, n, coarser })
-                }
-                const rows = [...rowsFiner, ...rowsCoarser].slice(0, 200)
-                // Grain chips (frontier column) + lens-global hidden-type
-                // filter, and the same parent-dataset grouping the classic
-                // columns use — the frontier reads "which datasets, via
-                // which fields", not a wall of bare names.
-                const typeCounts = new Map<string, number>()
-                for (const { rec } of byNeighbor.values()) {
-                  const t = (rec.neighborNode?.data?.type as string) ?? 'not loaded'
-                  typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1)
-                }
-                const hopChips: Array<[string, number]> = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])
-                let hopHiddenCount = 0
-                const shownRows: typeof rows = []
-                for (const it of rows) {
-                  const t = (it.rec.neighborNode?.data?.type as string) ?? 'not loaded'
-                  if (hiddenTypes.has(t)) { hopHiddenCount++; continue }
-                  shownRows.push(it)
-                }
-                const walkGroupMap = new Map<string, { kind: 'parent' | 'type'; key: string; rows: typeof rows }>()
-                const rollupRows: typeof rows = []
-                for (const it of shownRows) {
-                  if (it.coarser) { rollupRows.push(it); continue }
-                  const p = resolveParent(it.rec.neighborId)
-                  const useParent = !!p && p !== hopId
-                  const mk = useParent ? `p:${p}` : `t:${(it.rec.neighborNode?.data?.type as string) ?? 'not loaded'}`
-                  let g = walkGroupMap.get(mk)
-                  if (!g) {
-                    g = {
-                      kind: useParent ? 'parent' : 'type',
-                      key: useParent ? (p as string) : ((it.rec.neighborNode?.data?.type as string) ?? 'not loaded'),
-                      rows: [],
-                    }
-                    walkGroupMap.set(mk, g)
-                  }
-                  g.rows.push(it)
-                }
-                const hopGroups = [...walkGroupMap.values()].sort((a, b) => b.rows.length - a.rows.length)
-                const hopLabel = labelOf(hopId, nodeMap.get(hopId))
-                const hopColor = generateColorFromType((nodeMap.get(hopId)?.data?.type as string) ?? 'entity')
-                const hopFetch = fetchStatus?.get(hopId)
-                const hopChildren = (containmentByHop.get(hopId) ?? [])
-                  .filter(cid => !isLast || q === '' || labelOf(cid, nodeMap.get(cid)).toLowerCase().includes(q))
-                const hopChildTotal = Math.max(
-                  hopChildren.length,
-                  (nodeMap.get(hopId)?.data?.childCount as number | undefined) ?? 0,
-                )
-                return (
-                  <motion.div
-                    key={`walk-col-${hopId}-${i}`}
-                    initial={{ opacity: 0, x: 24 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ duration: 0.18, ease: 'easeOut' }}
-                    className={isLast
-                      ? 'flex-1 min-w-[300px] flex flex-col min-h-0 bg-accent-lineage/[0.03]'
-                      : 'w-[230px] flex-shrink-0 flex flex-col min-h-0'}
-                  >
-                    <div className="flex items-center gap-1.5 px-3 py-2 border-b border-black/[0.06] dark:border-white/[0.06]">
-                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: hopColor }} />
-                      <span className="truncate text-[11.5px] font-semibold text-ink">{hopLabel}</span>
-                      {(() => {
-                        const hp = resolveParent(hopId)
-                        return hp && hp !== lensStack[i - 1] ? (
-                          <span className="flex-shrink min-w-0 max-w-[40%] truncate text-[9.5px] text-ink-muted/60">
-                            · {labelOf(hp, nodeMap.get(hp))}
-                          </span>
-                        ) : null
-                      })()}
-                      <span className="ml-auto flex-shrink-0 flex items-center gap-1 text-[10px] tabular-nums text-ink-muted/70">
-                        {hopFetch === 'loading' && (
-                          <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
-                        )}
-                        {byNeighbor.size}
-                      </span>
-                    </div>
-                    <div className="flex-1 overflow-y-auto custom-scrollbar py-1">
-                      {/* IIFE so the row renderer can be shared by the
-                          parent groups, type groups, and rollup tier
-                          without hoisting its many closures into props. */}
-                      {(() => {
-                      const renderWalkRow = ({ rec, n, coarser }: { rec: NeighborRecord; n: number; coarser: boolean }, showParentHint: boolean) => {
-                        const rid = rec.neighborId
-                        const active = rid === walkedInto
-                        const rowColor = generateColorFromType((rec.neighborNode?.data?.type as string) ?? 'entity')
-                        // Parent breadcrumb — a bare field name isn't
-                        // identifying; say which dataset it belongs to.
-                        // Omitted inside parent groups (the header says it)
-                        // and when the parent IS this hop.
-                        const rowParent = showParentHint ? resolveParent(rid) : null
-                        const rowParentLabel = rowParent && rowParent !== hopId
-                          ? labelOf(rowParent, nodeMap.get(rowParent))
-                          : null
-                        const aggData = rec.edge.data as { isAggregated?: boolean; sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
-                        const drillKey = `${i}:${rid}`
-                        const canDrill = !!aggData?.isAggregated
-                          && ((aggData.sourceEdges?.length ?? 0) > 0 || (aggData.sourceEdgeCount ?? 0) > 1)
-                        const drilled = canDrill && drilledRows.has(drillKey)
-                        // Constituents = locally loaded raw edges ∪ edges
-                        // fetched on demand for this drill, deduped by id.
-                        const drillState = drilled ? drillStatus?.get(rec.edge.id) : undefined
-                        let constituents: LineageEdge[] = []
-                        let missing = 0
-                        if (drilled) {
-                          const local = (aggData?.sourceEdges ?? [])
-                            .map(eid => rawEdgeById.get(eid))
-                            .filter((e): e is LineageEdge => !!e)
-                          const seenConstituent = new Set(local.map(e => e.id))
-                          const fetched = (drillEdges?.get(rec.edge.id) ?? []).filter(e => !seenConstituent.has(e.id))
-                          const all = [...local, ...fetched]
-                          constituents = all.slice(0, 50)
-                          missing = Math.max(0, Math.max(aggData?.sourceEdgeCount ?? 0, all.length) - constituents.length)
-                        }
-                        return (
-                          // content-visibility: offscreen walk rows skip
-                          // layout+paint (frontiers can reach 200 rows).
-                          <div key={rid} className="[content-visibility:auto] [contain-intrinsic-size:auto_30px]">
-                            <div className="flex items-stretch">
-                              <button
-                                type="button"
-                                onClick={() => (isLast ? onRecenter(rid) : onWalkTo(i, rid))}
-                                title={isLast
-                                  ? `Walk into ${labelOf(rid, rec.neighborNode)}`
-                                  : `Branch the walk here — continue from ${labelOf(rid, rec.neighborNode)}`}
-                                className={
-                                  active
-                                    ? 'flex-1 min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-semibold text-accent-lineage bg-accent-lineage/10 border-l-2 border-accent-lineage'
-                                    : `flex-1 min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] border-l-2 border-transparent transition-colors${coarser ? ' opacity-70 hover:opacity-100' : ''}`
-                                }
-                              >
-                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: rowColor }} />
-                                <span className="truncate">{labelOf(rid, rec.neighborNode)}</span>
-                                {rowParentLabel && (
-                                  <span className="flex-shrink min-w-0 max-w-[45%] truncate text-[9px] text-ink-muted/50">
-                                    · {rowParentLabel}
-                                  </span>
-                                )}
-                                {n > 1 && <span className="flex-shrink-0 text-[9.5px] tabular-nums text-ink-muted/60">×{n}</span>}
-                                {coarser && (
-                                  <span
-                                    className="flex-shrink-0 flex items-center"
-                                    title="A coarser-grain summary of finer flows — not an additional connection"
-                                  >
-                                    <LucideIcons.Layers className="w-2.5 h-2.5 text-ink-muted/40" />
-                                  </span>
-                                )}
-                                <LucideIcons.ChevronRight className={`ml-auto w-3 h-3 flex-shrink-0 ${active ? 'text-accent-lineage' : 'text-ink-muted/30'}`} />
-                              </button>
-                              {canDrill && (
-                                <button
-                                  type="button"
-                                  onClick={() => toggleDrillWithFetch(drillKey, rec.edge)}
-                                  title={drilled
-                                    ? 'Collapse back to the rolled-up connection'
-                                    : `Refine — see the ${(aggData?.sourceEdgeCount ?? 0).toLocaleString()} underlying connection${(aggData?.sourceEdgeCount ?? 0) === 1 ? '' : 's'} this rolls up`}
-                                  className="flex-shrink-0 px-1.5 flex items-center text-ink-muted/50 hover:text-ink transition-colors"
-                                >
-                                  <LucideIcons.ChevronDown className={`w-3 h-3 transition-transform ${drilled ? '' : '-rotate-90'}`} />
-                                </button>
-                              )}
-                            </div>
-                            {/* Refined constituents — the aggregate's real
-                                endpoints, resolved from loaded raw edges.
-                                Unloaded remainder reported, never invented. */}
-                            {drilled && (
-                              <div className="ml-4 pl-2 border-l border-dashed border-black/[0.10] dark:border-white/[0.12] pb-1">
-                                {constituents.map(e => {
-                                  const otherId = walkDirection === 'outgoing' ? e.target : e.source
-                                  const nearId = walkDirection === 'outgoing' ? e.source : e.target
-                                  const oColor = generateColorFromType((nodeMap.get(otherId)?.data?.type as string) ?? 'entity')
-                                  return (
-                                    <div
-                                      key={e.id}
-                                      className="flex items-center gap-1.5 px-2 py-1 min-w-0 text-[10.5px] text-ink/90"
-                                      title={`${labelOf(nearId, nodeMap.get(nearId))} → ${labelOf(otherId, nodeMap.get(otherId))}${(e.data?.edgeType as string) ? ` (${e.data?.edgeType as string})` : ''}`}
-                                    >
-                                      <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ backgroundColor: oColor }} />
-                                      <span className="truncate">{labelOf(otherId, nodeMap.get(otherId))}</span>
-                                    </div>
-                                  )
-                                })}
-                                {drillState === 'loading' && (
-                                  <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-ink-muted/70">
-                                    <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" />
-                                    Fetching underlying connections…
-                                  </div>
-                                )}
-                                {drillState === 'error' && (
-                                  <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-400">
-                                    <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
-                                    <span>Couldn&apos;t fetch the underlying connections.</span>
-                                    {onDrillFetch && (
-                                      <button
-                                        type="button"
-                                        onClick={() => onDrillFetch(rec.edge)}
-                                        className="font-semibold hover:underline"
-                                      >
-                                        Retry
-                                      </button>
-                                    )}
-                                  </div>
-                                )}
-                                {constituents.length === 0 && drillState !== 'loading' && drillState !== 'error' && (
-                                  <p className="px-2 py-1 text-[10px] text-ink-muted/70 italic leading-snug">
-                                    {drillState === 'done'
-                                      ? 'No underlying connections found between these entities.'
-                                      : 'Constituent connections aren’t loaded — drill this edge on the canvas to fetch them.'}
-                                  </p>
-                                )}
-                                {missing > 0 && constituents.length > 0 && drillState !== 'loading' && (
-                                  <p className="px-2 py-0.5 text-[10px] text-ink-muted/60">
-                                    +{missing.toLocaleString()} more (showing the first {constituents.length})
-                                  </p>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        )
-                      }
-                      return (
-                        <>
-                          {isLast && hopChips.length > 1 && (
-                            <TypeChips chips={hopChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} className="px-3 pb-1.5 pt-0.5" />
-                          )}
-                          {hopGroups.map(g => {
-                            if (g.kind === 'parent') {
-                              const pLabel = labelOf(g.key, nodeMap.get(g.key))
-                              const pColor = generateColorFromType((nodeMap.get(g.key)?.data?.type as string) ?? 'entity')
-                              const headerActive = g.key === walkedInto
-                              // Same collapse rule as the classic columns:
-                              // 3+ parent groups start collapsed, searching
-                              // (frontier filter) force-expands, and the
-                              // group holding the hop you walked into stays
-                              // open so the trail never hides itself.
-                              const defaultCollapsed = hopGroups.filter(gr => gr.kind === 'parent').length >= 3
-                              const collapseKey = `w${i}:p:${g.key}`
-                              const holdsWalkedInto = !!walkedInto && g.rows.some(it => it.rec.neighborId === walkedInto)
-                              const collapsed = !(isLast && q !== '') && !holdsWalkedInto
-                                && (defaultCollapsed !== collapseToggles.has(collapseKey))
-                              return (
-                                <div key={`pg-${g.key}`} className="mb-0.5">
-                                  {/* The WHOLE row toggles collapse (big
-                                      target); walking into the parent lives
-                                      on the dedicated arrow button. */}
-                                  <div className="flex items-center gap-1 px-1.5 mb-0.5 min-w-0">
-                                    <button
-                                      type="button"
-                                      onClick={() => toggleCollapse(collapseKey)}
-                                      title={collapsed ? `Expand ${g.rows.length} connection${g.rows.length === 1 ? '' : 's'}` : 'Collapse group'}
-                                      className={cn(
-                                        'flex-1 min-w-0 flex items-center gap-1.5 px-1.5 py-1.5 rounded-md text-left transition-colors bg-black/[0.03] dark:bg-white/[0.04] hover:bg-black/[0.06] dark:hover:bg-white/[0.07]',
-                                        headerActive && 'bg-accent-lineage/[0.08]',
-                                      )}
-                                    >
-                                      <LucideIcons.ChevronDown className={cn('w-4 h-4 flex-shrink-0 text-ink-muted transition-transform', collapsed && '-rotate-90')} />
-                                      <LucideIcons.FolderTree className="w-3 h-3 flex-shrink-0 text-ink-muted/70" />
-                                      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: pColor }} />
-                                      <span className={cn('min-w-0 truncate text-[11.5px] font-semibold', headerActive ? 'text-accent-lineage' : 'text-ink')}>
-                                        {pLabel}
-                                      </span>
-                                      <span className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07] text-[9.5px] font-semibold tabular-nums text-ink-muted">
-                                        {g.rows.length}
-                                      </span>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => (isLast ? onRecenter(g.key) : onWalkTo(i, g.key))}
-                                      title={`Walk into ${pLabel}`}
-                                      className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors"
-                                    >
-                                      <LucideIcons.ArrowRight className="w-3.5 h-3.5" />
-                                    </button>
-                                  </div>
-                                  {!collapsed && g.rows.map(it => renderWalkRow(it, false))}
-                                </div>
-                              )
-                            }
-                            const tgUnloaded = g.key === 'not loaded'
-                            return (
-                              <div key={`tg-${g.key}`} className="mb-0.5">
-                                <div
-                                  className="flex items-center gap-1.5 px-3 pt-1.5 pb-0.5"
-                                  title={tgUnloaded ? 'Referenced by lineage, but the entity details couldn’t be resolved from the data source.' : undefined}
-                                >
-                                  {tgUnloaded
-                                    ? <LucideIcons.HelpCircle className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
-                                    : <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: generateColorFromType(g.key) }} />}
-                                  <span className="text-[9px] font-bold uppercase tracking-[0.1em] text-ink-muted/70">{tgUnloaded ? 'Unresolved' : g.key}</span>
-                                  <span className="text-[9.5px] tabular-nums text-ink-muted/50">{g.rows.length}</span>
-                                </div>
-                                {g.rows.map(it => renderWalkRow(it, true))}
-                              </div>
-                            )
-                          })}
-                          {rollupRows.length > 0 && (
-                            <div className="mt-1 pt-1 border-t border-dashed border-black/[0.08] dark:border-white/[0.10]">
-                              <div
-                                className="flex items-center gap-1.5 px-3 py-1"
-                                title="Coarser-grain summaries (containers, platforms) of the flows above — not additional connections"
-                              >
-                                <LucideIcons.Layers className="w-3 h-3 text-ink-muted/50" />
-                                <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/60">Rollups</span>
-                                <span className="text-[9.5px] tabular-nums text-ink-muted/50">{rollupRows.length}</span>
-                              </div>
-                              {rollupRows.map(it => renderWalkRow(it, true))}
-                            </div>
-                          )}
-                          {hopHiddenCount > 0 && (
-                            <p className="px-3 py-1 text-[10px] text-ink-muted/60">
-                              {hopHiddenCount} hidden by the type chips
-                            </p>
-                          )}
-                        </>
-                      )
-                      })()}
-                      {/* Contained entities — the containment descent that
-                          keeps a walk alive when a container carries its
-                          relationships at child level. Stepping into a
-                          child is a normal walk hop (trail + branch). */}
-                      {hopChildren.length > 0 && (
-                        <div className={byNeighbor.size > 0 ? 'mt-1 pt-1 border-t border-black/[0.05] dark:border-white/[0.05]' : ''}>
-                          <div className="flex items-center gap-1.5 px-3 py-1">
-                            <LucideIcons.FolderTree className="w-3 h-3 text-ink-muted/60" />
-                            <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/70">Contains</span>
-                            <span className="text-[9.5px] tabular-nums text-ink-muted/60">{hopChildTotal}</span>
-                          </div>
-                          {hopChildren.slice(0, 100).map(cid => {
-                            const active = cid === walkedInto
-                            const cColor = generateColorFromType((nodeMap.get(cid)?.data?.type as string) ?? 'entity')
-                            return (
-                              <button
-                                key={`child-${cid}`}
-                                type="button"
-                                onClick={() => (isLast ? onRecenter(cid) : onWalkTo(i, cid))}
-                                title={`Step into ${labelOf(cid, nodeMap.get(cid))} — walk its lineage`}
-                                className={
-                                  active
-                                    ? 'w-full min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-semibold text-accent-lineage bg-accent-lineage/10 border-l-2 border-accent-lineage [content-visibility:auto] [contain-intrinsic-size:auto_30px]'
-                                    : 'w-full min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] border-l-2 border-transparent transition-colors [content-visibility:auto] [contain-intrinsic-size:auto_30px]'
-                                }
-                              >
-                                <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
-                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: cColor }} />
-                                <span className="truncate">{labelOf(cid, nodeMap.get(cid))}</span>
-                                <LucideIcons.ChevronRight className={`ml-auto w-3 h-3 flex-shrink-0 ${active ? 'text-accent-lineage' : 'text-ink-muted/30'}`} />
-                              </button>
-                            )
-                          })}
-                          {hopChildTotal > Math.min(hopChildren.length, 100) && (
-                            <p className="px-3 py-0.5 text-[10px] text-ink-muted/60">
-                              +{(hopChildTotal - Math.min(hopChildren.length, 100)).toLocaleString()} more contained
-                            </p>
-                          )}
-                        </div>
-                      )}
-                      {byNeighbor.size === 0 && hopChildren.length > 0 && hopFetch !== 'loading' && (
-                        <p className="px-3 pt-2 pb-1 text-[10.5px] text-ink-muted/60 italic leading-snug">
-                          No direct {walkDirection === 'outgoing' ? 'downstream' : 'upstream'} connections —
-                          step into a contained entity to keep walking, or flip the direction.
-                        </p>
-                      )}
-                      {byNeighbor.size === 0 && hopChildren.length === 0 && (
-                        hopFetch === 'loading' ? (
-                          <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-ink-muted/70">
-                            <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
-                            Fetching lineage…
-                          </div>
-                        ) : (
-                          <p className="px-3 py-3 text-[11px] text-ink-muted/70 italic leading-snug">
-                            {hopFetch === 'done'
-                              // A completed fetch makes this a claim about the
-                              // data source, not about what happens to be loaded.
-                              ? <>No {walkDirection === 'outgoing' ? 'downstream' : 'upstream'} connections in the data source — the walk ends here, or flip the direction.</>
-                              : <>No {walkDirection === 'outgoing' ? 'downstream' : 'upstream'} connections loaded here — the walk ends, or flip the direction.</>}
-                          </p>
-                        )
-                      )}
-                    </div>
-                  </motion.div>
-                )
-              })}
-            </div>
-          ) : (
-          // minmax(0,1fr): a bare `1fr` track keeps min-width:auto, so a
-          // long unbroken field name blows the track past the dialog edge
-          // (no scroll → unusable). minmax(0,…) lets the track shrink and
-          // the rows' `truncate` take over.
+          {/* ── Body — the SAME layout at every depth: re-centering
+              swaps the focal in place instead of flipping to a
+              different presentation (the old Miller-columns walk body
+              was the #1 reported confusion).
+              minmax(0,1fr): a bare `1fr` track keeps min-width:auto, so
+              a long unbroken field name blows the track past the dialog
+              edge (no scroll → unusable). minmax(0,…) lets the track
+              shrink and the rows' `truncate` take over. ── */}
           <div className="flex-1 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] min-h-0">
             <NeighborColumn
               title="Data Sources"
@@ -1209,7 +801,6 @@ export function LineageLens({
               onOpenDetails={onOpenDetails}
             />
           </div>
-          )}
 
           {/* ── Outside this view (feature-flagged preview) — partners
               that exist in the data source but are beyond this view's
