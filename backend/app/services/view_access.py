@@ -281,6 +281,54 @@ def can_restore_view(ctx: ViewerContext, view: ViewORM) -> bool:
     )
 
 
+async def compute_access_envelope(
+    session: AsyncSession,
+    ctx: ViewerContext,
+    view: ViewORM,
+) -> dict:
+    """The caller's capability envelope for one view (camelCase keys,
+    ready for ``ViewAccessInfo``). Call only after ``can_read_view``
+    passed — ``accessVia`` assumes some path granted read.
+
+    ``accessVia`` precedence (most to least specific): owner → admin →
+    grant → workspace → enterprise. ``dataAccess`` is 'full' only when
+    the data plane would accept graph mutations from this caller
+    (``workspace:datasource:manage``) — everyone else, including
+    ``editor`` grantees, is 'readonly'.
+    """
+    claims = ctx.claims
+    is_creator = not ctx.is_anonymous and view.created_by == ctx.user_id
+    is_admin = has_permission(claims, "system:admin") or has_permission(
+        claims, "workspace:admin", workspace_id=view.workspace_id,
+    )
+    grant_roles = await _grant_roles(session, ctx, view)
+    if is_creator:
+        via = "owner"
+    elif is_admin:
+        via = "admin"
+    elif grant_roles:
+        via = "grant"
+    elif view.visibility == "workspace" and _is_workspace_member(ctx, view):
+        via = "workspace"
+    else:
+        via = "enterprise"
+    return {
+        "canEdit": await can_edit_view(session, ctx, view),
+        "canManageGrants": can_manage_grants(ctx, view),
+        "canChangeVisibility": can_change_visibility(ctx, view),
+        "canPublish": can_publish(ctx, view),
+        "accessVia": via,
+        "dataAccess": (
+            "full"
+            if has_permission(
+                claims, "workspace:datasource:manage",
+                workspace_id=view.workspace_id,
+            )
+            else "readonly"
+        ),
+    }
+
+
 # ── Read scope → SQL ─────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -365,6 +413,7 @@ __all__ = [
     "ViewReadScope",
     "build_read_scope",
     "readable_views_clause",
+    "compute_access_envelope",
     "can_read_view",
     "can_edit_view",
     "can_delete_view",

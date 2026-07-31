@@ -1096,6 +1096,33 @@ class ViewLayoutUpdateRequest(BaseModel):
         return self
 
 
+class ViewAccessInfo(BaseModel):
+    """The caller's capabilities on ONE view, computed server-side.
+
+    Returned only by the single-view read (never in list payloads — no
+    per-row grant math). The frontend drives its entire edit/share/
+    read-only UI off this envelope instead of re-deriving rules from
+    permission claims, so the two sides can't drift.
+
+    ``data_access`` describes what the DATA plane will accept for this
+    caller: ``full`` (holds ``workspace:datasource:manage``) or
+    ``readonly`` (view-capability reach — expand/trace/search work,
+    mutations don't). An ``editor`` grantee edits the view's config yet
+    stays ``readonly`` on graph data.
+    """
+    can_edit: bool = Field(alias="canEdit")
+    can_manage_grants: bool = Field(alias="canManageGrants")
+    can_change_visibility: bool = Field(alias="canChangeVisibility")
+    can_publish: bool = Field(alias="canPublish")
+    # 'owner' | 'admin' | 'grant' | 'workspace' | 'enterprise'
+    access_via: str = Field(alias="accessVia")
+    # 'full' | 'readonly'
+    data_access: str = Field(alias="dataAccess")
+
+    class Config:
+        populate_by_name = True
+
+
 class ViewResponse(BaseModel):
     id: str
     name: str
@@ -1147,6 +1174,12 @@ class ViewResponse(BaseModel):
     # knows some entity classifications may have changed since creation.
     # NULL on legacy rows → wizard treats as "drift check unavailable".
     ontology_digest: Optional[str] = Field(None, alias="ontologyDigest")
+    # Provider backing the view's (resolved) data source. Populated by
+    # the single-view read so the canvas can boot without the
+    # membership-gated workspace list; None in list payloads.
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    # Caller-specific capability envelope — single-view read only.
+    access: Optional[ViewAccessInfo] = None
 
     class Config:
         populate_by_name = True

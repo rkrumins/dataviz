@@ -32,7 +32,7 @@ from backend.app.auth.dependencies import (
 from backend.app.common.single_flight import normalised_principal, read_views_sf
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM
-from backend.app.db.repositories import view_repo
+from backend.app.db.repositories import data_source_repo, view_repo
 from backend.app.db.repositories import view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
@@ -42,6 +42,7 @@ from backend.app.services.versioning.db import graphver_session
 from backend.app.services.versioning.models import BranchORM
 from backend.auth_service.interface import User
 from backend.common.models.management import (
+    ViewAccessInfo,
     ViewCreateRequest,
     ViewUpdateRequest,
     ViewLayoutUpdateRequest,
@@ -526,10 +527,15 @@ async def get_view(
 
     ``branchId`` (a draft ref) projects the branch-effective config — base ⊕ the
     branch's layout overlay — so a draft sees its own layer/scope edits; published
-    and other branches see the base. Absent (or no overlay) → base, unchanged."""
+    and other branches see the base. Absent (or no overlay) → base, unchanged.
+
+    The response carries everything a caller needs to boot the canvas
+    WITHOUT workspace membership: the ``access`` capability envelope,
+    the resolved data source (workspace primary when the view stores
+    NULL), and its ``providerId``."""
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        view_orm = await _load_view_orm(session, view_id)
-        ctx = await _viewer_context(session, user, claims)
         if not await view_access.can_read_view(session, ctx, view_orm):
             # 404 (not 403) so view existence stays private from
             # users with no access path.
@@ -540,6 +546,26 @@ async def get_view(
     )
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
+    # Resolve the effective data source so the frontend never needs the
+    # (membership-gated) workspace list to find it.
+    if view_orm.data_source_id:
+        ds = await data_source_repo.get_data_source_orm(
+            session, view_orm.data_source_id,
+        )
+    else:
+        ds = await data_source_repo.get_primary_data_source(
+            session, view_orm.workspace_id,
+        )
+        if ds is not None:
+            view.data_source_id = ds.id
+            view.data_source_name = ds.label or view.data_source_name
+    if ds is not None:
+        view.provider_id = ds.provider_id
+
+    view.access = ViewAccessInfo(
+        **await view_access.compute_access_envelope(session, ctx, view_orm)
+    )
     return view
 
 
