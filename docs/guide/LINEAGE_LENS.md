@@ -13,25 +13,34 @@ Here you'll learn to:
 - **Open the Lens** from a dense node, the Anchor Rail, or a curated View.
 - **Read its layout** — sources on the left, consumers on the right, the focused
   entity in the middle.
-- **Walk a chain** of connections without ever touching the canvas.
+- **Walk a chain** of connections without ever touching the canvas, with
+  Back/Forward to retrace every step.
+- **Expand the picture** one hop at a time, exactly like dedicated lineage
+  tools.
 - **See lineage beyond a View's boundary** and preview what sits outside it.
 
 ## What the Lens shows
 
-The Lens opens as a centered panel over the canvas. The entity you focused sits
-in the middle as a highlighted card, with two columns flanking it:
-
-- **Data Sources** (left) — everything **upstream**, the entities your focal
-  node draws from.
-- **Data Consumers** (right) — everything **downstream**, the entities that
-  depend on it.
+The Lens opens as a near-fullscreen focus room over the canvas. By default it
+presents an **interactive lineage graph**: the entity you focused sits in the
+middle as a highlighted card, its **data sources** (upstream) fan out to the
+left and its **data consumers** (downstream) to the right, connected by
+direction-tinted edges.
 
 Data flows **left to right** throughout, so the layout reads the same way the
-canvas does. Each side is grouped by **entity type** (tables, columns,
-dashboards, and so on) with a count per group, and the focal card shows a quick
-tally — how many connections come *in* and how many go *out*. Numbers here
-always match the canvas, because the Lens reads the same connections you see on
-screen.
+canvas does. Neighbors that belong to the same parent — say, six fields of one
+dataset — arrive **rolled up into a single parent card** with a count, so a
+busy entity reads as "which datasets touch me" first; expanding the card
+reveals exactly the children that really participate in lineage, never the
+parent's full contents. Coarser-grain partners (a container or platform
+summarizing finer flows) keep a muted, dashed **rollup** treatment so they
+can't read as extra data. The focal card shows a quick tally — how many
+connections come *in* and how many go *out*. Numbers here always match the
+canvas, because the Lens reads the same connections you see on screen.
+
+Prefer scanning to exploring? The **Graph | List** toggle in the header swaps
+the body for the classic three-column list (sources | focal | consumers,
+grouped by parent with type chips). The Lens remembers your choice.
 
 ```mermaid
 flowchart LR
@@ -69,15 +78,32 @@ inside it changes your data — it reads connections, it doesn't rewrite them.
 
 The Lens is built for exploring, not just reading:
 
-- **Click any connection** to re-center the Lens on *that* entity. Its own
-  sources and consumers lay out around it, and a **Back** button appears so you
-  can retrace your steps. This lets you walk a chain of relationships without
-  ever touching the canvas.
-- **Filter connections** with the search box in the header — handy when a node
-  has dozens of neighbours and you're hunting for one by name.
-- Each connection row has two quiet actions on hover: **Reveal on canvas**
+- **Click a card** to inspect it — a detail strip slides up with the entity's
+  identity, its own in/out counts, and actions. Nothing jumps: focusing is
+  always a deliberate second gesture.
+- **Double-click a card** (or use **Focus here** in the strip) to re-center
+  the Lens on that entity. Its own sources and consumers lay out around it,
+  and the step is recorded in your **path**.
+- **Back and Forward** — buttons in the header, or the **←/→** keys — retrace
+  your walk in either direction, exactly like browser history: stepping back
+  never loses where you'd been, and the hops ahead of you stay visible
+  (dimmed) in the **Path** trail. Click any chip in the trail to jump straight
+  there. Focusing somewhere new after stepping back starts a fresh forward
+  path from that point.
+- **Expand a hop** with the **⊕ pill** on a card's outer edge to fetch and
+  reveal *that* entity's next hop of lineage — growing the graph outward from
+  your focus point, one deliberate step at a time. When the total is known,
+  the pill shows it (**+12**); the Lens never invents a number.
+- **Refine a rolled-up flow** with the **×N badge** on an aggregated
+  connection to see the underlying entity-level links it summarizes, with any
+  unloaded remainder reported honestly.
+- **Filter connections** with the search box in the header — matching cards
+  stay bright while the rest dim (a collapsed parent card tells you how many
+  matches it's holding), so a match can never silently vanish.
+- Cards offer two quiet actions on hover alongside Focus: **Reveal on canvas**
   (scrolls the real entity into view) and **Open details** (opens its details
-  panel).
+  panel). The path itself is a deliverable too — **Copy path** and **Show on
+  canvas** live at the end of the trail.
 
 At the bottom, two controls escalate beyond looking:
 
