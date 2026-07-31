@@ -1506,11 +1506,9 @@ class PropertyPreviewRequest(BaseModel):
 
 @router.get("/properties/storage")
 async def get_property_storage(
-    samplePerLabel: int = Query(
-        200, ge=1, le=2000,
-        description="Nodes sampled per label before classifying its storage.",
-    ),
-    engine: ContextEngine = Depends(get_context_engine),
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None, description="Target a specific data source."),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Report how each label stores its node properties.
 
@@ -1518,15 +1516,90 @@ async def get_property_storage(
     one container key. Those properties render (the read path hydrates the
     container) but are invisible to Advanced Search, because a nested value is
     not an indexable field. This says which labels are in that state, what
-    property paths unpacking would produce, exactly how many nodes are
+    property paths unpacking would produce, roughly how many nodes are
     affected, and which physical fields collide with platform-reserved names.
-    """
-    from backend.app.services.property_alignment import analyze_property_storage
 
-    mapping = getattr(engine.provider, "_mapping", None)
-    return await analyze_property_storage(
-        engine.provider, mapping, sample_per_label=samplePerLabel,
+    Cache-only read, exactly like ``/introspection``: it serves the
+    ``propertyStorage`` block the stats service writes into
+    ``data_source_stats.schema_stats``, and **never calls the provider**.
+    Classifying live would mean sampling every label on the request path,
+    which on a multi-million-node graph either blows its budget or starves
+    user reads for FalkorDB's single Cypher thread. Always HTTP 200 with the
+    canonical ``{data, meta}`` envelope; ``meta.status`` carries the cache
+    state, so a cold data source returns ``computing`` with a job id rather
+    than a timeout.
+    """
+    ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
+
+    try:
+        data, meta = await read_stats_cache(session, ds_id, ws_id, "schema_stats")
+        return JSONResponse(content=build_envelope(
+            (data or {}).get("propertyStorage"), meta,
+        ))
+    except CacheMiss:
+        pass
+    except (OperationalError, SQLAlchemyError) as exc:
+        logger.warning(
+            "get_property_storage: database unavailable (ds_id=%s): %s", ds_id, exc,
+        )
+        return JSONResponse(content=build_error_envelope(ds_id, reason="db_unavailable"))
+
+    msg_id = await enqueue_stats_job_safe(ds_id, ws_id) if ws_id else None
+    return JSONResponse(content=build_computing_envelope(ds_id, ws_id, msg_id))
+
+
+@router.post(
+    "/properties/storage/rescan",
+    status_code=202,
+    dependencies=[Depends(require_ws_manage)],
+)
+async def rescan_property_storage(
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None, description="Target a specific data source."),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Queue a fresh deep profile of this source's property storage.
+
+    The report is served from the stats service's cache, which refreshes on
+    its own cadence. An operator who has just changed the mapping should not
+    have to wait for the next sweep to see what it did, so this enqueues the
+    deep job directly and hands back its id to poll.
+
+    Force-enqueued past the dedup claim: the point is "re-read the graph
+    NOW", and silently collapsing into an in-flight poll that started before
+    the mapping changed would answer the wrong question.
+    """
+    from datetime import datetime as _dt
+    from backend.insights_service.enqueue import enqueue_job
+    from backend.insights_service.schemas import StatsDeepJobEnvelope
+
+    ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
+    if not ws_id:
+        raise HTTPException(status_code=400, detail="ws_id is required")
+
+    envelope = StatsDeepJobEnvelope(
+        data_source_id=ds_id,
+        workspace_id=ws_id,
+        enqueued_at=_dt.now(timezone.utc),
     )
+    try:
+        msg_id = await enqueue_job(envelope, dedup_ttl_secs=0)
+    except Exception as exc:
+        logger.warning("rescan_property_storage: enqueue failed (ds=%s): %s", ds_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "queue_unavailable",
+                "message": "Could not queue the re-scan — the job queue is "
+                           "unreachable. The report still refreshes on its "
+                           "normal schedule.",
+            },
+        )
+    return {"dataSourceId": ds_id, "jobId": msg_id, "status": "queued"}
 
 
 @router.post("/properties/storage/preview")

@@ -385,6 +385,15 @@ class GraphSchemaStats(BaseModel):
     entity_type_stats: List[EntityTypeSummary] = Field(default_factory=list, alias="entityTypeStats")
     edge_type_stats: List[EdgeTypeSummary] = Field(default_factory=list, alias="edgeTypeStats")
     tag_stats: List[TagSummary] = Field(default_factory=list, alias="tagStats")
+    # How each label physically stores its node properties (nested container vs
+    # native fields), produced by ``services.property_alignment``. Rides this
+    # model into the existing ``data_source_stats.schema_stats`` JSON column,
+    # so adding it needs no migration and rows written before it existed parse
+    # with ``None``. Left untyped: it is a report the analyzer owns, and a
+    # parallel model here would only be one more thing to keep in step.
+    property_storage: Optional[Dict[str, Any]] = Field(
+        default=None, alias="propertyStorage",
+    )
 
     class Config:
         populate_by_name = True

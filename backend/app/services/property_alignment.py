@@ -12,12 +12,28 @@ classifies the storage, and produces a before/after preview computed through
 the REAL read path, so what an operator previews cannot drift from what they
 will get.
 
-Sampling cost matches ``/search/discover`` (one bounded query per label), so
-callers can treat this as an ordinary synchronous endpoint.
+Scale contract
+--------------
+``analyze_property_storage`` issues exactly ONE bounded query per label — a
+capped sample — and nothing else. It deliberately does **not** count.
+
+An exact ``count(n) WHERE n.<container> IS NOT NULL`` is a non-indexable full
+label scan; on a multi-million-node graph it blows its budget, and a swallowed
+timeout reports zero affected nodes for precisely the graphs with the most
+trapped properties. Instead the affected figure is EXTRAPOLATED from the
+sample against the per-label totals the counts lane already caches
+(``{graph}:stats_cache``) — zero additional graph work at any graph size. The
+same trick, for the same reason, as
+:meth:`FalkorDBProvider._estimate_lineage_edge_count`.
+
+Even so, this runs in the insights service's deep pass (behind its admission
+gate and large-graph budget), not on the request path — see
+``insights_service/collector.py``. The web tier serves the cached result.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -71,20 +87,53 @@ def _classify(sampled: int, container_nodes: int, native_key_count: int) -> str:
     return "mixed"
 
 
+async def _label_totals(provider) -> Dict[str, int]:
+    """Per-label node totals from the counts the stats lane already caches.
+
+    Reads ``{graph}:stats_cache`` — the Redis key ``get_stats`` writes and the
+    insights collector primes write-through — so this costs no graph work at
+    any graph size. Returns ``{}`` when the cache is cold; callers then report
+    a ratio without an absolute, which is honest, rather than paying an O(N)
+    scan to invent one.
+    """
+    redis = getattr(provider, "_redis", None)
+    ns = getattr(provider, "_cache_ns", None)
+    if redis is None or not ns:
+        return {}
+    try:
+        cached = await redis.get(f"{ns}:stats_cache")
+        if not cached:
+            return {}
+        counts = (json.loads(cached) or {}).get("entityTypeCounts") or {}
+        return {str(k): int(v) for k, v in counts.items()}
+    except Exception:
+        return {}
+
+
 async def analyze_property_storage(
     provider,
     mapping: Optional[SchemaMapping] = None,
     *,
+    label_totals: Optional[Dict[str, int]] = None,
     sample_per_label: int = 200,
     max_labels: int = 100,
-    timeout_s: float = 5.0,
+    timeout_s: float = 30.0,
 ) -> Dict[str, Any]:
     """Per-label report of how this graph stores node properties.
 
     Returns the payload that drives the Mapping tab: what shape each label is
     in, which container keys were seen, what property paths unpacking would
-    produce, how many nodes are affected, and which physical fields collide
-    with platform-reserved names.
+    produce, roughly how many nodes are affected, and which physical fields
+    collide with platform-reserved names.
+
+    ONE bounded query per label; no counting. See the module docstring for why.
+    ``timeout_s`` defaults to the stats budget rather than the 5s generic read
+    default because this runs in the deep profiling pass, not on a request.
+
+    ``label_totals`` supplies the per-label node counts the estimates
+    extrapolate against. The insights collector passes the ones it just
+    computed; anyone else leaves it out and the cached counts are read from
+    Redis instead.
 
     Per-label failures are logged and skipped rather than failing the whole
     report — a single unreadable label should not blind the operator to the
@@ -97,6 +146,8 @@ async def analyze_property_storage(
     container_key = mapping.properties_field
     separator = mapping.properties_separator
     t0 = time.monotonic()
+    if label_totals is None:
+        label_totals = await _label_totals(provider)
 
     try:
         res = await provider._ro_query_tolerant(
@@ -168,33 +219,28 @@ async def analyze_property_storage(
 
         storage = _classify(sampled, container_nodes, len(native_keys))
 
-        # Exact affected count — the sample tells us the shape, not the size,
-        # and an operator about to rewrite a graph deserves the real number.
-        affected = 0
-        if container_key and container_nodes:
-            try:
-                res = await provider._ro_query_tolerant(
-                    f"MATCH (n:`{safe}`) WHERE n.`{container_key}` IS NOT NULL "
-                    f"RETURN count(n)",
-                    params={}, timeout=timeout_s,
-                )
-                rs = res.result_set or []
-                affected = int(rs[0][0]) if rs and rs[0] else 0
-            except Exception as exc:
-                logger.warning(
-                    "property analysis: label=%s count failed: %s", label, exc,
-                )
+        # Affected nodes, EXTRAPOLATED — never counted. The sample gives the
+        # ratio; the cached per-label total gives the size. ``None`` when the
+        # counts cache is cold: the UI shows the ratio and says the total is
+        # not known yet, which beats inventing a number or scanning for one.
+        label_total = label_totals.get(label)
+        affected_estimate: Optional[int] = None
+        if sampled and label_total is not None:
+            affected_estimate = round(container_nodes / sampled * label_total)
 
-        total_affected += affected
+        if affected_estimate:
+            total_affected += affected_estimate
         all_paths.update(inferred_paths)
 
         out_labels[label] = {
             "sampled": sampled,
+            "containerSampled": container_nodes,
+            "labelTotal": label_total,
             "storage": storage,
             "nativeKeys": sorted(native_keys),
             "containerKeys": sorted(container_keys_seen),
             "inferredPaths": sorted(inferred_paths),
-            "affectedNodes": affected,
+            "affectedEstimate": affected_estimate,
             "unparseable": unparseable,
             "collisions": [
                 {
@@ -206,6 +252,10 @@ async def analyze_property_storage(
             ],
         }
 
+    needs = sorted(
+        lbl for lbl, info in out_labels.items()
+        if info["storage"] in ("container", "mixed")
+    )
     return {
         "containerKey": container_key,
         "separator": separator,
@@ -214,13 +264,16 @@ async def analyze_property_storage(
         "labels": out_labels,
         "totals": {
             "labels": len(out_labels),
-            "affectedNodes": total_affected,
+            # Extrapolated, not counted — see the module docstring. Null when
+            # no label could be sized because the counts cache was cold.
+            "affectedEstimate": total_affected if label_totals else None,
             "newPaths": len(all_paths),
-            "needsAlignment": sorted(
-                lbl for lbl, info in out_labels.items()
-                if info["storage"] in ("container", "mixed")
-            ),
+            "needsAlignment": needs,
         },
+        # Lets the UI say "from a 200-node sample per type" instead of
+        # implying a precision the numbers above don't have.
+        "samplePerLabel": sample_per_label,
+        "sizedFromCache": bool(label_totals),
         "elapsedMs": int((time.monotonic() - t0) * 1000),
     }
 
