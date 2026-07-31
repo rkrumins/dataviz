@@ -699,7 +699,11 @@ async def delete_view(
     Hard-delete: ``workspace:admin`` only (per the action matrix).
     """
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        view_orm = await _load_view_orm(session, view_id)
+        # "Delete forever" targets views that are ALREADY in the trash —
+        # the live-only default would 404 before the authz check runs.
+        view_orm = await _load_view_orm(
+            session, view_id, include_deleted=permanent,
+        )
         ctx = await _viewer_context(session, user, claims)
         if permanent:
             allowed = view_access.can_hard_delete_view(ctx, view_orm)

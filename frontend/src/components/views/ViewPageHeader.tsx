@@ -95,7 +95,12 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             title="You can explore everything in this view — expanding, tracing and searching — but nothing can be changed."
                         >
                             <Eye className="w-3 h-3" />
-                            Shared with you · read-only
+                            {/* "Shared with you" is only true for grant/enterprise
+                                reach — a workspace viewer on their own workspace's
+                                views just has read-only rights, nothing was shared. */}
+                            {access?.accessVia === 'grant' || access?.accessVia === 'enterprise'
+                                ? 'Shared with you · read-only'
+                                : 'Read-only'}
                         </span>
                     )}
                 </div>

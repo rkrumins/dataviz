@@ -94,7 +94,11 @@ Reading a view now implies **read-only** access to its data plane: the
 graph/canvas routers accept a `?viewId=` capability context
 (`backend/app/api/v1/capability_gate.py`) pinned to the view's
 resolved data source. Mutations always require
-`workspace:datasource:manage`.
+`workspace:datasource:manage`. Workspace-metadata surfaces (assets
+rule-sets, context-model templates) use an unpinned variant of the
+gate — they have no data-source dimension, so a capability holder on
+ANY readable view in the workspace can read them; both routers are
+GET-only or manage-gated.
 
 `workspace:view:publish` gates every transition **to or from**
 `enterprise` (including creating a view directly as enterprise) — the

@@ -361,3 +361,25 @@ async def test_shared_with_me_category(test_client: AsyncClient, db_session):
     body = r.json()
     assert {v["id"] for v in body["items"]} == {ids["workspace_b"]}
     assert body["total"] == 1
+
+
+# ── deleted views: hard-delete stays reachable ───────────────────────
+
+@pytest.mark.asyncio
+async def test_permanent_delete_from_trash(test_client: AsyncClient, db_session):
+    """'Delete forever' targets views that are ALREADY soft-deleted —
+    the live-only default on _load_view_orm must not 404 the authz
+    step before can_hard_delete_view runs."""
+    ids = await _seed(db_session)
+    admin_claims = PermissionClaims(sid="s_wsadmin", ws_perms={WS_A: (
+        "workspace:admin", "workspace:view:*", "workspace:datasource:*",
+    )})
+    admin = _user("usr_trash_admin")
+    with _auth(user=admin, claims=admin_claims):
+        soft = await test_client.delete(f"/api/v1/views/{ids['workspace_a']}")
+        assert soft.status_code == 204, soft.text
+        hard = await test_client.delete(
+            f"/api/v1/views/{ids['workspace_a']}", params={"permanent": "true"},
+        )
+    assert hard.status_code == 204, hard.text
+    assert (await db_session.get(ViewORM, ids["workspace_a"])) is None

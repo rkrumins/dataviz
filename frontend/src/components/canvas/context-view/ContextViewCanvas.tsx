@@ -706,15 +706,17 @@ export function ContextViewCanvas({
   }, [])
 
   /** Arm (or re-arm) the debounced durable save and show the 'saving' indicator.
-   *  Read-only sessions never arm it: layout persistence is an edit, and the
-   *  backend would 403 the PUT anyway — one choke point instead of guarding
-   *  every gesture that feeds it. */
+   *  Gated on canEdit — the VIEW-config capability, not the graph-data one:
+   *  layout persistence is PUT /views/{id}/layout (can_edit_view), which an
+   *  editor-grantee passes even while their graph data stays read-only
+   *  (canEdit: true, dataAccess: 'readonly'). One choke point instead of
+   *  guarding every gesture that feeds it. */
   const armLayoutSave = useCallback(() => {
-    if (readOnly) return
+    if (!viewCaps.canEdit) return
     setLayoutSyncStatus('saving')
     if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current)
     layoutSaveTimer.current = setTimeout(() => { void doLayoutSave() }, 1500)
-  }, [doLayoutSave, readOnly])
+  }, [doLayoutSave, viewCaps.canEdit])
 
   /** Flush any pending debounced layout save NOW (no-op if none pending). Used by the Save button. */
   const flushLayoutSave = useCallback(async () => { await doLayoutSave() }, [doLayoutSave])
