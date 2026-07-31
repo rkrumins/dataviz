@@ -69,9 +69,17 @@ def upgrade() -> None:
             "revoked_by IS NULL OR revoked_at IS NOT NULL",
             name="ck_invites_revocation_consistency",
         ),
+        if_not_exists=True,
     )
-    op.create_index("idx_invites_created_by", "invites", ["created_by", "created_at"])
-    op.create_index("idx_invites_expires_at", "invites", ["expires_at"])
+    op.create_index(
+        "idx_invites_created_by",
+        "invites",
+        ["created_by", "created_at"],
+        if_not_exists=True,
+    )
+    op.create_index(
+        "idx_invites_expires_at", "invites", ["expires_at"], if_not_exists=True,
+    )
 
     op.create_table(
         "invite_redemptions",
@@ -86,11 +94,13 @@ def upgrade() -> None:
         sa.Column("email", sa.Text(), nullable=False),
         sa.Column("redeemed_at", sa.Text(), nullable=False),
         sa.UniqueConstraint("invite_id", "user_id", name="uq_invite_redemption"),
+        if_not_exists=True,
     )
     op.create_index(
         "idx_invite_redemptions_invite",
         "invite_redemptions",
         ["invite_id", "redeemed_at"],
+        if_not_exists=True,
     )
 
 

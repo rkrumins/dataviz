@@ -44,7 +44,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("users", sa.Column("display_name", sa.Text(), nullable=True))
+    op.add_column(
+        "users",
+        sa.Column("display_name", sa.Text(), nullable=True),
+        if_not_exists=True,
+    )
     op.add_column(
         "users",
         sa.Column(
@@ -53,10 +57,17 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.false(),
         ),
+        if_not_exists=True,
     )
-    op.add_column("users", sa.Column("avatar_id", sa.Text(), nullable=True))
     op.add_column(
-        "users", sa.Column("sessions_valid_from", sa.Text(), nullable=True),
+        "users",
+        sa.Column("avatar_id", sa.Text(), nullable=True),
+        if_not_exists=True,
+    )
+    op.add_column(
+        "users",
+        sa.Column("sessions_valid_from", sa.Text(), nullable=True),
+        if_not_exists=True,
     )
 
 

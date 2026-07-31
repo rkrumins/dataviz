@@ -28,6 +28,7 @@ def upgrade() -> None:
     op.add_column(
         "resource_grants",
         sa.Column("expires_at", sa.Text(), nullable=True),
+        if_not_exists=True,
     )
 
 
