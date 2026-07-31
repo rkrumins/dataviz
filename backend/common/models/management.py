@@ -1112,6 +1112,24 @@ class ViewResponse(BaseModel):
     workspace_name: Optional[str] = Field(None, alias="workspaceName")
     data_source_id: Optional[str] = Field(None, alias="dataSourceId")
     data_source_name: Optional[str] = Field(None, alias="dataSourceName")
+    # The graph provider behind this view's data source.
+    #
+    # The canvas cannot execute a single query without it, and the client used
+    # to resolve it by looking the view's workspace up in its own workspace
+    # store — which holds only the workspaces the caller is bound to. A reader
+    # who arrived through `enterprise` or `public` holds no such binding by
+    # definition, so it came back null and the canvas painted nothing.
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    # Liveness of the view's OWN workspace and data source, resolved server-
+    # side. Same reason: the client was deriving these from caller-scoped
+    # state, where "not in my list" is indistinguishable from "deleted".
+    workspace_is_active: bool = Field(True, alias="workspaceIsActive")
+    data_source_is_active: bool = Field(True, alias="dataSourceIsActive")
+    # healthy | warning | broken | stale, plus a reason naming what is
+    # actually wrong. Two callers must get the same answer for the same view:
+    # health describes the view, not the person asking about it.
+    health_status: str = Field("healthy", alias="healthStatus")
+    health_reason: Optional[str] = Field(None, alias="healthReason")
     view_type: str = Field(alias="viewType")
     # Layout algorithm (reference | hierarchical | force | …). Projected from
     # config.layoutType so metadata-only consumers (e.g. the ViewWizard's

@@ -1,11 +1,22 @@
 /**
- * useViewHealth — Cross-references views against workspace/datasource stores
- * to detect broken, stale, or warning views.
+ * View health — read from the server, never recomputed here.
  *
- * Computed client-side from existing Zustand store data — no new API calls.
+ * This module used to cross-reference each view against `useWorkspacesStore`
+ * and decide for itself whether the view was broken. That could not be right:
+ * `GET /workspaces` returns only the workspaces the caller holds a binding in,
+ * and `enterprise` / `public` views exist for people who hold no such binding.
+ * For exactly the audience those tiers were built for, the lookup always
+ * missed — and a miss was reported as `broken` / "Workspace no longer exists",
+ * which the Explorer card then rendered as the literal string "Source
+ * deleted". Nothing had been deleted, and the view's owner saw it as healthy
+ * at the same moment.
+ *
+ * Health is a property of the view, not of whoever is looking at it, so it is
+ * resolved server-side from the view's OWN workspace and data source and
+ * arrives on the DTO. The hook remains only to shape those fields into the map
+ * the existing call sites index by view id.
  */
 import { useMemo } from 'react'
-import { useWorkspacesStore } from '@/store/workspaces'
 import type { View } from '@/services/viewApiService'
 
 export type HealthStatus = 'healthy' | 'warning' | 'broken' | 'stale'
@@ -15,54 +26,15 @@ export interface ViewHealthInfo {
   reason?: string
 }
 
-const STALE_THRESHOLD_DAYS = 90
-
 export function useViewHealth(views: View[]): Map<string, ViewHealthInfo> {
-  const workspaces = useWorkspacesStore(s => s.workspaces)
-
   return useMemo(() => {
     const healthMap = new Map<string, ViewHealthInfo>()
-    const wsMap = new Map(workspaces.map(ws => [ws.id, ws]))
-
     for (const view of views) {
-      const ws = wsMap.get(view.workspaceId)
-
-      // Check if workspace exists
-      if (!ws) {
-        healthMap.set(view.id, { status: 'broken', reason: 'Workspace no longer exists' })
-        continue
-      }
-
-      // Check if workspace is active
-      if (!ws.isActive) {
-        healthMap.set(view.id, { status: 'warning', reason: 'Workspace is inactive' })
-        continue
-      }
-
-      // Check if data source exists (if view references one)
-      if (view.dataSourceId) {
-        const ds = ws.dataSources?.find(d => d.id === view.dataSourceId)
-        if (!ds) {
-          healthMap.set(view.id, { status: 'broken', reason: 'Data source no longer exists' })
-          continue
-        }
-        if (!ds.isActive) {
-          healthMap.set(view.id, { status: 'warning', reason: 'Data source is inactive' })
-          continue
-        }
-      }
-
-      // Check for staleness
-      const updatedAt = new Date(view.updatedAt)
-      const daysSinceUpdate = (Date.now() - updatedAt.getTime()) / (1000 * 60 * 60 * 24)
-      if (daysSinceUpdate > STALE_THRESHOLD_DAYS) {
-        healthMap.set(view.id, { status: 'stale', reason: `Not updated in ${Math.floor(daysSinceUpdate)} days` })
-        continue
-      }
-
-      healthMap.set(view.id, { status: 'healthy' })
+      healthMap.set(view.id, {
+        status: (view.healthStatus ?? 'healthy') as HealthStatus,
+        reason: view.healthReason ?? undefined,
+      })
     }
-
     return healthMap
-  }, [views, workspaces])
+  }, [views])
 }

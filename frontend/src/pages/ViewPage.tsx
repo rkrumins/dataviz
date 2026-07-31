@@ -19,7 +19,7 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function ViewPage() {
   const { viewId } = useParams<{ viewId: string }>()
-  const { status, view, layoutType, error, viewWorkspaceId, viewDataSourceId } = useViewNavigation(viewId)
+  const { status, view, layoutType, error, viewWorkspaceId, viewDataSourceId, providerId, healthStatus, healthReason } = useViewNavigation(viewId)
   const workspaces = useWorkspacesStore(s => s.workspaces)
 
   // Tab title: "{View} · {Workspace} · {Brand}". workspaceName is enriched from
@@ -33,17 +33,23 @@ export function ViewPage() {
       : 'View',
   )
 
-  // Lightweight health check for the active view
+  // Health comes from the server, which resolves it from the view's OWN
+  // workspace and data source.
+  //
+  // This used to look the workspace up in `workspaces` — the caller's own
+  // list — and blocked the canvas with "The workspace for this view no longer
+  // exists." whenever it missed. It misses for every reader of an `enterprise`
+  // or `public` view, because those tiers exist for people with no binding in
+  // that workspace, so the overlay covered a view that had loaded perfectly
+  // while its owner saw the same view as healthy. Note line ~29 above already
+  // had the right instinct: DTO first, store only as a fallback.
   const healthWarning = useMemo(() => {
     if (!view || status !== 'ready') return null
-    const ws = workspaces.find(w => w.id === view.workspaceId)
-    if (!ws) return 'The workspace for this view no longer exists.'
-    if (view.dataSourceId) {
-      const ds = ws.dataSources?.find(d => d.id === view.dataSourceId)
-      if (!ds) return 'The data source for this view has been deleted.'
+    if (healthStatus === 'broken') {
+      return healthReason ?? 'This view cannot be displayed.'
     }
     return null
-  }, [view, status, workspaces])
+  }, [view, status, healthStatus, healthReason])
 
   // ─── Error state ────────────────────────────────────────────────────
   if (status === 'error') {
@@ -114,6 +120,7 @@ export function ViewPage() {
             workspaceId={viewWorkspaceId}
             dataSourceId={viewDataSourceId}
             viewId={view?.id ?? null}
+            providerId={providerId}
           >
             <CanvasRouter layoutType={layoutType} />
             <UnsavedWorkGuard />

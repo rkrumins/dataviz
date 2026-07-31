@@ -104,6 +104,15 @@ interface ViewExecutionProviderProps {
   /** The active Context View's id (branch-per-view: scopes the draft lookup below to
    *  THIS view, so a different view on the same data source never reuses its branch). */
   viewId?: string | null
+  /**
+   * The view's own provider, resolved server-side and carried on the view DTO.
+   *
+   * Load-bearing for cross-workspace views: the store fallback below can only
+   * see workspaces the caller is bound to, so for any reader of an
+   * `enterprise` or `public` view it yields null — no provider, blank canvas.
+   * That was the "Enterprise/Public views can't be seen" report.
+   */
+  providerId?: string | null
   children: ReactNode
 }
 
@@ -111,6 +120,7 @@ export function ViewExecutionProvider({
   workspaceId,
   dataSourceId: dataSourceIdProp,
   viewId,
+  providerId: providerIdProp,
   children,
 }: ViewExecutionProviderProps) {
   const globalCtx = useGraphProviderContext()
@@ -141,12 +151,16 @@ export function ViewExecutionProvider({
   }, [dataSourceIdProp, workspaceId, globalCtx.workspaceId, globalActiveDataSourceId, workspaces])
 
   const providerId = useMemo(() => {
+    // The view's own provider wins. The store lookup below is a fallback for
+    // locally-created views that have no DTO yet — it cannot answer for a
+    // workspace the caller is not a member of.
+    if (providerIdProp) return providerIdProp
     const ws = workspaces.find((workspace) => workspace.id === workspaceId)
     const dataSource = ws?.dataSources?.find((candidate) => candidate.id === dataSourceId)
       ?? ws?.dataSources?.find((candidate) => candidate.isPrimary)
       ?? ws?.dataSources?.[0]
     return dataSource?.providerId ?? null
-  }, [workspaces, workspaceId, dataSourceId])
+  }, [providerIdProp, workspaces, workspaceId, dataSourceId])
   const providerStatus = useProviderStatus(providerId)
 
   // ── Draft scoping: the active branch (if this scope owns one) routes every read

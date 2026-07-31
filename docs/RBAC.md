@@ -343,6 +343,36 @@ private branch checks `workspace:admin`.
 > Membership is now the implementation of the `workspace` tier rather
 > than a parallel path around it.
 
+#### The corollary: never derive a fact about a view from the caller's scope
+
+`enterprise` and `public` readers hold **no binding** in the view's workspace.
+That is what those tiers are for, and it makes an entire class of code wrong:
+anything that answers a question about a view by consulting state scoped to
+the *caller* gets the right answer for members and a confidently wrong one for
+everybody the tier was written to serve.
+
+It bit twice, in both directions:
+
+* **Client.** View health and the canvas's `providerId` were computed by
+  looking the view's workspace up in the store behind `GET /workspaces`, which
+  is filtered to the caller's bindings. For a non-member the lookup missed, and
+  a miss was rendered as a deletion — a red badge and a full-screen "the
+  workspace no longer exists" over a healthy view, while its owner saw it as
+  fine. Health is a property of the view, so it is resolved server-side from
+  the view's own workspace and data source and carried on `ViewResponse`
+  (`health_status`, `health_reason`, `provider_id`, the `*_is_active` flags).
+* **Server.** Routes that had already loaded a view by id kept their own rule —
+  bare workspace membership, or nothing at all — and leaked `private` views
+  through the workspace activity feed, `visibility-preview`, the scope resolver
+  behind `/search/explain`, view-scoped import/export, and a 403-vs-404 split
+  on the grants router. All of them now go through `read_decision` /
+  `can_edit_view`.
+
+The rule, for anything added later: **a fact about a view is resolved from the
+view, and authorized with `view_access`.** If a code path answers "is this view
+broken / who is in its workspace / what is its scope" using the caller's
+workspaces, it is wrong for the tiers that matter most.
+
 Enforcement is a **SQL predicate** (`view_access.readable_views_predicate`),
 applied by `view_repo._apply_view_filters` to every listing. It used to be
 a Python loop at one endpoint, which made `total`/`hasMore` over-report by

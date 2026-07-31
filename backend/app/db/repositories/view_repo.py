@@ -94,6 +94,100 @@ async def _get_data_source_name(
     return result.scalar_one_or_none()
 
 
+#: Views older than this with no update are reported ``stale``.
+_STALE_THRESHOLD_DAYS = 90
+
+
+async def resolve_view_context(
+    session: AsyncSession,
+    *,
+    workspace_id: Optional[str],
+    data_source_id: Optional[str],
+    updated_at: Optional[str],
+) -> dict:
+    """The view's own workspace + data source, and what that says about it.
+
+    Resolved from the VIEW's ids, never from the caller's. That distinction is
+    the whole reason this exists on the server.
+
+    The client used to compute all of this itself, by looking the view's
+    workspace up in the store behind ``GET /workspaces`` — which returns only
+    the workspaces the caller holds a binding in. ``enterprise`` and ``public``
+    exist precisely for people who hold no such binding, so for exactly the
+    audience those tiers were built for the lookup always missed, and a miss
+    was rendered as a deletion: a red "Source deleted" badge on the card and a
+    full-screen "The workspace for this view no longer exists." over a view
+    that had loaded perfectly. Two accounts got opposite answers about the same
+    healthy view.
+
+    Health is a property of the view, not of whoever is looking at it. Only the
+    server can say so, because only the server can see the view's workspace
+    regardless of who asks.
+
+    ``providerId`` rides along because the canvas cannot execute without it and
+    the client was resolving that from the same store, with the same result:
+    ``null``, no provider, blank canvas.
+    """
+    ws = None
+    if workspace_id:
+        ws = (await session.execute(
+            select(WorkspaceORM.name, WorkspaceORM.is_active, WorkspaceORM.deleted_at)
+            .where(WorkspaceORM.id == workspace_id)
+        )).first()
+
+    ds = None
+    if data_source_id:
+        ds = (await session.execute(
+            select(
+                WorkspaceDataSourceORM.label,
+                WorkspaceDataSourceORM.is_active,
+                WorkspaceDataSourceORM.provider_id,
+                WorkspaceDataSourceORM.deleted_at,
+            ).where(WorkspaceDataSourceORM.id == data_source_id)
+        )).first()
+
+    status, reason = _classify_health(ws, ds, data_source_id, updated_at)
+    return {
+        "workspace_name": ws[0] if ws else None,
+        "workspace_is_active": bool(ws[1]) if ws else False,
+        "data_source_name": ds[0] if ds else None,
+        "data_source_is_active": bool(ds[1]) if ds else False,
+        "provider_id": ds[2] if ds else None,
+        "health_status": status,
+        "health_reason": reason,
+    }
+
+
+def _classify_health(ws, ds, data_source_id, updated_at) -> tuple[str, Optional[str]]:
+    """Order matters: report the most fundamental breakage, not the first one
+    noticed. A view whose workspace is gone is broken whatever its data source
+    says, and the message must name the thing that is actually missing — the
+    card used to label every ``broken`` "Source deleted" even when the reason
+    it recorded was "Workspace no longer exists"."""
+    if ws is None or ws[2] is not None:
+        return "broken", "This view's workspace no longer exists"
+    if not ws[1]:
+        return "warning", "This view's workspace is inactive"
+    if data_source_id:
+        if ds is None or ds[3] is not None:
+            return "broken", "This view's data source has been deleted"
+        if not ds[1]:
+            return "warning", "This view's data source is inactive"
+    if updated_at:
+        try:
+            when = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            days = (datetime.now(timezone.utc) - when).days
+            if days > _STALE_THRESHOLD_DAYS:
+                return "stale", f"Not updated in {days} days"
+        except ValueError:
+            # An unparseable timestamp says nothing about the view's health;
+            # reporting it as stale would be inventing a fact.
+            pass
+    return "healthy", None
+
+
 async def _get_favourite_count(
     session: AsyncSession, view_id: str
 ) -> int:
@@ -170,6 +264,7 @@ def _to_response(
     favourite_count: int = 0,
     is_favourited: bool = False,
     config_override: Optional[dict] = None,
+    context: Optional[dict] = None,
 ) -> ViewResponse:
     # ``config_override`` lets branch-scoped-layout callers project the
     # EFFECTIVE (base ⊕ overlay) config into the response without touching the
@@ -191,6 +286,11 @@ def _to_response(
         workspaceName=workspace_name,
         dataSourceId=row.data_source_id,
         dataSourceName=data_source_name,
+        providerId=(context or {}).get("provider_id"),
+        workspaceIsActive=(context or {}).get("workspace_is_active", True),
+        dataSourceIsActive=(context or {}).get("data_source_is_active", True),
+        healthStatus=(context or {}).get("health_status", "healthy"),
+        healthReason=(context or {}).get("health_reason"),
         viewType=row.view_type or "graph",
         layoutType=layout_type,
         config=config_dict,
@@ -233,8 +333,18 @@ async def _to_enriched_response(
     callers can project the effective (base ⊕ overlay) config; default None
     reads the row's stored config unchanged.
     """
-    ws_name = await _get_workspace_name(session, row.workspace_id)
-    ds_name = await _get_data_source_name(session, row.data_source_id)
+    # One resolver for the workspace, the data source and what their state
+    # says about the view — same two queries the two name lookups cost, and
+    # the health verdict comes back with them rather than being recomputed
+    # (differently, and wrongly) on the client.
+    context = await resolve_view_context(
+        session,
+        workspace_id=row.workspace_id,
+        data_source_id=row.data_source_id,
+        updated_at=row.updated_at,
+    )
+    ws_name = context["workspace_name"]
+    ds_name = context["data_source_name"]
     cm_name = await _get_context_model_name(session, row.context_model_id)
     # Resolve creator, modifier AND data-publisher in one batched lookup
     # (dedupes when they're the same principal).
@@ -260,6 +370,7 @@ async def _to_enriched_response(
         favourite_count=fav_count,
         is_favourited=fav,
         config_override=config_override,
+        context=context,
     )
 
 
@@ -323,22 +434,41 @@ async def _batch_enrich_rows(
     }
     view_ids: List[str] = [r.id for r in rows]
 
-    ws_map: Dict[str, str] = {}
+    # Both maps carry the liveness columns as well as the label, because the
+    # list path must produce the SAME health verdict as the single-view path.
+    # Two surfaces disagreeing about whether a view is broken is the class of
+    # bug this whole change exists to remove.
+    ws_rows: Dict[str, tuple] = {}
     if workspace_ids:
         res = await session.execute(
-            select(WorkspaceORM.id, WorkspaceORM.name)
-            .where(WorkspaceORM.id.in_(workspace_ids))
+            select(
+                WorkspaceORM.id, WorkspaceORM.name,
+                WorkspaceORM.is_active, WorkspaceORM.deleted_at,
+            ).where(WorkspaceORM.id.in_(workspace_ids))
         )
-        ws_map = {wid: name for wid, name in res.all()}
+        ws_rows = {wid: (name, active, deleted) for wid, name, active, deleted in res.all()}
+    ws_map: Dict[str, str] = {wid: r[0] for wid, r in ws_rows.items()}
 
-    ds_map: Dict[str, str] = {}
+    # Deliberately NOT filtered on deleted_at: the single-view resolver reads
+    # the column and classifies, so filtering here would make the two paths
+    # disagree for exactly the rows that matter.
+    ds_rows: Dict[str, tuple] = {}
     if ds_ids:
         res = await session.execute(
-            select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label)
-            .where(WorkspaceDataSourceORM.id.in_(ds_ids))
-            .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+            select(
+                WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label,
+                WorkspaceDataSourceORM.is_active,
+                WorkspaceDataSourceORM.provider_id,
+                WorkspaceDataSourceORM.deleted_at,
+            ).where(WorkspaceDataSourceORM.id.in_(ds_ids))
         )
-        ds_map = {did: label for did, label in res.all()}
+        ds_rows = {
+            did: (label, active, provider, deleted)
+            for did, label, active, provider, deleted in res.all()
+        }
+    ds_map: Dict[str, str] = {
+        did: r[0] for did, r in ds_rows.items() if r[3] is None
+    }
 
     cm_map: Dict[str, str] = {}
     if cm_ids:
@@ -392,8 +522,27 @@ async def _batch_enrich_rows(
             data_updated_by_email=publisher[1],
             favourite_count=fav_counts.get(row.id, 0),
             is_favourited=row.id in fav_set,
+            context=_context_from_maps(row, ws_rows, ds_rows),
         ))
     return responses
+
+
+def _context_from_maps(row: ViewORM, ws_rows: Dict[str, tuple], ds_rows: Dict[str, tuple]) -> dict:
+    """The batch equivalent of ``resolve_view_context``, off the prefetched
+    maps. Shares ``_classify_health`` with the single-view path so the list and
+    the detail route can never disagree about a view's health."""
+    ws = ws_rows.get(row.workspace_id) if row.workspace_id else None
+    ds = ds_rows.get(row.data_source_id) if row.data_source_id else None
+    status, reason = _classify_health(ws, ds, row.data_source_id, row.updated_at)
+    return {
+        "workspace_name": ws[0] if ws else None,
+        "workspace_is_active": bool(ws[1]) if ws else False,
+        "data_source_name": ds[0] if ds else None,
+        "data_source_is_active": bool(ds[1]) if ds else False,
+        "provider_id": ds[2] if ds else None,
+        "health_status": status,
+        "health_reason": reason,
+    }
 
 
 # ------------------------------------------------------------------ #

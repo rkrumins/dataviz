@@ -71,9 +71,47 @@ did not carry access to the data they showed. Four reported problems, one root c
   would serve a 200 with rows missing and nothing to say so. `system:admin`, anonymous callers and
   anyone reaching a View by grant or `public` are unaffected, since none of them need that half.
 
+### Fixed
+
+- **A Public view rendered as "Source deleted" to everyone it was published for.** View health and
+  the canvas's execution context were computed client-side by looking the view's workspace up in
+  the store behind `GET /workspaces` — which returns only the workspaces the caller is bound to.
+  `enterprise` and `public` exist for people with no such binding, so the lookup always missed for
+  their intended audience, and a miss was rendered as a deletion: a red badge on the card, a
+  full-screen "The workspace for this view no longer exists." over a view that had loaded fine, and
+  `providerId: null` so the canvas had nothing to query. Health, liveness and `providerId` are now
+  resolved server-side from the view's **own** workspace and data source and carried on
+  `ViewResponse`. Two callers get the same answer for the same view.
+- **The delegation bridge had never executed.** It was mounted on routers the frontend does not
+  call to render a view, and the client never sent the `?viewId=` it needs. Wired to the four graph
+  reads a canvas actually issues, via an explicit default-closed allow-list — that router also
+  carries `/save`, `/nodes/create` and `/commands/batch`, which must stay non-delegable.
+- Two delegation clamps widened instead of narrowing: a disjoint entity-type request produced `[]`,
+  which downstream means "no filter" and degraded to a full graph scan; and `expand` applied no
+  entity-type clamp at all, so one in-scope container was a doorway to the rest of the graph.
+
+### Security
+
+- `visibility-preview` returned a workspace's member headcount and sample member labels — often
+  live email addresses — to anyone who could read a single `public` view in it. Now gated on
+  `can_change_visibility`: you must be able to perform the change to preview its blast radius.
+- The workspace activity feed gated on `workspace:view:read` and returned every view's history, so
+  a `workspace_viewer` read private views' names, rename diffs and share lines. Now filtered by the
+  same SQL read predicate the list uses.
+- `ViewScopeResolver` authorized tenancy only, so `/search/explain` returned any view's root URNs
+  and entity-type allow-list — for a curated view, its entire content. A viewer context is now a
+  required argument and the check lives inside the resolver.
+- View-scoped import and export resolved `?viewId=` by raw primary key in a background worker with
+  no workspace check. Import was a **cross-tenant write**: a member of one workspace could merge
+  their URNs into a private view's layout in another. Checked at the route and again in the worker.
+- The view-grants router answered 404 for absent and 403-naming-the-workspace for forbidden, an
+  existence oracle over every private view on the platform. Both are 404 now.
+
 ### Removed
 
 - `context_models.visibility` — same column and CHECK as Views, no reader or writer anywhere.
+- `useViewHealth`'s client-side computation. A client cannot get this right by construction, so it
+  no longer has the code that pretends to — it now just shapes the server's verdict.
 - The `isPublic` boolean on the frontend View type. It collapsed the tier on the way in and
   expanded it back on the way out, so opening a Workspace View in the wizard silently promoted
   it to the whole organisation.

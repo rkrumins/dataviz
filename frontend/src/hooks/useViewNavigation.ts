@@ -46,6 +46,17 @@ export interface UseViewNavigationResult {
   viewWorkspaceId: string | null
   /** The resolved view's data source ID — consumed by ViewExecutionProvider. */
   viewDataSourceId: string | null
+  /**
+   * Server-resolved facts about the view's own world, straight off the DTO.
+   *
+   * Kept separate from `view` (a ViewConfiguration, which is the canvas's
+   * shape and has no notion of health) because these must not be recomputed
+   * client-side: they describe the view's workspace and data source, which the
+   * caller may legitimately have no visibility of. See useViewHealth.
+   */
+  providerId: string | null
+  healthStatus: 'healthy' | 'warning' | 'broken' | 'stale' | null
+  healthReason: string | null
 }
 
 // ─── Hook ───────────────────────────────────────────────────────────────────
@@ -53,6 +64,11 @@ export interface UseViewNavigationResult {
 export function useViewNavigation(viewId: string | undefined): UseViewNavigationResult {
   const [status, setStatus] = useState<ViewNavigationStatus>('idle')
   const [error, setError] = useState<string | null>(null)
+  const [serverContext, setServerContext] = useState<{
+    providerId: string | null
+    healthStatus: 'healthy' | 'warning' | 'broken' | 'stale' | null
+    healthReason: string | null
+  }>({ providerId: null, healthStatus: null, healthReason: null })
 
   const { setActiveView } = useSchemaStore()
   const { setViewport } = useCanvasStore()
@@ -93,12 +109,10 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
       const localView = useSchemaStore.getState().schema?.views.find(v => v.id === viewId)
 
       let viewConfig: ViewConfiguration | undefined
-      let targetWsId: string | undefined
       let targetDsId: string | undefined
 
       if (localView) {
         viewConfig = localView
-        targetWsId = localView.workspaceId
         targetDsId = localView.dataSourceId ?? undefined
         pendingViewConfigRef.current = viewConfig
       } else {
@@ -108,8 +122,12 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
           const data: View = await getView(viewId)
           if (cancelledRef.current) return
 
-          targetWsId = data.workspaceId
           targetDsId = data.dataSourceId
+          setServerContext({
+            providerId: data.providerId ?? null,
+            healthStatus: data.healthStatus ?? null,
+            healthReason: data.healthReason ?? null,
+          })
           viewConfig = viewToViewConfig(data)
           pendingViewConfigRef.current = viewConfig
 
@@ -136,15 +154,21 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
 
       if (cancelledRef.current) return
 
-      // 2. Validate workspace exists
-      if (targetWsId) {
-        const wsExists = useWorkspacesStore.getState().workspaces.some(w => w.id === targetWsId)
-        if (!wsExists) {
-          setStatus('error')
-          setError('The workspace for this view no longer exists.')
-          return
-        }
-      }
+      // 2. No workspace-membership gate here, deliberately.
+      //
+      // This used to check the view's workspace against useWorkspacesStore and
+      // hard-fail with "The workspace for this view no longer exists." That
+      // store is filled by GET /workspaces, which returns only the workspaces
+      // the caller holds a binding in — so for every reader of an `enterprise`
+      // or `public` view, and for anyone reached by an explicit share, the
+      // check failed on a workspace that was perfectly alive. The view never
+      // activated, and the effect is keyed on [viewId, retryCount] with no
+      // completedViewRef write on this branch, so the state was terminal.
+      //
+      // The 200 from GET /views/{id} above IS the authorization. Re-deriving it
+      // from a partial client store can only produce false negatives. Whether
+      // the workspace is genuinely gone is answered by view.healthStatus,
+      // resolved server-side from the view's own workspace.
 
       // 3. Activate the view immediately — no scope switching needed.
       // Provider and schema loading are handled by ViewExecutionProvider
@@ -239,5 +263,6 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
     error,
     viewWorkspaceId,
     viewDataSourceId,
+    ...serverContext,
   }
 }
