@@ -44,7 +44,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("users", sa.Column("display_name", sa.Text(), nullable=True))
+    op.add_column(
+        "users", sa.Column("display_name", sa.Text(), nullable=True),
+        if_not_exists=True,
+    )
     op.add_column(
         "users",
         sa.Column(
@@ -53,15 +56,21 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.false(),
         ),
+        if_not_exists=True,
     )
-    op.add_column("users", sa.Column("avatar_id", sa.Text(), nullable=True))
+    op.add_column(
+        "users", sa.Column("avatar_id", sa.Text(), nullable=True),
+        if_not_exists=True,
+    )
     op.add_column(
         "users", sa.Column("sessions_valid_from", sa.Text(), nullable=True),
+        if_not_exists=True,
     )
 
 
 def downgrade() -> None:
-    op.drop_column("users", "sessions_valid_from")
-    op.drop_column("users", "avatar_id")
-    op.drop_column("users", "must_change_password")
-    op.drop_column("users", "display_name")
+    # ``op.drop_column`` has no ``if_exists`` (alembic 1.18); raw DDL instead.
+    for column in (
+        "sessions_valid_from", "avatar_id", "must_change_password", "display_name",
+    ):
+        op.execute(f"ALTER TABLE users DROP COLUMN IF EXISTS {column}")
