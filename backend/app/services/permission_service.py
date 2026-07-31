@@ -55,7 +55,7 @@ from backend.app.db.repositories import (
 from backend.app.db.repositories.idp_group_mapping_repo import (
     FORBIDDEN_AUTO_ROLES,
 )
-from backend.auth_service.providers.assurance import (
+from backend.common.assurance import (
     UNVERIFIED,
     VERIFIED,
     assurance_for,

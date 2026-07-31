@@ -68,7 +68,7 @@ from .custom import (
     CustomSettings,
     build_custom_provider,
 )
-from .assurance import (
+from backend.common.assurance import (
     ASSURANCE_DESCRIPTIONS,
     ASSURANCE_ORDER,
     assurance_for,

@@ -35,6 +35,19 @@ Levels, worst to best:
 
 The ordering is meaningful: ``at_least()`` compares by rank, so a future
 level slots in without every call site changing.
+
+**Why this lives in ``common`` and not in ``auth_service.providers``.**
+It is pure policy — it reads a settings dict and returns a word — but the
+people who need it are not only the login path: the RBAC repositories and
+``permission_service`` consult it to refuse an escalation. Importing any
+submodule of ``auth_service.providers`` executes that package's ``__init__``,
+which eagerly pulls in every provider implementation and, through
+``custom`` -> ``core.tokens`` -> ``core.config``, resolves ``JWT_SECRET_KEY``
+at import time. That made a *background worker* — one that never sees a
+session token — fail to boot without the session signing secret. Assurance
+is shared vocabulary between ``auth_service`` and ``app``, so it belongs in
+the layer both may import, next to ``common.roles`` and
+``common.identity_provenance``.
 """
 from __future__ import annotations
 

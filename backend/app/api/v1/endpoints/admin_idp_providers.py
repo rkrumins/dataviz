@@ -83,7 +83,7 @@ class ProviderDTO(BaseModel):
     button_icon: Optional[str] = Field(default=None, alias="buttonIcon")
     # Derived from kind + settings on every read, never stored — a column
     # would drift the moment an operator edits settings. See
-    # ``auth_service/providers/assurance.py``.
+    # ``common/assurance.py``.
     assurance: str
     assurance_reason: str = Field(alias="assuranceReason")
     # Domains routed here by email-first login. Plaintext, no secrets.

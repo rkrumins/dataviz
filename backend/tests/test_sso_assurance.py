@@ -20,7 +20,7 @@ from backend.app.db.repositories.idp_group_mapping_repo import (
     ForbiddenSsoRoleError,
 )
 from backend.app.services.permission_service import reconcile_sso_targets
-from backend.auth_service.providers.assurance import (
+from backend.common.assurance import (
     ASSERTED,
     ASSURANCE_DESCRIPTIONS,
     ASSURANCE_ORDER,
