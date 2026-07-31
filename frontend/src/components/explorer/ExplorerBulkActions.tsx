@@ -3,7 +3,13 @@
  */
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, Eye, X, Globe, Users, Lock, ChevronDown } from 'lucide-react'
+import { Trash2, Eye, X, ChevronDown } from 'lucide-react'
+import {
+  VISIBILITY_ICON,
+  visibilityDescription,
+  visibilityLabel,
+  type ViewVisibility,
+} from '@/lib/viewVisibility'
 import { cn } from '@/lib/utils'
 
 interface ExplorerBulkActionsProps {
@@ -16,16 +22,19 @@ interface ExplorerBulkActionsProps {
   onClearSelection: () => void
 }
 
+// Data from the shared module (lib/viewVisibility), broad → narrow as
+// this menu has always rendered it.
 const VISIBILITY_OPTIONS: Array<{
-  value: 'private' | 'workspace' | 'enterprise'
+  value: ViewVisibility
   label: string
   icon: React.ElementType
   description: string
-}> = [
-  { value: 'enterprise', label: 'Enterprise', icon: Globe, description: 'Visible to everyone' },
-  { value: 'workspace', label: 'Workspace', icon: Users, description: 'Visible to workspace members' },
-  { value: 'private', label: 'Private', icon: Lock, description: 'Only visible to you' },
-]
+}> = (['enterprise', 'workspace', 'private'] as const).map(value => ({
+  value,
+  label: visibilityLabel(value),
+  icon: VISIBILITY_ICON[value],
+  description: visibilityDescription(value),
+}))
 
 export function ExplorerBulkActions({
   selectedCount,

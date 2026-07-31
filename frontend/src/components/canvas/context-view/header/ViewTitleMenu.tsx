@@ -26,7 +26,11 @@ import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-export type ViewVisibility = 'private' | 'workspace' | 'enterprise'
+import { VISIBILITY_ICON, visibilityLabel, type ViewVisibility } from '@/lib/viewVisibility'
+
+// Re-exported for the consumers that historically imported the union
+// from this file; the definition lives in lib/viewVisibility now.
+export type { ViewVisibility }
 
 export interface ViewTitleMenuProps {
   viewName: string
@@ -48,21 +52,23 @@ const POPOVER_WIDTH = 260
 
 // Plain-language visibility copy — short label on the row, the full sentence
 // in `title` so the badge stays calm but the meaning is a hover away.
+// Label + icon come from the shared module (icons standardized: workspace
+// renders Users everywhere now, not this menu's old Building2).
 const VISIBILITY: Record<ViewVisibility, { label: string; hint: string; Icon: LucideIcons.LucideIcon }> = {
   private: {
-    label: 'Private',
+    label: visibilityLabel('private'),
     hint: 'Private — only people it’s shared with',
-    Icon: LucideIcons.Lock,
+    Icon: VISIBILITY_ICON.private,
   },
   workspace: {
-    label: 'Workspace',
+    label: visibilityLabel('workspace'),
     hint: 'Workspace — everyone in this workspace',
-    Icon: LucideIcons.Building2,
+    Icon: VISIBILITY_ICON.workspace,
   },
   enterprise: {
-    label: 'Enterprise',
-    hint: 'Enterprise — the whole organisation',
-    Icon: LucideIcons.Globe,
+    label: visibilityLabel('enterprise'),
+    hint: 'Enterprise — anyone signed in, read-only outside this workspace',
+    Icon: VISIBILITY_ICON.enterprise,
   },
 }
 

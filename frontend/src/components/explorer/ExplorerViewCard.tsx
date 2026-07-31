@@ -10,9 +10,6 @@
 import { Link } from 'react-router-dom'
 import {
   Heart,
-  Globe,
-  Users,
-  Lock,
   Box,
   ExternalLink,
   Pencil,
@@ -24,6 +21,7 @@ import {
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
+import { VISIBILITY_ICON, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
@@ -55,10 +53,12 @@ function tagColor(tag: string) {
   return TAG_COLORS[Math.abs(hash) % TAG_COLORS.length]
 }
 
+// Data from the shared module — see lib/viewVisibility (eight surfaces
+// used to carry drifting copies of this map).
 const VISIBILITY_META: Record<string, { icon: React.ElementType; label: string }> = {
-  enterprise: { icon: Globe, label: 'Enterprise' },
-  workspace: { icon: Users, label: 'Workspace' },
-  private: { icon: Lock, label: 'Private' },
+  enterprise: { icon: VISIBILITY_ICON.enterprise, label: visibilityLabel('enterprise') },
+  workspace: { icon: VISIBILITY_ICON.workspace, label: visibilityLabel('workspace') },
+  private: { icon: VISIBILITY_ICON.private, label: visibilityLabel('private') },
 }
 
 const HEALTH_INDICATOR: Record<string, { color: string; tooltip: string }> = {

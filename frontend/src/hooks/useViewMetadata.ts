@@ -21,7 +21,7 @@
  * through React Query; callers render their own loading/error UI.
  */
 import { useQuery } from '@tanstack/react-query'
-import { getView, type View } from '@/services/viewApiService'
+import { getView, type View, type ViewAccess } from '@/services/viewApiService'
 
 export const VIEW_QUERY_KEY = ['view'] as const
 
@@ -103,4 +103,26 @@ export function useViewFull(viewId: string | null | undefined, branchId?: string
     enabled: Boolean(viewId),
     ...VIEW_QUERY_OPTIONS,
   })
+}
+
+/**
+ * The caller's capability envelope for a view — shares the
+ * ['view', viewId] cache entry with useViewMetadata/useViewFull, so it
+ * costs zero extra HTTP wherever the view is already being fetched.
+ * `access` is null while loading, on error, or against a backend that
+ * predates the envelope; combine with `deriveViewCapabilities` from
+ * `@/lib/viewAccess` for gating with a legacy fallback.
+ */
+export function useViewAccess(viewId: string | null | undefined) {
+  const query = useQuery({
+    queryKey: [...VIEW_QUERY_KEY, viewId],
+    queryFn: async () => {
+      if (!viewId) throw new Error('useViewAccess called without a viewId')
+      return await getView(viewId, undefined, { silent403: true })
+    },
+    enabled: Boolean(viewId),
+    ...VIEW_QUERY_OPTIONS,
+  })
+  const access: ViewAccess | null = query.data?.access ?? null
+  return { access, view: query.data, isLoading: query.isLoading, error: query.error }
 }

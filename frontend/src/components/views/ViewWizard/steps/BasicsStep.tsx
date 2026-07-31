@@ -16,9 +16,6 @@ import {
     Database,
     Box,
     Sparkles,
-    Lock,
-    Users,
-    Globe,
     X,
     Plus,
     AlertTriangle,
@@ -27,6 +24,9 @@ import {
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'
+import { usePermission } from '@/store/auth'
+import { useBrand } from '@/store/branding'
+import { buildVisibilityOptions } from '@/lib/viewVisibility'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useSchemaStore } from '@/store/schema'
 import { checkBlankGraphName } from '@/services/versioningApiService'
@@ -69,30 +69,13 @@ const ICON_OPTIONS = [
 // Component
 // ============================================
 
-const VISIBILITY_OPTIONS = [
-    {
-        id: 'private' as const,
-        label: 'Private',
-        description: 'Only you can see this view',
-        icon: Lock,
-    },
-    {
-        id: 'workspace' as const,
-        label: 'Workspace',
-        description: 'All members of this workspace',
-        icon: Users,
-    },
-    {
-        id: 'enterprise' as const,
-        label: 'Enterprise',
-        description: 'Anyone in the organization',
-        icon: Globe,
-    },
-]
+// Options come from the shared module (lib/viewVisibility) — built in
+// the component so the enterprise tile honors the publish permission.
 
 export function BasicsStep({ formData, updateFormData, mode, scopeContext, onChangeScope, blankNaming }: BasicsStepProps) {
     const [showSuggestions, setShowSuggestions] = useState(false)
     const [tagInput, setTagInput] = useState('')
+    const { appName } = useBrand()
     const navigate = useNavigate()
     const activeWorkspace = useWorkspacesStore(s => s.getActiveWorkspace())
     const activeDataSource = useWorkspacesStore(s => s.getActiveDataSource())
@@ -100,6 +83,17 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
     const missingOntology = scopeContext ? !scopeContext.hasOntology : !activeDataSource?.ontologyId
     const displayWorkspaceName = scopeContext?.workspaceName ?? activeWorkspace?.name
     const displayDataSourceLabel = scopeContext?.dataSourceLabel ?? activeDataSource?.label ?? activeDataSource?.catalogItemId
+
+    // Visibility options honor the publish rule: creating (or keeping) an
+    // enterprise view needs workspace:view:publish in the target workspace.
+    const scopeWorkspaceId = scopeContext?.workspaceId ?? activeWorkspace?.id
+    const canPublish = usePermission('workspace:view:publish', scopeWorkspaceId)
+    const visibilityOptions = buildVisibilityOptions({
+        current: formData.visibility,
+        canPublish,
+        appName,
+        workspaceName: displayWorkspaceName,
+    })
 
     // Context-catered suggestions: scope (workspace / data source / ontology)
     // + root entity types from the schema store — hydrated in BOTH journeys
@@ -503,15 +497,18 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                     Visibility
                 </label>
                 <div className="grid grid-cols-3 gap-3">
-                    {VISIBILITY_OPTIONS.map(({ id, label, description, icon: Icon }) => (
+                    {visibilityOptions.map(({ id, label, description, icon: Icon, disabled, disabledReason }) => (
                         <button
                             key={id}
-                            onClick={() => updateFormData({ visibility: id })}
+                            onClick={() => { if (!disabled) updateFormData({ visibility: id }) }}
+                            disabled={disabled}
+                            title={disabledReason}
                             className={cn(
                                 'flex flex-col items-center gap-2 px-4 py-4 rounded-xl border-2 transition-colors duration-150 text-center',
                                 formData.visibility === id
                                     ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400'
-                                    : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 text-slate-600 dark:text-slate-400'
+                                    : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 text-slate-600 dark:text-slate-400',
+                                disabled && 'opacity-50 cursor-not-allowed hover:border-slate-200 dark:hover:border-slate-700',
                             )}
                         >
                             <Icon className="w-5 h-5" />

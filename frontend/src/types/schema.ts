@@ -190,6 +190,10 @@ export interface ViewConfiguration {
 
   // Permissions
   isDefault: boolean;
+  /** The full visibility tier ('private' | 'workspace' | 'enterprise').
+   *  Optional because store-cached configs may predate the field. */
+  visibility?: 'private' | 'workspace' | 'enterprise';
+  /** @deprecated Lossy flattening of `visibility` — read that instead. */
   isPublic: boolean;
   createdBy: string;
   createdAt: string;

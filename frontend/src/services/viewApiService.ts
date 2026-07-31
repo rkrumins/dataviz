@@ -6,12 +6,32 @@
  *
  * API scope: /api/v1/views (top-level, cross-workspace)
  */
+import type { ViewVisibility } from '@/lib/viewVisibility'
 import type { LayerAssignmentEntry, ViewConfiguration, ViewLayerConfig } from '@/types/schema'
 import { authFetch } from './apiClient'
 
 // ============================================
 // Types
 // ============================================
+
+/**
+ * The caller's capabilities on ONE view, computed server-side by the
+ * same evaluator that enforces every request. Present only on the
+ * single-view read (never in list payloads). UI gating flows through
+ * `deriveViewCapabilities` in `@/lib/viewAccess` — do not re-derive
+ * these from permission claims.
+ */
+export interface ViewAccess {
+    canEdit: boolean
+    canManageGrants: boolean
+    canChangeVisibility: boolean
+    canPublish: boolean
+    /** How this caller reaches the view. */
+    accessVia: 'owner' | 'admin' | 'grant' | 'workspace' | 'enterprise'
+    /** What the DATA plane accepts: 'full' = graph mutations allowed;
+     *  'readonly' = view-capability reach (expand/trace/search only). */
+    dataAccess: 'full' | 'readonly'
+}
 
 export interface View {
     id: string
@@ -31,7 +51,7 @@ export interface View {
      */
     layoutType?: string
     config: Record<string, any>    // Full ViewConfiguration shape
-    visibility: 'private' | 'workspace' | 'enterprise'
+    visibility: ViewVisibility
     createdBy?: string
     /** Human-readable creator name resolved server-side from the users table. */
     createdByName?: string
@@ -64,6 +84,11 @@ export interface View {
      * Nullable for views created before drift tracking landed.
      */
     ontologyDigest?: string | null
+    /** Provider behind the view's (server-resolved) data source. Single-view
+     *  read only — lets the canvas boot without the workspace list. */
+    providerId?: string | null
+    /** Caller-specific capability envelope. Single-view read only. */
+    access?: ViewAccess | null
 }
 
 export interface ViewCreateRequest {
@@ -85,7 +110,9 @@ export interface ViewUpdateRequest {
     contextModelId?: string
     viewType?: string
     config?: Record<string, any>
-    visibility?: string
+    // NB: no `visibility` — the generic PUT rejects it (422). Visibility
+    // is a security field with its own authorization (publish gate);
+    // change it only through `updateViewVisibility`.
     tags?: string[]
     isPinned?: boolean
 }
@@ -125,6 +152,12 @@ export interface ViewListParams {
     deletedOnly?: boolean
     /** Return only views that need attention (stale, broken, or inactive). */
     attentionOnly?: boolean
+    /**
+     * Server-side category. `shared-with-me` = views shared with the
+     * caller through an explicit grant (direct or via group), excluding
+     * their own — a real answer, not a visibility approximation.
+     */
+    category?: string
     /**
      * Embedded resources the server should fold into the response.
      * ``"popular"`` makes the response carry ``popular`` (the trending
@@ -263,6 +296,7 @@ export async function listViews(
     if (params?.includeDeleted) sp.set('includeDeleted', 'true')
     if (params?.deletedOnly) sp.set('deletedOnly', 'true')
     if (params?.attentionOnly) sp.set('attentionOnly', 'true')
+    if (params?.category) sp.set('category', params.category)
     if (params?.include) params.include.forEach(v => sp.append('include', v))
     if (params?.popularLimit != null) sp.set('popularLimit', String(params.popularLimit))
     const qs = sp.toString()
@@ -326,6 +360,7 @@ export async function getViewStats(params?: ViewStatsParams): Promise<ViewCatalo
     if (params?.includeDeleted) sp.set('includeDeleted', 'true')
     if (params?.deletedOnly) sp.set('deletedOnly', 'true')
     if (params?.attentionOnly) sp.set('attentionOnly', 'true')
+    if (params?.category) sp.set('category', params.category)
     const qs = sp.toString()
     return apiFetch<ViewCatalogStats>(`/api/v1/views/stats${qs ? `?${qs}` : ''}`)
 }
@@ -345,9 +380,20 @@ export async function createView(data: ViewCreateRequest): Promise<View> {
  * response projects that branch's layout overlay (base ⊕ overlay). Omit on
  * Published/main (or when no overlay exists) → base config, unchanged.
  */
-export async function getView(viewId: string, branchId?: string): Promise<View> {
+export async function getView(
+    viewId: string,
+    branchId?: string,
+    opts?: {
+        /** Suppress the global AccessDeniedModal on 403 so the caller
+         *  (ViewPage) can render its own access-error surface. */
+        silent403?: boolean
+    },
+): Promise<View> {
     const qs = branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''
-    return apiFetch<View>(`/api/v1/views/${viewId}${qs}`)
+    return apiFetch<View>(
+        `/api/v1/views/${viewId}${qs}`,
+        opts?.silent403 ? { silent403: true } : undefined,
+    )
 }
 
 export type ViewActivityAction =
@@ -598,6 +644,10 @@ export function viewToViewConfig(view: View): ViewConfiguration {
         entityOverrides: cfg.entityOverrides ?? {},
         grouping: cfg.grouping,
         isDefault: false,
+        // The full tier — carried so the canvas can seed the Share dialog
+        // without a re-fetch. `isPublic` survives as a deprecated
+        // flattening for consumers not yet migrated.
+        visibility: view.visibility,
         isPublic: view.visibility !== 'private',
         createdBy: view.createdBy ?? '',
         createdAt: view.createdAt,

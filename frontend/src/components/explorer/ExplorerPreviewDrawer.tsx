@@ -21,9 +21,6 @@ import {
   Share2,
   Trash2,
   Tag,
-  Lock,
-  Users,
-  Globe,
   Calendar,
   User,
   ExternalLink,
@@ -37,6 +34,7 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { VISIBILITY_ICON, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta, viewTypeLabel } from '@/lib/viewUtils'
 import type { View } from '@/services/viewApiService'
@@ -68,10 +66,11 @@ interface ExplorerPreviewDrawerProps {
 
 // ─── Constants ──────────────────────────────────────────────────
 
+// Data from the shared module — see lib/viewVisibility.
 const VISIBILITY_META: Record<string, { label: string; icon: React.ComponentType<{ className?: string }> }> = {
-  private: { label: 'Private', icon: Lock },
-  workspace: { label: 'Workspace', icon: Users },
-  enterprise: { label: 'Enterprise', icon: Globe },
+  private: { label: visibilityLabel('private'), icon: VISIBILITY_ICON.private },
+  workspace: { label: visibilityLabel('workspace'), icon: VISIBILITY_ICON.workspace },
+  enterprise: { label: visibilityLabel('enterprise'), icon: VISIBILITY_ICON.enterprise },
 }
 
 // View type theme comes from the SHARED resolver — see viewTypeMeta() /
