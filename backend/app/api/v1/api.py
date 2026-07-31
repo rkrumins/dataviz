@@ -285,9 +285,29 @@ api_router.include_router(
 # ── Workspace-scoped data routers ───────────────────────────────────
 # Graph endpoints: /api/v1/{ws_id}/graph/trace, /api/v1/{ws_id}/graph/nodes, etc.
 # (api_router is already mounted at /api/v1, so prefix is just /{ws_id}/graph)
+# PARTIALLY DELEGABLE. The four reads below are what a saved view's canvas
+# actually calls; without them a delegate opened a view and painted nothing,
+# which is the exact failure view_delegation.py was written to remove.
+#
+# The allow-list is explicit and default-closed because this router is not
+# read-only: it also carries /save, /resync, /nodes/create, /edges,
+# /commands/batch and /introspection/refresh. Mounting it wholesale would sell
+# the workspace's entire write surface for the price of a ?viewId=. A route
+# added here later is non-delegable until someone adds it to this set on
+# purpose.
+_CANVAS_READS = frozenset({
+    "/nodes/top-level",
+    "/nodes/{urn}/children",
+    "/nodes/{urn}/children-with-edges",
+    "/nodes/{urn}/ancestors",
+    "/edges/aggregated",
+    "/metadata/entity-types",
+})
 api_router.include_router(
     graph.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
-    dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
+    dependencies=[Depends(requires_ws_read_or_view_delegate(
+        workspace="ws_id", delegable_routes=_CANVAS_READS,
+    ))],
 )
 # Assignment compute (workspace-scoped)
 api_router.include_router(

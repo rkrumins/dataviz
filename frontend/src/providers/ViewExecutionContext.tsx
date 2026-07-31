@@ -165,20 +165,20 @@ export function ViewExecutionProvider({
 
   const scopedProvider = useMemo(() => {
     if (scopeMatchesGlobal) return globalCtx.provider
-    return getOrCreateProvider(workspaceId, dataSourceId, effectiveBranchId)
-  }, [scopeMatchesGlobal, workspaceId, dataSourceId, effectiveBranchId, globalCtx.provider])
+    return getOrCreateProvider(workspaceId, dataSourceId, effectiveBranchId, viewId)
+  }, [scopeMatchesGlobal, workspaceId, dataSourceId, effectiveBranchId, viewId, globalCtx.provider])
 
   // ── Provider version: global if matching, otherwise local counter ──
   const [localVersion, setLocalVersion] = useState(1)
-  const prevScopeRef = useRef(poolKey(workspaceId, dataSourceId, effectiveBranchId))
+  const prevScopeRef = useRef(poolKey(workspaceId, dataSourceId, effectiveBranchId, viewId))
 
   useEffect(() => {
-    const key = poolKey(workspaceId, dataSourceId, effectiveBranchId)
+    const key = poolKey(workspaceId, dataSourceId, effectiveBranchId, viewId)
     if (key !== prevScopeRef.current) {
       prevScopeRef.current = key
       setLocalVersion(v => v + 1)
     }
-  }, [workspaceId, dataSourceId, effectiveBranchId])
+  }, [workspaceId, dataSourceId, effectiveBranchId, viewId])
 
   // mainEpoch bumps on publish/merge → folds into the version so schema + hydration
   // (keyed by providerVersion) refetch once main has moved.

@@ -124,12 +124,26 @@ def requires_ws_read_or_view_delegate(
     permission: str = "workspace:datasource:read",
     *,
     workspace: str = "ws_id",
+    delegable_routes: Optional[frozenset[str]] = None,
 ) -> Callable:
     """Router dependency: workspace read, or a view the caller can open.
 
     Drop-in replacement for
     ``requires(permission, workspace=workspace)`` on read routes that a
     non-member should be able to reach *through a view*.
+
+    ``delegable_routes`` is an allow-list of route-path suffixes. A request
+    whose route is not on it falls through to the plain permission check, so
+    delegation reaches exactly the named routes and **a route added later is
+    non-delegable until someone puts it here on purpose**. That matters on a
+    router like ``graph``, which mixes the four reads needed to paint a canvas
+    in with ``/save``, ``/nodes/create``, ``/edges``, ``/resync`` and
+    ``/commands/batch`` — mounting it wholesale would hand a delegate the
+    workspace's entire write surface for the price of a ``?viewId=``.
+
+    ``None`` means every route on the router is delegable, which is only
+    correct for a router that is read-only end to end (``canvas``,
+    ``context_models``). Prefer the explicit set.
     """
 
     async def _dependency(
@@ -159,6 +173,15 @@ def requires_ws_read_or_view_delegate(
         # 1. Members take the fast path, unchanged and unconfined.
         if has_permission(claims, permission, workspace_id=workspace_id):
             return user
+
+        # 1a. Is this route delegable at all? Checked against the route
+        #     TEMPLATE, not the concrete path, so it cannot be spoofed by a
+        #     urn that happens to contain a delegable suffix.
+        if delegable_routes is not None:
+            route = request.scope.get("route")
+            route_path = getattr(route, "path", "") or ""
+            if not any(route_path.endswith(s) for s in delegable_routes):
+                raise _denied(permission, workspace_id)
 
         # 1b. That check consulted the per-workspace grants, which live in
         #     the session store — so a store *and* database outage makes it

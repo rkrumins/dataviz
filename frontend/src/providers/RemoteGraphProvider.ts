@@ -83,6 +83,21 @@ export interface RemoteGraphProviderOptions {
      * draft (composed base+overlay) instead of live main. Omit for trunk/main.
      */
     branchId?: string
+    /**
+     * Saved view this provider reads on behalf of. Appended as ?viewId= to
+     * every workspace-scoped call.
+     *
+     * Load-bearing for cross-workspace views: a reader who reaches a view
+     * through its `enterprise` or `public` tier holds no binding in that
+     * workspace, so `workspace:datasource:read` fails and every graph call
+     * 403s. The backend accepts `?viewId=` on these routes and confines such
+     * a caller to that view's resolved scope instead — but it can only do
+     * that if the parameter arrives. See backend/app/auth/view_delegation.py.
+     *
+     * Members are unaffected: they pass the permission check outright and the
+     * parameter is ignored.
+     */
+    viewId?: string
     /** @deprecated Legacy connection ID. Use workspaceId instead. */
     connectionId?: string
 }
@@ -93,12 +108,18 @@ export class RemoteGraphProvider implements GraphDataProvider {
     private readonly workspaceId?: string
     private readonly dataSourceId?: string
     private readonly branchId?: string
+    private readonly viewId?: string
     private readonly connectionId?: string
 
-    /** (workspace, data source, branch) identity — client caches keyed by
-     *  URN fold this in so the same URN across two graphs can't collide. */
+    /** (workspace, data source, branch, view) identity — client caches keyed
+     *  by URN fold this in so the same URN across two graphs can't collide.
+     *
+     *  The view belongs in the identity because a delegate's reads are
+     *  confined to it: the same URN under two different views can legitimately
+     *  return different neighbourhoods, and a shared key would let one view's
+     *  confined answer be served for the other. */
     get scopeKey(): string {
-        return `${this.workspaceId ?? ''}:${this.dataSourceId ?? ''}:${this.branchId ?? this.connectionId ?? ''}`
+        return `${this.workspaceId ?? ''}:${this.dataSourceId ?? ''}:${this.branchId ?? this.connectionId ?? ''}:${this.viewId ?? ''}`
     }
 
     /** In-flight request deduplication: identical concurrent requests share one Promise */
@@ -113,6 +134,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         this.workspaceId = options?.workspaceId
         this.dataSourceId = options?.dataSourceId
         this.branchId = options?.branchId
+        this.viewId = options?.viewId
         this.connectionId = options?.connectionId
     }
 
@@ -173,6 +195,13 @@ export class RemoteGraphProvider implements GraphDataProvider {
         // Draft targeting: serve the draft branch (base+overlay) instead of live main.
         if (this.workspaceId && this.branchId) {
             url.searchParams.set('branchId', this.branchId)
+        }
+
+        // View context. Harmless for a member — the backend takes the fast
+        // path on their permission and ignores it — and the only thing that
+        // makes a cross-workspace view renderable for everyone else.
+        if (this.workspaceId && this.viewId) {
+            url.searchParams.set('viewId', this.viewId)
         }
 
         // Legacy fallback: append connectionId as query param
