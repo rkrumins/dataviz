@@ -1277,6 +1277,75 @@ class AggregationService:
         )
         return purge_job
 
+    async def claim_alignment_job(
+        self, ds_id: str, session: AsyncSession, *, dry_run: bool = False,
+    ) -> AggregationJobORM:
+        """Reserve a ``pending`` property-alignment slot in ``aggregation_jobs``.
+
+        Mirrors :meth:`claim_purge_job`. Reusing this table is what gives the
+        alignment run Job History, cancel and resume for free — and, more
+        importantly, mutual exclusion with aggregation over the same graph:
+        the two would otherwise rewrite the same nodes concurrently.
+
+        Raises ``NotFoundError`` when the data source has no aggregation state
+        and ``ConflictError`` when any job is already in flight for it.
+        """
+        from .models import AggregationDataSourceStateORM
+
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if not state:
+            raise NotFoundError(f"Data source {ds_id} not found in aggregation state")
+
+        if not state.workspace_id:
+            from backend.app.db.models import WorkspaceDataSourceORM
+            ds_orm = await session.get(WorkspaceDataSourceORM, ds_id)
+            if ds_orm is not None and ds_orm.deleted_at is None:
+                state.workspace_id = ds_orm.workspace_id
+
+        active = (
+            await session.execute(
+                select(AggregationJobORM)
+                .where(AggregationJobORM.data_source_id == ds_id)
+                .where(AggregationJobORM.status.in_(["pending", "running"]))
+            )
+        ).scalars().first()
+        if active:
+            raise ConflictError(
+                f"Cannot align properties while job {active.id} is active"
+            )
+
+        now = _now()
+        job = AggregationJobORM(
+            id=_generate_id(),
+            data_source_id=ds_id,
+            workspace_id=state.workspace_id,
+            status="pending",
+            trigger_source="property_alignment",
+            projection_mode="in_source",
+            progress=0,
+            total_edges=0,
+            processed_edges=0,
+            created_edges=0,
+            # Not meaningful here — the walk batches by internal-ID window,
+            # not by row count — but the column is non-null and the trigger
+            # schema enforces ``ge=100``, so a re-read has to validate.
+            batch_size=5000,
+            retry_count=0,
+            max_retries=0,
+            tuning_json=json.dumps({"dry_run": True}) if dry_run else None,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(job)
+        await session.commit()
+        await session.refresh(job)
+
+        logger.info(
+            "Property-alignment job %s claimed for ds=%s (dry_run=%s) — "
+            "handing off to insights worker", job.id, ds_id, dry_run,
+        )
+        return job
+
     # ── Schedule ──────────────────────────────────────────────────────
 
     async def set_schedule(

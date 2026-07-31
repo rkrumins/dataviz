@@ -104,9 +104,22 @@ PURGE_STREAM = StreamConfig(
     lane="purge",
 )
 
+# Property alignment rewrites node properties across a whole graph. It rides
+# the purge lane rather than its own: both are long, write-heavy, per-graph
+# rewrites, and sharing the lane means they queue behind each other instead of
+# competing for the same graph's single Cypher thread. Dedup is keyed on the
+# data_source_id so two alignment requests for one source coalesce.
+PROPERTY_ALIGNMENT_STREAM = StreamConfig(
+    kind="property_alignment",
+    stream="insights.jobs.property_alignment",
+    group=SHARED_GROUP,
+    dedup_prefix="insights:property_alignment",
+    lane="purge",
+)
+
 ALL_STREAMS: tuple[StreamConfig, ...] = (
     STATS_STREAM, STATS_DEEP_STREAM, DISCOVERY_STREAM, DISCOVERY_HOT_STREAM,
-    PURGE_STREAM,
+    PURGE_STREAM, PROPERTY_ALIGNMENT_STREAM,
 )
 
 # Kind → default producer stream. ``discovery`` deliberately maps to the
@@ -114,7 +127,8 @@ ALL_STREAMS: tuple[StreamConfig, ...] = (
 # ``stream=DISCOVERY_HOT_STREAM`` explicitly (see enqueue.py).
 _BY_KIND: dict[str, StreamConfig] = {
     s.kind: s
-    for s in (STATS_STREAM, STATS_DEEP_STREAM, DISCOVERY_STREAM, PURGE_STREAM)
+    for s in (STATS_STREAM, STATS_DEEP_STREAM, DISCOVERY_STREAM, PURGE_STREAM,
+              PROPERTY_ALIGNMENT_STREAM)
 }
 
 DLQ_STREAM = "insights.dlq"

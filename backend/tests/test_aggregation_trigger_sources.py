@@ -45,7 +45,14 @@ class _ExplodingSession:
 def test_trigger_sources_cover_automatic_callers():
     assert "post_purge" in TRIGGER_SOURCES   # insights purge worker
     assert "auto" in TRIGGER_SOURCES         # read-path backfill
-    assert set(API_TRIGGER_SOURCES) == set(TRIGGER_SOURCES) - {"purge"}
+    assert "property_alignment" in TRIGGER_SOURCES  # insights alignment worker
+    # A source is withheld from the API list when its own endpoint claims the
+    # row — those endpoints do more than mint one (conflict checks, enqueue,
+    # rollback on a dead queue), so letting a client ask for the source
+    # directly through /aggregation-jobs would bypass all of it.
+    assert set(API_TRIGGER_SOURCES) == (
+        set(TRIGGER_SOURCES) - {"purge", "property_alignment"}
+    )
 
 
 def test_check_constraint_built_from_trigger_sources():

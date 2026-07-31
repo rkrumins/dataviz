@@ -60,6 +60,7 @@ from .scheduler import (
 from . import collector as _collector  # noqa: F401  (registration side-effect)
 from . import discovery as _discovery  # noqa: F401  (registration side-effect)
 from . import purge as _purge  # noqa: F401  (registration side-effect)
+from . import alignment as _alignment  # noqa: F401  (registration side-effect)
 from . import dispatcher
 from .worker import StatsJobConsumer
 
@@ -233,10 +234,10 @@ async def main(args: argparse.Namespace) -> None:
     # Sanity-check registration before opening Redis loops — if a
     # handler module silently failed to import, surface the gap here
     # rather than DLQing every incoming message of that kind.
-    for required_kind in ("stats_poll", "stats_deep"):
+    for required_kind in ("stats_poll", "stats_deep", "purge", "property_alignment"):
         if required_kind not in dispatcher.registered_kinds():
             logger.critical(
-                "%s handler not registered; collector.py failed to import. Aborting.",
+                "%s handler not registered; its module failed to import. Aborting.",
                 required_kind,
             )
             sys.exit(1)

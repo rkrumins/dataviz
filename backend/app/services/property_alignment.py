@@ -366,3 +366,177 @@ async def preview_alignment(
             })
 
     return {"samples": samples, "count": len(samples)}
+
+
+# ---------------------------------------------------------------------------
+# The alignment run — unpack containers into native fields, for real.
+# ---------------------------------------------------------------------------
+
+#: Nodes per internal-ID window. Matches ``stamp_identity_urns``'s stride.
+#: The window bounds MEMORY, not row count: a sparse range yields few rows, a
+#: dense one yields at most ``window`` — either way the working set is capped.
+ALIGN_WINDOW = 50_000
+
+
+async def run_alignment(
+    provider,
+    mapping: Optional[SchemaMapping] = None,
+    *,
+    window: int = ALIGN_WINDOW,
+    start_id: int = 0,
+    progress_cb=None,
+    should_cancel=None,
+    dry_run: bool = False,
+    timeout_s: float = 120.0,
+) -> Dict[str, Any]:
+    """Unpack every nested property container into native FalkorDB fields.
+
+    Walks the graph in **internal-ID windows** rather than enumerating URNs.
+    The CLI script this replaces buffered every URN for a label into a Python
+    list before touching anything — roughly a gigabyte of strings at 10M
+    nodes, and an unbounded scan before the first write. ID windows cost
+    constant memory at any graph size, need no property index (the reason
+    ``stamp_identity_urns`` chose them), and make the run resumable: the
+    caller persists ``lastId`` and passes it back as ``start_id``.
+
+    Reads are windowed by ID; WRITES are keyed by ``urn``, which is indexed —
+    so the enumeration is scan-free and the mutation is index-backed. A node
+    with no ``urn`` cannot be written back safely and is counted in
+    ``skippedNoUrn``; for an onboarded graph ``stamp_identity_urns`` is what
+    puts one there, and it runs first.
+
+    A container that does not parse is **left exactly as it is** and counted.
+    The original script's ``REMOVE`` fired regardless, destroying the data it
+    was meant to migrate.
+
+    Returns running totals; ``progress_cb(stats)`` is invoked per window so a
+    job can publish them, and ``should_cancel()`` is honoured between windows.
+    """
+    from backend.app.providers.falkordb_provider import (
+        _compute_searchable_text,
+        _split_user_properties,
+    )
+
+    mapping = mapping or SchemaMapping()
+    container_key = mapping.properties_field
+    separator = mapping.properties_separator
+    overrides = mapping.property_overrides or {}
+
+    stats: Dict[str, Any] = {
+        "processed": 0,      # nodes seen carrying a container
+        "aligned": 0,        # nodes actually rewritten
+        "unparseable": 0,    # container present but not a dict — preserved
+        "skippedNoUrn": 0,   # cannot key the write back
+        "lastId": start_id,
+        "maxId": 0,
+        "cancelled": False,
+        "dryRun": dry_run,
+    }
+    if not container_key:
+        return stats
+
+    safe_key = str(container_key).replace("`", "")
+
+    try:
+        res = await provider._ro_query(
+            "MATCH (n) RETURN max(ID(n))", op="align.max_id",
+        )
+        rows = res.result_set or []
+        max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
+    except Exception as exc:
+        logger.warning("property alignment: max-id probe failed: %s", exc)
+        return stats
+    stats["maxId"] = max_id
+    if max_id < 0:
+        return stats
+
+    read_cypher = (
+        f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
+        f"AND n.`{safe_key}` IS NOT NULL "
+        f"RETURN n.urn AS urn, n.`{safe_key}` AS blob, "
+        f"n.displayName AS displayName, n.qualifiedName AS qualifiedName, "
+        f"n.description AS description"
+    )
+    write_cypher = (
+        f"UNWIND $batch AS item "
+        f"MATCH (n {{urn: item.urn}}) "
+        f"SET n += item.nativeProps, "
+        f"    n.propertiesRaw = item.propertiesRaw, "
+        f"    n.searchableText = item.searchableText "
+        f"REMOVE n.`{safe_key}`"
+    )
+
+    lo = max(0, int(start_id))
+    while lo <= max_id:
+        if should_cancel is not None and should_cancel():
+            stats["cancelled"] = True
+            break
+        hi = lo + window
+
+        try:
+            res = await provider._ro_query(
+                read_cypher, params={"lo": lo, "hi": hi},
+                timeout=timeout_s, op="align.read",
+            )
+            rows = res.result_set or []
+        except Exception as exc:
+            # One bad window must not abandon the run; the range is recorded
+            # so a re-run revisits it.
+            logger.warning(
+                "property alignment: window [%d,%d) read failed (continuing): %s",
+                lo, hi, exc,
+            )
+            lo = hi
+            stats["lastId"] = lo
+            continue
+
+        batch = []
+        for row in rows:
+            stats["processed"] += 1
+            urn, blob = row[0], row[1]
+            container = coerce_container(blob)
+            if container is None:
+                # Not a property dict. Preserve it, say so, move on.
+                stats["unparseable"] += 1
+                continue
+            if not urn:
+                stats["skippedNoUrn"] += 1
+                continue
+
+            user_props = flatten_properties(container, separator)
+            for src, dst in overrides.items():
+                if src in user_props and dst not in user_props:
+                    user_props[dst] = user_props.pop(src)
+            native_props, residual = _split_user_properties(user_props)
+            batch.append({
+                "urn": urn,
+                "nativeProps": native_props,
+                "propertiesRaw": residual,
+                # Recomputed in the SAME pass. The old script left this stale
+                # and offered a separate, non-composable backfill flag for it.
+                "searchableText": _compute_searchable_text(
+                    row[2], row[3], row[4], user_props,
+                ),
+            })
+
+        if batch and not dry_run:
+            try:
+                await provider._query(
+                    write_cypher, params={"batch": batch},
+                    timeout=timeout_s, op="align.write",
+                )
+                stats["aligned"] += len(batch)
+            except Exception as exc:
+                logger.warning(
+                    "property alignment: window [%d,%d) write failed "
+                    "(continuing): %s", lo, hi, exc,
+                )
+        elif batch:
+            stats["aligned"] += len(batch)
+
+        lo = hi
+        stats["lastId"] = lo
+        if progress_cb is not None:
+            await progress_cb(dict(stats))
+
+    return stats

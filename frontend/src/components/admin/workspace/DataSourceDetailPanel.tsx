@@ -45,10 +45,22 @@ export interface AggregationConfigSnapshot {
     nameProperty: string
 }
 
+/** Tabs the panel can open on. Also the accepted ``?dsTab=`` values. */
+export type DataSourceTab =
+    'insights' | 'mapping' | 'aggregation' | 'views' | 'versioning'
+
+const DS_TABS: readonly DataSourceTab[] = [
+    'insights', 'mapping', 'aggregation', 'views', 'versioning',
+]
+
 interface DataSourceDetailPanelProps {
     ds: DataSourceResponse | null
     wsId: string
     isOpen: boolean
+    /** Tab to open on, from ``?dsTab=``. Ignored when unrecognised, so a
+     *  stale or hand-edited link degrades to Overview rather than a blank
+     *  panel. */
+    initialTab?: string
     stats?: DataSourceStats
     providerInfo?: DataSourceProviderInfo
     ontologyName?: string
@@ -129,6 +141,7 @@ export function DataSourceDetailPanel({
     ds,
     wsId,
     isOpen,
+    initialTab,
     providerInfo,
     ontologyName,
     ontologyId,
@@ -143,7 +156,18 @@ export function DataSourceDetailPanel({
     onSaveAggregationConfig,
     onClose,
 }: DataSourceDetailPanelProps) {
-    const [activeTab, setActiveTab] = useState<'insights' | 'mapping' | 'aggregation' | 'views' | 'versioning'>('insights')
+    const requestedTab = DS_TABS.includes(initialTab as DataSourceTab)
+        ? (initialTab as DataSourceTab)
+        : undefined
+    const [activeTab, setActiveTab] = useState<DataSourceTab>(
+        requestedTab ?? 'insights',
+    )
+    // Re-apply when the link changes or the panel is pointed at a different
+    // source — but never on every render, or it would override the user's own
+    // tab clicks for as long as the param sits in the URL.
+    useEffect(() => {
+        if (requestedTab) setActiveTab(requestedTab)
+    }, [requestedTab, ds?.id])
     const versioningEnabled = useFeature('versioningEnabled')
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)

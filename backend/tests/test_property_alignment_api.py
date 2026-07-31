@@ -16,6 +16,7 @@ from httpx import AsyncClient
 from backend.app.services.property_alignment import (
     analyze_property_storage,
     preview_alignment,
+    run_alignment,
 )
 from backend.app.services.context_engine import ContextEngine
 from backend.graph.adapters.schema_mapping import SchemaMapping
@@ -86,6 +87,55 @@ class _FakeGraph:
 
 def _container(**kw):
     return json.dumps(kw)
+
+
+class _IdSpaceGraph:
+    """A graph addressed by internal node ID, for the alignment runner.
+
+    ``nodes`` is ``{id: props}``. Records every window it was asked for so a
+    test can assert the walk covered the ID space exactly once, and applies
+    writes so idempotency is observable.
+    """
+
+    def __init__(self, nodes, max_id=None):
+        self.nodes = dict(nodes)
+        self._max_id = max_id if max_id is not None else (
+            max(self.nodes) if self.nodes else -1
+        )
+        self.windows = []
+        self.writes = []
+        self.read_failures = set()
+
+    async def _ro_query(self, cypher, params=None, *, timeout=None, op=None):
+        if "max(ID(n))" in cypher:
+            return _Result([[self._max_id]])
+        lo, hi = params["lo"], params["hi"]
+        self.windows.append((lo, hi))
+        if lo in self.read_failures:
+            raise RuntimeError("simulated window read failure")
+        key = cypher.split("n.`")[1].split("`")[0]
+        rows = [
+            [p.get("urn"), p.get(key), p.get("displayName"),
+             p.get("qualifiedName"), p.get("description")]
+            for nid, p in sorted(self.nodes.items())
+            if lo <= nid < hi and p.get(key) is not None
+        ]
+        return _Result(rows)
+
+    async def _query(self, cypher, params=None, *, timeout=None, op=None):
+        batch = (params or {}).get("batch") or []
+        self.writes.append(batch)
+        key = cypher.split("REMOVE n.`")[1].split("`")[0]
+        by_urn = {p.get("urn"): p for p in self.nodes.values() if p.get("urn")}
+        for item in batch:
+            node = by_urn.get(item["urn"])
+            if node is None:
+                continue
+            node.update(item["nativeProps"])
+            node["propertiesRaw"] = item["propertiesRaw"]
+            node["searchableText"] = item["searchableText"]
+            node.pop(key, None)
+        return _Result([])
 
 
 # ── Analyzer ─────────────────────────────────────────────────────────────
@@ -632,3 +682,157 @@ class TestPropertyMappingSaveMergesServerSide:
         assert mapping.properties_separator == "."
         assert mapping.collect_unmapped_as_properties is False
         assert mapping.property_overrides == {"level": "source/level"}
+
+
+# ── The alignment run ────────────────────────────────────────────────────
+
+class TestRunAlignment:
+    """The scale-critical half. The CLI script this replaces buffered every
+    URN for a label into a Python list before writing anything — roughly a
+    gigabyte of strings at 10M nodes. These assert the replacement walks the
+    ID space in bounded windows instead."""
+
+    async def test_unpacks_containers_into_native_fields(self):
+        graph = _IdSpaceGraph({
+            0: {"urn": "u0", "properties": _container(technical={"format": "parquet"})},
+            1: {"urn": "u1", "properties": _container(owner="team")},
+        })
+        stats = await run_alignment(graph, SchemaMapping(), window=10)
+
+        assert stats["processed"] == 2
+        assert stats["aligned"] == 2
+        assert graph.nodes[0]["technical/format"] == "parquet"
+        assert graph.nodes[1]["owner"] == "team"
+        # The container is gone once its contents are native.
+        assert "properties" not in graph.nodes[0]
+
+    async def test_walks_the_id_space_in_bounded_windows(self):
+        """Memory is bounded by the window, not the graph. A 10M-node ID space
+        must still be walked in fixed-size steps."""
+        graph = _IdSpaceGraph({}, max_id=10_000_000)
+        await run_alignment(graph, SchemaMapping(), window=1_000_000)
+
+        assert graph.windows == [
+            (0, 1_000_000), (1_000_000, 2_000_000), (2_000_000, 3_000_000),
+            (3_000_000, 4_000_000), (4_000_000, 5_000_000), (5_000_000, 6_000_000),
+            (6_000_000, 7_000_000), (7_000_000, 8_000_000), (8_000_000, 9_000_000),
+            (9_000_000, 10_000_000), (10_000_000, 11_000_000),
+        ]
+        # Contiguous and non-overlapping: every id is visited exactly once.
+        assert all(a[1] == b[0] for a, b in zip(graph.windows, graph.windows[1:]))
+
+    async def test_resumes_from_a_stored_cursor(self):
+        graph = _IdSpaceGraph({
+            0: {"urn": "u0", "properties": _container(a=1)},
+            50: {"urn": "u50", "properties": _container(b=2)},
+        })
+        stats = await run_alignment(graph, SchemaMapping(), window=10, start_id=50)
+
+        # The first window's node was never read — the resume skipped it.
+        assert stats["processed"] == 1
+        assert graph.windows[0][0] == 50
+        assert "properties" in graph.nodes[0]
+        assert "properties" not in graph.nodes[50]
+
+    async def test_cancels_between_windows_and_reports_where_it_stopped(self):
+        graph = _IdSpaceGraph({i: {"urn": f"u{i}", "properties": _container(a=i)}
+                               for i in range(100)}, max_id=100)
+        calls = {"n": 0}
+
+        def _cancel():
+            calls["n"] += 1
+            return calls["n"] > 2
+
+        stats = await run_alignment(
+            graph, SchemaMapping(), window=10, should_cancel=_cancel,
+        )
+        assert stats["cancelled"] is True
+        # Resumable: lastId is where the next run picks up.
+        assert 0 < stats["lastId"] < 100
+
+    async def test_is_idempotent(self):
+        graph = _IdSpaceGraph({
+            0: {"urn": "u0", "properties": _container(a=1)},
+        })
+        await run_alignment(graph, SchemaMapping(), window=10)
+        second = await run_alignment(graph, SchemaMapping(), window=10)
+
+        assert second["processed"] == 0
+        assert second["aligned"] == 0
+
+    async def test_unparseable_container_is_preserved_not_destroyed(self):
+        """The original script's REMOVE fired regardless of whether the blob
+        parsed, destroying the data it was meant to migrate."""
+        graph = _IdSpaceGraph({
+            0: {"urn": "u0", "properties": "not json"},
+        })
+        stats = await run_alignment(graph, SchemaMapping(), window=10)
+
+        assert stats["unparseable"] == 1
+        assert stats["aligned"] == 0
+        assert graph.nodes[0]["properties"] == "not json"
+
+    async def test_node_without_urn_is_skipped_and_counted(self):
+        graph = _IdSpaceGraph({
+            0: {"properties": _container(a=1)},
+            1: {"urn": "u1", "properties": _container(b=2)},
+        })
+        stats = await run_alignment(graph, SchemaMapping(), window=10)
+
+        assert stats["skippedNoUrn"] == 1
+        assert stats["aligned"] == 1
+
+    async def test_dry_run_writes_nothing(self):
+        graph = _IdSpaceGraph({
+            0: {"urn": "u0", "properties": _container(a=1)},
+        })
+        stats = await run_alignment(graph, SchemaMapping(), window=10, dry_run=True)
+
+        assert stats["aligned"] == 1        # what it WOULD do
+        assert graph.writes == []
+        assert graph.nodes[0]["properties"] is not None
+
+    async def test_searchable_text_is_refreshed_in_the_same_pass(self):
+        """The old script left this stale and offered a separate,
+        non-composable --searchable-text flag to fix it."""
+        graph = _IdSpaceGraph({
+            0: {"urn": "u0", "displayName": "Revenue",
+                "properties": _container(owner="alice")},
+        })
+        await run_alignment(graph, SchemaMapping(), window=10)
+
+        text = graph.nodes[0]["searchableText"]
+        assert "revenue" in text.lower()
+        assert "alice" in text.lower()
+
+    async def test_a_failed_window_does_not_abandon_the_run(self):
+        graph = _IdSpaceGraph({
+            0: {"urn": "u0", "properties": _container(a=1)},
+            15: {"urn": "u15", "properties": _container(b=2)},
+        })
+        graph.read_failures = {0}
+        stats = await run_alignment(graph, SchemaMapping(), window=10)
+
+        # The second window still ran.
+        assert stats["aligned"] == 1
+        assert "properties" not in graph.nodes[15]
+
+    async def test_collision_overrides_are_applied_on_write(self):
+        graph = _IdSpaceGraph({
+            0: {"urn": "u0", "properties": _container(level="tier-1")},
+        })
+        await run_alignment(
+            graph,
+            SchemaMapping(property_overrides={"level": "source/level"}),
+            window=10,
+        )
+        assert graph.nodes[0]["source/level"] == "tier-1"
+        assert "level" not in graph.nodes[0]
+
+    async def test_no_container_key_is_a_no_op(self):
+        graph = _IdSpaceGraph({0: {"urn": "u0", "a": 1}})
+        stats = await run_alignment(
+            graph, SchemaMapping(properties_field=None), window=10,
+        )
+        assert stats["processed"] == 0
+        assert graph.windows == []

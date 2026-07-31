@@ -71,7 +71,8 @@ class JobEventLogORM(Base):
             name="ck_job_event_log_event_type",
         ),
         CheckConstraint(
-            "kind IN ('aggregation', 'purge', 'stats', 'discovery')",
+            "kind IN ('aggregation', 'purge', 'stats', 'discovery', "
+            "'property_alignment')",
             name="ck_job_event_log_kind",
         ),
         {"schema": "aggregation"},
