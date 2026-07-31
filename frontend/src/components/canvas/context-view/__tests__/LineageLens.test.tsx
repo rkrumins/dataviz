@@ -13,6 +13,7 @@ import { LineageLens } from '../LineageLens'
 import { deriveNeighborRecords } from '@/lib/lineage-neighbors'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
+import { usePreferencesStore } from '@/store/preferences'
 
 const node = (id: string, type = 'dataset'): LineageNode => ({
   id,
@@ -59,6 +60,9 @@ const renderLens = (
 
 describe('LineageLens', () => {
   beforeEach(() => {
+    // Pin the LIST body — these suites assert the column layout; the
+    // graph body has its own suite below.
+    usePreferencesStore.setState({ lensViewMode: 'list' })
     useCanvasStore.setState({
       nodes: [node('a'), node('b'), node('c')],
       edges: [edge('e1', 'a', 'b'), edge('e2', 'b', 'c')],
@@ -103,6 +107,9 @@ describe('LineageLens', () => {
 })
 
 describe('LineageLens on-demand fetch merge', () => {
+  beforeEach(() => {
+    usePreferencesStore.setState({ lensViewMode: 'list' })
+  })
   afterEach(() => cleanup())
 
   it('surfaces fetched edges and partner names the canvas never loaded', () => {
@@ -440,5 +447,47 @@ describe('LineageLens on-demand fetch merge', () => {
     } finally {
       useSchemaStore.setState({ schema: prevSchema } as never)
     }
+  })
+})
+
+describe('LineageLens graph mode', () => {
+  beforeEach(() => {
+    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    useCanvasStore.setState({
+      nodes: [node('a'), node('b'), node('c')],
+      edges: [edge('e1', 'a', 'b'), edge('e2', 'b', 'c')],
+      visibleEdges: [],
+    } as never)
+  })
+  afterEach(() => cleanup())
+
+  it('renders upstream and downstream as cards; double-click focuses', () => {
+    const onRecenter = vi.fn()
+    renderLens(['b'], { onRecenter })
+    // Focal + one card per neighbor (React Flow smoke — logic depth
+    // lives in the pure focus-graph tests).
+    expect(screen.getAllByText('label-b').length).toBeGreaterThan(0)
+    expect(screen.getByText('label-a')).toBeTruthy()
+    expect(screen.getByText('label-c')).toBeTruthy()
+    fireEvent.doubleClick(screen.getByText('label-c'))
+    expect(onRecenter).toHaveBeenCalledWith('c')
+  })
+
+  it('single click selects into the detail strip; Focus here re-centers', () => {
+    const onRecenter = vi.fn()
+    renderLens(['b'], { onRecenter })
+    fireEvent.click(screen.getByText('label-c'))
+    const focusBtn = screen.getByText('Focus here')
+    expect(focusBtn).toBeTruthy()
+    fireEvent.click(focusBtn)
+    expect(onRecenter).toHaveBeenCalledWith('c')
+  })
+
+  it('the header toggle switches to the list body and persists the preference', () => {
+    renderLens(['b'])
+    expect(screen.queryByText('Data Sources')).toBeNull()
+    fireEvent.click(screen.getByTitle('List — scan all connections as columns'))
+    expect(screen.getByText('Data Sources')).toBeTruthy()
+    expect(usePreferencesStore.getState().lensViewMode).toBe('list')
   })
 })

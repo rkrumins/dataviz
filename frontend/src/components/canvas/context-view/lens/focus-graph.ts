@@ -66,6 +66,8 @@ export interface FocusCard {
   parentLabel: string | null
   /** Entity: bundled connection count (≥1). Group: member count. */
   count: number
+  /** Entity: normalized type of the connecting edge ('' elsewhere). */
+  edgeTypeNorm: string
   /** Group: Σ member connection counts. 0 elsewhere. */
   sumCount: number
   /** Coarser-grain summary of finer flows (dashed, badged, demoted). */
@@ -76,6 +78,8 @@ export interface FocusCard {
   aggregateEdge: LineageEdge | null
   /** Key into drilledRows when the ×N badge can drill; null otherwise. */
   drillKey: string | null
+  /** True when this card's aggregate is currently drilled open. */
+  drilled: boolean
   /** Group toggle key into expandedGroups / frontier key into
    *  expandedFrontier; null when the card has no expansion. */
   expandKey: string | null
@@ -242,10 +246,10 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const baseCard = (): Omit<FocusCard, 'id' | 'kind' | 'nodeId' | 'band' | 'label' | 'type'> => ({
     x: 0, y: 0, w: CARD_W, h: CARD_H,
     parentId: null, parentLabel: null,
-    count: 1, sumCount: 0,
+    count: 1, edgeTypeNorm: '', sumCount: 0,
     rollup: false, unresolved: false,
     aggregated: false, aggregateEdge: null,
-    drillKey: null, expandKey: null, expanded: false,
+    drillKey: null, drilled: false, expandKey: null, expanded: false,
     frontier: false, frontierExpanded: false,
     degreeHint: null, fetch: null,
     dimmed: false, matchesInside: 0,
@@ -454,11 +458,13 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           parentId,
           parentLabel: parentId ? labelOf(parentId, nodeMap.get(parentId)) : null,
           count: entry.count,
+          edgeTypeNorm: entry.edgeTypeNorm,
           rollup: entry.rollup,
           unresolved: !entry.node,
           aggregated: entry.agg.aggregated,
           aggregateEdge: entry.agg.aggregateEdge,
           drillKey,
+          drilled: drillKey != null && drilledRows.has(drillKey),
           expandKey: frontierKey,
           // Any entity card can walk its own next hop until the hard
           // band stop — except rollups (they summarize flows already

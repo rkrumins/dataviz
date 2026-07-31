@@ -172,6 +172,10 @@ interface PreferencesState {
   toggleSubtleCanvasTreeLines: () => void
   resetCanvasDisplaySettings: () => void
 
+  /** Lineage Lens body: interactive graph (default) or the list columns. */
+  lensViewMode: 'graph' | 'list'
+  setLensViewMode: (mode: 'graph' | 'list') => void
+
   // Icon picker — recently used Lucide icon names (most recent first).
   recentIcons: string[]
   addRecentIcon: (name: string) => void
@@ -338,6 +342,10 @@ export const usePreferencesStore = create<PreferencesState>()(
         showCanvasTypeBadge: true,
         subtleCanvasTreeLines: false,
       }),
+
+      // Lineage Lens body mode
+      lensViewMode: 'graph',
+      setLensViewMode: (lensViewMode) => set({ lensViewMode }),
 
       // Icon picker recents
       recentIcons: [],

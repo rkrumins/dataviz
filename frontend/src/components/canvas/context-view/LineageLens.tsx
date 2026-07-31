@@ -45,11 +45,28 @@ import {
 import { EDGE_FETCH_LIMIT } from '@/hooks/useLensLineage'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
+import { usePreferencesStore } from '@/store/preferences'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { lensFocalOf, type LensHistory } from './lens/lensHistory'
+import { buildFocusGraph, labelOf } from './lens/focus-graph'
+import { FocusGraphView } from './lens/FocusGraphView'
 
 const ROWS_CAP = 200
 const EMPTY_TYPE_SET: ReadonlySet<string> = new Set()
+const EMPTY_PAGE_MAP: ReadonlyMap<string, number> = new Map()
+
+/** Graph-mode interaction state, keyed to the focal node (fresh on
+ *  every re-center, like the filter and chip state). */
+interface LensGraphState {
+  nodeId: string | null
+  selection: string | null
+  expandedGroups: ReadonlySet<string>
+  expandedFrontier: ReadonlySet<string>
+  bandPages: ReadonlyMap<string, number>
+}
+const freshGraphState = (nodeId: string | null): LensGraphState => ({
+  nodeId, selection: null, expandedGroups: EMPTY_TYPE_SET, expandedFrontier: EMPTY_TYPE_SET, bandPages: EMPTY_PAGE_MAP,
+})
 
 export interface LineageLensProps {
   /** Focus history; entries[cursor] is the current focal. Empty = closed. */
@@ -93,6 +110,12 @@ export interface LineageLensProps {
   drillStatus?: Map<string, 'loading' | 'done' | 'error'>
   /** Fetch an aggregated row's underlying connections on drill. */
   onDrillFetch?: (edge: LineageEdge) => void
+  /** Fetch a node's 1-hop lineage if not already fetched — powers the
+   *  graph mode's frontier (⊕) hop expansion. */
+  onEnsureFetched?: (nodeId: string) => void
+  /** Known total lineage degrees (in/out) per node — used for honest
+   *  "+N" frontier pills. Absent node = UNKNOWN, never zero. */
+  degreeHints?: Map<string, { in: number; out: number }>
 }
 
 export function LineageLens({
@@ -116,6 +139,8 @@ export function LineageLens({
   drillEdges,
   drillStatus,
   onDrillFetch,
+  onEnsureFetched,
+  degreeHints,
 }: LineageLensProps) {
   const { entries, cursor } = history
   const nodeId = lensFocalOf(history)
@@ -348,6 +373,111 @@ export function LineageLens({
     [nodeId, edgesByEndpoint, nodeMap, containmentEdgeTypes],
   )
 
+  // ── Graph mode — body preference + per-focal interaction state ─────
+  // (selection, expanded groups, expanded frontier hops, band pages),
+  // keyed to the focal like the other lens-local state so re-centering
+  // starts clean without reset effects.
+  const lensViewMode = usePreferencesStore((s) => s.lensViewMode)
+  const setLensViewMode = usePreferencesStore((s) => s.setLensViewMode)
+  const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
+  const [graphState, setGraphState] = useState<LensGraphState>(() => freshGraphState(null))
+  const graphCur = graphState.nodeId === nodeId ? graphState : freshGraphState(nodeId)
+  const setGraphSelection = useCallback((selection: string | null) => {
+    setGraphState(prev => ({ ...(prev.nodeId === nodeId ? prev : freshGraphState(nodeId)), selection }))
+  }, [nodeId])
+  const toggleGraphGroup = useCallback((key: string) => {
+    setGraphState(prev => {
+      const base = prev.nodeId === nodeId ? prev : freshGraphState(nodeId)
+      const next = new Set(base.expandedGroups)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return { ...base, expandedGroups: next }
+    })
+  }, [nodeId])
+  const toggleGraphFrontier = useCallback((key: string, frontierNodeId: string) => {
+    let wasExpanded = false
+    setGraphState(prev => {
+      const base = prev.nodeId === nodeId ? prev : freshGraphState(nodeId)
+      const next = new Set(base.expandedFrontier)
+      wasExpanded = next.has(key)
+      if (wasExpanded) next.delete(key)
+      else next.add(key)
+      return { ...base, expandedFrontier: next }
+    })
+    // Expanding walks INTO unexplored lineage — fetch that node's true
+    // 1-hop neighborhood (idempotent; no-op when already fetched).
+    if (!wasExpanded) onEnsureFetched?.(frontierNodeId)
+  }, [nodeId, onEnsureFetched])
+  const bumpBandPage = useCallback((bandKey: string) => {
+    setGraphState(prev => {
+      const base = prev.nodeId === nodeId ? prev : freshGraphState(nodeId)
+      const next = new Map(base.bandPages)
+      next.set(bandKey, (next.get(bandKey) ?? 0) + 1)
+      return { ...base, bandPages: next }
+    })
+  }, [nodeId])
+
+  // The pure graph build — every semantic decision (grouping, rollups,
+  // drills, frontier hops, caps, filter dimming, layout) lives in
+  // focus-graph.ts where it's unit-tested without React Flow.
+  const focusGraph = useMemo(() => {
+    if (!lensOpen || lensViewMode !== 'graph' || !nodeId) return null
+    return buildFocusGraph({
+      focalId: nodeId,
+      incomingRecords,
+      outgoingRecords,
+      edgesByEndpoint,
+      nodeMap,
+      containmentEdgeTypes,
+      containsChildren: focalChildren,
+      containsTotal: (nodeMap.get(nodeId)?.data?.childCount as number | undefined) ?? 0,
+      resolveParent,
+      isCoarser: isCoarserThan,
+      expandedGroups: graphCur.expandedGroups,
+      expandedFrontier: graphCur.expandedFrontier,
+      drilledRows,
+      drillEdges,
+      rawEdgeById,
+      bandPages: graphCur.bandPages,
+      query,
+      hiddenTypes,
+      degreeHints,
+      fetchStatus,
+    })
+  }, [
+    lensOpen, lensViewMode, nodeId, incomingRecords, outgoingRecords,
+    edgesByEndpoint, nodeMap, containmentEdgeTypes, focalChildren,
+    resolveParent, isCoarserThan, graphCur.expandedGroups,
+    graphCur.expandedFrontier, graphCur.bandPages, drilledRows,
+    drillEdges, rawEdgeById, query, hiddenTypes, degreeHints, fetchStatus,
+  ])
+
+  // Type chips for graph mode — one row across both directions (the
+  // list columns render their own per-column rows).
+  const graphTypeChips = useMemo(() => {
+    if (lensViewMode !== 'graph' || !lensOpen) return []
+    const counts = new Map<string, number>()
+    for (const r of [...incomingRecords, ...outgoingRecords]) {
+      const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
+      counts.set(t, (counts.get(t) ?? 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])
+  }, [lensViewMode, lensOpen, incomingRecords, outgoingRecords])
+
+  // Detail-strip data for the selected card — the selected node's own
+  // in/out tallies, derived the same way as everything else.
+  const selectedInfo = useMemo(() => {
+    const sel = graphCur.selection
+    if (!sel || lensViewMode !== 'graph') return null
+    const recs = deriveNeighborRecords(sel, edgesByEndpoint.get(sel) ?? [], nodeMap, containmentEdgeTypes)
+    return {
+      id: sel,
+      node: nodeMap.get(sel),
+      inCount: recs.incomingRecords.length,
+      outCount: recs.outgoingRecords.length,
+    }
+  }, [graphCur.selection, lensViewMode, edgesByEndpoint, nodeMap, containmentEdgeTypes])
+
   if (!nodeId) return null
 
   const focalNode = nodeMap.get(nodeId)
@@ -400,8 +530,16 @@ export function LineageLens({
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.97, y: 8 }}
           transition={{ duration: 0.18, ease: 'easeOut' }}
-          className="relative flex flex-col rounded-2xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-2xl shadow-black/40 overflow-hidden"
-          style={{ width: 'min(1000px, 92vw)', maxHeight: 'min(72vh, 780px)', minHeight: 380 }}
+          className="relative flex flex-col rounded-2xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-2xl shadow-black/40 overflow-hidden transition-[width,height,max-height] duration-300"
+          style={
+            // Graph exploration is a "focus room" — near-fullscreen with
+            // a RESOLVED height (React Flow needs one). The list keeps
+            // its adaptive height so small neighborhoods don't get a
+            // cavernous empty grid (why the original sizing adapted).
+            lensViewMode === 'graph'
+              ? { width: 'min(1800px, 96vw)', height: 'min(1100px, 94vh)' }
+              : { width: 'min(1000px, 92vw)', maxHeight: 'min(72vh, 780px)', minHeight: 380 }
+          }
           role="dialog"
           aria-label={`Connections of ${focalLabel}`}
         >
@@ -460,6 +598,40 @@ export function LineageLens({
               </button>
             )}
             <div className="ml-auto flex items-center gap-2">
+              {/* Graph | List body toggle — the graph is the premium
+                  default; the columns stay one click away (persisted). */}
+              <div className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]">
+                <button
+                  type="button"
+                  onClick={() => setLensViewMode('graph')}
+                  title="Graph — explore lineage interactively"
+                  aria-pressed={lensViewMode === 'graph'}
+                  className={cn(
+                    'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                    lensViewMode === 'graph'
+                      ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                      : 'text-ink-muted hover:text-ink',
+                  )}
+                >
+                  <LucideIcons.Network className="w-3 h-3" />
+                  Graph
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLensViewMode('list')}
+                  title="List — scan all connections as columns"
+                  aria-pressed={lensViewMode === 'list'}
+                  className={cn(
+                    'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                    lensViewMode === 'list'
+                      ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                      : 'text-ink-muted hover:text-ink',
+                  )}
+                >
+                  <LucideIcons.List className="w-3 h-3" />
+                  List
+                </button>
+              </div>
               <div className="relative">
                 <LucideIcons.Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-ink-muted/70" />
                 <input
@@ -659,11 +831,158 @@ export function LineageLens({
           {/* ── Body — the SAME layout at every depth: re-centering
               swaps the focal in place instead of flipping to a
               different presentation (the old Miller-columns walk body
-              was the #1 reported confusion).
-              minmax(0,1fr): a bare `1fr` track keeps min-width:auto, so
-              a long unbroken field name blows the track past the dialog
-              edge (no scroll → unusable). minmax(0,…) lets the track
-              shrink and the rows' `truncate` take over. ── */}
+              was the #1 reported confusion). Two bodies, one contract:
+              the interactive hop-band GRAPH (default) or the classic
+              three-column LIST, switched from the header toggle. ── */}
+          {lensViewMode === 'graph' && focusGraph ? (
+          <div className="flex-1 min-h-0 flex flex-col">
+            <div className="relative flex-1 min-h-0">
+              <FocusGraphView
+                graph={focusGraph}
+                focalId={nodeId}
+                focalStats={{ in: incomingRecords.length, out: outgoingRecords.length }}
+                selectedId={graphCur.selection}
+                reducedMotion={reducedMotion}
+                onSelect={setGraphSelection}
+                onFocus={onRecenter}
+                onToggleGroup={toggleGraphGroup}
+                onToggleDrill={toggleDrillWithFetch}
+                onExpandFrontier={toggleGraphFrontier}
+                onShowMore={bumpBandPage}
+                onRetryFetch={onRetryFetch}
+                onRevealOnCanvas={onRevealOnCanvas}
+                onOpenDetails={onOpenDetails}
+              />
+              {/* Floating grain chips — same explicit, reversible filter
+                  contract as the list columns, one row for the whole
+                  graph. Hidden counts stay visible (never silent loss). */}
+              {(graphTypeChips.length > 1 || focusGraph.hiddenByChips > 0) && (
+                <div className="absolute top-2 left-3 right-14 z-10 flex flex-wrap items-center gap-x-2 gap-y-1 pointer-events-none">
+                  {graphTypeChips.length > 1 && (
+                    <div className="pointer-events-auto rounded-lg bg-canvas-elevated/90 border border-black/[0.07] dark:border-white/[0.08] shadow-sm px-1.5 py-1">
+                      <TypeChips chips={graphTypeChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} />
+                    </div>
+                  )}
+                  {focusGraph.hiddenByChips > 0 && (
+                    <span className="pointer-events-auto px-1.5 py-0.5 rounded-md bg-canvas-elevated/90 border border-black/[0.07] dark:border-white/[0.08] text-[9.5px] text-ink-muted shadow-sm">
+                      {focusGraph.hiddenByChips} hidden by the type chips
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+            {/* ── Detail strip — single click inspects; focusing stays a
+                deliberate second gesture (the old click-to-flip was the
+                top confusion report). ── */}
+            <AnimatePresence>
+              {selectedInfo && (() => {
+                const selLabel = labelOf(selectedInfo.id, selectedInfo.node)
+                const selType = (selectedInfo.node?.data?.type as string) ?? 'entity'
+                const selColor = generateColorFromType(selType)
+                const selParent = resolveParent(selectedInfo.id)
+                return (
+                  <motion.div
+                    key={selectedInfo.id}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    transition={{ duration: reducedMotion ? 0 : 0.16, ease: 'easeOut' }}
+                    className="flex items-center gap-3 px-4 py-2.5 border-t border-black/[0.08] dark:border-white/[0.08] bg-black/[0.02] dark:bg-white/[0.03]"
+                  >
+                    <div
+                      className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+                      style={{ backgroundColor: `${selColor}1f` }}
+                    >
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: selColor }} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="flex items-center gap-1.5 min-w-0 text-[12.5px] font-semibold text-ink leading-tight">
+                        <span className="truncate">{selLabel}</span>
+                        <span
+                          className="flex-shrink-0 px-1.5 py-px rounded text-[8.5px] font-bold uppercase tracking-wide"
+                          style={{ backgroundColor: `${selColor}1f`, color: selColor }}
+                        >
+                          {selType}
+                        </span>
+                        {!selectedInfo.node && (
+                          <span className="flex-shrink-0 text-[9.5px] italic text-ink-muted/70">not on canvas</span>
+                        )}
+                      </p>
+                      <p className="flex items-center gap-2 text-[10px] text-ink-muted leading-tight tabular-nums">
+                        {selParent && (
+                          <span className="flex items-center gap-1 min-w-0">
+                            <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/60" />
+                            <span className="truncate max-w-[180px]">{labelOf(selParent, nodeMap.get(selParent))}</span>
+                          </span>
+                        )}
+                        <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
+                          <LucideIcons.ArrowDownLeft className="w-3 h-3" />
+                          {selectedInfo.inCount} in
+                        </span>
+                        <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                          <LucideIcons.ArrowUpRight className="w-3 h-3" />
+                          {selectedInfo.outCount} out
+                        </span>
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => onRecenter(selectedInfo.id)}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-accent-lineage/15 border border-accent-lineage/40 text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/25 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                      >
+                        <LucideIcons.Focus className="w-3 h-3" />
+                        Focus here
+                      </button>
+                      {onRevealOnCanvas && (
+                        <button
+                          type="button"
+                          onClick={() => void onRevealOnCanvas(selectedInfo.id)}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                        >
+                          <LucideIcons.Crosshair className="w-3 h-3" />
+                          Reveal on canvas
+                        </button>
+                      )}
+                      {onOpenDetails && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenDetails(selectedInfo.id)}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                        >
+                          <LucideIcons.PanelRight className="w-3 h-3" />
+                          Details
+                        </button>
+                      )}
+                      {onTrace && (
+                        <button
+                          type="button"
+                          onClick={() => { onClose(); onTrace(selectedInfo.id) }}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                        >
+                          <LucideIcons.GitBranch className="w-3 h-3" />
+                          Trace
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setGraphSelection(null)}
+                        aria-label="Clear selection"
+                        className="w-6 h-6 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                      >
+                        <LucideIcons.X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </motion.div>
+                )
+              })()}
+            </AnimatePresence>
+          </div>
+          ) : (
+          // minmax(0,1fr): a bare `1fr` track keeps min-width:auto, so a
+          // long unbroken field name blows the track past the dialog
+          // edge (no scroll → unusable). minmax(0,…) lets the track
+          // shrink and the rows' `truncate` take over.
           <div className="flex-1 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] min-h-0">
             <NeighborColumn
               title="Data Sources"
@@ -801,6 +1120,7 @@ export function LineageLens({
               onOpenDetails={onOpenDetails}
             />
           </div>
+          )}
 
           {/* ── Outside this view (feature-flagged preview) — partners
               that exist in the data source but are beyond this view's
@@ -857,7 +1177,9 @@ export function LineageLens({
           {/* Footer */}
           <div className="flex items-center gap-2 px-4 py-2.5 border-t border-black/[0.08] dark:border-white/[0.08]">
             <p className="text-[10.5px] text-ink-muted/80">
-              Click a connection to re-center · Esc to close
+              {lensViewMode === 'graph'
+                ? 'Click a card to inspect · Double-click to focus · Drag to pan · Esc to close'
+                : 'Click a connection to re-center · Esc to close'}
             </p>
             <div className="ml-auto flex items-center gap-2">
               {onLocateAll && (
@@ -903,18 +1225,6 @@ function FlowRail({ color, active }: { color: string; active: boolean }) {
       <LucideIcons.ChevronRight className="w-3 h-3 -ml-1 flex-shrink-0" style={{ color }} />
     </div>
   )
-}
-
-function labelOf(id: string, node: LineageNode | undefined): string {
-  const data = node?.data as Record<string, unknown> | undefined
-  return (data?.label as string)
-    ?? (data?.businessLabel as string)
-    // URN-derived fallback for an as-yet-unresolved neighbor. Split on
-    // structural punctuation too (`,` `(` `)`) so nested URNs like
-    // `urn:…:(…,field_name)` yield `field_name`, never a stray `)` or a
-    // comma-joined blob.
-    ?? id.split(/[:/.,()]/).filter(Boolean).pop()
-    ?? id
 }
 
 /** Entity-type filter chips — shared by the classic columns and the
