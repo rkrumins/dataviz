@@ -9,6 +9,57 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — View sharing that means what it says
+
+### Security
+
+**Private views were not private.** The view-access evaluator checked
+workspace membership before the visibility tier, so every workspace member —
+and every org-level reader — could open any private view in their workspaces.
+Worse, `GET /views/facets` had no authentication at all and served every
+private view's tags and creator identity to the open internet-facing API, the
+popular list leaked workspace-tier views across workspaces, and the stats
+endpoint counted views the caller could not read. Visibility now gates first
+(private = creator + explicit grantees + workspace admins), every list and
+aggregate read filters inside SQL, and the unauthenticated endpoints require
+sign-in.
+
+**Sharing state had side doors.** The generic view-update endpoint accepted a
+`visibility` field under mere edit rights, and creating a view straight as
+`enterprise` skipped visibility authorization entirely. Both are closed: the
+dedicated visibility endpoint is the only path, and it now demands the new
+`workspace:view:publish` permission for any transition to or from
+`enterprise`. Favouriting no longer works on views you cannot read, and two
+graph mutations that had shipped under the read gate
+(`vocab-alignment/confirm` and the atomic draft-commit path) require
+`workspace:datasource:manage` like every sibling write. A request naming a
+`dataSourceId` outside the path workspace now 404s — the binding was never
+verified before.
+
+### Added
+
+**Enterprise visibility now actually opens.** Any signed-in user can open a
+published view from its `/views/{id}` link and the canvas loads, read-only —
+expand, trace, and search included. The data plane accepts a view-capability
+context (`?viewId=`) pinned to the view's resolved data source; mutations stay
+membership-gated. The single-view read returns a per-caller `access` envelope
+(capabilities + `dataAccess`) plus the resolved data source and provider so
+the canvas can boot without workspace membership.
+
+**Sharing with people and groups is complete.** A signed-in-user directory
+(`GET /directory`) replaces the admin-only picker source, grant roles can be
+edited in place (`PUT /views/{id}/grants/{grant_id}`), and the Explorer's
+"Shared with me" is a real server-side category (explicit grants, not a
+visibility approximation).
+
+### Upgrading
+
+Pre-upgrade sessions may carry a collapsed `workspace:view:*` wildcard that
+satisfies publish checks until they refresh (bounded by the access-token TTL);
+force re-login via session revocation if that window matters. Clients that
+sent `visibility` through the generic view PUT now receive 422 — use the
+dedicated visibility endpoint.
+
 ## [Unreleased] — Invite links that actually work, and can be taken back
 
 ### Security

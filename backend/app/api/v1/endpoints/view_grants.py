@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -270,6 +270,78 @@ async def create_grant(
         role=grant.role_name,
         granted_at=grant.granted_at,
         granted_by=grant.granted_by,
+        subject=subject,
+    )
+
+
+@router.put(
+    "/{grant_id}",
+    response_model=ViewGrantResponse,
+    response_model_by_alias=True,
+)
+async def update_grant_role(
+    view_id: str,
+    grant_id: str,
+    role: str = Body(..., embed=True),
+    user: User = Depends(get_current_user),
+    view: ViewORM = Depends(can_manage_view_grants),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Change an existing grant's role (viewer ↔ editor) in place —
+    no revoke + re-share dance, and the grant's audit trail
+    (granted_at / granted_by) stays intact."""
+    if role not in grant_repo.VALID_GRANT_ROLES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"role must be one of: {', '.join(sorted(grant_repo.VALID_GRANT_ROLES))}",
+        )
+    grants = await grant_repo.list_grants_for_resource(
+        session, resource_type="view", resource_id=view_id,
+    )
+    target = next((g for g in grants if g.id == grant_id), None)
+    if target is None:
+        # Same defence as delete: a grant id from another view the
+        # caller happens to manage must not be reachable here.
+        raise HTTPException(status_code=404, detail="Grant not found on this view")
+
+    previous_role = target.role_name
+    if previous_role != role:
+        target.role_name = role
+        await session.flush()
+        await user_repo.create_outbox_event(
+            session,
+            event_type="rbac.view.grant_updated",
+            payload={
+                "view_id": view_id,
+                "workspace_id": view.workspace_id,
+                "grant_id": grant_id,
+                "subject_type": target.subject_type,
+                "subject_id": target.subject_id,
+                "role": role,
+                "previous_role": previous_role,
+                "actor_id": user.id,
+            },
+        )
+        subject_for_log = await _hydrate_subject(
+            session, target.subject_type, target.subject_id,
+        )
+        subject_label = subject_for_log.display_name or target.subject_id
+        await view_activity_repo.record_view_activity(
+            session, view_id=view_id, workspace_id=view.workspace_id,
+            action="shared", actor=user.id,
+            summary=f"Changed {subject_label} to {role}",
+            changes={
+                "subjectType": target.subject_type,
+                "subjectId": target.subject_id,
+                "role": {"from": previous_role, "to": role},
+            },
+        )
+    subject = await _hydrate_subject(session, target.subject_type, target.subject_id)
+    return ViewGrantResponse(
+        grant_id=target.id,
+        role=target.role_name,
+        granted_at=target.granted_at,
+        granted_by=target.granted_by,
         subject=subject,
     )
 

@@ -12,7 +12,7 @@ from .endpoints import (
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config,
     groups, workspace_members, view_grants, role_bindings,
-    permissions_admin, access_requests, rbac_search,
+    permissions_admin, access_requests, rbac_search, directory,
     versioning,
     admin_idp_groups,
     admin_idp_providers,
@@ -123,6 +123,14 @@ api_router.include_router(
     view_grants.router,
     prefix="/views/{view_id}/grants",
     tags=["views:grants"],
+)
+# People/group directory for share pickers — any signed-in user (the
+# route itself enforces authentication; see directory.py for why it is
+# deliberately not admin-gated).
+api_router.include_router(
+    directory.router,
+    prefix="/directory",
+    tags=["directory"],
 )
 
 # RBAC Phase 4.3 — self-service access requests.

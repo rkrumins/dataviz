@@ -69,11 +69,44 @@ filter.
 | `workspace:view:create`         | workspace | `super_admin`, `org_admin`, `workspace_admin`*, `workspace_member` |
 | `workspace:view:edit`           | workspace | (same)                             |
 | `workspace:view:delete`         | workspace | (same)                             |
+| `workspace:view:publish`        | workspace | `super_admin`, `org_admin`, `workspace_admin`* |
 | `workspace:view:read`           | workspace | + `workspace_viewer`               |
 
 \* `workspace_admin` only stores `workspace:admin` in
 `role_permissions`. The other `workspace:*` perms come from the
 resolver's auto-implication rule — see *Auto-implication* below.
+
+### View visibility and sharing (2026-07-31 rework)
+
+Views carry a visibility tier plus optional explicit grants
+(`resource_grants`, user or group subjects, `viewer`/`editor` roles).
+The evaluator (`backend/app/services/view_access.py`) gates on the tier
+first — the old membership-first union made `private` behave exactly
+like `workspace` for every member:
+
+| Tier         | Who can open it (and load its data, read-only)                       |
+|--------------|----------------------------------------------------------------------|
+| `private`    | creator, explicit grantees, workspace admins (+ org/system admins)   |
+| `workspace`  | the above + `workspace:view:read` holders in the view's workspace    |
+| `enterprise` | any signed-in user on the platform                                   |
+
+Reading a view now implies **read-only** access to its data plane: the
+graph/canvas routers accept a `?viewId=` capability context
+(`backend/app/api/v1/capability_gate.py`) pinned to the view's
+resolved data source. Mutations always require
+`workspace:datasource:manage`.
+
+`workspace:view:publish` gates every transition **to or from**
+`enterprise` (including creating a view directly as enterprise) — the
+base creator/ws-admin rule still gates `private ↔ workspace`. The
+permission is deliberately delegable: grant it to a trusted non-admin
+role to let curators publish.
+
+Caveat for rollouts: sessions minted before this permission shipped may
+still carry a collapsed `workspace:view:*` wildcard in their cached
+claims and would pass a publish check until the session refreshes
+(bounded by the access-token TTL). Force re-login via the revocation
+service if that window matters.
 
 ## Resolver behaviour
 
