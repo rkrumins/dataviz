@@ -9,7 +9,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Sequence, Set
 
-from sqlalchemy import select, delete, func, or_, update
+from sqlalchemy import and_, select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel
@@ -947,26 +947,46 @@ def _apply_view_filters(
     view_types: Optional[List[str]] = None,
     created_by: Optional[str] = None,
     created_by_in: Optional[List[str]] = None,
+    created_by_not: Optional[str] = None,
     created_after: Optional[str] = None,
     search: Optional[str] = None,
     tags: Optional[List[str]] = None,
+    ids_in: Optional[List[str]] = None,
     user_id: Optional[str] = None,
     favourited_only: bool = False,
     include_deleted: bool = False,
     deleted_only: bool = False,
     attention_only: bool = False,
+    readable=None,
 ):
     """Apply all filter predicates to a query on ``ViewORM``.
 
     Shared by the listing, counting, and discovery code paths so the same
     set of predicates produces the same result set whether the caller is
     fetching rows or the total count.
+
+    ``readable`` is the caller's access clause (from
+    ``view_access.readable_views_clause``). Applying it here — inside the
+    same WHERE as every other predicate — is what makes ``total`` /
+    ``has_more`` honest; the old Python post-filter over-reported both.
+    ``ids_in`` / ``created_by_not`` exist for the shared-with-me
+    category (explicit grants, excluding the caller's own views).
     """
+    if readable is not None:
+        query = query.where(readable)
+
     # Soft-delete filtering
     if deleted_only:
         query = query.where(ViewORM.deleted_at.isnot(None))
     elif not include_deleted:
         query = query.where(ViewORM.deleted_at.is_(None))
+
+    if ids_in is not None:
+        query = query.where(ViewORM.id.in_(ids_in))
+    if created_by_not:
+        query = query.where(
+            or_(ViewORM.created_by.is_(None), ViewORM.created_by != created_by_not)
+        )
 
     # When favourited_only is True, inner-join on the favourites table so only
     # views the requesting user has bookmarked are returned.
@@ -1106,16 +1126,18 @@ async def record_view_visit(
 
 async def list_recent_views(
     session: AsyncSession, user_id: Optional[str], *, limit: int = 5,
+    readable=None,
 ) -> List[RecentViewEntry]:
     """This user's most recently visited views, newest first.
 
     Joined against the LIVE view rows, so names/scope are never a stale snapshot
     and a deleted view drops out on its own (no more clicking a recent entry into
-    a 404).
+    a 404). ``readable`` additionally drops views the user has since
+    lost access to — a visit row is history, not a capability.
     """
     if not user_id or user_id == "anonymous":
         return []
-    rows = (await session.execute(
+    query = (
         select(ViewORM, ViewVisitORM.visited_at)
         .join(ViewVisitORM, ViewVisitORM.view_id == ViewORM.id)
         .where(
@@ -1124,7 +1146,10 @@ async def list_recent_views(
         )
         .order_by(ViewVisitORM.visited_at.desc())
         .limit(limit)
-    )).all()
+    )
+    if readable is not None:
+        query = query.where(readable)
+    rows = (await session.execute(query)).all()
 
     out: List[RecentViewEntry] = []
     for view_row, visited_at in rows:
@@ -1202,9 +1227,11 @@ async def list_views_filtered(
     view_types: Optional[List[str]] = None,
     created_by: Optional[str] = None,
     created_by_in: Optional[List[str]] = None,
+    created_by_not: Optional[str] = None,
     created_after: Optional[str] = None,
     search: Optional[str] = None,
     tags: Optional[List[str]] = None,
+    ids_in: Optional[List[str]] = None,
     limit: int = 50,
     offset: int = 0,
     user_id: Optional[str] = None,
@@ -1212,6 +1239,7 @@ async def list_views_filtered(
     include_deleted: bool = False,
     deleted_only: bool = False,
     attention_only: bool = False,
+    readable=None,
 ) -> ViewListResponse:
     """Return a paginated envelope of views matching the given filters.
 
@@ -1232,14 +1260,17 @@ async def list_views_filtered(
         view_types=view_types,
         created_by=created_by,
         created_by_in=created_by_in,
+        created_by_not=created_by_not,
         created_after=created_after,
         search=search,
         tags=tags,
+        ids_in=ids_in,
         user_id=user_id,
         favourited_only=favourited_only,
         include_deleted=include_deleted,
         deleted_only=deleted_only,
         attention_only=attention_only,
+        readable=readable,
     )
 
     select_query = _apply_view_filters(select(ViewORM), **filter_kwargs)
@@ -1281,17 +1312,20 @@ async def list_views_filtered(
 
 async def get_view_facets(
     session: AsyncSession,
+    *,
+    readable=None,
 ) -> ViewFacetsResponse:
     """Aggregate distinct tags, view types, and creators across non-deleted views.
 
     Used by the Explorer to populate the Tag / View Type / Creator filter
-    dropdowns. Facets are intentionally GLOBAL (unscoped by other active
-    filters) so users can always pick from the full set of values in the
-    database rather than the intersection of their current filters —
-    matches the behaviour users expect from Explorer-style UIs where the
-    picker is a discovery tool, not a query refinement.
+    dropdowns. Facets are intentionally unscoped by the caller's *other*
+    active filters (the picker is a discovery tool, not a query
+    refinement) — but ALWAYS scoped by ``readable``: a facet computed
+    over views the caller cannot read leaks their tags and creators.
     """
     base_where = ViewORM.deleted_at.is_(None)
+    if readable is not None:
+        base_where = and_(base_where, readable)
 
     # 1. Tags — parsed in Python since the column is a JSON string.
     tags_query = (
@@ -1388,14 +1422,17 @@ async def get_view_stats(
     view_types: Optional[List[str]] = None,
     created_by: Optional[str] = None,
     created_by_in: Optional[List[str]] = None,
+    created_by_not: Optional[str] = None,
     created_after: Optional[str] = None,
     search: Optional[str] = None,
     tags: Optional[List[str]] = None,
+    ids_in: Optional[List[str]] = None,
     user_id: Optional[str] = None,
     favourited_only: bool = False,
     include_deleted: bool = False,
     deleted_only: bool = False,
     attention_only: bool = False,
+    readable=None,
 ) -> ViewCatalogStats:
     """Compute the Explorer stats bar numbers for a given filter set.
 
@@ -1415,9 +1452,11 @@ async def get_view_stats(
         view_types=view_types,
         created_by=created_by,
         created_by_in=created_by_in,
+        created_by_not=created_by_not,
         created_after=created_after,
         search=search,
         tags=tags,
+        ids_in=ids_in,
         user_id=user_id,
         favourited_only=favourited_only,
         include_deleted=include_deleted,
@@ -1427,6 +1466,7 @@ async def get_view_stats(
         # The needs_attention query below always overlays True — when
         # both resolve to True the numbers line up as expected.
         attention_only=attention_only,
+        readable=readable,
     )
 
     # Total — matches list ``total`` for identical filters.
@@ -1486,15 +1526,16 @@ async def list_popular_views(
     *,
     limit: int = 20,
     user_id: Optional[str] = None,
+    readable=None,
 ) -> List[ViewResponse]:
     """List the most-favourited views visible to the caller.
 
-    Visibility scoping:
-    - ``enterprise`` and ``workspace`` visibility are visible to everyone
-      (matches how ``list_views_filtered`` treats access today).
-    - ``private`` views only surface for their creator, so user A never
-      sees user B's private view bubble up into their Trending strip
-      just because A has happened to favourite it.
+    ``readable`` (from ``view_access.readable_views_clause``) is the
+    caller's actual read reach and should always be supplied by the
+    endpoint; the legacy predicate below survives only for the
+    ``RBAC_ENFORCE_VIEWS`` kill-switch path. The legacy predicate leaked
+    workspace-tier views across workspaces — it had no workspace
+    scoping at all.
 
     Zero-favourite views are excluded so Trending reflects actual
     popularity rather than padding with unloved views.
@@ -1508,14 +1549,17 @@ async def list_popular_views(
         .subquery()
     )
 
-    # Privacy-safe visibility predicate: everyone sees non-private views;
-    # private views only surface to their creator.
-    visibility_predicate = ViewORM.visibility.in_(("enterprise", "workspace"))
-    if user_id:
-        visibility_predicate = or_(
-            visibility_predicate,
-            ViewORM.created_by == user_id,
-        )
+    if readable is not None:
+        visibility_predicate = readable
+    else:
+        # Legacy (kill-switch) predicate: everyone sees non-private
+        # views; private views only surface to their creator.
+        visibility_predicate = ViewORM.visibility.in_(("enterprise", "workspace"))
+        if user_id:
+            visibility_predicate = or_(
+                visibility_predicate,
+                ViewORM.created_by == user_id,
+            )
 
     query = (
         select(ViewORM, fav_count_sq.c.fav_count)

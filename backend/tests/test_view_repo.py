@@ -825,3 +825,175 @@ async def test_overlay_cascades_on_view_hard_delete():
             assert await view_repo.get_overlay(session, created.id, "br1") is None
     finally:
         await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Readable-clause scoping (view-sharing rework)
+# ---------------------------------------------------------------------------
+#
+# The repo functions take a pre-rendered SQL clause (from
+# view_access.readable_views_clause); scope construction itself is
+# covered by test_view_access_matrix. Here we prove every list/aggregate
+# path actually applies the clause — and that pagination totals are
+# computed AFTER it.
+
+from backend.app.services import view_access as _va  # noqa: E402
+
+
+def _member_scope(user_id: str, member_ws: tuple, granted: tuple = ()):
+    return _va.ViewReadScope(
+        authenticated=True,
+        unrestricted=False,
+        org_viewer=False,
+        user_id=user_id,
+        member_ws_ids=member_ws,
+        admin_ws_ids=(),
+        granted_view_ids=granted,
+    )
+
+
+async def _seed_scoped_population(db_session):
+    """ws_a: alice-private (tag 'secret'), workspace-tier, enterprise;
+    ws_b: workspace-tier (the cross-workspace leak fixture)."""
+    ws_a = await _create_workspace(db_session, name="WS A")
+    ws_b = await _create_workspace(db_session, name="WS B")
+    mk = view_repo.create_view
+    private_a = await mk(db_session, _make_create_req(
+        ws_a.id, name="alice-private", visibility="private", tags=["secret"],
+    ), user_id="usr_alice")
+    workspace_a = await mk(db_session, _make_create_req(
+        ws_a.id, name="ws-a-shared", visibility="workspace",
+    ), user_id="usr_alice")
+    enterprise_a = await mk(db_session, _make_create_req(
+        ws_a.id, name="ws-a-public", visibility="enterprise",
+    ), user_id="usr_alice")
+    workspace_b = await mk(db_session, _make_create_req(
+        ws_b.id, name="ws-b-shared", visibility="workspace",
+    ), user_id="usr_carol")
+    await db_session.commit()
+    return ws_a, ws_b, private_a, workspace_a, enterprise_a, workspace_b
+
+
+async def test_list_views_filtered_scoped_by_readable_clause(db_session):
+    ws_a, _ws_b, private_a, workspace_a, enterprise_a, workspace_b = (
+        await _seed_scoped_population(db_session)
+    )
+    scope = _member_scope("usr_bob", (ws_a.id,))
+    resp = await view_repo.list_views_filtered(
+        db_session, user_id="usr_bob",
+        readable=_va.readable_views_clause(scope),
+    )
+    ids = {v.id for v in resp.items}
+    assert ids == {workspace_a.id, enterprise_a.id}
+    # Pagination totals are computed after scoping, not before.
+    assert resp.total == 2
+
+
+async def test_list_views_filtered_pagination_after_scoping(db_session):
+    ws_a, *_ = await _seed_scoped_population(db_session)
+    scope = _member_scope("usr_bob", (ws_a.id,))
+    page = await view_repo.list_views_filtered(
+        db_session, user_id="usr_bob", limit=1, offset=0,
+        readable=_va.readable_views_clause(scope),
+    )
+    assert page.total == 2
+    assert page.has_more is True
+    assert page.next_offset == 1
+    assert len(page.items) == 1
+    page2 = await view_repo.list_views_filtered(
+        db_session, user_id="usr_bob", limit=1, offset=1,
+        readable=_va.readable_views_clause(scope),
+    )
+    assert page2.has_more is False
+    assert len(page2.items) == 1
+
+
+async def test_get_view_stats_scoped_matches_list_total(db_session):
+    ws_a, *_ = await _seed_scoped_population(db_session)
+    scope = _member_scope("usr_bob", (ws_a.id,))
+    clause = _va.readable_views_clause(scope)
+    stats = await view_repo.get_view_stats(
+        db_session, user_id="usr_bob", readable=clause,
+    )
+    listed = await view_repo.list_views_filtered(
+        db_session, user_id="usr_bob", readable=clause,
+    )
+    assert stats.total == listed.total == 2
+
+
+async def test_get_view_facets_scoped(db_session):
+    ws_a, *_ = await _seed_scoped_population(db_session)
+    scope = _member_scope("usr_bob", (ws_a.id,))
+    facets = await view_repo.get_view_facets(
+        db_session, readable=_va.readable_views_clause(scope),
+    )
+    # The 'secret' tag lives only on alice's private view.
+    assert all(t.value != "secret" for t in facets.tags)
+    # usr_carol only created the unreadable ws_b view.
+    assert all(c.user_id != "usr_carol" for c in facets.creators)
+    # alice's readable views keep her in the creator facet.
+    assert any(c.user_id == "usr_alice" for c in facets.creators)
+
+
+async def test_list_popular_views_scoped(db_session):
+    ws_a, _ws_b, private_a, workspace_a, enterprise_a, workspace_b = (
+        await _seed_scoped_population(db_session)
+    )
+    for v in (private_a, workspace_a, enterprise_a, workspace_b):
+        await view_repo.favourite_view(db_session, v.id, "usr_someone")
+    await db_session.commit()
+    scope = _member_scope("usr_bob", (ws_a.id,))
+    popular = await view_repo.list_popular_views(
+        db_session, user_id="usr_bob",
+        readable=_va.readable_views_clause(scope),
+    )
+    ids = {v.id for v in popular}
+    # The ws_b workspace-tier view must NOT leak cross-workspace, and
+    # alice's private view must not surface for bob.
+    assert ids == {workspace_a.id, enterprise_a.id}
+
+
+async def test_list_recent_views_scoped_drops_revoked(db_session):
+    ws_a, _ws_b, private_a, workspace_a, *_ = (
+        await _seed_scoped_population(db_session)
+    )
+    # bob visited both while he could; his read reach today excludes the
+    # private one.
+    await view_repo.record_view_visit(db_session, private_a.id, "usr_bob")
+    await view_repo.record_view_visit(db_session, workspace_a.id, "usr_bob")
+    await db_session.commit()
+    scope = _member_scope("usr_bob", (ws_a.id,))
+    recents = await view_repo.list_recent_views(
+        db_session, "usr_bob", readable=_va.readable_views_clause(scope),
+    )
+    ids = {r.viewId for r in recents}
+    assert ids == {workspace_a.id}
+
+
+async def test_shared_with_me_filter_kwargs(db_session):
+    """category=shared-with-me maps to ids_in (granted views) plus
+    created_by_not (exclude own) at the endpoint layer; the repo just
+    honours the two generic kwargs."""
+    ws_a, _ws_b, private_a, workspace_a, enterprise_a, workspace_b = (
+        await _seed_scoped_population(db_session)
+    )
+    scope = _member_scope(
+        "usr_bob", (ws_a.id,), granted=(workspace_b.id, enterprise_a.id),
+    )
+    resp = await view_repo.list_views_filtered(
+        db_session, user_id="usr_bob",
+        readable=_va.readable_views_clause(scope),
+        ids_in=[workspace_b.id, enterprise_a.id],
+        created_by_not="usr_bob",
+    )
+    assert {v.id for v in resp.items} == {workspace_b.id, enterprise_a.id}
+    resp_own_excluded = await view_repo.list_views_filtered(
+        db_session, user_id="usr_alice",
+        readable=_va.readable_views_clause(
+            _member_scope("usr_alice", (ws_a.id,), granted=(enterprise_a.id,)),
+        ),
+        ids_in=[enterprise_a.id],
+        created_by_not="usr_alice",
+    )
+    # alice created it — shared-with-me must not echo her own view back.
+    assert resp_own_excluded.items == []
