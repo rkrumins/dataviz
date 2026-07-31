@@ -607,7 +607,9 @@ export function ContextViewCanvas({
   const canEnterEdit = !!graphId
   // Blank (hand-built) models drive the guided empty state + first-steps
   // companion; react-query dedupes this against CanvasVersioningBar's resolve.
-  const resolveQ = useResolveGraph(scopeWsId ?? undefined, dataSourceId)
+  // Threading the view id keeps every resolve consumer on ONE cache entry per
+  // scope AND carries the capability context for non-members.
+  const resolveQ = useResolveGraph(scopeWsId ?? undefined, dataSourceId, activeView?.id ?? null)
   const isBlankModel = resolveQ.data?.kind === 'blank'
   const mainHeadSeq = resolveQ.data?.mainHeadCommitSeq ?? 0
 

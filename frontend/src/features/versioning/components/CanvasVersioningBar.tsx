@@ -41,7 +41,10 @@ interface CanvasVersioningBarProps {
 export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersioningBarProps) {
   const { showToast } = useToast()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
-  const resolve = useResolveGraph(workspaceId, dataSourceId)
+  // Hoisted so the resolve below can carry the view id (capability context +
+  // shared cache entry with the canvas's own resolve).
+  const activeView = useActiveView()
+  const resolve = useResolveGraph(workspaceId, dataSourceId, activeView?.id ?? null)
   const graphId = resolve.data?.graphId ?? null
   const [showEnable, setShowEnable] = useState(false)
   // The enablement job: live progress while it runs (seeded from /resolve, so a reload
@@ -51,7 +54,6 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
     seed: resolve.data?.bootstrap ?? undefined,
   })
 
-  const activeView = useActiveView()
   const viewId = activeView?.id ?? null
   const viewName = activeView?.name ?? null
   // Branch-per-view: scope the effective branch to the active view, so `isDraft` never reflects

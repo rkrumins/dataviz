@@ -16,12 +16,14 @@
  * parameterize ViewExecutionProvider with the correct scope.
  */
 import { useEffect, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useHealthStore } from '@/store/health'
 import { useRecentViews } from '@/hooks/useRecentViews'
-import { getView, viewToViewConfig, type View } from '@/services/viewApiService'
+import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
+import { getView, viewToViewConfig, type View, type ViewAccess } from '@/services/viewApiService'
 import type { ViewConfiguration } from '@/types/schema'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -44,8 +46,20 @@ export interface UseViewNavigationResult {
   error: string | null
   /** The resolved view's workspace ID — consumed by ViewExecutionProvider. */
   viewWorkspaceId: string | null
-  /** The resolved view's data source ID — consumed by ViewExecutionProvider. */
+  /** The resolved view's data source ID — consumed by ViewExecutionProvider.
+   *  Server-resolved (workspace primary when the view stores NULL), so it is
+   *  correct even for callers with no workspace membership. */
   viewDataSourceId: string | null
+  /** Display name of the view's workspace, from the API response — present
+   *  even when the caller is not a member (the workspace list can't say). */
+  viewWorkspaceName: string | null
+  /** Display name of the view's (resolved) data source, from the API. */
+  viewDataSourceName: string | null
+  /** Provider behind the view's resolved source — boots the canvas without
+   *  the (membership-gated) workspace list. */
+  viewProviderId: string | null
+  /** The caller's capability envelope; null until the API response lands. */
+  access: ViewAccess | null
 }
 
 // ─── Hook ───────────────────────────────────────────────────────────────────
@@ -53,6 +67,10 @@ export interface UseViewNavigationResult {
 export function useViewNavigation(viewId: string | undefined): UseViewNavigationResult {
   const [status, setStatus] = useState<ViewNavigationStatus>('idle')
   const [error, setError] = useState<string | null>(null)
+  // The raw API response — carries the access envelope + enriched names
+  // that the (RBAC-scoped) workspace store cannot supply for non-members.
+  const [apiView, setApiView] = useState<View | null>(null)
+  const queryClient = useQueryClient()
 
   const { setActiveView } = useSchemaStore()
   const { setViewport } = useCanvasStore()
@@ -88,27 +106,41 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
     cancelledRef.current = false
     setError(null)
 
+    // One GET per view open: the shared ['view', viewId] React Query entry
+    // also feeds ViewPageHeader, useViewAccess, and the Share dialog.
+    const fetchApiView = () =>
+      queryClient.ensureQueryData<View>({
+        queryKey: [...VIEW_QUERY_KEY, viewId],
+        queryFn: () => getView(viewId, undefined, { silent403: true }),
+        staleTime: 60 * 1000,
+      })
+
     const resolveView = async () => {
       // 1a. Check local cache first (synchronous)
       const localView = useSchemaStore.getState().schema?.views.find(v => v.id === viewId)
 
       let viewConfig: ViewConfiguration | undefined
-      let targetWsId: string | undefined
       let targetDsId: string | undefined
+      let apiData: View | undefined
 
       if (localView) {
         viewConfig = localView
-        targetWsId = localView.workspaceId
         targetDsId = localView.dataSourceId ?? undefined
         pendingViewConfigRef.current = viewConfig
+        // The store copy lacks the access envelope + enriched names —
+        // fetch them in the background without blocking activation.
+        fetchApiView()
+          .then(data => { if (!cancelledRef.current) setApiView(data) })
+          .catch(() => { /* envelope is an enhancement on this path */ })
       } else {
         // 1b. Fetch from API (deep link / shared URL)
         setStatus('resolving')
         try {
-          const data: View = await getView(viewId)
+          const data: View = await fetchApiView()
           if (cancelledRef.current) return
 
-          targetWsId = data.workspaceId
+          apiData = data
+          setApiView(data)
           targetDsId = data.dataSourceId
           viewConfig = viewToViewConfig(data)
           pendingViewConfigRef.current = viewConfig
@@ -124,10 +156,13 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
           if (!cancelledRef.current) {
             completedViewRef.current = viewId  // Prevent retry loop
             setStatus('error')
+            // The backend answers 404 for both "doesn't exist" and "not
+            // shared with you" (existence-hiding), so the copy covers both
+            // honestly instead of the old flat "View not found".
             setError(
               err instanceof Error && err.message.includes('500')
                 ? 'The backend returned an error loading this view. Please try again later.'
-                : 'View not found',
+                : "This view doesn't exist or hasn't been shared with you. Ask its owner for access.",
             )
           }
           return
@@ -136,20 +171,12 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
 
       if (cancelledRef.current) return
 
-      // 2. Validate workspace exists
-      if (targetWsId) {
-        const wsExists = useWorkspacesStore.getState().workspaces.some(w => w.id === targetWsId)
-        if (!wsExists) {
-          setStatus('error')
-          setError('The workspace for this view no longer exists.')
-          return
-        }
-      }
-
-      // 3. Activate the view immediately — no scope switching needed.
-      // Provider and schema loading are handled by ViewExecutionProvider
-      // in the render tree.
-      activateView(viewId, viewConfig, targetDsId)
+      // 2. Activate the view immediately — no scope switching, and no
+      // workspace-store existence check: that list is RBAC-scoped to the
+      // caller's memberships, so for a shared/enterprise view it said
+      // "the workspace no longer exists" to exactly the people the view
+      // was shared with. The server already vouched for the view.
+      activateView(viewId, viewConfig, targetDsId, apiData)
     }
 
     resolveView()
@@ -165,6 +192,7 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
     id: string,
     viewConfig: ViewConfiguration | undefined,
     dsId: string | undefined,
+    apiData?: View,
   ) {
     if (completedViewRef.current === id) return
 
@@ -181,7 +209,10 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
     setStatus('ready')
 
     if (viewConfig) {
-      const ds = dsId
+      // Names come from the API response when we have it (works for
+      // non-members); the workspace-store lookup is only the fallback
+      // for the store-hit path.
+      const ds = !apiData && dsId
         ? useWorkspacesStore.getState().workspaces
             .flatMap(w => w.dataSources ?? [])
             .find(d => d.id === dsId)
@@ -192,9 +223,9 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
         viewType: viewConfig.layout?.type ?? 'graph',
         icon: viewConfig.icon,
         workspaceId: viewConfig.workspaceId,
-        workspaceName: viewConfig.workspaceName,
-        dataSourceId: dsId,
-        dataSourceName: ds?.label || ds?.catalogItemId || undefined,
+        workspaceName: apiData?.workspaceName ?? viewConfig.workspaceName,
+        dataSourceId: apiData?.dataSourceId ?? dsId,
+        dataSourceName: apiData?.dataSourceName ?? ds?.label ?? ds?.catalogItemId ?? undefined,
       })
     }
   }
@@ -204,6 +235,7 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
   useEffect(() => {
     completedViewRef.current = null
     pendingViewConfigRef.current = null
+    setApiView(null)
   }, [viewId])
 
   // ─── Auto-retry on backend recovery ────────────────────────────────────
@@ -228,9 +260,15 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
     activeView?.layout?.type ??
     'graph'
 
-  // Derive scope from the resolved view config
+  // Derive scope from the resolved view config. The API response wins for
+  // the data source: the server resolves NULL to the workspace primary,
+  // which a non-member could never look up locally.
   const viewWorkspaceId = pendingViewConfigRef.current?.workspaceId ?? activeView?.workspaceId ?? null
-  const viewDataSourceId = pendingViewConfigRef.current?.dataSourceId ?? activeView?.dataSourceId ?? null
+  const viewDataSourceId =
+    apiView?.dataSourceId
+    ?? pendingViewConfigRef.current?.dataSourceId
+    ?? activeView?.dataSourceId
+    ?? null
 
   return {
     status,
@@ -239,5 +277,9 @@ export function useViewNavigation(viewId: string | undefined): UseViewNavigation
     error,
     viewWorkspaceId,
     viewDataSourceId,
+    viewWorkspaceName: apiView?.workspaceName ?? null,
+    viewDataSourceName: apiView?.dataSourceName ?? null,
+    viewProviderId: apiView?.providerId ?? null,
+    access: apiView?.access ?? null,
   }
 }

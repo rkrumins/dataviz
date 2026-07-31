@@ -115,7 +115,7 @@ export function EntityDrawer({
   // to its graph (cached; the same resolve the canvas versioning bar uses). Null when version
   // control isn't enabled, in which case the History section hides.
   const activeView = useActiveView()
-  const resolve = useResolveGraph(activeView?.workspaceId, activeView?.dataSourceId ?? null)
+  const resolve = useResolveGraph(activeView?.workspaceId, activeView?.dataSourceId ?? null, activeView?.id ?? null)
   const historyWsId = activeView?.workspaceId
   const historyGraphId = resolve.data?.graphId ?? null
   const historyMainBranch = resolve.data?.mainBranchId ?? null
