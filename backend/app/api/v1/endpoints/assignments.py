@@ -26,8 +26,11 @@ router = APIRouter()
 async def compute_assignments(
     response: Response,
     request: LayerAssignmentRequest = Body(..., embed=False),
-    engine: ContextEngine = Depends(get_context_engine),
+    # Authorization BEFORE engine construction: deps resolve in
+    # declaration order, and an unauthorized caller must get their 403
+    # without us building a provider-backed engine for them first.
     _: object = Depends(require_ws_manage),
+    engine: ContextEngine = Depends(get_context_engine),
 ):
     """Compute layer assignments using the workspace-scoped ContextEngine.
 

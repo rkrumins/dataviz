@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.feature_gate import require_feature
+from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import data_source_repo
@@ -1455,7 +1456,11 @@ async def resolve_graph_get(
     ws_id: str,
     data_source_id: str = Query(..., alias="dataSourceId"),
     view_id: Optional[str] = Query(None, alias="viewId"),
-    user: User = Depends(requires(_READ, workspace="ws_id")),
+    # Membership OR view capability: the read-only canvas boot needs
+    # branch resolution, and ``viewId`` is already a first-class param
+    # here (branch-per-view). The only versioning endpoint open to
+    # capability callers — history/diff surfaces stay membership-only.
+    user: User = Depends(require_ds_read_or_view),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Resolve (workspace, dataSource) → versioned graph + the caller's open draft, if

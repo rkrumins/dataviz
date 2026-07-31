@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import WorkspaceORM, WorkspaceDataSourceORM, ViewORM
 
+from backend.app.api.v1.capability_gate import require_ds_read_or_view_dspath
 from backend.app.auth.dependencies import (
     get_current_user,
     get_permission_claims,
@@ -1163,7 +1164,9 @@ async def get_cached_stats(
 async def get_cached_schema(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
-    _user: User = Depends(requires("workspace:datasource:read", workspace="workspace_id")),
+    # Membership OR ?viewId= capability — the canvas open path needs
+    # this read for non-members of the view's workspace.
+    _user: User = Depends(require_ds_read_or_view_dspath),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Return cached graph schema for a data source.
@@ -1213,7 +1216,8 @@ async def get_cached_schema(
 async def get_cached_ontology(
     workspace_id: str = Path(...),
     ds_id: str = Path(...),
-    _user: User = Depends(requires("workspace:datasource:read", workspace="workspace_id")),
+    # Membership OR ?viewId= capability — see cached-schema above.
+    _user: User = Depends(require_ds_read_or_view_dspath),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Return cached ontology metadata for a data source.

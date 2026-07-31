@@ -1,5 +1,9 @@
 from fastapi import APIRouter, Depends
 
+from backend.app.api.v1.capability_gate import (
+    require_ds_read_or_view,
+    require_ws_read_or_view,
+)
 from backend.app.auth.dependencies import requires
 from .versioning_gate import versioning_write_gate
 from .endpoints import (
@@ -282,29 +286,34 @@ api_router.include_router(
 )
 
 # ── Workspace-scoped data routers ───────────────────────────────────
+# Workspace data plane. Every mount accepts EITHER workspace:datasource:read
+# membership OR a ?viewId= capability context (caller can read that view →
+# read-only reach; see capability_gate.py). Mutating routes carry their own
+# workspace:datasource:manage dependency, which capability callers never pass.
+#
 # Graph endpoints: /api/v1/{ws_id}/graph/trace, /api/v1/{ws_id}/graph/nodes, etc.
 # (api_router is already mounted at /api/v1, so prefix is just /{ws_id}/graph)
 api_router.include_router(
     graph.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
-    dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
+    dependencies=[Depends(require_ds_read_or_view)],
 )
-# Assignment compute (workspace-scoped)
+# Assignment compute (workspace-scoped; its only route is manage-gated)
 api_router.include_router(
     assignments.router, prefix="/{ws_id}/graph/assignments", tags=["assignments:workspace"],
-    dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
+    dependencies=[Depends(require_ws_read_or_view)],
 )
 # Batched canvas contract (open/expand) — /api/v1/{ws_id}/graph/canvas/*
 api_router.include_router(
     canvas.router, prefix="/{ws_id}/graph", tags=["canvas:workspace"],
-    dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
+    dependencies=[Depends(require_ds_read_or_view)],
 )
 # Asset endpoints: /api/v1/{ws_id}/assets/rule-sets
 api_router.include_router(
     assets.router, prefix="/{ws_id}/assets", tags=["assets:workspace"],
-    dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
+    dependencies=[Depends(require_ws_read_or_view)],
 )
 # Context models: /api/v1/{ws_id}/context-models
 api_router.include_router(
     context_models.router, prefix="/{ws_id}/context-models", tags=["context-models"],
-    dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
+    dependencies=[Depends(require_ws_read_or_view)],
 )
