@@ -9,11 +9,12 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Check, Package, Database, BookOpen, Compass, Sparkles,
-    Zap, Plus, Activity, Loader2, CheckCircle2, Clock, AlertCircle,
+    Zap, Plus, Activity, Loader2, CheckCircle2, Clock, AlertCircle, PackageOpen,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { CatalogItemResponse } from '@/services/catalogService'
 import { aggregationService, type AggregationJobResponse } from '@/services/aggregationService'
+import { isCustomisedMapping, type PropertyMapping } from '@/services/propertyStorageService'
 import type { OnboardingFormData } from '../AssetOnboardingWizard'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -139,6 +140,11 @@ function ReviewPhase({
     workspaceNames,
     ontologyNames,
 }: Omit<ReviewStepProps, 'phase' | 'onNavigate' | 'createdDataSourceIds'>) {
+    const unpacking = catalogItems
+        .map(item => ({ item, mapping: formData.propertyMappings?.[item.id] }))
+        .filter((e): e is { item: CatalogItemResponse; mapping: PropertyMapping } =>
+            !!e.mapping && isCustomisedMapping(e.mapping))
+
     return (
         <div className="max-w-2xl mx-auto space-y-8">
             {/* Header — matches ViewWizard PreviewStep */}
@@ -276,6 +282,46 @@ function ReviewPhase({
                             })}
                         </div>
                     </div>
+
+                    {/* Property shape — only when the user actually changed it.
+                        A review screen lists decisions, not defaults. */}
+                    {unpacking.length > 0 && (
+                        <div className="p-5">
+                            <div className="flex items-center gap-3 mb-3">
+                                <div className="w-10 h-10 rounded-lg bg-sky-100 dark:bg-sky-900/30 flex items-center justify-center text-sky-600 dark:text-sky-400">
+                                    <PackageOpen className="w-5 h-5" />
+                                </div>
+                                <div className="flex-1">
+                                    <p className="text-sm font-medium text-slate-500 uppercase tracking-wide">Property Shape</p>
+                                    <p className="font-semibold text-slate-800 dark:text-slate-200">
+                                        {unpacking.length} source{unpacking.length !== 1 ? 's' : ''} unpacking nested properties
+                                    </p>
+                                </div>
+                                <Check className="w-5 h-5 text-green-500" />
+                            </div>
+                            <div className="space-y-2">
+                                {unpacking.map(({ item, mapping }) => (
+                                    <div key={item.id} className="flex items-center gap-2 text-sm">
+                                        <span className="text-slate-500">{item.name}</span>
+                                        <span className="text-slate-400">&rarr;</span>
+                                        <span className="font-medium text-slate-800 dark:text-slate-200 font-mono text-xs">
+                                            {mapping.containerKey
+                                                ? `${mapping.containerKey}${mapping.separator}…`
+                                                : 'no container — fields read as-is'}
+                                        </span>
+                                        {!mapping.collectUnmapped && (
+                                            <span className="text-xs text-slate-500">· other fields hidden</span>
+                                        )}
+                                        {Object.keys(mapping.propertyOverrides).length > 0 && (
+                                            <span className="text-xs text-slate-500">
+                                                · {Object.keys(mapping.propertyOverrides).length} remapped
+                                            </span>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
 
                     {/* Aggregation */}
                     <div className="p-5 flex items-center gap-4">

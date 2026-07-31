@@ -31,6 +31,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
+import { EmptyPropertiesHint } from '@/components/dataSource/mappingLink'
 import {
   useSchemaStore,
   useActiveView,
@@ -675,6 +676,7 @@ export function EntityDrawer({
               onFocusNode={onFocusNode}
               onLocateMany={onLocateMany}
               wsId={historyWsId}
+              dataSourceId={activeView?.dataSourceId}
               graphId={historyGraphId}
               mainBranchId={historyMainBranch}
               branchId={historyBranchId}
@@ -1205,6 +1207,8 @@ interface ViewModeContentProps {
   onFocusNode?: (nodeId: string) => void | Promise<void>
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
   wsId?: string
+  /** Lets the empty Properties state point at this source's Mapping tab. */
+  dataSourceId?: string | null
   graphId?: string | null
   mainBranchId?: string | null
   branchId?: string | null
@@ -1222,6 +1226,7 @@ function ViewModeContent({
   onFocusNode,
   onLocateMany,
   wsId,
+  dataSourceId,
   graphId,
   mainBranchId,
   branchId,
@@ -1269,9 +1274,17 @@ function ViewModeContent({
             <PropertyEditor value={propertiesBag} onChange={() => {}} readOnly searchable groupByPath bare />
           </PanelErrorBoundary>
         ) : (
-          <p className="text-xs text-ink-muted italic">
-            No properties yet. Switch to Edit to add metadata.
-          </p>
+          /* An empty bag on an onboarded graph usually isn't missing data —
+             it's data the platform can't see, because the source nests every
+             property under a container key that hasn't been mapped. Blaming
+             the user for not having added metadata sends them the wrong way,
+             and this drawer is where people actually notice. */
+          <div className="space-y-1.5">
+            <p className="text-xs text-ink-muted italic">
+              No properties yet. Switch to Edit to add metadata.
+            </p>
+            {wsId && <EmptyPropertiesHint wsId={wsId} dataSourceId={dataSourceId} />}
+          </div>
         )}
       </Section>
 

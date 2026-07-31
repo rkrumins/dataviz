@@ -32,6 +32,14 @@ import type { OntologyMatchResult } from '@/services/ontologyDefinitionService'
 import { useQuery } from '@tanstack/react-query'
 import { workspaceService } from '@/services/workspaceService'
 import { NodeIdentityField, isIdentityOverridden, isNameOverridden } from '@/components/dataSource/NodeIdentity'
+import { useToast } from '@/components/ui/toast'
+import { PropertyShapeField } from '@/components/admin/shared/PropertyShapeField'
+import {
+    DEFAULT_PROPERTY_MAPPING,
+    isCustomisedMapping,
+    savePropertyMapping,
+    type PropertyMapping,
+} from '@/services/propertyStorageService'
 import { catalogService } from '@/services/catalogService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -67,9 +75,16 @@ export function AddDataSourceWizard({
     const [ontologyId, setOntologyId] = useState('')
     const [identityProperty, setIdentityProperty] = useState('')
     const [nameProperty, setNameProperty] = useState('')
+    // Property mapping is saved AFTER the source exists, through the same
+    // narrow endpoint the Mapping tab uses — the create request has no
+    // extraConfig, and giving it one would put the client back in the
+    // business of round-tripping a blob whose secrets come back redacted.
+    const [propertyMapping, setPropertyMapping] =
+        useState<PropertyMapping>(DEFAULT_PROPERTY_MAPPING)
 
     const [phase, setPhase] = useState<'steps' | 'adding' | 'success'>('steps')
     const [error, setError] = useState<string | null>(null)
+    const { showToast } = useToast()
 
     // OWNERSHIP, not permission. The page's catalog list is filtered by
     // `permittedWorkspaces` — who MAY use an item — which says nothing about who
@@ -181,6 +196,20 @@ export function AddDataSourceWizard({
         onClose()
     }, [phase, reset, onClose])
 
+    /** Persist the mapping only when the operator actually changed it. A failure
+     *  must not lose them the source they just attached — but it must not pass
+     *  silently either, or they'll wonder later why the mapping never took. */
+    const saveMapping = useCallback(async (dsId: string | undefined) => {
+        if (!dsId || !isCustomisedMapping(propertyMapping)) return
+        try {
+            await savePropertyMapping(workspaceId, dsId, propertyMapping)
+        } catch {
+            showToast('warning',
+                "The source is attached, but its property mapping didn't save"
+                + ' — set it from the source\'s Mapping tab.')
+        }
+    }, [workspaceId, propertyMapping, showToast])
+
     const handleSubmit = useCallback(async () => {
         setPhase('adding')
         setError(null)
@@ -203,14 +232,16 @@ export function AddDataSourceWizard({
                         nameProperty: nameProperty || undefined,
                     })
                 }
+                await saveMapping(selected.boundDataSourceId)
             } else {
-                await workspaceService.addDataSource(workspaceId, {
+                const created = await workspaceService.addDataSource(workspaceId, {
                     catalogItemId,
                     label: label.trim() || undefined,
                     ontologyId: ontologyId || undefined,
                     identityProperty: identityProperty || undefined,
                     nameProperty: nameProperty || undefined,
                 })
+                await saveMapping(created?.id)
             }
             setPhase('success')
         } catch (err) {
@@ -220,7 +251,7 @@ export function AddDataSourceWizard({
             setPhase('steps')
             setStep('review')
         }
-    }, [workspaceId, catalogItemId, label, ontologyId, identityProperty, nameProperty, isMove, selected])
+    }, [workspaceId, catalogItemId, label, ontologyId, identityProperty, nameProperty, isMove, selected, saveMapping])
 
     if (!isOpen) return null
 
@@ -486,6 +517,16 @@ export function AddDataSourceWizard({
                         graphName={selected?.sourceIdentifier || selected?.name}
                         nameValue={nameProperty}
                         onNameChange={setNameProperty}
+                    />
+
+                    {/* Where this source keeps its properties. Set at attach
+                        time so the first read is already correct — otherwise
+                        the drawer shows an empty bag until someone notices. */}
+                    <PropertyShapeField
+                        value={propertyMapping}
+                        onChange={setPropertyMapping}
+                        providerId={selected?.providerId}
+                        graphName={selected?.sourceIdentifier || selected?.name}
                     />
                 </div>
             )}

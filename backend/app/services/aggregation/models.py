@@ -28,8 +28,17 @@ def _now() -> str:
 TRIGGER_SOURCES = (
     "onboarding", "manual", "schedule", "drift", "api",
     "purge", "post_purge", "auto",
+    # Unpacks nested property containers into native fields. Reuses this row
+    # (as purge does) so Job History stays uniform AND so it inherits the
+    # one-active-job-per-source guard — an alignment must not rewrite node
+    # properties while an aggregation materializes edges over the same graph.
+    "property_alignment",
 )
-API_TRIGGER_SOURCES = tuple(s for s in TRIGGER_SOURCES if s != "purge")
+#: Sources a client may ask for directly. ``purge`` and ``property_alignment``
+#: are claimed by their own endpoints, which do more than mint a row.
+API_TRIGGER_SOURCES = tuple(
+    s for s in TRIGGER_SOURCES if s not in ("purge", "property_alignment")
+)
 
 
 class AggregationJobORM(Base):

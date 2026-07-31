@@ -1450,6 +1450,244 @@ async def search_discover(
     return await svc.discover(sample_per_label=samplePerLabel)
 
 
+# ---------------------------------------------------------------------------
+# Property storage — how this graph physically stores node properties, and
+# what would change if it were aligned. Powers the data source's Mapping tab.
+# Same cost model as /search/discover (one bounded query per label), so these
+# stay ordinary synchronous reads rather than jobs. Writing is a separate,
+# explicitly-triggered operation.
+# ---------------------------------------------------------------------------
+
+class PropertyMappingInput(BaseModel):
+    """The property half of ``SchemaMapping``, as the Mapping tab edits it.
+
+    Only the fields this feature governs are accepted — the rest of the
+    mapping (identity, display name, entity type, …) is out of scope here and
+    must not be settable through a preview endpoint.
+    """
+    containerKey: Optional[str] = Field(
+        default="properties",
+        description="Node property holding the nested property container. "
+                    "null means the source stores everything as native fields.",
+    )
+    separator: str = Field(
+        default="/",
+        description="Joins a nested path into a flat key. Only '/' renders as "
+                    "a folder tree in the UI.",
+    )
+    collectUnmapped: bool = Field(
+        default=True,
+        description="Collect native non-reserved fields as user properties.",
+    )
+    propertyOverrides: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Physical field -> property path renames, applied after "
+                    "unpacking. The escape hatch for reserved-key collisions.",
+    )
+
+    def to_schema_mapping(self):
+        from backend.graph.adapters.schema_mapping import SchemaMapping
+        return SchemaMapping(
+            properties_field=self.containerKey,
+            properties_separator=self.separator,
+            collect_unmapped_as_properties=self.collectUnmapped,
+            property_overrides=self.propertyOverrides,
+        )
+
+
+class PropertyPreviewRequest(BaseModel):
+    mapping: PropertyMappingInput
+    labels: Optional[List[str]] = Field(
+        default=None,
+        description="Restrict sampling to these labels. Omitted = first few.",
+    )
+    limit: int = Field(default=5, ge=1, le=25)
+
+
+@router.get("/properties/storage")
+async def get_property_storage(
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None, description="Target a specific data source."),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Report how each label stores its node properties.
+
+    A graph built outside the platform usually nests every user property under
+    one container key. Those properties render (the read path hydrates the
+    container) but are invisible to Advanced Search, because a nested value is
+    not an indexable field. This says which labels are in that state, what
+    property paths unpacking would produce, roughly how many nodes are
+    affected, and which physical fields collide with platform-reserved names.
+
+    Cache-only read, exactly like ``/introspection``: it serves the
+    ``propertyStorage`` block the stats service writes into
+    ``data_source_stats.schema_stats``, and **never calls the provider**.
+    Classifying live would mean sampling every label on the request path,
+    which on a multi-million-node graph either blows its budget or starves
+    user reads for FalkorDB's single Cypher thread. Always HTTP 200 with the
+    canonical ``{data, meta}`` envelope; ``meta.status`` carries the cache
+    state, so a cold data source returns ``computing`` with a job id rather
+    than a timeout.
+    """
+    ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
+
+    try:
+        data, meta = await read_stats_cache(session, ds_id, ws_id, "schema_stats")
+        return JSONResponse(content=build_envelope(
+            (data or {}).get("propertyStorage"), meta,
+        ))
+    except CacheMiss:
+        pass
+    except (OperationalError, SQLAlchemyError) as exc:
+        logger.warning(
+            "get_property_storage: database unavailable (ds_id=%s): %s", ds_id, exc,
+        )
+        return JSONResponse(content=build_error_envelope(ds_id, reason="db_unavailable"))
+
+    msg_id = await enqueue_stats_job_safe(ds_id, ws_id) if ws_id else None
+    return JSONResponse(content=build_computing_envelope(ds_id, ws_id, msg_id))
+
+
+@router.post(
+    "/properties/storage/rescan",
+    status_code=202,
+    dependencies=[Depends(require_ws_manage)],
+)
+async def rescan_property_storage(
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None, description="Target a specific data source."),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Queue a fresh deep profile of this source's property storage.
+
+    The report is served from the stats service's cache, which refreshes on
+    its own cadence. An operator who has just changed the mapping should not
+    have to wait for the next sweep to see what it did, so this enqueues the
+    deep job directly and hands back its id to poll.
+
+    Force-enqueued past the dedup claim: the point is "re-read the graph
+    NOW", and silently collapsing into an in-flight poll that started before
+    the mapping changed would answer the wrong question.
+    """
+    from datetime import datetime as _dt
+    from backend.insights_service.enqueue import enqueue_job
+    from backend.insights_service.schemas import StatsDeepJobEnvelope
+
+    ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
+    if not ws_id:
+        raise HTTPException(status_code=400, detail="ws_id is required")
+
+    envelope = StatsDeepJobEnvelope(
+        data_source_id=ds_id,
+        workspace_id=ws_id,
+        enqueued_at=_dt.now(timezone.utc),
+    )
+    try:
+        msg_id = await enqueue_job(envelope, dedup_ttl_secs=0)
+    except Exception as exc:
+        logger.warning("rescan_property_storage: enqueue failed (ds=%s): %s", ds_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "queue_unavailable",
+                "message": "Could not queue the re-scan — the job queue is "
+                           "unreachable. The report still refreshes on its "
+                           "normal schedule.",
+            },
+        )
+    return {"dataSourceId": ds_id, "jobId": msg_id, "status": "queued"}
+
+
+@router.post("/properties/storage/preview")
+async def preview_property_storage(
+    body: PropertyPreviewRequest,
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Before/after property bags for a few real nodes under a proposed mapping.
+
+    Read-only — nothing is written, so an operator can iterate on the mapping
+    freely before committing. Both sides are computed through the same
+    ``_node_from_props`` the drawer's payload comes from, so the preview cannot
+    drift from the result.
+    """
+    from backend.app.services.property_alignment import preview_alignment
+
+    return await preview_alignment(
+        engine.provider,
+        body.mapping.to_schema_mapping(),
+        current=getattr(engine.provider, "_mapping", None),
+        labels=body.labels,
+        limit=body.limit,
+    )
+
+
+@router.put("/properties/mapping", dependencies=[Depends(require_ws_manage)])
+async def put_property_mapping(
+    body: PropertyMappingInput,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None, description="Target data source."),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Persist the property half of this data source's schema mapping.
+
+    Deliberately NOT done through ``PATCH /admin/workspaces/{ws}/data-sources/
+    {ds}``. That endpoint replaces ``extra_config`` wholesale, and the
+    matching response redacts secret-looking values to ``***`` — so a client
+    doing read-modify-write on the blob would overwrite this source's real
+    FalkorDB and cache credentials with the mask. Merging server-side, from
+    the row rather than the response, closes that path: only the four
+    property keys are touched and everything else in ``extra_config`` is
+    carried through untouched.
+    """
+    from backend.app.db.repositories.data_source_repo import get_data_source_orm
+    from backend.app.providers.manager import provider_manager
+
+    ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
+    ds = await get_data_source_orm(session, ds_id)
+    if ds is None:
+        raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found")
+
+    try:
+        existing = json.loads(ds.extra_config) if ds.extra_config else {}
+    except (ValueError, TypeError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+
+    schema_mapping = dict(existing.get("schemaMapping") or {})
+    schema_mapping.update({
+        "properties_field": body.containerKey,
+        "properties_separator": body.separator,
+        "collect_unmapped_as_properties": body.collectUnmapped,
+        "property_overrides": body.propertyOverrides,
+    })
+    existing["schemaMapping"] = schema_mapping
+    ds.extra_config = json.dumps(existing)
+    await session.commit()
+
+    # The provider caches its SchemaMapping at construction and is itself
+    # cached per (provider_id, graph_name) — without evicting, the new mapping
+    # would not take effect until the pod restarted.
+    try:
+        await provider_manager.evict_data_source(ds.provider_id, ds.graph_name or "")
+    except Exception:                                  # pragma: no cover - cache only
+        logger.exception("could not evict cached provider for %s", ds_id)
+
+    return {
+        "dataSourceId": ds_id,
+        "containerKey": body.containerKey,
+        "separator": body.separator,
+        "collectUnmapped": body.collectUnmapped,
+        "propertyOverrides": body.propertyOverrides,
+    }
+
+
 # Process-level cache of the SearchQuery JSON Schema. It's static
 # within a release (Pydantic builds it from class definitions at import
 # time), so compute once and reuse on every request.

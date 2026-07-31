@@ -24,7 +24,9 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-JobKind = Literal["aggregation", "purge", "stats", "discovery"]
+JobKind = Literal[
+    "aggregation", "purge", "stats", "discovery", "property_alignment",
+]
 """Discriminator for the job's domain. New kinds extend this Literal —
 breaking change managed via the ``v`` field on the envelope."""
 

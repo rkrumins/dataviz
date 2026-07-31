@@ -320,6 +320,39 @@ async def materialize_top_level(
                 await restore_dirty_flag(envelope.data_source_id)
 
 
+async def _profile_property_storage(provider, schema_stats, ds_id: str):
+    """Classify how each label physically stores its node properties.
+
+    Runs inside the deep pass's admission gate, so it inherits the large-graph
+    budget and — because ``collect_deep`` short-circuits on unchanged counts —
+    costs a steady-state graph nothing. Doing it here rather than on the
+    request path is what lets the web tier serve this cache-only: a live
+    version would have to scan, and a scan on a multi-million-node graph
+    either blows its budget or starves user reads.
+
+    The per-label totals it extrapolates against are the ones we just
+    computed, so no Redis round-trip and no ordering coupling with
+    ``prime_stats_cache`` below.
+
+    Never raises. Like ``_materialize_top_level``, this is an optimization —
+    a failure here must not cost the data source its counts and schema.
+    """
+    try:
+        from backend.app.services.property_alignment import analyze_property_storage
+        return await analyze_property_storage(
+            provider,
+            getattr(provider, "_mapping", None),
+            label_totals={s.id: s.count for s in schema_stats.entity_type_stats},
+            timeout_s=resilience.STATS_POLL_TIMEOUT_LARGE_SECS,
+        )
+    except Exception as exc:
+        logger.warning(
+            "stats_deep: property-storage profiling skipped for ds=%s (%s)",
+            ds_id, exc,
+        )
+        return None
+
+
 async def collect_deep(envelope: StatsJobEnvelope) -> None:
     """Deep facet — one ``get_schema_stats`` pass serves everything.
 
@@ -389,6 +422,9 @@ async def collect_deep(envelope: StatsJobEnvelope) -> None:
         schema_stats = await provider.get_schema_stats()
         graph_schema = await engine.get_graph_schema(
             stats=schema_stats, ontology=ontology_meta,
+        )
+        schema_stats.property_storage = await _profile_property_storage(
+            provider, schema_stats, envelope.data_source_id,
         )
         if _COUNTS_PARITY_CHECK:
             await _log_counts_parity(provider, schema_stats, envelope.data_source_id)

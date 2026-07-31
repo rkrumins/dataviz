@@ -137,8 +137,61 @@ class PurgeJobEnvelope(BaseModel):
         )
 
 
+class PropertyAlignmentJobEnvelope(BaseModel):
+    """Unpack nested property containers into native FalkorDB fields.
+
+    Scope is the ``data_source_id`` so two alignment requests against the same
+    source coalesce. The durable status / audit record is the pre-existing
+    ``aggregation_jobs`` row (``job_id``), exactly as purge does — the worker
+    flips it to ``completed`` / ``failed`` when the run finishes, which keeps
+    Job History uniform across kinds.
+
+    ``start_id`` is the internal-ID cursor a resumed run picks up from; the run
+    walks the graph in ID windows rather than buffering URNs, so resuming is
+    just "start the walk higher up".
+    """
+
+    kind: Literal["property_alignment"] = "property_alignment"
+    job_id: str           # AggregationJobORM.id (durable record)
+    data_source_id: str
+    workspace_id: str
+    enqueued_at: datetime
+    attempt: int = 1
+    start_id: int = 0
+    dry_run: bool = False
+
+    @property
+    def scope_key(self) -> str:
+        return self.data_source_id
+
+    def to_stream_fields(self) -> dict[str, str]:
+        return {
+            "kind": self.kind,
+            "job_id": self.job_id,
+            "data_source_id": self.data_source_id,
+            "workspace_id": self.workspace_id,
+            "enqueued_at": self.enqueued_at.isoformat(),
+            "attempt": str(self.attempt),
+            "start_id": str(self.start_id),
+            "dry_run": "1" if self.dry_run else "0",
+        }
+
+    @classmethod
+    def from_stream_fields(cls, fields: dict[str, str]) -> "PropertyAlignmentJobEnvelope":
+        return cls(
+            job_id=fields["job_id"],
+            data_source_id=fields["data_source_id"],
+            workspace_id=fields["workspace_id"],
+            enqueued_at=datetime.fromisoformat(fields["enqueued_at"]),
+            attempt=int(fields.get("attempt", "1")),
+            start_id=int(fields.get("start_id", "0")),
+            dry_run=fields.get("dry_run", "0") == "1",
+        )
+
+
 JobEnvelope = Union[
     StatsJobEnvelope, StatsDeepJobEnvelope, DiscoveryJobEnvelope, PurgeJobEnvelope,
+    PropertyAlignmentJobEnvelope,
 ]
 
 
@@ -147,6 +200,7 @@ _ENVELOPE_BY_KIND: dict[str, type[BaseModel]] = {
     "stats_deep": StatsDeepJobEnvelope,
     "discovery": DiscoveryJobEnvelope,
     "purge": PurgeJobEnvelope,
+    "property_alignment": PropertyAlignmentJobEnvelope,
 }
 
 

@@ -224,7 +224,9 @@ function AggregationStatusCard({ dataSourceId }: { dataSourceId: string; wsId: s
 
 // ── component ────────────────────────────────────────────────────────────
 
-export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: {
+export function DataSourceProfile({
+    catalogId, context, embedded, onNavigate, onOpenMapping,
+}: {
     catalogId: string
     context?: DataSourceProfileContext | null
     /** True when a host already shows the source's identity + actions (the
@@ -234,6 +236,10 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
     /** Called when an internal link is followed, so a host drawer can close
      *  itself (a link to the page you're already on is otherwise a no-op). */
     onNavigate?: () => void
+    /** Switch the host drawer to its Mapping tab. The profile is rendered
+     *  INSIDE that drawer, so a self-link would be a no-op — a tab switch is
+     *  the right move, and a URL would be the wrong one. */
+    onOpenMapping?: () => void
 }) {
     const { item, provider, stats, meta, consumers, statsLoading, consumersLoading, notFound } = useDataSourceProfile(catalogId)
 
@@ -366,7 +372,8 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
 
             {/* ── Enhanced (workspace-context): alignment + aggregation + vocab ── */}
             {context?.ontologyId && (
-                <PhysicalAlignmentSection wsId={context.wsId} dataSourceId={context.dataSourceId} />
+                <PhysicalAlignmentSection wsId={context.wsId} dataSourceId={context.dataSourceId}
+                                          onOpenMapping={onOpenMapping} />
             )}
             {context && <AggregationStatusCard dataSourceId={context.dataSourceId} wsId={context.wsId} />}
             {/* Vocab warning: the workspace drawer already shows it in its

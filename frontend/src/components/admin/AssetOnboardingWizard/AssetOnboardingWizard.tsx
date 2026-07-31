@@ -28,6 +28,12 @@ import { SchemaReviewStep, type SchemaReviewStatusMap } from './steps/SchemaRevi
 import { ReviewStep, type NavigationDestination } from './steps/ReviewStep'
 import { aggregationService, type AggregationTuning } from '@/services/aggregationService'
 import { useWizardKeyboard } from './hooks/useWizardKeyboard'
+import {
+    DEFAULT_PROPERTY_MAPPING,
+    isCustomisedMapping,
+    savePropertyMapping,
+    type PropertyMapping,
+} from '@/services/propertyStorageService'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -57,6 +63,10 @@ export interface OnboardingFormData {
     // Per-source node display-name property ('' / 'name' = default). Graphs that
     // store their human node name under e.g. `title` map it here.
     nameProperties: Record<string, string>
+    // Per-source property shape. Foreign graphs nest every property under one
+    // container key; this says which key, and how to unpack it into fields the
+    // platform can index. Defaults are a no-op — only a changed mapping is saved.
+    propertyMappings: Record<string, PropertyMapping>
 }
 
 type WizardStep = 'workspace' | 'aggregation' | 'semantic' | 'schemaReview' | 'review'
@@ -107,6 +117,9 @@ export function AssetOnboardingWizard({
         ),
         identityProperties: Object.fromEntries(catalogItems.map(c => [c.id, ''])),
         nameProperties: Object.fromEntries(catalogItems.map(c => [c.id, ''])),
+        propertyMappings: Object.fromEntries(
+            catalogItems.map(c => [c.id, DEFAULT_PROPERTY_MAPPING])
+        ),
     }))
 
     // ─── Navigation State ─────────────────────────────────────────────────────
@@ -167,6 +180,9 @@ export function AssetOnboardingWizard({
                 ),
                 identityProperties: Object.fromEntries(catalogItems.map(c => [c.id, ''])),
                 nameProperties: Object.fromEntries(catalogItems.map(c => [c.id, ''])),
+                propertyMappings: Object.fromEntries(
+                    catalogItems.map(c => [c.id, DEFAULT_PROPERTY_MAPPING])
+                ),
             })
         }
     }, [isOpen, catalogItems])
@@ -259,7 +275,10 @@ export function AssetOnboardingWizard({
                     : 'Skipped'
             case 'semantic': {
                 const configured = Object.values(formData.ontologySelections).filter(s => s.ontologyId).length
+                const unpacking = Object.values(formData.propertyMappings ?? {})
+                    .filter(isCustomisedMapping).length
                 return `${configured}/${catalogItems.length} configured`
+                    + (unpacking ? ` · ${unpacking} unpacking` : '')
             }
             case 'schemaReview': {
                 const required = catalogItems.filter(c => formData.ontologySelections[c.id]?.ontologyId)
@@ -467,6 +486,21 @@ export function AssetOnboardingWizard({
                         const catalogId = group.items[i].id
                         const ds = ws.dataSources.find(d => d.catalogItemId === catalogId)
                         if (ds) {
+                            // Before aggregation, not after: the first run should
+                            // read the graph through the mapping the user just
+                            // chose. A failure here is not worth losing the
+                            // source over — it stays editable from the Mapping
+                            // tab — but it must not pass silently either.
+                            const mapping = formData.propertyMappings?.[group.placeholderIds[i]]
+                            if (mapping && isCustomisedMapping(mapping)) {
+                                try {
+                                    await savePropertyMapping(wsId, ds.id, mapping)
+                                } catch {
+                                    showToast('warning',
+                                        `Couldn't save the property mapping for ${group.items[i].name}`
+                                        + ' — set it from the source\'s Mapping tab.')
+                                }
+                            }
                             if (formData.projectionMode === 'skip') {
                                 await aggregationService.skipAggregation(ds.id)
                             } else {
@@ -498,7 +532,7 @@ export function AssetOnboardingWizard({
         } finally {
             setIsSubmitting(false)
         }
-    }, [catalogItems, formData, provider.id, loadedWorkspaceNames])
+    }, [catalogItems, formData, provider.id, loadedWorkspaceNames, showToast])
 
     // ─── Success Navigation ───────────────────────────────────────────────────
     const handleNavigate = useCallback((destination: NavigationDestination) => {

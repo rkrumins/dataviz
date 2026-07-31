@@ -37,6 +37,7 @@ from .redis_streams import (
 from .schemas import (
     DiscoveryJobEnvelope,
     JobEnvelope,
+    PropertyAlignmentJobEnvelope,
     PurgeJobEnvelope,
     StatsJobEnvelope,
 )
@@ -426,6 +427,45 @@ async def enqueue_purge_job_force(
     )
 
 
+async def enqueue_alignment_job_force(
+    job_id: str,
+    data_source_id: str,
+    workspace_id: str,
+    *,
+    start_id: int = 0,
+    dry_run: bool = False,
+    dedup_ttl_secs: int = _DEFAULT_DEDUP_TTL_SECS,
+) -> Optional[str]:
+    """Drop any existing dedup claim, then enqueue a property-alignment job.
+
+    Force, for the same reason purge forces: duplicate protection is
+    authoritative at the DB layer (the one-active-job-per-source guard on
+    ``aggregation_jobs``), so the Redis claim is only an optimization. A stale
+    claim left by a crashed worker would otherwise make the user's explicit
+    "Align" click silently do nothing for up to the claim's TTL.
+
+    ``start_id`` resumes an interrupted walk from its stored ID cursor.
+    """
+    if not job_id or not data_source_id or not workspace_id:
+        return None
+    cfg = get_stream("property_alignment")
+    try:
+        await release_claim(data_source_id, stream=cfg)
+    except _REDIS_BENIGN_ERRORS as exc:
+        logger.warning(
+            "alignment force-release failed (continuing to enqueue): %s", exc,
+        )
+    envelope = PropertyAlignmentJobEnvelope(
+        job_id=job_id,
+        data_source_id=data_source_id,
+        workspace_id=workspace_id,
+        enqueued_at=datetime.now(timezone.utc),
+        start_id=start_id,
+        dry_run=dry_run,
+    )
+    return await enqueue_job_safe(envelope, dedup_ttl_secs=dedup_ttl_secs)
+
+
 __all__ = [
     "enqueue_job",
     "enqueue_job_safe",
@@ -437,4 +477,5 @@ __all__ = [
     "enqueue_discovery_job_force",
     "enqueue_purge_job_safe",
     "enqueue_purge_job_force",
+    "enqueue_alignment_job_force",
 ]

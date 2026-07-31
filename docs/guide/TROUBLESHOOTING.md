@@ -31,6 +31,16 @@ unhealthy provider** — start there.
 - You likely have **viewer** access only. Ask the owner for an **editor** grant.
   See [Managing Views](/guide/managing-views).
 
+### Nodes show no properties, or Advanced Search can't find a property I can see
+- The source most likely stores its properties **nested** — packed into one
+  dictionary on the node instead of each having its own field. They render in the
+  entity drawer but can't be indexed, so search never matches them. An empty
+  Properties panel is the same symptom with the container key not yet mapped.
+- Open the data source's **Mapping** tab (Workspace → the source → Mapping). It
+  shows which types are nested, previews the change against real nodes, and can
+  **unpack** them into native fields in the background. See
+  [Glossary](/guide/glossary#property-storage-terms) for the terms.
+
 ### "What am I actually allowed to do?"
 - Open your **My Access** page — it lists your roles, scopes, and permissions in
   plain language. See [Users & Access](/guide/users-access).

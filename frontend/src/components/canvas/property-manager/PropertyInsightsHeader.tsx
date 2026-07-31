@@ -7,6 +7,7 @@
  */
 import { AlertTriangle, Boxes, Database, Layers, Tag } from 'lucide-react'
 import { type FC, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 
 import { cn } from '@/lib/utils'
 import { compactNum } from '@/components/dashboard/dashboard-constants'
@@ -18,8 +19,12 @@ export interface PropertyInsightsHeaderProps {
     propertyCount: number
     tagCount: number
     entityTypeCount: number
-    /** Subtle guidance chips (e.g. "3 types not yet migrated"). */
-    warnings?: string[]
+    /**
+     * Subtle guidance chips. A chip may carry an `href` when the thing it
+     * warns about is actually fixable somewhere — a warning that names a
+     * problem and offers no way to reach the fix is a dead end.
+     */
+    warnings?: (string | { text: string; href?: string })[]
 }
 
 export const PropertyInsightsHeader: FC<PropertyInsightsHeaderProps> = ({
@@ -48,16 +53,26 @@ export const PropertyInsightsHeader: FC<PropertyInsightsHeaderProps> = ({
             </div>
             {warnings.length > 0 && (
                 <div className="relative mt-2 flex flex-wrap gap-1.5">
-                    {warnings.map((w) => (
-                        <span
-                            key={w}
-                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] bg-amber-500/12 text-amber-300 border border-amber-500/25"
-                            title={w}
-                        >
-                            <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
-                            <span className="truncate max-w-[160px]">{w}</span>
-                        </span>
-                    ))}
+                    {warnings.map((raw) => {
+                        const w = typeof raw === 'string' ? { text: raw } : raw
+                        const cls = 'inline-flex items-center gap-1 px-1.5 py-0.5'
+                            + ' rounded-md text-[10px] bg-amber-500/12 text-amber-300'
+                            + ' border border-amber-500/25'
+                        const body = (
+                            <>
+                                <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
+                                <span className="truncate max-w-[200px]">{w.text}</span>
+                            </>
+                        )
+                        return w.href ? (
+                            <Link key={w.text} to={w.href} title={w.text}
+                                  className={cn(cls, 'hover:bg-amber-500/20 transition-colors')}>
+                                {body}
+                            </Link>
+                        ) : (
+                            <span key={w.text} className={cls} title={w.text}>{body}</span>
+                        )
+                    })}
                 </div>
             )}
         </div>

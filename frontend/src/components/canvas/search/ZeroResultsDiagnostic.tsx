@@ -32,6 +32,8 @@ import {
 import { type FC, useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
+import { useActiveView } from '@/store/schema'
+import { PropertyMappingLink } from '@/components/dataSource/mappingLink'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import type {
@@ -445,6 +447,9 @@ function DiscoverProbe({ query: _query }: { query: SearchQuery }) {
 
 
 function DiscoverTable({ result }: { result: SearchDiscoverResult }) {
+    // The view knows which workspace and source it reads, so the fix is one
+    // click away without threading ids down through the search panel.
+    const activeView = useActiveView()
     const entries = Object.entries(result.labels).sort(
         ([a], [b]) => a.localeCompare(b),
     )
@@ -485,13 +490,17 @@ function DiscoverTable({ result }: { result: SearchDiscoverResult }) {
             ))}
             {result.blobOnlyLabels.length > 0 && (
                 <div className="mt-2 text-[10.5px] text-amber-300 leading-snug">
-                    <strong>Blob-only labels:</strong>{' '}
-                    {result.blobOnlyLabels.join(', ')} — these nodes still
-                    have properties stored as a single JSON blob. Run{' '}
-                    <code className="font-mono">
-                        python -m backend.scripts.migrate_native_properties
-                    </code>{' '}
-                    to flatten them.
+                    <strong>Properties are nested:</strong>{' '}
+                    {result.blobOnlyLabels.join(', ')} — these nodes keep their
+                    properties inside a container, so they display but can't be
+                    filtered on. Unpacking them into fields makes them
+                    searchable.{' '}
+                    <PropertyMappingLink
+                        wsId={activeView?.workspaceId}
+                        dataSourceId={activeView?.dataSourceId}
+                        label="Unpack them"
+                        className="text-[10.5px]"
+                    />
                 </div>
             )}
             {result.missingContainment && (

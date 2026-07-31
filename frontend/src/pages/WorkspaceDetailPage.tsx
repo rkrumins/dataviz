@@ -143,6 +143,16 @@ export function WorkspaceDetailPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedDsId])
 
+    // ``?dsTab=<tab>`` picks which tab the panel opens on. Without it every
+    // deep link lands on Overview, so a link that means "go fix the property
+    // mapping" drops the reader one click short of the thing it named — and
+    // the surfaces that link here (search diagnostics, the entity drawer's
+    // empty state) are exactly the ones where that click is the whole point.
+    const dsTabParam = searchParams.get('dsTab')
+    // Read once per panel-open rather than continuously: it seeds the panel's
+    // own tab state, and re-applying it would fight the user's clicks.
+    const initialDsTab = selectedDsId ? dsTabParam ?? undefined : undefined
+
     // ── Sync editName/editDesc when workspace loads ────────
     useEffect(() => {
         if (workspace) {
@@ -648,6 +658,7 @@ export function WorkspaceDetailPage() {
             <DataSourceDetailPanel
                 ds={selectedDs}
                 isOpen={!!selectedDsId && !!selectedDs}
+                initialTab={initialDsTab}
                 wsId={wsId!}
                 stats={selectedDsId ? dsStatsMap[selectedDsId] : undefined}
                 providerInfo={selectedDsId ? dsProviderMap[selectedDsId] : undefined}

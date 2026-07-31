@@ -1043,6 +1043,72 @@ async def skip_aggregation(
         raise HTTPException(status_code=422, detail=str(e))
 
 
+@router.post(
+    "/data-sources/{ds_id}/property-alignment",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Unpack nested property containers into native fields",
+    dependencies=[Depends(_REQUIRE_DS_MANAGE)],
+)
+async def align_properties(
+    ds_id: str,
+    response: Response,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(get_db_session),
+    dryRun: bool = Query(
+        False, description="Report what would change without writing.",
+    ),
+):
+    """Queue a property-alignment run. Returns 202 with the job row.
+
+    The run rewrites every node whose properties are nested under a container
+    key so each scalar leaf becomes its own indexable FalkorDB field — which
+    is what makes them visible to Advanced Search. It walks the graph in
+    internal-ID windows, so it costs flat memory on a ten-million-node graph
+    and resumes from a cursor if interrupted.
+
+    Deliberately not a ``BackgroundTasks``: a rolling restart mid-run would
+    strand the job in ``running`` forever, which is exactly why purge moved
+    off that plumbing. Progress rides the existing job SSE stream.
+    """
+    from backend.insights_service.enqueue import enqueue_alignment_job_force
+
+    _, _, _, ConflictError, NotFoundError = _direct_imports()
+    try:
+        job = await svc.claim_alignment_job(ds_id, session, dry_run=dryRun)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    msg_id = await enqueue_alignment_job_force(
+        job.id, ds_id, job.workspace_id or "", dry_run=dryRun,
+    )
+    if msg_id is None:
+        # The row would otherwise sit in ``pending`` with nothing coming for
+        # it, and the one-active-job guard would block every later attempt.
+        job.status = "failed"
+        job.error_message = "could not enqueue — job queue unreachable"
+        await session.commit()
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "queue_unavailable",
+                "message": "Could not queue the alignment run — the job queue "
+                           "is unreachable. Nothing was changed.",
+            },
+        )
+
+    response.headers["Location"] = (
+        f"/api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job.id}"
+    )
+    return {
+        "dataSourceId": ds_id,
+        "jobId": job.id,
+        "status": "pending",
+        "dryRun": dryRun,
+    }
+
+
 # ── PUT /data-sources/{ds_id}/aggregation-schedule ──────────────────
 
 @router.put(

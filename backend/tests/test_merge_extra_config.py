@@ -8,8 +8,11 @@ cache credentials come from its own encrypted blob but the merged config (includ
 host and exfiltrate the provider's cache credentials on connect. cacheConnection is
 now provider-authoritative: a data-source-supplied one is dropped (with a warning).
 """
+import pytest
+
 from backend.app.providers.manager import ProviderManager
 from backend.app.registry.provider_registry import ProviderRegistry
+from backend.graph.adapters.schema_mapping import SchemaMapping
 
 
 class TestMergeExtraConfigCacheConnection:
@@ -78,3 +81,48 @@ class TestRegistryMergeExtraConfigCacheConnection:
         assert result["cacheConnection"] == {"host": "provider-cache.internal"}
         assert result["schemaMapping"]["nodeLabel"] == "Node"
         assert result["schemaMapping"]["urnProperty"] == "urn"
+
+
+class TestPropertyUnpackingMappingFields:
+    """``properties_separator`` / ``property_overrides`` ride the existing
+    ``extra_config.schemaMapping`` blob — no new columns — so they must survive
+    both merge implementations and both parse factories."""
+
+    def test_defaults_match_the_platform_schema(self):
+        mapping = SchemaMapping()
+        assert mapping.properties_separator == "/"
+        assert mapping.property_overrides == {}
+        assert mapping.is_default is True
+
+    def test_parsed_from_extra_config(self):
+        mapping = SchemaMapping.from_extra_config({
+            "schemaMapping": {
+                "properties_field": "attributes",
+                "properties_separator": ".",
+                "property_overrides": {"level": "source/level"},
+            },
+        })
+        assert mapping.properties_field == "attributes"
+        assert mapping.properties_separator == "."
+        assert mapping.property_overrides == {"level": "source/level"}
+
+    def test_datasource_overrides_provider_defaults(self):
+        mapping = SchemaMapping.merge(
+            {"schemaMapping": {"properties_field": "attributes",
+                               "properties_separator": "/"}},
+            {"schemaMapping": {"properties_separator": "."}},
+        )
+        assert mapping.properties_field == "attributes"   # from provider
+        assert mapping.properties_separator == "."        # data source wins
+
+    @pytest.mark.parametrize("merger", [ProviderManager, ProviderRegistry])
+    def test_survives_both_merge_implementations(self, merger):
+        """The deep-merge of ``schemaMapping`` is duplicated in two modules
+        that must stay in sync."""
+        result = merger._merge_extra_config(
+            {"schemaMapping": {"properties_field": "attributes"}},
+            {"schemaMapping": {"property_overrides": {"level": "source/level"}}},
+        )
+        mapping = SchemaMapping.from_extra_config(result)
+        assert mapping.properties_field == "attributes"
+        assert mapping.property_overrides == {"level": "source/level"}

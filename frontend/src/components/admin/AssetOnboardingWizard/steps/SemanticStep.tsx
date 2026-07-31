@@ -34,6 +34,8 @@ import { useToast } from '@/components/ui/toast'
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import { CoverageRing, MiniBar, coverageColor, coverageBarClass, MergedVariantsAdvisory } from './CoverageVisuals'
 import { NodeIdentityField } from '@/components/dataSource/NodeIdentity'
+import { PropertyShapeField } from '@/components/admin/shared/PropertyShapeField'
+import { DEFAULT_PROPERTY_MAPPING } from '@/services/propertyStorageService'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -826,6 +828,20 @@ export function SemanticStep({
                                                     onNameChange={v => updateFormData(prev => ({
                                                         nameProperties: { ...prev.nameProperties, [item.id]: v },
                                                     }))}
+                                                />
+                                            )}
+
+                                            {/* Property shape — the third part of "how do we read
+                                                this foreign graph?", alongside identity and display
+                                                name. Unfolds itself when the probe finds nesting. */}
+                                            {!state.skipped && state.phase === 'recommendations' && (
+                                                <PropertyShapeField
+                                                    value={formData.propertyMappings?.[item.id] ?? DEFAULT_PROPERTY_MAPPING}
+                                                    onChange={m => updateFormData(prev => ({
+                                                        propertyMappings: { ...prev.propertyMappings, [item.id]: m },
+                                                    }))}
+                                                    providerId={providerId}
+                                                    graphName={item.sourceIdentifier || item.name}
                                                 />
                                             )}
                                         </div>
