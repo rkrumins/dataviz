@@ -131,6 +131,9 @@ export interface WizardFormData {
     description: string
     icon: string
     visibility: 'private' | 'workspace' | 'enterprise'
+    /** Optional note carried into the publication request when the creator
+     *  picks Enterprise but can't publish themselves. */
+    publishNote?: string
     tags: string[]
     dataSourceId?: string
     layoutType: 'graph' | 'hierarchy' | 'reference'
@@ -1215,7 +1218,7 @@ function ViewWizardBody({
                         try {
                             await requestViewPublication(
                                 createdViewId,
-                                'Requested while creating this view',
+                                formData.publishNote?.trim() || undefined,
                             )
                             showToast(
                                 'success',
@@ -1272,9 +1275,28 @@ function ViewWizardBody({
                     visibleEntityTypes: formData.visibleEntityTypes,
                     visibleRelationshipTypes: formData.visibleRelationshipTypes,
                     fieldFilters,
-                    visibility: formData.visibility,
+                    // Same rule as create: asking for Enterprise without the
+                    // permission files a request rather than attempting a
+                    // transition the server will refuse.
+                    visibility: wantsPublication ? undefined : formData.visibility,
                     tags: formData.tags.length > 0 ? formData.tags : undefined,
                 }, fullViewQuery.data?.config)
+                if (wantsPublication) {
+                    try {
+                        await requestViewPublication(
+                            viewId, formData.publishNote?.trim() || undefined,
+                        )
+                        showToast(
+                            'success',
+                            'Saved — your publication request was sent to your workspace admins',
+                        )
+                    } catch {
+                        showToast(
+                            'error',
+                            "Saved, but the publication request couldn't be sent. You can ask again from Share.",
+                        )
+                    }
+                }
                 if (result.success && result.data) {
                     // Preserve an explicit editingView.content.entityScope; otherwise derive
                     // from the submitted assignments — a deliberate wizard save is allowed to
@@ -1553,6 +1575,7 @@ function ViewWizardBody({
                     formData={formData}
                     updateFormData={updateFormData}
                     mode={mode}
+                    savedVisibility={mode === 'edit' ? editingView?.visibility : undefined}
                     scopeContext={scopeContext}
                     onChangeScope={mode === 'create' ? onBackToScope : undefined}
                     blankNaming={isBlank && blankProviderId

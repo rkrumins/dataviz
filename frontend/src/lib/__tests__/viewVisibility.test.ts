@@ -55,14 +55,14 @@ describe('buildVisibilityOptions publish gating', () => {
 
     it('publisher sees all three tiers enabled', () => {
         const options = buildVisibilityOptions({
-            current: 'private', canPublish: true, ...base,
+            saved: 'private', canPublish: true, ...base,
         })
         expect(options.map(o => o.disabled)).toEqual([false, false, false])
     })
 
     it('non-publisher cannot select enterprise', () => {
         const options = buildVisibilityOptions({
-            current: 'workspace', canPublish: false, ...base,
+            saved: 'workspace', canPublish: false, ...base,
         })
         const enterprise = options.find(o => o.id === 'enterprise')!
         expect(enterprise.disabled).toBe(true)
@@ -72,7 +72,7 @@ describe('buildVisibilityOptions publish gating', () => {
 
     it('non-publisher cannot UNpublish an enterprise view either', () => {
         const options = buildVisibilityOptions({
-            current: 'enterprise', canPublish: false, ...base,
+            saved: 'enterprise', canPublish: false, ...base,
         })
         expect(options.find(o => o.id === 'enterprise')!.disabled).toBe(false)
         for (const id of ['private', 'workspace'] as ViewVisibility[]) {
@@ -84,7 +84,7 @@ describe('buildVisibilityOptions publish gating', () => {
 
     it('canRequestPublish turns the enterprise tile into a route, not a wall', () => {
         const options = buildVisibilityOptions({
-            current: 'workspace', canPublish: false, canRequestPublish: true, ...base,
+            saved: 'workspace', canPublish: false, canRequestPublish: true, ...base,
         })
         const enterprise = options.find(o => o.id === 'enterprise')!
         expect(enterprise.disabled).toBe(false)
@@ -99,14 +99,14 @@ describe('buildVisibilityOptions publish gating', () => {
 
     it('a publisher never needs approval', () => {
         const options = buildVisibilityOptions({
-            current: 'workspace', canPublish: true, canRequestPublish: true, ...base,
+            saved: 'workspace', canPublish: true, canRequestPublish: true, ...base,
         })
         expect(options.map(o => o.requiresApproval)).toEqual([false, false, false])
     })
 
     it('requesting is not a way to UNpublish — the lower tiers stay locked', () => {
         const options = buildVisibilityOptions({
-            current: 'enterprise', canPublish: false, canRequestPublish: true, ...base,
+            saved: 'enterprise', canPublish: false, canRequestPublish: true, ...base,
         })
         expect(options.find(o => o.id === 'enterprise')!.requiresApproval).toBe(false)
         for (const id of ['private', 'workspace'] as ViewVisibility[]) {
@@ -125,5 +125,29 @@ describe('accent classes', () => {
                 expect(cls).toMatch(/^[a-z0-9:/ \-.[\]%]+$/i)
             }
         }
+    })
+})
+
+describe('an unsaved view (the create wizard)', () => {
+    const base = { appName: 'App', workspaceName: 'WS' }
+
+    it('never locks the lower tiers — there is nothing published to un-publish', () => {
+        // Regression: the wizard passed its DRAFT selection as `saved`, so
+        // choosing Enterprise instantly disabled Private and Workspace and
+        // the user could not change their mind.
+        const options = buildVisibilityOptions({
+            saved: undefined, canPublish: false, canRequestPublish: true, ...base,
+        })
+        expect(options.find(o => o.id === 'private')!.disabled).toBe(false)
+        expect(options.find(o => o.id === 'workspace')!.disabled).toBe(false)
+    })
+
+    it('keeps offering the approval route for enterprise', () => {
+        const options = buildVisibilityOptions({
+            saved: undefined, canPublish: false, canRequestPublish: true, ...base,
+        })
+        const enterprise = options.find(o => o.id === 'enterprise')!
+        expect(enterprise.disabled).toBe(false)
+        expect(enterprise.requiresApproval).toBe(true)
     })
 })

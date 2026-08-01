@@ -157,7 +157,7 @@ export function ShareViewDialog({
 
     const visibilityOptions = useMemo(
         () => buildVisibilityOptions({
-            current: visibility, canPublish, canRequestPublish, appName,
+            saved: visibility, canPublish, canRequestPublish, appName,
         }),
         [visibility, canPublish, canRequestPublish, appName],
     )

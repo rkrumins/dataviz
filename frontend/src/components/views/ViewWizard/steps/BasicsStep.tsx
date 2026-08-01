@@ -21,6 +21,7 @@ import {
     AlertTriangle,
     Check,
     Loader2,
+    Send,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'
@@ -48,6 +49,8 @@ interface BasicsStepProps {
     onChangeScope?: () => void
     /** Blank models only: scope for the physical graph-name picker + live check. */
     blankNaming?: { workspaceId: string; providerId: string }
+    /** The tier this view is SAVED at — undefined while creating. */
+    savedVisibility?: 'private' | 'workspace' | 'enterprise'
 }
 
 const ICON_OPTIONS = [
@@ -72,7 +75,7 @@ const ICON_OPTIONS = [
 // Options come from the shared module (lib/viewVisibility) — built in
 // the component so the enterprise tile honors the publish permission.
 
-export function BasicsStep({ formData, updateFormData, mode, scopeContext, onChangeScope, blankNaming }: BasicsStepProps) {
+export function BasicsStep({ formData, updateFormData, mode, scopeContext, onChangeScope, blankNaming, savedVisibility }: BasicsStepProps) {
     const [showSuggestions, setShowSuggestions] = useState(false)
     const [tagInput, setTagInput] = useState('')
     const { appName } = useBrand()
@@ -95,7 +98,10 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
         // request is filed against the view once it exists (see the
         // wizard's submit).
         canRequestPublish: !canPublish,
-        current: formData.visibility,
+        // Nothing is saved yet while creating, so no tier is "current" —
+        // passing the draft selection here is what locked the user out of
+        // going back to Private after clicking Enterprise.
+        saved: savedVisibility,
         canPublish,
         appName,
         workspaceName: displayWorkspaceName,
@@ -532,11 +538,58 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                     ))}
                 </div>
                 {visibilityOptions.some(o => o.id === formData.visibility && o.requiresApproval) && (
-                    <p className="text-2xs text-amber-600 dark:text-amber-400 leading-relaxed">
-                        Your view will be created for your workspace, and a request to
-                        publish it to everyone will be sent to your workspace admins.
-                        You'll see the outcome on the view's activity.
-                    </p>
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.06] p-4 space-y-3">
+                        <div className="flex items-start gap-2.5">
+                            <span className="w-7 h-7 rounded-lg bg-amber-500/15 border border-amber-500/25 flex items-center justify-center shrink-0">
+                                <Send className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                            </span>
+                            <div className="min-w-0">
+                                <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                                    We'll ask an admin to publish this
+                                </p>
+                                <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
+                                    Publishing shows a view to everyone signed in, so a workspace
+                                    admin approves it. Here's what happens when you finish:
+                                </p>
+                            </div>
+                        </div>
+
+                        <ol className="space-y-1.5 pl-1">
+                            {[
+                                'Your view is created and visible to your workspace right away — you can use it immediately.',
+                                'A request to publish goes to your workspace admins.',
+                                "When they answer, it's recorded on the view's activity. If approved, the view becomes visible to everyone.",
+                            ].map((line, i) => (
+                                <li key={i} className="flex gap-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                                    <span className="shrink-0 w-4 h-4 mt-px rounded-full bg-amber-500/20 text-amber-700 dark:text-amber-300 text-[10px] font-bold flex items-center justify-center">
+                                        {i + 1}
+                                    </span>
+                                    <span>{line}</span>
+                                </li>
+                            ))}
+                        </ol>
+
+                        <div>
+                            <label className="block text-2xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">
+                                Note for your admin (optional)
+                            </label>
+                            <textarea
+                                value={formData.publishNote ?? ''}
+                                onChange={e => updateFormData({ publishNote: e.target.value })}
+                                rows={2}
+                                placeholder="e.g. Needed for the quarterly finance readout"
+                                className="w-full px-3 py-2 rounded-lg bg-white/70 dark:bg-slate-900/40 border border-amber-500/25 text-sm text-slate-800 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500/30 resize-none"
+                            />
+                            <p className="text-2xs text-slate-500 dark:text-slate-400 mt-1">
+                                Saying why usually gets a faster answer.
+                            </p>
+                        </div>
+
+                        <p className="text-2xs text-slate-500 dark:text-slate-400">
+                            Changed your mind? Pick Private or Workspace above — nothing is sent
+                            until you finish creating the view.
+                        </p>
+                    </div>
                 )}
                 <div className="hidden">
                 </div>

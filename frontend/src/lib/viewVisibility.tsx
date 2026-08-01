@@ -85,22 +85,29 @@ export interface VisibilityOption {
  * that files a request rather than a greyed-out dead end.
  */
 export function buildVisibilityOptions(args: {
-    /** The view's current tier; undefined for mixed/bulk selections. */
-    current?: ViewVisibility
+    /**
+     * The tier the view is SAVED at — not whatever tile is selected in a
+     * form. Undefined for an unsaved view (the create wizard) or a mixed
+     * bulk selection. The distinction matters: the un-publish lock below
+     * asks "is this view published?", and answering it with a draft
+     * selection froze the wizard the instant someone picked Enterprise,
+     * with no way back to Private.
+     */
+    saved?: ViewVisibility
     canPublish: boolean
     /** May ask a publish-permission holder to publish this view. */
     canRequestPublish?: boolean
     appName?: string
     workspaceName?: string
 }): VisibilityOption[] {
-    const { current, canPublish, canRequestPublish, appName, workspaceName } = args
+    const { saved, canPublish, canRequestPublish, appName, workspaceName } = args
     return VISIBILITY_ORDER.map(id => {
         let disabled = false
         let disabledReason: string | undefined
         let requiresApproval = false
         let approvalHint: string | undefined
         if (!canPublish) {
-            if (id === 'enterprise' && current !== 'enterprise') {
+            if (id === 'enterprise' && saved !== 'enterprise') {
                 if (canRequestPublish) {
                     requiresApproval = true
                     approvalHint =
@@ -111,7 +118,7 @@ export function buildVisibilityOptions(args: {
                         'Publishing to everyone needs the "Publish views" ' +
                         'permission — ask a workspace admin.'
                 }
-            } else if (current === 'enterprise' && id !== 'enterprise') {
+            } else if (saved === 'enterprise' && id !== 'enterprise') {
                 disabled = true
                 disabledReason =
                     'Unpublishing needs the "Publish views" permission — ' +

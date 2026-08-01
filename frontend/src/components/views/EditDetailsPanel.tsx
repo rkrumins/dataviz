@@ -91,7 +91,7 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
   }
 
   const VIS = buildVisibilityOptions({
-    current: view.visibility,
+    saved: view.visibility,
     canPublish,
     appName,
     workspaceName: view.workspaceName,
