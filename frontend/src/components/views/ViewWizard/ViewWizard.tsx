@@ -63,7 +63,11 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { useFeatureList } from '@/store/features'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { viewService } from '@/services/viewService'
-import { viewToViewConfig, updateViewLayout } from '@/services/viewApiService'
+import {
+    viewToViewConfig, updateViewLayout, requestViewPublication,
+} from '@/services/viewApiService'
+import { useToast } from '@/components/ui/toast'
+import { usePermission } from '@/store/auth'
 import { provisionBlankGraph, GraphNameUnavailableError, type BlankGraphResult } from '@/services/versioningApiService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -843,7 +847,11 @@ function ViewWizardBody({
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
     const { clearAssignments } = useReferenceModelStore()
+    const { showToast } = useToast()
     const isBlank = scopeMode === 'blank'
+    // Picking Enterprise without the publish permission means "create it,
+    // then ask" — the view has to exist before a request can attach to it.
+    const canPublishHere = usePermission('workspace:view:publish', resolvedWorkspaceId)
 
     // Admin → Features → View modes. `null` means no restriction (see useFeatureList).
     //
@@ -1095,6 +1103,9 @@ function ViewWizardBody({
     const handleSubmit = useCallback(async () => {
         setIsSubmitting(true)
         setProvisionError(null)
+        // Enterprise was chosen by someone who can't grant it: create at the
+        // widest tier they can set, then ask on their behalf.
+        const wantsPublication = formData.visibility === 'enterprise' && !canPublishHere
         try {
             const layersWithScope = formData.layers.map(l => ({ ...l, scopeEdges: formData.scopeEdges }))
             // Canonical-clean: strips any stray legacy entityAssignments and merges
@@ -1181,7 +1192,11 @@ function ViewWizardBody({
                         fieldFilters,
                         workspaceId: resolvedWorkspaceId,
                         dataSourceId,
-                        visibility: formData.visibility,
+                        // A member who picked Enterprise but can't publish
+                        // gets the widest tier they CAN set; the request
+                        // below asks for the rest. Creating at 'enterprise'
+                        // would just 403.
+                        visibility: wantsPublication ? 'workspace' : formData.visibility,
                         tags: formData.tags.length > 0 ? formData.tags : undefined,
                     })
                     if (!result.success || !result.data) {
@@ -1191,6 +1206,28 @@ function ViewWizardBody({
                     }
                     createdViewId = result.data.id
                     createdViewIdRef.current = createdViewId
+
+                    // The view exists now, so the ask has something to
+                    // attach to. Failure here must not fail the create —
+                    // the view is saved either way and the request can be
+                    // re-sent from Share.
+                    if (wantsPublication) {
+                        try {
+                            await requestViewPublication(
+                                createdViewId,
+                                'Requested while creating this view',
+                            )
+                            showToast(
+                                'success',
+                                'View created — your publication request was sent to your workspace admins',
+                            )
+                        } catch {
+                            showToast(
+                                'error',
+                                "View created, but the publication request couldn't be sent. You can ask again from Share.",
+                            )
+                        }
+                    }
                 }
                 setStageStates(s => ({ ...s, create: 'done', layout: 'active' }))
 
@@ -1269,7 +1306,7 @@ function ViewWizardBody({
         } finally {
             setIsSubmitting(false)
         }
-    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, buildFieldFilters, fullViewQuery.data, editingView, clearDraft])
+    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, buildFieldFilters, fullViewQuery.data, editingView, clearDraft, canPublishHere, showToast])
 
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {
         markDirty()

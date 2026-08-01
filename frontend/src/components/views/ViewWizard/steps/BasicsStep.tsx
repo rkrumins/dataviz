@@ -89,6 +89,12 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
     const scopeWorkspaceId = scopeContext?.workspaceId ?? activeWorkspace?.id
     const canPublish = usePermission('workspace:view:publish', scopeWorkspaceId)
     const visibilityOptions = buildVisibilityOptions({
+        // Whoever can create a view here will be its creator, and a
+        // creator may always ASK for publication — so the Enterprise
+        // tile is a route at creation time too, never a dead end. The
+        // request is filed against the view once it exists (see the
+        // wizard's submit).
+        canRequestPublish: !canPublish,
         current: formData.visibility,
         canPublish,
         appName,
@@ -497,12 +503,15 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                     Visibility
                 </label>
                 <div className="grid grid-cols-3 gap-3">
-                    {visibilityOptions.map(({ id, label, description, icon: Icon, disabled, disabledReason }) => (
+                    {visibilityOptions.map(({
+                        id, label, description, icon: Icon,
+                        disabled, disabledReason, requiresApproval, approvalHint,
+                    }) => (
                         <button
                             key={id}
                             onClick={() => { if (!disabled) updateFormData({ visibility: id }) }}
                             disabled={disabled}
-                            title={disabledReason}
+                            title={disabledReason ?? approvalHint}
                             className={cn(
                                 'flex flex-col items-center gap-2 px-4 py-4 rounded-xl border-2 transition-colors duration-150 text-center',
                                 formData.visibility === id
@@ -514,8 +523,22 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                             <Icon className="w-5 h-5" />
                             <span className="text-sm font-medium">{label}</span>
                             <span className="text-2xs text-slate-400">{description}</span>
+                            {requiresApproval && (
+                                <span className="text-2xs font-semibold text-amber-600 dark:text-amber-400">
+                                    Needs approval
+                                </span>
+                            )}
                         </button>
                     ))}
+                </div>
+                {visibilityOptions.some(o => o.id === formData.visibility && o.requiresApproval) && (
+                    <p className="text-2xs text-amber-600 dark:text-amber-400 leading-relaxed">
+                        Your view will be created for your workspace, and a request to
+                        publish it to everyone will be sent to your workspace admins.
+                        You'll see the outcome on the view's activity.
+                    </p>
+                )}
+                <div className="hidden">
                 </div>
             </motion.div>
 
