@@ -89,6 +89,9 @@ export interface FocusCard {
   frontier: boolean
   /** True when this card's next hop is already expanded. */
   frontierExpanded: boolean
+  /** Expanded, fetch completed, and NOTHING further exists — the walk
+   *  genuinely ends here (a data-source claim, never a guess). */
+  deadEnd: boolean
   degreeHint: { in: number; out: number } | null
   fetch: 'loading' | 'error' | null
   /** Text-filter miss — rendered dimmed, never removed. */
@@ -250,7 +253,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     rollup: false, unresolved: false,
     aggregated: false, aggregateEdge: null,
     drillKey: null, drilled: false, expandKey: null, expanded: false,
-    frontier: false, frontierExpanded: false,
+    frontier: false, frontierExpanded: false, deadEnd: false,
     degreeHint: null, fetch: null,
     dimmed: false, matchesInside: 0,
     overflowCount: 0, missingConstituents: 0,
@@ -332,7 +335,12 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     let refs: Array<{ nodeId: string; type: string }> = [{ nodeId: focalId, type: focalType }]
 
     for (let band = 1; band <= MAX_BAND && refs.length > 0; band++) {
-      // Collect this band's records from every reference node.
+      // Collect this band's records from every reference node. Track
+      // how much each expanded ref contributed — an expanded ref whose
+      // COMPLETED fetch yields nothing is a true dead end, and the UI
+      // must say so rather than let an expansion silently no-op.
+      // (Counted before the chip filter: hidden ≠ nonexistent.)
+      const refContrib = new Map<string, number>()
       const entryMap = new Map<string, BandEntry>()
       for (const ref of refs) {
         const recs = ref.nodeId === focalId
@@ -347,6 +355,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           // The band grows OUTWARD only — a neighbor already placed
           // anywhere (any band, either side, the focal itself) gets an
           // edge to its existing card instead of a duplicate.
+          refContrib.set(ref.nodeId, (refContrib.get(ref.nodeId) ?? 0) + 1)
           const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
           if (hiddenTypes.has(t)) { hiddenByChips++; continue }
           const aggData = r.edge.data as { isAggregated?: boolean } | undefined
@@ -383,6 +392,21 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           const refStat = entry.refs.get(ref.nodeId)
           if (refStat) refStat.count += n
           else entry.refs.set(ref.nodeId, { count: n, edgeTypeNorm: r.edgeTypeNorm, aggregated: !!aggData?.isAggregated })
+        }
+      }
+
+      // Stamp dead ends onto the previous band's expanded cards: fetch
+      // completed, zero records either direction of growth — the walk
+      // ends here in the data source, and the pill will say so.
+      for (const ref of refs) {
+        if (ref.nodeId === focalId) continue
+        if ((refContrib.get(ref.nodeId) ?? 0) > 0) continue
+        if (fetchStatus?.get(ref.nodeId) !== 'done') continue
+        const cardId = placed.get(ref.nodeId)
+        const refCard = cardId ? cards.find(c => c.id === cardId) : undefined
+        if (refCard) {
+          refCard.deadEnd = true
+          refCard.frontier = false
         }
       }
 

@@ -220,6 +220,37 @@ describe('buildFocusGraph — frontier hop expansion', () => {
     expect(g.cards.filter(c => c.nodeId === 'B')).toHaveLength(1)
     expect(g.edges.find(e => e.id === 'fe:n:B->f')).toBeTruthy()
   })
+
+  it('marks a completed-empty expansion as a dead end — never a silent no-op', () => {
+    const build2 = (fetchState: 'done' | 'loading') => build({
+      nodes: [node('F'), node('B')],
+      edges: [edge('e1', 'F', 'B')],
+      over: {
+        expandedFrontier: new Set(['out:B']),
+        fetchStatus: new Map([['B', fetchState]]),
+      },
+    })
+    const done = build2('done')
+    const b = done.cards.find(c => c.id === 'n:B')!
+    expect(b.deadEnd).toBe(true)      // fetch completed, nothing further
+    expect(b.frontier).toBe(false)
+    // An in-flight fetch is NOT a dead end (it's a claim about the
+    // data source, so it needs a completed fetch behind it).
+    expect(build2('loading').cards.find(c => c.id === 'n:B')!.deadEnd).toBe(false)
+  })
+
+  it('a cycle-only contribution is not a dead end', () => {
+    const g = build({
+      nodes: [node('F'), node('B')],
+      edges: [edge('e1', 'F', 'B'), edge('e2', 'B', 'F')],
+      over: {
+        expandedFrontier: new Set(['out:B']),
+        fetchStatus: new Map([['B', 'done' as const]]),
+      },
+    })
+    // B's downstream exists (it's F) — the walk loops, it doesn't end.
+    expect(g.cards.find(c => c.id === 'n:B')!.deadEnd).toBe(false)
+  })
 })
 
 describe('buildFocusGraph — caps, chips, filter', () => {

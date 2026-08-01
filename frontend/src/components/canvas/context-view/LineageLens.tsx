@@ -345,16 +345,17 @@ export function LineageLens({
     return m
   }, [rawEdges, supplementalEdges])
   const [drilledRows, setDrilledRows] = useState<Set<string>>(() => new Set())
-  const toggleDrill = (key: string) => setDrilledRows(prev => {
+  const toggleDrill = useCallback((key: string) => setDrilledRows(prev => {
     const next = new Set(prev)
     if (next.has(key)) next.delete(key)
     else next.add(key)
     return next
-  })
+  }), [])
   // Opening a drill with incomplete local coverage fetches the
   // underlying edges on demand (idempotent per aggregate). Shared by
-  // the walk columns and the classic-mode cards.
-  const toggleDrillWithFetch = (key: string, edge: LineageEdge) => {
+  // the graph cards and the classic-mode rows. Memoized — it rides
+  // into every graph card's context, which must stay identity-stable.
+  const toggleDrillWithFetch = useCallback((key: string, edge: LineageEdge) => {
     const aggData = edge.data as { sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
     if (!drilledRows.has(key) && onDrillFetch && !drillEdges?.has(edge.id)) {
       let localCount = 0
@@ -364,7 +365,7 @@ export function LineageLens({
       if (localCount < (aggData?.sourceEdgeCount ?? 0)) onDrillFetch(edge)
     }
     toggleDrill(key)
-  }
+  }, [drilledRows, onDrillFetch, drillEdges, rawEdgeById, toggleDrill])
 
   const { incomingRecords, outgoingRecords } = useMemo(
     () => (nodeId
@@ -850,6 +851,7 @@ export function LineageLens({
                 graph={focusGraph}
                 focalId={nodeId}
                 focalStats={{ in: incomingRecords.length, out: outgoingRecords.length }}
+                focalFetch={focalFetch}
                 selectedId={graphCur.selection}
                 reducedMotion={reducedMotion}
                 onSelect={setGraphSelection}
@@ -876,6 +878,27 @@ export function LineageLens({
                     <span className="pointer-events-auto px-1.5 py-0.5 rounded-md bg-canvas-elevated/90 border border-black/[0.07] dark:border-white/[0.08] text-[9.5px] text-ink-muted shadow-sm">
                       {focusGraph.hiddenByChips} hidden by the type chips
                     </span>
+                  )}
+                </div>
+              )}
+              {/* Empty/loading state — a lone focal card floating in
+                  space explains nothing. In-flight fetches narrate;
+                  a store-only empty view says what it is (the DONE +
+                  empty case is claimed per-direction by the whispers
+                  inside the graph itself). */}
+              {incomingRecords.length === 0 && outgoingRecords.length === 0 && focalChildren.length === 0
+                && (focalFetch === 'loading' || focalFetch === undefined) && (
+                <div className="absolute inset-x-0 bottom-8 z-10 flex justify-center pointer-events-none">
+                  {focalFetch === 'loading' ? (
+                    <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-canvas-elevated/95 border border-black/[0.07] dark:border-white/[0.08] shadow-sm text-[11px] text-ink-muted">
+                      <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
+                      Fetching lineage from the data source…
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-canvas-elevated/95 border border-black/[0.07] dark:border-white/[0.08] shadow-sm text-[11px] text-ink-muted">
+                      <LucideIcons.CircleSlash className="w-3.5 h-3.5 text-ink-muted/50" />
+                      No lineage connections loaded on this canvas
+                    </div>
                   )}
                 </div>
               )}
@@ -932,6 +955,11 @@ export function LineageLens({
                           <LucideIcons.ArrowUpRight className="w-3 h-3" />
                           {selectedInfo.outCount} out
                         </span>
+                        {(selectedInfo.node?.data?.description as string | undefined) && (
+                          <span className="min-w-0 truncate max-w-[420px] italic text-ink-muted/70">
+                            {selectedInfo.node?.data?.description as string}
+                          </span>
+                        )}
                       </p>
                     </div>
                     <div className="flex items-center gap-1.5 flex-shrink-0">

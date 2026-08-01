@@ -8,11 +8,18 @@
  *   single click  = select (detail strip)     double click = focus
  *   group header  = expand/collapse           ⊕ pill       = next hop
  *   ×N badge      = drill the aggregate       pane click   = deselect
+ *   hover a card  = light up its connections
  *
  * Positions come pre-baked from the builder, so React Flow does no
  * layout of its own — card ids are stable across rebuilds and a CSS
  * transform transition (killed under .reduce-motion) makes shared
  * cards glide when the focal changes.
+ *
+ * Perf contract: the card context is identity-stable across selection
+ * and hover, selection is stamped through React Flow's own `selected`
+ * flag, and hover touches only the (small) edge array — so selecting
+ * or sweeping the pointer re-renders a couple of memoized cards, never
+ * the whole board.
  */
 import { memo, useEffect, useMemo, useState } from 'react'
 import {
@@ -23,8 +30,10 @@ import {
   BaseEdge,
   EdgeLabelRenderer,
   Handle,
+  Panel,
   Position,
   getBezierPath,
+  useReactFlow,
   type Edge,
   type EdgeProps,
   type Node,
@@ -38,7 +47,7 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import type { FocusCard, FocusGraph } from './focus-graph'
+import { CARD_W, BAND_GAP, type FocusCard, type FocusGraph } from './focus-graph'
 
 /** Direction tints — the house semantics: upstream = sky, downstream
  *  = amber (matches the list columns and the canvas). */
@@ -47,7 +56,6 @@ const TINT_DOWN = '#f59e0b'
 const TINT_CONTAIN = '#94a3b8'
 
 interface CardCtx {
-  selectedId: string | null
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
   onToggleGroup: (expandKey: string) => void
@@ -64,6 +72,8 @@ interface FocusGraphViewProps {
   focalId: string
   /** Focal in/out tallies (record counts — groups don't hide them). */
   focalStats: { in: number; out: number }
+  /** Focal fetch state — drives the empty-direction whispers. */
+  focalFetch?: 'loading' | 'done' | 'error'
   selectedId: string | null
   reducedMotion: boolean
   onSelect: (nodeId: string | null) => void
@@ -79,13 +89,9 @@ interface FocusGraphViewProps {
 
 // ── Card node ────────────────────────────────────────────────────────
 
-function useTypeVisual(typeId: string) {
-  const schema = useSchemaStore((s) => s.schema)
-  return useMemo(() => getEntityVisual(schema ? { schema } : null, typeId), [schema, typeId])
-}
-
 function TypeIcon({ typeId, color, className }: { typeId: string; color: string; className?: string }) {
-  const visual = useTypeVisual(typeId)
+  const schema = useSchemaStore((s) => s.schema)
+  const visual = useMemo(() => getEntityVisual(schema ? { schema } : null, typeId), [schema, typeId])
   const Icon = (LucideIcons as unknown as Record<string, LucideIcons.LucideIcon>)[visual.icon] ?? LucideIcons.Box
   return <Icon className={className} style={{ color }} />
 }
@@ -152,7 +158,8 @@ function CardActions({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
 
 /** The ⊕ / +N pill on a frontier card's outward side — fetches and
  *  reveals that entity's own next hop. Never invents a number: the
- *  count renders only when the backend reported a real degree. */
+ *  count renders only when the backend reported a real degree; a
+ *  completed-empty expansion becomes an explicit end-of-lineage mark. */
 function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   if (!card.nodeId || !card.expandKey || (!card.frontier && !card.frontierExpanded)) return null
   const outLeft = card.band < 0
@@ -174,6 +181,18 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
         className={cn('absolute top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded-full bg-canvas-elevated border border-amber-500/60 text-amber-600 dark:text-amber-400 hover:bg-amber-500/10', pos)}
       >
         <LucideIcons.AlertTriangle className="w-3 h-3" />
+      </button>
+    )
+  }
+  if (card.deadEnd) {
+    return (
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier(card.expandKey!, card.nodeId!) }}
+        title={`No further ${outLeft ? 'upstream' : 'downstream'} lineage in the data source — the walk ends here (click to collapse)`}
+        className={cn('absolute top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded-full bg-canvas-elevated border border-black/10 dark:border-white/15 text-ink-muted/50 hover:text-ink-muted', pos)}
+      >
+        <LucideIcons.CircleSlash className="w-3 h-3" />
       </button>
     )
   }
@@ -203,7 +222,7 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   )
 }
 
-function FocusGraphCard({ data }: NodeProps) {
+function FocusGraphCard({ data, selected }: NodeProps) {
   const { card, ctx, focalStats } = data as unknown as {
     card: FocusCard
     ctx: CardCtx
@@ -215,7 +234,6 @@ function FocusGraphCard({ data }: NodeProps) {
     [schema, card.type],
   )
   const accent = card.type === 'not loaded' ? '#94a3b8' : visual.color
-  const selected = card.nodeId != null && ctx.selectedId === card.nodeId
 
   const activate = () => {
     if (card.kind === 'overflow') { if (card.expandKey) ctx.onShowMore(card.expandKey); return }
@@ -429,7 +447,7 @@ function FocusGraphCard({ data }: NodeProps) {
       style={{ width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent }}
       className={cn(
         'group relative flex items-center gap-2 rounded-lg border px-2.5 cursor-pointer transition-colors bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-        card.rollup
+      card.rollup
           ? 'border-dashed border-black/[0.12] dark:border-white/[0.14] opacity-75 hover:opacity-100'
           : 'border-black/[0.07] dark:border-white/[0.08]',
         selected && 'ring-2 ring-accent-lineage',
@@ -504,6 +522,39 @@ function FocusGraphCard({ data }: NodeProps) {
 
 const MemoFocusGraphCard = memo(FocusGraphCard)
 
+// ── Band labels ──────────────────────────────────────────────────────
+
+/** Non-interactive header floating above each hop band ("Data Sources
+ *  · 30 of 45"), or an italic whisper for an empty direction. */
+function BandLabelNode({ data }: NodeProps) {
+  const d = data as unknown as { band?: number; sub?: string; whisper?: string }
+  if (d.whisper) {
+    return (
+      <div style={{ width: CARD_W }} className="pointer-events-none text-[10.5px] italic text-ink-muted/60 leading-snug">
+        {d.whisper}
+      </div>
+    )
+  }
+  const band = d.band ?? 1
+  const isUp = band < 0
+  const hop = Math.abs(band)
+  return (
+    <div style={{ width: CARD_W }} className="pointer-events-none flex items-baseline gap-1.5 whitespace-nowrap">
+      {isUp
+        ? <LucideIcons.ArrowDownLeft className="w-3 h-3 self-center text-sky-500" />
+        : <LucideIcons.ArrowUpRight className="w-3 h-3 self-center text-amber-500" />}
+      <span className="text-[9.5px] font-bold uppercase tracking-[0.12em] text-ink-muted/70">
+        {isUp
+          ? hop === 1 ? 'Data Sources' : `Sources · hop ${hop}`
+          : hop === 1 ? 'Data Consumers' : `Consumers · hop ${hop}`}
+      </span>
+      {d.sub && <span className="text-[9px] tabular-nums text-ink-muted/50">{d.sub}</span>}
+    </div>
+  )
+}
+
+const NODE_TYPES = { focusCard: MemoFocusGraphCard, bandLabel: BandLabelNode }
+
 // ── Edge ─────────────────────────────────────────────────────────────
 
 function FocusGraphEdgeComp({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data }: EdgeProps) {
@@ -513,8 +564,16 @@ function FocusGraphEdgeComp({ id, sourceX, sourceY, targetX, targetY, sourcePosi
     containment: boolean
     dimmed: boolean
     tint: string
+    emphasized: boolean
+    hoverActive: boolean
   }
   const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
+  // Hovering a card lights up ITS connections and quiets the rest —
+  // the read-your-neighborhood gesture.
+  const opacity = d.dimmed ? 0.12
+    : d.emphasized ? 1
+      : d.hoverActive ? 0.2
+        : d.containment ? 0.45 : 0.7
   return (
     <>
       <BaseEdge
@@ -522,15 +581,16 @@ function FocusGraphEdgeComp({ id, sourceX, sourceY, targetX, targetY, sourcePosi
         path={path}
         style={{
           stroke: d.tint,
-          strokeWidth: d.aggregated ? 2 : 1.5,
+          strokeWidth: d.emphasized ? (d.aggregated ? 3 : 2.5) : d.aggregated ? 2 : 1.5,
           strokeDasharray: d.containment ? '4 4' : undefined,
-          opacity: d.dimmed ? 0.12 : d.containment ? 0.45 : 0.7,
+          opacity,
+          transition: 'opacity 120ms, stroke-width 120ms',
         }}
       />
       {d.count > 1 && !d.dimmed && (
         <EdgeLabelRenderer>
           <div
-            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
+            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`, opacity: d.hoverActive && !d.emphasized ? 0.3 : 1 }}
             className="absolute pointer-events-none px-1 py-px rounded-full bg-canvas-elevated border border-black/10 dark:border-white/10 text-[8.5px] font-semibold tabular-nums text-ink-muted shadow-sm"
           >
             ×{d.count.toLocaleString()}
@@ -541,8 +601,37 @@ function FocusGraphEdgeComp({ id, sourceX, sourceY, targetX, targetY, sourcePosi
   )
 }
 
-const NODE_TYPES = { focusCard: MemoFocusGraphCard }
 const EDGE_TYPES = { focusEdge: FocusGraphEdgeComp }
+
+// ── Controls ─────────────────────────────────────────────────────────
+
+/** House-styled zoom cluster (React Flow's default chrome doesn't
+ *  match the lens). Must render inside <ReactFlow> for useReactFlow. */
+function GraphControls({ reducedMotion }: { reducedMotion: boolean }) {
+  const rf = useReactFlow()
+  const dur = reducedMotion ? 0 : 200
+  const btn = 'w-7 h-7 flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
+  return (
+    <Panel position="bottom-right" className="!m-3">
+      <div className="flex flex-col rounded-lg border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-md overflow-hidden divide-y divide-black/[0.06] dark:divide-white/[0.06]">
+        <button type="button" title="Zoom in" onClick={() => void rf.zoomIn({ duration: dur })} className={btn}>
+          <LucideIcons.Plus className="w-3.5 h-3.5" />
+        </button>
+        <button type="button" title="Zoom out" onClick={() => void rf.zoomOut({ duration: dur })} className={btn}>
+          <LucideIcons.Minus className="w-3.5 h-3.5" />
+        </button>
+        <button
+          type="button"
+          title="Fit the lineage in view"
+          onClick={() => void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: 1 })}
+          className={btn}
+        >
+          <LucideIcons.Maximize2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </Panel>
+  )
+}
 
 // ── View ─────────────────────────────────────────────────────────────
 
@@ -550,6 +639,7 @@ export function FocusGraphView({
   graph,
   focalId,
   focalStats,
+  focalFetch,
   selectedId,
   reducedMotion,
   onSelect,
@@ -562,8 +652,9 @@ export function FocusGraphView({
   onRevealOnCanvas,
   onOpenDetails,
 }: FocusGraphViewProps) {
+  // Identity-stable across selection & hover — see the perf contract
+  // in the file header.
   const ctx = useMemo<CardCtx>(() => ({
-    selectedId,
     onSelect,
     onFocus,
     onToggleGroup,
@@ -573,18 +664,75 @@ export function FocusGraphView({
     onRetryFetch,
     onRevealOnCanvas,
     onOpenDetails,
-  }), [selectedId, onSelect, onFocus, onToggleGroup, onToggleDrill, onExpandFrontier, onShowMore, onRetryFetch, onRevealOnCanvas, onOpenDetails])
+  }), [onSelect, onFocus, onToggleGroup, onToggleDrill, onExpandFrontier, onShowMore, onRetryFetch, onRevealOnCanvas, onOpenDetails])
 
-  const nodes = useMemo((): Node[] => graph.cards.map((card) => ({
-    id: card.id,
-    type: 'focusCard',
-    position: { x: card.x, y: card.y },
-    draggable: false,
-    selectable: false,
-    focusable: false,
-    data: card.kind === 'focal' ? { card, ctx, focalStats } : { card, ctx },
-  })), [graph.cards, ctx, focalStats])
+  const focalIn = focalStats.in
+  const focalOut = focalStats.out
 
+  const baseNodes = useMemo((): Node[] => {
+    const minYByBand = new Map<number, number>()
+    for (const c of graph.cards) {
+      const cur = minYByBand.get(c.band)
+      if (cur === undefined || c.y < cur) minYByBand.set(c.band, c.y)
+    }
+    const nodes: Node[] = graph.cards.map((card) => ({
+      id: card.id,
+      type: 'focusCard',
+      position: { x: card.x, y: card.y },
+      draggable: false,
+      selectable: false,
+      focusable: false,
+      data: card.kind === 'focal'
+        ? { card, ctx, focalStats: { in: focalIn, out: focalOut } }
+        : { card, ctx },
+    }))
+    // Hop-band headers with honest shown/total counts.
+    for (const [band, minY] of minYByBand) {
+      if (band === 0) continue
+      const totals = graph.bandTotals.get(`${band < 0 ? 'in' : 'out'}:${Math.abs(band)}`)
+      const sub = totals
+        ? totals.total > totals.shown ? `${totals.shown} of ${totals.total}` : `${totals.total}`
+        : undefined
+      nodes.push({
+        id: `bl:${band}`,
+        type: 'bandLabel',
+        position: { x: band * (CARD_W + BAND_GAP), y: minY - 34 },
+        draggable: false,
+        selectable: false,
+        focusable: false,
+        data: { band, sub },
+      })
+    }
+    // A COMPLETED fetch with an empty direction is a data-source claim
+    // — whisper it where the band would be, instead of blank space.
+    if (focalFetch === 'done') {
+      if (!minYByBand.has(-1)) {
+        nodes.push({
+          id: 'blw:in', type: 'bandLabel', position: { x: -(CARD_W + BAND_GAP), y: -10 },
+          draggable: false, selectable: false, focusable: false,
+          data: { whisper: 'No upstream sources in the data source' },
+        })
+      }
+      if (!minYByBand.has(1)) {
+        nodes.push({
+          id: 'blw:out', type: 'bandLabel', position: { x: CARD_W + BAND_GAP, y: -10 },
+          draggable: false, selectable: false, focusable: false,
+          data: { whisper: 'No downstream consumers in the data source' },
+        })
+      }
+    }
+    return nodes
+  }, [graph.cards, graph.bandTotals, ctx, focalIn, focalOut, focalFetch])
+
+  // Selection rides React Flow's own `selected` flag so changing it
+  // re-renders exactly the affected memoized cards.
+  const nodes = useMemo(() => baseNodes.map((n) => {
+    const cardNodeId = (n.data as { card?: FocusCard }).card?.nodeId ?? null
+    const sel = cardNodeId != null && cardNodeId === selectedId
+    return sel === !!n.selected ? n : { ...n, selected: sel }
+  }), [baseNodes, selectedId])
+
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
   const edges = useMemo((): Edge[] => {
     const bandById = new Map(graph.cards.map(c => [c.id, c.band]))
     return graph.edges.map((e) => {
@@ -599,10 +747,18 @@ export function FocusGraphView({
         target: e.target,
         sourceHandle: e.containment ? 'contains' : undefined,
         type: 'focusEdge',
-        data: { count: e.count, aggregated: e.aggregated, containment: e.containment, dimmed: e.dimmed, tint },
+        data: {
+          count: e.count,
+          aggregated: e.aggregated,
+          containment: e.containment,
+          dimmed: e.dimmed,
+          tint,
+          emphasized: hoveredId != null && (e.source === hoveredId || e.target === hoveredId),
+          hoverActive: hoveredId != null,
+        },
       }
     })
-  }, [graph.cards, graph.edges])
+  }, [graph.cards, graph.edges, hoveredId])
 
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
   // Re-frame on focal swaps and expansion changes — the graph's shape
@@ -644,10 +800,13 @@ export function FocusGraphView({
           elementsSelectable={false}
           edgesFocusable={false}
           onPaneClick={() => onSelect(null)}
+          onNodeMouseEnter={(_, n) => { if (n.type === 'focusCard') setHoveredId(n.id) }}
+          onNodeMouseLeave={() => setHoveredId(null)}
           proOptions={{ hideAttribution: true }}
           style={{ background: 'transparent' }}
         >
           <Background variant={BackgroundVariant.Dots} gap={26} size={1.25} color="currentColor" />
+          <GraphControls reducedMotion={reducedMotion} />
         </ReactFlow>
       </ReactFlowProvider>
     </div>

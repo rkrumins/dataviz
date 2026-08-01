@@ -485,9 +485,11 @@ describe('LineageLens graph mode', () => {
 
   it('the header toggle switches to the list body and persists the preference', () => {
     renderLens(['b'])
-    expect(screen.queryByText('Data Sources')).toBeNull()
+    // The graph shows band headers ("Data Sources") too — the LIST
+    // body is identified by its column subtitles.
+    expect(screen.queryByText('Upstream')).toBeNull()
     fireEvent.click(screen.getByTitle('List — scan all connections as columns'))
-    expect(screen.getByText('Data Sources')).toBeTruthy()
+    expect(screen.getByText('Upstream')).toBeTruthy()
     expect(usePreferencesStore.getState().lensViewMode).toBe('list')
   })
 })
