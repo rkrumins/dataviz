@@ -1101,6 +1101,20 @@ class ViewLayoutUpdateRequest(BaseModel):
         return self
 
 
+class ViewAudience(BaseModel):
+    """How far this view currently reaches, in people.
+
+    'Workspace' is an abstraction until it has a number attached, and
+    the sharer cannot count it client-side: the workspace list their
+    browser holds is scoped to their own memberships.
+    """
+    workspace_member_count: int = Field(0, alias="workspaceMemberCount")
+    explicit_grant_count: int = Field(0, alias="explicitGrantCount")
+
+    class Config:
+        populate_by_name = True
+
+
 class ViewPublishRequest(BaseModel):
     """A pending ask to publish this view platform-wide."""
     requested_by: str = Field(alias="requestedBy")
@@ -1223,6 +1237,8 @@ class ViewResponse(BaseModel):
     health: Optional[ViewHealthInfo] = None
     # Set while a publication request is awaiting an answer.
     publish_request: Optional[ViewPublishRequest] = Field(None, alias="publishRequest")
+    # Reach, in people — single-view read only.
+    audience: Optional[ViewAudience] = None
 
     class Config:
         populate_by_name = True

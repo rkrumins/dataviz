@@ -155,6 +155,35 @@ async def mark_read(
 
 # ── recipient resolution ─────────────────────────────────────────────
 
+async def workspace_member_count(
+    session: AsyncSession, workspace_id: str,
+) -> int:
+    """How many distinct people are bound to this workspace.
+
+    "Everyone in Finance" means nothing until you know Finance is twelve
+    people — an audience the sharer cannot count from the browser,
+    because the workspace list they can see is scoped to their own
+    memberships. Group bindings expand to their members; a person bound
+    twice counts once.
+    """
+    bindings = (await session.execute(
+        select(RoleBindingORM).where(
+            RoleBindingORM.scope_type == "workspace",
+            RoleBindingORM.scope_id == workspace_id,
+        )
+    )).scalars().all()
+    users = {b.subject_id for b in bindings if b.subject_type == "user"}
+    group_ids = {b.subject_id for b in bindings if b.subject_type == "group"}
+    if group_ids:
+        members = (await session.execute(
+            select(GroupMemberORM.user_id).where(
+                GroupMemberORM.group_id.in_(group_ids)
+            )
+        )).all()
+        users.update(m[0] for m in members)
+    return len(users)
+
+
 async def users_who_can(
     session: AsyncSession, *, workspace_id: str, permission: str,
 ) -> set[str]:

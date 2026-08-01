@@ -33,7 +33,7 @@ from backend.app.auth.dependencies import (
 from backend.app.common.single_flight import normalised_principal, read_views_sf
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM
-from backend.app.db.repositories import data_source_repo, view_repo
+from backend.app.db.repositories import data_source_repo, grant_repo, view_repo
 from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
@@ -44,6 +44,7 @@ from backend.app.services.versioning.models import BranchORM
 from backend.auth_service.interface import User
 from backend.common.models.management import (
     ViewAccessInfo,
+    ViewAudience,
     ViewPublishRequest,
     ViewCreateRequest,
     ViewUpdateRequest,
@@ -646,6 +647,14 @@ async def get_view(
     if ds is not None:
         view.provider_id = ds.provider_id
 
+    view.audience = ViewAudience(
+        workspaceMemberCount=await notification_repo.workspace_member_count(
+            session, view_orm.workspace_id,
+        ),
+        explicitGrantCount=len(await grant_repo.list_grants_for_resource(
+            session, resource_type="view", resource_id=view_id,
+        )),
+    )
     view.access = ViewAccessInfo(**await view_access.compute_access_envelope(
         session, ctx, view_orm,
         workspace_policy=await _publish_policy(session, view_orm.workspace_id),

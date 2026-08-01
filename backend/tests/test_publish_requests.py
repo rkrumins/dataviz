@@ -218,3 +218,45 @@ async def test_request_policy_still_refuses_direct_publish(
             f"/api/v1/views/{vid}/visibility", json={"visibility": "enterprise"},
         )
     assert r.status_code == 403
+
+
+# ── audience: the number that makes a tier mean something ────────────
+
+@pytest.mark.asyncio
+async def test_view_reports_its_audience(test_client: AsyncClient, db_session):
+    """'Everyone in Finance' means nothing until you know Finance is
+    three people — and the sharer's browser can't count it, because the
+    workspace list it holds is scoped to their own memberships."""
+    from backend.app.db.models import GroupMemberORM, RoleBindingORM, UserORM
+    from backend.app.db.repositories import group_repo
+
+    vid = await _seed(db_session)
+    for uid in ("usr_pf_m1", "usr_pf_m2", "usr_pf_m3"):
+        db_session.add(UserORM(
+            id=uid, email=f"{uid}@example.com", password_hash="x",
+            first_name="M", last_name="X", status="active",
+        ))
+    # Two bound directly, one via a group — and one person bound twice,
+    # who must still count once.
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id="usr_pf_m1",
+        role_name="workspace_member", scope_type="workspace", scope_id=WS,
+    ))
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id="usr_pf_m2",
+        role_name="workspace_viewer", scope_type="workspace", scope_id=WS,
+    ))
+    group = await group_repo.create_group(db_session, name="Team PF")
+    db_session.add(GroupMemberORM(group_id=group.id, user_id="usr_pf_m3"))
+    db_session.add(GroupMemberORM(group_id=group.id, user_id="usr_pf_m1"))
+    db_session.add(RoleBindingORM(
+        subject_type="group", subject_id=group.id,
+        role_name="workspace_member", scope_type="workspace", scope_id=WS,
+    ))
+    await db_session.commit()
+
+    with _auth(user=ADMIN, claims=ADMIN_CLAIMS):
+        r = await test_client.get(f"/api/v1/views/{vid}")
+    audience = r.json()["audience"]
+    assert audience["workspaceMemberCount"] == 3
+    assert audience["explicitGrantCount"] == 0
