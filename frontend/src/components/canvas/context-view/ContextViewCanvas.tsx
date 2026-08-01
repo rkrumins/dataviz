@@ -1288,7 +1288,12 @@ export function ContextViewCanvas({
   // the still-stale projection, so merged properties don't appear until a later refresh. Watch the
   // projection watermark: when it finishes (fresh false→true), re-hydrate so the canvas reflects the
   // freshly-projected state with no manual refresh.
-  const projFresh = useProjectionWatermark(scopeWsId ?? undefined, graphId).data?.fresh
+  // Versioning reads are membership-gated and meaningless to a read-only
+  // shared viewer (no drafts, no projection to chase) — don't fire them.
+  const projFresh = useProjectionWatermark(
+    readOnly ? undefined : scopeWsId ?? undefined,
+    readOnly ? null : graphId,
+  ).data?.fresh
   const prevProjFreshRef = useRef<boolean | undefined>(undefined)
   useEffect(() => {
     if (prevProjFreshRef.current === false && projFresh === true) {

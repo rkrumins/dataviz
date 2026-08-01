@@ -305,10 +305,12 @@ api_router.include_router(
     graph.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
     dependencies=[Depends(require_ds_read_or_view)],
 )
-# Assignment compute (workspace-scoped; its only route is manage-gated)
+# Assignment compute — reads graph data for one data source, so it takes
+# the ds-pinned read gate (a capability viewer may compute assignments
+# for the view's own source, nothing else).
 api_router.include_router(
     assignments.router, prefix="/{ws_id}/graph/assignments", tags=["assignments:workspace"],
-    dependencies=[Depends(require_ws_read_or_view)],
+    dependencies=[Depends(require_ds_read_or_view)],
 )
 # Batched canvas contract (open/expand) — /api/v1/{ws_id}/graph/canvas/*
 api_router.include_router(

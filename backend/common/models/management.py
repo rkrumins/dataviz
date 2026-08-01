@@ -1096,6 +1096,24 @@ class ViewLayoutUpdateRequest(BaseModel):
         return self
 
 
+class ViewHealthInfo(BaseModel):
+    """Whether a view's scope is still intact — computed SERVER-side.
+
+    This used to be derived in the browser by looking the view's
+    workspace and data source up in the workspace store, which only
+    lists workspaces the caller is bound to. Any view outside those (a
+    shared or enterprise view, or anything an admin can see) failed the
+    lookup and rendered as "Source deleted". The server is the only
+    party that can tell "you're not a member" apart from "it's gone",
+    so it answers, and every surface renders the same verdict — which
+    also keeps the badge and the ``attentionOnly`` list filter using
+    one definition of broken.
+    """
+    # 'healthy' | 'warning' | 'broken' | 'stale'
+    status: str
+    reason: Optional[str] = None
+
+
 class ViewAccessInfo(BaseModel):
     """The caller's capabilities on ONE view, computed server-side.
 
@@ -1180,6 +1198,8 @@ class ViewResponse(BaseModel):
     provider_id: Optional[str] = Field(None, alias="providerId")
     # Caller-specific capability envelope — single-view read only.
     access: Optional[ViewAccessInfo] = None
+    # Scope integrity (workspace/data-source still present and active).
+    health: Optional[ViewHealthInfo] = None
 
     class Config:
         populate_by_name = True

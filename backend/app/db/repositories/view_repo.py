@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Sequence, Set
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set
 
 from sqlalchemy import and_, select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +25,7 @@ from ..models import (
     UserORM,
 )
 from backend.common.models.management import (
+    ViewHealthInfo,
     ViewCreateRequest,
     ViewUpdateRequest,
     ViewLayoutUpdateRequest,
@@ -150,6 +151,89 @@ async def resolve_user_ids(
 _resolve_user_ids = resolve_user_ids
 
 
+# ------------------------------------------------------------------ #
+# View health (server-authoritative)                                    #
+# ------------------------------------------------------------------ #
+
+_STALE_THRESHOLD_DAYS = 90
+
+
+class _ScopeFacts(NamedTuple):
+    """What the server knows about a view's workspace + data source."""
+    ws_exists: bool
+    ws_active: bool
+    ds_exists: bool
+    ds_active: bool
+
+
+def _health_for(row: ViewORM, facts: _ScopeFacts) -> Dict[str, Optional[str]]:
+    """Verdict on one view's scope integrity.
+
+    Mirrors the ``attention_only`` SQL filter in ``_apply_view_filters``
+    so the badge and the "needs attention" list can never disagree. The
+    browser cannot compute this: its workspace store holds only the
+    caller's own memberships, so "not mine" is indistinguishable there
+    from "deleted" — which is how every shared view came to be labelled
+    "Source deleted".
+    """
+    if not facts.ws_exists:
+        return {"status": "broken", "reason": "Workspace no longer exists"}
+    if not facts.ws_active:
+        return {"status": "warning", "reason": "Workspace is inactive"}
+    if row.data_source_id:
+        if not facts.ds_exists:
+            return {"status": "broken", "reason": "Data source no longer exists"}
+        if not facts.ds_active:
+            return {"status": "warning", "reason": "Data source is inactive"}
+    try:
+        updated = datetime.fromisoformat((row.updated_at or "").replace("Z", "+00:00"))
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - updated).days
+        if age_days > _STALE_THRESHOLD_DAYS:
+            return {"status": "stale", "reason": f"Not updated in {age_days} days"}
+    except (TypeError, ValueError):
+        pass
+    return {"status": "healthy", "reason": None}
+
+
+async def _scope_facts_for(
+    session: AsyncSession, rows: Sequence[ViewORM],
+) -> Dict[str, _ScopeFacts]:
+    """Batch-resolve workspace/data-source existence + active flags,
+    keyed by view id. Two SELECTs regardless of row count."""
+    ws_ids = {r.workspace_id for r in rows if r.workspace_id}
+    ds_ids = {r.data_source_id for r in rows if r.data_source_id}
+
+    ws_state: Dict[str, bool] = {}
+    if ws_ids:
+        res = await session.execute(
+            select(WorkspaceORM.id, WorkspaceORM.is_active)
+            .where(WorkspaceORM.id.in_(ws_ids))
+            .where(WorkspaceORM.deleted_at.is_(None))
+        )
+        ws_state = {wid: bool(active) for wid, active in res.all()}
+
+    ds_state: Dict[str, bool] = {}
+    if ds_ids:
+        res = await session.execute(
+            select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.is_active)
+            .where(WorkspaceDataSourceORM.id.in_(ds_ids))
+            .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+        )
+        ds_state = {did: bool(active) for did, active in res.all()}
+
+    out: Dict[str, _ScopeFacts] = {}
+    for r in rows:
+        out[r.id] = _ScopeFacts(
+            ws_exists=r.workspace_id in ws_state,
+            ws_active=ws_state.get(r.workspace_id, False),
+            ds_exists=(r.data_source_id in ds_state) if r.data_source_id else True,
+            ds_active=ds_state.get(r.data_source_id, False) if r.data_source_id else True,
+        )
+    return out
+
+
 def _to_response(
     row: ViewORM,
     *,
@@ -165,6 +249,7 @@ def _to_response(
     favourite_count: int = 0,
     is_favourited: bool = False,
     config_override: Optional[dict] = None,
+    health: Optional[Dict[str, Optional[str]]] = None,
 ) -> ViewResponse:
     # ``config_override`` lets branch-scoped-layout callers project the
     # EFFECTIVE (base ⊕ overlay) config into the response without touching the
@@ -177,6 +262,7 @@ def _to_response(
         raw_layout = config_dict.get("layoutType")
         layout_type = str(raw_layout) if raw_layout is not None else None
     return ViewResponse(
+        health=ViewHealthInfo(**health) if health else None,
         id=row.id,
         name=row.name,
         description=row.description,
@@ -241,8 +327,10 @@ async def _to_enriched_response(
         getattr(row, 'data_updated_by', None) or "", (None, None))
     fav_count = await _get_favourite_count(session, row.id)
     fav = await _is_favourited(session, row.id, user_id)
+    facts = (await _scope_facts_for(session, [row]))[row.id]
     return _to_response(
         row,
+        health=_health_for(row, facts),
         workspace_name=ws_name,
         data_source_name=ds_name,
         context_model_name=cm_name,
@@ -343,6 +431,9 @@ async def _batch_enrich_rows(
         )
         cm_map = {cid: name for cid, name in res.all()}
 
+    # Scope integrity (existence + active flags) for the whole batch.
+    health_map = await _scope_facts_for(session, rows)
+
     # One users lookup resolves every creator AND modifier id in the batch.
     user_map = await _resolve_user_ids(session, user_ids)
 
@@ -387,6 +478,7 @@ async def _batch_enrich_rows(
             data_updated_by_email=publisher[1],
             favourite_count=fav_counts.get(row.id, 0),
             is_favourited=row.id in fav_set,
+            health=_health_for(row, health_map[row.id]),
         ))
     return responses
 

@@ -383,3 +383,63 @@ async def test_permanent_delete_from_trash(test_client: AsyncClient, db_session)
         )
     assert hard.status_code == 204, hard.text
     assert (await db_session.get(ViewORM, ids["workspace_a"])) is None
+
+
+# ── view health is server-computed (never guessed from membership) ───
+
+@pytest.mark.asyncio
+async def test_health_is_server_authoritative(test_client: AsyncClient, db_session):
+    """The Explorer used to compute health in the browser against the
+    membership-scoped workspace store, so any view in a workspace the
+    caller isn't a member of rendered as 'Source deleted'. Health is a
+    server fact now: a live source is healthy for a non-member too."""
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+
+    ids = await _seed(db_session)
+    db_session.add(ProviderORM(id="prov_h", name="P", provider_type="falkordb"))
+    db_session.add(WorkspaceDataSourceORM(
+        id="ds_live", workspace_id=WS_A, provider_id="prov_h",
+        label="Live Source", graph_name="g_live", is_active=True,
+    ))
+    live = await db_session.get(ViewORM, ids["enterprise_a"])
+    live.data_source_id = "ds_live"
+    # A second enterprise view pointing at a source that no longer exists.
+    db_session.add(ViewORM(
+        id="view_orphan", name="orphan", workspace_id=WS_A,
+        visibility="enterprise", created_by=ALICE.id,
+        data_source_id="ds_vanished",
+    ))
+    await db_session.commit()
+
+    # MALLORY is a member of nothing — the exact caller the old client-side
+    # computation mislabelled.
+    with _auth(user=MALLORY, claims=EMPTY_CLAIMS):
+        r = await test_client.get("/api/v1/views/")
+    assert r.status_code == 200
+    by_id = {v["id"]: v for v in r.json()["items"]}
+
+    healthy = by_id[ids["enterprise_a"]]
+    assert healthy["health"]["status"] == "healthy", healthy["health"]
+
+    orphan = by_id["view_orphan"]
+    assert orphan["health"]["status"] == "broken"
+    assert "source" in orphan["health"]["reason"].lower()
+
+
+@pytest.mark.asyncio
+async def test_health_flags_inactive_source(test_client: AsyncClient, db_session):
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+
+    ids = await _seed(db_session)
+    db_session.add(ProviderORM(id="prov_i", name="P", provider_type="falkordb"))
+    db_session.add(WorkspaceDataSourceORM(
+        id="ds_off", workspace_id=WS_A, provider_id="prov_i",
+        label="Paused", graph_name="g_off", is_active=False,
+    ))
+    v = await db_session.get(ViewORM, ids["enterprise_a"])
+    v.data_source_id = "ds_off"
+    await db_session.commit()
+
+    with _auth(user=MALLORY, claims=EMPTY_CLAIMS):
+        r = await test_client.get(f"/api/v1/views/{ids['enterprise_a']}")
+    assert r.json()["health"]["status"] == "warning"

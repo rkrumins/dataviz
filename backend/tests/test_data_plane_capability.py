@@ -16,7 +16,9 @@ missing providers in the SQLite harness.
 Also pinned here: the two state-changing routes that hid under the
 read gate (``vocab-alignment/confirm``, ``graph/changes``) now require
 ``workspace:datasource:manage`` — capability holders and read-only
-members both get 403.
+members both get 403. The reverse correction is pinned too:
+``assignments/compute`` is a cached READ and is gated as one (see
+``test_assignments_compute_is_read_gated``).
 """
 from __future__ import annotations
 
@@ -245,7 +247,6 @@ async def test_capability_cannot_mutate(test_client: AsyncClient, db_session):
         ("POST", f"/api/v1/{WS_A}/graph/changes",
          {**q, "branchId": "br_x"}),
         ("DELETE", f"/api/v1/{WS_A}/assets/rule-sets/rs_x", q),
-        ("POST", f"/api/v1/{WS_A}/graph/assignments/compute", q),
         ("POST", f"/api/v1/{WS_A}/graph/save", q),
     ]
     for method, path, params in cases:
@@ -272,3 +273,37 @@ async def test_write_under_read_holes_closed(
     with _auth(user=MEMBER, claims=MEMBER_CLAIMS):
         r = await _request(test_client, method, path, params)
     assert r.status_code == 403, f"{method} {path} → {r.status_code}: {r.text[:200]}"
+
+
+# ── assignments/compute is a READ, not a write ───────────────────────
+
+@pytest.mark.asyncio
+async def test_assignments_compute_is_read_gated(test_client: AsyncClient, db_session):
+    """Layer assignment is a cached computation over graph data — its own
+    docstring says so. Gating it behind datasource:manage 403'd every
+    read-only member (workspace_viewer) and every capability viewer,
+    silently breaking their canvas layer assignment. It reads, so it is
+    gated as a read."""
+    ids = await _seed(db_session)
+    body = {"layers": [], "entityAssignments": {}}
+
+    # Capability viewer (non-member, enterprise view).
+    with _auth(user=OUTSIDER, claims=EMPTY_CLAIMS):
+        cap = await test_client.post(
+            f"/api/v1/{WS_A}/graph/assignments/compute",
+            params={"viewId": ids["enterprise"], "dataSourceId": DS_A1},
+            json=body,
+        )
+    assert cap.status_code not in (401, 403), cap.text
+
+    # Read-only member (holds datasource:read, not manage).
+    viewer_claims = PermissionClaims(sid="s_viewer", ws_perms={WS_A: (
+        "workspace:datasource:read", "workspace:view:read",
+    )})
+    with _auth(user=_user("usr_viewer"), claims=viewer_claims):
+        member = await test_client.post(
+            f"/api/v1/{WS_A}/graph/assignments/compute",
+            params={"dataSourceId": DS_A1},
+            json=body,
+        )
+    assert member.status_code not in (401, 403), member.text

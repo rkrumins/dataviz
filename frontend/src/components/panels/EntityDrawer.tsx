@@ -54,6 +54,7 @@ import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
 import { useResolveGraph, useEntityHistory, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
+import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { timeAgo, formatUtc } from '@/lib/timeAgo'
 import { useEffectiveBranchId, useBranchStore } from '@/store/branchStore'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
@@ -116,8 +117,12 @@ export function EntityDrawer({
   // control isn't enabled, in which case the History section hides.
   const activeView = useActiveView()
   const resolve = useResolveGraph(activeView?.workspaceId, activeView?.dataSourceId ?? null, activeView?.id ?? null)
-  const historyWsId = activeView?.workspaceId
-  const historyGraphId = resolve.data?.graphId ?? null
+  // Version history is a membership-gated surface and has no meaning for
+  // a read-only shared viewer (no drafts, no commits they can act on) —
+  // withholding the ids keeps every versioning query from firing.
+  const readOnlyView = useViewExecutionContext()?.readOnly ?? false
+  const historyWsId = readOnlyView ? undefined : activeView?.workspaceId
+  const historyGraphId = readOnlyView ? null : (resolve.data?.graphId ?? null)
   const historyMainBranch = resolve.data?.mainBranchId ?? null
   // The active draft (if any), so the History section also shows this branch's unmerged commits.
   // Scoped by the active view's id (branch-per-view) so this never shows another view's draft

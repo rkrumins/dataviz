@@ -33,6 +33,18 @@ export interface ViewAccess {
     dataAccess: 'full' | 'readonly'
 }
 
+/**
+ * Whether a view's workspace + data source are still present and
+ * active. Computed SERVER-side: only the server can tell "you're not a
+ * member of that workspace" apart from "it was deleted", which is why
+ * the old client-side computation branded every shared view
+ * "Source deleted".
+ */
+export interface ViewHealth {
+    status: 'healthy' | 'warning' | 'broken' | 'stale'
+    reason?: string | null
+}
+
 export interface View {
     id: string
     name: string
@@ -89,6 +101,8 @@ export interface View {
     providerId?: string | null
     /** Caller-specific capability envelope. Single-view read only. */
     access?: ViewAccess | null
+    /** Scope integrity, computed server-side (see ViewHealth). */
+    health?: ViewHealth | null
 }
 
 export interface ViewCreateRequest {

@@ -12,7 +12,6 @@ from backend.app.api.v1.endpoints.graph import (
     _cache_scope,
     _provider_health_header,
     get_context_engine,
-    require_ws_manage,
 )
 from backend.app.models.assignment import LayerAssignmentRequest, LayerAssignmentResult
 from backend.app.services.assignment_engine import assignment_engine
@@ -26,13 +25,17 @@ router = APIRouter()
 async def compute_assignments(
     response: Response,
     request: LayerAssignmentRequest = Body(..., embed=False),
-    # Authorization BEFORE engine construction: deps resolve in
-    # declaration order, and an unauthorized caller must get their 403
-    # without us building a provider-backed engine for them first.
-    _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Compute layer assignments using the workspace-scoped ContextEngine.
+
+    Authorization: the router-level READ gate only. This endpoint reads
+    graph data and memoises the result in GraphCache — it mutates
+    nothing in the graph or the management DB. It used to require
+    ``workspace:datasource:manage``, which silently 403'd every
+    read-only member (``workspace_viewer``) and every capability viewer
+    of a shared view: their canvas asked for layer assignments and was
+    told no. A read gesture is gated as a read.
 
     The previous implementation used the global singleton context_engine,
     which caused an intermittent ProviderConfigurationError: whenever the
