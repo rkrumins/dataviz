@@ -106,6 +106,22 @@ base creator/ws-admin rule still gates `private ↔ workspace`. The
 permission is deliberately delegable: grant it to a trusted non-admin
 role to let curators publish.
 
+**Nobody is ever stuck.** A member who owns a view's sharing settings
+but lacks the permission can *request* publication (`POST
+/views/{id}/publish-request`); the pending request lives on the view
+and is the admin queue. A publish-permission holder approves (which
+performs the transition, logged as `visibility_changed`) or declines
+with a reason that lands on the view's timeline. Workspaces that don't
+want the ceremony set `workspaces.publish_policy = 'open'`, where
+anyone who may change a view's visibility may publish it directly —
+the policy widens who satisfies the permission, never who may touch a
+view's visibility.
+
+**Admin reads of private views are recorded.** `system:admin` reach
+over a private view someone else created writes an `admin_viewed`
+entry to that view's activity log (deduped hourly per admin). The
+reach is unchanged; it is simply no longer invisible to the owner.
+
 Caveat for rollouts: sessions minted before this permission shipped may
 still carry a collapsed `workspace:view:*` wildcard in their cached
 claims and would pass a publish check until the session refreshes

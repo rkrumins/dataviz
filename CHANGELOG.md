@@ -52,6 +52,39 @@ edited in place (`PUT /views/{id}/grants/{grant_id}`), and the Explorer's
 "Shared with me" is a real server-side category (explicit grants, not a
 visibility approximation).
 
+**Publishing is a journey, not a wall.** A member who can't publish can ask:
+the Enterprise option opens a request (with an optional note) that a
+publish-permission holder approves or declines with a reason, both recorded on
+the view's timeline. Workspaces that prefer no ceremony set their publication
+policy to *open*, where anyone who may change a view's visibility may publish
+it directly.
+
+### Fixed
+
+**Views stopped claiming their sources were deleted.** View health was
+computed in the browser against the workspace list, which only contains
+workspaces you belong to — so every view you could see but weren't a member of
+(anything shared, published, or seen as an admin) was branded "Source deleted".
+Health is a server fact now, from the same predicate the "needs attention"
+filter uses, so the badge and the filter can't disagree.
+
+**Layer assignment stopped being denied to people allowed to read.**
+`assignments/compute` is a cached read, but it required *manage* — which
+silently 403'd every read-only workspace member's canvas, and every visitor to
+a shared view. It is gated as the read it is.
+
+**Access-denied messages say something useful.** Inside a view shared with
+you, the card now explains that you're exploring read-only and offers to
+request edit access, instead of reciting `Missing permission:
+workspace:datasource:read`.
+
+### Security
+
+**Break-glass admin access is visible to the owner.** A platform admin opening
+someone else's private view records an `admin_viewed` entry on that view's
+timeline (deduped hourly). The reach is unchanged and deliberate; it is no
+longer silent.
+
 ### Upgrading
 
 Pre-upgrade sessions may carry a collapsed `workspace:view:*` wildcard that
