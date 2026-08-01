@@ -15,7 +15,7 @@ reverts scoping to legacy behaviour (auth requirements stay).
 """
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -239,6 +239,56 @@ async def _enriched_or_404(
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     return view
+
+
+async def _record_break_glass_read(
+    session: AsyncSession,
+    ctx: view_access.ViewerContext,
+    view_orm: ViewORM,
+    user: User,
+) -> None:
+    """Note when an admin opens a PRIVATE view that isn't theirs.
+
+    Platform admins can read every view — that reach is deliberate and
+    stays (support, governance, incident response). What it shouldn't
+    also be is invisible: a private view carries the expectation that
+    nobody else looks, so when someone does, its owner can see that on
+    the view's own timeline. Only break-glass reads qualify — the
+    creator reading their own view, or anyone reading a workspace or
+    enterprise view, is just reading.
+    """
+    if user is None or (view_orm.visibility or "private") != "private":
+        return
+    if view_orm.created_by == user.id:
+        return
+    # Reach the owner did NOT grant: a global admin short-circuit rather
+    # than workspace-admin standing or an explicit share.
+    from backend.app.services.permission_service import has_permission
+    if not has_permission(ctx.claims, "system:admin"):
+        return
+    # One entry per admin per view per hour. The client re-reads a view
+    # on every open and React Query refetches on top of that; without a
+    # window the owner's timeline would be buried under one person's
+    # single visit.
+    from backend.app.db.models import ViewActivityLogORM
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    recent = await session.execute(
+        select(ViewActivityLogORM.id)
+        .where(
+            ViewActivityLogORM.view_id == view_orm.id,
+            ViewActivityLogORM.action == "admin_viewed",
+            ViewActivityLogORM.actor == user.id,
+            ViewActivityLogORM.created_at >= cutoff,
+        )
+        .limit(1)
+    )
+    if recent.first() is not None:
+        return
+    await view_activity_repo.record_view_activity(
+        session, view_id=view_orm.id, workspace_id=view_orm.workspace_id,
+        action="admin_viewed", actor=user.id,
+        summary="Opened by a platform administrator",
+    )
 
 
 async def _publish_policy(session: AsyncSession, workspace_id: str) -> str:
@@ -571,6 +621,8 @@ async def get_view(
             # 404 (not 403) so view existence stays private from
             # users with no access path.
             raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
+    await _record_break_glass_read(session, ctx, view_orm, user)
 
     view = await view_repo.get_view_enriched(
         session, view_id, user_id=_user_id(user), branch_id=branch_id,

@@ -443,3 +443,66 @@ async def test_health_flags_inactive_source(test_client: AsyncClient, db_session
     with _auth(user=MALLORY, claims=EMPTY_CLAIMS):
         r = await test_client.get(f"/api/v1/views/{ids['enterprise_a']}")
     assert r.json()["health"]["status"] == "warning"
+
+
+# ── break-glass admin access leaves a trace ──────────────────────────
+
+@pytest.mark.asyncio
+async def test_admin_opening_a_private_view_is_recorded(
+    test_client: AsyncClient, db_session,
+):
+    """Platform admins can open anyone's private view — that reach is
+    deliberate (support, governance, incident response). It should not
+    also be invisible: the owner can see, on their own view's timeline,
+    that an admin looked."""
+    ids = await _seed(db_session)
+    admin = _user("usr_platform_admin")
+    admin_claims = PermissionClaims(sid="s_sysadmin", global_perms=("system:admin",))
+
+    with _auth(user=admin, claims=admin_claims):
+        opened = await test_client.get(f"/api/v1/views/{ids['private_a']}")
+        acts = await test_client.get(f"/api/v1/views/{ids['private_a']}/activity")
+    assert opened.status_code == 200
+    entries = [a for a in acts.json() if a["action"] == "admin_viewed"]
+    assert entries, "an admin opening someone else's private view must be logged"
+    assert entries[0]["actor"] == admin.id
+
+
+@pytest.mark.asyncio
+async def test_owner_opening_their_own_private_view_is_not_logged(
+    test_client: AsyncClient, db_session,
+):
+    """Only break-glass reach is noteworthy. The creator reading their
+    own view is just reading."""
+    ids = await _seed(db_session)
+    with _auth(user=ALICE, claims=ALICE_CLAIMS):
+        await test_client.get(f"/api/v1/views/{ids['private_a']}")
+        acts = await test_client.get(f"/api/v1/views/{ids['private_a']}/activity")
+    assert not [a for a in acts.json() if a["action"] == "admin_viewed"]
+
+
+@pytest.mark.asyncio
+async def test_admin_reading_a_workspace_view_is_not_logged(
+    test_client: AsyncClient, db_session,
+):
+    """Only PRIVATE views carry the expectation that nobody else looks."""
+    ids = await _seed(db_session)
+    admin = _user("usr_platform_admin2")
+    admin_claims = PermissionClaims(sid="s_sysadmin2", global_perms=("system:admin",))
+    with _auth(user=admin, claims=admin_claims):
+        await test_client.get(f"/api/v1/views/{ids['workspace_a']}")
+        acts = await test_client.get(f"/api/v1/views/{ids['workspace_a']}/activity")
+    assert not [a for a in acts.json() if a["action"] == "admin_viewed"]
+
+
+@pytest.mark.asyncio
+async def test_admin_view_audit_is_deduped(test_client: AsyncClient, db_session):
+    """A single visit is one entry, not one per refetch."""
+    ids = await _seed(db_session)
+    admin = _user("usr_platform_admin3")
+    admin_claims = PermissionClaims(sid="s_sysadmin3", global_perms=("system:admin",))
+    with _auth(user=admin, claims=admin_claims):
+        for _ in range(4):
+            await test_client.get(f"/api/v1/views/{ids['private_a']}")
+        acts = await test_client.get(f"/api/v1/views/{ids['private_a']}/activity")
+    assert len([a for a in acts.json() if a["action"] == "admin_viewed"]) == 1
