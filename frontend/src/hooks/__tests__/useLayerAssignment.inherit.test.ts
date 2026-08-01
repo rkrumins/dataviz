@@ -264,6 +264,23 @@ describe('useLayerAssignment — explicit assignment wins (wizard cross-level pl
     expect(res.nodesByLayer.get('A')![0].children).toHaveLength(0)
   })
 
+  it('an assigned child renders in its column even when its LOADED parent has no assignment (curated)', () => {
+    // E.g. an ancestor pulled in by search/trace hydration: it has no entry of
+    // its own, so it renders nowhere (surfaced via unassignedNodes, not lost) —
+    // and it must not drag its explicitly-placed child out of its column.
+    const { parentMap, childMap } = pc()
+    const res = resolveCurated({
+      nodes: [node('p', 'layer'), node('c', 'object')],
+      sortedLayers: twoCols(),
+      assignments: { c: { layerId: 'B', inheritsChildren: true } },
+      parentMap,
+      childMap,
+    })
+    expect(res.nodeLayerMap.has('p')).toBe(false)
+    expect(res.unassignedNodes.map(n => n.id)).toEqual(['p'])
+    expect(rootIds(res, 'B')).toEqual(['c'])
+  })
+
   it('a live session drag (instanceAssignments) on a child wins over inheritance', () => {
     const { parentMap, childMap } = pc()
     const res = resolveCurated({
