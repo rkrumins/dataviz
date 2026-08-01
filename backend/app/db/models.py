@@ -1986,6 +1986,46 @@ class RoleBindingORM(Base):
 # resource_grants  (per-View explicit shares — Layer 3 of view ACL)    #
 # ------------------------------------------------------------------ #
 
+class NotificationORM(Base):
+    """An in-app notification for one user.
+
+    Written in the SAME transaction as the event it describes, rather
+    than derived from the outbox by a relay. Sharing flows are only as
+    good as the moment someone learns they were shared with, so the
+    notification has to be as durable as the grant or the request that
+    caused it — an eventually-consistent fan-out that can silently lag
+    (or drop) turns "you have access" into "you have access and nobody
+    told you". The outbox keeps carrying the same events for external
+    consumers; this table is what the bell reads.
+    """
+    __tablename__ = "notifications"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ntf_{uuid.uuid4().hex[:12]}")
+    user_id = Column(Text, nullable=False)          # recipient
+    # Machine kind, e.g. 'view.publish_requested'. Drives the icon and
+    # any client-side grouping; the copy lives in title/body.
+    kind = Column(Text, nullable=False)
+    title = Column(Text, nullable=False)
+    body = Column(Text, nullable=True)
+    # In-app destination, e.g. '/views/view_abc'. Nullable for purely
+    # informational notices.
+    link = Column(Text, nullable=True)
+    actor_id = Column(Text, nullable=True)          # who caused it
+    resource_type = Column(Text, nullable=True)     # 'view' | ...
+    resource_id = Column(Text, nullable=True)
+    read_at = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        # The bell's only query: this user's newest, unread-first.
+        Index("idx_notifications_user_created", "user_id", "created_at"),
+        Index("idx_notifications_unread", "user_id", "read_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Notification id={self.id!r} kind={self.kind!r} user={self.user_id!r}>"
+
+
 class ResourceGrantORM(Base):
     """Explicit grant of access to a single resource (Phase 1: views only).
 

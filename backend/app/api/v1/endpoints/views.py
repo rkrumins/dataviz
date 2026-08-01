@@ -34,7 +34,7 @@ from backend.app.common.single_flight import normalised_principal, read_views_sf
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM
 from backend.app.db.repositories import data_source_repo, view_repo
-from backend.app.db.repositories import view_activity_repo
+from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims
@@ -945,6 +945,23 @@ async def request_publication(
         summary="Requested publication to everyone",
         changes={"note": view_orm.publish_request_note},
     )
+    # A queue nobody is told about is not a queue.
+    await notification_repo.notify(
+        session,
+        user_ids=await notification_repo.users_who_can(
+            session,
+            workspace_id=view_orm.workspace_id,
+            permission="workspace:view:publish",
+        ),
+        kind="view.publish_requested",
+        title=f'Publication requested: "{view_orm.name}"',
+        body=view_orm.publish_request_note
+             or "Someone asked to publish this view to everyone.",
+        link=f"/views/{view_id}",
+        actor_id=user.id,
+        resource_type="view",
+        resource_id=view_id,
+    )
     return await _enriched_or_404(session, view_id, user)
 
 
@@ -1006,6 +1023,17 @@ async def approve_publication(
             "approvedRequestFrom": requester,
         },
     )
+    await notification_repo.notify(
+        session,
+        user_ids=[requester] if requester else [],
+        kind="view.publish_approved",
+        title=f'"{view_orm.name}" is now published',
+        body="Your request was approved — anyone signed in can open this view.",
+        link=f"/views/{view_id}",
+        actor_id=user.id,
+        resource_type="view",
+        resource_id=view_id,
+    )
     return await _enriched_or_404(session, view_id, user)
 
 
@@ -1037,6 +1065,18 @@ async def deny_publication(
         action="publish_denied", actor=user.id,
         summary=(reason or "").strip() or "Publication request declined",
         changes={"requestedBy": requester, "reason": (reason or "").strip() or None},
+    )
+    await notification_repo.notify(
+        session,
+        user_ids=[requester] if requester else [],
+        kind="view.publish_denied",
+        title=f'Publication declined: "{view_orm.name}"',
+        body=(reason or "").strip()
+             or "Your request to publish this view was declined.",
+        link=f"/views/{view_id}",
+        actor_id=user.id,
+        resource_type="view",
+        resource_id=view_id,
     )
     return await _enriched_or_404(session, view_id, user)
 

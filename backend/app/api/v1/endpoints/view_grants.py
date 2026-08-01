@@ -35,7 +35,7 @@ from backend.app.auth.dependencies import (
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import GroupORM, UserORM, ViewORM
 from backend.app.db.repositories import grant_repo, group_repo, user_repo
-from backend.app.db.repositories import view_activity_repo
+from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.services import view_access
 from backend.app.services.permission_service import PermissionClaims
 from backend.auth_service.interface import User
@@ -258,6 +258,22 @@ async def create_grant(
     subject_label = (
         getattr(subject, "name", None) or getattr(subject, "display_name", None)
         or body.subject_id
+    )
+    # The whole point of sharing: the recipient finds out.
+    recipients = (
+        [body.subject_id] if body.subject_type == "user"
+        else [m.user_id for m in await group_repo.list_group_members(session, body.subject_id)]
+    )
+    await notification_repo.notify(
+        session,
+        user_ids=recipients,
+        kind="view.shared",
+        title=f'"{view.name}" was shared with you',
+        body=f"You can open it as a {body.role}.",
+        link=f"/views/{view_id}",
+        actor_id=user.id,
+        resource_type="view",
+        resource_id=view_id,
     )
     await view_activity_repo.record_view_activity(
         session, view_id=view_id, workspace_id=view.workspace_id,
