@@ -67,6 +67,11 @@ export interface VisibilityOption {
     icon: LucideIcon
     disabled: boolean
     disabledReason?: string
+    /** Selectable, but picking it files a request instead of applying the
+     *  change. Only ever set on `enterprise`. */
+    requiresApproval?: boolean
+    /** Plain-language explanation to render alongside a `requiresApproval` tile. */
+    approvalHint?: string
 }
 
 /**
@@ -74,24 +79,38 @@ export interface VisibilityOption {
  * transition to OR from `enterprise` needs the publish permission, so
  * without it the enterprise tile is disabled — and on an already-
  * published view the two lower tiles are, symmetrically.
+ *
+ * `canRequestPublish` is the escape hatch: a caller who owns the view's
+ * sharing settings but not the permission gets a LIVE enterprise tile
+ * that files a request rather than a greyed-out dead end.
  */
 export function buildVisibilityOptions(args: {
     /** The view's current tier; undefined for mixed/bulk selections. */
     current?: ViewVisibility
     canPublish: boolean
+    /** May ask a publish-permission holder to publish this view. */
+    canRequestPublish?: boolean
     appName?: string
     workspaceName?: string
 }): VisibilityOption[] {
-    const { current, canPublish, appName, workspaceName } = args
+    const { current, canPublish, canRequestPublish, appName, workspaceName } = args
     return VISIBILITY_ORDER.map(id => {
         let disabled = false
         let disabledReason: string | undefined
+        let requiresApproval = false
+        let approvalHint: string | undefined
         if (!canPublish) {
             if (id === 'enterprise' && current !== 'enterprise') {
-                disabled = true
-                disabledReason =
-                    'Publishing to everyone needs the "Publish views" ' +
-                    'permission — ask a workspace admin.'
+                if (canRequestPublish) {
+                    requiresApproval = true
+                    approvalHint =
+                        'Needs approval — ask a workspace admin to publish'
+                } else {
+                    disabled = true
+                    disabledReason =
+                        'Publishing to everyone needs the "Publish views" ' +
+                        'permission — ask a workspace admin.'
+                }
             } else if (current === 'enterprise' && id !== 'enterprise') {
                 disabled = true
                 disabledReason =
@@ -106,6 +125,8 @@ export function buildVisibilityOptions(args: {
             icon: VISIBILITY_ICON[id],
             disabled,
             disabledReason,
+            requiresApproval,
+            approvalHint,
         }
     })
 }

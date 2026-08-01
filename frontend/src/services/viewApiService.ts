@@ -25,12 +25,33 @@ export interface ViewAccess {
     canEdit: boolean
     canManageGrants: boolean
     canChangeVisibility: boolean
+    /** Already accounts for the workspace's publish policy — an `open`
+     *  workspace grants this to anyone who can change visibility. */
     canPublish: boolean
+    /** Can't publish, but may ASK someone who can. This is what turns the
+     *  Enterprise tile from a wall into a route. Absent on backends that
+     *  predate the request flow. */
+    canRequestPublish?: boolean
+    /** Holds the publish permission, so may approve/deny a pending request. */
+    canAnswerPublishRequest?: boolean
     /** How this caller reaches the view. */
     accessVia: 'owner' | 'admin' | 'grant' | 'workspace' | 'enterprise'
     /** What the DATA plane accepts: 'full' = graph mutations allowed;
      *  'readonly' = view-capability reach (expand/trace/search only). */
     dataAccess: 'full' | 'readonly'
+}
+
+/**
+ * A pending ask to publish this view platform-wide. Present on the
+ * single-view read AND on list payloads (the workspace governance
+ * surface lists every view awaiting an answer).
+ */
+export interface ViewPublishRequest {
+    requestedBy: string
+    /** Resolved server-side from the users table; null for a deleted user. */
+    requestedByName?: string | null
+    requestedAt: string
+    note?: string | null
 }
 
 /**
@@ -103,6 +124,8 @@ export interface View {
     access?: ViewAccess | null
     /** Scope integrity, computed server-side (see ViewHealth). */
     health?: ViewHealth | null
+    /** A pending ask to publish this view to everyone. Null when none. */
+    publishRequest?: ViewPublishRequest | null
 }
 
 export interface ViewCreateRequest {
@@ -514,6 +537,41 @@ export async function updateViewVisibility(viewId: string, visibility: string): 
     return apiFetch<View>(`/api/v1/views/${viewId}/visibility`, {
         method: 'PUT',
         body: JSON.stringify({ visibility }),
+    })
+}
+
+// ============================================
+// Publication requests
+// ============================================
+//
+// Publishing needs `workspace:view:publish`, which most members don't
+// hold — so instead of a dead end, they ask and a holder answers. Every
+// call except the withdraw returns the updated View, so callers can
+// refresh straight from the response.
+
+/** Ask for this view to be published to everyone. */
+export async function requestViewPublication(viewId: string, note?: string): Promise<View> {
+    return apiFetch<View>(`/api/v1/views/${viewId}/publish-request`, {
+        method: 'POST',
+        body: JSON.stringify({ note: note?.trim() || null }),
+    })
+}
+
+/** Withdraw a pending request — the requester, or anyone who could answer it. */
+export async function withdrawViewPublicationRequest(viewId: string): Promise<void> {
+    return apiFetch<void>(`/api/v1/views/${viewId}/publish-request`, { method: 'DELETE' })
+}
+
+/** Approve a pending request: the view becomes enterprise-visible. */
+export async function approveViewPublication(viewId: string): Promise<View> {
+    return apiFetch<View>(`/api/v1/views/${viewId}/publish-request/approve`, { method: 'POST' })
+}
+
+/** Decline a pending request. The reason lands on the view's timeline. */
+export async function denyViewPublication(viewId: string, reason?: string): Promise<View> {
+    return apiFetch<View>(`/api/v1/views/${viewId}/publish-request/deny`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason?.trim() || null }),
     })
 }
 

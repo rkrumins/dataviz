@@ -5,7 +5,11 @@
  *   1. Visibility tier (private | workspace | enterprise) — broadcast
  *      audience. Saved on every selection. Transitions to/from
  *      enterprise are publish-gated (workspace:view:publish) and the
- *      tiles disable themselves accordingly.
+ *      tiles disable themselves accordingly — EXCEPT that a member who
+ *      owns the view's sharing settings but not the permission gets a
+ *      live Enterprise tile that files a request for an admin to
+ *      answer. The request's whole lifecycle (compose → pending →
+ *      approve/decline/withdraw) lives inline under the tiles.
  *   2. Explicit grants — additive shares with named users or groups
  *      at editor or viewer scope. Independent of workspace membership.
  *      Roles are editable in place; the picker searches the signed-in
@@ -22,14 +26,26 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
     X, Link2, Check, UserPlus, UserCog, Users2,
-    Search, Loader2, Eye, Pencil, Trash2, Lock,
+    Search, Loader2, Eye, Pencil, Trash2, Lock, Send, Clock,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
-import { updateViewVisibility, type ViewAccess } from '@/services/viewApiService'
+import {
+    updateViewVisibility,
+    requestViewPublication,
+    withdrawViewPublicationRequest,
+    approveViewPublication,
+    denyViewPublication,
+    type View,
+    type ViewAccess,
+    type ViewPublishRequest,
+} from '@/services/viewApiService'
+import { VIEW_QUERY_KEY, useViewAccess } from '@/hooks/useViewMetadata'
+import { timeAgo } from '@/lib/timeAgo'
 import {
     viewGrantsService,
     type ViewGrantResponse,
@@ -40,7 +56,7 @@ import {
     type DirectoryUser,
 } from '@/services/userDirectoryService'
 import { useToast } from '@/components/ui/toast'
-import { usePermission } from '@/store/auth'
+import { useAuthStore, usePermission } from '@/store/auth'
 import { useBrand } from '@/store/branding'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { buildViewShareUrl } from '@/lib/viewShareLink'
@@ -65,6 +81,10 @@ interface ShareViewDialogProps {
     workspaceId?: string
     /** The caller's capability envelope from GET /views/{id}. */
     access?: ViewAccess | null
+    /** The view's pending publication request, when the host already holds
+     *  one (list payloads carry it). Hosts that don't pass it get it from
+     *  the shared ['view', viewId] query instead. */
+    publishRequest?: ViewPublishRequest | null
     isOpen: boolean
     onClose: () => void
     onVisibilityChange?: (visibility: ViewVisibility) => void
@@ -83,6 +103,7 @@ export function ShareViewDialog({
     currentVisibility,
     workspaceId,
     access = null,
+    publishRequest,
     isOpen,
     onClose,
     onVisibilityChange,
@@ -95,21 +116,50 @@ export function ShareViewDialog({
     const [busyGrantId, setBusyGrantId] = useState<string | null>(null)
     const [adding, setAdding] = useState(false)
 
+    const [composingRequest, setComposingRequest] = useState(false)
+    const [requestNote, setRequestNote] = useState('')
+    const [composingDenial, setComposingDenial] = useState(false)
+    const [denialReason, setDenialReason] = useState('')
+    const [requestBusy, setRequestBusy] = useState(false)
+
     const { showToast } = useToast()
     const { appName } = useBrand()
+    const queryClient = useQueryClient()
+    const currentUserId = useAuthStore(s => s.user?.id ?? null)
+
+    // Shares the ['view', viewId] cache entry, so hosts that pass neither an
+    // envelope nor a publishRequest (Explorer, the workspace governance
+    // surface) still get both — no call site has to be updated. Disabled
+    // while closed so a mounted-but-hidden dialog costs nothing.
+    const { view: liveView } = useViewAccess(isOpen ? viewId : null)
 
     // Envelope wins; fallbacks preserve the pre-envelope behavior (hosts
     // gated the open action; the backend enforces regardless).
+    const envelope = access ?? liveView?.access ?? null
     const publishPerm = usePermission('workspace:view:publish', workspaceId)
-    const canPublish = access ? access.canPublish : publishPerm
-    const canManageGrants = access ? access.canManageGrants : true
-    const canChangeVisibility = access ? access.canChangeVisibility : true
+    const canPublish = envelope ? envelope.canPublish : publishPerm
+    const canManageGrants = envelope ? envelope.canManageGrants : true
+    const canChangeVisibility = envelope ? envelope.canChangeVisibility : true
+    const canRequestPublish = envelope?.canRequestPublish ?? false
+    const canAnswerRequest = envelope?.canAnswerPublishRequest ?? false
+
+    // `undefined` = nothing answered yet, follow the seed. Once one of our
+    // own mutations replies its response wins — an override rather than
+    // mirrored state, so a host passing an inline object can't loop us.
+    const [answered, setAnswered] = useState<ViewPublishRequest | null | undefined>(undefined)
+    const pending = answered !== undefined
+        ? answered
+        : publishRequest ?? liveView?.publishRequest ?? null
+
+    const isRequester = !!currentUserId && pending?.requestedBy === currentUserId
 
     const shareUrl = buildViewShareUrl(viewId)
 
     const visibilityOptions = useMemo(
-        () => buildVisibilityOptions({ current: visibility, canPublish, appName }),
-        [visibility, canPublish, appName],
+        () => buildVisibilityOptions({
+            current: visibility, canPublish, canRequestPublish, appName,
+        }),
+        [visibility, canPublish, canRequestPublish, appName],
     )
 
 
@@ -164,6 +214,65 @@ export function ShareViewDialog({
             setSavingVisibility(false)
         }
     }, [viewId, visibility, onVisibilityChange, showToast])
+
+    // ── Publication requests ────────────────────────────────────────
+
+    const invalidateView = useCallback(() => {
+        void queryClient.invalidateQueries({ queryKey: [...VIEW_QUERY_KEY, viewId] })
+    }, [queryClient, viewId])
+
+    /** Adopt the server's answer: it carries both the request state and the
+     *  visibility an approval just changed. */
+    const applyView = useCallback((updated: View) => {
+        setAnswered(updated.publishRequest ?? null)
+        setVisibility(updated.visibility)
+        invalidateView()
+    }, [invalidateView])
+
+    const runRequestAction = useCallback(async (
+        action: () => Promise<void>,
+        fallbackError: string,
+    ) => {
+        setRequestBusy(true)
+        try {
+            await action()
+        } catch (err) {
+            showToast('error', err instanceof Error ? err.message : fallbackError)
+        } finally {
+            setRequestBusy(false)
+        }
+    }, [showToast])
+
+    const handleSendRequest = () => runRequestAction(async () => {
+        applyView(await requestViewPublication(viewId, requestNote))
+        setComposingRequest(false)
+        setRequestNote('')
+        showToast(
+            'success',
+            "Sent to your workspace admins — you'll see it here when it's approved",
+        )
+    }, 'Could not send the request')
+
+    const handleWithdrawRequest = () => runRequestAction(async () => {
+        await withdrawViewPublicationRequest(viewId)
+        setAnswered(null)
+        invalidateView()
+        showToast('success', 'Publication request withdrawn')
+    }, 'Could not withdraw the request')
+
+    const handleApproveRequest = () => runRequestAction(async () => {
+        const updated = await approveViewPublication(viewId)
+        applyView(updated)
+        onVisibilityChange?.(updated.visibility)
+        showToast('success', `"${viewName}" is now visible to everyone`)
+    }, 'Could not approve the request')
+
+    const handleDenyRequest = () => runRequestAction(async () => {
+        applyView(await denyViewPublication(viewId, denialReason))
+        setComposingDenial(false)
+        setDenialReason('')
+        showToast('success', 'Publication request declined')
+    }, 'Could not decline the request')
 
     const handleAddGrant = async (
         subjectType: SubjectType,
@@ -289,16 +398,25 @@ export function ShareViewDialog({
                                 )}
                             </div>
                             <div className="space-y-2">
-                                {visibilityOptions.map(({ id, label, description, icon: Icon, disabled, disabledReason }) => {
+                                {visibilityOptions.map(({ id, label, description, icon: Icon, disabled, disabledReason, requiresApproval, approvalHint }) => {
                                     const isSelected = visibility === id
                                     const accent = VISIBILITY_ACCENT[id]
                                     const locked = disabled || !canChangeVisibility
                                     return (
                                         <button
                                             key={id}
-                                            onClick={() => { if (!locked) void handleVisibilityChange(id) }}
+                                            onClick={() => {
+                                                if (locked) return
+                                                // Picking a tier you can't set yourself files a
+                                                // request instead of a doomed PUT.
+                                                if (requiresApproval) {
+                                                    if (!pending) setComposingRequest(true)
+                                                    return
+                                                }
+                                                void handleVisibilityChange(id)
+                                            }}
                                             disabled={savingVisibility || locked}
-                                            title={disabledReason}
+                                            title={disabledReason ?? approvalHint}
                                             className={cn(
                                                 'w-full flex items-center gap-3 px-4 py-3 rounded-xl border-2 transition-colors duration-150 text-left',
                                                 isSelected
@@ -323,7 +441,11 @@ export function ShareViewDialog({
                                                     {label}
                                                 </span>
                                                 <span className="text-[11px] text-ink-muted leading-snug">
-                                                    {disabled && disabledReason ? disabledReason : description}
+                                                    {disabled && disabledReason
+                                                        ? disabledReason
+                                                        : requiresApproval && approvalHint
+                                                            ? approvalHint
+                                                            : description}
                                                 </span>
                                             </div>
                                             {isSelected && (
@@ -333,6 +455,139 @@ export function ShareViewDialog({
                                     )
                                 })}
                             </div>
+
+                            {/* Request composer — only reachable from a
+                                requiresApproval tile, and never while a
+                                request is already pending. */}
+                            {composingRequest && !pending && (
+                                <div className={cn(
+                                    'mt-2 rounded-xl border p-3',
+                                    VISIBILITY_ACCENT.enterprise.chipBorder,
+                                    VISIBILITY_ACCENT.enterprise.chipBg,
+                                )}>
+                                    <p className="text-xs font-semibold text-ink">
+                                        Ask to publish this view
+                                    </p>
+                                    <p className="text-[11px] text-ink-muted mt-0.5 mb-2">
+                                        A workspace admin decides. Add a note if it helps them.
+                                    </p>
+                                    <textarea
+                                        value={requestNote}
+                                        onChange={(e) => setRequestNote(e.target.value)}
+                                        rows={2}
+                                        placeholder="Why should everyone see this? (optional)"
+                                        className="input w-full text-sm bg-glass-base/40 resize-none"
+                                    />
+                                    <div className="flex items-center gap-2 mt-2">
+                                        <button
+                                            onClick={() => void handleSendRequest()}
+                                            disabled={requestBusy}
+                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500 text-white hover:brightness-110 transition-all disabled:opacity-50"
+                                        >
+                                            {requestBusy
+                                                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                : <Send className="w-3.5 h-3.5" />}
+                                            Send request
+                                        </button>
+                                        <button
+                                            onClick={() => { setComposingRequest(false); setRequestNote('') }}
+                                            disabled={requestBusy}
+                                            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                                        >
+                                            Cancel
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Pending request — the state everyone sees, with
+                                the actions each side is allowed to take. */}
+                            {pending && (
+                                <div className={cn(
+                                    'mt-2 rounded-xl border p-3 flex items-start gap-2.5',
+                                    VISIBILITY_ACCENT.enterprise.chipBorder,
+                                    VISIBILITY_ACCENT.enterprise.chipBg,
+                                )}>
+                                    <Clock className={cn('w-4 h-4 mt-0.5 shrink-0', VISIBILITY_ACCENT.enterprise.iconText)} />
+                                    <div className="min-w-0 flex-1">
+                                        <p className="text-xs font-semibold text-ink">
+                                            Publication requested by {pending.requestedByName ?? 'a workspace member'} — awaiting approval
+                                        </p>
+                                        <p className="text-[11px] text-ink-muted mt-0.5">
+                                            Asked {timeAgo(pending.requestedAt)}
+                                        </p>
+                                        {pending.note && (
+                                            <p className="text-[11px] text-ink-secondary italic mt-1.5 pl-2 border-l-2 border-glass-border">
+                                                {pending.note}
+                                            </p>
+                                        )}
+
+                                        {composingDenial ? (
+                                            <div className="mt-2">
+                                                <input
+                                                    type="text"
+                                                    value={denialReason}
+                                                    onChange={(e) => setDenialReason(e.target.value)}
+                                                    placeholder="Why not? (optional — the asker sees this)"
+                                                    className="input w-full text-sm bg-glass-base/40"
+                                                />
+                                                <div className="flex items-center gap-2 mt-2">
+                                                    <button
+                                                        onClick={() => void handleDenyRequest()}
+                                                        disabled={requestBusy}
+                                                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+                                                    >
+                                                        {requestBusy
+                                                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                            : <X className="w-3.5 h-3.5" />}
+                                                        Confirm decline
+                                                    </button>
+                                                    <button
+                                                        onClick={() => { setComposingDenial(false); setDenialReason('') }}
+                                                        disabled={requestBusy}
+                                                        className="px-3 py-1.5 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="flex flex-wrap items-center gap-2 mt-2">
+                                                {canAnswerRequest && (
+                                                    <>
+                                                        <button
+                                                            onClick={() => void handleApproveRequest()}
+                                                            disabled={requestBusy}
+                                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 text-white hover:brightness-110 transition-all disabled:opacity-50"
+                                                        >
+                                                            {requestBusy
+                                                                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                                : <Check className="w-3.5 h-3.5" />}
+                                                            Approve
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setComposingDenial(true)}
+                                                            disabled={requestBusy}
+                                                            className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-glass-border text-ink-muted hover:text-ink transition-colors disabled:opacity-50"
+                                                        >
+                                                            Decline
+                                                        </button>
+                                                    </>
+                                                )}
+                                                {(isRequester || canAnswerRequest) && (
+                                                    <button
+                                                        onClick={() => void handleWithdrawRequest()}
+                                                        disabled={requestBusy}
+                                                        className="px-3 py-1.5 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                                                    >
+                                                        Withdraw request
+                                                    </button>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
                         </div>
 
                         {/* Explicit grants */}

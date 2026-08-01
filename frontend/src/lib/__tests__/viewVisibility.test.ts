@@ -81,6 +81,40 @@ describe('buildVisibilityOptions publish gating', () => {
             expect(o.disabledReason).toMatch(/unpublish/i)
         }
     })
+
+    it('canRequestPublish turns the enterprise tile into a route, not a wall', () => {
+        const options = buildVisibilityOptions({
+            current: 'workspace', canPublish: false, canRequestPublish: true, ...base,
+        })
+        const enterprise = options.find(o => o.id === 'enterprise')!
+        expect(enterprise.disabled).toBe(false)
+        expect(enterprise.disabledReason).toBeUndefined()
+        expect(enterprise.requiresApproval).toBe(true)
+        expect(enterprise.approvalHint).toMatch(/needs approval/i)
+        // The lower tiers are unaffected — they were never publish-gated.
+        for (const id of ['private', 'workspace'] as ViewVisibility[]) {
+            expect(options.find(o => o.id === id)!.requiresApproval).toBe(false)
+        }
+    })
+
+    it('a publisher never needs approval', () => {
+        const options = buildVisibilityOptions({
+            current: 'workspace', canPublish: true, canRequestPublish: true, ...base,
+        })
+        expect(options.map(o => o.requiresApproval)).toEqual([false, false, false])
+    })
+
+    it('requesting is not a way to UNpublish — the lower tiers stay locked', () => {
+        const options = buildVisibilityOptions({
+            current: 'enterprise', canPublish: false, canRequestPublish: true, ...base,
+        })
+        expect(options.find(o => o.id === 'enterprise')!.requiresApproval).toBe(false)
+        for (const id of ['private', 'workspace'] as ViewVisibility[]) {
+            const o = options.find(x => x.id === id)!
+            expect(o.disabled).toBe(true)
+            expect(o.requiresApproval).toBe(false)
+        }
+    })
 })
 
 describe('accent classes', () => {
