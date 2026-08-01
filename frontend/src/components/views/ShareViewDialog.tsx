@@ -9,7 +9,8 @@
  *      owns the view's sharing settings but not the permission gets a
  *      live Enterprise tile that files a request for an admin to
  *      answer. The request's whole lifecycle (compose → pending →
- *      approve/decline/withdraw) lives inline under the tiles.
+ *      approve/decline/withdraw) lives inline under the tiles,
+ *      as does one sentence saying who that tier IS, in people.
  *   2. Explicit grants — additive shares with named users or groups
  *      at editor or viewer scope. Independent of workspace membership.
  *      Roles are editable in place; the picker searches the signed-in
@@ -42,6 +43,7 @@ import {
     denyViewPublication,
     type View,
     type ViewAccess,
+    type ViewAudience,
     type ViewPublishRequest,
 } from '@/services/viewApiService'
 import { VIEW_QUERY_KEY, useViewAccess } from '@/hooks/useViewMetadata'
@@ -63,7 +65,6 @@ import { buildViewShareUrl } from '@/lib/viewShareLink'
 import {
     VISIBILITY_ACCENT,
     buildVisibilityOptions,
-    visibilityDescription,
     type ViewVisibility,
 } from '@/lib/viewVisibility'
 
@@ -95,6 +96,56 @@ const GRANT_ROLES: { id: GrantRole; label: string; icon: typeof Eye }[] = [
     { id: 'viewer', label: 'Viewer', icon: Eye },
     { id: 'editor', label: 'Editor', icon: Pencil },
 ]
+
+
+/**
+ * Who can open this view right now, said in people rather than tiers.
+ *
+ * "Workspace" is an abstraction until a number is attached to it, and the
+ * sharer cannot count it themselves — the workspace list their browser
+ * holds is scoped to their OWN memberships. Both figures therefore come
+ * from the server's `audience` (single-view read only).
+ *
+ * When they're missing the sentence still reads; it just makes no claim
+ * about size. Printing "0 people" where we merely don't know would be
+ * wrong in the one direction that matters for a sharing decision.
+ */
+function audienceSentence(args: {
+    visibility: ViewVisibility
+    appName: string
+    workspaceName?: string
+    audience?: ViewAudience | null
+}): string {
+    const { visibility, appName, workspaceName, audience } = args
+    const shared = audience?.explicitGrantCount
+    // Long form where no other count shares the sentence; short form where
+    // "people" has already been said and repeating it would clatter.
+    const sharedLong = shared === undefined
+        ? "people you've shared with"
+        : shared > 0
+            ? `${shared} ${shared === 1 ? 'person' : 'people'} you've shared with`
+            : null
+    const sharedShort = shared ? `plus ${shared} you've shared with` : null
+
+    switch (visibility) {
+        case 'private':
+            return sharedLong
+                ? `Only you, ${sharedLong}, and workspace admins`
+                : 'Only you and workspace admins'
+        case 'workspace': {
+            const members = audience?.workspaceMemberCount
+            const where = `Everyone in ${workspaceName ?? "this view's workspace"}`
+            const sized = members
+                ? `${where} — ${members} ${members === 1 ? 'person' : 'people'}`
+                : where
+            return sharedShort ? `${sized} — ${sharedShort}` : sized
+        }
+        case 'enterprise':
+            return sharedShort
+                ? `Anyone signed in to ${appName}, ${sharedShort}`
+                : `Anyone signed in to ${appName}`
+    }
+}
 
 
 export function ShareViewDialog({
@@ -158,8 +209,12 @@ export function ShareViewDialog({
     const visibilityOptions = useMemo(
         () => buildVisibilityOptions({
             saved: visibility, canPublish, canRequestPublish, appName,
+            // Name the workspace on the tile too — the sentence below
+            // already does, and two different names for the same
+            // audience in one dialog reads like two audiences.
+            workspaceName: liveView?.workspaceName,
         }),
-        [visibility, canPublish, canRequestPublish, appName],
+        [visibility, canPublish, canRequestPublish, appName, liveView?.workspaceName],
     )
 
 
@@ -456,6 +511,19 @@ export function ShareViewDialog({
                                 })}
                             </div>
 
+                            {/* The tiles name a tier; only this says how many
+                                humans that is. Reads off the SAVED tier, which
+                                `visibility` tracks (it reverts on a failed save). */}
+                            <p className="mt-2.5 text-[11px] text-ink-muted leading-relaxed">
+                                <span className="font-semibold text-ink-secondary">Who can open this view: </span>
+                                {audienceSentence({
+                                    visibility,
+                                    appName,
+                                    workspaceName: liveView?.workspaceName,
+                                    audience: liveView?.audience,
+                                })}.
+                            </p>
+
                             {/* Request composer — only reachable from a
                                 requiresApproval tile, and never while a
                                 request is already pending. */}
@@ -713,16 +781,6 @@ export function ShareViewDialog({
                                 </>
                             )}
                         </div>
-                    </div>
-
-                    {/* Footer */}
-                    <div className="px-6 py-3 border-t border-glass-border bg-glass-base/20 shrink-0">
-                        <p className="text-[11px] text-ink-muted text-center leading-relaxed">
-                            {visibilityDescription(visibility, { appName })}
-                            {canManageGrants && grants && grants.length > 0 && (
-                                <> Plus <span className="font-semibold text-ink-secondary">{grants.length} explicit share{grants.length !== 1 ? 's' : ''}</span>.</>
-                            )}
-                        </p>
                     </div>
                 </motion.div>
             </div>

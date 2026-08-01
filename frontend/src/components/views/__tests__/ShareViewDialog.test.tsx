@@ -64,6 +64,7 @@ import {
   type ViewAccess,
   type ViewPublishRequest,
 } from '@/services/viewApiService'
+import type { ViewVisibility } from '@/lib/viewVisibility'
 
 const mockList = vi.mocked(viewGrantsService.list)
 const mockUpdate = vi.mocked(viewGrantsService.update)
@@ -139,14 +140,18 @@ function viewResponse(overrides: Partial<View> = {}): View {
   }
 }
 
-function renderDialog(access: ViewAccess, publishRequest?: ViewPublishRequest | null) {
+function renderDialog(
+  access: ViewAccess,
+  publishRequest?: ViewPublishRequest | null,
+  currentVisibility: ViewVisibility = 'workspace',
+) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={qc}>
       <ShareViewDialog
         viewId="view_1"
         viewName="Test View"
-        currentVisibility="workspace"
+        currentVisibility={currentVisibility}
         workspaceId="ws_1"
         access={access}
         publishRequest={publishRequest}
@@ -177,6 +182,74 @@ describe('visibility tiles', () => {
     const enterpriseTile = (await screen.findByText('Enterprise')).closest('button')!
     expect(enterpriseTile).toBeDisabled()
     expect(enterpriseTile.textContent).toMatch(/publish views/i)
+  })
+})
+
+/** The audience sentence, addressed by its label — the visibility TILE
+ *  names the same workspace in the same words, so a bare phrase match
+ *  finds both. */
+async function audienceLine(): Promise<HTMLElement> {
+  const label = await screen.findByText(/Who can open this view:/)
+  return label.parentElement as HTMLElement
+}
+
+describe('audience sentence', () => {
+  /** The counts only ever come from the single-view read. */
+  const withAudience = (over: Partial<View> = {}) =>
+    mockGetView.mockResolvedValue(viewResponse({
+      workspaceName: 'Finance',
+      audience: { workspaceMemberCount: 12, explicitGrantCount: 2 },
+      ...over,
+    }))
+
+  it('names the workspace, its size, and the explicit shares', async () => {
+    withAudience()
+    renderDialog(MANAGER_ACCESS, null, 'workspace')
+    expect(
+      (await audienceLine()).textContent,
+    ).toContain("Everyone in Finance — 12 people — plus 2 you've shared with.")
+  })
+
+  it('counts the shares in the private sentence', async () => {
+    withAudience()
+    renderDialog(MANAGER_ACCESS, null, 'private')
+    expect(
+      await screen.findByText(/Only you, 2 people you've shared with, and workspace admins\./),
+    ).toBeTruthy()
+  })
+
+  it('names the brand for the enterprise tier', async () => {
+    withAudience()
+    renderDialog(ANSWERER_ACCESS, null, 'enterprise')
+    expect(
+      await screen.findByText(/Anyone signed in to TestBrand, plus 2 you've shared with\./),
+    ).toBeTruthy()
+  })
+
+  it('says "1 person", not "1 people"', async () => {
+    withAudience({ audience: { workspaceMemberCount: 1, explicitGrantCount: 1 } })
+    renderDialog(MANAGER_ACCESS, null, 'private')
+    expect(
+      await screen.findByText(/Only you, 1 person you've shared with, and workspace admins\./),
+    ).toBeTruthy()
+  })
+
+  it('drops the clause rather than claiming zero shares', async () => {
+    withAudience({ audience: { workspaceMemberCount: 12, explicitGrantCount: 0 } })
+    renderDialog(MANAGER_ACCESS, null, 'workspace')
+    const line = await audienceLine()
+    expect(line.textContent).toContain('Everyone in Finance')
+    expect(line.textContent).toContain('12 people')
+    expect(line.textContent).not.toMatch(/shared with/)
+  })
+
+  it('degrades to an unnumbered sentence when the payload has no audience', async () => {
+    mockGetView.mockResolvedValue(viewResponse({ workspaceName: 'Finance' }))
+    renderDialog(MANAGER_ACCESS, null, 'workspace')
+    const line = await audienceLine()
+    expect(line.textContent).toContain('Everyone in Finance')
+    // No audience means no counts — never a fabricated 0.
+    expect(line.textContent).not.toMatch(/\d/)
   })
 })
 

@@ -49,6 +49,7 @@ import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useToast } from '@/components/ui/toast'
 import { useAuthStore, usePermission } from '@/store/auth'
+import { useBrand } from '@/store/branding'
 import { timeAgo } from '@/lib/timeAgo'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
@@ -61,6 +62,17 @@ import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 
 type Visibility = 'private' | 'workspace' | 'enterprise'
+
+/**
+ * Where a view stands today, said from the APPROVER's seat. Not
+ * `visibilityDescription` — that one speaks to the owner ("Only you…"),
+ * which is the wrong voice for someone reviewing another person's view.
+ */
+const CURRENT_REACH: Record<string, string> = {
+    private: 'currently visible only to its owner and workspace admins',
+    workspace: 'currently visible to this workspace',
+    enterprise: 'currently visible to everyone signed in',
+}
 
 interface WorkspaceViewsSectionProps {
     wsId: string
@@ -81,6 +93,7 @@ export default function WorkspaceViewsSection({
     const currentUser = useAuthStore(s => s.user)
     const { openViewEditor } = useViewEditorModal()
     const { showToast } = useToast()
+    const { appName } = useBrand()
     const { resolve: resolveProvider } = useDataSourceProviderMap()
     const canAnswerPublishRequests = usePermission('workspace:view:publish', wsId)
     const canAdminWorkspace = usePermission('workspace:admin', wsId)
@@ -222,6 +235,10 @@ export default function WorkspaceViewsSection({
     const [busyRequestId, setBusyRequestId] = useState<string | null>(null)
     const [denyingId, setDenyingId] = useState<string | null>(null)
     const [denyReason, setDenyReason] = useState('')
+    // Approve is a one-way door onto every signed-in account, so it goes
+    // through a confirm step that states the consequence. Decline already
+    // had one (its reason box) — this makes the pair symmetric.
+    const [confirmingId, setConfirmingId] = useState<string | null>(null)
     const [policySaving, setPolicySaving] = useState(false)
 
     const pendingRequests = useMemo(
@@ -240,6 +257,7 @@ export default function WorkspaceViewsSection({
             setAnsweredIds(prev => new Set(prev).add(view.id))
             setDenyingId(null)
             setDenyReason('')
+            setConfirmingId(null)
             refetch()
             onWorkspaceChanged?.()
             showToast('success', successMessage)
@@ -362,6 +380,12 @@ export default function WorkspaceViewsSection({
                                 {pendingRequests.map(v => {
                                     const req = v.publishRequest!
                                     const isBusy = busyRequestId === v.id
+                                    // The whole decision in one sentence. Named data
+                                    // source when we have one — list payloads carry it,
+                                    // but a view with no source assigned does not.
+                                    const consequence = v.dataSourceName
+                                        ? `Publishing makes this view, and read-only access to ${v.dataSourceName}, visible to everyone signed in to ${appName}.`
+                                        : `Publishing makes this view visible to everyone signed in to ${appName}.`
                                     return (
                                         <div key={v.id} className="px-3 py-2.5">
                                             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -370,6 +394,11 @@ export default function WorkspaceViewsSection({
                                                     · asked by {req.requestedByName ?? 'a workspace member'} {timeAgo(req.requestedAt)}
                                                 </span>
                                             </div>
+                                            {/* What they'd be handing over, and from where. */}
+                                            <p className="text-[11px] text-ink-muted mt-0.5">
+                                                {v.dataSourceName ? `${v.dataSourceName} · ` : ''}
+                                                {CURRENT_REACH[v.visibility] ?? ''}
+                                            </p>
                                             {req.note && (
                                                 <p className="text-[11px] text-ink-secondary italic mt-1 pl-2 border-l-2 border-amber-500/30">
                                                     {req.note}
@@ -400,14 +429,37 @@ export default function WorkspaceViewsSection({
                                                         Cancel
                                                     </button>
                                                 </div>
+                                            ) : confirmingId === v.id ? (
+                                                <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5">
+                                                    <p className="text-[11px] text-ink leading-relaxed">
+                                                        {consequence}
+                                                    </p>
+                                                    <div className="flex flex-wrap items-center gap-2 mt-2">
+                                                        <button
+                                                            onClick={() => void answerRequest(v, () => approveViewPublication(v.id), `"${v.name}" is now visible to everyone`)}
+                                                            disabled={isBusy}
+                                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 text-white hover:brightness-110 transition-all disabled:opacity-50"
+                                                        >
+                                                            {isBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                                                            Publish to everyone
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setConfirmingId(null)}
+                                                            disabled={isBusy}
+                                                            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink transition-colors disabled:opacity-50"
+                                                        >
+                                                            Cancel
+                                                        </button>
+                                                    </div>
+                                                </div>
                                             ) : (
                                                 <div className="flex items-center gap-2 mt-2">
                                                     <button
-                                                        onClick={() => void answerRequest(v, () => approveViewPublication(v.id), `"${v.name}" is now visible to everyone`)}
+                                                        onClick={() => setConfirmingId(v.id)}
                                                         disabled={isBusy}
                                                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 text-white hover:brightness-110 transition-all disabled:opacity-50"
                                                     >
-                                                        {isBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                                                        <Check className="w-3.5 h-3.5" />
                                                         Approve
                                                     </button>
                                                     <button

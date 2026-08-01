@@ -55,6 +55,19 @@ export interface ViewPublishRequest {
 }
 
 /**
+ * How far a view currently reaches, in people. Single-view read only —
+ * list payloads omit it, so never render these numbers from a list row.
+ *
+ * The client cannot compute either figure: the workspace list a browser
+ * holds is scoped to the caller's own memberships, and grants belong to
+ * the view, not the session.
+ */
+export interface ViewAudience {
+    workspaceMemberCount: number
+    explicitGrantCount: number
+}
+
+/**
  * Whether a view's workspace + data source are still present and
  * active. Computed SERVER-side: only the server can tell "you're not a
  * member of that workspace" apart from "it was deleted", which is why
@@ -122,6 +135,8 @@ export interface View {
     providerId?: string | null
     /** Caller-specific capability envelope. Single-view read only. */
     access?: ViewAccess | null
+    /** How many people this view reaches. Single-view read only. */
+    audience?: ViewAudience | null
     /** Scope integrity, computed server-side (see ViewHealth). */
     health?: ViewHealth | null
     /** A pending ask to publish this view to everyone. Null when none. */
