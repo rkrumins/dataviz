@@ -922,6 +922,9 @@ class WorkspaceUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     is_active: Optional[bool] = Field(None, alias="isActive")
+    # 'request' (members ask, a publisher answers) | 'open' (anyone who
+    # can change a view's visibility may publish it directly).
+    publish_policy: Optional[str] = Field(None, alias="publishPolicy")
 
     class Config:
         populate_by_name = True
@@ -941,6 +944,8 @@ class WorkspaceResponse(BaseModel):
     member_count: int = Field(0, alias="memberCount")
     #: Live (non-deleted) views built on this workspace.
     view_count: int = Field(0, alias="viewCount")
+    #: Who may publish a view platform-wide here — 'request' | 'open'.
+    publish_policy: str = Field("request", alias="publishPolicy")
 
     class Config:
         populate_by_name = True
@@ -1096,6 +1101,17 @@ class ViewLayoutUpdateRequest(BaseModel):
         return self
 
 
+class ViewPublishRequest(BaseModel):
+    """A pending ask to publish this view platform-wide."""
+    requested_by: str = Field(alias="requestedBy")
+    requested_by_name: Optional[str] = Field(None, alias="requestedByName")
+    requested_at: str = Field(alias="requestedAt")
+    note: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
 class ViewHealthInfo(BaseModel):
     """Whether a view's scope is still intact — computed SERVER-side.
 
@@ -1132,6 +1148,11 @@ class ViewAccessInfo(BaseModel):
     can_manage_grants: bool = Field(alias="canManageGrants")
     can_change_visibility: bool = Field(alias="canChangeVisibility")
     can_publish: bool = Field(alias="canPublish")
+    # Cannot publish, but may ASK someone who can. This is what turns a
+    # greyed-out Enterprise option into a route instead of a wall.
+    can_request_publish: bool = Field(False, alias="canRequestPublish")
+    # May approve/deny a pending publish request on this view.
+    can_answer_publish_request: bool = Field(False, alias="canAnswerPublishRequest")
     # 'owner' | 'admin' | 'grant' | 'workspace' | 'enterprise'
     access_via: str = Field(alias="accessVia")
     # 'full' | 'readonly'
@@ -1200,6 +1221,8 @@ class ViewResponse(BaseModel):
     access: Optional[ViewAccessInfo] = None
     # Scope integrity (workspace/data-source still present and active).
     health: Optional[ViewHealthInfo] = None
+    # Set while a publication request is awaiting an answer.
+    publish_request: Optional[ViewPublishRequest] = Field(None, alias="publishRequest")
 
     class Config:
         populate_by_name = True

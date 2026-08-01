@@ -259,6 +259,40 @@ def can_publish_in_workspace(
     )
 
 
+def can_publish_under_policy(
+    ctx: ViewerContext, view: ViewORM, *, policy: Optional[str],
+) -> bool:
+    """May this caller publish, taking the workspace policy into account?
+
+    A workspace set to ``'open'`` has decided that publishing is not an
+    admin-only act there: anyone who may change the view's visibility at
+    all (its creator, or a workspace admin) may take it platform-wide.
+    The permission still governs everywhere else, and still wins here —
+    ``'open'`` widens, never narrows.
+    """
+    if can_publish(ctx, view):
+        return True
+    if (policy or "request") != "open":
+        return False
+    return can_change_visibility(ctx, view)
+
+
+def can_request_publish(ctx: ViewerContext, view: ViewORM) -> bool:
+    """May this caller ASK for the view to be published?
+
+    Same bar as changing visibility (creator or workspace admin): if you
+    own the view's sharing settings you may ask for the one setting you
+    cannot set yourself. Asking grants nothing on its own.
+    """
+    return can_change_visibility(ctx, view)
+
+
+def can_answer_publish_request(ctx: ViewerContext, view: ViewORM) -> bool:
+    """May this caller approve or deny a pending request? Approving
+    performs the publish, so it takes exactly the publish permission."""
+    return can_publish(ctx, view)
+
+
 def can_manage_grants(ctx: ViewerContext, view: ViewORM) -> bool:
     """Creator or workspace admin manage explicit shares. An ``editor``
     grant lets you edit the view, never re-share it."""
@@ -285,6 +319,8 @@ async def compute_access_envelope(
     session: AsyncSession,
     ctx: ViewerContext,
     view: ViewORM,
+    *,
+    workspace_policy: Optional[str] = None,
 ) -> dict:
     """The caller's capability envelope for one view (camelCase keys,
     ready for ``ViewAccessInfo``). Call only after ``can_read_view``
@@ -312,11 +348,16 @@ async def compute_access_envelope(
         via = "workspace"
     else:
         via = "enterprise"
+    may_publish = can_publish_under_policy(ctx, view, policy=workspace_policy)
     return {
         "canEdit": await can_edit_view(session, ctx, view),
         "canManageGrants": can_manage_grants(ctx, view),
         "canChangeVisibility": can_change_visibility(ctx, view),
-        "canPublish": can_publish(ctx, view),
+        "canPublish": may_publish,
+        # Can't publish, but may ask someone who can — this is what turns
+        # the greyed-out Enterprise tile into a route rather than a wall.
+        "canRequestPublish": (not may_publish) and can_request_publish(ctx, view),
+        "canAnswerPublishRequest": can_answer_publish_request(ctx, view),
         "accessVia": via,
         "dataAccess": (
             "full"
@@ -421,6 +462,9 @@ __all__ = [
     "can_change_visibility",
     "can_publish",
     "can_publish_in_workspace",
+    "can_publish_under_policy",
+    "can_request_publish",
+    "can_answer_publish_request",
     "can_manage_grants",
     "can_restore_view",
 ]

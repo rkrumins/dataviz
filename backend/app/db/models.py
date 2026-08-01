@@ -517,6 +517,15 @@ class WorkspaceORM(Base):
     description = Column(Text, nullable=True)
     is_default = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
+    # Who may publish a view to enterprise (platform-wide) visibility.
+    #   'request' (default) — members ask; a publish-permission holder
+    #                         approves. Nobody is ever stuck: the ask is
+    #                         one click and lands in the Views cockpit.
+    #   'open'              — anyone who can change the view's visibility
+    #                         may publish it directly, no approval.
+    # The permission stays the enforcement primitive either way; this
+    # only decides whether a member's own request auto-satisfies it.
+    publish_policy = Column(Text, nullable=False, default="request")
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -705,7 +714,7 @@ class ContextModelORM(Base):
     # Columns added during context-model → view unification
     view_type = Column(Text, nullable=True)                            # graph | table | lineage | ...
     config = Column(Text, nullable=True)                               # JSON: full ViewConfiguration
-    visibility = Column(Text, nullable=False, default="private")       # private | workspace | enterprise
+    visibility = Column(Text, nullable=False, default="private")        # private | workspace | enterprise
     created_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                                 # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
@@ -763,6 +772,14 @@ class ViewORM(Base):
     # EXTENSION POINT: persist referenced_entity_types / referenced_relationship_types
     # for view-ontology compatibility checks once real breakage workflows appear.
     visibility = Column(Text, nullable=False, default="private")
+    # Pending request to publish this view platform-wide. Set when a
+    # member who cannot publish asks for it; cleared on approve (which
+    # flips visibility), deny, or withdrawal. A pending request IS the
+    # queue — no separate table, because the request is a fact about
+    # this view and dies with it.
+    publish_requested_by = Column(Text, nullable=True)
+    publish_requested_at = Column(Text, nullable=True)
+    publish_request_note = Column(Text, nullable=True)
     created_by = Column(Text, nullable=True)
     # Principal id of whoever last edited the view (same convention as
     # created_by). NULL on legacy rows and until the first edit after the
@@ -789,6 +806,7 @@ class ViewORM(Base):
         Index("idx_view_workspace", "workspace_id"),
         Index("idx_view_context_model", "context_model_id"),
         Index("idx_view_visibility", "visibility"),
+        Index("idx_view_publish_requested", "publish_requested_at"),
         Index("idx_view_data_source", "data_source_id"),
         Index("idx_view_deleted_at", "deleted_at"),
         CheckConstraint(
@@ -833,7 +851,8 @@ class ViewActivityLogORM(Base):
         CheckConstraint(
             "action IN ('created', 'updated', 'visibility_changed', 'shared', "
             "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored', "
-            "'data_changed')",
+            "'data_changed', 'publish_requested', 'publish_denied', "
+            "'admin_viewed')",
             name="ck_val_action_enum",
         ),
     )

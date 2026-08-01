@@ -26,6 +26,7 @@ from ..models import (
 )
 from backend.common.models.management import (
     ViewHealthInfo,
+    ViewPublishRequest,
     ViewCreateRequest,
     ViewUpdateRequest,
     ViewLayoutUpdateRequest,
@@ -250,6 +251,7 @@ def _to_response(
     is_favourited: bool = False,
     config_override: Optional[dict] = None,
     health: Optional[Dict[str, Optional[str]]] = None,
+    publish_requester_name: Optional[str] = None,
 ) -> ViewResponse:
     # ``config_override`` lets branch-scoped-layout callers project the
     # EFFECTIVE (base ⊕ overlay) config into the response without touching the
@@ -263,6 +265,15 @@ def _to_response(
         layout_type = str(raw_layout) if raw_layout is not None else None
     return ViewResponse(
         health=ViewHealthInfo(**health) if health else None,
+        publish_request=(
+            ViewPublishRequest(
+                requested_by=row.publish_requested_by,
+                requested_by_name=publish_requester_name,
+                requested_at=row.publish_requested_at,
+                note=row.publish_request_note,
+            )
+            if getattr(row, "publish_requested_at", None) else None
+        ),
         id=row.id,
         name=row.name,
         description=row.description,
@@ -319,8 +330,11 @@ async def _to_enriched_response(
     cm_name = await _get_context_model_name(session, row.context_model_id)
     # Resolve creator, modifier AND data-publisher in one batched lookup
     # (dedupes when they're the same principal).
-    user_map = await _resolve_user_ids(
-        session, {row.created_by, row.updated_by, getattr(row, 'data_updated_by', None)})
+    user_map = await _resolve_user_ids(session, {
+        row.created_by, row.updated_by,
+        getattr(row, 'data_updated_by', None),
+        getattr(row, 'publish_requested_by', None),
+    })
     creator_name, creator_email = user_map.get(row.created_by or "", (None, None))
     modifier_name, modifier_email = user_map.get(row.updated_by or "", (None, None))
     publisher_name, publisher_email = user_map.get(
@@ -331,6 +345,8 @@ async def _to_enriched_response(
     return _to_response(
         row,
         health=_health_for(row, facts),
+        publish_requester_name=user_map.get(
+            getattr(row, 'publish_requested_by', None) or "", (None, None))[0],
         workspace_name=ws_name,
         data_source_name=ds_name,
         context_model_name=cm_name,
@@ -402,7 +418,11 @@ async def _batch_enrich_rows(
     cm_ids: Set[str] = {r.context_model_id for r in rows if r.context_model_id}
     user_ids: Set[Optional[str]] = {
         uid for r in rows
-        for uid in (r.created_by, r.updated_by, getattr(r, 'data_updated_by', None))
+        for uid in (
+            r.created_by, r.updated_by,
+            getattr(r, 'data_updated_by', None),
+            getattr(r, 'publish_requested_by', None),
+        )
     }
     view_ids: List[str] = [r.id for r in rows]
 
@@ -479,6 +499,8 @@ async def _batch_enrich_rows(
             favourite_count=fav_counts.get(row.id, 0),
             is_favourited=row.id in fav_set,
             health=_health_for(row, health_map[row.id]),
+            publish_requester_name=user_map.get(
+                getattr(row, 'publish_requested_by', None) or "", (None, None))[0],
         ))
     return responses
 

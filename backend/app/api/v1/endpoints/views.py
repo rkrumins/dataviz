@@ -15,6 +15,7 @@ reverts scoping to legacy behaviour (auth requirements stay).
 """
 import logging
 import os
+from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -43,6 +44,7 @@ from backend.app.services.versioning.models import BranchORM
 from backend.auth_service.interface import User
 from backend.common.models.management import (
     ViewAccessInfo,
+    ViewPublishRequest,
     ViewCreateRequest,
     ViewUpdateRequest,
     ViewLayoutUpdateRequest,
@@ -220,6 +222,31 @@ async def _compute_ontology_digest(
             workspace_id, data_source_id, exc,
         )
         return None
+
+
+def _clear_publish_request(view_orm: ViewORM) -> None:
+    """Drop a pending publication request (approved, denied, or withdrawn)."""
+    view_orm.publish_requested_by = None
+    view_orm.publish_requested_at = None
+    view_orm.publish_request_note = None
+
+
+async def _enriched_or_404(
+    session: AsyncSession, view_id: str, user: User,
+) -> ViewResponse:
+    """Re-read a view for the response after a mutation."""
+    view = await view_repo.get_view_enriched(session, view_id, user_id=_user_id(user))
+    if not view:
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    return view
+
+
+async def _publish_policy(session: AsyncSession, workspace_id: str) -> str:
+    """The workspace's publication policy ('request' | 'open')."""
+    from backend.app.db.models import WorkspaceORM
+    row = await session.get(WorkspaceORM, workspace_id)
+    return (getattr(row, "publish_policy", None) or "request") if row else "request"
+
 
 
 @router.get("/popular", response_model=List[ViewResponse])
@@ -493,10 +520,14 @@ async def create_view(
         if req.visibility == "enterprise" and not view_access.can_publish_in_workspace(
             claims, req.workspace_id,
         ):
-            raise HTTPException(
-                status_code=403,
-                detail="Missing permission: workspace:view:publish",
-            )
+            # A workspace set to 'open' has decided publishing isn't
+            # admin-only there; anyone who may create a view in it may
+            # publish one.
+            if await _publish_policy(session, req.workspace_id) != "open":
+                raise HTTPException(
+                    status_code=403,
+                    detail="Missing permission: workspace:view:publish",
+                )
 
     # Admin → Features → View modes. The admin picks which layouts this deployment offers; the
     # wizard hides the rest. Enforced here too, because a hidden button is not a rule.
@@ -563,9 +594,10 @@ async def get_view(
     if ds is not None:
         view.provider_id = ds.provider_id
 
-    view.access = ViewAccessInfo(
-        **await view_access.compute_access_envelope(session, ctx, view_orm)
-    )
+    view.access = ViewAccessInfo(**await view_access.compute_access_envelope(
+        session, ctx, view_orm,
+        workspace_policy=await _publish_policy(session, view_orm.workspace_id),
+    ))
     return view
 
 
@@ -788,11 +820,15 @@ async def update_view_visibility(
             view_orm.visibility != visibility
             and "enterprise" in (view_orm.visibility, visibility)
         )
-        if crosses_enterprise and not view_access.can_publish(ctx, view_orm):
-            raise HTTPException(
-                status_code=403,
-                detail="Missing permission: workspace:view:publish",
-            )
+        if crosses_enterprise:
+            policy = await _publish_policy(session, view_orm.workspace_id)
+            if not view_access.can_publish_under_policy(
+                ctx, view_orm, policy=policy,
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Missing permission: workspace:view:publish",
+                )
 
     existing = await view_repo.get_view(session, view_id)
     view = await view_repo.update_visibility(
@@ -809,6 +845,148 @@ async def update_view_visibility(
         )
     return view
 
+
+
+# ── Publication requests ─────────────────────────────────────────────
+#
+# ``workspace:view:publish`` is the right gate for exposing a view (and
+# read-only access to its data source) to the whole platform. But a
+# permission with no path around it is a dead end, and the product
+# intent is the opposite: any member should be able to share their work
+# with the wider world. So a member who cannot publish can ASK, in one
+# click, and whoever holds the permission answers. Workspaces that
+# don't want the ceremony set ``publish_policy='open'`` and members
+# publish directly.
+
+@router.post("/{view_id}/publish-request", response_model=ViewResponse)
+async def request_publication(
+    view_id: str = Path(...),
+    note: Optional[str] = Body(None, embed=True),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Ask for this view to be published platform-wide.
+
+    Open to whoever owns the view's sharing settings (creator or
+    workspace admin) — the same bar as changing visibility, since this
+    is the one visibility they cannot set themselves. Asking grants
+    nothing; it queues the question for a publish-permission holder.
+    """
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not view_access.can_request_publish(ctx, view_orm):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the view's owner or a workspace admin can request publication",
+        )
+    if view_orm.visibility == "enterprise":
+        raise HTTPException(status_code=409, detail="This view is already published")
+
+    view_orm.publish_requested_by = user.id
+    view_orm.publish_requested_at = datetime.now(timezone.utc).isoformat()
+    view_orm.publish_request_note = (note or "").strip() or None
+    await session.flush()
+    await view_activity_repo.record_view_activity(
+        session, view_id=view_id, workspace_id=view_orm.workspace_id,
+        action="publish_requested", actor=user.id,
+        summary="Requested publication to everyone",
+        changes={"note": view_orm.publish_request_note},
+    )
+    return await _enriched_or_404(session, view_id, user)
+
+
+@router.delete("/{view_id}/publish-request", status_code=204)
+async def withdraw_publication_request(
+    view_id: str = Path(...),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Withdraw a pending request — the requester, or anyone who could
+    have answered it."""
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    is_requester = view_orm.publish_requested_by == user.id
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not (
+        is_requester or view_access.can_answer_publish_request(ctx, view_orm)
+    ):
+        raise HTTPException(status_code=403, detail="Not your request to withdraw")
+    _clear_publish_request(view_orm)
+    await session.flush()
+
+
+@router.post("/{view_id}/publish-request/approve", response_model=ViewResponse)
+async def approve_publication(
+    view_id: str = Path(...),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Approve a pending request: the view goes enterprise.
+
+    Recorded as ``visibility_changed`` — the approval's whole point is
+    the transition, and the timeline should say what happened, not how
+    it was authorised (the request's own entry already says that).
+    """
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not view_access.can_answer_publish_request(ctx, view_orm):
+        raise HTTPException(
+            status_code=403,
+            detail="Missing permission: workspace:view:publish",
+        )
+    if not view_orm.publish_requested_at:
+        raise HTTPException(status_code=409, detail="No pending publication request")
+
+    previous = view_orm.visibility
+    requester = view_orm.publish_requested_by
+    _clear_publish_request(view_orm)
+    view_orm.visibility = "enterprise"
+    view_orm.updated_by = user.id
+    await session.flush()
+    await view_activity_repo.record_view_activity(
+        session, view_id=view_id, workspace_id=view_orm.workspace_id,
+        action="visibility_changed", actor=user.id,
+        summary=f"Published to everyone (requested by {requester or 'unknown'})",
+        changes={
+            "visibility": {"from": previous, "to": "enterprise"},
+            "approvedRequestFrom": requester,
+        },
+    )
+    return await _enriched_or_404(session, view_id, user)
+
+
+@router.post("/{view_id}/publish-request/deny", response_model=ViewResponse)
+async def deny_publication(
+    view_id: str = Path(...),
+    reason: Optional[str] = Body(None, embed=True),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Decline a pending request. The view keeps its current visibility;
+    the reason lands on the view's timeline so the asker learns why."""
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not view_access.can_answer_publish_request(ctx, view_orm):
+        raise HTTPException(
+            status_code=403,
+            detail="Missing permission: workspace:view:publish",
+        )
+    if not view_orm.publish_requested_at:
+        raise HTTPException(status_code=409, detail="No pending publication request")
+
+    requester = view_orm.publish_requested_by
+    _clear_publish_request(view_orm)
+    await session.flush()
+    await view_activity_repo.record_view_activity(
+        session, view_id=view_id, workspace_id=view_orm.workspace_id,
+        action="publish_denied", actor=user.id,
+        summary=(reason or "").strip() or "Publication request declined",
+        changes={"requestedBy": requester, "reason": (reason or "").strip() or None},
+    )
+    return await _enriched_or_404(session, view_id, user)
 
 @router.post("/{view_id}/favourite", status_code=201)
 async def favourite_view(
