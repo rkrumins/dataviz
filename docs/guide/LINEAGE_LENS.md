@@ -35,7 +35,11 @@ reveals exactly the children that really participate in lineage, never the
 parent's full contents. Coarser-grain partners (a container or platform
 summarizing finer flows) keep a muted, dashed **rollup** treatment so they
 can't read as extra data. The focal card shows a quick tally — how many
-connections come *in* and how many go *out*. Numbers here always match the
+connections come *in* and how many go *out* — and, once measured, its
+**reach**: how many distinct entities it touches transitively upstream and
+downstream ("Reaches 12 upstream · 47 downstream"), the change-impact answer
+Focus mode usually gets opened for. A capped measurement shows as a floor
+("47+") — the Lens never invents a number. Numbers here always match the
 canvas, because the Lens reads the same connections you see on screen.
 
 Prefer scanning to exploring? The **Graph | List** toggle in the header swaps
@@ -104,6 +108,13 @@ The Lens is built for exploring, not just reading:
   (scrolls the real entity into view) and **Open details** (opens its details
   panel). The path itself is a deliverable too — **Copy path** and **Show on
   canvas** live at the end of the trail.
+- **Share the exploration** with the link button in the header: it copies a
+  URL that reopens this exact picture — the walked path, the focused entity,
+  and everything you expanded — for a colleague. And the **image button** in
+  the corner controls downloads the graph as a PNG for a deck or a doc.
+
+First time here? The Lens offers a **one-minute guided tour** when the graph
+opens; replay it any time from the **Help** panel while you're on a view.
 
 At the bottom, two controls escalate beyond looking:
 

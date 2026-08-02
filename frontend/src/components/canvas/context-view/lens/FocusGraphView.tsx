@@ -34,6 +34,8 @@ import {
   Panel,
   Position,
   getBezierPath,
+  getNodesBounds,
+  getViewportForBounds,
   useReactFlow,
   type Edge,
   type EdgeProps,
@@ -42,8 +44,10 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
+import { toPng } from 'html-to-image'
 import * as LucideIcons from 'lucide-react'
 import type { LineageEdge } from '@/store/canvas'
+import { IMPACT_DEPTH, type LensImpact } from '@/hooks/useLensImpact'
 import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
@@ -76,6 +80,11 @@ interface FocusGraphViewProps {
   focalStats: { in: number; out: number }
   /** Focal fetch state — drives the empty-direction whispers. */
   focalFetch?: 'loading' | 'done' | 'error'
+  /** Transitive reach of the focal (useLensImpact); null = unknown. */
+  focalImpact?: LensImpact | null
+  focalImpactLoading?: boolean
+  /** Filename stem for the PNG export. */
+  exportName?: string
   selectedId: string | null
   reducedMotion: boolean
   edgeTypeInfo?: EdgeTypeInfoMap
@@ -226,10 +235,12 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
 }
 
 function FocusGraphCard({ data, selected }: NodeProps) {
-  const { card, ctx, focalStats } = data as unknown as {
+  const { card, ctx, focalStats, focalImpact, focalImpactLoading } = data as unknown as {
     card: FocusCard
     ctx: CardCtx
     focalStats?: { in: number; out: number }
+    focalImpact?: LensImpact | null
+    focalImpactLoading?: boolean
   }
   const schema = useSchemaStore((s) => s.schema)
   const visual = useMemo(
@@ -322,6 +333,26 @@ function FocusGraphCard({ data, selected }: NodeProps) {
               {focalStats.out} out
             </span>
           </div>
+        )}
+        {/* Transitive reach — the question Focus mode gets opened to
+            answer. Truncated = floors ("47+"); unknown = nothing. */}
+        {focalImpactLoading && (
+          <p className="flex items-center gap-1 mt-0.5 text-[9px] text-ink-muted/70">
+            <LucideIcons.Loader2 className="w-2.5 h-2.5 animate-spin text-accent-lineage/60" />
+            Measuring reach…
+          </p>
+        )}
+        {focalImpact && (
+          <p
+            className="flex items-center gap-1 mt-0.5 text-[9px] text-ink-muted tabular-nums truncate"
+            title={`Distinct entities connected within ${IMPACT_DEPTH} hops, at this entity's level${focalImpact.truncated ? ' — measurement capped, true totals may be higher' : ''}`}
+          >
+            <LucideIcons.Radar className="w-2.5 h-2.5 flex-shrink-0 text-accent-lineage/70" />
+            <span className="truncate">
+              Reaches {focalImpact.up.toLocaleString()}{focalImpact.truncated ? '+' : ''} upstream
+              {' · '}{focalImpact.down.toLocaleString()}{focalImpact.truncated ? '+' : ''} downstream
+            </span>
+          </p>
         )}
       </div>
     )
@@ -621,10 +652,49 @@ const EDGE_TYPES = { focusEdge: FocusGraphEdgeComp }
 
 /** House-styled zoom cluster (React Flow's default chrome doesn't
  *  match the lens). Must render inside <ReactFlow> for useReactFlow. */
-function GraphControls({ reducedMotion }: { reducedMotion: boolean }) {
+function GraphControls({ reducedMotion, exportName }: { reducedMotion: boolean; exportName?: string }) {
   const rf = useReactFlow()
+  const [exporting, setExporting] = useState(false)
   const dur = reducedMotion ? 0 : 200
   const btn = 'w-7 h-7 flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
+
+  // PNG export: re-project the whole graph into a fixed frame and
+  // rasterize the viewport pane (the standard React Flow recipe).
+  const exportPng = async (e: React.MouseEvent) => {
+    const viewport = (e.currentTarget as HTMLElement)
+      .closest('.react-flow')
+      ?.querySelector<HTMLElement>('.react-flow__viewport')
+    if (!viewport || exporting) return
+    setExporting(true)
+    try {
+      const bounds = getNodesBounds(rf.getNodes())
+      const width = Math.min(Math.ceil(bounds.width) + 160, 3200)
+      const height = Math.min(Math.ceil(bounds.height) + 160, 2400)
+      const vp = getViewportForBounds(bounds, width, height, 0.25, 2, 0.08)
+      const bg = getComputedStyle(document.documentElement).getPropertyValue('--nx-bg-elevated').trim() || '#ffffff'
+      const dataUrl = await toPng(viewport, {
+        backgroundColor: bg,
+        width,
+        height,
+        pixelRatio: 2,
+        style: {
+          width: `${width}px`,
+          height: `${height}px`,
+          transform: `translate(${vp.x}px, ${vp.y}px) scale(${vp.zoom})`,
+        },
+      })
+      const a = document.createElement('a')
+      a.href = dataUrl
+      a.download = `lineage-${(exportName ?? 'focus').replace(/[^\p{L}\p{N}_-]+/gu, '-')}.png`
+      a.click()
+    } catch {
+      // Rasterization can fail on exotic content (e.g. blocked images);
+      // the graph itself is unaffected — just release the button.
+    } finally {
+      setExporting(false)
+    }
+  }
+
   return (
     <Panel position="bottom-right" className="!m-3">
       <div className="flex flex-col rounded-lg border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-md overflow-hidden divide-y divide-black/[0.06] dark:divide-white/[0.06]">
@@ -642,6 +712,17 @@ function GraphControls({ reducedMotion }: { reducedMotion: boolean }) {
         >
           <LucideIcons.Maximize2 className="w-3.5 h-3.5" />
         </button>
+        <button
+          type="button"
+          title="Download this lineage as an image (for decks and docs)"
+          onClick={(e) => void exportPng(e)}
+          className={btn}
+          disabled={exporting}
+        >
+          {exporting
+            ? <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
+            : <LucideIcons.ImageDown className="w-3.5 h-3.5" />}
+        </button>
       </div>
     </Panel>
   )
@@ -654,6 +735,9 @@ export function FocusGraphView({
   focalId,
   focalStats,
   focalFetch,
+  focalImpact,
+  focalImpactLoading,
+  exportName,
   selectedId,
   reducedMotion,
   edgeTypeInfo,
@@ -699,7 +783,7 @@ export function FocusGraphView({
       selectable: false,
       focusable: false,
       data: card.kind === 'focal'
-        ? { card, ctx, focalStats: { in: focalIn, out: focalOut } }
+        ? { card, ctx, focalStats: { in: focalIn, out: focalOut }, focalImpact, focalImpactLoading }
         : { card, ctx },
     }))
     // Hop-band headers with honest shown/total counts.
@@ -738,7 +822,7 @@ export function FocusGraphView({
       }
     }
     return nodes
-  }, [graph.cards, graph.bandTotals, ctx, focalIn, focalOut, focalFetch])
+  }, [graph.cards, graph.bandTotals, ctx, focalIn, focalOut, focalFetch, focalImpact, focalImpactLoading])
 
   // Selection rides React Flow's own `selected` flag so changing it
   // re-renders exactly the affected memoized cards.
@@ -827,7 +911,7 @@ export function FocusGraphView({
           style={{ background: 'transparent' }}
         >
           <Background variant={BackgroundVariant.Dots} gap={26} size={1.25} color="currentColor" />
-          <GraphControls reducedMotion={reducedMotion} />
+          <GraphControls reducedMotion={reducedMotion} exportName={exportName} />
         </ReactFlow>
       </ReactFlowProvider>
     </div>

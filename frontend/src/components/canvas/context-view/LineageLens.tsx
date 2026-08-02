@@ -44,12 +44,15 @@ import {
   type NeighborRecord,
 } from '@/lib/lineage-neighbors'
 import { EDGE_FETCH_LIMIT } from '@/hooks/useLensLineage'
+import { IMPACT_DEPTH, type LensImpact } from '@/hooks/useLensImpact'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { usePreferencesStore } from '@/store/preferences'
+import { useTourStore } from '@/features/tour/tourStore'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { lensFocalOf, type LensHistory } from './lens/lensHistory'
 import { buildFocusGraph, labelOf, edgeLabelFor, type EdgeTypeInfoMap } from './lens/focus-graph'
+import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
 
 const ROWS_CAP = 200
@@ -118,6 +121,13 @@ export interface LineageLensProps {
   /** Known total lineage degrees (in/out) per node — used for honest
    *  "+N" frontier pills. Absent node = UNKNOWN, never zero. */
   degreeHints?: Map<string, { in: number; out: number }>
+  /** Transitive reach per visited focal (useLensImpact). Absent =
+   *  unknown or unsupported — nothing is shown, never a fake zero. */
+  impact?: Map<string, LensImpact>
+  impactStatus?: Map<string, 'loading' | 'done' | 'error'>
+  /** Exploration restored from a share link: expansion state to seed
+   *  the graph with when this focal first renders. */
+  graphSeed?: { nodeId: string; expandedGroups: string[]; expandedFrontier: string[] } | null
 }
 
 export function LineageLens({
@@ -143,6 +153,9 @@ export function LineageLens({
   onDrillFetch,
   onEnsureFetched,
   degreeHints,
+  impact,
+  impactStatus,
+  graphSeed,
 }: LineageLensProps) {
   const { entries, cursor } = history
   const nodeId = lensFocalOf(history)
@@ -396,23 +409,36 @@ export function LineageLens({
   const setLensViewMode = usePreferencesStore((s) => s.setLensViewMode)
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
   const [graphState, setGraphState] = useState<LensGraphState>(() => freshGraphState(null))
-  const graphCur = graphState.nodeId === nodeId ? graphState : freshGraphState(nodeId)
+  // A share-link seed pre-expands the restored focal's groups/frontier
+  // the first time it renders; any later re-center falls back to fresh.
+  const seededFresh = useCallback((id: string | null): LensGraphState => (
+    graphSeed && id != null && graphSeed.nodeId === id
+      ? {
+          nodeId: id,
+          selection: null,
+          expandedGroups: new Set(graphSeed.expandedGroups),
+          expandedFrontier: new Set(graphSeed.expandedFrontier),
+          bandPages: EMPTY_PAGE_MAP,
+        }
+      : freshGraphState(id)
+  ), [graphSeed])
+  const graphCur = graphState.nodeId === nodeId ? graphState : seededFresh(nodeId)
   const setGraphSelection = useCallback((selection: string | null) => {
-    setGraphState(prev => ({ ...(prev.nodeId === nodeId ? prev : freshGraphState(nodeId)), selection }))
-  }, [nodeId])
+    setGraphState(prev => ({ ...(prev.nodeId === nodeId ? prev : seededFresh(nodeId)), selection }))
+  }, [nodeId, seededFresh])
   const toggleGraphGroup = useCallback((key: string) => {
     setGraphState(prev => {
-      const base = prev.nodeId === nodeId ? prev : freshGraphState(nodeId)
+      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
       const next = new Set(base.expandedGroups)
       if (next.has(key)) next.delete(key)
       else next.add(key)
       return { ...base, expandedGroups: next }
     })
-  }, [nodeId])
+  }, [nodeId, seededFresh])
   const toggleGraphFrontier = useCallback((key: string, frontierNodeId: string) => {
     let wasExpanded = false
     setGraphState(prev => {
-      const base = prev.nodeId === nodeId ? prev : freshGraphState(nodeId)
+      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
       const next = new Set(base.expandedFrontier)
       wasExpanded = next.has(key)
       if (wasExpanded) next.delete(key)
@@ -422,15 +448,21 @@ export function LineageLens({
     // Expanding walks INTO unexplored lineage — fetch that node's true
     // 1-hop neighborhood (idempotent; no-op when already fetched).
     if (!wasExpanded) onEnsureFetched?.(frontierNodeId)
-  }, [nodeId, onEnsureFetched])
+  }, [nodeId, seededFresh, onEnsureFetched])
   const bumpBandPage = useCallback((bandKey: string) => {
     setGraphState(prev => {
-      const base = prev.nodeId === nodeId ? prev : freshGraphState(nodeId)
+      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
       const next = new Map(base.bandPages)
       next.set(bandKey, (next.get(bandKey) ?? 0) + 1)
       return { ...base, bandPages: next }
     })
-  }, [nodeId])
+  }, [nodeId, seededFresh])
+  // Restored frontier expansions need their nodes' lineage fetched —
+  // the same idempotent kick a live ⊕ click performs.
+  useEffect(() => {
+    if (!graphSeed || graphSeed.nodeId !== nodeId || !onEnsureFetched) return
+    for (const k of graphSeed.expandedFrontier) onEnsureFetched(k.replace(/^(in|out):/, ''))
+  }, [graphSeed, nodeId, onEnsureFetched])
 
   // The pure graph build — every semantic decision (grouping, rollups,
   // drills, frontier hops, caps, filter dimming, layout) lives in
@@ -493,6 +525,44 @@ export function LineageLens({
     }
   }, [graphCur.selection, lensViewMode, edgesByEndpoint, nodeMap, containmentEdgeTypes])
 
+  // ── Share this exploration — encode history + current expansions
+  // into a link a colleague can open to the exact same picture.
+  const [shareCopied, setShareCopied] = useState(false)
+  const copyShareLink = () => {
+    const token = encodeLensShare({
+      entries,
+      cursor,
+      mode: lensViewMode,
+      groups: [...graphCur.expandedGroups],
+      frontier: [...graphCur.expandedFrontier],
+    })
+    const url = new URL(window.location.href)
+    url.searchParams.set('lens', token)
+    void navigator.clipboard?.writeText(url.toString())
+    setShareCopied(true)
+    window.setTimeout(() => setShareCopied(false), 1600)
+  }
+
+  // ── Guided tour — offered ONCE, the first time the graph body opens
+  // (rich gestures shouldn't be discovered by accident); replayable
+  // from Help on any view afterwards.
+  const tourStart = useTourStore((s) => s.start)
+  const tourActive = useTourStore((s) => s.activeTourId)
+  const hasCompletedTour = useTourStore((s) => s.hasCompleted)
+  useEffect(() => {
+    if (!lensOpen || lensViewMode !== 'graph' || tourActive) return
+    if (hasCompletedTour('lineage-lens')) return
+    try {
+      if (localStorage.getItem('nx-lens-tour-offered')) return
+      localStorage.setItem('nx-lens-tour-offered', '1')
+    } catch {
+      return
+    }
+    // Let the dialog and graph mount so the spotlight targets exist.
+    const t = window.setTimeout(() => tourStart('lineage-lens'), 650)
+    return () => window.clearTimeout(t)
+  }, [lensOpen, lensViewMode, tourActive, hasCompletedTour, tourStart])
+
   if (!nodeId) return null
 
   const focalNode = nodeMap.get(nodeId)
@@ -500,6 +570,8 @@ export function LineageLens({
   const focalType = (focalNode?.data?.type as string) ?? 'entity'
   const focalColor = generateColorFromType(focalType)
   const focalFetch = fetchStatus?.get(nodeId)
+  const focalImpact = impact?.get(nodeId) ?? null
+  const focalImpactLoading = impactStatus?.get(nodeId) === 'loading'
   const focalChildTotal = Math.max(
     focalChildren.length,
     (focalNode?.data?.childCount as number | undefined) ?? 0,
@@ -649,9 +721,27 @@ export function LineageLens({
                   <LucideIcons.HelpCircle className="w-4 h-4" />
                 </button>
               </InfoTooltip>
+              {/* Share this exploration — the walked path and current
+                  expansions as a link (the URL param restores it). */}
+              <InfoTooltip side="bottom" content={shareCopied ? 'Link copied' : 'Copy a link to this exact exploration'}>
+                <button
+                  type="button"
+                  data-tour="lens-share"
+                  onClick={copyShareLink}
+                  aria-label="Copy exploration link"
+                  className={cn(
+                    'w-7 h-7 rounded-md flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                    shareCopied
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]',
+                  )}
+                >
+                  {shareCopied ? <LucideIcons.Check className="w-4 h-4" /> : <LucideIcons.Link2 className="w-4 h-4" />}
+                </button>
+              </InfoTooltip>
               {/* Graph | List body toggle — the graph is the premium
                   default; the columns stay one click away (persisted). */}
-              <div className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]">
+              <div data-tour="lens-toggle" className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]">
                 <button
                   type="button"
                   onClick={() => setLensViewMode('graph')}
@@ -896,12 +986,15 @@ export function LineageLens({
               three-column LIST, switched from the header toggle. ── */}
           {lensViewMode === 'graph' && focusGraph ? (
           <div className="flex-1 min-h-0 flex flex-col">
-            <div className="relative flex-1 min-h-0">
+            <div data-tour="lens-graph" className="relative flex-1 min-h-0">
               <FocusGraphView
                 graph={focusGraph}
                 focalId={nodeId}
                 focalStats={{ in: incomingRecords.length, out: outgoingRecords.length }}
                 focalFetch={focalFetch}
+                focalImpact={focalImpact}
+                focalImpactLoading={focalImpactLoading}
+                exportName={focalLabel}
                 selectedId={graphCur.selection}
                 reducedMotion={reducedMotion}
                 edgeTypeInfo={edgeTypeInfo}
@@ -1141,6 +1234,27 @@ export function LineageLens({
                       {outgoingRecords.length} out
                     </span>
                   </div>
+                  {/* Transitive reach — the question Focus mode is opened
+                      to answer. Truncated measurements show as floors
+                      ("47+"), absent capability shows nothing. */}
+                  {focalImpactLoading && (
+                    <p className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted/70">
+                      <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/60" />
+                      Measuring reach…
+                    </p>
+                  )}
+                  {focalImpact && (
+                    <p
+                      className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted tabular-nums"
+                      title={`Distinct entities connected within ${IMPACT_DEPTH} hops, at this entity's level${focalImpact.truncated ? ' — measurement capped, true totals may be higher' : ''}`}
+                    >
+                      <LucideIcons.Radar className="w-3 h-3 text-accent-lineage/70" />
+                      <span>
+                        Reaches {focalImpact.up.toLocaleString()}{focalImpact.truncated ? '+' : ''} upstream
+                        {' · '}{focalImpact.down.toLocaleString()}{focalImpact.truncated ? '+' : ''} downstream
+                      </span>
+                    </p>
+                  )}
                 </div>
                 <FlowRail color={focalColor} active={outgoingRecords.length > 0} />
               </div>

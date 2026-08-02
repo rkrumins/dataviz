@@ -1,4 +1,4 @@
-import { Sparkles, DatabaseZap, Compass, Boxes, Workflow, Import, Layers, GitPullRequestArrow } from 'lucide-react'
+import { Sparkles, DatabaseZap, Compass, Boxes, Workflow, Import, Layers, GitPullRequestArrow, Focus } from 'lucide-react'
 import type { TourDefinition } from './types'
 
 /**
@@ -355,6 +355,48 @@ TOURS.push(
     ],
   },
 )
+
+TOURS.push({
+  id: 'lineage-lens',
+  title: 'Explore lineage in Focus mode',
+  description: 'Walk an entity\'s lineage interactively — inspect, focus, expand hop by hop, and share what you find.',
+  icon: Focus,
+  estimate: '1 min',
+  // Targets live inside the open Lens dialog on a view canvas. Offered
+  // automatically the first time the graph body opens, and from Help
+  // while you're on a view.
+  contextual: true,
+  contextPathPrefix: '/views/',
+  steps: [
+    {
+      title: 'Focus mode',
+      body: 'Everything that touches **one entity** — sources on the left, consumers on the right, rolled up so busy entities stay readable. Leave any time with **Esc**.',
+    },
+    {
+      target: '[data-tour="lens-graph"]',
+      placement: 'top',
+      padding: -8,
+      title: 'Explore the lineage',
+      body: '**Click** a card to inspect it. **Double-click** to focus there. The **⊕** on a card\'s outer edge reveals its next hop; **×N** opens the connections a rolled-up flow summarizes.',
+    },
+    {
+      target: '[data-tour="lens-toggle"]',
+      placement: 'bottom',
+      title: 'Two ways to read it',
+      body: 'Prefer scanning to exploring? Switch to the **List** columns any time — the Lens remembers your choice.',
+    },
+    {
+      target: '[data-tour="lens-share"]',
+      placement: 'bottom',
+      title: 'Share what you found',
+      body: 'Copy a link that reopens this exact exploration — the walked path and everything you expanded — for a colleague.',
+    },
+    {
+      title: 'Retrace any time',
+      body: 'Every focus is recorded: **← / →** step back and forward, and the **Path** trail jumps anywhere you\'ve been. Press **?** in the header for the full gesture list.',
+    },
+  ],
+})
 
 export function getTour(id: string): TourDefinition | undefined {
   return TOURS.find((t) => t.id === id)

@@ -102,7 +102,9 @@ import {
   lensJump,
   type LensHistory,
 } from './lens/lensHistory'
+import { decodeLensShare } from './lens/shareCodec'
 import { useLensLineage } from '@/hooks/useLensLineage'
+import { useLensImpact } from '@/hooks/useLensImpact'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -3050,24 +3052,74 @@ export function ContextViewCanvas({
   // Browser-style back/forward: moving the cursor never drops entries;
   // focusing a NEW node truncates the forward side first (the same
   // invariant as the staged-changes undo/redo).
-  const [lensHistory, setLensHistory] = useState<LensHistory>(EMPTY_LENS_HISTORY)
-  const openLens = useCallback((nodeId: string) => setLensHistory({ entries: [nodeId], cursor: 0 }), [])
+  // Shared exploration links (?lens=…): decoded ONCE during the first
+  // render so the lens opens directly on the shared picture (no
+  // un-restored flash); the param strip and mode apply — external-
+  // system updates — happen in the mount effect below. Malformed
+  // tokens decode to null and the canvas opens normally.
+  const [initialLensShare] = useState(() => {
+    const raw = new URLSearchParams(window.location.search).get('lens')
+    return raw ? decodeLensShare(raw) : null
+  })
+  const [lensHistory, setLensHistory] = useState<LensHistory>(() => (
+    initialLensShare
+      ? { entries: initialLensShare.entries, cursor: initialLensShare.cursor }
+      : EMPTY_LENS_HISTORY
+  ))
+  // Expansion state restored from a share link, consumed by the lens
+  // when the restored focal first renders (fresh opens clear it).
+  const [lensShareSeed, setLensShareSeed] = useState<{
+    nodeId: string
+    expandedGroups: string[]
+    expandedFrontier: string[]
+  } | null>(() => (
+    initialLensShare
+      ? {
+          nodeId: initialLensShare.entries[initialLensShare.cursor],
+          expandedGroups: initialLensShare.groups,
+          expandedFrontier: initialLensShare.frontier,
+        }
+      : null
+  ))
+  const openLens = useCallback((nodeId: string) => {
+    setLensShareSeed(null)
+    setLensHistory({ entries: [nodeId], cursor: 0 })
+  }, [])
   const lensRecenter = useCallback((nodeId: string) => setLensHistory(h => lensPush(h, nodeId)), [])
   const lensBack = useCallback(() => setLensHistory(lensBackward), [])
   const lensForward = useCallback(() => setLensHistory(lensForwardStep), [])
   // Path-trail jump: move the cursor to hop i without dropping the trail.
   const lensJumpTo = useCallback((index: number) => setLensHistory(h => lensJump(h, index)), [])
-  const lensClose = useCallback(() => setLensHistory(EMPTY_LENS_HISTORY), [])
+  const lensClose = useCallback(() => {
+    setLensShareSeed(null)
+    setLensHistory(EMPTY_LENS_HISTORY)
+  }, [])
   // On-demand lineage for every visited focal node — the lens tells the
   // truth about the DATA SOURCE, not just what's hydrated on the canvas.
   // Lens-local (never written to the canvas store), cached per session.
   const lensLineage = useLensLineage(lensHistory.entries, provider, lineageEdgeTypes)
+  // Transitive reach of the current focal — one bounded trace per
+  // visited focal per session (lens-local, same invariants).
+  const lensImpact = useLensImpact(lensFocalOf(lensHistory), provider)
   useEffect(() => {
     focusLensRef.current = () => {
       const target = selectedNodeId ?? drawerNodeId
-      if (target) setLensHistory({ entries: [target], cursor: 0 })
+      if (target) {
+        setLensShareSeed(null)
+        setLensHistory({ entries: [target], cursor: 0 })
+      }
     }
   }, [selectedNodeId, drawerNodeId])
+  // Finish consuming the share link: strip the param (so refreshes and
+  // copied URLs stay clean) and apply the shared body mode.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (!params.has('lens')) return
+    params.delete('lens')
+    const qs = params.toString()
+    window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
+    if (initialLensShare) usePreferencesStore.getState().setLensViewMode(initialLensShare.mode)
+  }, [initialLensShare])
 
   // ── Anchor Rail — the selected node's off-screen partners docked as
   // proxy chips in their owning columns. The overlay computes the
@@ -3828,6 +3880,9 @@ export function ContextViewCanvas({
           onDrillFetch={lensLineage.fetchDrill}
           onEnsureFetched={lensLineage.ensureFetched}
           degreeHints={externalDegrees}
+          impact={lensImpact.impact}
+          impactStatus={lensImpact.status}
+          graphSeed={lensShareSeed}
           externalPreview={externalPreview && lensFocalOf(lensHistory) === externalPreview.nodeId ? externalPreview : null}
           onRecenter={lensRecenter}
           onBack={lensBack}

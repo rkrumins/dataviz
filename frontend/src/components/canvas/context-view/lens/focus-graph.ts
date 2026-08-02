@@ -42,7 +42,7 @@ export const CONTAINS_CAP = 8
 export const MAX_BAND = 4
 
 export const CARD_W = 240
-export const FOCAL_H = 96
+export const FOCAL_H = 120
 export const CARD_H = 64
 export const GROUP_HEADER_H = 40
 export const CONTAINS_H = 36
