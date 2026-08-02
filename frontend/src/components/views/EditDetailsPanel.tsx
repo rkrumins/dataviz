@@ -103,6 +103,10 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
   const VIS = buildVisibilityOptions({
     saved: view.visibility,
     canPublish,
+    // Without this the picker explains a stranger's lock in terms of the
+    // publish permission, which would not help them — they are not the
+    // creator or a workspace admin, so no permission reaches this view.
+    canChangeVisibility: view.access?.canChangeVisibility,
     canRequestPublish,
     restrictedSource: gate.restrictedSource,
     blockedBy,

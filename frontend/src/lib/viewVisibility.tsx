@@ -119,6 +119,18 @@ export function buildVisibilityOptions(args: {
      */
     saved?: ViewVisibility
     canPublish: boolean
+    /**
+     * Owns this view's sharing settings at all — creator or workspace
+     * admin. This is the FIRST gate, before any publish rule: without
+     * it no tier is reachable, and the reason has nothing to do with
+     * the publish permission.
+     *
+     * Defaults to true so surfaces that only know about publishing keep
+     * their existing behaviour. Pass the envelope's value wherever you
+     * have it, or the picker tells a stranger to go and request a
+     * permission that still would not let them touch the view.
+     */
+    canChangeVisibility?: boolean
     /** May ask a publish-permission holder to publish this view. */
     canRequestPublish?: boolean
     /** The block comes from the SOURCE being restricted rather than from
@@ -138,7 +150,8 @@ export function buildVisibilityOptions(args: {
     workspaceName?: string
 }): VisibilityOption[] {
     const {
-        saved, canPublish, canRequestPublish, restrictedSource, blockedBy,
+        saved, canPublish, canChangeVisibility = true, canRequestPublish,
+        restrictedSource, blockedBy,
         enterpriseAvailable = true, appName, workspaceName,
     } = args
     const tiers = enterpriseAvailable || saved === 'enterprise'
@@ -149,7 +162,17 @@ export function buildVisibilityOptions(args: {
         let disabledReason: string | undefined
         let requiresApproval = false
         let approvalHint: string | undefined
-        if (!canPublish) {
+        if (!canChangeVisibility) {
+            // The outer gate. Nothing below applies: the publish
+            // permission would not help this person, and neither would
+            // a request — asking to publish a view whose sharing you do
+            // not own is not a thing the backend offers.
+            disabled = id !== saved
+            disabledReason = disabled
+                ? 'Only the view’s creator or a workspace admin can '
+                  + 'change who sees it.'
+                : undefined
+        } else if (!canPublish) {
             if (id === 'enterprise' && saved !== 'enterprise') {
                 if (canRequestPublish) {
                     requiresApproval = true

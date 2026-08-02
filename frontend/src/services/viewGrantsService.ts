@@ -27,8 +27,11 @@ function url(viewId: string, suffix: string = ''): string {
 
 
 export const viewGrantsService = {
+    /** silent403: whoever cannot manage grants gets a locked panel that
+     *  says so. A global access-denied card on top of it is the same
+     *  refusal twice, and the vaguer one. */
     list(viewId: string): Promise<ViewGrantResponse[]> {
-        return authFetch<ViewGrantResponse[]>(url(viewId))
+        return authFetch<ViewGrantResponse[]>(url(viewId), { silent403: true })
     },
 
     create(viewId: string, req: ViewGrantCreateRequest): Promise<ViewGrantResponse> {

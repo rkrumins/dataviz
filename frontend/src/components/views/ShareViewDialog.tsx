@@ -167,16 +167,16 @@ export function ShareViewDialog({
 
     const visibilityOptions = useMemo(
         () => buildVisibilityOptions({
-            saved: visibility, canPublish, canRequestPublish, appName,
-            blockedBy, enterpriseAvailable,
+            saved: visibility, canPublish, canChangeVisibility, canRequestPublish,
+            appName, blockedBy, enterpriseAvailable,
             // Name the workspace on the tile too — the panel below
             // already does, and two different names for the same
             // audience in one dialog reads like two audiences.
             workspaceName: liveView?.workspaceName,
         }),
         [
-            visibility, canPublish, canRequestPublish, appName,
-            blockedBy, enterpriseAvailable, liveView?.workspaceName,
+            visibility, canPublish, canChangeVisibility, canRequestPublish,
+            appName, blockedBy, enterpriseAvailable, liveView?.workspaceName,
         ],
     )
     const selectedOption = visibilityOptions.find(o => o.id === visibility)
@@ -185,7 +185,13 @@ export function ShareViewDialog({
     // ── Initial load: fetch existing grants ─────────────────────────
 
     const fetchGrants = useCallback(async () => {
-        if (!isOpen || !canManageGrants) return
+        // Wait for POSITIVE knowledge, not the optimistic default. Hosts
+        // that pass no `access` prop (the Explorer) render once with
+        // `envelope === null`, where canManageGrants falls back to true —
+        // so this fired a guaranteed-403 before the envelope arrived and
+        // the user got a global "Access denied" card over a dialog that
+        // was already explaining the same thing, calmly, in its footer.
+        if (!isOpen || !envelope || !canManageGrants) return
         try {
             const data = await viewGrantsService.list(viewId)
             setGrants(data)
@@ -194,7 +200,7 @@ export function ShareViewDialog({
             // sharing; a red error box on top of it helped nobody.
             setGrants([])
         }
-    }, [isOpen, viewId, canManageGrants])
+    }, [isOpen, viewId, envelope, canManageGrants])
 
     useEffect(() => { void fetchGrants() }, [fetchGrants])
 
