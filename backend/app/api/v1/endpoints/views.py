@@ -22,7 +22,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.api.v1.feature_gate import ensure_view_mode_allowed
+from backend.app.api.v1.feature_gate import (
+    ensure_view_mode_allowed,
+    feature_disabled,
+    resolve_enterprise_view_policy,
+)
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
@@ -37,7 +41,7 @@ from backend.app.db.repositories import data_source_repo, grant_repo, view_repo
 from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
-from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services import view_access
 from backend.app.services.versioning.db import graphver_session
 from backend.app.services.versioning.models import BranchORM
@@ -346,6 +350,37 @@ async def list_popular_views(
     )
 
 
+@router.get("/audience", response_model=ViewAudience)
+async def get_workspace_audience(
+    workspaceId: str = Query(..., description="Workspace the view would live in"),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> ViewAudience:
+    """How many people each visibility tier would reach, for a workspace.
+
+    The single-view read already carries this, but the View wizard asks
+    the question before any view exists — and the sharer cannot count it
+    in the browser, because the workspace list they hold is scoped to
+    their own memberships and carries no member counts at all.
+
+    Requires membership of the workspace being asked about: the size of
+    a workspace you cannot see is not yours to know, and this would
+    otherwise enumerate the shape of the estate for anyone signed in.
+    """
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not has_permission(
+        claims, "workspace:view:read", workspace_id=workspaceId,
+    ):
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return ViewAudience(
+        workspaceMemberCount=await notification_repo.workspace_member_count(
+            session, workspaceId,
+        ),
+        explicitGrantCount=0,
+        platformUserCount=await notification_repo.platform_user_count(session),
+    )
+
+
 @router.get("/facets", response_model=ViewFacetsResponse)
 async def get_view_facets(
     user: User = Depends(get_current_user),
@@ -587,22 +622,25 @@ async def create_view(
                 status_code=403,
                 detail="Missing permission: workspace:view:create",
             )
-        if req.visibility == "enterprise" and not view_access.can_publish_in_workspace(
-            claims, req.workspace_id,
-        ):
-            # A workspace set to 'open' has decided publishing isn't
-            # admin-only there; anyone who may create a view in it may
-            # publish one — unless the source itself is restricted, in
-            # which case the exposure is the point of the gate.
-            open_ws = await _publish_policy(session, req.workspace_id) == "open"
-            restricted = await _source_is_restricted(
-                session, req.workspace_id, req.data_source_id,
-            )
-            if not open_ws or restricted:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Missing permission: workspace:view:publish",
+        if req.visibility == "enterprise":
+            # The platform ceiling binds everyone, including the people who
+            # hold the publish permission — a limit only non-admins obey is
+            # not a limit. Below it, an 'open' workspace lets any creator
+            # publish, unless the source itself is restricted.
+            platform = await resolve_enterprise_view_policy(session)
+            if platform == "off":
+                raise feature_disabled("enterpriseViewPolicy")
+            has_perm = view_access.can_publish_in_workspace(claims, req.workspace_id)
+            if not has_perm:
+                open_ws = await _publish_policy(session, req.workspace_id) == "open"
+                restricted = await _source_is_restricted(
+                    session, req.workspace_id, req.data_source_id,
                 )
+                if platform == "request" or not open_ws or restricted:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Missing permission: workspace:view:publish",
+                    )
 
     # Admin → Features → View modes. The admin picks which layouts this deployment offers; the
     # wizard hides the rest. Enforced here too, because a hidden button is not a rule.
@@ -678,6 +716,7 @@ async def get_view(
         explicitGrantCount=len(await grant_repo.list_grants_for_resource(
             session, resource_type="view", resource_id=view_id,
         )),
+        platformUserCount=await notification_repo.platform_user_count(session),
     )
     view.access = ViewAccessInfo(**await view_access.compute_access_envelope(
         session, ctx, view_orm,
@@ -685,6 +724,7 @@ async def get_view(
         source_restricted=await _source_is_restricted(
             session, view_orm.workspace_id, view_orm.data_source_id,
         ),
+        platform_policy=await resolve_enterprise_view_policy(session),
     ))
     return view
 
@@ -904,17 +944,34 @@ async def update_view_visibility(
                 status_code=403,
                 detail="Only the creator or a workspace admin can change visibility",
             )
-        crosses_enterprise = (
-            view_orm.visibility != visibility
-            and "enterprise" in (view_orm.visibility, visibility)
-        )
-        if crosses_enterprise:
+        publishing = view_orm.visibility != "enterprise" and visibility == "enterprise"
+        unpublishing = view_orm.visibility == "enterprise" and visibility != "enterprise"
+        if publishing:
+            platform = await resolve_enterprise_view_policy(session)
+            if platform == "off":
+                raise feature_disabled("enterpriseViewPolicy")
             policy = await _publish_policy(session, view_orm.workspace_id)
             restricted = await _source_is_restricted(
                 session, view_orm.workspace_id, view_orm.data_source_id,
             )
             if not view_access.can_publish_under_policy(
                 ctx, view_orm, policy=policy, source_restricted=restricted,
+                platform_policy=platform,
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Missing permission: workspace:view:publish",
+                )
+        elif unpublishing:
+            # Same standing as publishing, minus the platform ceiling —
+            # otherwise a deployment switching to 'off' would strand every
+            # view it had already published, with nobody able to close them.
+            if not view_access.can_unpublish(
+                ctx, view_orm,
+                policy=await _publish_policy(session, view_orm.workspace_id),
+                source_restricted=await _source_is_restricted(
+                    session, view_orm.workspace_id, view_orm.data_source_id,
+                ),
             ):
                 raise HTTPException(
                     status_code=403,
@@ -1066,6 +1123,11 @@ async def approve_publication(
         )
     if not view_orm.publish_requested_at:
         raise HTTPException(status_code=409, detail="No pending publication request")
+
+    if await resolve_enterprise_view_policy(session) == "off":
+        # The queue can outlive the setting: a request filed while the
+        # tier was available must not become a way around its withdrawal.
+        raise feature_disabled("enterpriseViewPolicy")
 
     previous = view_orm.visibility
     requester = view_orm.publish_requested_by

@@ -27,6 +27,8 @@ import { useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { useBrand } from '@/store/branding'
 import { buildVisibilityOptions } from '@/lib/viewVisibility'
+import { VisibilityImpact } from '@/components/views/VisibilityImpact'
+import { useViewAudience } from '@/hooks/useViewAudience'
 import { usePublishGate } from '@/hooks/usePublishGate'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useSchemaStore } from '@/store/schema'
@@ -75,6 +77,22 @@ const ICON_OPTIONS = [
 // Options come from the shared module (lib/viewVisibility) — built in
 // the component so the enterprise tile honors the publish permission.
 
+/** Why this needs reviewing, in the words of whoever is actually
+ *  asking. Sending someone to their workspace admin when the
+ *  ORGANISATION set the rule sends them to a person who cannot help. */
+const PUBLISH_REVIEW_REASON: Record<'platform' | 'workspace' | 'source', string> = {
+    platform:
+        'Your organisation reviews everything published to everyone, so a '
+        + 'publisher approves this one.',
+    workspace:
+        'Publishing shows a view to everyone signed in, so a workspace admin '
+        + 'approves it.',
+    source:
+        'This data source is restricted \u2014 publishing a view over it gives '
+        + 'people read-only access to the whole source, so a workspace admin '
+        + 'approves it.',
+}
+
 export function BasicsStep({ formData, updateFormData, mode, scopeContext, onChangeScope, blankNaming, savedVisibility }: BasicsStepProps) {
     const [showSuggestions, setShowSuggestions] = useState(false)
     const [tagInput, setTagInput] = useState('')
@@ -94,25 +112,45 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
     // any member publish directly, and a restricted source pulls the gate
     // back down even there. Asking only for the permission told most of the
     // platform their view "will be requested" when it would just publish.
-    const { canPublish, restrictedSource } = usePublishGate(
+    const gate = usePublishGate(
         scopeWorkspaceId, formData.dataSourceId ?? scopeContext?.dataSourceId,
     )
+    const { canPublish, restrictedSource, blockedBy, enterpriseAvailable } = gate
     const visibilityOptions = buildVisibilityOptions({
         // Whoever can create a view here will be its creator, and a
         // creator may always ASK for publication — so the Enterprise
         // tile is a route at creation time too, never a dead end. The
         // request is filed against the view once it exists (see the
         // wizard's submit).
-        canRequestPublish: !canPublish,
+        canRequestPublish: gate.canRequestPublish,
         // Nothing is saved yet while creating, so no tier is "current" —
         // passing the draft selection here is what locked the user out of
         // going back to Private after clicking Enterprise.
         saved: savedVisibility,
         canPublish,
         restrictedSource,
+        blockedBy,
+        enterpriseAvailable,
         appName,
         workspaceName: displayWorkspaceName,
     })
+    // Counts for the impact panel. No view exists yet, so this cannot
+    // ride on a view read — and it cannot be computed in the browser
+    // either: the workspace list held here is scoped to the caller's own
+    // memberships and carries no member counts.
+    const audience = useViewAudience(scopeWorkspaceId)
+    const selectedOption = visibilityOptions.find(o => o.id === formData.visibility)
+
+    // A saved draft can hold a tier the deployment has since withdrawn.
+    // Left alone, the picker would show nothing selected while the form
+    // still carried Enterprise, and the create would fail at the server
+    // with no tile to point at. Fall back to the next-widest tier that
+    // still exists.
+    useEffect(() => {
+        if (visibilityOptions.length && !selectedOption) {
+            updateFormData({ visibility: visibilityOptions[visibilityOptions.length - 1].id })
+        }
+    }, [visibilityOptions, selectedOption, updateFormData])
 
     // Context-catered suggestions: scope (workspace / data source / ontology)
     // + root entity types from the schema store — hydrated in BOTH journeys
@@ -544,6 +582,20 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                         </button>
                     ))}
                 </div>
+
+                {/* The tiles say WHICH tier; this says what picking it does.
+                    Three words and a half-sentence were never enough to make
+                    the choice feel safe, which is why people default to
+                    Private and their work never leaves their screen. */}
+                <VisibilityImpact
+                    selected={formData.visibility}
+                    saved={savedVisibility}
+                    counts={audience}
+                    workspaceName={displayWorkspaceName}
+                    requiresApproval={selectedOption?.requiresApproval}
+                    approvalHint={selectedOption?.approvalHint}
+                />
+
                 {visibilityOptions.some(o => o.id === formData.visibility && o.requiresApproval) && (
                     <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.06] p-4 space-y-3">
                         <div className="flex items-start gap-2.5">
@@ -552,11 +604,11 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                             </span>
                             <div className="min-w-0">
                                 <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-                                    We'll ask an admin to publish this
+                                    We&rsquo;ll ask an admin to publish this
                                 </p>
                                 <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
-                                    Publishing shows a view to everyone signed in, so a workspace
-                                    admin approves it. Here's what happens when you finish:
+                                    {PUBLISH_REVIEW_REASON[blockedBy ?? 'workspace']}{' '}
+                                    Here&rsquo;s what happens when you finish:
                                 </p>
                             </div>
                         </div>
@@ -564,8 +616,8 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                         <ol className="space-y-1.5 pl-1">
                             {[
                                 'Your view is created and visible to your workspace right away — you can use it immediately.',
-                                'A request to publish goes to your workspace admins.',
-                                "When they answer, it's recorded on the view's activity. If approved, the view becomes visible to everyone.",
+                                'A request to publish goes to the people who can approve it.',
+                                "When they answer, it's recorded on the view's activity and you're notified. If approved, the view becomes visible to everyone.",
                             ].map((line, i) => (
                                 <li key={i} className="flex gap-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
                                     <span className="shrink-0 w-4 h-4 mt-px rounded-full bg-amber-500/20 text-amber-700 dark:text-amber-300 text-[10px] font-bold flex items-center justify-center">

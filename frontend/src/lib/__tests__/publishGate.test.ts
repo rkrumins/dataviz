@@ -76,3 +76,80 @@ describe('an unknown policy', () => {
         expect(gate.canPublish).toBe(true)
     })
 })
+
+describe('the platform ceiling', () => {
+    it('overrides an open workspace when the organisation requires approval', () => {
+        const gate = resolvePublishGate({
+            hasPublishPermission: false,
+            publishPolicy: 'open',
+            platformPolicy: 'request',
+        })
+        expect(gate.canPublish).toBe(false)
+        expect(gate.canRequestPublish).toBe(true)
+        // Sending them to a workspace admin would send them to someone
+        // who cannot lift an organisation-wide rule.
+        expect(gate.blockedBy).toBe('platform')
+    })
+
+    it('binds the publish permission too — a ceiling only non-admins obey is not one', () => {
+        const gate = resolvePublishGate({
+            hasPublishPermission: true,
+            publishPolicy: 'open',
+            platformPolicy: 'off',
+        })
+        expect(gate.canPublish).toBe(false)
+        expect(gate.enterpriseAvailable).toBe(false)
+    })
+
+    it('offers no request when the tier is withdrawn, because nobody could answer it', () => {
+        const gate = resolvePublishGate({
+            hasPublishPermission: false,
+            publishPolicy: 'open',
+            platformPolicy: 'off',
+        })
+        expect(gate.canRequestPublish).toBe(false)
+    })
+
+    it('still lets a publisher through when the organisation only asks for review', () => {
+        const gate = resolvePublishGate({
+            hasPublishPermission: true,
+            publishPolicy: 'request',
+            platformPolicy: 'request',
+        })
+        expect(gate.canPublish).toBe(true)
+    })
+
+    it('treats an unloaded value as the default, not as a lock', () => {
+        const gate = resolvePublishGate({
+            hasPublishPermission: false,
+            publishPolicy: 'open',
+            platformPolicy: undefined,
+        })
+        expect(gate.canPublish).toBe(true)
+        expect(gate.enterpriseAvailable).toBe(true)
+    })
+})
+
+describe('the reason for the block', () => {
+    it('names the source when the workspace is open but the source is not', () => {
+        expect(resolvePublishGate({
+            hasPublishPermission: false,
+            publishPolicy: 'open',
+            sourceRestricted: true,
+        }).blockedBy).toBe('source')
+    })
+
+    it('names the workspace when its own policy is the only thing asking', () => {
+        expect(resolvePublishGate({
+            hasPublishPermission: false,
+            publishPolicy: 'request',
+        }).blockedBy).toBe('workspace')
+    })
+
+    it('is null when nothing is holding it back', () => {
+        expect(resolvePublishGate({
+            hasPublishPermission: false,
+            publishPolicy: 'open',
+        }).blockedBy).toBeNull()
+    })
+})

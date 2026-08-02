@@ -26,6 +26,7 @@ from backend.app.db.models import (
     NotificationORM,
     RoleBindingORM,
     RolePermissionORM,
+    UserORM,
 )
 
 logger = logging.getLogger(__name__)
@@ -182,6 +183,25 @@ async def workspace_member_count(
         )).all()
         users.update(m[0] for m in members)
     return len(users)
+
+
+async def platform_user_count(session: AsyncSession) -> int:
+    """How many people "anyone signed in" actually is.
+
+    Publishing is the one visibility choice whose audience the sharer
+    cannot picture. "Everyone in Finance" is twelve people they can
+    name; "anyone signed in" is a phrase. Attaching the number is what
+    turns publishing from a shrug into a decision.
+
+    Counts ACTIVE accounts only — pending invitees and suspended
+    accounts cannot open anything, so including them would overstate
+    the reach and make the number untrustworthy the first time someone
+    checked it against the admin user list.
+    """
+    result = await session.execute(
+        select(func.count(UserORM.id)).where(UserORM.status == "active")
+    )
+    return int(result.scalar_one() or 0)
 
 
 async def users_who_can(

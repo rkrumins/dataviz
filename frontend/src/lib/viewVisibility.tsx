@@ -74,6 +74,30 @@ export interface VisibilityOption {
     approvalHint?: string
 }
 
+/** Which control is holding publication back. The server resolves this
+ *  (`publishBlockedBy` on the access envelope) so the UI never has to
+ *  guess which of the three it is. */
+export type PublishBlockedBy = 'platform' | 'workspace' | 'source' | null
+
+/**
+ * Why approval is needed, in the words of whoever is actually asking.
+ *
+ * "Ask a workspace admin" is wrong — actively misleading — when the
+ * organisation set the rule, because the workspace admin cannot help
+ * and the person is sent to the wrong door. And it reads as a bug when
+ * the workspace is open and only THIS source is restricted.
+ */
+const APPROVAL_HINT: Record<'platform' | 'workspace' | 'source', string> = {
+    platform:
+        'Needs approval — your organisation reviews everything published ' +
+        'to everyone',
+    workspace:
+        'Needs approval — ask a workspace admin to publish',
+    source:
+        'Needs approval — this data source is restricted, so a workspace ' +
+        'admin publishes views over it',
+}
+
 /**
  * Options for a visibility picker, honoring the publish rule: any
  * transition to OR from `enterprise` needs the publish permission, so
@@ -101,14 +125,26 @@ export function buildVisibilityOptions(args: {
      *  the workspace's policy — worth saying, because in an open
      *  workspace the same person publishes other views without asking. */
     restrictedSource?: boolean
+    /** Which control is holding publication back. Three greyed-out tiles
+     *  that look identical mean three different things, and only one of
+     *  them can be resolved by asking a workspace admin. */
+    blockedBy?: PublishBlockedBy
+    /** The deployment offers the enterprise tier at all. False DROPS the
+     *  option rather than disabling it — a choice nobody here can ever
+     *  make is noise, and a permanently grey tile invites people to keep
+     *  asking why. */
+    enterpriseAvailable?: boolean
     appName?: string
     workspaceName?: string
 }): VisibilityOption[] {
     const {
-        saved, canPublish, canRequestPublish, restrictedSource,
-        appName, workspaceName,
+        saved, canPublish, canRequestPublish, restrictedSource, blockedBy,
+        enterpriseAvailable = true, appName, workspaceName,
     } = args
-    return VISIBILITY_ORDER.map(id => {
+    const tiers = enterpriseAvailable || saved === 'enterprise'
+        ? VISIBILITY_ORDER
+        : VISIBILITY_ORDER.filter(id => id !== 'enterprise')
+    return tiers.map(id => {
         let disabled = false
         let disabledReason: string | undefined
         let requiresApproval = false
@@ -117,15 +153,16 @@ export function buildVisibilityOptions(args: {
             if (id === 'enterprise' && saved !== 'enterprise') {
                 if (canRequestPublish) {
                     requiresApproval = true
-                    approvalHint = restrictedSource
-                        ? 'Needs approval — this data source is restricted, '
-                            + 'so a workspace admin publishes views over it'
-                        : 'Needs approval — ask a workspace admin to publish'
+                    approvalHint = APPROVAL_HINT[
+                        blockedBy ?? (restrictedSource ? 'source' : 'workspace')
+                    ]
                 } else {
                     disabled = true
-                    disabledReason =
-                        'Publishing to everyone needs the "Publish views" ' +
-                        'permission — ask a workspace admin.'
+                    disabledReason = blockedBy === 'platform'
+                        ? 'Your organisation does not allow views to be ' +
+                          'published to everyone on this deployment.'
+                        : 'Publishing to everyone needs the "Publish views" ' +
+                          'permission — ask a workspace admin.'
                 }
             } else if (saved === 'enterprise' && id !== 'enterprise') {
                 disabled = true
@@ -145,6 +182,74 @@ export function buildVisibilityOptions(args: {
             approvalHint,
         }
     })
+}
+
+/**
+ * What a tier actually grants, in the words a person would use.
+ *
+ * The tier NAMES are the least informative thing about them. "Enterprise"
+ * does not tell you that a stranger gets read-only access to the whole
+ * data source behind the view, and "Private" does not tell you that
+ * workspace admins can still open it. Every surface that offers this
+ * choice renders from here, so the answer to "what am I agreeing to?"
+ * is the same everywhere it is asked.
+ *
+ * `cannot` is not padding. The fear that stops people sharing is that
+ * publishing means losing control of the thing — saying plainly that
+ * nobody else can change it, delete it, or reach the rest of the
+ * workspace is what makes the choice safe to make.
+ */
+export interface VisibilityGrants {
+    /** What the audience can do once they have it. */
+    can: readonly string[]
+    /** What they still cannot do — the reassurance half. */
+    cannot: readonly string[]
+}
+
+export function visibilityGrants(
+    visibility: ViewVisibility,
+    opts?: { appName?: string; workspaceName?: string },
+): VisibilityGrants {
+    const workspace = opts?.workspaceName ?? 'the workspace'
+    switch (visibility) {
+        case 'private':
+            return {
+                can: [
+                    'You can open, edit and delete it',
+                    `Workspace admins in ${workspace} can open it`,
+                    'Anyone you share it with directly can open it',
+                ],
+                cannot: [
+                    'It stays out of Explorer, search and trending for everyone else',
+                    'Nobody else in the workspace can find it',
+                ],
+            }
+        case 'workspace':
+            return {
+                can: [
+                    `Everyone in ${workspace} can open it`,
+                    'They can explore, expand, trace lineage and search inside it',
+                    'It appears in their Explorer and search results',
+                ],
+                cannot: [
+                    'People outside the workspace cannot open it',
+                    'Only you and workspace admins can change or delete it',
+                ],
+            }
+        case 'enterprise':
+            return {
+                can: [
+                    `Anyone signed in to ${opts?.appName ?? 'the platform'} can open it`,
+                    'They can explore, expand, trace lineage and search inside it',
+                    'They get read-only access to the data source behind it',
+                ],
+                cannot: [
+                    'They cannot change this view, or edit any data',
+                    'They cannot see other views, or anything else in the workspace',
+                    'Only you and workspace admins can unpublish it',
+                ],
+            }
+    }
 }
 
 export interface VisibilityAccent {

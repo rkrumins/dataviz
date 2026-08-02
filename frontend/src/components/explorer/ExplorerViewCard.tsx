@@ -21,7 +21,7 @@ import {
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
-import { VISIBILITY_ICON, visibilityLabel } from '@/lib/viewVisibility'
+import { VISIBILITY_ICON, visibilityDescription, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
@@ -55,10 +55,13 @@ function tagColor(tag: string) {
 
 // Data from the shared module — see lib/viewVisibility (eight surfaces
 // used to carry drifting copies of this map).
-const VISIBILITY_META: Record<string, { icon: React.ElementType; label: string }> = {
-  enterprise: { icon: VISIBILITY_ICON.enterprise, label: visibilityLabel('enterprise') },
-  workspace: { icon: VISIBILITY_ICON.workspace, label: visibilityLabel('workspace') },
-  private: { icon: VISIBILITY_ICON.private, label: visibilityLabel('private') },
+// The tier NAME tells nobody who can actually open the view — "Enterprise"
+// is a label, not an answer. The shared description is the answer, and it
+// costs a title attribute.
+const VISIBILITY_META: Record<string, { icon: React.ElementType; label: string; hint: string }> = {
+  enterprise: { icon: VISIBILITY_ICON.enterprise, label: visibilityLabel('enterprise'), hint: visibilityDescription('enterprise') },
+  workspace: { icon: VISIBILITY_ICON.workspace, label: visibilityLabel('workspace'), hint: visibilityDescription('workspace') },
+  private: { icon: VISIBILITY_ICON.private, label: visibilityLabel('private'), hint: visibilityDescription('private') },
 }
 
 const HEALTH_INDICATOR: Record<string, { color: string; tooltip: string }> = {
@@ -393,7 +396,10 @@ export function ExplorerViewCard({
             providerType={providerInfo?.providerType}
             hideWorkspace={hideWorkspaceInScope}
           />
-          <span className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium">
+          <span
+            title={vis.hint}
+            className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium"
+          >
             <VisIcon className="h-2.5 w-2.5" />
             {vis.label}
           </span>

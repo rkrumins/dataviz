@@ -57,6 +57,20 @@ def validate_and_merge_values(
             if not isinstance(value, bool):
                 raise ValidationError(f"{key} must be a boolean", field=key)
             result[key] = value
+        elif ftype == "string":
+            # Single-select: exactly one of the declared options. Some flags
+            # are not switches and not allow-lists — they pick one posture
+            # from a ladder ("workspaces decide" / "always require approval"
+            # / "not available"). Without this branch the value fell to the
+            # permissive `else` below and ANY string saved, so a typo became
+            # a policy the resolver would silently fail open on.
+            options = defn.get("options") or []
+            allowed = {opt["id"] for opt in options}
+            if not isinstance(value, str) or (allowed and value not in allowed):
+                raise ValidationError(
+                    f"{key} must be one of: {', '.join(sorted(allowed))}", field=key,
+                )
+            result[key] = value
         else:
             result[key] = value
     return result

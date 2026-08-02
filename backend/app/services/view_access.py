@@ -26,7 +26,10 @@ Mutations:
   * restore       → ``workspace:admin``
   * visibility    → creator ∨ ``workspace:admin`` (base rule); any
                     transition to/from ``enterprise`` additionally
-                    requires ``workspace:view:publish`` (``can_publish``)
+                    passes the publish ladder — see
+                    ``resolve_publish_gate``: platform ceiling, then
+                    workspace policy, then source restriction, with
+                    ``workspace:view:publish`` satisfying the last two
   * manage grants → creator ∨ ``workspace:admin``
 
 Implementation notes:
@@ -259,37 +262,159 @@ def can_publish_in_workspace(
     )
 
 
+#: What the deployment allows at most. ``workspaces`` = each workspace
+#: decides for itself (the default); ``request`` = every publish goes
+#: through an approval, whatever a workspace has set; ``off`` = the tier
+#: is withdrawn from new work entirely.
+PlatformPolicy = str
+PLATFORM_POLICIES: tuple[str, ...] = ("workspaces", "request", "off")
+
+#: Why publishing is not available to this caller right now. Ordered
+#: most-general to most-specific — the UI says something different for
+#: each, because "an admin has to approve this" and "your organisation
+#: does not allow this at all" are not the same sentence.
+BlockedBy = Optional[str]  # 'platform' | 'workspace' | 'source' | None
+
+
+@dataclass(frozen=True)
+class PublishGate:
+    """The whole publish decision, with its reason.
+
+    One resolver, because this question is asked in four places (the
+    visibility endpoint, the create path, the approve path, and the
+    capability envelope the UI renders from) and every place that
+    answers it separately is a place that can answer it differently.
+    Its exact twin lives at ``frontend/src/lib/publishGate.ts`` — a UI
+    that resolves this differently tells people the wrong thing about
+    the button they are looking at.
+    """
+
+    #: Choosing enterprise publishes the view now.
+    can_publish: bool
+    #: Choosing enterprise files a request for someone else to answer.
+    can_request: bool
+    #: What is holding publication back, for the sentence shown to the user.
+    blocked_by: BlockedBy
+    #: The tier exists on this deployment at all. False hides it rather
+    #: than disabling it — an option nobody here can ever pick is noise.
+    enterprise_available: bool
+
+
+def resolve_publish_gate(
+    ctx: ViewerContext,
+    view: ViewORM,
+    *,
+    policy: Optional[str],
+    source_restricted: bool = False,
+    platform_policy: Optional[str] = None,
+) -> PublishGate:
+    """Resolve publishing for one caller on one view.
+
+    The ladder, widest constraint first:
+
+    1. **Platform ceiling** (``enterpriseViewPolicy``). ``off`` withdraws
+       the tier from everyone including admins — a deployment that has
+       decided lineage never leaves its workspace should not have a
+       button that does it. ``request`` forces an approval even in
+       workspaces that opened publishing to their members; it is the
+       control a workspace admin cannot opt out of.
+    2. **Workspace policy**. ``open`` (the default) means anyone who may
+       change the view's visibility may take it platform-wide, because
+       the graph holds metadata and the product exists to share it.
+    3. **Source restriction**. Publishing exposes read-only access to the
+       whole source, so the few sources worth a human in the loop carry
+       the requirement themselves — the HR warehouse is gated without
+       gating the workspace that contains it.
+    4. **The permission**. ``workspace:view:publish`` satisfies 2 and 3
+       outright: holding it IS the approval. It does not satisfy 1,
+       because a ceiling only a non-admin obeys is not a ceiling.
+
+    Unpublishing is deliberately NOT resolved here — see
+    ``can_unpublish``. Closing something down must always be possible.
+    """
+    platform = platform_policy or "workspaces"
+    owns_sharing = can_change_visibility(ctx, view)
+
+    if platform == "off":
+        # Nothing to route around: there is no one on this deployment who
+        # could approve it, so offering the ask would be a dead end.
+        return PublishGate(
+            can_publish=False, can_request=False,
+            blocked_by="platform", enterprise_available=False,
+        )
+
+    holds_permission = can_publish(ctx, view)
+    if holds_permission:
+        return PublishGate(
+            can_publish=True, can_request=False,
+            blocked_by=None, enterprise_available=True,
+        )
+
+    if platform == "request":
+        blocked: BlockedBy = "platform"
+    elif source_restricted:
+        blocked = "source"
+    elif (policy or "open") != "open":
+        blocked = "workspace"
+    else:
+        return PublishGate(
+            can_publish=owns_sharing, can_request=False,
+            blocked_by=None if owns_sharing else "workspace",
+            enterprise_available=True,
+        )
+
+    # Blocked, but not stuck: whoever owns the view's sharing settings
+    # may ask the people who hold the permission.
+    return PublishGate(
+        can_publish=False, can_request=owns_sharing,
+        blocked_by=blocked, enterprise_available=True,
+    )
+
+
 def can_publish_under_policy(
     ctx: ViewerContext,
     view: ViewORM,
     *,
     policy: Optional[str],
     source_restricted: bool = False,
+    platform_policy: Optional[str] = None,
 ) -> bool:
-    """May this caller publish, given the workspace policy and the
-    sensitivity of the data source behind the view?
+    """May this caller publish right now? Thin read of
+    :func:`resolve_publish_gate` for call sites that only need the bit."""
+    return resolve_publish_gate(
+        ctx, view, policy=policy, source_restricted=source_restricted,
+        platform_policy=platform_policy,
+    ).can_publish
 
-    An ``'open'`` workspace has decided publishing is not an admin-only
-    act there: anyone who may change the view's visibility at all (its
-    creator, or a workspace admin) may take it platform-wide. That is
-    the default, because the graph holds metadata and the product
-    exists to share it.
 
-    A **restricted source** overrides that. Publishing exposes read-only
-    access to the whole source, so the few sources worth a human in the
-    loop carry the requirement themselves — the HR warehouse is gated
-    without gating the workspace that happens to contain it.
+def can_unpublish(
+    ctx: ViewerContext,
+    view: ViewORM,
+    *,
+    policy: Optional[str] = None,
+    source_restricted: bool = False,
+) -> bool:
+    """May this caller take a published view back out of circulation?
 
-    The permission always wins: holding ``workspace:view:publish`` is
-    sufficient everywhere, restricted or not.
+    Whoever could have published it can un-publish it: the same standing
+    as :func:`resolve_publish_gate`, **minus the platform ceiling**.
+
+    The two halves of that are deliberate. Keeping the workspace policy
+    and the source restriction means the rule stays symmetric — a
+    workspace that made publishing an admin act made retracting one an
+    admin act too, because a view others have come to depend on is not
+    something any one member should be able to pull out from under them.
+
+    Dropping the ceiling is the asymmetry that matters. That setting
+    exists to reduce exposure; applying it in reverse would mean a
+    deployment switching to ``off`` strands every view it had already
+    published, with nobody able to close them — the exact opposite of
+    what an administrator reaching for it wants.
     """
-    if can_publish(ctx, view):
-        return True
-    if source_restricted:
-        return False
-    if (policy or "open") != "open":
-        return False
-    return can_change_visibility(ctx, view)
+    return resolve_publish_gate(
+        ctx, view, policy=policy, source_restricted=source_restricted,
+        platform_policy="workspaces",
+    ).can_publish
 
 
 def can_request_publish(ctx: ViewerContext, view: ViewORM) -> bool:
@@ -337,6 +462,7 @@ async def compute_access_envelope(
     *,
     workspace_policy: Optional[str] = None,
     source_restricted: bool = False,
+    platform_policy: Optional[str] = None,
 ) -> dict:
     """The caller's capability envelope for one view (camelCase keys,
     ready for ``ViewAccessInfo``). Call only after ``can_read_view``
@@ -364,17 +490,34 @@ async def compute_access_envelope(
         via = "workspace"
     else:
         via = "enterprise"
-    may_publish = can_publish_under_policy(
+    gate = resolve_publish_gate(
         ctx, view, policy=workspace_policy, source_restricted=source_restricted,
+        platform_policy=platform_policy,
     )
+    # A published view can always be taken back out of circulation, even
+    # where the deployment has since withdrawn the tier — otherwise
+    # switching the platform to 'off' strands everything already out
+    # there with nobody able to close it.
+    already_published = view.visibility == "enterprise"
     return {
         "canEdit": await can_edit_view(session, ctx, view),
         "canManageGrants": can_manage_grants(ctx, view),
         "canChangeVisibility": can_change_visibility(ctx, view),
-        "canPublish": may_publish,
+        "canPublish": gate.can_publish or (
+            already_published
+            and can_unpublish(
+                ctx, view, policy=workspace_policy,
+                source_restricted=source_restricted,
+            )
+        ),
         # Can't publish, but may ask someone who can — this is what turns
         # the greyed-out Enterprise tile into a route rather than a wall.
-        "canRequestPublish": (not may_publish) and can_request_publish(ctx, view),
+        "canRequestPublish": gate.can_request,
+        # WHY it's blocked, so the UI can say whether the organisation,
+        # the workspace, or the data source is the one asking. Without
+        # this the same grey tile means three different things.
+        "publishBlockedBy": gate.blocked_by,
+        "enterpriseAvailable": gate.enterprise_available or already_published,
         "canAnswerPublishRequest": can_answer_publish_request(ctx, view),
         "accessVia": via,
         "dataAccess": (

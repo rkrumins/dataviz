@@ -34,6 +34,14 @@ export interface ViewAccess {
     canRequestPublish?: boolean
     /** Holds the publish permission, so may approve/deny a pending request. */
     canAnswerPublishRequest?: boolean
+    /** WHICH control is holding publication back: the deployment's
+     *  ceiling, the workspace's policy, or a restricted data source.
+     *  Three identical grey tiles mean three different things, and only
+     *  one of them is resolved by asking a workspace admin. */
+    publishBlockedBy?: 'platform' | 'workspace' | 'source' | null
+    /** The enterprise tier exists on this deployment at all. False HIDES
+     *  the option rather than disabling it. */
+    enterpriseAvailable?: boolean
     /** How this caller reaches the view. */
     accessVia: 'owner' | 'admin' | 'grant' | 'workspace' | 'enterprise'
     /** What the DATA plane accepts: 'full' = graph mutations allowed;
@@ -65,6 +73,11 @@ export interface ViewPublishRequest {
 export interface ViewAudience {
     workspaceMemberCount: number
     explicitGrantCount: number
+    /** Active accounts on the whole deployment — what "anyone signed in"
+     *  actually comes to. Absent on backends that predate the impact
+     *  panel, which is why the UI renders a phrase when it is missing
+     *  rather than the number zero. */
+    platformUserCount?: number
 }
 
 /**
@@ -445,6 +458,23 @@ export async function getView(
     return apiFetch<View>(
         `/api/v1/views/${viewId}${qs}`,
         opts?.silent403 ? { silent403: true } : undefined,
+    )
+}
+
+/**
+ * How many people each tier would reach, for a workspace — before any
+ * view exists. The View wizard needs this; every other surface already
+ * has it on the view it is looking at.
+ *
+ * Server-side on purpose: the workspace list a browser holds is scoped
+ * to the caller's own memberships and carries no member counts, so this
+ * is not derivable client-side.
+ */
+export async function getWorkspaceAudience(
+    workspaceId: string,
+): Promise<ViewAudience> {
+    return apiFetch<ViewAudience>(
+        `/api/v1/views/audience?workspaceId=${encodeURIComponent(workspaceId)}`,
     )
 }
 

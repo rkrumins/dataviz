@@ -34,7 +34,7 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { VISIBILITY_ICON, visibilityLabel } from '@/lib/viewVisibility'
+import { VISIBILITY_ICON, visibilityDescription, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta, viewTypeLabel } from '@/lib/viewUtils'
 import type { View } from '@/services/viewApiService'
@@ -445,7 +445,12 @@ export function ExplorerPreviewDrawer({
                   const vis = VISIBILITY_META[view.visibility] ?? VISIBILITY_META.private
                   const VisIcon = vis.icon
                   return (
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-black/[0.04] dark:bg-white/[0.06] px-3 py-1 text-xs font-medium text-ink-muted">
+                    <span
+                      title={visibilityDescription(view.visibility, {
+                        workspaceName: view.workspaceName ?? undefined,
+                      })}
+                      className="inline-flex items-center gap-1.5 rounded-full bg-black/[0.04] dark:bg-white/[0.06] px-3 py-1 text-xs font-medium text-ink-muted"
+                    >
                       <VisIcon className="h-3 w-3" />
                       {vis.label}
                     </span>

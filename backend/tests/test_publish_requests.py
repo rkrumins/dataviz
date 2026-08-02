@@ -403,3 +403,53 @@ async def test_publishing_tells_whoever_governs_the_workspace(
     assert published, "the workspace admin has to hear about it"
     assert "unpublish" in (published[0].body or "").lower()
     assert published[0].link == f"/views/{vid}"
+
+
+@pytest.mark.asyncio
+async def test_the_wizard_can_ask_before_a_view_exists(
+    test_client: AsyncClient, db_session,
+):
+    """The View wizard has to show the audience for a tier the user is
+    picking for a view that does not exist yet, so the counts cannot
+    ride on the single-view read alone."""
+    from backend.app.db.models import UserORM
+
+    await _seed(db_session, view_id="view_pf_aud")
+    db_session.add(UserORM(
+        id="usr_pf_active", email="a@example.com", password_hash="x",
+        first_name="A", last_name="A", status="active",
+    ))
+    db_session.add(UserORM(
+        id="usr_pf_pending", email="p@example.com", password_hash="x",
+        first_name="P", last_name="P", status="pending",
+    ))
+    await db_session.commit()
+
+    with _auth(user=CREATOR, claims=MEMBER_CLAIMS):
+        r = await test_client.get(f"/api/v1/views/audience?workspaceId={WS}")
+    assert r.status_code == 200, r.text
+    before = r.json()["platformUserCount"]
+    assert before >= 1
+
+    # Pending invitees cannot open anything, so counting them would
+    # overstate the reach the first time someone checked the number
+    # against the admin user list. Activating exactly one must move the
+    # count by exactly one — asserting an absolute total instead would
+    # only hold while this file ran alone.
+    pending = await db_session.get(UserORM, "usr_pf_pending")
+    pending.status = "active"
+    await db_session.commit()
+
+    with _auth(user=CREATOR, claims=MEMBER_CLAIMS):
+        r2 = await test_client.get(f"/api/v1/views/audience?workspaceId={WS}")
+    assert r2.json()["platformUserCount"] == before + 1
+
+
+@pytest.mark.asyncio
+async def test_audience_of_a_workspace_you_cannot_see_is_not_yours_to_know(
+    test_client: AsyncClient, db_session,
+):
+    await _seed(db_session, view_id="view_pf_aud2")
+    with _auth(user=STRANGER, claims=EMPTY_CLAIMS):
+        r = await test_client.get(f"/api/v1/views/audience?workspaceId={WS}")
+    assert r.status_code == 404

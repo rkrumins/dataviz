@@ -43,9 +43,10 @@ import {
     denyViewPublication,
     type View,
     type ViewAccess,
-    type ViewAudience,
     type ViewPublishRequest,
 } from '@/services/viewApiService'
+import { VisibilityImpact } from '@/components/views/VisibilityImpact'
+import { usePublishGate } from '@/hooks/usePublishGate'
 import { VIEW_QUERY_KEY, useViewAccess } from '@/hooks/useViewMetadata'
 import { timeAgo } from '@/lib/timeAgo'
 import {
@@ -98,56 +99,6 @@ const GRANT_ROLES: { id: GrantRole; label: string; icon: typeof Eye }[] = [
 ]
 
 
-/**
- * Who can open this view right now, said in people rather than tiers.
- *
- * "Workspace" is an abstraction until a number is attached to it, and the
- * sharer cannot count it themselves — the workspace list their browser
- * holds is scoped to their OWN memberships. Both figures therefore come
- * from the server's `audience` (single-view read only).
- *
- * When they're missing the sentence still reads; it just makes no claim
- * about size. Printing "0 people" where we merely don't know would be
- * wrong in the one direction that matters for a sharing decision.
- */
-function audienceSentence(args: {
-    visibility: ViewVisibility
-    appName: string
-    workspaceName?: string
-    audience?: ViewAudience | null
-}): string {
-    const { visibility, appName, workspaceName, audience } = args
-    const shared = audience?.explicitGrantCount
-    // Long form where no other count shares the sentence; short form where
-    // "people" has already been said and repeating it would clatter.
-    const sharedLong = shared === undefined
-        ? "people you've shared with"
-        : shared > 0
-            ? `${shared} ${shared === 1 ? 'person' : 'people'} you've shared with`
-            : null
-    const sharedShort = shared ? `plus ${shared} you've shared with` : null
-
-    switch (visibility) {
-        case 'private':
-            return sharedLong
-                ? `Only you, ${sharedLong}, and workspace admins`
-                : 'Only you and workspace admins'
-        case 'workspace': {
-            const members = audience?.workspaceMemberCount
-            const where = `Everyone in ${workspaceName ?? "this view's workspace"}`
-            const sized = members
-                ? `${where} — ${members} ${members === 1 ? 'person' : 'people'}`
-                : where
-            return sharedShort ? `${sized} — ${sharedShort}` : sized
-        }
-        case 'enterprise':
-            return sharedShort
-                ? `Anyone signed in to ${appName}, ${sharedShort}`
-                : `Anyone signed in to ${appName}`
-    }
-}
-
-
 export function ShareViewDialog({
     viewId,
     viewName,
@@ -193,6 +144,14 @@ export function ShareViewDialog({
     const canChangeVisibility = envelope ? envelope.canChangeVisibility : true
     const canRequestPublish = envelope?.canRequestPublish ?? false
     const canAnswerRequest = envelope?.canAnswerPublishRequest ?? false
+    // WHICH control is asking. Three identical grey tiles mean three
+    // different things, and only one of them is resolved by going to a
+    // workspace admin — so the envelope carries the reason, and the
+    // client-side gate answers for payloads that predate it.
+    const localGate = usePublishGate(workspaceId, liveView?.dataSourceId)
+    const blockedBy = envelope?.publishBlockedBy ?? localGate.blockedBy
+    const enterpriseAvailable =
+        envelope?.enterpriseAvailable ?? localGate.enterpriseAvailable
 
     // `undefined` = nothing answered yet, follow the seed. Once one of our
     // own mutations replies its response wins — an override rather than
@@ -209,13 +168,18 @@ export function ShareViewDialog({
     const visibilityOptions = useMemo(
         () => buildVisibilityOptions({
             saved: visibility, canPublish, canRequestPublish, appName,
-            // Name the workspace on the tile too — the sentence below
+            blockedBy, enterpriseAvailable,
+            // Name the workspace on the tile too — the panel below
             // already does, and two different names for the same
             // audience in one dialog reads like two audiences.
             workspaceName: liveView?.workspaceName,
         }),
-        [visibility, canPublish, canRequestPublish, appName, liveView?.workspaceName],
+        [
+            visibility, canPublish, canRequestPublish, appName,
+            blockedBy, enterpriseAvailable, liveView?.workspaceName,
+        ],
     )
+    const selectedOption = visibilityOptions.find(o => o.id === visibility)
 
 
     // ── Initial load: fetch existing grants ─────────────────────────
@@ -512,17 +476,19 @@ export function ShareViewDialog({
                             </div>
 
                             {/* The tiles name a tier; only this says how many
-                                humans that is. Reads off the SAVED tier, which
-                                `visibility` tracks (it reverts on a failed save). */}
-                            <p className="mt-2.5 text-[11px] text-ink-muted leading-relaxed">
-                                <span className="font-semibold text-ink-secondary">Who can open this view: </span>
-                                {audienceSentence({
-                                    visibility,
-                                    appName,
-                                    workspaceName: liveView?.workspaceName,
-                                    audience: liveView?.audience,
-                                })}.
-                            </p>
+                                humans that is, and what they can do once they
+                                have it. Reads off the SAVED tier, which
+                                `visibility` tracks (it reverts on a failed
+                                save), so there is no pending-change delta to
+                                show here — this dialog applies on click. */}
+                            <VisibilityImpact
+                                className="mt-3"
+                                selected={visibility}
+                                counts={liveView?.audience}
+                                workspaceName={liveView?.workspaceName}
+                                requiresApproval={selectedOption?.requiresApproval}
+                                approvalHint={selectedOption?.approvalHint}
+                            />
 
                             {/* Request composer — only reachable from a
                                 requiresApproval tile, and never while a
@@ -537,7 +503,12 @@ export function ShareViewDialog({
                                         Ask to publish this view
                                     </p>
                                     <p className="text-[11px] text-ink-muted mt-0.5 mb-2">
-                                        A workspace admin decides. Add a note if it helps them.
+                                        {blockedBy === 'platform'
+                                            ? 'Your organisation reviews everything published to everyone.'
+                                            : blockedBy === 'source'
+                                                ? 'This data source is restricted, so a workspace admin decides.'
+                                                : 'A workspace admin decides.'}
+                                        {' '}Add a note if it helps them.
                                     </p>
                                     <textarea
                                         value={requestNote}

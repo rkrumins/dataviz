@@ -118,6 +118,44 @@ everyone, which is the same as not having it.
 The policy widens who *satisfies* the publish check; it never widens
 who may touch a view's visibility (that stays creator / ws-admin).
 
+### The publish ladder
+
+Four controls decide it, and they nest. `resolve_publish_gate`
+(`services/view_access.py`) is the only place that walks them, and
+`resolvePublishGate` (`frontend/src/lib/publishGate.ts`) is its exact
+twin — a UI that resolves this differently tells people the wrong thing
+about the button in front of them.
+
+| # | Control | Where it is set | Binds |
+|---|---------|-----------------|-------|
+| 1 | `enterpriseViewPolicy` — `workspaces` \| `request` \| `off` | Admin → Features | Everyone, **including permission holders** |
+| 2 | `workspaces.publish_policy` — `open` \| `request` | Workspace → Views tab | Everyone without the permission |
+| 3 | `workspace_data_sources.is_restricted` | Workspace → Views tab | Everyone without the permission |
+| 4 | `workspace:view:publish` | Role binding | Satisfies 2 and 3 outright |
+
+The platform ceiling is checked first and the permission does **not**
+satisfy it: a limit only non-admins obey is not a limit. `off`
+withdraws the tier from new work entirely (the request queue is refused
+too, so a request filed before the change cannot be used to route
+around it); `request` forces an approval even in workspaces that opened
+publishing to their members — the one rule a workspace admin cannot opt
+out of.
+
+The refusal carries its reason (`publishBlockedBy` on the access
+envelope: `platform` / `workspace` / `source`). Three identically
+greyed-out tiles mean three different things, and only one of them is
+resolved by asking a workspace admin — telling someone to do that when
+the *organisation* set the rule sends them to a person who cannot help.
+
+**Un-publishing takes the same standing as publishing, minus the
+ceiling** (`can_unpublish`). Keeping the workspace policy and the source
+restriction keeps the rule symmetric: a workspace that made publishing
+an admin act made retracting one an admin act too, because a view others
+depend on is not something any one member should pull out from under
+them. Dropping the *ceiling* is the asymmetry that matters — it exists
+to reduce exposure, and applying it in reverse would strand every
+already-published view with nobody able to close it.
+
 **Control moves after the fact, not away.** On a direct publish, every
 holder of `workspace:view:publish` in that workspace is notified
 (`view.published`) with a link to the view and to the undo — the

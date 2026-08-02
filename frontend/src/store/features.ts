@@ -42,6 +42,11 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     graphExportEnabled: true,
     blankModelsEnabled: true,
     allowedViewModes: ['graph', 'hierarchy', 'reference', 'layered-lineage'],
+    // Fail OPEN to "workspaces decide". Guessing the strictest value on a
+    // slow network would hide the Enterprise tier for a deployment nobody
+    // had restricted — and the server refuses regardless, so the client's
+    // guess must never be what stops someone sharing.
+    enterpriseViewPolicy: 'workspaces',
     semanticLayerEditMode: true,
     semanticLayerImportEnabled: true,
     semanticLayerExportEnabled: true,
@@ -142,6 +147,29 @@ export function useFeatureList(key: string): string[] | null {
     return useFeaturesStore(s => {
         const value = s.values[key] ?? DEFAULT_FEATURES[key]
         return Array.isArray(value) && value.length > 0 ? (value as string[]) : null
+    })
+}
+
+/**
+ * Read a SINGLE-SELECT flag (`enterpriseViewPolicy`) — one posture chosen from a ladder.
+ *
+ * Neither of the readers above fits. `useFeature` coerces to a boolean, and every non-empty
+ * string is truthy, so it would answer "yes" for a setting whose whole point is WHICH of three
+ * values it holds — including the one that means "off". `useFeatureList` wants an array.
+ *
+ * Returns `null` when the value hasn't arrived or isn't one the caller recognises. `null` means
+ * "assume the default", not "assume the strictest": these flags gate capabilities, and a client
+ * that guessed the tightest setting on a slow network would hide sharing options for a
+ * deployment nobody had restricted. The server is the enforcement either way.
+ */
+export function useFeatureChoice<T extends string>(
+    key: string, allowed: readonly T[],
+): T | null {
+    return useFeaturesStore(s => {
+        const value = s.values[key] ?? DEFAULT_FEATURES[key]
+        return typeof value === 'string' && (allowed as readonly string[]).includes(value)
+            ? (value as T)
+            : null
     })
 }
 

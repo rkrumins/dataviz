@@ -1114,6 +1114,10 @@ class ViewAudience(BaseModel):
     """
     workspace_member_count: int = Field(0, alias="workspaceMemberCount")
     explicit_grant_count: int = Field(0, alias="explicitGrantCount")
+    #: Active accounts on the whole deployment — what "anyone signed in"
+    #: comes to. Without it the enterprise tier is the only choice whose
+    #: audience is a phrase rather than a number.
+    platform_user_count: int = Field(0, alias="platformUserCount")
 
     class Config:
         populate_by_name = True
@@ -1171,6 +1175,17 @@ class ViewAccessInfo(BaseModel):
     can_request_publish: bool = Field(False, alias="canRequestPublish")
     # May approve/deny a pending publish request on this view.
     can_answer_publish_request: bool = Field(False, alias="canAnswerPublishRequest")
+    # WHY publishing is unavailable: 'platform' (the deployment's ceiling),
+    # 'workspace' (its policy), 'source' (the data source is restricted),
+    # or null. The same disabled tile means three different things, and
+    # "your organisation doesn't allow this" is not the sentence
+    # "a workspace admin has to approve this" — the UI needs to tell them
+    # apart or the only way to find out is to go and ask someone.
+    publish_blocked_by: Optional[str] = Field(None, alias="publishBlockedBy")
+    # The enterprise tier exists on this deployment at all. False HIDES
+    # the option rather than disabling it: a choice nobody here can ever
+    # make is noise, not information.
+    enterprise_available: bool = Field(True, alias="enterpriseAvailable")
     # 'owner' | 'admin' | 'grant' | 'workspace' | 'enterprise'
     access_via: str = Field(alias="accessVia")
     # 'full' | 'readonly'

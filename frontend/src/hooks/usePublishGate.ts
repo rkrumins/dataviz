@@ -1,20 +1,42 @@
 /**
- * The publish gate, resolved against the stores the wizard already has.
+ * The publish gate, resolved against the stores the app already has.
  *
  * Kept separate from {@link resolvePublishGate} so the rule stays a
  * pure, testable function and this file only does the plumbing:
- * permission claim + workspace policy + the source's restricted flag.
+ * platform ceiling + permission claim + workspace policy + the source's
+ * restricted flag.
+ *
+ * Prefer the server's `access` envelope wherever a view has been
+ * fetched — it is computed by the same evaluator that enforces every
+ * request. This exists for the wizard, where no view exists yet, and as
+ * the fallback for payloads that predate the envelope.
  */
 import { useMemo } from 'react'
 
-import { resolvePublishGate, type PublishGate } from '@/lib/publishGate'
+import {
+    resolvePublishGate,
+    type PlatformPublishPolicy,
+    type PublishGate,
+} from '@/lib/publishGate'
 import { usePermission } from '@/store/auth'
+import { useFeatureChoice } from '@/store/features'
 import { useWorkspacesStore } from '@/store/workspaces'
+
+const PLATFORM_POLICIES: readonly PlatformPublishPolicy[] = [
+    'workspaces', 'request', 'off',
+] as const
+
+/** The deployment-wide ceiling on publishing. Exported because the
+ *  Explorer's bulk action needs it without a specific workspace. */
+export function usePlatformPublishPolicy(): PlatformPublishPolicy {
+    return useFeatureChoice('enterpriseViewPolicy', PLATFORM_POLICIES) ?? 'workspaces'
+}
 
 export function usePublishGate(
     workspaceId?: string | null,
     dataSourceId?: string | null,
 ): PublishGate {
+    const platformPolicy = usePlatformPublishPolicy()
     const hasPublishPermission = usePermission(
         'workspace:view:publish', workspaceId ?? undefined,
     )
@@ -34,6 +56,7 @@ export function usePublishGate(
             hasPublishPermission,
             publishPolicy: workspace?.publishPolicy,
             sourceRestricted: source?.isRestricted,
+            platformPolicy,
         })
-    }, [hasPublishPermission, workspace, dataSourceId])
+    }, [hasPublishPermission, workspace, dataSourceId, platformPolicy])
 }

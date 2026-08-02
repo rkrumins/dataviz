@@ -16,6 +16,7 @@ import { Save, Settings2, Check, X, ChevronRight } from 'lucide-react'
 import { updateView, updateViewVisibility, type View as ViewT } from '@/services/viewApiService'
 import { useToast } from '@/components/ui/toast'
 import { usePublishGate } from '@/hooks/usePublishGate'
+import { VisibilityImpact } from '@/components/views/VisibilityImpact'
 import { useBrand } from '@/store/branding'
 import { buildVisibilityOptions, type ViewVisibility } from '@/lib/viewVisibility'
 import { cn } from '@/lib/utils'
@@ -45,6 +46,9 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
   const gate = usePublishGate(view.workspaceId, view.dataSourceId)
   const canPublish = view.access?.canPublish ?? gate.canPublish
   const canRequestPublish = view.access?.canRequestPublish ?? gate.canRequestPublish
+  const blockedBy = view.access?.publishBlockedBy ?? gate.blockedBy
+  const enterpriseAvailable =
+    view.access?.enterpriseAvailable ?? gate.enterpriseAvailable
   const [name, setName] = useState(view.name)
   const [description, setDescription] = useState(view.description ?? '')
   const [tagList, setTagList] = useState<string[]>(view.tags ?? [])
@@ -101,6 +105,8 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
     canPublish,
     canRequestPublish,
     restrictedSource: gate.restrictedSource,
+    blockedBy,
+    enterpriseAvailable,
     appName,
     workspaceName: view.workspaceName,
   })
@@ -156,7 +162,10 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
       <div>
         <label className={labelCls}>Visibility</label>
         <div className="space-y-2">
-          {VIS.map(({ id, icon: Icon, label, description: desc, disabled, disabledReason }) => {
+          {VIS.map(({
+            id, icon: Icon, label, description: desc,
+            disabled, disabledReason, requiresApproval, approvalHint,
+          }) => {
             const active = visibility === id
             return (
               <button
@@ -164,7 +173,7 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
                 type="button"
                 onClick={() => { if (!disabled) setVisibility(id) }}
                 disabled={disabled}
-                title={disabledReason}
+                title={disabledReason ?? approvalHint}
                 className={cn(
                   'w-full flex items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors',
                   active
@@ -177,8 +186,21 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
                   <Icon className="h-4 w-4" />
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-semibold text-ink">{label}</span>
-                  <span className="block text-xs text-ink-muted">{disabled && disabledReason ? disabledReason : desc}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-sm font-semibold text-ink">{label}</span>
+                    {requiresApproval && (
+                      <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-px text-[9px] font-bold uppercase tracking-wide text-amber-600 dark:text-amber-400">
+                        Needs approval
+                      </span>
+                    )}
+                  </span>
+                  <span className="block text-xs text-ink-muted">
+                    {disabled && disabledReason
+                      ? disabledReason
+                      : requiresApproval && approvalHint
+                        ? approvalHint
+                        : desc}
+                  </span>
                 </span>
                 <span className={cn('w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center', active ? 'border-accent-lineage bg-accent-lineage' : 'border-ink-muted/30')}>
                   {active && <Check className="h-2.5 w-2.5 text-white" strokeWidth={3} />}
@@ -187,6 +209,19 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
             )
           })}
         </div>
+
+        {/* This panel is a FORM — the tier above is a draft until Save,
+            so the before/after is real here and worth stating. The
+            counts ride on the view we already fetched; no extra call. */}
+        <VisibilityImpact
+          className="mt-3"
+          selected={visibility}
+          saved={view.visibility}
+          counts={view.audience}
+          workspaceName={view.workspaceName}
+          requiresApproval={VIS.find(o => o.id === visibility)?.requiresApproval}
+          approvalHint={VIS.find(o => o.id === visibility)?.approvalHint}
+        />
       </div>
 
       {onEditLayout && (

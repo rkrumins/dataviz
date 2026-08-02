@@ -185,71 +185,86 @@ describe('visibility tiles', () => {
   })
 })
 
-/** The audience sentence, addressed by its label — the visibility TILE
+/** The impact panel, addressed by its landmark — the visibility TILE
  *  names the same workspace in the same words, so a bare phrase match
  *  finds both. */
-async function audienceLine(): Promise<HTMLElement> {
-  const label = await screen.findByText(/Who can open this view:/)
-  return label.parentElement as HTMLElement
+async function impactPanel(): Promise<HTMLElement> {
+  return await screen.findByLabelText('Who will see this view')
 }
 
-describe('audience sentence', () => {
+describe('the impact panel', () => {
   /** The counts only ever come from the single-view read. */
   const withAudience = (over: Partial<View> = {}) =>
     mockGetView.mockResolvedValue(viewResponse({
       workspaceName: 'Finance',
-      audience: { workspaceMemberCount: 12, explicitGrantCount: 2 },
+      audience: {
+        workspaceMemberCount: 12, explicitGrantCount: 2, platformUserCount: 1240,
+      },
       ...over,
     }))
 
   it('names the workspace, its size, and the explicit shares', async () => {
     withAudience()
     renderDialog(MANAGER_ACCESS, null, 'workspace')
-    expect(
-      (await audienceLine()).textContent,
-    ).toContain("Everyone in Finance — 12 people — plus 2 you've shared with.")
+    const panel = await impactPanel()
+    expect(panel.textContent).toContain('Everyone in Finance')
+    // 12 members + 2 shared directly, and the shares called out.
+    expect(panel.textContent).toContain('14 people')
+    expect(panel.textContent).toMatch(/2 shared directly/)
   })
 
-  it('counts the shares in the private sentence', async () => {
+  it('counts the shares in the private tier', async () => {
     withAudience()
     renderDialog(MANAGER_ACCESS, null, 'private')
-    expect(
-      await screen.findByText(/Only you, 2 people you've shared with, and workspace admins\./),
-    ).toBeTruthy()
+    const panel = await impactPanel()
+    expect(panel.textContent).toContain('Only you and people you choose')
+    expect(panel.textContent).toContain('3 people')
   })
 
   it('names the brand for the enterprise tier', async () => {
     withAudience()
     renderDialog(ANSWERER_ACCESS, null, 'enterprise')
-    expect(
-      await screen.findByText(/Anyone signed in to TestBrand, plus 2 you've shared with\./),
-    ).toBeTruthy()
+    const panel = await impactPanel()
+    expect(panel.textContent).toContain('Anyone signed in to TestBrand')
   })
 
   it('says "1 person", not "1 people"', async () => {
-    withAudience({ audience: { workspaceMemberCount: 1, explicitGrantCount: 1 } })
+    withAudience({ audience: { workspaceMemberCount: 1, explicitGrantCount: 0 } })
     renderDialog(MANAGER_ACCESS, null, 'private')
-    expect(
-      await screen.findByText(/Only you, 1 person you've shared with, and workspace admins\./),
-    ).toBeTruthy()
+    const panel = await impactPanel()
+    // No word boundary: textContent concatenates, so the next element
+    // runs straight on ("1 personThey can…").
+    expect(panel.textContent).toContain('1 person')
+    expect(panel.textContent).not.toContain('1 people')
   })
 
-  it('drops the clause rather than claiming zero shares', async () => {
+  it('drops the shares clause rather than claiming zero', async () => {
     withAudience({ audience: { workspaceMemberCount: 12, explicitGrantCount: 0 } })
     renderDialog(MANAGER_ACCESS, null, 'workspace')
-    const line = await audienceLine()
-    expect(line.textContent).toContain('Everyone in Finance')
-    expect(line.textContent).toContain('12 people')
-    expect(line.textContent).not.toMatch(/shared with/)
+    const panel = await impactPanel()
+    expect(panel.textContent).toContain('Everyone in Finance')
+    expect(panel.textContent).toContain('12 people')
+    expect(panel.textContent).not.toMatch(/shared directly/)
   })
 
-  it('degrades to an unnumbered sentence when the payload has no audience', async () => {
+  it('degrades to an unnumbered line when the payload has no audience', async () => {
     mockGetView.mockResolvedValue(viewResponse({ workspaceName: 'Finance' }))
     renderDialog(MANAGER_ACCESS, null, 'workspace')
-    const line = await audienceLine()
-    expect(line.textContent).toContain('Everyone in Finance')
+    const panel = await impactPanel()
+    expect(panel.textContent).toContain('Everyone in Finance')
     // No audience means no counts — never a fabricated 0.
-    expect(line.textContent).not.toMatch(/\d/)
+    expect(panel.textContent).toMatch(/Counting/)
+    expect(panel.textContent).not.toMatch(/\d+ (person|people)/)
+  })
+
+  it('says what publishing actually exposes', async () => {
+    // The word "Enterprise" hides the thing a person most needs to know
+    // before choosing it.
+    withAudience()
+    renderDialog(ANSWERER_ACCESS, null, 'enterprise')
+    const panel = await impactPanel()
+    expect(panel.textContent).toMatch(/read-only access to the data source/i)
+    expect(panel.textContent).toMatch(/cannot change this view/i)
   })
 })
 

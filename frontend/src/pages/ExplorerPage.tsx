@@ -459,13 +459,19 @@ export function ExplorerPage() {
     } else {
       const reason = failed[0].reason
       const detail = reason instanceof Error ? reason.message : 'unknown error'
+      // A bulk selection can span workspaces, so a partial failure is
+      // normal and the REASON is the whole value of the message —
+      // "3 failed" with no cause leaves someone re-clicking. The three
+      // refusals a person can act on differently get named.
+      const cause =
+        detail.includes('enterpriseViewPolicy') || detail.includes('feature_disabled')
+          ? 'your organisation does not allow publishing to everyone'
+          : detail.includes('workspace:view:publish')
+            ? 'publishing those needs approval — open each view to ask'
+            : detail
       showToast(
         'error',
-        `Updated ${ids.length - failed.length} of ${ids.length} views — ${failed.length} failed: ${
-          detail.includes('workspace:view:publish')
-            ? 'publishing needs the "Publish views" permission'
-            : detail
-        }`,
+        `Updated ${ids.length - failed.length} of ${ids.length} views — ${failed.length} failed: ${cause}`,
       )
     }
   }, [selectedIds, showToast, refetch])
