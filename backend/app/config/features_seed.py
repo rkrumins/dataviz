@@ -58,6 +58,9 @@ def option_ids(key: str) -> frozenset[str]:
 #: they live together rather than in the gate module: a refusal must name the thing the person was
 #: trying to do and who can restore it. "feature_disabled" alone tells nobody anything they can act on.
 REFUSAL_MESSAGES: dict[str, str] = {
+    "enterpriseViewPolicy":
+        "Publishing views to everyone is turned off for this deployment. "
+        "An administrator can change this under Admin \u2192 Features.",
     "versioningEnabled":
         "Version control is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
@@ -313,6 +316,41 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "This is the switch that decides whether your lineage can leave the product. Note that "
             "'Export layers' only covers the SCHEMA — the shape of your estate. This one covers the "
             "data. If you are turning one off for confidentiality, you almost certainly want both."
+        ),
+        "sort_order": 0,
+        "deprecated": False,
+    },
+    {
+        "key": "enterpriseViewPolicy",
+        "name": "Publishing views to everyone",
+        "description": (
+            "How far a workspace may open publishing on its own. Publishing a view makes it "
+            "readable by anyone signed in, and gives them read-only access to the data source "
+            "behind it."
+        ),
+        "impact_when_off": (
+            "This is a ceiling, not a switch — it caps how open any workspace can be, and no "
+            "workspace admin can go past it. 'Always require approval' overrides workspaces that "
+            "have opened publishing to their members: they can still ASK, and a publisher still "
+            "answers. 'Not available' withdraws the tier from new work — views already published "
+            "keep working and can still be unpublished, which is never blocked."
+        ),
+        "category_id": "governance",
+        "type": "string",
+        "default_value": json.dumps("workspaces"),
+        "options": json.dumps([
+            {"id": "workspaces", "label": "Workspaces decide"},
+            {"id": "request", "label": "Always require approval"},
+            {"id": "off", "label": "Not available"},
+        ]),
+        "help_url": None,
+        "admin_hint": (
+            "Leave this on 'Workspaces decide' unless your organisation needs a rule that a "
+            "workspace admin cannot opt out of. What these views expose is metadata — names, "
+            "types and the lineage between them — so the default is deliberately open; tightening "
+            "it everywhere is a real cost to how people share their work. If only a few sources "
+            "are sensitive, mark THOSE restricted in the workspace's Views tab instead of "
+            "closing the whole platform."
         ),
         "sort_order": 0,
         "deprecated": False,

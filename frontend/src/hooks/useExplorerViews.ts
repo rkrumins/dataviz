@@ -170,7 +170,10 @@ export function resolveCategoryParams(
       return { createdAfter: sevenDaysAgo.toISOString() }
     }
     case 'shared-with-me':
-      return { visibilityIn: ['workspace', 'enterprise'] }
+      // Server-side truth: views reachable through an explicit grant
+      // (direct or via group), excluding your own. The old visibilityIn
+      // approximation showed every workspace/enterprise view instead.
+      return { category: 'shared-with-me' }
     case 'needs-attention':
       return { attentionOnly: true }
     case 'deleted':

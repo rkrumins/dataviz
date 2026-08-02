@@ -3,8 +3,6 @@ import { Link } from 'react-router-dom'
 import {
   Heart,
   Link2,
-  Globe,
-  Users,
   Lock,
   Box,
   Database,
@@ -18,6 +16,7 @@ import {
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
+import { VISIBILITY_ICON } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
@@ -33,11 +32,9 @@ import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 // lib/viewUtils. Do not reintroduce a local map (that drift is what made the
 // recents strip show a different icon/colour for the same view).
 
-const VISIBILITY_ICON: Record<string, React.ElementType> = {
-  enterprise: Globe,
-  workspace: Users,
-  private: Lock,
-}
+// Icons come from the shared module — see lib/viewVisibility. Loosened
+// to a string index because row data types visibility as string.
+const ROW_VISIBILITY_ICON: Record<string, React.ElementType> = VISIBILITY_ICON
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -89,7 +86,7 @@ export function ExplorerListRow({
   const typeMeta = viewTypeMeta(view.viewType)
   // Glyph = user-chosen icon when set; tile colors stay type identity.
   const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
-  const VisIcon = VISIBILITY_ICON[view.visibility] ?? Lock
+  const VisIcon = ROW_VISIBILITY_ICON[view.visibility] ?? Lock
   const isDeleted = !!view.deletedAt
   const [activityOpen, setActivityOpen] = useState(false)
 

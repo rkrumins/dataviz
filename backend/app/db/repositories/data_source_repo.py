@@ -46,6 +46,7 @@ def _to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         providerId=row.provider_id,
         graphName=row.graph_name,
         accessLevel=row.access_level,
+        isRestricted=bool(getattr(row, 'is_restricted', False)),
         # extra_config is an UNENCRYPTED column and, like a provider's, can hold
         # secrets left over from before the request-boundary validator existed
         # (or a sibling field like the legacy redisUrl). Redact on the way out.
@@ -247,6 +248,8 @@ async def update_data_source(
         row.dedicated_graph_name = req.dedicated_graph_name if req.dedicated_graph_name else None
     if getattr(req, "access_level", None) is not None:
         row.access_level = req.access_level
+    if getattr(req, "is_restricted", None) is not None:
+        row.is_restricted = req.is_restricted
     if req.extra_config is not None:
         row.extra_config = json.dumps(req.extra_config) if req.extra_config else None
     if req.identity_property is not None:

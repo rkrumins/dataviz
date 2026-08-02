@@ -4,29 +4,31 @@ View endpoints (top-level, cross-workspace).
 Views are visual renderings of context models (or ad-hoc graphs).
 Mounted at /api/v1/views
 
-RBAC Phase 2C: each route enforces the three-layer view evaluator
-(``backend.app.services.view_access``). Reads pass when ANY of:
-workspace binding, visibility tier, or explicit ``resource_grants``.
-Mutations (create / edit / delete / change-visibility / restore /
-hard-delete) check the corresponding action predicate.
-
-The list endpoint filters its items post-fetch when enforcement is on.
-That means ``total``/``hasMore`` can overestimate for non-admins
-(callers see fewer rows than the count claims). A Phase 3 SQL refactor
-will push the filter into the query for accurate paging; for now the
-trade-off is acceptable because the kill-switch
-``RBAC_ENFORCE_VIEWS=false`` reverts to the legacy behaviour.
+View-sharing rework (2026-07-31): every route enforces the
+visibility-first evaluator (``backend.app.services.view_access``) —
+private = creator + grants + workspace admins; workspace = members;
+enterprise = any signed-in user. List/aggregate reads are scoped in
+SQL via ``readable_views_clause`` (correct pagination, no
+post-filtering); transitions to/from ``enterprise`` require
+``workspace:view:publish``. The kill-switch ``RBAC_ENFORCE_VIEWS=false``
+reverts scoping to legacy behaviour (auth requirements stay).
 """
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.api.v1.feature_gate import ensure_view_mode_allowed
+from backend.app.api.v1.feature_gate import (
+    ensure_view_mode_allowed,
+    feature_disabled,
+    resolve_enterprise_view_policy,
+)
 from backend.app.auth.dependencies import (
+    get_current_user,
     get_optional_user,
     get_permission_claims,
     rbac_flag,
@@ -35,16 +37,19 @@ from backend.app.auth.dependencies import (
 from backend.app.common.single_flight import normalised_principal, read_views_sf
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM
-from backend.app.db.repositories import view_repo
-from backend.app.db.repositories import view_activity_repo
+from backend.app.db.repositories import data_source_repo, grant_repo, view_repo
+from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
-from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services import view_access
 from backend.app.services.versioning.db import graphver_session
 from backend.app.services.versioning.models import BranchORM
 from backend.auth_service.interface import User
 from backend.common.models.management import (
+    ViewAccessInfo,
+    ViewAudience,
+    ViewPublishRequest,
     ViewCreateRequest,
     ViewUpdateRequest,
     ViewLayoutUpdateRequest,
@@ -67,52 +72,81 @@ async def _viewer_context(
     return await view_access.ViewerContext.build(session, user=user, claims=claims)
 
 
-async def _load_view_orm(session: AsyncSession, view_id: str) -> ViewORM:
+async def _load_view_orm(
+    session: AsyncSession, view_id: str, *, include_deleted: bool = False,
+) -> ViewORM:
     """Fetch the raw ORM row (the access predicates need it).
 
     The endpoint then calls ``view_repo.get_view_enriched`` to return
     the response shape — kept separate so the access check happens
     against the authoritative row and not a lossy DTO projection.
+
+    Soft-deleted rows are invisible by default; only the restore flow
+    passes ``include_deleted=True``.
     """
     from sqlalchemy import select
-    row = await session.execute(
-        select(ViewORM).where(ViewORM.id == view_id)
-    )
+    query = select(ViewORM).where(ViewORM.id == view_id)
+    if not include_deleted:
+        query = query.where(ViewORM.deleted_at.is_(None))
+    row = await session.execute(query)
     view = row.scalar_one_or_none()
     if view is None:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     return view
 
 
-class _ViewProxy:
-    """Adapter that exposes the access-predicate fields off a
-    ``ViewResponse``-shaped object.
+async def _read_scope(
+    session: AsyncSession,
+    user: User,
+    claims: PermissionClaims,
+) -> view_access.ViewReadScope:
+    """The caller's read reach for SQL scoping.
 
-    The list endpoint receives DTOs from the repo, not ORM rows. The
-    predicates only need ``id``, ``workspace_id``, ``visibility``, and
-    ``created_by`` — all present on the response shape. We wrap the
-    DTO in this lightweight proxy so the predicate functions stay
-    typed against ``ViewORM`` without forcing a re-fetch.
+    Mirrors the ``requires()`` doctrine on session-store outages: when
+    workspace grants are unavailable we refuse (503) rather than render
+    an empty catalog that looks like revoked access.
     """
-
-    __slots__ = ("id", "workspace_id", "visibility", "created_by")
-
-    def __init__(self, *, id, workspace_id, visibility, created_by):
-        self.id = id
-        self.workspace_id = workspace_id
-        self.visibility = visibility
-        self.created_by = created_by
-
-    @classmethod
-    def from_response(cls, item) -> "_ViewProxy":
-        # Pydantic models expose snake-case attrs; legacy ORM responses
-        # via ``from_attributes`` do too. Both paths funnel here.
-        return cls(
-            id=getattr(item, "id"),
-            workspace_id=getattr(item, "workspace_id", None),
-            visibility=getattr(item, "visibility", "private"),
-            created_by=getattr(item, "created_by", None),
+    if not claims.ws_available and "system:admin" not in claims.global_perms:
+        raise HTTPException(
+            status_code=503, detail="Authorization temporarily unavailable",
         )
+    ctx = await _viewer_context(session, user, claims)
+    return await view_access.build_read_scope(session, ctx)
+
+
+async def _readable_clause(
+    session: AsyncSession,
+    user: User,
+    claims: PermissionClaims,
+):
+    """(clause, scope) under RBAC enforcement; (None, None) when the
+    kill-switch is off — repo functions treat None as unscoped."""
+    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
+        return None, None
+    scope = await _read_scope(session, user, claims)
+    return view_access.readable_views_clause(scope), scope
+
+
+def _category_filters(
+    category: Optional[str],
+    scope: Optional[view_access.ViewReadScope],
+    user: Optional[User],
+):
+    """Translate the Explorer's ``category`` param into repo kwargs.
+
+    ``shared-with-me`` = views reachable through an explicit grant
+    (direct or via group), excluding the caller's own — a real answer,
+    not the old visibility-tier approximation the frontend faked.
+    Unknown categories are ignored (the other pills are plain filters
+    the frontend already expresses via existing params).
+    """
+    if category != "shared-with-me":
+        return None, None
+    if scope is None:
+        # Kill-switch path has no grant index — return nothing rather
+        # than everything.
+        return [], None
+    return list(scope.granted_view_ids), user.id if user else None
 
 
 # Suppress the "imported but unused" hint while os is referenced via
@@ -139,8 +173,8 @@ def _view_update_changes(old, req) -> dict:
         ch["description"] = {"from": old.description, "to": req.description}
     if req.view_type is not None and req.view_type != old.view_type:
         ch["viewType"] = {"from": old.view_type, "to": req.view_type}
-    if req.visibility is not None and req.visibility != old.visibility:
-        ch["visibility"] = {"from": old.visibility, "to": req.visibility}
+    # visibility is deliberately absent: the generic PUT rejects it, so
+    # only the dedicated endpoint can log a visibility_changed entry.
     if req.tags is not None and sorted(req.tags or []) != sorted(old.tags or []):
         ch["tags"] = {"from": old.tags, "to": req.tags}
     if req.is_pinned is not None and req.is_pinned != old.is_pinned:
@@ -195,13 +229,108 @@ async def _compute_ontology_digest(
         return None
 
 
+def _clear_publish_request(view_orm: ViewORM) -> None:
+    """Drop a pending publication request (approved, denied, or withdrawn)."""
+    view_orm.publish_requested_by = None
+    view_orm.publish_requested_at = None
+    view_orm.publish_request_note = None
+
+
+async def _enriched_or_404(
+    session: AsyncSession, view_id: str, user: User,
+) -> ViewResponse:
+    """Re-read a view for the response after a mutation."""
+    view = await view_repo.get_view_enriched(session, view_id, user_id=_user_id(user))
+    if not view:
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    return view
+
+
+async def _record_break_glass_read(
+    session: AsyncSession,
+    ctx: view_access.ViewerContext,
+    view_orm: ViewORM,
+    user: User,
+) -> None:
+    """Note when an admin opens a PRIVATE view that isn't theirs.
+
+    Platform admins can read every view — that reach is deliberate and
+    stays (support, governance, incident response). What it shouldn't
+    also be is invisible: a private view carries the expectation that
+    nobody else looks, so when someone does, its owner can see that on
+    the view's own timeline. Only break-glass reads qualify — the
+    creator reading their own view, or anyone reading a workspace or
+    enterprise view, is just reading.
+    """
+    if user is None or (view_orm.visibility or "private") != "private":
+        return
+    if view_orm.created_by == user.id:
+        return
+    # Reach the owner did NOT grant: a global admin short-circuit rather
+    # than workspace-admin standing or an explicit share.
+    from backend.app.services.permission_service import has_permission
+    if not has_permission(ctx.claims, "system:admin"):
+        return
+    # One entry per admin per view per hour. The client re-reads a view
+    # on every open and React Query refetches on top of that; without a
+    # window the owner's timeline would be buried under one person's
+    # single visit.
+    from backend.app.db.models import ViewActivityLogORM
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    recent = await session.execute(
+        select(ViewActivityLogORM.id)
+        .where(
+            ViewActivityLogORM.view_id == view_orm.id,
+            ViewActivityLogORM.action == "admin_viewed",
+            ViewActivityLogORM.actor == user.id,
+            ViewActivityLogORM.created_at >= cutoff,
+        )
+        .limit(1)
+    )
+    if recent.first() is not None:
+        return
+    await view_activity_repo.record_view_activity(
+        session, view_id=view_orm.id, workspace_id=view_orm.workspace_id,
+        action="admin_viewed", actor=user.id,
+        summary="Opened by a platform administrator",
+    )
+
+
+async def _publish_policy(session: AsyncSession, workspace_id: str) -> str:
+    """The workspace's publication policy ('open' | 'request')."""
+    from backend.app.db.models import WorkspaceORM
+    row = await session.get(WorkspaceORM, workspace_id)
+    return (getattr(row, "publish_policy", None) or "open") if row else "open"
+
+
+async def _source_is_restricted(
+    session: AsyncSession, workspace_id: str, data_source_id: Optional[str],
+) -> bool:
+    """Is the source behind this view marked restricted?
+
+    Publishing exposes read-only access to the whole source, so a
+    restricted one requires the publish permission even where the
+    workspace has opened publishing to its members. Views with no
+    explicit source resolve to the workspace primary — the same source
+    they would actually read.
+    """
+    ds = None
+    if data_source_id:
+        ds = await data_source_repo.get_data_source_orm(session, data_source_id)
+    if ds is None:
+        ds = await data_source_repo.get_primary_data_source(session, workspace_id)
+    return bool(getattr(ds, "is_restricted", False)) if ds else False
+
+
+
 @router.get("/popular", response_model=List[ViewResponse])
 async def list_popular_views(
     limit: int = Query(20, le=100),
-    user=Depends(get_optional_user),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """List the most-favourited enterprise-visible views.
+    """List the most-favourited views readable by the caller.
 
     Single-flight wrapped: when N concurrent callers hit this with the
     same (principal, limit) pair the leader runs the query and the
@@ -210,34 +339,72 @@ async def list_popular_views(
     every Explorer tab opening at once; this kills the thundering
     herd against the views + favourites tables.
     """
+    clause, _scope = await _readable_clause(session, user, claims)
     principal = normalised_principal(_user_id(user))
     key = ("popular", principal, limit)
     return await read_views_sf.run(
         key,
         lambda: view_repo.list_popular_views(
-            session, limit=limit, user_id=_user_id(user),
+            session, limit=limit, user_id=_user_id(user), readable=clause,
         ),
+    )
+
+
+@router.get("/audience", response_model=ViewAudience)
+async def get_workspace_audience(
+    workspaceId: str = Query(..., description="Workspace the view would live in"),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> ViewAudience:
+    """How many people each visibility tier would reach, for a workspace.
+
+    The single-view read already carries this, but the View wizard asks
+    the question before any view exists — and the sharer cannot count it
+    in the browser, because the workspace list they hold is scoped to
+    their own memberships and carries no member counts at all.
+
+    Requires membership of the workspace being asked about: the size of
+    a workspace you cannot see is not yours to know, and this would
+    otherwise enumerate the shape of the estate for anyone signed in.
+    """
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not has_permission(
+        claims, "workspace:view:read", workspace_id=workspaceId,
+    ):
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return ViewAudience(
+        workspaceMemberCount=await notification_repo.workspace_member_count(
+            session, workspaceId,
+        ),
+        explicitGrantCount=0,
+        platformUserCount=await notification_repo.platform_user_count(session),
     )
 
 
 @router.get("/facets", response_model=ViewFacetsResponse)
 async def get_view_facets(
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ) -> ViewFacetsResponse:
-    """Return distinct tags, view types, and creators across non-deleted views.
+    """Return distinct tags, view types, and creators across the views
+    the caller can read.
 
     Used to populate the Explorer's Tag / View Type / Creator filter
-    dropdowns from the authoritative DB-wide set of values rather than
-    deriving them from the currently-loaded page (which would miss
-    tags/creators beyond the first page at scale).
+    dropdowns from the authoritative set of values rather than deriving
+    them from the currently-loaded page (which would miss tags/creators
+    beyond the first page at scale). Scoped per principal — an
+    unscoped facet aggregate leaks private views' tags and creator
+    identities, which is how this endpoint shipped originally.
 
-    Single-flight wrapped: facets is a global aggregation read with a
-    fixed key. Under any concurrency, exactly one worker runs the
-    aggregate and the rest piggy-back on its result.
+    Single-flight wrapped per principal: the response depends on who
+    asks, so the key must too.
     """
+    clause, _scope = await _readable_clause(session, user, claims)
+    principal = normalised_principal(_user_id(user))
     return await read_views_sf.run(
-        ("facets",),
-        lambda: view_repo.get_view_facets(session),
+        ("facets", principal),
+        lambda: view_repo.get_view_facets(session, readable=clause),
     )
 
 
@@ -260,14 +427,18 @@ async def get_view_stats(
     include_deleted: bool = Query(False, alias="includeDeleted"),
     deleted_only: bool = Query(False, alias="deletedOnly"),
     attention_only: bool = Query(False, alias="attentionOnly"),
-    user=Depends(get_optional_user),
+    category: Optional[str] = Query(None),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ) -> ViewCatalogStats:
     """Aggregate counts for the Explorer stats bar, scoped to the same
-    filters the list endpoint accepts. All four numbers describe the
-    currently-filtered population so the stats bar stays in sync as
-    users narrow their query.
+    filters the list endpoint accepts — including the caller's read
+    reach, so the numbers always describe the population the list
+    would actually return.
     """
+    clause, scope = await _readable_clause(session, user, claims)
+    ids_in, created_by_not = _category_filters(category, scope, user)
     return await view_repo.get_view_stats(
         session,
         visibility=visibility,
@@ -280,14 +451,17 @@ async def get_view_stats(
         view_types=view_types,
         created_by=created_by,
         created_by_in=created_by_in,
+        created_by_not=created_by_not,
         created_after=created_after,
         search=search,
         tags=tags,
+        ids_in=ids_in,
         user_id=_user_id(user),
         favourited_only=favourited_only,
         include_deleted=include_deleted,
         deleted_only=deleted_only,
         attention_only=attention_only,
+        readable=clause,
     )
 
 
@@ -335,7 +509,15 @@ async def list_views(
         alias="popularLimit",
         description="Cap on the embedded popular list when include=popular.",
     ),
-    user=Depends(get_optional_user),
+    category: Optional[str] = Query(
+        None,
+        description=(
+            "Explorer category with server-side meaning: "
+            "``shared-with-me`` = views shared with the caller through "
+            "an explicit grant (excluding their own)."
+        ),
+    ),
+    user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ) -> ViewListResponse:
@@ -343,7 +525,10 @@ async def list_views(
 
     Returns ``{ items, total, hasMore, nextOffset }``. ``total`` is the
     authoritative count of matches so callers never have to infer "is
-    there another page?" from array length.
+    there another page?" from array length. Access control runs inside
+    the SQL (``readable_views_clause``), so the numbers are exact —
+    the previous Python post-filter made ``total`` overcount and pages
+    come back short.
 
     Filter params (single/multi pairs — the multi-value param wins when both are sent):
     - ``workspaceId`` / ``workspaceIds``
@@ -357,7 +542,10 @@ async def list_views(
     - ``attentionOnly`` — stale (>90d), inactive workspace/source, or
       broken data source reference. Mirrors the frontend health model
       so pagination stays accurate on large catalogs.
+    - ``category=shared-with-me`` — explicit-grant shares only.
     """
+    clause, scope = await _readable_clause(session, user, claims)
+    ids_in, created_by_not = _category_filters(category, scope, user)
     response = await view_repo.list_views_filtered(
         session,
         visibility=visibility,
@@ -370,9 +558,11 @@ async def list_views(
         view_types=view_types,
         created_by=created_by,
         created_by_in=created_by_in,
+        created_by_not=created_by_not,
         created_after=created_after,
         search=search,
         tags=tags,
+        ids_in=ids_in,
         sort=sort,
         limit=limit,
         offset=offset,
@@ -381,33 +571,18 @@ async def list_views(
         include_deleted=include_deleted,
         deleted_only=deleted_only,
         attention_only=attention_only,
+        readable=clause,
     )
 
     # Optional ?include=popular: fold the trending strip into the same
     # response so the Explorer only makes one round-trip instead of two.
-    # ``list_popular_views`` enforces its own visibility scoping (private
-    # views only surface to their creator), so it does not need to pass
-    # through the RBAC post-filter below — popular IS the visible set.
+    # Scoped by the same readable clause as the main list.
     if "popular" in include:
         response.popular = await view_repo.list_popular_views(
             session, limit=popular_limit, user_id=_user_id(user),
+            readable=clause,
         )
 
-    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
-        return response
-
-    # Three-layer post-filter. ``response.items`` is a list of
-    # ViewResponse-shaped objects from the repo, NOT ORM rows — but
-    # they carry the fields our predicates need (id, workspace_id,
-    # visibility, created_by). We adapt them here rather than re-
-    # querying the DB.
-    ctx = await _viewer_context(session, user, claims)
-    keep = []
-    for item in response.items:
-        proxy = _ViewProxy.from_response(item)
-        if await view_access.can_read_view(session, ctx, proxy):
-            keep.append(item)
-    response.items = keep
     return response
 
 
@@ -425,8 +600,19 @@ async def create_view(
     user's ID so views can be filtered by creator in the Explorer.
 
     Authorization: requires ``workspace:view:create`` in the target
-    workspace. Phase 2C enforces; Phase 1 left this open.
+    workspace; creating straight to ``enterprise`` additionally
+    requires ``workspace:view:publish`` (the same gate as the
+    visibility endpoint — a birth certificate is not a bypass).
     """
+    if req.visibility is not None and req.visibility not in (
+        "private", "workspace", "enterprise",
+    ):
+        # Validate before the DB CHECK constraint turns this into a 500.
+        raise HTTPException(
+            status_code=422,
+            detail="visibility must be one of: private, workspace, enterprise",
+        )
+
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         from backend.app.services.permission_service import has_permission
         if not has_permission(
@@ -436,6 +622,25 @@ async def create_view(
                 status_code=403,
                 detail="Missing permission: workspace:view:create",
             )
+        if req.visibility == "enterprise":
+            # The platform ceiling binds everyone, including the people who
+            # hold the publish permission — a limit only non-admins obey is
+            # not a limit. Below it, an 'open' workspace lets any creator
+            # publish, unless the source itself is restricted.
+            platform = await resolve_enterprise_view_policy(session)
+            if platform == "off":
+                raise feature_disabled("enterpriseViewPolicy")
+            has_perm = view_access.can_publish_in_workspace(claims, req.workspace_id)
+            if not has_perm:
+                open_ws = await _publish_policy(session, req.workspace_id) == "open"
+                restricted = await _source_is_restricted(
+                    session, req.workspace_id, req.data_source_id,
+                )
+                if platform == "request" or not open_ws or restricted:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Missing permission: workspace:view:publish",
+                    )
 
     # Admin → Features → View modes. The admin picks which layouts this deployment offers; the
     # wizard hides the rest. Enforced here too, because a hidden button is not a rule.
@@ -466,20 +671,61 @@ async def get_view(
 
     ``branchId`` (a draft ref) projects the branch-effective config — base ⊕ the
     branch's layout overlay — so a draft sees its own layer/scope edits; published
-    and other branches see the base. Absent (or no overlay) → base, unchanged."""
+    and other branches see the base. Absent (or no overlay) → base, unchanged.
+
+    The response carries everything a caller needs to boot the canvas
+    WITHOUT workspace membership: the ``access`` capability envelope,
+    the resolved data source (workspace primary when the view stores
+    NULL), and its ``providerId``."""
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        view_orm = await _load_view_orm(session, view_id)
-        ctx = await _viewer_context(session, user, claims)
         if not await view_access.can_read_view(session, ctx, view_orm):
             # 404 (not 403) so view existence stays private from
             # users with no access path.
             raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
+    await _record_break_glass_read(session, ctx, view_orm, user)
 
     view = await view_repo.get_view_enriched(
         session, view_id, user_id=_user_id(user), branch_id=branch_id,
     )
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
+    # Resolve the effective data source so the frontend never needs the
+    # (membership-gated) workspace list to find it.
+    if view_orm.data_source_id:
+        ds = await data_source_repo.get_data_source_orm(
+            session, view_orm.data_source_id,
+        )
+    else:
+        ds = await data_source_repo.get_primary_data_source(
+            session, view_orm.workspace_id,
+        )
+        if ds is not None:
+            view.data_source_id = ds.id
+            view.data_source_name = ds.label or view.data_source_name
+    if ds is not None:
+        view.provider_id = ds.provider_id
+
+    view.audience = ViewAudience(
+        workspaceMemberCount=await notification_repo.workspace_member_count(
+            session, view_orm.workspace_id,
+        ),
+        explicitGrantCount=len(await grant_repo.list_grants_for_resource(
+            session, resource_type="view", resource_id=view_id,
+        )),
+        platformUserCount=await notification_repo.platform_user_count(session),
+    )
+    view.access = ViewAccessInfo(**await view_access.compute_access_envelope(
+        session, ctx, view_orm,
+        workspace_policy=await _publish_policy(session, view_orm.workspace_id),
+        source_restricted=await _source_is_restricted(
+            session, view_orm.workspace_id, view_orm.data_source_id,
+        ),
+        platform_policy=await resolve_enterprise_view_policy(session),
+    ))
     return view
 
 
@@ -496,7 +742,21 @@ async def update_view(
     Refreshes the stored ontology digest to the CURRENT ontology state so
     subsequent edits will flag drift only for changes that happen after
     this save — every explicit save resets the drift baseline.
+
+    ``visibility`` is NOT accepted here: it is a security field with its
+    own authorization (publish gate) on ``PUT /views/{id}/visibility``.
+    Rejecting loudly beats silently ignoring — an old client must never
+    believe it changed sharing state when it didn't.
     """
+    if req.visibility is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "visibility cannot be changed here; "
+                "use PUT /views/{view_id}/visibility"
+            ),
+        )
+
     existing = await view_repo.get_view(session, view_id)
     if not existing:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
@@ -599,7 +859,11 @@ async def delete_view(
     Hard-delete: ``workspace:admin`` only (per the action matrix).
     """
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        view_orm = await _load_view_orm(session, view_id)
+        # "Delete forever" targets views that are ALREADY in the trash —
+        # the live-only default would 404 before the authz check runs.
+        view_orm = await _load_view_orm(
+            session, view_id, include_deleted=permanent,
+        )
         ctx = await _viewer_context(session, user, claims)
         if permanent:
             allowed = view_access.can_hard_delete_view(ctx, view_orm)
@@ -634,7 +898,7 @@ async def restore_view(
 ):
     """Restore a soft-deleted view (workspace admin only)."""
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        view_orm = await _load_view_orm(session, view_id)
+        view_orm = await _load_view_orm(session, view_id, include_deleted=True)
         ctx = await _viewer_context(session, user, claims)
         if not view_access.can_restore_view(ctx, view_orm):
             raise HTTPException(
@@ -664,7 +928,10 @@ async def update_view_visibility(
 ):
     """Change the visibility of a view (private | workspace | enterprise).
 
-    Creator or workspace admin only — see the action matrix.
+    Base rule: creator or workspace admin. Any transition to or from
+    ``enterprise`` additionally requires ``workspace:view:publish`` —
+    publishing exposes the view and read-only access to its data source
+    to every signed-in user, which is a governance act, not an edit.
     """
     if visibility not in ("private", "workspace", "enterprise"):
         raise HTTPException(status_code=422, detail="visibility must be one of: private, workspace, enterprise")
@@ -677,6 +944,39 @@ async def update_view_visibility(
                 status_code=403,
                 detail="Only the creator or a workspace admin can change visibility",
             )
+        publishing = view_orm.visibility != "enterprise" and visibility == "enterprise"
+        unpublishing = view_orm.visibility == "enterprise" and visibility != "enterprise"
+        if publishing:
+            platform = await resolve_enterprise_view_policy(session)
+            if platform == "off":
+                raise feature_disabled("enterpriseViewPolicy")
+            policy = await _publish_policy(session, view_orm.workspace_id)
+            restricted = await _source_is_restricted(
+                session, view_orm.workspace_id, view_orm.data_source_id,
+            )
+            if not view_access.can_publish_under_policy(
+                ctx, view_orm, policy=policy, source_restricted=restricted,
+                platform_policy=platform,
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Missing permission: workspace:view:publish",
+                )
+        elif unpublishing:
+            # Same standing as publishing, minus the platform ceiling —
+            # otherwise a deployment switching to 'off' would strand every
+            # view it had already published, with nobody able to close them.
+            if not view_access.can_unpublish(
+                ctx, view_orm,
+                policy=await _publish_policy(session, view_orm.workspace_id),
+                source_restricted=await _source_is_restricted(
+                    session, view_orm.workspace_id, view_orm.data_source_id,
+                ),
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Missing permission: workspace:view:publish",
+                )
 
     existing = await view_repo.get_view(session, view_id)
     view = await view_repo.update_visibility(
@@ -691,23 +991,237 @@ async def update_view_visibility(
             summary=f"Visibility {existing.visibility} → {visibility}",
             changes={"visibility": {"from": existing.visibility, "to": visibility}},
         )
+        # Publishing is open by default, so the control is after the fact
+        # rather than before it: whoever governs this workspace hears
+        # about it and can unpublish. Silence would make "open" mean
+        # "unsupervised".
+        if visibility == "enterprise":
+            await notification_repo.notify(
+                session,
+                user_ids=await notification_repo.users_who_can(
+                    session,
+                    workspace_id=view.workspace_id,
+                    permission="workspace:view:publish",
+                ),
+                kind="view.published",
+                title=f'"{view.name}" was published to everyone',
+                body="Anyone signed in can now open it. You can unpublish it from the workspace's Views tab.",
+                link=f"/views/{view_id}",
+                actor_id=_user_id(user),
+                resource_type="view",
+                resource_id=view_id,
+            )
     return view
 
+
+
+# ── Publication requests ─────────────────────────────────────────────
+#
+# ``workspace:view:publish`` is the right gate for exposing a view (and
+# read-only access to its data source) to the whole platform. But a
+# permission with no path around it is a dead end, and the product
+# intent is the opposite: any member should be able to share their work
+# with the wider world. So a member who cannot publish can ASK, in one
+# click, and whoever holds the permission answers. Workspaces that
+# don't want the ceremony set ``publish_policy='open'`` and members
+# publish directly.
+
+@router.post("/{view_id}/publish-request", response_model=ViewResponse)
+async def request_publication(
+    view_id: str = Path(...),
+    note: Optional[str] = Body(None, embed=True),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Ask for this view to be published platform-wide.
+
+    Open to whoever owns the view's sharing settings (creator or
+    workspace admin) — the same bar as changing visibility, since this
+    is the one visibility they cannot set themselves. Asking grants
+    nothing; it queues the question for a publish-permission holder.
+    """
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not view_access.can_request_publish(ctx, view_orm):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the view's owner or a workspace admin can request publication",
+        )
+    if view_orm.visibility == "enterprise":
+        raise HTTPException(status_code=409, detail="This view is already published")
+
+    view_orm.publish_requested_by = user.id
+    view_orm.publish_requested_at = datetime.now(timezone.utc).isoformat()
+    view_orm.publish_request_note = (note or "").strip() or None
+    await session.flush()
+    await view_activity_repo.record_view_activity(
+        session, view_id=view_id, workspace_id=view_orm.workspace_id,
+        action="publish_requested", actor=user.id,
+        summary="Requested publication to everyone",
+        changes={"note": view_orm.publish_request_note},
+    )
+    # A queue nobody is told about is not a queue.
+    await notification_repo.notify(
+        session,
+        user_ids=await notification_repo.users_who_can(
+            session,
+            workspace_id=view_orm.workspace_id,
+            permission="workspace:view:publish",
+        ),
+        kind="view.publish_requested",
+        title=f'Publication requested: "{view_orm.name}"',
+        body=view_orm.publish_request_note
+             or "Someone asked to publish this view to everyone.",
+        link=f"/views/{view_id}",
+        actor_id=user.id,
+        resource_type="view",
+        resource_id=view_id,
+    )
+    return await _enriched_or_404(session, view_id, user)
+
+
+@router.delete("/{view_id}/publish-request", status_code=204)
+async def withdraw_publication_request(
+    view_id: str = Path(...),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Withdraw a pending request — the requester, or anyone who could
+    have answered it."""
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    is_requester = view_orm.publish_requested_by == user.id
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not (
+        is_requester or view_access.can_answer_publish_request(ctx, view_orm)
+    ):
+        raise HTTPException(status_code=403, detail="Not your request to withdraw")
+    _clear_publish_request(view_orm)
+    await session.flush()
+
+
+@router.post("/{view_id}/publish-request/approve", response_model=ViewResponse)
+async def approve_publication(
+    view_id: str = Path(...),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Approve a pending request: the view goes enterprise.
+
+    Recorded as ``visibility_changed`` — the approval's whole point is
+    the transition, and the timeline should say what happened, not how
+    it was authorised (the request's own entry already says that).
+    """
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not view_access.can_answer_publish_request(ctx, view_orm):
+        raise HTTPException(
+            status_code=403,
+            detail="Missing permission: workspace:view:publish",
+        )
+    if not view_orm.publish_requested_at:
+        raise HTTPException(status_code=409, detail="No pending publication request")
+
+    if await resolve_enterprise_view_policy(session) == "off":
+        # The queue can outlive the setting: a request filed while the
+        # tier was available must not become a way around its withdrawal.
+        raise feature_disabled("enterpriseViewPolicy")
+
+    previous = view_orm.visibility
+    requester = view_orm.publish_requested_by
+    _clear_publish_request(view_orm)
+    view_orm.visibility = "enterprise"
+    view_orm.updated_by = user.id
+    await session.flush()
+    await view_activity_repo.record_view_activity(
+        session, view_id=view_id, workspace_id=view_orm.workspace_id,
+        action="visibility_changed", actor=user.id,
+        summary=f"Published to everyone (requested by {requester or 'unknown'})",
+        changes={
+            "visibility": {"from": previous, "to": "enterprise"},
+            "approvedRequestFrom": requester,
+        },
+    )
+    await notification_repo.notify(
+        session,
+        user_ids=[requester] if requester else [],
+        kind="view.publish_approved",
+        title=f'"{view_orm.name}" is now published',
+        body="Your request was approved — anyone signed in can open this view.",
+        link=f"/views/{view_id}",
+        actor_id=user.id,
+        resource_type="view",
+        resource_id=view_id,
+    )
+    return await _enriched_or_404(session, view_id, user)
+
+
+@router.post("/{view_id}/publish-request/deny", response_model=ViewResponse)
+async def deny_publication(
+    view_id: str = Path(...),
+    reason: Optional[str] = Body(None, embed=True),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Decline a pending request. The view keeps its current visibility;
+    the reason lands on the view's timeline so the asker learns why."""
+    view_orm = await _load_view_orm(session, view_id)
+    ctx = await _viewer_context(session, user, claims)
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not view_access.can_answer_publish_request(ctx, view_orm):
+        raise HTTPException(
+            status_code=403,
+            detail="Missing permission: workspace:view:publish",
+        )
+    if not view_orm.publish_requested_at:
+        raise HTTPException(status_code=409, detail="No pending publication request")
+
+    requester = view_orm.publish_requested_by
+    _clear_publish_request(view_orm)
+    await session.flush()
+    await view_activity_repo.record_view_activity(
+        session, view_id=view_id, workspace_id=view_orm.workspace_id,
+        action="publish_denied", actor=user.id,
+        summary=(reason or "").strip() or "Publication request declined",
+        changes={"requestedBy": requester, "reason": (reason or "").strip() or None},
+    )
+    await notification_repo.notify(
+        session,
+        user_ids=[requester] if requester else [],
+        kind="view.publish_denied",
+        title=f'Publication declined: "{view_orm.name}"',
+        body=(reason or "").strip()
+             or "Your request to publish this view was declined.",
+        link=f"/views/{view_id}",
+        actor_id=user.id,
+        resource_type="view",
+        resource_id=view_id,
+    )
+    return await _enriched_or_404(session, view_id, user)
 
 @router.post("/{view_id}/favourite", status_code=201)
 async def favourite_view(
     view_id: str = Path(...),
-    user=Depends(get_optional_user),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Favourite a view for the current user."""
-    view = await view_repo.get_view(session, view_id)
-    if not view:
-        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    """Favourite a view for the current user. Gated by view-read access
+    (this endpoint previously had no check at all — anyone who knew an
+    id could favourite it and write to its activity log)."""
+    view_orm = await _load_view_orm(session, view_id)
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        ctx = await _viewer_context(session, user, claims)
+        if not await view_access.can_read_view(session, ctx, view_orm):
+            raise HTTPException(
+                status_code=404, detail=f"View '{view_id}' not found",
+            )
     created = await view_repo.favourite_view(session, view_id, _user_id(user))
     if created:
         await view_activity_repo.record_view_activity(
-            session, view_id=view_id, workspace_id=view.workspace_id,
+            session, view_id=view_id, workspace_id=view_orm.workspace_id,
             action="favourited", actor=_user_id(user), summary="Favourited",
         )
     return {"favourited": True, "created": created}
@@ -716,10 +1230,12 @@ async def favourite_view(
 @router.delete("/{view_id}/favourite", status_code=204)
 async def unfavourite_view(
     view_id: str = Path(...),
-    user=Depends(get_optional_user),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Remove favourite for the current user."""
+    """Remove favourite for the current user. No read check — removing
+    your own bookmark must keep working after access is revoked, and a
+    404 here only ever reflects the caller's own rows."""
     removed = await view_repo.unfavourite_view(session, view_id, _user_id(user))
     if not removed:
         raise HTTPException(status_code=404, detail="Favourite not found")
@@ -790,23 +1306,20 @@ async def list_my_activity_feed(
     Path is ``/me/feed`` rather than ``/me/activity`` on purpose: the latter
     would bind ``/{view_id}/activity`` with view_id="me".
 
-    Over-fetch, then apply the SAME per-view read predicate as the views list
-    (``can_read_view``), then trim — so the feed can never surface activity for a
-    view the user has no access to.
+    The read scope is pushed into SQL (``readable_views_clause``), so the
+    LIMIT applies to the caller's readable feed — the old over-fetch+trim
+    starved users whose readable views were sparse relative to global
+    activity.
     """
-    pairs = await view_activity_repo.get_recent_activity(session, limit=limit * 4)
-
-    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
+    clause, _scope = await _readable_clause(session, user, claims)
+    if clause is None:
+        # Kill-switch path: legacy unscoped feed.
+        pairs = await view_activity_repo.get_recent_activity(session, limit=limit)
         return [entry for entry, _ in pairs][:limit]
-
-    ctx = await _viewer_context(session, user, claims)
-    visible: List[view_activity_repo.ViewActivityEntry] = []
-    for entry, view_orm in pairs:
-        if len(visible) >= limit:
-            break
-        if await view_access.can_read_view(session, ctx, view_orm):
-            visible.append(entry)
-    return visible
+    pairs = await view_activity_repo.get_recent_activity(
+        session, limit=limit, readable=clause,
+    )
+    return [entry for entry, _ in pairs]
 
 
 class MyDraftEntry(BaseModel):
@@ -921,15 +1434,21 @@ async def list_my_drafts(
 @router.get("/me/recent", response_model=List[view_repo.RecentViewEntry])
 async def list_my_recent_views(
     limit: int = Query(5, le=20),
-    user=Depends(get_optional_user),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """The signed-in user's recently visited views — "Continue where you left off".
 
     Server-side and per-user, so it follows them across devices/browsers and is
     joined against the LIVE views (never a stale name, deleted views drop out).
+    Also scoped by the caller's CURRENT read reach — a visit row is
+    history, not a capability, so a view that went private drops out.
     """
-    return await view_repo.list_recent_views(session, _user_id(user), limit=limit)
+    clause, _scope = await _readable_clause(session, user, claims)
+    return await view_repo.list_recent_views(
+        session, _user_id(user), limit=limit, readable=clause,
+    )
 
 
 @router.post("/{view_id}/visit", status_code=204)

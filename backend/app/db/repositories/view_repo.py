@@ -7,9 +7,9 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Sequence, Set
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set
 
-from sqlalchemy import select, delete, func, or_, update
+from sqlalchemy import and_, select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel
@@ -25,6 +25,8 @@ from ..models import (
     UserORM,
 )
 from backend.common.models.management import (
+    ViewHealthInfo,
+    ViewPublishRequest,
     ViewCreateRequest,
     ViewUpdateRequest,
     ViewLayoutUpdateRequest,
@@ -150,6 +152,89 @@ async def resolve_user_ids(
 _resolve_user_ids = resolve_user_ids
 
 
+# ------------------------------------------------------------------ #
+# View health (server-authoritative)                                    #
+# ------------------------------------------------------------------ #
+
+_STALE_THRESHOLD_DAYS = 90
+
+
+class _ScopeFacts(NamedTuple):
+    """What the server knows about a view's workspace + data source."""
+    ws_exists: bool
+    ws_active: bool
+    ds_exists: bool
+    ds_active: bool
+
+
+def _health_for(row: ViewORM, facts: _ScopeFacts) -> Dict[str, Optional[str]]:
+    """Verdict on one view's scope integrity.
+
+    Mirrors the ``attention_only`` SQL filter in ``_apply_view_filters``
+    so the badge and the "needs attention" list can never disagree. The
+    browser cannot compute this: its workspace store holds only the
+    caller's own memberships, so "not mine" is indistinguishable there
+    from "deleted" — which is how every shared view came to be labelled
+    "Source deleted".
+    """
+    if not facts.ws_exists:
+        return {"status": "broken", "reason": "Workspace no longer exists"}
+    if not facts.ws_active:
+        return {"status": "warning", "reason": "Workspace is inactive"}
+    if row.data_source_id:
+        if not facts.ds_exists:
+            return {"status": "broken", "reason": "Data source no longer exists"}
+        if not facts.ds_active:
+            return {"status": "warning", "reason": "Data source is inactive"}
+    try:
+        updated = datetime.fromisoformat((row.updated_at or "").replace("Z", "+00:00"))
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - updated).days
+        if age_days > _STALE_THRESHOLD_DAYS:
+            return {"status": "stale", "reason": f"Not updated in {age_days} days"}
+    except (TypeError, ValueError):
+        pass
+    return {"status": "healthy", "reason": None}
+
+
+async def _scope_facts_for(
+    session: AsyncSession, rows: Sequence[ViewORM],
+) -> Dict[str, _ScopeFacts]:
+    """Batch-resolve workspace/data-source existence + active flags,
+    keyed by view id. Two SELECTs regardless of row count."""
+    ws_ids = {r.workspace_id for r in rows if r.workspace_id}
+    ds_ids = {r.data_source_id for r in rows if r.data_source_id}
+
+    ws_state: Dict[str, bool] = {}
+    if ws_ids:
+        res = await session.execute(
+            select(WorkspaceORM.id, WorkspaceORM.is_active)
+            .where(WorkspaceORM.id.in_(ws_ids))
+            .where(WorkspaceORM.deleted_at.is_(None))
+        )
+        ws_state = {wid: bool(active) for wid, active in res.all()}
+
+    ds_state: Dict[str, bool] = {}
+    if ds_ids:
+        res = await session.execute(
+            select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.is_active)
+            .where(WorkspaceDataSourceORM.id.in_(ds_ids))
+            .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+        )
+        ds_state = {did: bool(active) for did, active in res.all()}
+
+    out: Dict[str, _ScopeFacts] = {}
+    for r in rows:
+        out[r.id] = _ScopeFacts(
+            ws_exists=r.workspace_id in ws_state,
+            ws_active=ws_state.get(r.workspace_id, False),
+            ds_exists=(r.data_source_id in ds_state) if r.data_source_id else True,
+            ds_active=ds_state.get(r.data_source_id, False) if r.data_source_id else True,
+        )
+    return out
+
+
 def _to_response(
     row: ViewORM,
     *,
@@ -165,6 +250,8 @@ def _to_response(
     favourite_count: int = 0,
     is_favourited: bool = False,
     config_override: Optional[dict] = None,
+    health: Optional[Dict[str, Optional[str]]] = None,
+    publish_requester_name: Optional[str] = None,
 ) -> ViewResponse:
     # ``config_override`` lets branch-scoped-layout callers project the
     # EFFECTIVE (base ⊕ overlay) config into the response without touching the
@@ -177,6 +264,16 @@ def _to_response(
         raw_layout = config_dict.get("layoutType")
         layout_type = str(raw_layout) if raw_layout is not None else None
     return ViewResponse(
+        health=ViewHealthInfo(**health) if health else None,
+        publish_request=(
+            ViewPublishRequest(
+                requested_by=row.publish_requested_by,
+                requested_by_name=publish_requester_name,
+                requested_at=row.publish_requested_at,
+                note=row.publish_request_note,
+            )
+            if getattr(row, "publish_requested_at", None) else None
+        ),
         id=row.id,
         name=row.name,
         description=row.description,
@@ -233,16 +330,23 @@ async def _to_enriched_response(
     cm_name = await _get_context_model_name(session, row.context_model_id)
     # Resolve creator, modifier AND data-publisher in one batched lookup
     # (dedupes when they're the same principal).
-    user_map = await _resolve_user_ids(
-        session, {row.created_by, row.updated_by, getattr(row, 'data_updated_by', None)})
+    user_map = await _resolve_user_ids(session, {
+        row.created_by, row.updated_by,
+        getattr(row, 'data_updated_by', None),
+        getattr(row, 'publish_requested_by', None),
+    })
     creator_name, creator_email = user_map.get(row.created_by or "", (None, None))
     modifier_name, modifier_email = user_map.get(row.updated_by or "", (None, None))
     publisher_name, publisher_email = user_map.get(
         getattr(row, 'data_updated_by', None) or "", (None, None))
     fav_count = await _get_favourite_count(session, row.id)
     fav = await _is_favourited(session, row.id, user_id)
+    facts = (await _scope_facts_for(session, [row]))[row.id]
     return _to_response(
         row,
+        health=_health_for(row, facts),
+        publish_requester_name=user_map.get(
+            getattr(row, 'publish_requested_by', None) or "", (None, None))[0],
         workspace_name=ws_name,
         data_source_name=ds_name,
         context_model_name=cm_name,
@@ -314,7 +418,11 @@ async def _batch_enrich_rows(
     cm_ids: Set[str] = {r.context_model_id for r in rows if r.context_model_id}
     user_ids: Set[Optional[str]] = {
         uid for r in rows
-        for uid in (r.created_by, r.updated_by, getattr(r, 'data_updated_by', None))
+        for uid in (
+            r.created_by, r.updated_by,
+            getattr(r, 'data_updated_by', None),
+            getattr(r, 'publish_requested_by', None),
+        )
     }
     view_ids: List[str] = [r.id for r in rows]
 
@@ -342,6 +450,9 @@ async def _batch_enrich_rows(
             .where(ContextModelORM.id.in_(cm_ids))
         )
         cm_map = {cid: name for cid, name in res.all()}
+
+    # Scope integrity (existence + active flags) for the whole batch.
+    health_map = await _scope_facts_for(session, rows)
 
     # One users lookup resolves every creator AND modifier id in the batch.
     user_map = await _resolve_user_ids(session, user_ids)
@@ -387,6 +498,9 @@ async def _batch_enrich_rows(
             data_updated_by_email=publisher[1],
             favourite_count=fav_counts.get(row.id, 0),
             is_favourited=row.id in fav_set,
+            health=_health_for(row, health_map[row.id]),
+            publish_requester_name=user_map.get(
+                getattr(row, 'publish_requested_by', None) or "", (None, None))[0],
         ))
     return responses
 
@@ -508,8 +622,10 @@ async def update_view(
         row.view_type = req.view_type
     if req.config is not None:
         row.config = json.dumps(req.config)
-    if req.visibility is not None:
-        row.visibility = req.visibility
+    # visibility is NOT written here: it is a security field with its own
+    # authorization (publish gate) — see update_visibility. The endpoint
+    # 422s before reaching this function; skipping it here keeps a direct
+    # repo caller from bypassing that rule too.
     if req.tags is not None:
         row.tags = json.dumps(req.tags)
     if req.is_pinned is not None:
@@ -947,26 +1063,46 @@ def _apply_view_filters(
     view_types: Optional[List[str]] = None,
     created_by: Optional[str] = None,
     created_by_in: Optional[List[str]] = None,
+    created_by_not: Optional[str] = None,
     created_after: Optional[str] = None,
     search: Optional[str] = None,
     tags: Optional[List[str]] = None,
+    ids_in: Optional[List[str]] = None,
     user_id: Optional[str] = None,
     favourited_only: bool = False,
     include_deleted: bool = False,
     deleted_only: bool = False,
     attention_only: bool = False,
+    readable=None,
 ):
     """Apply all filter predicates to a query on ``ViewORM``.
 
     Shared by the listing, counting, and discovery code paths so the same
     set of predicates produces the same result set whether the caller is
     fetching rows or the total count.
+
+    ``readable`` is the caller's access clause (from
+    ``view_access.readable_views_clause``). Applying it here — inside the
+    same WHERE as every other predicate — is what makes ``total`` /
+    ``has_more`` honest; the old Python post-filter over-reported both.
+    ``ids_in`` / ``created_by_not`` exist for the shared-with-me
+    category (explicit grants, excluding the caller's own views).
     """
+    if readable is not None:
+        query = query.where(readable)
+
     # Soft-delete filtering
     if deleted_only:
         query = query.where(ViewORM.deleted_at.isnot(None))
     elif not include_deleted:
         query = query.where(ViewORM.deleted_at.is_(None))
+
+    if ids_in is not None:
+        query = query.where(ViewORM.id.in_(ids_in))
+    if created_by_not:
+        query = query.where(
+            or_(ViewORM.created_by.is_(None), ViewORM.created_by != created_by_not)
+        )
 
     # When favourited_only is True, inner-join on the favourites table so only
     # views the requesting user has bookmarked are returned.
@@ -1106,16 +1242,18 @@ async def record_view_visit(
 
 async def list_recent_views(
     session: AsyncSession, user_id: Optional[str], *, limit: int = 5,
+    readable=None,
 ) -> List[RecentViewEntry]:
     """This user's most recently visited views, newest first.
 
     Joined against the LIVE view rows, so names/scope are never a stale snapshot
     and a deleted view drops out on its own (no more clicking a recent entry into
-    a 404).
+    a 404). ``readable`` additionally drops views the user has since
+    lost access to — a visit row is history, not a capability.
     """
     if not user_id or user_id == "anonymous":
         return []
-    rows = (await session.execute(
+    query = (
         select(ViewORM, ViewVisitORM.visited_at)
         .join(ViewVisitORM, ViewVisitORM.view_id == ViewORM.id)
         .where(
@@ -1124,7 +1262,10 @@ async def list_recent_views(
         )
         .order_by(ViewVisitORM.visited_at.desc())
         .limit(limit)
-    )).all()
+    )
+    if readable is not None:
+        query = query.where(readable)
+    rows = (await session.execute(query)).all()
 
     out: List[RecentViewEntry] = []
     for view_row, visited_at in rows:
@@ -1202,9 +1343,11 @@ async def list_views_filtered(
     view_types: Optional[List[str]] = None,
     created_by: Optional[str] = None,
     created_by_in: Optional[List[str]] = None,
+    created_by_not: Optional[str] = None,
     created_after: Optional[str] = None,
     search: Optional[str] = None,
     tags: Optional[List[str]] = None,
+    ids_in: Optional[List[str]] = None,
     limit: int = 50,
     offset: int = 0,
     user_id: Optional[str] = None,
@@ -1212,6 +1355,7 @@ async def list_views_filtered(
     include_deleted: bool = False,
     deleted_only: bool = False,
     attention_only: bool = False,
+    readable=None,
 ) -> ViewListResponse:
     """Return a paginated envelope of views matching the given filters.
 
@@ -1232,14 +1376,17 @@ async def list_views_filtered(
         view_types=view_types,
         created_by=created_by,
         created_by_in=created_by_in,
+        created_by_not=created_by_not,
         created_after=created_after,
         search=search,
         tags=tags,
+        ids_in=ids_in,
         user_id=user_id,
         favourited_only=favourited_only,
         include_deleted=include_deleted,
         deleted_only=deleted_only,
         attention_only=attention_only,
+        readable=readable,
     )
 
     select_query = _apply_view_filters(select(ViewORM), **filter_kwargs)
@@ -1281,17 +1428,20 @@ async def list_views_filtered(
 
 async def get_view_facets(
     session: AsyncSession,
+    *,
+    readable=None,
 ) -> ViewFacetsResponse:
     """Aggregate distinct tags, view types, and creators across non-deleted views.
 
     Used by the Explorer to populate the Tag / View Type / Creator filter
-    dropdowns. Facets are intentionally GLOBAL (unscoped by other active
-    filters) so users can always pick from the full set of values in the
-    database rather than the intersection of their current filters —
-    matches the behaviour users expect from Explorer-style UIs where the
-    picker is a discovery tool, not a query refinement.
+    dropdowns. Facets are intentionally unscoped by the caller's *other*
+    active filters (the picker is a discovery tool, not a query
+    refinement) — but ALWAYS scoped by ``readable``: a facet computed
+    over views the caller cannot read leaks their tags and creators.
     """
     base_where = ViewORM.deleted_at.is_(None)
+    if readable is not None:
+        base_where = and_(base_where, readable)
 
     # 1. Tags — parsed in Python since the column is a JSON string.
     tags_query = (
@@ -1388,14 +1538,17 @@ async def get_view_stats(
     view_types: Optional[List[str]] = None,
     created_by: Optional[str] = None,
     created_by_in: Optional[List[str]] = None,
+    created_by_not: Optional[str] = None,
     created_after: Optional[str] = None,
     search: Optional[str] = None,
     tags: Optional[List[str]] = None,
+    ids_in: Optional[List[str]] = None,
     user_id: Optional[str] = None,
     favourited_only: bool = False,
     include_deleted: bool = False,
     deleted_only: bool = False,
     attention_only: bool = False,
+    readable=None,
 ) -> ViewCatalogStats:
     """Compute the Explorer stats bar numbers for a given filter set.
 
@@ -1415,9 +1568,11 @@ async def get_view_stats(
         view_types=view_types,
         created_by=created_by,
         created_by_in=created_by_in,
+        created_by_not=created_by_not,
         created_after=created_after,
         search=search,
         tags=tags,
+        ids_in=ids_in,
         user_id=user_id,
         favourited_only=favourited_only,
         include_deleted=include_deleted,
@@ -1427,6 +1582,7 @@ async def get_view_stats(
         # The needs_attention query below always overlays True — when
         # both resolve to True the numbers line up as expected.
         attention_only=attention_only,
+        readable=readable,
     )
 
     # Total — matches list ``total`` for identical filters.
@@ -1486,15 +1642,16 @@ async def list_popular_views(
     *,
     limit: int = 20,
     user_id: Optional[str] = None,
+    readable=None,
 ) -> List[ViewResponse]:
     """List the most-favourited views visible to the caller.
 
-    Visibility scoping:
-    - ``enterprise`` and ``workspace`` visibility are visible to everyone
-      (matches how ``list_views_filtered`` treats access today).
-    - ``private`` views only surface for their creator, so user A never
-      sees user B's private view bubble up into their Trending strip
-      just because A has happened to favourite it.
+    ``readable`` (from ``view_access.readable_views_clause``) is the
+    caller's actual read reach and should always be supplied by the
+    endpoint; the legacy predicate below survives only for the
+    ``RBAC_ENFORCE_VIEWS`` kill-switch path. The legacy predicate leaked
+    workspace-tier views across workspaces — it had no workspace
+    scoping at all.
 
     Zero-favourite views are excluded so Trending reflects actual
     popularity rather than padding with unloved views.
@@ -1508,14 +1665,17 @@ async def list_popular_views(
         .subquery()
     )
 
-    # Privacy-safe visibility predicate: everyone sees non-private views;
-    # private views only surface to their creator.
-    visibility_predicate = ViewORM.visibility.in_(("enterprise", "workspace"))
-    if user_id:
-        visibility_predicate = or_(
-            visibility_predicate,
-            ViewORM.created_by == user_id,
-        )
+    if readable is not None:
+        visibility_predicate = readable
+    else:
+        # Legacy (kill-switch) predicate: everyone sees non-private
+        # views; private views only surface to their creator.
+        visibility_predicate = ViewORM.visibility.in_(("enterprise", "workspace"))
+        if user_id:
+            visibility_predicate = or_(
+                visibility_predicate,
+                ViewORM.created_by == user_id,
+            )
 
     query = (
         select(ViewORM, fav_count_sq.c.fav_count)

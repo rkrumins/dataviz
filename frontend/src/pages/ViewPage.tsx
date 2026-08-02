@@ -19,25 +19,34 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function ViewPage() {
   const { viewId } = useParams<{ viewId: string }>()
-  const { status, view, layoutType, error, viewWorkspaceId, viewDataSourceId } = useViewNavigation(viewId)
+  const {
+    status, view, layoutType, error,
+    viewWorkspaceId, viewDataSourceId,
+    viewWorkspaceName, viewProviderId, access,
+  } = useViewNavigation(viewId)
   const workspaces = useWorkspacesStore(s => s.workspaces)
 
-  // Tab title: "{View} · {Workspace} · {Brand}". workspaceName is enriched from
-  // the API but absent for locally-created views, so fall back to the store.
-  // Only title with the view once it's the active/ready one (during resolve,
-  // `view` may still be the previously-open view), else a neutral "View".
-  const wsName = view?.workspaceName ?? workspaces.find(w => w.id === view?.workspaceId)?.name
+  // Tab title: "{View} · {Workspace} · {Brand}". The API response names the
+  // workspace even for non-members; the store lookup is only a fallback for
+  // locally-created views.
+  const wsName =
+    viewWorkspaceName
+    ?? view?.workspaceName
+    ?? workspaces.find(w => w.id === view?.workspaceId)?.name
   useDocumentTitle(
     status === 'ready' && view
       ? (wsName ? `${view.name} · ${wsName}` : view.name)
       : 'View',
   )
 
-  // Lightweight health check for the active view
+  // Lightweight health check for the active view. Membership-scoped on
+  // purpose: the workspace store only lists workspaces the caller belongs
+  // to, so for a shared/enterprise view its absence proves nothing — the
+  // server already vouched for the view by returning it.
   const healthWarning = useMemo(() => {
     if (!view || status !== 'ready') return null
     const ws = workspaces.find(w => w.id === view.workspaceId)
-    if (!ws) return 'The workspace for this view no longer exists.'
+    if (!ws) return null
     if (view.dataSourceId) {
       const ds = ws.dataSources?.find(d => d.id === view.dataSourceId)
       if (!ds) return 'The data source for this view has been deleted.'
@@ -114,6 +123,8 @@ export function ViewPage() {
             workspaceId={viewWorkspaceId}
             dataSourceId={viewDataSourceId}
             viewId={view?.id ?? null}
+            providerId={viewProviderId}
+            access={access}
           >
             <CanvasRouter layoutType={layoutType} />
             <UnsavedWorkGuard />

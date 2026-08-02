@@ -29,12 +29,18 @@ import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDraw
 import {
     Eye, Search, Plus, Compass, LayoutGrid, List as ListIcon,
     Lock, Users, Globe, AlertTriangle, UserRound, Clock, X, History, ChevronDown,
+    Check, Loader2,
 } from 'lucide-react'
 import { WorkspaceActivityFeed } from '@/components/views/WorkspaceActivityFeed'
 import { cn } from '@/lib/utils'
-import type { DataSourceResponse } from '@/services/workspaceService'
 import {
-    updateViewVisibility, restoreView as restoreViewApi, type View,
+    workspaceService,
+    type DataSourceResponse,
+    type WorkspacePublishPolicy,
+} from '@/services/workspaceService'
+import {
+    updateViewVisibility, restoreView as restoreViewApi,
+    approveViewPublication, denyViewPublication, type View,
 } from '@/services/viewApiService'
 import { useExplorerViews, type ExplorerFilters, type SortOption } from '@/hooks/useExplorerViews'
 import { useViewStats } from '@/hooks/useViewStats'
@@ -42,7 +48,8 @@ import { useViewHealth } from '@/hooks/useViewHealth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useToast } from '@/components/ui/toast'
-import { useAuthStore } from '@/store/auth'
+import { useAuthStore, usePermission } from '@/store/auth'
+import { useBrand } from '@/store/branding'
 import { timeAgo } from '@/lib/timeAgo'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
@@ -56,19 +63,40 @@ import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 
 type Visibility = 'private' | 'workspace' | 'enterprise'
 
+/**
+ * Where a view stands today, said from the APPROVER's seat. Not
+ * `visibilityDescription` — that one speaks to the owner ("Only you…"),
+ * which is the wrong voice for someone reviewing another person's view.
+ */
+const CURRENT_REACH: Record<string, string> = {
+    private: 'currently visible only to its owner and workspace admins',
+    workspace: 'currently visible to this workspace',
+    enterprise: 'currently visible to everyone signed in',
+}
+
 interface WorkspaceViewsSectionProps {
     wsId: string
     dataSources: DataSourceResponse[]
     /** The full, unfiltered workspace view population — drives the insight
      *  header totals so they describe the whole workspace, not the filter. */
     allViews: View[]
+    /** Who may publish here. Absent on servers that predate the setting. */
+    publishPolicy?: WorkspacePublishPolicy
+    /** Re-pull the workspace (and `allViews`) after answering a request or
+     *  changing the policy — both change data this component only reads. */
+    onWorkspaceChanged?: () => void
 }
 
-export default function WorkspaceViewsSection({ wsId, dataSources, allViews }: WorkspaceViewsSectionProps) {
+export default function WorkspaceViewsSection({
+    wsId, dataSources, allViews, publishPolicy, onWorkspaceChanged,
+}: WorkspaceViewsSectionProps) {
     const currentUser = useAuthStore(s => s.user)
     const { openViewEditor } = useViewEditorModal()
     const { showToast } = useToast()
+    const { appName } = useBrand()
     const { resolve: resolveProvider } = useDataSourceProviderMap()
+    const canAnswerPublishRequests = usePermission('workspace:view:publish', wsId)
+    const canAdminWorkspace = usePermission('workspace:admin', wsId)
 
     // ─── Filters + layout ────────────────────────────────────────────
     const [search, setSearch] = useState('')
@@ -200,6 +228,78 @@ export default function WorkspaceViewsSection({ wsId, dataSources, allViews }: W
         }
     }
 
+    // ─── Publication requests ────────────────────────────────────────
+    // `allViews` is the parent's snapshot, so an answered row is dropped
+    // locally rather than waiting for the reload to come back.
+    const [answeredIds, setAnsweredIds] = useState<Set<string>>(new Set())
+    const [busyRequestId, setBusyRequestId] = useState<string | null>(null)
+    const [denyingId, setDenyingId] = useState<string | null>(null)
+    const [denyReason, setDenyReason] = useState('')
+    // Approve is a one-way door onto every signed-in account, so it goes
+    // through a confirm step that states the consequence. Decline already
+    // had one (its reason box) — this makes the pair symmetric.
+    const [confirmingId, setConfirmingId] = useState<string | null>(null)
+    const [policySaving, setPolicySaving] = useState(false)
+    const [restrictingDsId, setRestrictingDsId] = useState<string | null>(null)
+
+    const pendingRequests = useMemo(
+        () => allViews.filter(v => v.publishRequest && !answeredIds.has(v.id)),
+        [allViews, answeredIds],
+    )
+
+    const answerRequest = async (
+        view: View,
+        answer: () => Promise<unknown>,
+        successMessage: string,
+    ) => {
+        setBusyRequestId(view.id)
+        try {
+            await answer()
+            setAnsweredIds(prev => new Set(prev).add(view.id))
+            setDenyingId(null)
+            setDenyReason('')
+            setConfirmingId(null)
+            refetch()
+            onWorkspaceChanged?.()
+            showToast('success', successMessage)
+        } catch (err) {
+            showToast('error', err instanceof Error ? err.message : 'Could not answer the request')
+        } finally {
+            setBusyRequestId(null)
+        }
+    }
+
+    const handleSetPublishPolicy = async (policy: WorkspacePublishPolicy) => {
+        if (policy === (publishPolicy ?? 'open')) return
+        setPolicySaving(true)
+        try {
+            await workspaceService.update(wsId, { publishPolicy: policy })
+            onWorkspaceChanged?.()
+            showToast('success', policy === 'open'
+                ? 'Members can now publish views directly'
+                : 'Members must request approval to publish')
+        } catch (err) {
+            showToast('error', err instanceof Error ? err.message : 'Could not change the policy')
+        } finally {
+            setPolicySaving(false)
+        }
+    }
+
+    const handleSetRestricted = async (dsId: string, isRestricted: boolean) => {
+        setRestrictingDsId(dsId)
+        try {
+            await workspaceService.updateDataSource(wsId, dsId, { isRestricted })
+            onWorkspaceChanged?.()
+            showToast('success', isRestricted
+                ? 'Views over this source now need a publisher\u2019s approval'
+                : 'Members can publish views over this source directly')
+        } catch (err) {
+            showToast('error', err instanceof Error ? err.message : 'Could not change the source')
+        } finally {
+            setRestrictingDsId(null)
+        }
+    }
+
     const handleBulkDeleted = () => {
         const ids = Array.from(selectedIds)
         ids.forEach(id => removeView(id))
@@ -272,6 +372,192 @@ export default function WorkspaceViewsSection({ wsId, dataSources, allViews }: W
                     )}
                 </div>
             </div>
+
+            {/* ── Publishing: the request queue + who may publish ── */}
+            {(canAnswerPublishRequests || canAdminWorkspace) && (
+                <div className="rounded-2xl border border-glass-border bg-canvas-elevated p-4 mb-4">
+                    <div className="flex flex-wrap items-center gap-2 mb-3">
+                        <Globe className="w-4 h-4 text-amber-500" />
+                        <span className="text-sm font-bold text-ink">Publication requests</span>
+                        {pendingRequests.length > 0 && (
+                            <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                                {pendingRequests.length}
+                            </span>
+                        )}
+                    </div>
+
+                    {canAnswerPublishRequests && (
+                        pendingRequests.length === 0 ? (
+                            <p className="text-xs text-ink-muted">
+                                Nothing waiting. Members who can't publish ask from a view's Share dialog, and the request lands here.
+                            </p>
+                        ) : (
+                            <div className="rounded-xl border border-amber-500/25 bg-amber-500/5 divide-y divide-amber-500/15">
+                                {pendingRequests.map(v => {
+                                    const req = v.publishRequest!
+                                    const isBusy = busyRequestId === v.id
+                                    // The whole decision in one sentence. Named data
+                                    // source when we have one — list payloads carry it,
+                                    // but a view with no source assigned does not.
+                                    const consequence = v.dataSourceName
+                                        ? `Publishing makes this view, and read-only access to ${v.dataSourceName}, visible to everyone signed in to ${appName}.`
+                                        : `Publishing makes this view visible to everyone signed in to ${appName}.`
+                                    return (
+                                        <div key={v.id} className="px-3 py-2.5">
+                                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                <span className="text-sm font-semibold text-ink truncate">{v.name}</span>
+                                                <span className="text-[11px] text-ink-muted">
+                                                    · asked by {req.requestedByName ?? 'a workspace member'} {timeAgo(req.requestedAt)}
+                                                </span>
+                                            </div>
+                                            {/* What they'd be handing over, and from where. */}
+                                            <p className="text-[11px] text-ink-muted mt-0.5">
+                                                {v.dataSourceName ? `${v.dataSourceName} · ` : ''}
+                                                {CURRENT_REACH[v.visibility] ?? ''}
+                                            </p>
+                                            {req.note && (
+                                                <p className="text-[11px] text-ink-secondary italic mt-1 pl-2 border-l-2 border-amber-500/30">
+                                                    {req.note}
+                                                </p>
+                                            )}
+                                            {denyingId === v.id ? (
+                                                <div className="flex flex-wrap items-center gap-2 mt-2">
+                                                    <input
+                                                        type="text"
+                                                        value={denyReason}
+                                                        onChange={e => setDenyReason(e.target.value)}
+                                                        placeholder="Why not? (optional — the asker sees this)"
+                                                        className="flex-1 min-w-[200px] px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                                                    />
+                                                    <button
+                                                        onClick={() => void answerRequest(v, () => denyViewPublication(v.id, denyReason), `Declined publishing "${v.name}"`)}
+                                                        disabled={isBusy}
+                                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+                                                    >
+                                                        {isBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <X className="w-3.5 h-3.5" />}
+                                                        Confirm decline
+                                                    </button>
+                                                    <button
+                                                        onClick={() => { setDenyingId(null); setDenyReason('') }}
+                                                        disabled={isBusy}
+                                                        className="px-3 py-1.5 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink transition-colors disabled:opacity-50"
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                </div>
+                                            ) : confirmingId === v.id ? (
+                                                <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5">
+                                                    <p className="text-[11px] text-ink leading-relaxed">
+                                                        {consequence}
+                                                    </p>
+                                                    <div className="flex flex-wrap items-center gap-2 mt-2">
+                                                        <button
+                                                            onClick={() => void answerRequest(v, () => approveViewPublication(v.id), `"${v.name}" is now visible to everyone`)}
+                                                            disabled={isBusy}
+                                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 text-white hover:brightness-110 transition-all disabled:opacity-50"
+                                                        >
+                                                            {isBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                                                            Publish to everyone
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setConfirmingId(null)}
+                                                            disabled={isBusy}
+                                                            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink transition-colors disabled:opacity-50"
+                                                        >
+                                                            Cancel
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <div className="flex items-center gap-2 mt-2">
+                                                    <button
+                                                        onClick={() => setConfirmingId(v.id)}
+                                                        disabled={isBusy}
+                                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 text-white hover:brightness-110 transition-all disabled:opacity-50"
+                                                    >
+                                                        <Check className="w-3.5 h-3.5" />
+                                                        Approve
+                                                    </button>
+                                                    <button
+                                                        onClick={() => { setDenyingId(v.id); setDenyReason('') }}
+                                                        disabled={isBusy}
+                                                        className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-glass-border text-ink-muted hover:text-ink transition-colors disabled:opacity-50"
+                                                    >
+                                                        Decline
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )
+                                })}
+                            </div>
+                        )
+                    )}
+
+                    {canAdminWorkspace && (
+                        <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-glass-border">
+                            <span className="text-xs text-ink-muted">Publishing to everyone:</span>
+                            {([
+                                { id: 'request' as const, label: 'Members must request approval' },
+                                { id: 'open' as const, label: 'Members can publish directly' },
+                            ]).map(opt => (
+                                <button
+                                    key={opt.id}
+                                    onClick={() => void handleSetPublishPolicy(opt.id)}
+                                    disabled={policySaving}
+                                    aria-pressed={(publishPolicy ?? 'open') === opt.id}
+                                    className={cn(
+                                        'px-2.5 py-1 rounded-full border text-xs font-medium transition-colors disabled:opacity-50',
+                                        (publishPolicy ?? 'open') === opt.id
+                                            ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30'
+                                            : 'text-ink-muted border-glass-border hover:border-amber-500/30',
+                                    )}
+                                >
+                                    {opt.label}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+
+                    {/* Restriction belongs to the SOURCE, not the workspace:
+                        publishing a view exposes read-only access to the whole
+                        source behind it. Marking the sensitive one keeps the
+                        rest of the workspace open, instead of dragging every
+                        view back to admin-only because one source is touchy. */}
+                    {canAdminWorkspace && dataSources.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-glass-border">
+                            <p className="text-xs text-ink-muted mb-2">
+                                Sources that always need a publisher&rsquo;s approval:
+                            </p>
+                            <div className="flex flex-wrap items-center gap-2">
+                                {dataSources.map(ds => {
+                                    const restricted = !!ds.isRestricted
+                                    return (
+                                        <button
+                                            key={ds.id}
+                                            onClick={() => void handleSetRestricted(ds.id, !restricted)}
+                                            disabled={restrictingDsId === ds.id}
+                                            aria-pressed={restricted}
+                                            title={restricted
+                                                ? 'Restricted — publishing a view over this source needs the publish permission'
+                                                : 'Open — members can publish views over this source'}
+                                            className={cn(
+                                                'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium transition-colors disabled:opacity-50',
+                                                restricted
+                                                    ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border-rose-500/30'
+                                                    : 'text-ink-muted border-glass-border hover:border-rose-500/30',
+                                            )}
+                                        >
+                                            {restricted ? <Lock className="w-3 h-3" /> : <Globe className="w-3 h-3" />}
+                                            {ds.label || ds.id}
+                                        </button>
+                                    )
+                                })}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* ── Recent activity (collapsible) ──────────────────── */}
             <div className="rounded-2xl border border-glass-border bg-canvas-elevated mb-4 overflow-hidden">

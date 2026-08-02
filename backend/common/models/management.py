@@ -849,6 +849,7 @@ class DataSourceUpdateRequest(BaseModel):
     is_active: Optional[bool] = Field(None, alias="isActive")
     projection_mode: Optional[str] = Field(None, alias="projectionMode")  # None | "in_source" | "dedicated"
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")  # graph name when dedicated
+    is_restricted: Optional[bool] = Field(None, alias="isRestricted")
     extra_config: Optional[dict] = Field(None, alias="extraConfig")  # per-data-source config (schema mapping, etc.)
     # Node-identity property — the URN-equivalent for this physical graph.
     # None → field untouched on update (partial-update semantics); an explicit
@@ -881,6 +882,9 @@ class DataSourceResponse(BaseModel):
     is_active: bool = Field(alias="isActive")
     projection_mode: Optional[str] = Field(None, alias="projectionMode")
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")
+    #: Views over a restricted source always need the publish permission,
+    #: even where the workspace lets members publish freely.
+    is_restricted: bool = Field(False, alias="isRestricted")
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
     extra_config: Optional[dict] = Field(None, alias="extraConfig")
     # Node-identity property (URN-equivalent). Always populated on the way out —
@@ -922,6 +926,9 @@ class WorkspaceUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     is_active: Optional[bool] = Field(None, alias="isActive")
+    # 'request' (members ask, a publisher answers) | 'open' (anyone who
+    # can change a view's visibility may publish it directly).
+    publish_policy: Optional[str] = Field(None, alias="publishPolicy")
 
     class Config:
         populate_by_name = True
@@ -941,6 +948,8 @@ class WorkspaceResponse(BaseModel):
     member_count: int = Field(0, alias="memberCount")
     #: Live (non-deleted) views built on this workspace.
     view_count: int = Field(0, alias="viewCount")
+    #: Who may publish a view platform-wide here — 'request' | 'open'.
+    publish_policy: str = Field("open", alias="publishPolicy")
 
     class Config:
         populate_by_name = True
@@ -1096,6 +1105,96 @@ class ViewLayoutUpdateRequest(BaseModel):
         return self
 
 
+class ViewAudience(BaseModel):
+    """How far this view currently reaches, in people.
+
+    'Workspace' is an abstraction until it has a number attached, and
+    the sharer cannot count it client-side: the workspace list their
+    browser holds is scoped to their own memberships.
+    """
+    workspace_member_count: int = Field(0, alias="workspaceMemberCount")
+    explicit_grant_count: int = Field(0, alias="explicitGrantCount")
+    #: Active accounts on the whole deployment — what "anyone signed in"
+    #: comes to. Without it the enterprise tier is the only choice whose
+    #: audience is a phrase rather than a number.
+    platform_user_count: int = Field(0, alias="platformUserCount")
+
+    class Config:
+        populate_by_name = True
+
+
+class ViewPublishRequest(BaseModel):
+    """A pending ask to publish this view platform-wide."""
+    requested_by: str = Field(alias="requestedBy")
+    requested_by_name: Optional[str] = Field(None, alias="requestedByName")
+    requested_at: str = Field(alias="requestedAt")
+    note: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class ViewHealthInfo(BaseModel):
+    """Whether a view's scope is still intact — computed SERVER-side.
+
+    This used to be derived in the browser by looking the view's
+    workspace and data source up in the workspace store, which only
+    lists workspaces the caller is bound to. Any view outside those (a
+    shared or enterprise view, or anything an admin can see) failed the
+    lookup and rendered as "Source deleted". The server is the only
+    party that can tell "you're not a member" apart from "it's gone",
+    so it answers, and every surface renders the same verdict — which
+    also keeps the badge and the ``attentionOnly`` list filter using
+    one definition of broken.
+    """
+    # 'healthy' | 'warning' | 'broken' | 'stale'
+    status: str
+    reason: Optional[str] = None
+
+
+class ViewAccessInfo(BaseModel):
+    """The caller's capabilities on ONE view, computed server-side.
+
+    Returned only by the single-view read (never in list payloads — no
+    per-row grant math). The frontend drives its entire edit/share/
+    read-only UI off this envelope instead of re-deriving rules from
+    permission claims, so the two sides can't drift.
+
+    ``data_access`` describes what the DATA plane will accept for this
+    caller: ``full`` (holds ``workspace:datasource:manage``) or
+    ``readonly`` (view-capability reach — expand/trace/search work,
+    mutations don't). An ``editor`` grantee edits the view's config yet
+    stays ``readonly`` on graph data.
+    """
+    can_edit: bool = Field(alias="canEdit")
+    can_manage_grants: bool = Field(alias="canManageGrants")
+    can_change_visibility: bool = Field(alias="canChangeVisibility")
+    can_publish: bool = Field(alias="canPublish")
+    # Cannot publish, but may ASK someone who can. This is what turns a
+    # greyed-out Enterprise option into a route instead of a wall.
+    can_request_publish: bool = Field(False, alias="canRequestPublish")
+    # May approve/deny a pending publish request on this view.
+    can_answer_publish_request: bool = Field(False, alias="canAnswerPublishRequest")
+    # WHY publishing is unavailable: 'platform' (the deployment's ceiling),
+    # 'workspace' (its policy), 'source' (the data source is restricted),
+    # or null. The same disabled tile means three different things, and
+    # "your organisation doesn't allow this" is not the sentence
+    # "a workspace admin has to approve this" — the UI needs to tell them
+    # apart or the only way to find out is to go and ask someone.
+    publish_blocked_by: Optional[str] = Field(None, alias="publishBlockedBy")
+    # The enterprise tier exists on this deployment at all. False HIDES
+    # the option rather than disabling it: a choice nobody here can ever
+    # make is noise, not information.
+    enterprise_available: bool = Field(True, alias="enterpriseAvailable")
+    # 'owner' | 'admin' | 'grant' | 'workspace' | 'enterprise'
+    access_via: str = Field(alias="accessVia")
+    # 'full' | 'readonly'
+    data_access: str = Field(alias="dataAccess")
+
+    class Config:
+        populate_by_name = True
+
+
 class ViewResponse(BaseModel):
     id: str
     name: str
@@ -1147,6 +1246,18 @@ class ViewResponse(BaseModel):
     # knows some entity classifications may have changed since creation.
     # NULL on legacy rows → wizard treats as "drift check unavailable".
     ontology_digest: Optional[str] = Field(None, alias="ontologyDigest")
+    # Provider backing the view's (resolved) data source. Populated by
+    # the single-view read so the canvas can boot without the
+    # membership-gated workspace list; None in list payloads.
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    # Caller-specific capability envelope — single-view read only.
+    access: Optional[ViewAccessInfo] = None
+    # Scope integrity (workspace/data-source still present and active).
+    health: Optional[ViewHealthInfo] = None
+    # Set while a publication request is awaiting an answer.
+    publish_request: Optional[ViewPublishRequest] = Field(None, alias="publishRequest")
+    # Reach, in people — single-view read only.
+    audience: Optional[ViewAudience] = None
 
     class Config:
         populate_by_name = True

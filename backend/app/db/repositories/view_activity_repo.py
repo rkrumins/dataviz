@@ -31,6 +31,13 @@ logger = logging.getLogger(__name__)
 ACTIONS = frozenset({
     "created", "updated", "visibility_changed", "shared", "unshared",
     "favourited", "unfavourited", "deleted", "restored", "data_changed",
+    # Publication workflow: a member asks, a publish-permission holder
+    # answers. Approval is recorded as ``visibility_changed`` (the thing
+    # that actually happened); only the ask and the refusal need verbs.
+    "publish_requested", "publish_denied",
+    # Break-glass transparency: an admin opened a private view they
+    # neither created nor were shared on.
+    "admin_viewed",
 })
 
 
@@ -191,22 +198,28 @@ async def get_recent_activity(
     session: AsyncSession,
     *,
     limit: int = 60,
+    readable=None,
 ) -> list[tuple[ViewActivityEntry, ViewORM]]:
-    """Most recent activity across ALL live views — the dashboard's "What
+    """Most recent activity across live views — the dashboard's "What
     changed" feed.
 
-    Returns each entry paired with its ViewORM so the CALLER can apply the same
-    per-view read check the views list uses (``view_access.can_read_view``). This
-    read is deliberately un-scoped; scoping is the endpoint's job, so a feed can
-    never surface a view the user isn't allowed to see.
+    ``readable`` is the caller's access clause
+    (``view_access.readable_views_clause``); with it, the LIMIT applies
+    to the caller's readable feed rather than the global one, so a user
+    with sparse access no longer gets a starved feed cut down from a
+    global page. Without it (kill-switch path), each entry still pairs
+    with its ViewORM so the endpoint can post-filter.
     """
-    rows = (await session.execute(
+    query = (
         select(ViewActivityLogORM, ViewORM)
         .join(ViewORM, ViewORM.id == ViewActivityLogORM.view_id)
         .where(ViewORM.deleted_at.is_(None))
         .order_by(ViewActivityLogORM.created_at.desc())
         .limit(limit)
-    )).all()
+    )
+    if readable is not None:
+        query = query.where(readable)
+    rows = (await session.execute(query)).all()
     if not rows:
         return []
 

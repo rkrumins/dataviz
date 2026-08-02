@@ -32,6 +32,9 @@ export interface DataSourceUpdateRequest {
     label?: string
     accessLevel?: string
     isActive?: boolean
+    /** Views over a restricted source always need the publish permission,
+     *  even where the workspace lets members publish freely. */
+    isRestricted?: boolean
     projectionMode?: string | null  // null | "in_source" | "dedicated"
     dedicatedGraphName?: string | null  // graph name when mode is "dedicated"
     /** URN-equivalent node-identity property. "" clears back to the default "urn". */
@@ -53,6 +56,10 @@ export interface DataSourceResponse {
     label?: string
     accessLevel: string
     isPrimary: boolean
+    /** Publishing a view exposes read-only access to this whole source, so
+     *  the sources that need a human in the loop carry the flag themselves
+     *  rather than locking down every workspace that contains one. */
+    isRestricted?: boolean
     isActive: boolean
     projectionMode?: string | null  // null = inherit from provider
     dedicatedGraphName?: string | null  // graph name when dedicated
@@ -86,10 +93,19 @@ export interface WorkspaceCreateRequest {
     dataSources: DataSourceCreateRequest[]
 }
 
+/**
+ * Who may publish a view platform-wide from this workspace.
+ * `request` — members ask, a publish-permission holder answers.
+ * `open`    — anyone who can change a view's visibility publishes directly.
+ */
+export type WorkspacePublishPolicy = 'request' | 'open'
+
 export interface WorkspaceUpdateRequest {
     name?: string
     description?: string
     isActive?: boolean
+    /** workspace:admin only — the server rejects anything else. */
+    publishPolicy?: WorkspacePublishPolicy
 }
 
 export interface WorkspaceResponse {
@@ -106,6 +122,9 @@ export interface WorkspaceResponse {
     memberCount?: number
     /** Live (non-deleted) views built on this workspace. */
     viewCount?: number
+    /** Publication gate for this workspace's views. Absent on servers that
+     *  predate the setting — treat a missing value as 'request'. */
+    publishPolicy?: WorkspacePublishPolicy
     /** Convenience: from primary data source (backward compat) */
     providerId?: string
     graphName?: string

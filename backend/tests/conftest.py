@@ -281,6 +281,7 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
             ("workspace:view:create", "Create views.", "workspace"),
             ("workspace:view:edit", "Edit views.", "workspace"),
             ("workspace:view:delete", "Delete views.", "workspace"),
+            ("workspace:view:publish", "Publish views to enterprise visibility.", "workspace"),
             ("workspace:view:read", "Read views.", "workspace"),
         ):
             _seed_session.add(_models.PermissionORM(
@@ -295,14 +296,16 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
                 "system:workspaces:create", "workspace:admin",
                 "workspace:datasource:manage", "workspace:datasource:read",
                 "workspace:view:create", "workspace:view:edit",
-                "workspace:view:delete", "workspace:view:read",
+                "workspace:view:delete", "workspace:view:publish",
+                "workspace:view:read",
             )]
             + [("org_admin", p) for p in (
                 "system:org-admin", "system:groups:manage",
                 "system:workspaces:create", "workspace:admin",
                 "workspace:datasource:manage", "workspace:datasource:read",
                 "workspace:view:create", "workspace:view:edit",
-                "workspace:view:delete", "workspace:view:read",
+                "workspace:view:delete", "workspace:view:publish",
+                "workspace:view:read",
             )]
             + [("workspace_admin", "workspace:admin")]
             + [("workspace_member", p) for p in (

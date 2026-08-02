@@ -25,6 +25,9 @@ _MIGRATION_PATH = _VERSIONS_DIR / "20260430_1200_rbac_schema.py"
 # provider. Those leaves are seeded here, not in the Phase-1 migration, so the
 # seed-vs-collapser check must account for them too.
 _WS_READS_MIGRATION_PATH = _VERSIONS_DIR / "20260605_1200_phase18_ws_reads.py"
+# View-sharing rework added workspace:view:publish (gates enterprise
+# visibility). Seeded by its own data migration, same pattern as Phase 18.
+_VIEW_PUBLISH_MIGRATION_PATH = _VERSIONS_DIR / "20260731_1300_view_publish.py"
 
 
 def _load_migration(path: Path, name: str):
@@ -106,17 +109,75 @@ def test_seed_leaves_match_catalogue(migration_module, ws_reads_migration_module
 
     The catalogue is seeded across more than one migration: the Phase-1
     schema migration plus the Phase-18 workspace-reads migration (which
-    owns the ontology / catalog / provider leaves)."""
+    owns the ontology / catalog / provider leaves) plus the view-publish
+    migration (which owns ``workspace:view:publish``)."""
     from backend.app.services.permission_service import _SEED_LEAVES
+
+    assert _VIEW_PUBLISH_MIGRATION_PATH.exists(), (
+        f"missing migration: {_VIEW_PUBLISH_MIGRATION_PATH}"
+    )
+    view_publish_module = _load_migration(
+        _VIEW_PUBLISH_MIGRATION_PATH, "_rbac_view_publish_migration"
+    )
 
     perm_ids = {p[0] for p in migration_module._PERMISSIONS}
     perm_ids |= {p[0] for p in ws_reads_migration_module._NEW_PERMISSIONS}
+    perm_ids |= {p[0] for p in view_publish_module._NEW_PERMISSIONS}
     for prefix, leaves in _SEED_LEAVES.items():
         expected = {p for p in perm_ids if p.startswith(prefix + ":")}
         assert leaves == expected, (
             f"prefix {prefix!r}: collapser knows {sorted(leaves)} but "
             f"catalogue has {sorted(expected)}"
         )
+
+
+def test_view_publish_seed_convergence():
+    """``workspace:view:publish`` must exist in BOTH seed paths — the
+    fresh-install seed (``rbac_seed``) and the migration chain — with the
+    same role grants, and the resolver's collapse/implication sets must
+    know the new leaf. Divergence here means fresh installs and migrated
+    databases authorise publishing differently."""
+    from backend.app.config import rbac_seed
+    from backend.app.services.permission_service import (
+        _SEED_LEAVES,
+        _WORKSPACE_CATEGORY_LEAVES,
+    )
+
+    perm = "workspace:view:publish"
+
+    assert _VIEW_PUBLISH_MIGRATION_PATH.exists(), (
+        f"missing migration: {_VIEW_PUBLISH_MIGRATION_PATH}"
+    )
+    mod = _load_migration(_VIEW_PUBLISH_MIGRATION_PATH, "_view_publish_migration")
+
+    # Migration side.
+    migration_perm_ids = {p[0] for p in mod._NEW_PERMISSIONS}
+    assert migration_perm_ids == {perm}
+    migration_grants = set(mod._NEW_ROLE_PERMISSIONS)
+    assert migration_grants == {("org_admin", perm), ("super_admin", perm)}, (
+        "publish is granted to org_admin + super_admin explicitly; "
+        "workspace_admin gets it via workspace:admin auto-implication, "
+        f"got: {sorted(migration_grants)}"
+    )
+
+    # Fresh-install seed side.
+    assert perm in {p["id"] for p in rbac_seed.PERMISSIONS}
+    seed_grants = {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm}
+    assert seed_grants == migration_grants, (
+        f"rbac_seed grants {sorted(seed_grants)} but the migration grants "
+        f"{sorted(migration_grants)}"
+    )
+
+    # No plain-member tier may hold publish in either path.
+    for role in ("workspace_member", "workspace_data_engineer",
+                 "workspace_viewer", "org_auditor"):
+        assert (role, perm) not in set(rbac_seed.ROLE_GRANTS)
+
+    # Resolver knowledge: the wildcard collapse set MUST include the new
+    # leaf (otherwise legacy workspace:view:* wildcards silently imply
+    # publish for plain members), and workspace:admin must auto-imply it.
+    assert perm in _SEED_LEAVES["workspace:view"]
+    assert perm in _WORKSPACE_CATEGORY_LEAVES
 
 
 def test_phase_1_role_enum_matches_repo_validation():

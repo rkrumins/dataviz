@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,11 +35,9 @@ from backend.app.auth.dependencies import (
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import GroupORM, UserORM, ViewORM
 from backend.app.db.repositories import grant_repo, group_repo, user_repo
-from backend.app.db.repositories import view_activity_repo
-from backend.app.services.permission_service import (
-    PermissionClaims,
-    has_permission,
-)
+from backend.app.db.repositories import notification_repo, view_activity_repo
+from backend.app.services import view_access
+from backend.app.services.permission_service import PermissionClaims
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
     ViewGrantCreateRequest,
@@ -82,17 +80,14 @@ def _ensure_can_manage_grants(
     """Permit only the creator OR a workspace admin of the view's
     workspace. Raises 403 otherwise.
 
-    Pure-function variant of ``can_manage_view_grants`` kept for
-    callers that already have the view in hand (e.g. the handler
-    body, which loaded the view to attach workspace metadata to the
-    outbox event). Both paths agree by construction — there's one
-    rule, two callsites.
+    The rule itself lives in ``view_access.can_manage_grants`` (one
+    rule, one place); this wrapper adapts it to the HTTP layer. Group
+    ids aren't needed — the rule never consults grants.
     """
-    if view.created_by == user.id:
-        return
-    if has_permission(claims, "workspace:admin", workspace_id=view.workspace_id):
-        return
-    if has_permission(claims, "system:admin"):
+    ctx = view_access.ViewerContext(
+        user_id=user.id, claims=claims, group_ids=(),
+    )
+    if view_access.can_manage_grants(ctx, view):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -264,6 +259,22 @@ async def create_grant(
         getattr(subject, "name", None) or getattr(subject, "display_name", None)
         or body.subject_id
     )
+    # The whole point of sharing: the recipient finds out.
+    recipients = (
+        [body.subject_id] if body.subject_type == "user"
+        else [m.user_id for m in await group_repo.list_group_members(session, body.subject_id)]
+    )
+    await notification_repo.notify(
+        session,
+        user_ids=recipients,
+        kind="view.shared",
+        title=f'"{view.name}" was shared with you',
+        body=f"You can open it as a {body.role}.",
+        link=f"/views/{view_id}",
+        actor_id=user.id,
+        resource_type="view",
+        resource_id=view_id,
+    )
     await view_activity_repo.record_view_activity(
         session, view_id=view_id, workspace_id=view.workspace_id,
         action="shared", actor=user.id,
@@ -275,6 +286,78 @@ async def create_grant(
         role=grant.role_name,
         granted_at=grant.granted_at,
         granted_by=grant.granted_by,
+        subject=subject,
+    )
+
+
+@router.put(
+    "/{grant_id}",
+    response_model=ViewGrantResponse,
+    response_model_by_alias=True,
+)
+async def update_grant_role(
+    view_id: str,
+    grant_id: str,
+    role: str = Body(..., embed=True),
+    user: User = Depends(get_current_user),
+    view: ViewORM = Depends(can_manage_view_grants),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Change an existing grant's role (viewer ↔ editor) in place —
+    no revoke + re-share dance, and the grant's audit trail
+    (granted_at / granted_by) stays intact."""
+    if role not in grant_repo.VALID_GRANT_ROLES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"role must be one of: {', '.join(sorted(grant_repo.VALID_GRANT_ROLES))}",
+        )
+    grants = await grant_repo.list_grants_for_resource(
+        session, resource_type="view", resource_id=view_id,
+    )
+    target = next((g for g in grants if g.id == grant_id), None)
+    if target is None:
+        # Same defence as delete: a grant id from another view the
+        # caller happens to manage must not be reachable here.
+        raise HTTPException(status_code=404, detail="Grant not found on this view")
+
+    previous_role = target.role_name
+    if previous_role != role:
+        target.role_name = role
+        await session.flush()
+        await user_repo.create_outbox_event(
+            session,
+            event_type="rbac.view.grant_updated",
+            payload={
+                "view_id": view_id,
+                "workspace_id": view.workspace_id,
+                "grant_id": grant_id,
+                "subject_type": target.subject_type,
+                "subject_id": target.subject_id,
+                "role": role,
+                "previous_role": previous_role,
+                "actor_id": user.id,
+            },
+        )
+        subject_for_log = await _hydrate_subject(
+            session, target.subject_type, target.subject_id,
+        )
+        subject_label = subject_for_log.display_name or target.subject_id
+        await view_activity_repo.record_view_activity(
+            session, view_id=view_id, workspace_id=view.workspace_id,
+            action="shared", actor=user.id,
+            summary=f"Changed {subject_label} to {role}",
+            changes={
+                "subjectType": target.subject_type,
+                "subjectId": target.subject_id,
+                "role": {"from": previous_role, "to": role},
+            },
+        )
+    subject = await _hydrate_subject(session, target.subject_type, target.subject_id)
+    return ViewGrantResponse(
+        grant_id=target.id,
+        role=target.role_name,
+        granted_at=target.granted_at,
+        granted_by=target.granted_by,
         subject=subject,
     )
 

@@ -54,9 +54,26 @@ def test_collapse_wildcards_full_view_set():
         "workspace:view:create",
         "workspace:view:edit",
         "workspace:view:delete",
+        "workspace:view:publish",
         "workspace:view:read",
     }
     assert _collapse_wildcards(full) == ("workspace:view:*",)
+
+
+def test_collapse_wildcards_member_view_set_not_collapsed():
+    """The four member-tier leaves must NOT collapse now that
+    ``workspace:view:publish`` is a known fifth leaf — a collapsed
+    ``workspace:view:*`` would satisfy publish checks for roles that
+    were never granted publish."""
+    member = {
+        "workspace:view:create",
+        "workspace:view:edit",
+        "workspace:view:delete",
+        "workspace:view:read",
+    }
+    out = _collapse_wildcards(member)
+    assert "workspace:view:*" not in out
+    assert set(out) == member
 
 
 def test_collapse_wildcards_partial_set_left_intact():
@@ -67,7 +84,8 @@ def test_collapse_wildcards_partial_set_left_intact():
 def test_collapse_wildcards_mixed_domain():
     perms = {
         "workspace:view:create", "workspace:view:edit",
-        "workspace:view:delete", "workspace:view:read",
+        "workspace:view:delete", "workspace:view:publish",
+        "workspace:view:read",
         "workspace:datasource:read",  # only one of two — not collapsed
     }
     out = _collapse_wildcards(perms)
@@ -184,9 +202,19 @@ async def test_resolve_user_with_workspace_user_role(db_session):
     claims = await resolve(db_session, user_id)
     assert "ws_a" in claims.ws_perms
     perms = set(claims.ws_perms["ws_a"])
-    # 'workspace_member' role gets the full view + datasource sets
-    # → wildcards collapse.
-    assert "workspace:view:*" in perms
+    # 'workspace_member' holds four of the five view leaves (no
+    # publish) → the view set must stay explicit, never collapse to
+    # ``workspace:view:*`` (which would imply publish).
+    assert "workspace:view:*" not in perms
+    assert {
+        "workspace:view:create", "workspace:view:edit",
+        "workspace:view:delete", "workspace:view:read",
+    } <= perms
+    assert "workspace:view:publish" not in perms
+    assert not has_permission(
+        claims, "workspace:view:publish", workspace_id="ws_a"
+    )
+    # The datasource pair is complete → still collapses.
     assert "workspace:datasource:*" in perms
 
 
@@ -215,8 +243,10 @@ async def test_resolve_unions_direct_and_group_bindings(db_session):
     assert "ws_a" in claims.ws_perms
     assert "ws_b" in claims.ws_perms
     assert "workspace:view:read" in claims.ws_perms["ws_a"]
-    # ws_b 'workspace_member' bundle collapses to wildcard
-    assert "workspace:view:*" in claims.ws_perms["ws_b"]
+    # ws_b 'workspace_member' bundle stays explicit (4 of 5 view
+    # leaves — publish missing — so no wildcard collapse).
+    assert "workspace:view:edit" in claims.ws_perms["ws_b"]
+    assert "workspace:view:*" not in claims.ws_perms["ws_b"]
 
 
 @pytest.mark.asyncio

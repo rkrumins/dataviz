@@ -33,6 +33,9 @@ export interface UseGraphSchemaOptions {
   workspaceId?: string
   /** Override data-source scope. Defaults to the active graph-provider context. */
   dataSourceId?: string
+  /** View-capability context — authorizes non-members of the view's
+   *  workspace through their read access to the view. */
+  viewId?: string
 }
 
 interface SchemaFetchResult {
@@ -48,10 +51,12 @@ interface SchemaFetchResult {
 async function fetchCachedSchema(
   workspaceId: string,
   dataSourceId: string,
+  viewId?: string,
 ): Promise<SchemaFetchResult> {
   try {
+    const viewParam = viewId ? `?viewId=${encodeURIComponent(viewId)}` : ''
     const res = await fetchWithTimeout(
-      `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-schema`,
+      `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-schema${viewParam}`,
     )
     if (!res.ok) return { schema: null, meta: null }
     const json = await res.json()
@@ -71,10 +76,12 @@ async function fetchCachedSchema(
 async function fetchCachedOntologyAsSchema(
   workspaceId: string,
   dataSourceId: string,
+  viewId?: string,
 ): Promise<GraphSchema | null> {
   try {
+    const viewParam = viewId ? `?viewId=${encodeURIComponent(viewId)}` : ''
     const res = await fetchWithTimeout(
-      `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-ontology`,
+      `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-ontology${viewParam}`,
     )
     if (!res.ok) return null
     const json = await res.json()
@@ -101,8 +108,9 @@ async function fetchCachedOntologyAsSchema(
 async function fetchGraphSchema(
   workspaceId: string,
   dataSourceId: string,
+  viewId?: string,
 ): Promise<SchemaFetchResult> {
-  const cached = await fetchCachedSchema(workspaceId, dataSourceId)
+  const cached = await fetchCachedSchema(workspaceId, dataSourceId, viewId)
   if (cached.schema && cached.schema.entityTypes && cached.schema.entityTypes.length > 0) {
     return cached
   }
@@ -110,7 +118,7 @@ async function fetchGraphSchema(
   // Empty cache — surface a minimal ontology-derived schema so the
   // wizard's entity-type selectors render. Carry through the cached
   // meta so the hook still drives the refetch interval correctly.
-  const ontologySchema = await fetchCachedOntologyAsSchema(workspaceId, dataSourceId)
+  const ontologySchema = await fetchCachedOntologyAsSchema(workspaceId, dataSourceId, viewId)
   if (ontologySchema) {
     return { schema: ontologySchema, meta: cached.meta }
   }
@@ -139,6 +147,7 @@ export function useGraphSchema(options?: UseGraphSchemaOptions) {
 
   const workspaceId = options?.workspaceId ?? ctx.workspaceId ?? undefined
   const dataSourceId = options?.dataSourceId ?? ctx.dataSourceId ?? undefined
+  const viewId = options?.viewId
 
   const loadFromBackend = useSchemaStore(s => s.loadFromBackend)
   const queryClient = useQueryClient()
@@ -146,8 +155,10 @@ export function useGraphSchema(options?: UseGraphSchemaOptions) {
   const query = useQuery<SchemaFetchResult>({
     // Include workspaceId + dataSourceId + providerVersion so workspace A's
     // schema is never served for workspace B.
-    queryKey: [...GRAPH_SCHEMA_QUERY_KEY, workspaceId, dataSourceId, providerVersion],
-    queryFn: () => fetchGraphSchema(workspaceId!, dataSourceId!),
+    // viewId is part of the key so a member's cached entry can never mask
+    // a non-member's authorization path (and vice versa).
+    queryKey: [...GRAPH_SCHEMA_QUERY_KEY, workspaceId, dataSourceId, providerVersion, viewId ?? null],
+    queryFn: () => fetchGraphSchema(workspaceId!, dataSourceId!, viewId),
     enabled: Boolean(workspaceId && dataSourceId),
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,

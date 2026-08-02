@@ -588,9 +588,14 @@ async def test_list_popular_views_owner_sees_own_private(test_client: AsyncClien
 async def test_list_popular_views_excludes_others_private(
     test_client: AsyncClient, db_session
 ):
-    """A private view belonging to someone else never appears in popular."""
+    """A private view belonging to someone else never appears in popular
+    — for a real non-privileged caller. (The conftest default identity
+    is system:admin, whose read reach is deliberately unrestricted, so
+    the deny case needs an explicit member identity.)"""
     from sqlalchemy import update as _sa_update
     from backend.app.db.models import ViewORM as _V
+    from backend.app.services.permission_service import PermissionClaims
+    from backend.tests.test_views_scoping_regressions import _auth, _user
 
     ws_id = await _create_workspace(test_client)
     created = await _create_view(test_client, ws_id, "NotMine", visibility="private")
@@ -607,9 +612,18 @@ async def test_list_popular_views_excludes_others_private(
     )
     await db_session.commit()
 
-    resp = await test_client.get("/api/v1/views/popular")
+    member = _user("usr_b_member")
+    member_claims = PermissionClaims(
+        sid="s_member", ws_perms={ws_id: ("workspace:view:read",)},
+    )
+    with _auth(user=member, claims=member_claims):
+        resp = await test_client.get("/api/v1/views/popular")
     assert resp.status_code == 200
     assert vid not in {v["id"] for v in resp.json()}
+
+    # The system:admin default identity, by contrast, sees everything.
+    resp_admin = await test_client.get("/api/v1/views/popular")
+    assert vid in {v["id"] for v in resp_admin.json()}
 
 
 async def test_list_popular_views_excludes_zero_fav(test_client: AsyncClient):

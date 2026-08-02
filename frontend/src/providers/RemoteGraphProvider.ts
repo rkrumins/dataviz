@@ -83,6 +83,14 @@ export interface RemoteGraphProviderOptions {
      * draft (composed base+overlay) instead of live main. Omit for trunk/main.
      */
     branchId?: string
+    /**
+     * View-capability context. When set, appended as ?viewId= to every
+     * workspace-scoped request so the backend can authorize callers who
+     * can read this view but hold no workspace membership (shared /
+     * enterprise views open read-only). Harmless for members — their
+     * membership path short-circuits first.
+     */
+    viewId?: string
     /** @deprecated Legacy connection ID. Use workspaceId instead. */
     connectionId?: string
 }
@@ -93,12 +101,14 @@ export class RemoteGraphProvider implements GraphDataProvider {
     private readonly workspaceId?: string
     private readonly dataSourceId?: string
     private readonly branchId?: string
+    private readonly viewId?: string
     private readonly connectionId?: string
 
-    /** (workspace, data source, branch) identity — client caches keyed by
-     *  URN fold this in so the same URN across two graphs can't collide. */
+    /** (workspace, data source, branch, view) identity — client caches keyed
+     *  by URN fold this in so the same URN across two graphs (or two
+     *  capability contexts) can't collide. */
     get scopeKey(): string {
-        return `${this.workspaceId ?? ''}:${this.dataSourceId ?? ''}:${this.branchId ?? this.connectionId ?? ''}`
+        return `${this.workspaceId ?? ''}:${this.dataSourceId ?? ''}:${this.branchId ?? this.connectionId ?? ''}:${this.viewId ?? ''}`
     }
 
     /** In-flight request deduplication: identical concurrent requests share one Promise */
@@ -113,6 +123,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         this.workspaceId = options?.workspaceId
         this.dataSourceId = options?.dataSourceId
         this.branchId = options?.branchId
+        this.viewId = options?.viewId
         this.connectionId = options?.connectionId
     }
 
@@ -173,6 +184,14 @@ export class RemoteGraphProvider implements GraphDataProvider {
         // Draft targeting: serve the draft branch (base+overlay) instead of live main.
         if (this.workspaceId && this.branchId) {
             url.searchParams.set('branchId', this.branchId)
+        }
+
+        // View-capability context: lets the backend authorize non-members
+        // through their read access to this view. One line here puts it on
+        // every graph/canvas/trace/search/metadata request — they all
+        // funnel through buildUrl.
+        if (this.workspaceId && this.viewId) {
+            url.searchParams.set('viewId', this.viewId)
         }
 
         // Legacy fallback: append connectionId as query param

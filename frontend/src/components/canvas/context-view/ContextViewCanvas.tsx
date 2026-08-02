@@ -39,6 +39,8 @@ import { usePermission, useAuthStore } from '@/store/auth'
 import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
 import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
 import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
+import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
+import { deriveViewCapabilities } from '@/lib/viewAccess'
 import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -604,24 +606,37 @@ export function ContextViewCanvas({
   useDeletionGhosts(isDraft)
   const canManage = usePermission('workspace:datasource:manage', scopeWsId ?? undefined)
   const graphId = useGraphId()
-  const canEnterEdit = !!graphId
+  // Capability context: readOnly means the data plane rejects every write
+  // for this caller (shared/enterprise view opened without membership).
+  const viewExecCtx = useViewExecutionContext()
+  const readOnly = viewExecCtx?.readOnly ?? false
+  const canEnterEdit = !!graphId && !readOnly
   // Blank (hand-built) models drive the guided empty state + first-steps
   // companion; react-query dedupes this against CanvasVersioningBar's resolve.
-  const resolveQ = useResolveGraph(scopeWsId ?? undefined, dataSourceId)
+  // Threading the view id keeps every resolve consumer on ONE cache entry per
+  // scope AND carries the capability context for non-members.
+  const resolveQ = useResolveGraph(scopeWsId ?? undefined, dataSourceId, activeView?.id ?? null)
   const isBlankModel = resolveQ.data?.kind === 'blank'
   const mainHeadSeq = resolveQ.data?.mainHeadCommitSeq ?? 0
 
   // View-level rights for the title menu — deliberately independent of the
-  // canvas Edit cluster (view metadata is not graph data). Scoped to the
-  // canvas workspace (scopeWsId) so they line up with the rest of the view
-  // state. Both mirror the backend enforcers (see the header design spec):
-  //   • edit details  = workspace:view:edit OR creator
-  //   • manage sharing = workspace:admin (system:admin folds in) OR creator
-  //     (view_grants.py::can_manage_view_grants)
+  // canvas Edit cluster (view metadata is not graph data). The server's
+  // access envelope is authoritative when present (it is computed by the
+  // same evaluator that enforces every request); the claim-derived legacy
+  // inputs below only cover responses that predate it.
   const currentUserId = useAuthStore(s => s.user?.id) ?? null
   const isViewCreator = !!activeView?.createdBy && activeView.createdBy === currentUserId
-  const canEditView = usePermission('workspace:view:edit', scopeWsId ?? undefined) || isViewCreator
-  const canShareView = usePermission('workspace:admin', scopeWsId ?? undefined) || isViewCreator
+  const canEditPerm = usePermission('workspace:view:edit', scopeWsId ?? undefined)
+  const canAdminPerm = usePermission('workspace:admin', scopeWsId ?? undefined)
+  const canPublishPerm = usePermission('workspace:view:publish', scopeWsId ?? undefined)
+  const viewCaps = deriveViewCapabilities(viewExecCtx?.access ?? null, {
+    isCreator: isViewCreator,
+    canEditPerm,
+    canAdminPerm,
+    canPublishPerm,
+  })
+  const canEditView = viewCaps.canEdit
+  const canShareView = viewCaps.canManageGrants
 
   // Keyboard shortcuts. Published is read-only, so its mutating shortcuts — Delete, ⌘D (duplicate),
   // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
@@ -690,12 +705,18 @@ export function ContextViewCanvas({
     }
   }, [])
 
-  /** Arm (or re-arm) the debounced durable save and show the 'saving' indicator. */
+  /** Arm (or re-arm) the debounced durable save and show the 'saving' indicator.
+   *  Gated on canEdit — the VIEW-config capability, not the graph-data one:
+   *  layout persistence is PUT /views/{id}/layout (can_edit_view), which an
+   *  editor-grantee passes even while their graph data stays read-only
+   *  (canEdit: true, dataAccess: 'readonly'). One choke point instead of
+   *  guarding every gesture that feeds it. */
   const armLayoutSave = useCallback(() => {
+    if (!viewCaps.canEdit) return
     setLayoutSyncStatus('saving')
     if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current)
     layoutSaveTimer.current = setTimeout(() => { void doLayoutSave() }, 1500)
-  }, [doLayoutSave])
+  }, [doLayoutSave, viewCaps.canEdit])
 
   /** Flush any pending debounced layout save NOW (no-op if none pending). Used by the Save button. */
   const flushLayoutSave = useCallback(async () => { await doLayoutSave() }, [doLayoutSave])
@@ -1267,7 +1288,12 @@ export function ContextViewCanvas({
   // the still-stale projection, so merged properties don't appear until a later refresh. Watch the
   // projection watermark: when it finishes (fresh false→true), re-hydrate so the canvas reflects the
   // freshly-projected state with no manual refresh.
-  const projFresh = useProjectionWatermark(scopeWsId ?? undefined, graphId).data?.fresh
+  // Versioning reads are membership-gated and meaningless to a read-only
+  // shared viewer (no drafts, no projection to chase) — don't fire them.
+  const projFresh = useProjectionWatermark(
+    readOnly ? undefined : scopeWsId ?? undefined,
+    readOnly ? null : graphId,
+  ).data?.fresh
   const prevProjFreshRef = useRef<boolean | undefined>(undefined)
   useEffect(() => {
     if (prevProjFreshRef.current === false && projFresh === true) {
@@ -2405,11 +2431,17 @@ export function ContextViewCanvas({
     [],
   )
 
-  // Share — the in-store view lacks visibility, so fetch it fresh to seed
-  // both the dialog and the menu's read-only visibility row.
+  // Share — the store config carries the tier now (viewToViewConfig), so the
+  // dialog seeds synchronously; the fetch survives only as a fallback for
+  // store entries that predate the field.
   const handleShareView = useCallback(async () => {
     const view = useSchemaStore.getState().getActiveView()
     if (!view?.id) return
+    if (view.visibility) {
+      setShareSeed({ id: view.id, name: view.name, visibility: view.visibility })
+      setViewVisibility(view.visibility)
+      return
+    }
     try {
       const full = await getView(view.id)
       setShareSeed({ id: full.id, name: full.name, visibility: full.visibility })
@@ -4267,6 +4299,8 @@ export function ContextViewCanvas({
           viewId={shareSeed.id}
           viewName={shareSeed.name}
           currentVisibility={shareSeed.visibility}
+          workspaceId={scopeWsId ?? undefined}
+          access={viewExecCtx?.access ?? null}
           isOpen={true}
           onClose={() => setShareSeed(null)}
         />

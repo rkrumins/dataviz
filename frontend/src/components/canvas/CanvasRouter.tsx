@@ -16,6 +16,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
 import { useGraphProviderContext } from '@/providers/GraphProviderContext'
+import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useLoadingToast } from '@/components/ui/toast'
@@ -50,6 +51,9 @@ interface CanvasRouterProps {
 export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRouterProps) {
   const activeView = useSchemaStore((s) => s.getActiveView())
   const versioningEnabled = useFeature('versioningEnabled')
+  // Read-only capability sessions get no versioning chrome — drafts,
+  // branch switching, and publish are all writes the backend would 403.
+  const viewExecCtx = useViewExecutionContext()
   const { providerVersion } = useGraphProviderContext()
   // Prefer the prop (from navigation pipeline) over the store lookup.
   // This avoids the race where loadFromBackend resets activeViewId to null
@@ -155,7 +159,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
           which now reads the same polled freshness signal BranchBehindBanner used to own. There were
           two banners saying the same thing — one polled and thin, one derived and rich — and both
           could render at once for the same draft. */}
-      {versioningEnabled && activeView?.workspaceId && (
+      {versioningEnabled && activeView?.workspaceId && !viewExecCtx?.readOnly && (
         <CanvasVersioningBar
           workspaceId={activeView.workspaceId}
           dataSourceId={activeView.dataSourceId ?? null}

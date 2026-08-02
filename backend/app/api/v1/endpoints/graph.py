@@ -555,6 +555,9 @@ async def confirm_vocab_variant(
     declared: str = Query(..., description="The declared type id the variants merged into."),
     keepMerged: bool = Query(True, description="Keep the merge (true) or split into distinct types (false)."),
     dimension: str = Query("relationship", description="relationship | entity"),
+    # State-changing: records a curation decision. Was missing the
+    # manage gate every sibling write on this router carries.
+    _perm=Depends(require_ws_manage),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Record a user's Keep/Split decision for a same-source multi-variant type (Task E
@@ -1837,8 +1840,8 @@ class SaveGraphRequest(BaseModel):
 @router.post("/save")
 async def save_graph(
     request: SaveGraphRequest,
-    engine: ContextEngine = Depends(get_context_engine),
     _: object = Depends(require_ws_manage),
+    engine: ContextEngine = Depends(get_context_engine),
 ):
     """Save custom graph nodes and edges."""
     success = await engine.save_custom_graph(request.nodes, request.edges)
@@ -2226,9 +2229,9 @@ async def get_aggregated_edges(
 
 @router.post("/edges/aggregated/materialize")
 async def materialize_aggregated_edges(
+    _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
     batch_size: int = Body(1000, embed=True),
-    _: object = Depends(require_ws_manage),
 ):
     """
     Trigger batch materialization of AGGREGATED edges.
@@ -2252,8 +2255,8 @@ async def materialize_aggregated_edges(
 @router.post("/nodes/create", response_model=CreateNodeResult, response_model_by_alias=True, dependencies=[Depends(require_edit_mode)])
 async def create_node(
     request: CreateNodeRequest = Body(...),
-    engine: ContextEngine = Depends(get_context_engine),
     _: object = Depends(require_ws_manage),
+    engine: ContextEngine = Depends(get_context_engine),
 ):
     """
     Create a new node with optional containment edge.
@@ -2270,8 +2273,8 @@ async def create_node(
 @router.post("/edges", response_model=EdgeMutationResult, response_model_by_alias=True, status_code=201, dependencies=[Depends(require_edit_mode)])
 async def create_edge(
     request: CreateEdgeRequest = Body(...),
-    engine: ContextEngine = Depends(get_context_engine),
     _: object = Depends(require_ws_manage),
+    engine: ContextEngine = Depends(get_context_engine),
 ):
     """
     Create a directed edge between two existing nodes.
@@ -2288,8 +2291,8 @@ async def create_edge(
 async def update_edge(
     edge_id: str,
     request: UpdateEdgeRequest = Body(...),
-    engine: ContextEngine = Depends(get_context_engine),
     _: object = Depends(require_ws_manage),
+    engine: ContextEngine = Depends(get_context_engine),
 ):
     """Update mutable properties of an existing edge. Edge type is immutable."""
     result = await engine.update_edge(edge_id, request)
@@ -2300,8 +2303,8 @@ async def update_edge(
 @router.delete("/edges/{edge_id}", status_code=204, dependencies=[Depends(require_edit_mode)])
 async def delete_edge(
     edge_id: str,
-    engine: ContextEngine = Depends(get_context_engine),
     _: object = Depends(require_ws_manage),
+    engine: ContextEngine = Depends(get_context_engine),
 ):
     """Delete an edge by ID."""
     success = await engine.delete_edge(edge_id)
@@ -2447,7 +2450,7 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
     return ops, assigned
 
 
-@router.post("/changes", response_model=GraphChangesResponse, response_model_by_alias=True, dependencies=[Depends(require_edit_mode)])
+@router.post("/changes", response_model=GraphChangesResponse, response_model_by_alias=True, dependencies=[Depends(require_edit_mode), Depends(require_ws_manage)])
 async def apply_graph_changes(
     ws_id: str,
     request: GraphChangesRequest = Body(...),
@@ -2571,8 +2574,8 @@ class AllowedEdgeOption(BaseModel):
 @router.post("/commands/batch", response_model=BatchResponse, response_model_by_alias=True)
 async def batch_commands(
     request: BatchCommandRequest = Body(...),
-    engine: ContextEngine = Depends(get_context_engine),
     _: object = Depends(require_ws_manage),
+    engine: ContextEngine = Depends(get_context_engine),
 ):
     """
     Execute a batch of graph mutation commands.

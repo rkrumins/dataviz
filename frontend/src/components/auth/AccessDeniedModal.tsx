@@ -15,9 +15,11 @@
  * card is in its compact display state.
  */
 import { useEffect, useMemo, useState } from 'react'
+import { useLocation } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-    ShieldAlert, ChevronDown, X, Send, Check, Loader2, AlertCircle,
+    ShieldAlert, ChevronDown, X, Send, Check, Loader2, AlertCircle, Eye,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
@@ -28,6 +30,8 @@ import {
 import {
     accessRequestsService,
 } from '@/services/accessRequestsService'
+import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
+import type { View } from '@/services/viewApiService'
 
 
 interface DenialEvent {
@@ -48,8 +52,32 @@ function extractWorkspaceId(path: string): string | null {
 }
 
 
+
+/** Plain-language for the permissions users actually hit. The raw
+ *  ``Missing permission: workspace:datasource:read`` is accurate and
+ *  useless to the person reading it — it names our internal grammar,
+ *  not what they were trying to do. The permission id stays available
+ *  under "Details". */
+const PERMISSION_COPY: Record<string, string> = {
+    'workspace:datasource:read': "You don't have access to this workspace's data.",
+    'workspace:datasource:manage': 'Changing data in this workspace needs edit access.',
+    'workspace:view:edit': 'Editing views in this workspace needs edit access.',
+    'workspace:view:publish': 'Publishing views to everyone needs the "Publish views" permission.',
+    'workspace:view:delete': 'Deleting views in this workspace needs delete access.',
+    'workspace:admin': 'This action is limited to workspace admins.',
+}
+
+function permissionFrom(detail: string | null): string | null {
+    if (!detail) return null
+    const m = detail.match(/([a-z]+:[a-z-]+(?::[a-z-]+)*)/i)
+    return m ? m[1] : null
+}
+
+
 export function AccessDeniedModal() {
     const [event, setEvent] = useState<DenialEvent | null>(null)
+    const location = useLocation()
+    const queryClient = useQueryClient()
     const [showDetails, setShowDetails] = useState(false)
     const [composerOpen, setComposerOpen] = useState(false)
 
@@ -73,11 +101,32 @@ export function AccessDeniedModal() {
         return () => clearTimeout(t)
     }, [event, showDetails, composerOpen])
 
-    // ``Missing permission: workspace:view:edit`` — surface just the
-    // human-friendly part for non-developers.
-    const headlineMessage = event
-        ? (event.detail ?? `Access denied (HTTP ${event.status})`)
+    // Is the caller sitting in a view that was SHARED with them (read-only
+    // reach)? Then the denial isn't a fault to fix — it's the expected
+    // shape of their access, and the card should say so instead of
+    // reciting a permission id. Read from the cached view rather than new
+    // state: the open view is already in React Query under ['view', id].
+    const readOnlyShare = useMemo(() => {
+        const m = location.pathname.match(/^\/views\/([^/]+)/)
+        if (!m) return null
+        const cached = queryClient.getQueryData<View>([...VIEW_QUERY_KEY, m[1]])
+        if (cached?.access?.dataAccess !== 'readonly') return null
+        return cached
+    }, [location.pathname, queryClient, event])
+
+    const permission = event ? permissionFrom(event.detail) : null
+
+    const headline = readOnlyShare ? 'Read-only view' : 'Access denied'
+    const sharedFrom = readOnlyShare?.workspaceName
+        ? ` from ${readOnlyShare.workspaceName}`
         : ''
+    const headlineMessage = !event
+        ? ''
+        : readOnlyShare
+            ? `You're exploring a view shared with you${sharedFrom}. Everything here is read-only — changing anything needs access to the workspace.`
+            : (permission ? PERMISSION_COPY[permission] : undefined)
+                ?? event.detail
+                ?? `Access denied (HTTP ${event.status})`
 
     const wsId = useMemo(
         () => (event ? extractWorkspaceId(event.path) : null),
@@ -102,11 +151,18 @@ export function AccessDeniedModal() {
                     )}
                 >
                     <div className="flex items-start gap-3 px-4 py-3.5">
-                        <div className="w-9 h-9 rounded-lg border border-amber-500/20 bg-amber-500/10 flex items-center justify-center shrink-0">
-                            <ShieldAlert className="w-4 h-4 text-amber-500" />
+                        <div className={cn(
+                            'w-9 h-9 rounded-lg border flex items-center justify-center shrink-0',
+                            readOnlyShare
+                                ? 'border-sky-500/20 bg-sky-500/10'
+                                : 'border-amber-500/20 bg-amber-500/10',
+                        )}>
+                            {readOnlyShare
+                                ? <Eye className="w-4 h-4 text-sky-500" />
+                                : <ShieldAlert className="w-4 h-4 text-amber-500" />}
                         </div>
                         <div className="flex-1 min-w-0">
-                            <p className="text-sm font-semibold text-ink leading-snug">Access denied</p>
+                            <p className="text-sm font-semibold text-ink leading-snug">{headline}</p>
                             <p className="text-xs text-ink-secondary mt-0.5 leading-snug break-words">{headlineMessage}</p>
 
                             {wsId && !composerOpen && (
@@ -115,7 +171,7 @@ export function AccessDeniedModal() {
                                     className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/15 transition-colors"
                                 >
                                     <Send className="w-3 h-3" />
-                                    Request access
+                                    {readOnlyShare ? 'Request edit access' : 'Request access'}
                                 </button>
                             )}
 

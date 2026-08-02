@@ -517,6 +517,21 @@ class WorkspaceORM(Base):
     description = Column(Text, nullable=True)
     is_default = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
+    # Who may publish a view to enterprise (platform-wide) visibility.
+    #   'open' (default)  — anyone who can change a view's visibility may
+    #                       publish it directly. This is the default
+    #                       because the graph holds METADATA: names,
+    #                       types and lineage. A platform whose purpose
+    #                       is shared understanding of lineage should not
+    #                       require a signature before anyone can share
+    #                       lineage, and a gate that always says yes is
+    #                       friction with no signal.
+    #   'request'         — members ask; a publish-permission holder
+    #                       answers. For workspaces whose sources are
+    #                       sensitive enough to want a human in the loop.
+    # Risk that is concentrated in a few SOURCES belongs on the source
+    # (see ``WorkspaceDataSourceORM.is_restricted``), not on everyone.
+    publish_policy = Column(Text, nullable=False, default="open")
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -580,6 +595,12 @@ class WorkspaceDataSourceORM(Base):
     projection_mode = Column(Text, nullable=True)  # None = inherit from provider, "in_source" | "dedicated"
     dedicated_graph_name = Column(Text, nullable=True)  # graph name when projection_mode == "dedicated"
     access_level = Column(Text, nullable=True, default="read")  # read | write | admin
+    # Publishing a view exposes read-only access to THIS source, so the
+    # sources that deserve a human in the loop are marked here rather
+    # than by locking down every workspace that happens to contain one.
+    # A restricted source overrides an 'open' workspace policy: views
+    # over it always need ``workspace:view:publish`` (or a request).
+    is_restricted = Column(Boolean, nullable=False, default=False)
     extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
     # Node-identity property — the physical graph property that plays the role
     # the platform's canonical ``urn`` does (universal node identity). NULL means
@@ -705,7 +726,7 @@ class ContextModelORM(Base):
     # Columns added during context-model → view unification
     view_type = Column(Text, nullable=True)                            # graph | table | lineage | ...
     config = Column(Text, nullable=True)                               # JSON: full ViewConfiguration
-    visibility = Column(Text, nullable=False, default="private")       # private | workspace | enterprise
+    visibility = Column(Text, nullable=False, default="private")        # private | workspace | enterprise
     created_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                                 # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
@@ -763,6 +784,14 @@ class ViewORM(Base):
     # EXTENSION POINT: persist referenced_entity_types / referenced_relationship_types
     # for view-ontology compatibility checks once real breakage workflows appear.
     visibility = Column(Text, nullable=False, default="private")
+    # Pending request to publish this view platform-wide. Set when a
+    # member who cannot publish asks for it; cleared on approve (which
+    # flips visibility), deny, or withdrawal. A pending request IS the
+    # queue — no separate table, because the request is a fact about
+    # this view and dies with it.
+    publish_requested_by = Column(Text, nullable=True)
+    publish_requested_at = Column(Text, nullable=True)
+    publish_request_note = Column(Text, nullable=True)
     created_by = Column(Text, nullable=True)
     # Principal id of whoever last edited the view (same convention as
     # created_by). NULL on legacy rows and until the first edit after the
@@ -789,6 +818,7 @@ class ViewORM(Base):
         Index("idx_view_workspace", "workspace_id"),
         Index("idx_view_context_model", "context_model_id"),
         Index("idx_view_visibility", "visibility"),
+        Index("idx_view_publish_requested", "publish_requested_at"),
         Index("idx_view_data_source", "data_source_id"),
         Index("idx_view_deleted_at", "deleted_at"),
         CheckConstraint(
@@ -833,7 +863,8 @@ class ViewActivityLogORM(Base):
         CheckConstraint(
             "action IN ('created', 'updated', 'visibility_changed', 'shared', "
             "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored', "
-            "'data_changed')",
+            "'data_changed', 'publish_requested', 'publish_denied', "
+            "'admin_viewed')",
             name="ck_val_action_enum",
         ),
     )
@@ -1966,6 +1997,46 @@ class RoleBindingORM(Base):
 # ------------------------------------------------------------------ #
 # resource_grants  (per-View explicit shares — Layer 3 of view ACL)    #
 # ------------------------------------------------------------------ #
+
+class NotificationORM(Base):
+    """An in-app notification for one user.
+
+    Written in the SAME transaction as the event it describes, rather
+    than derived from the outbox by a relay. Sharing flows are only as
+    good as the moment someone learns they were shared with, so the
+    notification has to be as durable as the grant or the request that
+    caused it — an eventually-consistent fan-out that can silently lag
+    (or drop) turns "you have access" into "you have access and nobody
+    told you". The outbox keeps carrying the same events for external
+    consumers; this table is what the bell reads.
+    """
+    __tablename__ = "notifications"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ntf_{uuid.uuid4().hex[:12]}")
+    user_id = Column(Text, nullable=False)          # recipient
+    # Machine kind, e.g. 'view.publish_requested'. Drives the icon and
+    # any client-side grouping; the copy lives in title/body.
+    kind = Column(Text, nullable=False)
+    title = Column(Text, nullable=False)
+    body = Column(Text, nullable=True)
+    # In-app destination, e.g. '/views/view_abc'. Nullable for purely
+    # informational notices.
+    link = Column(Text, nullable=True)
+    actor_id = Column(Text, nullable=True)          # who caused it
+    resource_type = Column(Text, nullable=True)     # 'view' | ...
+    resource_id = Column(Text, nullable=True)
+    read_at = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        # The bell's only query: this user's newest, unread-first.
+        Index("idx_notifications_user_created", "user_id", "created_at"),
+        Index("idx_notifications_unread", "user_id", "read_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Notification id={self.id!r} kind={self.kind!r} user={self.user_id!r}>"
+
 
 class ResourceGrantORM(Base):
     """Explicit grant of access to a single resource (Phase 1: views only).

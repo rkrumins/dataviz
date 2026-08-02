@@ -18,6 +18,7 @@
  */
 
 import { createContext, useContext, useState, useEffect, useRef, useMemo, type ReactNode } from 'react'
+import type { ViewAccess } from '@/services/viewApiService'
 import type { GraphSchema } from './GraphDataProvider'
 import type { GraphProviderContextValueExtended } from './GraphProviderContext'
 import { useGraphProviderContext, ProviderOverride } from './GraphProviderContext'
@@ -50,6 +51,12 @@ export interface ViewExecutionContextValue {
   workspaceId: string
   /** The view's data source ID */
   dataSourceId: string | null
+  /** The caller's capability envelope for the open view (null when the
+   *  response hasn't landed or predates the envelope). */
+  access: ViewAccess | null
+  /** True when the data plane is read-only for this caller — the whole
+   *  canvas tree hides edit/draft/versioning affordances off this flag. */
+  readOnly: boolean
 }
 
 const ViewExecCtx = createContext<ViewExecutionContextValue | null>(null)
@@ -67,7 +74,7 @@ export function useViewExecutionContext(): ViewExecutionContextValue | null {
  */
 export function StaticViewSchemaProvider({ schema, children }: { schema: ResolvedViewSchema; children: ReactNode }) {
   const value = useMemo<ViewExecutionContextValue>(
-    () => ({ schema, workspaceId: '__preview__', dataSourceId: null }),
+    () => ({ schema, workspaceId: '__preview__', dataSourceId: null, access: null, readOnly: false }),
     [schema],
   )
   return <ViewExecCtx.Provider value={value}>{children}</ViewExecCtx.Provider>
@@ -102,8 +109,15 @@ interface ViewExecutionProviderProps {
   workspaceId: string
   dataSourceId: string | null | undefined
   /** The active Context View's id (branch-per-view: scopes the draft lookup below to
-   *  THIS view, so a different view on the same data source never reuses its branch). */
+   *  THIS view, so a different view on the same data source never reuses its branch).
+   *  Also the capability context: it rides on every data request so the backend can
+   *  authorize non-members through their read access to this view. */
   viewId?: string | null
+  /** Provider behind the view's resolved source, from the API response —
+   *  present even for non-members (the workspace store can't say). */
+  providerId?: string | null
+  /** The caller's capability envelope from GET /views/{id}. */
+  access?: ViewAccess | null
   children: ReactNode
 }
 
@@ -111,6 +125,8 @@ export function ViewExecutionProvider({
   workspaceId,
   dataSourceId: dataSourceIdProp,
   viewId,
+  providerId: providerIdProp,
+  access = null,
   children,
 }: ViewExecutionProviderProps) {
   const globalCtx = useGraphProviderContext()
@@ -141,12 +157,15 @@ export function ViewExecutionProvider({
   }, [dataSourceIdProp, workspaceId, globalCtx.workspaceId, globalActiveDataSourceId, workspaces])
 
   const providerId = useMemo(() => {
+    // The API-resolved provider wins — it exists for non-members, where
+    // the workspace-store lookup below comes back empty.
+    if (providerIdProp) return providerIdProp
     const ws = workspaces.find((workspace) => workspace.id === workspaceId)
     const dataSource = ws?.dataSources?.find((candidate) => candidate.id === dataSourceId)
       ?? ws?.dataSources?.find((candidate) => candidate.isPrimary)
       ?? ws?.dataSources?.[0]
     return dataSource?.providerId ?? null
-  }, [workspaces, workspaceId, dataSourceId])
+  }, [providerIdProp, workspaces, workspaceId, dataSourceId])
   const providerStatus = useProviderStatus(providerId)
 
   // ── Draft scoping: the active branch (if this scope owns one) routes every read
@@ -158,27 +177,31 @@ export function ViewExecutionProvider({
   const mainEpoch = useBranchStore((s) => s.mainEpoch)
 
   // ── Decide whether to reuse the global provider or create a scoped one ──
+  // An open view ALWAYS gets a pooled scoped provider: its requests carry the
+  // ?viewId= capability context, which the shared global provider doesn't.
+  // Members pay one extra cheap getStats() probe; non-members need it.
   const scopeMatchesGlobal =
     !effectiveBranchId &&
+    !viewId &&
     workspaceId === globalCtx.workspaceId &&
     (dataSourceId === globalCtx.dataSourceId || (!dataSourceId && !globalCtx.dataSourceId))
 
   const scopedProvider = useMemo(() => {
     if (scopeMatchesGlobal) return globalCtx.provider
-    return getOrCreateProvider(workspaceId, dataSourceId, effectiveBranchId)
-  }, [scopeMatchesGlobal, workspaceId, dataSourceId, effectiveBranchId, globalCtx.provider])
+    return getOrCreateProvider(workspaceId, dataSourceId, effectiveBranchId, viewId)
+  }, [scopeMatchesGlobal, workspaceId, dataSourceId, effectiveBranchId, viewId, globalCtx.provider])
 
   // ── Provider version: global if matching, otherwise local counter ──
   const [localVersion, setLocalVersion] = useState(1)
-  const prevScopeRef = useRef(poolKey(workspaceId, dataSourceId, effectiveBranchId))
+  const prevScopeRef = useRef(poolKey(workspaceId, dataSourceId, effectiveBranchId, viewId))
 
   useEffect(() => {
-    const key = poolKey(workspaceId, dataSourceId, effectiveBranchId)
+    const key = poolKey(workspaceId, dataSourceId, effectiveBranchId, viewId)
     if (key !== prevScopeRef.current) {
       prevScopeRef.current = key
       setLocalVersion(v => v + 1)
     }
-  }, [workspaceId, dataSourceId, effectiveBranchId])
+  }, [workspaceId, dataSourceId, effectiveBranchId, viewId])
 
   // mainEpoch bumps on publish/merge → folds into the version so schema + hydration
   // (keyed by providerVersion) refetch once main has moved.
@@ -234,11 +257,13 @@ export function ViewExecutionProvider({
   // IMPORTANT: We call useGraphSchema INSIDE the ProviderOverride so the hook's
   // call to useGraphProvider() returns our scoped provider. This ensures the
   // background refresh hits the correct workspace's API endpoint.
+  const readOnly = access?.dataAccess === 'readonly'
+
   return (
     <ProviderOverride value={providerContextValue}>
-      <ViewSchemaGate workspaceId={workspaceId} dataSourceId={dataSourceId}>
+      <ViewSchemaGate workspaceId={workspaceId} dataSourceId={dataSourceId} viewId={viewId ?? undefined}>
         {(schema) => (
-          <ViewExecCtx.Provider value={{ schema, workspaceId, dataSourceId }}>
+          <ViewExecCtx.Provider value={{ schema, workspaceId, dataSourceId, access, readOnly }}>
             {children}
           </ViewExecCtx.Provider>
         )}
@@ -254,13 +279,16 @@ export function ViewExecutionProvider({
 interface ViewSchemaGateProps {
   workspaceId: string
   dataSourceId: string | null
+  /** Capability context — threads into the cached-schema/-ontology reads. */
+  viewId?: string
   children: (schema: ResolvedViewSchema) => ReactNode
 }
 
-function ViewSchemaGate({ workspaceId, dataSourceId, children }: ViewSchemaGateProps) {
+function ViewSchemaGate({ workspaceId, dataSourceId, viewId, children }: ViewSchemaGateProps) {
   const { isLoading, isError, error, data, refetch } = useGraphSchema({
     workspaceId,
     dataSourceId: dataSourceId ?? undefined,
+    viewId,
   })
 
   // Sync schema to the global Zustand store so global consumers (sidebar,

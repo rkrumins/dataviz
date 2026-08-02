@@ -38,6 +38,15 @@ export const viewGrantsService = {
         })
     },
 
+    /** Change an existing grant's role in place — no revoke + re-share,
+     *  and the grant's audit trail (grantedAt/grantedBy) stays intact. */
+    update(viewId: string, grantId: string, role: 'editor' | 'viewer'): Promise<ViewGrantResponse> {
+        return authFetch<ViewGrantResponse>(url(viewId, `/${grantId}`), {
+            method: 'PUT',
+            body: JSON.stringify({ role }),
+        })
+    },
+
     delete(viewId: string, grantId: string): Promise<void> {
         return authFetch<void>(url(viewId, `/${grantId}`), { method: 'DELETE' })
     },
