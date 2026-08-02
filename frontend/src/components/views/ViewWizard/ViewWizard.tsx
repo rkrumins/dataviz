@@ -67,7 +67,7 @@ import {
     viewToViewConfig, updateViewLayout, requestViewPublication,
 } from '@/services/viewApiService'
 import { useToast } from '@/components/ui/toast'
-import { usePermission } from '@/store/auth'
+import { usePublishGate } from '@/hooks/usePublishGate'
 import { provisionBlankGraph, GraphNameUnavailableError, type BlankGraphResult } from '@/services/versioningApiService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -854,7 +854,9 @@ function ViewWizardBody({
     const isBlank = scopeMode === 'blank'
     // Picking Enterprise without the publish permission means "create it,
     // then ask" — the view has to exist before a request can attach to it.
-    const canPublishHere = usePermission('workspace:view:publish', resolvedWorkspaceId)
+    const { canPublish: canPublishHere } = usePublishGate(
+        resolvedWorkspaceId, resolvedDataSourceId,
+    )
 
     // Admin → Features → View modes. `null` means no restriction (see useFeatureList).
     //

@@ -260,19 +260,34 @@ def can_publish_in_workspace(
 
 
 def can_publish_under_policy(
-    ctx: ViewerContext, view: ViewORM, *, policy: Optional[str],
+    ctx: ViewerContext,
+    view: ViewORM,
+    *,
+    policy: Optional[str],
+    source_restricted: bool = False,
 ) -> bool:
-    """May this caller publish, taking the workspace policy into account?
+    """May this caller publish, given the workspace policy and the
+    sensitivity of the data source behind the view?
 
-    A workspace set to ``'open'`` has decided that publishing is not an
-    admin-only act there: anyone who may change the view's visibility at
-    all (its creator, or a workspace admin) may take it platform-wide.
-    The permission still governs everywhere else, and still wins here —
-    ``'open'`` widens, never narrows.
+    An ``'open'`` workspace has decided publishing is not an admin-only
+    act there: anyone who may change the view's visibility at all (its
+    creator, or a workspace admin) may take it platform-wide. That is
+    the default, because the graph holds metadata and the product
+    exists to share it.
+
+    A **restricted source** overrides that. Publishing exposes read-only
+    access to the whole source, so the few sources worth a human in the
+    loop carry the requirement themselves — the HR warehouse is gated
+    without gating the workspace that happens to contain it.
+
+    The permission always wins: holding ``workspace:view:publish`` is
+    sufficient everywhere, restricted or not.
     """
     if can_publish(ctx, view):
         return True
-    if (policy or "request") != "open":
+    if source_restricted:
+        return False
+    if (policy or "open") != "open":
         return False
     return can_change_visibility(ctx, view)
 
@@ -321,6 +336,7 @@ async def compute_access_envelope(
     view: ViewORM,
     *,
     workspace_policy: Optional[str] = None,
+    source_restricted: bool = False,
 ) -> dict:
     """The caller's capability envelope for one view (camelCase keys,
     ready for ``ViewAccessInfo``). Call only after ``can_read_view``
@@ -348,7 +364,9 @@ async def compute_access_envelope(
         via = "workspace"
     else:
         via = "enterprise"
-    may_publish = can_publish_under_policy(ctx, view, policy=workspace_policy)
+    may_publish = can_publish_under_policy(
+        ctx, view, policy=workspace_policy, source_restricted=source_restricted,
+    )
     return {
         "canEdit": await can_edit_view(session, ctx, view),
         "canManageGrants": can_manage_grants(ctx, view),

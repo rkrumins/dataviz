@@ -849,6 +849,7 @@ class DataSourceUpdateRequest(BaseModel):
     is_active: Optional[bool] = Field(None, alias="isActive")
     projection_mode: Optional[str] = Field(None, alias="projectionMode")  # None | "in_source" | "dedicated"
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")  # graph name when dedicated
+    is_restricted: Optional[bool] = Field(None, alias="isRestricted")
     extra_config: Optional[dict] = Field(None, alias="extraConfig")  # per-data-source config (schema mapping, etc.)
     # Node-identity property — the URN-equivalent for this physical graph.
     # None → field untouched on update (partial-update semantics); an explicit
@@ -881,6 +882,9 @@ class DataSourceResponse(BaseModel):
     is_active: bool = Field(alias="isActive")
     projection_mode: Optional[str] = Field(None, alias="projectionMode")
     dedicated_graph_name: Optional[str] = Field(None, alias="dedicatedGraphName")
+    #: Views over a restricted source always need the publish permission,
+    #: even where the workspace lets members publish freely.
+    is_restricted: bool = Field(False, alias="isRestricted")
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
     extra_config: Optional[dict] = Field(None, alias="extraConfig")
     # Node-identity property (URN-equivalent). Always populated on the way out —
@@ -945,7 +949,7 @@ class WorkspaceResponse(BaseModel):
     #: Live (non-deleted) views built on this workspace.
     view_count: int = Field(0, alias="viewCount")
     #: Who may publish a view platform-wide here — 'request' | 'open'.
-    publish_policy: str = Field("request", alias="publishPolicy")
+    publish_policy: str = Field("open", alias="publishPolicy")
 
     class Config:
         populate_by_name = True

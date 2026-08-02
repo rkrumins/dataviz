@@ -260,3 +260,146 @@ async def test_view_reports_its_audience(test_client: AsyncClient, db_session):
     audience = r.json()["audience"]
     assert audience["workspaceMemberCount"] == 3
     assert audience["explicitGrantCount"] == 0
+
+
+# ── open by default, restricted where it matters ─────────────────────
+
+@pytest.mark.asyncio
+async def test_a_new_workspace_lets_members_publish(
+    test_client: AsyncClient, db_session,
+):
+    """The posture, not a setting: a workspace nobody has configured
+    lets its members share their work with the platform.
+
+    Publishing shipped admin-only, which made the tier unreachable for
+    almost everyone — a member could build a lineage view and have
+    nobody to hand it to. What these views expose is metadata, so the
+    default inverts and the control moves after the fact.
+    """
+    ws = WorkspaceORM(id="ws_pf_fresh", name="Untouched")
+    db_session.add(ws)
+    db_session.add(ViewORM(
+        id="view_pf_fresh", name="Fresh", workspace_id="ws_pf_fresh",
+        visibility="workspace", created_by=CREATOR.id,
+    ))
+    await db_session.commit()
+    await db_session.refresh(ws)
+    assert ws.publish_policy == "open", "the default IS the decision"
+
+    claims = PermissionClaims(sid="s_pf_fresh", ws_perms={"ws_pf_fresh": (
+        "workspace:view:create", "workspace:view:edit",
+        "workspace:view:delete", "workspace:view:read",
+    )})
+    with _auth(user=CREATOR, claims=claims):
+        r = await test_client.put(
+            "/api/v1/views/view_pf_fresh/visibility",
+            json={"visibility": "enterprise"},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["visibility"] == "enterprise"
+
+
+@pytest.mark.asyncio
+async def test_a_restricted_source_still_needs_a_publisher(
+    test_client: AsyncClient, db_session,
+):
+    """Restriction belongs to the source, not the workspace.
+
+    Publishing exposes read-only access to the whole source behind the
+    view — so the HR warehouse can carry a gate without dragging every
+    workspace that happens to contain it back to admin-only.
+    """
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+
+    db_session.add(WorkspaceORM(id="ws_pf_restr", name="Open WS", publish_policy="open"))
+    db_session.add(ProviderORM(id="prov_pf", name="P", provider_type="falkordb"))
+    db_session.add(WorkspaceDataSourceORM(
+        id="ds_pf_restr", workspace_id="ws_pf_restr", provider_id="prov_pf",
+        graph_name="g", label="People", is_primary=True, is_restricted=True,
+    ))
+    db_session.add(ViewORM(
+        id="view_pf_restr", name="Restricted", workspace_id="ws_pf_restr",
+        data_source_id="ds_pf_restr", visibility="workspace", created_by=CREATOR.id,
+    ))
+    await db_session.commit()
+
+    claims = PermissionClaims(sid="s_pf_restr", ws_perms={"ws_pf_restr": (
+        "workspace:view:create", "workspace:view:edit",
+        "workspace:view:delete", "workspace:view:read",
+    )})
+    with _auth(user=CREATOR, claims=claims):
+        r = await test_client.put(
+            "/api/v1/views/view_pf_restr/visibility",
+            json={"visibility": "enterprise"},
+        )
+        env = await test_client.get("/api/v1/views/view_pf_restr")
+    assert r.status_code == 403, r.text
+    # And the envelope offers the way through, so the UI isn't a wall.
+    access = env.json()["access"]
+    assert access["canPublish"] is False
+    assert access["canRequestPublish"] is True
+
+
+@pytest.mark.asyncio
+async def test_creating_over_a_restricted_source_cannot_publish(
+    test_client: AsyncClient, db_session,
+):
+    """The create path enforces the same rule the visibility path does —
+    otherwise the gate is one POST away from irrelevant."""
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+
+    db_session.add(WorkspaceORM(id="ws_pf_cr", name="Open WS", publish_policy="open"))
+    db_session.add(ProviderORM(id="prov_pf_cr", name="P", provider_type="falkordb"))
+    db_session.add(WorkspaceDataSourceORM(
+        id="ds_pf_cr", workspace_id="ws_pf_cr", provider_id="prov_pf_cr",
+        graph_name="g", label="People", is_primary=True, is_restricted=True,
+    ))
+    await db_session.commit()
+
+    claims = PermissionClaims(sid="s_pf_cr", ws_perms={"ws_pf_cr": (
+        "workspace:view:create", "workspace:view:read",
+    )})
+    with _auth(user=CREATOR, claims=claims):
+        r = await test_client.post("/api/v1/views/", json={
+            "name": "Over restricted", "workspaceId": "ws_pf_cr",
+            "dataSourceId": "ds_pf_cr", "viewType": "custom",
+            "visibility": "enterprise",
+        })
+    assert r.status_code == 403, r.text
+
+
+@pytest.mark.asyncio
+async def test_publishing_tells_whoever_governs_the_workspace(
+    test_client: AsyncClient, db_session,
+):
+    """Open publishing without a backstop is unsupervised publishing.
+
+    The admin didn't approve this one, so the only way they learn it
+    happened is being told — and the notification has to say where the
+    undo lives.
+    """
+    from backend.app.db.models import RoleBindingORM, UserORM
+    from backend.app.db.repositories import notification_repo
+
+    vid = await _seed(db_session, policy="open", view_id="view_pf_notify")
+    db_session.add(UserORM(
+        id=ADMIN.id, email="pf_admin@example.com", password_hash="x",
+        first_name="A", last_name="D", status="active",
+    ))
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id=ADMIN.id,
+        role_name="workspace_admin", scope_type="workspace", scope_id=WS,
+    ))
+    await db_session.commit()
+
+    with _auth(user=CREATOR, claims=MEMBER_CLAIMS):
+        r = await test_client.put(
+            f"/api/v1/views/{vid}/visibility", json={"visibility": "enterprise"},
+        )
+    assert r.status_code == 200, r.text
+
+    inbox = await notification_repo.list_for_user(db_session, ADMIN.id)
+    published = [n for n in inbox if n.kind == "view.published"]
+    assert published, "the workspace admin has to hear about it"
+    assert "unpublish" in (published[0].body or "").lower()
+    assert published[0].link == f"/views/{vid}"

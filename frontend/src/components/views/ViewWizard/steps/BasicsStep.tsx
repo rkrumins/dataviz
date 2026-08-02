@@ -25,9 +25,9 @@ import {
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'
-import { usePermission } from '@/store/auth'
 import { useBrand } from '@/store/branding'
 import { buildVisibilityOptions } from '@/lib/viewVisibility'
+import { usePublishGate } from '@/hooks/usePublishGate'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useSchemaStore } from '@/store/schema'
 import { checkBlankGraphName } from '@/services/versioningApiService'
@@ -90,7 +90,13 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
     // Visibility options honor the publish rule: creating (or keeping) an
     // enterprise view needs workspace:view:publish in the target workspace.
     const scopeWorkspaceId = scopeContext?.workspaceId ?? activeWorkspace?.id
-    const canPublish = usePermission('workspace:view:publish', scopeWorkspaceId)
+    // The permission is no longer the whole answer: an open workspace lets
+    // any member publish directly, and a restricted source pulls the gate
+    // back down even there. Asking only for the permission told most of the
+    // platform their view "will be requested" when it would just publish.
+    const { canPublish, restrictedSource } = usePublishGate(
+        scopeWorkspaceId, formData.dataSourceId ?? scopeContext?.dataSourceId,
+    )
     const visibilityOptions = buildVisibilityOptions({
         // Whoever can create a view here will be its creator, and a
         // creator may always ASK for publication — so the Enterprise
@@ -103,6 +109,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
         // going back to Private after clicking Enterprise.
         saved: savedVisibility,
         canPublish,
+        restrictedSource,
         appName,
         workspaceName: displayWorkspaceName,
     })

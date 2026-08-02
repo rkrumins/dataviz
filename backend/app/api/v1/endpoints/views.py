@@ -293,10 +293,29 @@ async def _record_break_glass_read(
 
 
 async def _publish_policy(session: AsyncSession, workspace_id: str) -> str:
-    """The workspace's publication policy ('request' | 'open')."""
+    """The workspace's publication policy ('open' | 'request')."""
     from backend.app.db.models import WorkspaceORM
     row = await session.get(WorkspaceORM, workspace_id)
-    return (getattr(row, "publish_policy", None) or "request") if row else "request"
+    return (getattr(row, "publish_policy", None) or "open") if row else "open"
+
+
+async def _source_is_restricted(
+    session: AsyncSession, workspace_id: str, data_source_id: Optional[str],
+) -> bool:
+    """Is the source behind this view marked restricted?
+
+    Publishing exposes read-only access to the whole source, so a
+    restricted one requires the publish permission even where the
+    workspace has opened publishing to its members. Views with no
+    explicit source resolve to the workspace primary — the same source
+    they would actually read.
+    """
+    ds = None
+    if data_source_id:
+        ds = await data_source_repo.get_data_source_orm(session, data_source_id)
+    if ds is None:
+        ds = await data_source_repo.get_primary_data_source(session, workspace_id)
+    return bool(getattr(ds, "is_restricted", False)) if ds else False
 
 
 
@@ -573,8 +592,13 @@ async def create_view(
         ):
             # A workspace set to 'open' has decided publishing isn't
             # admin-only there; anyone who may create a view in it may
-            # publish one.
-            if await _publish_policy(session, req.workspace_id) != "open":
+            # publish one — unless the source itself is restricted, in
+            # which case the exposure is the point of the gate.
+            open_ws = await _publish_policy(session, req.workspace_id) == "open"
+            restricted = await _source_is_restricted(
+                session, req.workspace_id, req.data_source_id,
+            )
+            if not open_ws or restricted:
                 raise HTTPException(
                     status_code=403,
                     detail="Missing permission: workspace:view:publish",
@@ -658,6 +682,9 @@ async def get_view(
     view.access = ViewAccessInfo(**await view_access.compute_access_envelope(
         session, ctx, view_orm,
         workspace_policy=await _publish_policy(session, view_orm.workspace_id),
+        source_restricted=await _source_is_restricted(
+            session, view_orm.workspace_id, view_orm.data_source_id,
+        ),
     ))
     return view
 
@@ -883,8 +910,11 @@ async def update_view_visibility(
         )
         if crosses_enterprise:
             policy = await _publish_policy(session, view_orm.workspace_id)
+            restricted = await _source_is_restricted(
+                session, view_orm.workspace_id, view_orm.data_source_id,
+            )
             if not view_access.can_publish_under_policy(
-                ctx, view_orm, policy=policy,
+                ctx, view_orm, policy=policy, source_restricted=restricted,
             ):
                 raise HTTPException(
                     status_code=403,
@@ -904,6 +934,26 @@ async def update_view_visibility(
             summary=f"Visibility {existing.visibility} → {visibility}",
             changes={"visibility": {"from": existing.visibility, "to": visibility}},
         )
+        # Publishing is open by default, so the control is after the fact
+        # rather than before it: whoever governs this workspace hears
+        # about it and can unpublish. Silence would make "open" mean
+        # "unsupervised".
+        if visibility == "enterprise":
+            await notification_repo.notify(
+                session,
+                user_ids=await notification_repo.users_who_can(
+                    session,
+                    workspace_id=view.workspace_id,
+                    permission="workspace:view:publish",
+                ),
+                kind="view.published",
+                title=f'"{view.name}" was published to everyone',
+                body="Anyone signed in can now open it. You can unpublish it from the workspace's Views tab.",
+                link=f"/views/{view_id}",
+                actor_id=_user_id(user),
+                resource_type="view",
+                resource_id=view_id,
+            )
     return view
 
 

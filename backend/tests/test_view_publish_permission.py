@@ -1,10 +1,19 @@
 """Publish-permission enforcement on the visibility endpoints.
 
 Moving a view to or from ``enterprise`` exposes it (and read-only
-access to its data source) platform-wide, so it requires
-``workspace:view:publish`` on top of the base creator/ws-admin rule.
-Private ↔ workspace stays with the creator. Creation directly as
-``enterprise`` passes the same gate.
+access to its data source) platform-wide. Private ↔ workspace stays
+with the creator.
+
+This file pins the ``publish_policy='request'`` posture: the workspace
+has asked for a human in the loop, so crossing the enterprise boundary
+needs ``workspace:view:publish`` on top of the base creator/ws-admin
+rule, in both directions and on the create path.
+
+The DEFAULT posture is the opposite — a workspace nobody has
+configured lets its members publish directly, with an admin backstop
+after the fact. That side lives in ``test_publish_requests.py``, which
+is why every workspace here sets the policy explicitly instead of
+leaning on the default.
 """
 from __future__ import annotations
 
@@ -42,7 +51,7 @@ DELEGATED_CLAIMS = PermissionClaims(sid="s_delegate", ws_perms={WS: (
 async def _seed_view(db_session, *, visibility, view_id="view_pub",
                      created_by=CREATOR.id):
     if (await db_session.get(WorkspaceORM, WS)) is None:
-        db_session.add(WorkspaceORM(id=WS, name="Pub"))
+        db_session.add(WorkspaceORM(id=WS, name="Pub", publish_policy="request"))
     db_session.add(ViewORM(
         id=view_id, name=view_id, workspace_id=WS,
         visibility=visibility, created_by=created_by,

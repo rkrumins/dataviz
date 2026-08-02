@@ -151,3 +151,19 @@ describe('an unsaved view (the create wizard)', () => {
         expect(enterprise.requiresApproval).toBe(true)
     })
 })
+
+describe('a restricted source', () => {
+    it('says the source is why approval is needed, not the workspace', () => {
+        // In an open workspace the member CAN publish other views, so a
+        // bare "ask a workspace admin" reads as a bug. The hint has to
+        // name the source, or the only way to understand the block is to
+        // go ask someone.
+        const enterprise = buildVisibilityOptions({
+            canPublish: false,
+            canRequestPublish: true,
+            restrictedSource: true,
+        }).find(o => o.id === 'enterprise')!
+        expect(enterprise.requiresApproval).toBe(true)
+        expect(enterprise.approvalHint).toMatch(/source/i)
+    })
+})

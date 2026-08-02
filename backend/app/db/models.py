@@ -518,14 +518,20 @@ class WorkspaceORM(Base):
     is_default = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
     # Who may publish a view to enterprise (platform-wide) visibility.
-    #   'request' (default) — members ask; a publish-permission holder
-    #                         approves. Nobody is ever stuck: the ask is
-    #                         one click and lands in the Views cockpit.
-    #   'open'              — anyone who can change the view's visibility
-    #                         may publish it directly, no approval.
-    # The permission stays the enforcement primitive either way; this
-    # only decides whether a member's own request auto-satisfies it.
-    publish_policy = Column(Text, nullable=False, default="request")
+    #   'open' (default)  — anyone who can change a view's visibility may
+    #                       publish it directly. This is the default
+    #                       because the graph holds METADATA: names,
+    #                       types and lineage. A platform whose purpose
+    #                       is shared understanding of lineage should not
+    #                       require a signature before anyone can share
+    #                       lineage, and a gate that always says yes is
+    #                       friction with no signal.
+    #   'request'         — members ask; a publish-permission holder
+    #                       answers. For workspaces whose sources are
+    #                       sensitive enough to want a human in the loop.
+    # Risk that is concentrated in a few SOURCES belongs on the source
+    # (see ``WorkspaceDataSourceORM.is_restricted``), not on everyone.
+    publish_policy = Column(Text, nullable=False, default="open")
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -589,6 +595,12 @@ class WorkspaceDataSourceORM(Base):
     projection_mode = Column(Text, nullable=True)  # None = inherit from provider, "in_source" | "dedicated"
     dedicated_graph_name = Column(Text, nullable=True)  # graph name when projection_mode == "dedicated"
     access_level = Column(Text, nullable=True, default="read")  # read | write | admin
+    # Publishing a view exposes read-only access to THIS source, so the
+    # sources that deserve a human in the loop are marked here rather
+    # than by locking down every workspace that happens to contain one.
+    # A restricted source overrides an 'open' workspace policy: views
+    # over it always need ``workspace:view:publish`` (or a request).
+    is_restricted = Column(Boolean, nullable=False, default=False)
     extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
     # Node-identity property — the physical graph property that plays the role
     # the platform's canonical ``urn`` does (universal node identity). NULL means

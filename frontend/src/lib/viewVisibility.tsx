@@ -97,10 +97,17 @@ export function buildVisibilityOptions(args: {
     canPublish: boolean
     /** May ask a publish-permission holder to publish this view. */
     canRequestPublish?: boolean
+    /** The block comes from the SOURCE being restricted rather than from
+     *  the workspace's policy — worth saying, because in an open
+     *  workspace the same person publishes other views without asking. */
+    restrictedSource?: boolean
     appName?: string
     workspaceName?: string
 }): VisibilityOption[] {
-    const { saved, canPublish, canRequestPublish, appName, workspaceName } = args
+    const {
+        saved, canPublish, canRequestPublish, restrictedSource,
+        appName, workspaceName,
+    } = args
     return VISIBILITY_ORDER.map(id => {
         let disabled = false
         let disabledReason: string | undefined
@@ -110,8 +117,10 @@ export function buildVisibilityOptions(args: {
             if (id === 'enterprise' && saved !== 'enterprise') {
                 if (canRequestPublish) {
                     requiresApproval = true
-                    approvalHint =
-                        'Needs approval — ask a workspace admin to publish'
+                    approvalHint = restrictedSource
+                        ? 'Needs approval — this data source is restricted, '
+                            + 'so a workspace admin publishes views over it'
+                        : 'Needs approval — ask a workspace admin to publish'
                 } else {
                     disabled = true
                     disabledReason =

@@ -240,6 +240,7 @@ export default function WorkspaceViewsSection({
     // had one (its reason box) — this makes the pair symmetric.
     const [confirmingId, setConfirmingId] = useState<string | null>(null)
     const [policySaving, setPolicySaving] = useState(false)
+    const [restrictingDsId, setRestrictingDsId] = useState<string | null>(null)
 
     const pendingRequests = useMemo(
         () => allViews.filter(v => v.publishRequest && !answeredIds.has(v.id)),
@@ -269,7 +270,7 @@ export default function WorkspaceViewsSection({
     }
 
     const handleSetPublishPolicy = async (policy: WorkspacePublishPolicy) => {
-        if (policy === (publishPolicy ?? 'request')) return
+        if (policy === (publishPolicy ?? 'open')) return
         setPolicySaving(true)
         try {
             await workspaceService.update(wsId, { publishPolicy: policy })
@@ -281,6 +282,21 @@ export default function WorkspaceViewsSection({
             showToast('error', err instanceof Error ? err.message : 'Could not change the policy')
         } finally {
             setPolicySaving(false)
+        }
+    }
+
+    const handleSetRestricted = async (dsId: string, isRestricted: boolean) => {
+        setRestrictingDsId(dsId)
+        try {
+            await workspaceService.updateDataSource(wsId, dsId, { isRestricted })
+            onWorkspaceChanged?.()
+            showToast('success', isRestricted
+                ? 'Views over this source now need a publisher\u2019s approval'
+                : 'Members can publish views over this source directly')
+        } catch (err) {
+            showToast('error', err instanceof Error ? err.message : 'Could not change the source')
+        } finally {
+            setRestrictingDsId(null)
         }
     }
 
@@ -489,10 +505,10 @@ export default function WorkspaceViewsSection({
                                     key={opt.id}
                                     onClick={() => void handleSetPublishPolicy(opt.id)}
                                     disabled={policySaving}
-                                    aria-pressed={(publishPolicy ?? 'request') === opt.id}
+                                    aria-pressed={(publishPolicy ?? 'open') === opt.id}
                                     className={cn(
                                         'px-2.5 py-1 rounded-full border text-xs font-medium transition-colors disabled:opacity-50',
-                                        (publishPolicy ?? 'request') === opt.id
+                                        (publishPolicy ?? 'open') === opt.id
                                             ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30'
                                             : 'text-ink-muted border-glass-border hover:border-amber-500/30',
                                     )}
@@ -500,6 +516,44 @@ export default function WorkspaceViewsSection({
                                     {opt.label}
                                 </button>
                             ))}
+                        </div>
+                    )}
+
+                    {/* Restriction belongs to the SOURCE, not the workspace:
+                        publishing a view exposes read-only access to the whole
+                        source behind it. Marking the sensitive one keeps the
+                        rest of the workspace open, instead of dragging every
+                        view back to admin-only because one source is touchy. */}
+                    {canAdminWorkspace && dataSources.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-glass-border">
+                            <p className="text-xs text-ink-muted mb-2">
+                                Sources that always need a publisher&rsquo;s approval:
+                            </p>
+                            <div className="flex flex-wrap items-center gap-2">
+                                {dataSources.map(ds => {
+                                    const restricted = !!ds.isRestricted
+                                    return (
+                                        <button
+                                            key={ds.id}
+                                            onClick={() => void handleSetRestricted(ds.id, !restricted)}
+                                            disabled={restrictingDsId === ds.id}
+                                            aria-pressed={restricted}
+                                            title={restricted
+                                                ? 'Restricted — publishing a view over this source needs the publish permission'
+                                                : 'Open — members can publish views over this source'}
+                                            className={cn(
+                                                'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium transition-colors disabled:opacity-50',
+                                                restricted
+                                                    ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border-rose-500/30'
+                                                    : 'text-ink-muted border-glass-border hover:border-rose-500/30',
+                                            )}
+                                        >
+                                            {restricted ? <Lock className="w-3 h-3" /> : <Globe className="w-3 h-3" />}
+                                            {ds.label || ds.id}
+                                        </button>
+                                    )
+                                })}
+                            </div>
                         </div>
                     )}
                 </div>
