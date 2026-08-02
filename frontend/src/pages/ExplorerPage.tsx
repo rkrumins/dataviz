@@ -256,6 +256,7 @@ export function ExplorerPage() {
     isLoading,
     toggleFavourite,
     removeView: removeViewFromList,
+    patchView,
     refetch,
     loadMore,
     hasMore,
@@ -378,6 +379,19 @@ export function ExplorerPage() {
   const handleShareDialog = useCallback((view: View) => {
     setShareView({ id: view.id, name: view.name, visibility: view.visibility, workspaceId: view.workspaceId })
   }, [])
+
+  /**
+   * The card menu changed a view's tier. Patch it in place rather than
+   * refetching: the menu has already confirmed with a toast naming the
+   * new audience, and a round trip during which the card still shows the
+   * OLD badge is exactly what made this feel like nothing happened.
+   */
+  const handleVisibilityChanged = useCallback(
+    (viewId: string) => (visibility: 'private' | 'workspace' | 'enterprise') => {
+      patchView(viewId, { visibility })
+    },
+    [patchView],
+  )
 
   // BE rule (views.py: can_delete_view): creator OR
   // workspace:view:delete on the view's workspace. Mirror that
@@ -715,6 +729,8 @@ export function ExplorerPage() {
                     view={v}
                     onToggleFavourite={() => toggleFavourite(v.id)}
                     onShare={() => handleShare(v)}
+                    onManageSharing={() => handleShareDialog(v)}
+                    onVisibilityChange={handleVisibilityChanged(v.id)}
                     onPreview={() => openViewPreview(v)}
                     onEdit={() => openViewDetailsEdit(v)}
                     onEditLayout={() => openViewEditor(v.id)}
@@ -803,6 +819,8 @@ export function ExplorerPage() {
                       view={v}
                       onToggleFavourite={() => toggleFavourite(v.id)}
                       onShare={() => handleShare(v)}
+                      onManageSharing={() => handleShareDialog(v)}
+                      onVisibilityChange={handleVisibilityChanged(v.id)}
                       onPreview={() => openViewPreview(v)}
                       onEdit={() => openViewDetailsEdit(v)}
                       onEditLayout={() => openViewEditor(v.id)}
