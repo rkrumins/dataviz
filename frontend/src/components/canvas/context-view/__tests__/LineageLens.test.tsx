@@ -469,6 +469,8 @@ describe('LineageLens graph mode', () => {
     expect(screen.getAllByText('label-b').length).toBeGreaterThan(0)
     expect(screen.getByText('label-a')).toBeTruthy()
     expect(screen.getByText('label-c')).toBeTruthy()
+    // Edge types read as words, not tokens (FLOWS_TO → "Flows to").
+    expect(screen.getAllByText('Flows to').length).toBeGreaterThan(0)
     fireEvent.doubleClick(screen.getByText('label-c'))
     expect(onRecenter).toHaveBeenCalledWith('c')
   })

@@ -34,7 +34,8 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
-import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType, useEntityTypeHierarchyMap } from '@/store/schema'
+import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType, useEntityTypeHierarchyMap, useRelationshipTypes } from '@/store/schema'
+import { relationshipLabel } from '@/lib/relationshipLabel'
 import {
   deriveNeighborRecords,
   mergeSupplementalEdges,
@@ -48,7 +49,7 @@ import { cn } from '@/lib/utils'
 import { usePreferencesStore } from '@/store/preferences'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { lensFocalOf, type LensHistory } from './lens/lensHistory'
-import { buildFocusGraph, labelOf } from './lens/focus-graph'
+import { buildFocusGraph, labelOf, edgeLabelFor, type EdgeTypeInfoMap } from './lens/focus-graph'
 import { FocusGraphView } from './lens/FocusGraphView'
 
 const ROWS_CAP = 200
@@ -67,6 +68,7 @@ interface LensGraphState {
 const freshGraphState = (nodeId: string | null): LensGraphState => ({
   nodeId, selection: null, expandedGroups: EMPTY_TYPE_SET, expandedFrontier: EMPTY_TYPE_SET, bandPages: EMPTY_PAGE_MAP,
 })
+
 
 export interface LineageLensProps {
   /** Focus history; entries[cursor] is the current focal. Empty = closed. */
@@ -289,6 +291,18 @@ export function LineageLens({
   // partner's type can contain the base's type (e.g. CONTAINER and
   // DATAPLATFORM vs a DATASET focal). Case-insensitive like the other
   // schema helpers. Tiny input (schema type list), computed once.
+  // Ontology wording for edge types — display name + description when
+  // the schema defines them. Shared by both bodies so the lens never
+  // shows a raw FLOWS_TO token to a business user.
+  const relationshipTypes = useRelationshipTypes()
+  const edgeTypeInfo = useMemo<EdgeTypeInfoMap>(() => {
+    const m: EdgeTypeInfoMap = new Map()
+    for (const rt of relationshipTypes) {
+      m.set(rt.id.toUpperCase(), { label: rt.name || relationshipLabel(rt.id), description: rt.description })
+    }
+    return m
+  }, [relationshipTypes])
+
   const hierarchyMap = useEntityTypeHierarchyMap()
   const canContainClosure = useMemo(() => buildCanContainClosure(hierarchyMap), [hierarchyMap])
   const isCoarserThan = useCallback(
@@ -599,6 +613,42 @@ export function LineageLens({
               </button>
             )}
             <div className="ml-auto flex items-center gap-2">
+              {/* Gesture guide — the graph's interactions are rich, and
+                  a first-time business user shouldn't have to discover
+                  them by accident. */}
+              <InfoTooltip
+                side="bottom"
+                align="end"
+                content={
+                  <div className="space-y-1 text-left">
+                    <p className="font-semibold text-ink">Exploring lineage</p>
+                    {lensViewMode === 'graph' ? (
+                      <ul className="space-y-0.5 text-ink-muted">
+                        <li><span className="font-medium text-ink">Click</span> a card — inspect it</li>
+                        <li><span className="font-medium text-ink">Double-click</span> — focus there</li>
+                        <li><span className="font-medium text-ink">⊕</span> on a card's outer edge — reveal its next hop</li>
+                        <li><span className="font-medium text-ink">×N</span> — show the underlying connections</li>
+                        <li><span className="font-medium text-ink">← / →</span> — step back / forward</li>
+                        <li><span className="font-medium text-ink">Drag · scroll</span> — pan and zoom</li>
+                      </ul>
+                    ) : (
+                      <ul className="space-y-0.5 text-ink-muted">
+                        <li><span className="font-medium text-ink">Click</span> a connection — re-center on it</li>
+                        <li><span className="font-medium text-ink">← / →</span> — step back / forward</li>
+                        <li><span className="font-medium text-ink">Hover</span> a row — reveal &amp; details actions</li>
+                      </ul>
+                    )}
+                  </div>
+                }
+              >
+                <button
+                  type="button"
+                  aria-label="How to explore"
+                  className="w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                >
+                  <LucideIcons.HelpCircle className="w-4 h-4" />
+                </button>
+              </InfoTooltip>
               {/* Graph | List body toggle — the graph is the premium
                   default; the columns stay one click away (persisted). */}
               <div className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]">
@@ -728,7 +778,7 @@ export function LineageLens({
                         meta && adjacent ? (
                           <span
                             className="flex items-center"
-                            title={`${meta.edgeType || 'connection'} — walked ${meta.downstream ? 'downstream' : 'upstream'}`}
+                            title={`${meta.edgeType ? edgeLabelFor(meta.edgeType.toUpperCase(), edgeTypeInfo) : 'Connection'} — walked ${meta.downstream ? 'downstream' : 'upstream'}`}
                           >
                             {meta.downstream
                               ? <LucideIcons.MoveRight className={cn('w-3.5 h-3.5 text-accent-lineage/70', isForward && 'opacity-50')} />
@@ -854,6 +904,7 @@ export function LineageLens({
                 focalFetch={focalFetch}
                 selectedId={graphCur.selection}
                 reducedMotion={reducedMotion}
+                edgeTypeInfo={edgeTypeInfo}
                 onSelect={setGraphSelection}
                 onFocus={onRecenter}
                 onToggleGroup={toggleGraphGroup}
@@ -1029,6 +1080,7 @@ export function LineageLens({
               direction="incoming"
               fetchState={focalFetch}
               nodeMap={nodeMap}
+              edgeTypeInfo={edgeTypeInfo}
               resolveParent={resolveParent}
               isCoarser={(t) => isCoarserThan(t, focalType)}
               hiddenTypes={hiddenTypes}
@@ -1139,6 +1191,7 @@ export function LineageLens({
               direction="outgoing"
               fetchState={focalFetch}
               nodeMap={nodeMap}
+              edgeTypeInfo={edgeTypeInfo}
               resolveParent={resolveParent}
               isCoarser={(t) => isCoarserThan(t, focalType)}
               hiddenTypes={hiddenTypes}
@@ -1332,6 +1385,7 @@ function NeighborRow({
   rollup,
   drill,
   nodeMap,
+  edgeTypeInfo,
   onRecenter,
   onRevealOnCanvas,
   onOpenDetails,
@@ -1344,6 +1398,7 @@ function NeighborRow({
   /** Present when the row is a drillable aggregate. */
   drill?: NeighborRowDrill
   nodeMap: Map<string, LineageNode>
+  edgeTypeInfo?: EdgeTypeInfoMap
   onRecenter: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
@@ -1387,7 +1442,12 @@ function NeighborRow({
         </p>
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug">
           <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ backgroundColor: edgeColor }} />
-          <span className="truncate uppercase tracking-wide">{r.edgeTypeNorm || 'relationship'}</span>
+          <span
+            className="truncate uppercase tracking-wide"
+            title={edgeTypeInfo?.get(r.edgeTypeNorm)?.description}
+          >
+            {edgeLabelFor(r.edgeTypeNorm, edgeTypeInfo)}
+          </span>
           {drill ? (
             // The ×N badge IS the drill toggle — same refine gesture as
             // the walk columns (stopPropagation: card click re-centers).
@@ -1506,6 +1566,7 @@ function NeighborColumn({
   direction,
   fetchState,
   nodeMap,
+  edgeTypeInfo,
   resolveParent,
   isCoarser,
   hiddenTypes,
@@ -1532,6 +1593,7 @@ function NeighborColumn({
    *  fetch from reading as "no connections". */
   fetchState?: 'loading' | 'done' | 'error'
   nodeMap: Map<string, LineageNode>
+  edgeTypeInfo?: EdgeTypeInfoMap
   /** Containment parent of a node, when known (fetched or loaded). */
   resolveParent: (id: string) => string | null
   /** True when the given entity type is a COARSER grain than the focal
@@ -1744,6 +1806,7 @@ function NeighborColumn({
                         accentColor={r.neighborNode ? generateColorFromType((r.neighborNode.data?.type as string) ?? 'entity') : '#94a3b8'}
                         drill={buildDrill(r)}
                         nodeMap={nodeMap}
+                        edgeTypeInfo={edgeTypeInfo}
                         onRecenter={onRecenter}
                         onRevealOnCanvas={onRevealOnCanvas}
                         onOpenDetails={onOpenDetails}
@@ -1781,6 +1844,7 @@ function NeighborColumn({
                     accentColor={typeColor}
                     drill={buildDrill(r)}
                     nodeMap={nodeMap}
+                    edgeTypeInfo={edgeTypeInfo}
                     onRecenter={onRecenter}
                     onRevealOnCanvas={onRevealOnCanvas}
                     onOpenDetails={onOpenDetails}
@@ -1813,6 +1877,7 @@ function NeighborColumn({
                   rollup
                   drill={buildDrill(r)}
                   nodeMap={nodeMap}
+                  edgeTypeInfo={edgeTypeInfo}
                   onRecenter={onRecenter}
                   onRevealOnCanvas={onRevealOnCanvas}
                   onOpenDetails={onOpenDetails}

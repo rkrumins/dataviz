@@ -21,6 +21,18 @@
  */
 import type { LineageNode, LineageEdge } from '@/store/canvas'
 import { deriveNeighborRecords, type NeighborRecord } from '@/lib/lineage-neighbors'
+import { relationshipLabel } from '@/lib/relationshipLabel'
+
+/** Ontology wording for edge types, keyed by UPPERCASE id: the
+ *  schema's display name + description when defined. */
+export type EdgeTypeInfoMap = Map<string, { label: string; description?: string }>
+
+/** Human wording for a normalized edge type — the ontology's display
+ *  name when defined, a readable fallback otherwise ("FLOWS_TO" →
+ *  "Flows to"). Raw ids are engineer-speak; both lens bodies use this
+ *  so the wording never drifts. */
+export const edgeLabelFor = (norm: string, info?: EdgeTypeInfoMap): string =>
+  norm ? (info?.get(norm)?.label ?? relationshipLabel(norm)) : 'relationship'
 
 /** Cards per band before the "+N more" overflow card (paged). */
 export const GRAPH_BAND_CAP = 30
@@ -60,6 +72,8 @@ export interface FocusCard {
   w: number
   h: number
   label: string
+  /** Entity description when known — hover context for business users. */
+  description: string | null
   /** Entity type id; 'entity' fallback, 'not loaded' when unresolved. */
   type: string
   parentId: string | null
@@ -248,6 +262,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
 
   const baseCard = (): Omit<FocusCard, 'id' | 'kind' | 'nodeId' | 'band' | 'label' | 'type'> => ({
     x: 0, y: 0, w: CARD_W, h: CARD_H,
+    description: null,
     parentId: null, parentLabel: null,
     count: 1, edgeTypeNorm: '', sumCount: 0,
     rollup: false, unresolved: false,
@@ -268,6 +283,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     band: 0,
     h: FOCAL_H,
     label: focalLabel,
+    description: (focalNode?.data?.description as string | undefined) ?? null,
     type: focalType,
     parentId: resolveParent(focalId),
     parentLabel: null,
@@ -478,6 +494,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           nodeId: entry.nodeId,
           band: sign * band,
           label,
+          description: (entry.node?.data?.description as string | undefined) ?? null,
           type,
           parentId,
           parentLabel: parentId ? labelOf(parentId, nodeMap.get(parentId)) : null,

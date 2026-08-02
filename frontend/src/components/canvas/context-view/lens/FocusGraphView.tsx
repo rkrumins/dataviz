@@ -30,6 +30,7 @@ import {
   BaseEdge,
   EdgeLabelRenderer,
   Handle,
+  MarkerType,
   Panel,
   Position,
   getBezierPath,
@@ -47,7 +48,7 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, type FocusCard, type FocusGraph } from './focus-graph'
+import { CARD_W, BAND_GAP, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph } from './focus-graph'
 
 /** Direction tints — the house semantics: upstream = sky, downstream
  *  = amber (matches the list columns and the canvas). */
@@ -56,6 +57,7 @@ const TINT_DOWN = '#f59e0b'
 const TINT_CONTAIN = '#94a3b8'
 
 interface CardCtx {
+  edgeTypeInfo?: EdgeTypeInfoMap
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
   onToggleGroup: (expandKey: string) => void
@@ -76,6 +78,7 @@ interface FocusGraphViewProps {
   focalFetch?: 'loading' | 'done' | 'error'
   selectedId: string | null
   reducedMotion: boolean
+  edgeTypeInfo?: EdgeTypeInfoMap
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
   onToggleGroup: (expandKey: string) => void
@@ -291,7 +294,12 @@ function FocusGraphCard({ data, selected }: NodeProps) {
             <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
           )}
         </div>
-        <p className="text-[13.5px] font-semibold text-ink truncate leading-snug" title={card.label}>{card.label}</p>
+        <p
+          className="text-[13.5px] font-semibold text-ink truncate leading-snug"
+          title={`${card.label}${card.description ? ` — ${card.description}` : ''}`}
+        >
+          {card.label}
+        </p>
         {card.parentId && (
           <button
             type="button"
@@ -417,7 +425,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
         onClick={activate}
         onKeyDown={keyActivate}
         onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
-        title={`${card.label} — contained by the focal entity · double-click to focus`}
+        title={`${card.label}${card.description ? ` — ${card.description}` : ''} — contained by the focal entity · double-click to focus`}
         style={{ width: card.w, height: card.h }}
         className={cn(
           'group relative flex items-center gap-1.5 rounded-lg border border-black/[0.06] dark:border-white/[0.07] bg-black/[0.015] dark:bg-white/[0.02] px-2.5 cursor-pointer transition-colors hover:border-accent-lineage/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
@@ -443,7 +451,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       onClick={activate}
       onKeyDown={keyActivate}
       onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
-      title={`${card.label} · click to inspect, double-click to focus`}
+      title={`${card.label}${card.description ? ` — ${card.description}` : ''} · click to inspect, double-click to focus`}
       style={{ width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent }}
       className={cn(
         'group relative flex items-center gap-2 rounded-lg border px-2.5 cursor-pointer transition-colors bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
@@ -490,7 +498,12 @@ function FocusGraphCard({ data, selected }: NodeProps) {
                 className="w-1 h-1 rounded-full flex-shrink-0"
                 style={{ backgroundColor: generateEdgeColorFromType(card.edgeTypeNorm) }}
               />
-              <span className="truncate uppercase tracking-wide">{card.edgeTypeNorm}</span>
+              <span
+                className="truncate uppercase tracking-wide"
+                title={ctx.edgeTypeInfo?.get(card.edgeTypeNorm)?.description}
+              >
+                {edgeLabelFor(card.edgeTypeNorm, ctx.edgeTypeInfo)}
+              </span>
             </>
           )}
           {card.drillKey && card.aggregateEdge ? (
@@ -557,7 +570,7 @@ const NODE_TYPES = { focusCard: MemoFocusGraphCard, bandLabel: BandLabelNode }
 
 // ── Edge ─────────────────────────────────────────────────────────────
 
-function FocusGraphEdgeComp({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data }: EdgeProps) {
+function FocusGraphEdgeComp({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd, data }: EdgeProps) {
   const d = data as unknown as {
     count: number
     aggregated: boolean
@@ -579,6 +592,7 @@ function FocusGraphEdgeComp({ id, sourceX, sourceY, targetX, targetY, sourcePosi
       <BaseEdge
         id={id}
         path={path}
+        markerEnd={markerEnd}
         style={{
           stroke: d.tint,
           strokeWidth: d.emphasized ? (d.aggregated ? 3 : 2.5) : d.aggregated ? 2 : 1.5,
@@ -642,6 +656,7 @@ export function FocusGraphView({
   focalFetch,
   selectedId,
   reducedMotion,
+  edgeTypeInfo,
   onSelect,
   onFocus,
   onToggleGroup,
@@ -655,6 +670,7 @@ export function FocusGraphView({
   // Identity-stable across selection & hover — see the perf contract
   // in the file header.
   const ctx = useMemo<CardCtx>(() => ({
+    edgeTypeInfo,
     onSelect,
     onFocus,
     onToggleGroup,
@@ -664,7 +680,7 @@ export function FocusGraphView({
     onRetryFetch,
     onRevealOnCanvas,
     onOpenDetails,
-  }), [onSelect, onFocus, onToggleGroup, onToggleDrill, onExpandFrontier, onShowMore, onRetryFetch, onRevealOnCanvas, onOpenDetails])
+  }), [edgeTypeInfo, onSelect, onFocus, onToggleGroup, onToggleDrill, onExpandFrontier, onShowMore, onRetryFetch, onRevealOnCanvas, onOpenDetails])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out
@@ -747,6 +763,11 @@ export function FocusGraphView({
         target: e.target,
         sourceHandle: e.containment ? 'contains' : undefined,
         type: 'focusEdge',
+        // Business users shouldn't infer direction from layout
+        // convention alone — flow edges carry an explicit arrowhead.
+        markerEnd: e.containment
+          ? undefined
+          : { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
         data: {
           count: e.count,
           aggregated: e.aggregated,
