@@ -15,7 +15,7 @@ import { useState } from 'react'
 import { Save, Settings2, Check, X, ChevronRight } from 'lucide-react'
 import { updateView, updateViewVisibility, type View as ViewT } from '@/services/viewApiService'
 import { useToast } from '@/components/ui/toast'
-import { usePermission } from '@/store/auth'
+import { usePublishGate } from '@/hooks/usePublishGate'
 import { useBrand } from '@/store/branding'
 import { buildVisibilityOptions, type ViewVisibility } from '@/lib/viewVisibility'
 import { cn } from '@/lib/utils'
@@ -38,7 +38,13 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
 }) {
   const { showToast } = useToast()
   const { appName } = useBrand()
-  const canPublish = usePermission('workspace:view:publish', view.workspaceId)
+  // The server's envelope already folded in the workspace policy and the
+  // source's restricted flag; the gate below is the fallback for payloads
+  // that predate it. Asking for the permission alone would tell an open
+  // workspace's members their view needs approval when it does not.
+  const gate = usePublishGate(view.workspaceId, view.dataSourceId)
+  const canPublish = view.access?.canPublish ?? gate.canPublish
+  const canRequestPublish = view.access?.canRequestPublish ?? gate.canRequestPublish
   const [name, setName] = useState(view.name)
   const [description, setDescription] = useState(view.description ?? '')
   const [tagList, setTagList] = useState<string[]>(view.tags ?? [])
@@ -93,6 +99,8 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
   const VIS = buildVisibilityOptions({
     saved: view.visibility,
     canPublish,
+    canRequestPublish,
+    restrictedSource: gate.restrictedSource,
     appName,
     workspaceName: view.workspaceName,
   })

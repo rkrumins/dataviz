@@ -73,7 +73,13 @@ async def test_envelope_owner(test_client: AsyncClient, db_session):
     assert access["canEdit"] is True
     assert access["canManageGrants"] is True
     assert access["canChangeVisibility"] is True
-    assert access["canPublish"] is False  # member leaves, no publish
+    # No publish leaf in these claims — but this workspace is on the
+    # default 'open' policy, where whoever may change a view's
+    # visibility may publish it. The envelope has to say so, or the
+    # Share dialog offers to file a request the backend would never
+    # need. The permission-gated side lives in test_publish_requests.
+    assert access["canPublish"] is True
+    assert access["canRequestPublish"] is False
     assert access["dataAccess"] == "full"  # datasource:* implies manage
 
 

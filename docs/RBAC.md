@@ -106,16 +106,47 @@ base creator/ws-admin rule still gates `private ↔ workspace`. The
 permission is deliberately delegable: grant it to a trusted non-admin
 role to let curators publish.
 
-**Nobody is ever stuck.** A member who owns a view's sharing settings
-but lacks the permission can *request* publication (`POST
+**Publishing is open by default.** `workspaces.publish_policy`
+defaults to `'open'`, where anyone who may change a view's visibility
+may publish it without holding the permission. This is a deliberate
+product stance: the graph is metadata — names, types, and the lineage
+between them — and a platform whose purpose is shared understanding of
+lineage should not require a signature before anyone can share
+lineage. Admin-only publishing made the tier unreachable for almost
+everyone, which is the same as not having it.
+
+The policy widens who *satisfies* the publish check; it never widens
+who may touch a view's visibility (that stays creator / ws-admin).
+
+**Control moves after the fact, not away.** On a direct publish, every
+holder of `workspace:view:publish` in that workspace is notified
+(`view.published`) with a link to the view and to the undo — the
+workspace's Views tab, where visibility can be changed back. Silence
+would make "open" mean "unsupervised".
+
+**Restriction belongs to the source.** Publishing exposes read-only
+access to the whole data source behind the view, and that risk is
+concentrated in a few sources rather than spread across all of them.
+`workspace_data_sources.is_restricted` overrides an open policy: views
+over that source always need the permission. This gates the sensitive
+warehouse without dragging every view in the workspace back to
+admin-only. Admins toggle it in the workspace's Views tab, beside the
+policy itself.
+
+**Nobody is ever stuck.** Under `publish_policy = 'request'` — or over
+a restricted source — a member who owns a view's sharing settings but
+lacks the permission can *request* publication (`POST
 /views/{id}/publish-request`); the pending request lives on the view
 and is the admin queue. A publish-permission holder approves (which
 performs the transition, logged as `visibility_changed`) or declines
-with a reason that lands on the view's timeline. Workspaces that don't
-want the ceremony set `workspaces.publish_policy = 'open'`, where
-anyone who may change a view's visibility may publish it directly —
-the policy widens who satisfies the permission, never who may touch a
-view's visibility.
+with a reason that lands on the view's timeline.
+
+The UI must resolve this the same way the backend does
+(`can_publish_under_policy` ↔ `resolvePublishGate` in
+`frontend/src/lib/publishGate.ts`): permission, then policy, then the
+source flag. A UI that checks only the permission tells an open
+workspace's members their view "will be requested" when it would
+simply publish.
 
 **Admin reads of private views are recorded.** `system:admin` reach
 over a private view someone else created writes an `admin_viewed`
