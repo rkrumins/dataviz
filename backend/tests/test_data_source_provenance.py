@@ -89,3 +89,31 @@ async def test_legacy_rows_default_to_null_mode(db_session):
     ds = got.data_sources[0]
     assert ds.source_mode is None  # client derives from shape
     assert ds.write_back_enabled is False
+
+
+# ── restriction: the same both-serializers hazard ────────────────────
+
+async def test_is_restricted_survives_both_serializers(db_session):
+    """A restricted source decides whether views over it can be
+    published, and the admin toggle reads whichever serializer served
+    the page it is on. Dropping the field in one of them would render
+    the toggle off for a source that IS restricted — the reading a
+    person would trust before publishing.
+    """
+    ws = await _seed_workspace_with_ds(db_session, name="restr-ws", provider_id="prov_restr")
+    row = await _ds_row(db_session, ws.id)
+    row.is_restricted = True
+    await db_session.flush()
+
+    nested = (await workspace_repo.get_workspace(db_session, ws.id)).data_sources[0]
+    assert nested.is_restricted is True
+    assert nested.model_dump(by_alias=True)["isRestricted"] is True
+
+    listed = await data_source_repo.list_data_sources(db_session, ws.id)
+    assert listed[0].is_restricted is True
+
+
+async def test_sources_are_unrestricted_until_someone_says_otherwise(db_session):
+    ws = await _seed_workspace_with_ds(db_session, name="restr-ws-2", provider_id="prov_restr2")
+    nested = (await workspace_repo.get_workspace(db_session, ws.id)).data_sources[0]
+    assert nested.is_restricted is False

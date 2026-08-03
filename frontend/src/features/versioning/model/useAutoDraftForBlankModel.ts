@@ -22,7 +22,11 @@ export function useAutoDraftForBlankModel(
   dataSourceId: string | null,
   viewId?: string | null,
 ) {
-  const resolve = useResolveGraph(workspaceId ?? undefined, dataSourceId)
+  // Pass the view id: it is both the capability context (a shared-view
+  // viewer's resolve is authorized through the view, not membership) and
+  // the cache key every other resolve consumer uses — without it this
+  // hook fired its own unauthorized copy of the same query.
+  const resolve = useResolveGraph(workspaceId ?? undefined, dataSourceId, viewId ?? null)
   const canManage = usePermission('workspace:datasource:manage', workspaceId ?? undefined)
   // Branch-per-view: scope by the active view too, so this doesn't skip auto-opening a
   // draft for THIS view just because another view on the same data source already has one.

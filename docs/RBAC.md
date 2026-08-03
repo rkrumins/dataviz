@@ -69,11 +69,133 @@ filter.
 | `workspace:view:create`         | workspace | `super_admin`, `org_admin`, `workspace_admin`*, `workspace_member` |
 | `workspace:view:edit`           | workspace | (same)                             |
 | `workspace:view:delete`         | workspace | (same)                             |
+| `workspace:view:publish`        | workspace | `super_admin`, `org_admin`, `workspace_admin`* |
 | `workspace:view:read`           | workspace | + `workspace_viewer`               |
 
 \* `workspace_admin` only stores `workspace:admin` in
 `role_permissions`. The other `workspace:*` perms come from the
 resolver's auto-implication rule — see *Auto-implication* below.
+
+### View visibility and sharing (2026-07-31 rework)
+
+Views carry a visibility tier plus optional explicit grants
+(`resource_grants`, user or group subjects, `viewer`/`editor` roles).
+The evaluator (`backend/app/services/view_access.py`) gates on the tier
+first — the old membership-first union made `private` behave exactly
+like `workspace` for every member:
+
+| Tier         | Who can open it (and load its data, read-only)                       |
+|--------------|----------------------------------------------------------------------|
+| `private`    | creator, explicit grantees, workspace admins (+ org/system admins)   |
+| `workspace`  | the above + `workspace:view:read` holders in the view's workspace    |
+| `enterprise` | any signed-in user on the platform                                   |
+
+Reading a view now implies **read-only** access to its data plane: the
+graph/canvas routers accept a `?viewId=` capability context
+(`backend/app/api/v1/capability_gate.py`) pinned to the view's
+resolved data source. Mutations always require
+`workspace:datasource:manage`. Workspace-metadata surfaces (assets
+rule-sets, context-model templates) use an unpinned variant of the
+gate — they have no data-source dimension, so a capability holder on
+ANY readable view in the workspace can read them; both routers are
+GET-only or manage-gated.
+
+`workspace:view:publish` gates every transition **to or from**
+`enterprise` (including creating a view directly as enterprise) — the
+base creator/ws-admin rule still gates `private ↔ workspace`. The
+permission is deliberately delegable: grant it to a trusted non-admin
+role to let curators publish.
+
+**Publishing is open by default.** `workspaces.publish_policy`
+defaults to `'open'`, where anyone who may change a view's visibility
+may publish it without holding the permission. This is a deliberate
+product stance: the graph is metadata — names, types, and the lineage
+between them — and a platform whose purpose is shared understanding of
+lineage should not require a signature before anyone can share
+lineage. Admin-only publishing made the tier unreachable for almost
+everyone, which is the same as not having it.
+
+The policy widens who *satisfies* the publish check; it never widens
+who may touch a view's visibility (that stays creator / ws-admin).
+
+### The publish ladder
+
+Four controls decide it, and they nest. `resolve_publish_gate`
+(`services/view_access.py`) is the only place that walks them, and
+`resolvePublishGate` (`frontend/src/lib/publishGate.ts`) is its exact
+twin — a UI that resolves this differently tells people the wrong thing
+about the button in front of them.
+
+| # | Control | Where it is set | Binds |
+|---|---------|-----------------|-------|
+| 1 | `enterpriseViewPolicy` — `workspaces` \| `request` \| `off` | Admin → Features | Everyone, **including permission holders** |
+| 2 | `workspaces.publish_policy` — `open` \| `request` | Workspace → Views tab | Everyone without the permission |
+| 3 | `workspace_data_sources.is_restricted` | Workspace → Views tab | Everyone without the permission |
+| 4 | `workspace:view:publish` | Role binding | Satisfies 2 and 3 outright |
+
+The platform ceiling is checked first and the permission does **not**
+satisfy it: a limit only non-admins obey is not a limit. `off`
+withdraws the tier from new work entirely (the request queue is refused
+too, so a request filed before the change cannot be used to route
+around it); `request` forces an approval even in workspaces that opened
+publishing to their members — the one rule a workspace admin cannot opt
+out of.
+
+The refusal carries its reason (`publishBlockedBy` on the access
+envelope: `platform` / `workspace` / `source`). Three identically
+greyed-out tiles mean three different things, and only one of them is
+resolved by asking a workspace admin — telling someone to do that when
+the *organisation* set the rule sends them to a person who cannot help.
+
+**Un-publishing takes the same standing as publishing, minus the
+ceiling** (`can_unpublish`). Keeping the workspace policy and the source
+restriction keeps the rule symmetric: a workspace that made publishing
+an admin act made retracting one an admin act too, because a view others
+depend on is not something any one member should pull out from under
+them. Dropping the *ceiling* is the asymmetry that matters — it exists
+to reduce exposure, and applying it in reverse would strand every
+already-published view with nobody able to close it.
+
+**Control moves after the fact, not away.** On a direct publish, every
+holder of `workspace:view:publish` in that workspace is notified
+(`view.published`) with a link to the view and to the undo — the
+workspace's Views tab, where visibility can be changed back. Silence
+would make "open" mean "unsupervised".
+
+**Restriction belongs to the source.** Publishing exposes read-only
+access to the whole data source behind the view, and that risk is
+concentrated in a few sources rather than spread across all of them.
+`workspace_data_sources.is_restricted` overrides an open policy: views
+over that source always need the permission. This gates the sensitive
+warehouse without dragging every view in the workspace back to
+admin-only. Admins toggle it in the workspace's Views tab, beside the
+policy itself.
+
+**Nobody is ever stuck.** Under `publish_policy = 'request'` — or over
+a restricted source — a member who owns a view's sharing settings but
+lacks the permission can *request* publication (`POST
+/views/{id}/publish-request`); the pending request lives on the view
+and is the admin queue. A publish-permission holder approves (which
+performs the transition, logged as `visibility_changed`) or declines
+with a reason that lands on the view's timeline.
+
+The UI must resolve this the same way the backend does
+(`can_publish_under_policy` ↔ `resolvePublishGate` in
+`frontend/src/lib/publishGate.ts`): permission, then policy, then the
+source flag. A UI that checks only the permission tells an open
+workspace's members their view "will be requested" when it would
+simply publish.
+
+**Admin reads of private views are recorded.** `system:admin` reach
+over a private view someone else created writes an `admin_viewed`
+entry to that view's activity log (deduped hourly per admin). The
+reach is unchanged; it is simply no longer invisible to the owner.
+
+Caveat for rollouts: sessions minted before this permission shipped may
+still carry a collapsed `workspace:view:*` wildcard in their cached
+claims and would pass a publish check until the session refreshes
+(bounded by the access-token TTL). Force re-login via the revocation
+service if that window matters.
 
 ## Resolver behaviour
 

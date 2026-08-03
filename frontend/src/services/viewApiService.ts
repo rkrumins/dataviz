@@ -6,12 +6,91 @@
  *
  * API scope: /api/v1/views (top-level, cross-workspace)
  */
+import type { ViewVisibility } from '@/lib/viewVisibility'
 import type { LayerAssignmentEntry, ViewConfiguration, ViewLayerConfig } from '@/types/schema'
 import { authFetch } from './apiClient'
 
 // ============================================
 // Types
 // ============================================
+
+/**
+ * The caller's capabilities on ONE view, computed server-side by the
+ * same evaluator that enforces every request. Present only on the
+ * single-view read (never in list payloads). UI gating flows through
+ * `deriveViewCapabilities` in `@/lib/viewAccess` — do not re-derive
+ * these from permission claims.
+ */
+export interface ViewAccess {
+    canEdit: boolean
+    canManageGrants: boolean
+    canChangeVisibility: boolean
+    /** Already accounts for the workspace's publish policy — an `open`
+     *  workspace grants this to anyone who can change visibility. */
+    canPublish: boolean
+    /** Can't publish, but may ASK someone who can. This is what turns the
+     *  Enterprise tile from a wall into a route. Absent on backends that
+     *  predate the request flow. */
+    canRequestPublish?: boolean
+    /** Holds the publish permission, so may approve/deny a pending request. */
+    canAnswerPublishRequest?: boolean
+    /** WHICH control is holding publication back: the deployment's
+     *  ceiling, the workspace's policy, or a restricted data source.
+     *  Three identical grey tiles mean three different things, and only
+     *  one of them is resolved by asking a workspace admin. */
+    publishBlockedBy?: 'platform' | 'workspace' | 'source' | null
+    /** The enterprise tier exists on this deployment at all. False HIDES
+     *  the option rather than disabling it. */
+    enterpriseAvailable?: boolean
+    /** How this caller reaches the view. */
+    accessVia: 'owner' | 'admin' | 'grant' | 'workspace' | 'enterprise'
+    /** What the DATA plane accepts: 'full' = graph mutations allowed;
+     *  'readonly' = view-capability reach (expand/trace/search only). */
+    dataAccess: 'full' | 'readonly'
+}
+
+/**
+ * A pending ask to publish this view platform-wide. Present on the
+ * single-view read AND on list payloads (the workspace governance
+ * surface lists every view awaiting an answer).
+ */
+export interface ViewPublishRequest {
+    requestedBy: string
+    /** Resolved server-side from the users table; null for a deleted user. */
+    requestedByName?: string | null
+    requestedAt: string
+    note?: string | null
+}
+
+/**
+ * How far a view currently reaches, in people. Single-view read only —
+ * list payloads omit it, so never render these numbers from a list row.
+ *
+ * The client cannot compute either figure: the workspace list a browser
+ * holds is scoped to the caller's own memberships, and grants belong to
+ * the view, not the session.
+ */
+export interface ViewAudience {
+    workspaceMemberCount: number
+    explicitGrantCount: number
+    /** Active accounts on the whole deployment — what "anyone signed in"
+     *  actually comes to. Absent on backends that predate the impact
+     *  panel, which is why the UI renders a phrase when it is missing
+     *  rather than the number zero. */
+    platformUserCount?: number
+}
+
+/**
+ * Whether a view's workspace + data source are still present and
+ * active. Computed SERVER-side: only the server can tell "you're not a
+ * member of that workspace" apart from "it was deleted", which is why
+ * the old client-side computation branded every shared view
+ * "Source deleted".
+ */
+export interface ViewHealth {
+    status: 'healthy' | 'warning' | 'broken' | 'stale'
+    reason?: string | null
+}
 
 export interface View {
     id: string
@@ -31,7 +110,7 @@ export interface View {
      */
     layoutType?: string
     config: Record<string, any>    // Full ViewConfiguration shape
-    visibility: 'private' | 'workspace' | 'enterprise'
+    visibility: ViewVisibility
     createdBy?: string
     /** Human-readable creator name resolved server-side from the users table. */
     createdByName?: string
@@ -64,6 +143,17 @@ export interface View {
      * Nullable for views created before drift tracking landed.
      */
     ontologyDigest?: string | null
+    /** Provider behind the view's (server-resolved) data source. Single-view
+     *  read only — lets the canvas boot without the workspace list. */
+    providerId?: string | null
+    /** Caller-specific capability envelope. Single-view read only. */
+    access?: ViewAccess | null
+    /** How many people this view reaches. Single-view read only. */
+    audience?: ViewAudience | null
+    /** Scope integrity, computed server-side (see ViewHealth). */
+    health?: ViewHealth | null
+    /** A pending ask to publish this view to everyone. Null when none. */
+    publishRequest?: ViewPublishRequest | null
 }
 
 export interface ViewCreateRequest {
@@ -85,7 +175,9 @@ export interface ViewUpdateRequest {
     contextModelId?: string
     viewType?: string
     config?: Record<string, any>
-    visibility?: string
+    // NB: no `visibility` — the generic PUT rejects it (422). Visibility
+    // is a security field with its own authorization (publish gate);
+    // change it only through `updateViewVisibility`.
     tags?: string[]
     isPinned?: boolean
 }
@@ -125,6 +217,12 @@ export interface ViewListParams {
     deletedOnly?: boolean
     /** Return only views that need attention (stale, broken, or inactive). */
     attentionOnly?: boolean
+    /**
+     * Server-side category. `shared-with-me` = views shared with the
+     * caller through an explicit grant (direct or via group), excluding
+     * their own — a real answer, not a visibility approximation.
+     */
+    category?: string
     /**
      * Embedded resources the server should fold into the response.
      * ``"popular"`` makes the response carry ``popular`` (the trending
@@ -263,6 +361,7 @@ export async function listViews(
     if (params?.includeDeleted) sp.set('includeDeleted', 'true')
     if (params?.deletedOnly) sp.set('deletedOnly', 'true')
     if (params?.attentionOnly) sp.set('attentionOnly', 'true')
+    if (params?.category) sp.set('category', params.category)
     if (params?.include) params.include.forEach(v => sp.append('include', v))
     if (params?.popularLimit != null) sp.set('popularLimit', String(params.popularLimit))
     const qs = sp.toString()
@@ -326,6 +425,7 @@ export async function getViewStats(params?: ViewStatsParams): Promise<ViewCatalo
     if (params?.includeDeleted) sp.set('includeDeleted', 'true')
     if (params?.deletedOnly) sp.set('deletedOnly', 'true')
     if (params?.attentionOnly) sp.set('attentionOnly', 'true')
+    if (params?.category) sp.set('category', params.category)
     const qs = sp.toString()
     return apiFetch<ViewCatalogStats>(`/api/v1/views/stats${qs ? `?${qs}` : ''}`)
 }
@@ -345,9 +445,37 @@ export async function createView(data: ViewCreateRequest): Promise<View> {
  * response projects that branch's layout overlay (base ⊕ overlay). Omit on
  * Published/main (or when no overlay exists) → base config, unchanged.
  */
-export async function getView(viewId: string, branchId?: string): Promise<View> {
+export async function getView(
+    viewId: string,
+    branchId?: string,
+    opts?: {
+        /** Suppress the global AccessDeniedModal on 403 so the caller
+         *  (ViewPage) can render its own access-error surface. */
+        silent403?: boolean
+    },
+): Promise<View> {
     const qs = branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''
-    return apiFetch<View>(`/api/v1/views/${viewId}${qs}`)
+    return apiFetch<View>(
+        `/api/v1/views/${viewId}${qs}`,
+        opts?.silent403 ? { silent403: true } : undefined,
+    )
+}
+
+/**
+ * How many people each tier would reach, for a workspace — before any
+ * view exists. The View wizard needs this; every other surface already
+ * has it on the view it is looking at.
+ *
+ * Server-side on purpose: the workspace list a browser holds is scoped
+ * to the caller's own memberships and carries no member counts, so this
+ * is not derivable client-side.
+ */
+export async function getWorkspaceAudience(
+    workspaceId: string,
+): Promise<ViewAudience> {
+    return apiFetch<ViewAudience>(
+        `/api/v1/views/audience?workspaceId=${encodeURIComponent(workspaceId)}`,
+    )
 }
 
 export type ViewActivityAction =
@@ -451,9 +579,51 @@ export async function restoreView(viewId: string): Promise<View> {
 
 /** Change the visibility of a view */
 export async function updateViewVisibility(viewId: string, visibility: string): Promise<View> {
+    // silent403 on purpose: EVERY caller of this catches and renders its
+    // own message, and several of them say something the generic card
+    // cannot — which view of a bulk selection failed, or that the details
+    // saved but the visibility did not. Without this the user gets the
+    // same refusal twice, once as a global card and once as a toast, and
+    // the vaguer of the two is the one that stays on screen longest.
     return apiFetch<View>(`/api/v1/views/${viewId}/visibility`, {
         method: 'PUT',
         body: JSON.stringify({ visibility }),
+        silent403: true,
+    })
+}
+
+// ============================================
+// Publication requests
+// ============================================
+//
+// Publishing needs `workspace:view:publish`, which most members don't
+// hold — so instead of a dead end, they ask and a holder answers. Every
+// call except the withdraw returns the updated View, so callers can
+// refresh straight from the response.
+
+/** Ask for this view to be published to everyone. */
+export async function requestViewPublication(viewId: string, note?: string): Promise<View> {
+    return apiFetch<View>(`/api/v1/views/${viewId}/publish-request`, {
+        method: 'POST',
+        body: JSON.stringify({ note: note?.trim() || null }),
+    })
+}
+
+/** Withdraw a pending request — the requester, or anyone who could answer it. */
+export async function withdrawViewPublicationRequest(viewId: string): Promise<void> {
+    return apiFetch<void>(`/api/v1/views/${viewId}/publish-request`, { method: 'DELETE' })
+}
+
+/** Approve a pending request: the view becomes enterprise-visible. */
+export async function approveViewPublication(viewId: string): Promise<View> {
+    return apiFetch<View>(`/api/v1/views/${viewId}/publish-request/approve`, { method: 'POST' })
+}
+
+/** Decline a pending request. The reason lands on the view's timeline. */
+export async function denyViewPublication(viewId: string, reason?: string): Promise<View> {
+    return apiFetch<View>(`/api/v1/views/${viewId}/publish-request/deny`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason?.trim() || null }),
     })
 }
 
@@ -598,6 +768,10 @@ export function viewToViewConfig(view: View): ViewConfiguration {
         entityOverrides: cfg.entityOverrides ?? {},
         grouping: cfg.grouping,
         isDefault: false,
+        // The full tier — carried so the canvas can seed the Share dialog
+        // without a re-fetch. `isPublic` survives as a deprecated
+        // flattening for consumers not yet migrated.
+        visibility: view.visibility,
         isPublic: view.visibility !== 'private',
         createdBy: view.createdBy ?? '',
         createdAt: view.createdAt,

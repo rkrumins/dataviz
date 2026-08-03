@@ -10,9 +10,6 @@
 import { Link } from 'react-router-dom'
 import {
   Heart,
-  Globe,
-  Users,
-  Lock,
   Box,
   ExternalLink,
   Pencil,
@@ -24,6 +21,7 @@ import {
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
+import { VISIBILITY_ICON, visibilityDescription, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
@@ -55,10 +53,15 @@ function tagColor(tag: string) {
   return TAG_COLORS[Math.abs(hash) % TAG_COLORS.length]
 }
 
-const VISIBILITY_META: Record<string, { icon: React.ElementType; label: string }> = {
-  enterprise: { icon: Globe, label: 'Enterprise' },
-  workspace: { icon: Users, label: 'Workspace' },
-  private: { icon: Lock, label: 'Private' },
+// Data from the shared module — see lib/viewVisibility (eight surfaces
+// used to carry drifting copies of this map).
+// The tier NAME tells nobody who can actually open the view — "Enterprise"
+// is a label, not an answer. The shared description is the answer, and it
+// costs a title attribute.
+const VISIBILITY_META: Record<string, { icon: React.ElementType; label: string; hint: string }> = {
+  enterprise: { icon: VISIBILITY_ICON.enterprise, label: visibilityLabel('enterprise'), hint: visibilityDescription('enterprise') },
+  workspace: { icon: VISIBILITY_ICON.workspace, label: visibilityLabel('workspace'), hint: visibilityDescription('workspace') },
+  private: { icon: VISIBILITY_ICON.private, label: visibilityLabel('private'), hint: visibilityDescription('private') },
 }
 
 const HEALTH_INDICATOR: Record<string, { color: string; tooltip: string }> = {
@@ -132,7 +135,15 @@ function MiniPreview({ viewType }: { viewType: string }) {
 export interface ExplorerViewCardProps {
   view: View
   onToggleFavourite: () => void
+  /** The hover button: copies the shareable link, no dialog. */
   onShare: () => void
+  /** Opens the Share dialog, where the audience panel and the request
+   *  flow live. The overflow menu routes here — a menu is the wrong
+   *  place to publish something to everyone. */
+  onManageSharing?: () => void
+  /** The tier settled on the server. Without this the card keeps showing
+   *  the old one until a full reload — the change appeared to do nothing. */
+  onVisibilityChange?: (visibility: 'private' | 'workspace' | 'enterprise') => void
   onPreview?: () => void
   onEdit?: () => void
   /** Opens the full builder (ViewWizard) — entity scope, layers, layout. */
@@ -165,6 +176,8 @@ export function ExplorerViewCard({
   view,
   onToggleFavourite,
   onShare,
+  onManageSharing,
+  onVisibilityChange,
   onPreview,
   onEdit,
   onEditLayout,
@@ -355,11 +368,14 @@ export function ExplorerViewCard({
             viewId={view.id}
             viewName={view.name}
             visibility={view.visibility}
+            workspaceId={view.workspaceId}
+            dataSourceId={view.dataSourceId}
+            onVisibilityChange={onVisibilityChange}
             onEdit={onEdit}
             onEditLayout={onEditLayout}
             editDisabled={editDisabled}
             onDelete={() => onDelete?.()}
-            onShare={onShare}
+            onShare={onManageSharing ?? onShare}
           />
             </>
           )}
@@ -393,7 +409,10 @@ export function ExplorerViewCard({
             providerType={providerInfo?.providerType}
             hideWorkspace={hideWorkspaceInScope}
           />
-          <span className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium">
+          <span
+            title={vis.hint}
+            className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium"
+          >
             <VisIcon className="h-2.5 w-2.5" />
             {vis.label}
           </span>

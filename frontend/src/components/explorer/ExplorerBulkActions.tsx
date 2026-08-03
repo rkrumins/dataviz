@@ -3,7 +3,14 @@
  */
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, Eye, X, Globe, Users, Lock, ChevronDown } from 'lucide-react'
+import { Trash2, Eye, X, ChevronDown } from 'lucide-react'
+import { usePlatformPublishPolicy } from '@/hooks/usePublishGate'
+import {
+  VISIBILITY_ICON,
+  visibilityDescription,
+  visibilityLabel,
+  type ViewVisibility,
+} from '@/lib/viewVisibility'
 import { cn } from '@/lib/utils'
 
 interface ExplorerBulkActionsProps {
@@ -16,16 +23,19 @@ interface ExplorerBulkActionsProps {
   onClearSelection: () => void
 }
 
+// Data from the shared module (lib/viewVisibility), broad → narrow as
+// this menu has always rendered it.
 const VISIBILITY_OPTIONS: Array<{
-  value: 'private' | 'workspace' | 'enterprise'
+  value: ViewVisibility
   label: string
   icon: React.ElementType
   description: string
-}> = [
-  { value: 'enterprise', label: 'Enterprise', icon: Globe, description: 'Visible to everyone' },
-  { value: 'workspace', label: 'Workspace', icon: Users, description: 'Visible to workspace members' },
-  { value: 'private', label: 'Private', icon: Lock, description: 'Only visible to you' },
-]
+}> = (['enterprise', 'workspace', 'private'] as const).map(value => ({
+  value,
+  label: visibilityLabel(value),
+  icon: VISIBILITY_ICON[value],
+  description: visibilityDescription(value),
+}))
 
 export function ExplorerBulkActions({
   selectedCount,
@@ -34,6 +44,17 @@ export function ExplorerBulkActions({
   onClearSelection,
 }: ExplorerBulkActionsProps) {
   const [showVisMenu, setShowVisMenu] = useState(false)
+  // A deployment that has withdrawn the enterprise tier must not be
+  // offered a bulk action that publishes N views at once — every one of
+  // them would 403, and a menu entry that always fails is worse than a
+  // missing one. The selection can span workspaces, so only the
+  // platform-wide ceiling is knowable here; per-workspace policy and
+  // restricted sources are enforced per view by the server, and the
+  // Explorer already reports partial failures with their reason.
+  const platformPolicy = usePlatformPublishPolicy()
+  const options = platformPolicy === 'off'
+    ? VISIBILITY_OPTIONS.filter(o => o.value !== 'enterprise')
+    : VISIBILITY_OPTIONS
   const menuRef = useRef<HTMLDivElement>(null)
 
   // Close menu on outside click
@@ -94,7 +115,7 @@ export function ExplorerBulkActions({
                         Set visibility for {selectedCount} view{selectedCount !== 1 ? 's' : ''}
                       </span>
                     </div>
-                    {VISIBILITY_OPTIONS.map(opt => {
+                    {options.map(opt => {
                       const Icon = opt.icon
                       return (
                         <button

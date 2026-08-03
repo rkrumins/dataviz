@@ -52,6 +52,7 @@ def _ds_to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         providerId=row.provider_id,
         graphName=row.graph_name,
         accessLevel=row.access_level,
+        isRestricted=bool(getattr(row, 'is_restricted', False)),
         # Mirror data_source_repo._to_response — this parallel serializer backs
         # the workspace list/detail reads, so omitting these made a saved
         # identity/name mapping silently read back as the default on refresh
@@ -83,6 +84,7 @@ def _to_response(row: WorkspaceORM) -> WorkspaceResponse:
         isActive=bool(row.is_active),
         createdAt=row.created_at,
         updatedAt=row.updated_at,
+        publishPolicy=row.publish_policy or "open",
     )
 
 
@@ -296,6 +298,10 @@ async def update_workspace(
         row.description = req.description
     if req.is_active is not None:
         row.is_active = req.is_active
+    if req.publish_policy is not None:
+        if req.publish_policy not in ("request", "open"):
+            raise ValueError("publishPolicy must be 'request' or 'open'")
+        row.publish_policy = req.publish_policy
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()

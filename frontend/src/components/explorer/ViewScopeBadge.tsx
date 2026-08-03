@@ -56,9 +56,11 @@ export function ViewScopeBadge({
             wsColor.text,
             wsColor.border,
           )}
-          title={workspaceName ?? workspaceId}
+          title={workspaceName ?? 'Workspace'}
         >
-          <span className="truncate">{workspaceName ?? workspaceId}</span>
+          {/* Non-members have no name for this workspace — a neutral label
+              beats leaking a raw UUID into the UI. */}
+          <span className="truncate">{workspaceName ?? 'Workspace'}</span>
         </span>
       )}
 
@@ -70,10 +72,10 @@ export function ViewScopeBadge({
             pillMax,
             textSize,
           )}
-          title={dataSourceName ?? dataSourceId}
+          title={dataSourceName ?? 'Data source'}
         >
           <Database className="h-2.5 w-2.5 shrink-0" />
-          <span className="truncate">{dataSourceName ?? dataSourceId}</span>
+          <span className="truncate">{dataSourceName ?? 'Data source'}</span>
         </span>
       )}
 

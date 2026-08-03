@@ -117,6 +117,24 @@ async def ensure_view_mode_allowed(view_type: str | None, session) -> None:
         raise feature_disabled("allowedViewModes")
 
 
+async def resolve_enterprise_view_policy(session) -> str:
+    """How open publishing may be on this deployment: the ceiling.
+
+    ``enterpriseViewPolicy`` is a single-select, not a switch, so it
+    cannot be a ``require_feature`` gate — the middle setting ("always
+    require approval") is neither on nor off. Callers pass the result
+    into ``view_access.resolve_publish_gate``, which owns the ladder.
+
+    Fails OPEN to "workspaces decide", like every capability flag: if
+    the value cannot be read we must not silently freeze publishing
+    across the whole platform. The failure a person would report is
+    "sharing stopped working", with nothing pointing at a database
+    hiccup as the cause.
+    """
+    value = await feature_flags.get_value("enterpriseViewPolicy", session, default=None)
+    return value if value in option_ids("enterpriseViewPolicy") else "workspaces"
+
+
 def write_gate(key: str, *, default: bool = True, allow_suffixes: tuple[str, ...] = ()) -> Callable:
     """Router-level dependency: gate every MUTATING method on a router, leave GETs open.
 

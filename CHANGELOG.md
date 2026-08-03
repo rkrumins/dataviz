@@ -9,6 +9,90 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — View sharing that means what it says
+
+### Security
+
+**Private views were not private.** The view-access evaluator checked
+workspace membership before the visibility tier, so every workspace member —
+and every org-level reader — could open any private view in their workspaces.
+Worse, `GET /views/facets` had no authentication at all and served every
+private view's tags and creator identity to the open internet-facing API, the
+popular list leaked workspace-tier views across workspaces, and the stats
+endpoint counted views the caller could not read. Visibility now gates first
+(private = creator + explicit grantees + workspace admins), every list and
+aggregate read filters inside SQL, and the unauthenticated endpoints require
+sign-in.
+
+**Sharing state had side doors.** The generic view-update endpoint accepted a
+`visibility` field under mere edit rights, and creating a view straight as
+`enterprise` skipped visibility authorization entirely. Both are closed: the
+dedicated visibility endpoint is the only path, and it now demands the new
+`workspace:view:publish` permission for any transition to or from
+`enterprise`. Favouriting no longer works on views you cannot read, and two
+graph mutations that had shipped under the read gate
+(`vocab-alignment/confirm` and the atomic draft-commit path) require
+`workspace:datasource:manage` like every sibling write. A request naming a
+`dataSourceId` outside the path workspace now 404s — the binding was never
+verified before.
+
+### Added
+
+**Enterprise visibility now actually opens.** Any signed-in user can open a
+published view from its `/views/{id}` link and the canvas loads, read-only —
+expand, trace, and search included. The data plane accepts a view-capability
+context (`?viewId=`) pinned to the view's resolved data source; mutations stay
+membership-gated. The single-view read returns a per-caller `access` envelope
+(capabilities + `dataAccess`) plus the resolved data source and provider so
+the canvas can boot without workspace membership.
+
+**Sharing with people and groups is complete.** A signed-in-user directory
+(`GET /directory`) replaces the admin-only picker source, grant roles can be
+edited in place (`PUT /views/{id}/grants/{grant_id}`), and the Explorer's
+"Shared with me" is a real server-side category (explicit grants, not a
+visibility approximation).
+
+**Publishing is a journey, not a wall.** A member who can't publish can ask:
+the Enterprise option opens a request (with an optional note) that a
+publish-permission holder approves or declines with a reason, both recorded on
+the view's timeline. Workspaces that prefer no ceremony set their publication
+policy to *open*, where anyone who may change a view's visibility may publish
+it directly.
+
+### Fixed
+
+**Views stopped claiming their sources were deleted.** View health was
+computed in the browser against the workspace list, which only contains
+workspaces you belong to — so every view you could see but weren't a member of
+(anything shared, published, or seen as an admin) was branded "Source deleted".
+Health is a server fact now, from the same predicate the "needs attention"
+filter uses, so the badge and the filter can't disagree.
+
+**Layer assignment stopped being denied to people allowed to read.**
+`assignments/compute` is a cached read, but it required *manage* — which
+silently 403'd every read-only workspace member's canvas, and every visitor to
+a shared view. It is gated as the read it is.
+
+**Access-denied messages say something useful.** Inside a view shared with
+you, the card now explains that you're exploring read-only and offers to
+request edit access, instead of reciting `Missing permission:
+workspace:datasource:read`.
+
+### Security
+
+**Break-glass admin access is visible to the owner.** A platform admin opening
+someone else's private view records an `admin_viewed` entry on that view's
+timeline (deduped hourly). The reach is unchanged and deliberate; it is no
+longer silent.
+
+### Upgrading
+
+Pre-upgrade sessions may carry a collapsed `workspace:view:*` wildcard that
+satisfies publish checks until they refresh (bounded by the access-token TTL);
+force re-login via session revocation if that window matters. Clients that
+sent `visibility` through the generic view PUT now receive 422 — use the
+dedicated visibility endpoint.
+
 ## [Unreleased] — Invite links that actually work, and can be taken back
 
 ### Security

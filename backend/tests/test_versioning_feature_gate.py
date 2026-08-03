@@ -84,7 +84,25 @@ async def test_writes_blocked_when_disabled(test_client: AsyncClient):
         assert resp.json()["detail"]["feature"] == "versioningEnabled"
 
 
-async def test_bootstrap_and_resync_blocked_when_disabled(test_client: AsyncClient):
+async def test_bootstrap_and_resync_blocked_when_disabled(
+    test_client: AsyncClient, db_session,
+):
+    from backend.app.db.models import (
+        ProviderORM,
+        WorkspaceDataSourceORM,
+        WorkspaceORM,
+    )
+
+    # The data-plane gate now verifies dataSourceId belongs to the path
+    # workspace before anything else, so the source must really exist —
+    # otherwise the 404 answers before the feature gate's typed 403.
+    db_session.add(WorkspaceORM(id=WS, name="Gate WS"))
+    db_session.add(ProviderORM(id="prov_gate", name="P", provider_type="falkordb"))
+    db_session.add(WorkspaceDataSourceORM(
+        id="ds_x", workspace_id=WS, provider_id="prov_gate", graph_name="g_x",
+    ))
+    await db_session.commit()
+
     _prime_flags(versioningEnabled=False)
     for path in (
         f"/api/v1/{WS}/graph/bootstrap?dataSourceId=ds_x",

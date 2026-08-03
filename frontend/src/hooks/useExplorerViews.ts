@@ -130,6 +130,10 @@ export interface UseExplorerViewsResult {
   error: string | null
   toggleFavourite: (viewId: string) => void
   removeView: (viewId: string) => void
+  /** Apply a settled server change to one view in place. Cheaper and
+   *  faster than a refetch, and without the window where the card still
+   *  shows the old value. */
+  patchView: (viewId: string, patch: Partial<View>) => void
   refetch: () => void
   loadMore: () => void
   hasMore: boolean
@@ -170,7 +174,10 @@ export function resolveCategoryParams(
       return { createdAfter: sevenDaysAgo.toISOString() }
     }
     case 'shared-with-me':
-      return { visibilityIn: ['workspace', 'enterprise'] }
+      // Server-side truth: views reachable through an explicit grant
+      // (direct or via group), excluding your own. The old visibilityIn
+      // approximation showed every workspace/enterprise view instead.
+      return { category: 'shared-with-me' }
     case 'needs-attention':
       return { attentionOnly: true }
     case 'deleted':
@@ -364,6 +371,27 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     })
   }, [queryClient, queryKey])
 
+  /**
+   * Patch one view in place — the settled server value, applied locally.
+   *
+   * A plain ``refetch()`` is not enough for a single-field change: it
+   * costs a round trip during which the card still shows the OLD value,
+   * which reads as "nothing happened". Changing a view's visibility from
+   * the card menu did exactly that, and the only way to see the new tier
+   * was a full page reload.
+   *
+   * Patches the popular strip too — the same view can be on screen twice
+   * (Trending and the grid), and updating only one is worse than
+   * updating neither.
+   */
+  const patchView = useCallback((viewId: string, patch: Partial<View>) => {
+    queryClient.setQueryData<InfiniteData<ViewListResponse>>(queryKey, (curr) =>
+      curr
+        ? mapViewInPages(curr, (v) => (v.id === viewId ? { ...v, ...patch } : v))
+        : curr,
+    )
+  }, [queryClient, queryKey])
+
   const refetch = useCallback(() => { rqRefetch() }, [rqRefetch])
 
   return {
@@ -375,6 +403,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     error: error ? (error instanceof Error ? error.message : 'Failed to load views') : null,
     toggleFavourite,
     removeView,
+    patchView,
     refetch,
     loadMore,
     hasMore: hasNextPage,

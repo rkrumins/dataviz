@@ -5,6 +5,7 @@
  * Updates the local schema store as a cache after each operation.
  */
 
+import type { ViewVisibility } from '@/lib/viewVisibility'
 import type { ViewConfiguration, ViewLayerConfig, FieldFilter } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
 import * as viewApi from './viewApiService'
@@ -25,7 +26,7 @@ export interface CreateViewRequest {
     workspaceId: string
     dataSourceId?: string
     contextModelId?: string
-    visibility?: 'private' | 'workspace' | 'enterprise'
+    visibility?: ViewVisibility
     tags?: string[]
 }
 
@@ -39,7 +40,7 @@ export interface UpdateViewRequest {
     visibleRelationshipTypes?: string[]
     fieldFilters?: FieldFilter[]
     contextModelId?: string
-    visibility?: 'private' | 'workspace' | 'enterprise'
+    visibility?: ViewVisibility
     tags?: string[]
 }
 
@@ -154,14 +155,35 @@ class ViewServiceImpl {
         base?: Record<string, unknown>,
     ): Promise<ViewServiceResult<ViewConfiguration>> {
         try {
-            const result = await viewApi.updateView(id, {
+            // The generic PUT rejects `visibility` (it has its own
+            // authorization — the publish gate), so the save is split:
+            // settings first, then the tier through its endpoint, and
+            // only when it actually differs.
+            let result = await viewApi.updateView(id, {
                 name: request.name,
                 contextModelId: request.contextModelId,
                 ...(request.layoutType && { viewType: request.layoutType }),
                 config: buildViewConfig(request, base),
-                visibility: request.visibility,
                 tags: request.tags,
             })
+
+            if (request.visibility && request.visibility !== result.visibility) {
+                try {
+                    result = await viewApi.updateViewVisibility(id, request.visibility)
+                } catch (visError) {
+                    // Settings saved; the tier didn't. Cache the saved
+                    // half and report precisely.
+                    const viewConfig = viewApi.viewToViewConfig(result)
+                    useSchemaStore.getState().addOrUpdateView(viewConfig)
+                    return {
+                        success: false,
+                        data: viewConfig,
+                        error:
+                            'Details saved, but visibility could not be ' +
+                            `changed: ${(visError as Error).message}`,
+                    }
+                }
+            }
 
             const viewConfig = viewApi.viewToViewConfig(result)
             useSchemaStore.getState().addOrUpdateView(viewConfig)

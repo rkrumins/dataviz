@@ -12,9 +12,13 @@
  * had silently drifted between surfaces.
  */
 import { useState } from 'react'
-import { Save, Settings2, Check, Lock, Users, Globe, X, ChevronRight } from 'lucide-react'
-import { updateView, type View as ViewT } from '@/services/viewApiService'
+import { Save, Settings2, Check, X, ChevronRight } from 'lucide-react'
+import { updateView, updateViewVisibility, type View as ViewT } from '@/services/viewApiService'
 import { useToast } from '@/components/ui/toast'
+import { usePublishGate } from '@/hooks/usePublishGate'
+import { VisibilityImpact } from '@/components/views/VisibilityImpact'
+import { useBrand } from '@/store/branding'
+import { buildVisibilityOptions, type ViewVisibility } from '@/lib/viewVisibility'
 import { cn } from '@/lib/utils'
 
 /**
@@ -34,11 +38,22 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
   editDisabled?: boolean
 }) {
   const { showToast } = useToast()
+  const { appName } = useBrand()
+  // The server's envelope already folded in the workspace policy and the
+  // source's restricted flag; the gate below is the fallback for payloads
+  // that predate it. Asking for the permission alone would tell an open
+  // workspace's members their view needs approval when it does not.
+  const gate = usePublishGate(view.workspaceId, view.dataSourceId)
+  const canPublish = view.access?.canPublish ?? gate.canPublish
+  const canRequestPublish = view.access?.canRequestPublish ?? gate.canRequestPublish
+  const blockedBy = view.access?.publishBlockedBy ?? gate.blockedBy
+  const enterpriseAvailable =
+    view.access?.enterpriseAvailable ?? gate.enterpriseAvailable
   const [name, setName] = useState(view.name)
   const [description, setDescription] = useState(view.description ?? '')
   const [tagList, setTagList] = useState<string[]>(view.tags ?? [])
   const [tagInput, setTagInput] = useState('')
-  const [visibility, setVisibility] = useState<string>(view.visibility)
+  const [visibility, setVisibility] = useState<ViewVisibility>(view.visibility)
   const [saving, setSaving] = useState(false)
 
   const origTags = (view.tags ?? []).join('|')
@@ -58,12 +73,23 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
     if (!name.trim()) { showToast('error', 'Name is required'); return }
     setSaving(true)
     try {
-      const updated = await updateView(view.id, {
+      // The generic PUT rejects `visibility` (it carries its own
+      // authorization — the publish gate), so the save is two steps.
+      let updated = await updateView(view.id, {
         name: name.trim(),
         description: description.trim() || undefined,
         tags: tagList,
-        visibility,
       })
+      if (visibility !== updated.visibility) {
+        try {
+          updated = await updateViewVisibility(view.id, visibility)
+        } catch (visError) {
+          showToast('error', `Details saved, but visibility could not be changed: ${(visError as Error).message}`)
+          onSaved?.(updated)
+          onCancel()
+          return
+        }
+      }
       showToast('success', 'View details updated')
       onSaved?.(updated)
       onCancel()
@@ -74,11 +100,20 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
     }
   }
 
-  const VIS = [
-    { value: 'private', icon: Lock, label: 'Private', desc: 'Only you can see it' },
-    { value: 'workspace', icon: Users, label: 'Workspace', desc: 'Everyone in this workspace' },
-    { value: 'enterprise', icon: Globe, label: 'Enterprise', desc: 'Everyone in the organisation' },
-  ] as const
+  const VIS = buildVisibilityOptions({
+    saved: view.visibility,
+    canPublish,
+    // Without this the picker explains a stranger's lock in terms of the
+    // publish permission, which would not help them — they are not the
+    // creator or a workspace admin, so no permission reaches this view.
+    canChangeVisibility: view.access?.canChangeVisibility,
+    canRequestPublish,
+    restrictedSource: gate.restrictedSource,
+    blockedBy,
+    enterpriseAvailable,
+    appName,
+    workspaceName: view.workspaceName,
+  })
 
   const labelCls = 'block text-[11px] font-bold uppercase tracking-wider text-ink-muted mb-1.5'
   const inputCls = 'w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40 focus:border-accent-lineage/40 transition-shadow'
@@ -131,26 +166,45 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
       <div>
         <label className={labelCls}>Visibility</label>
         <div className="space-y-2">
-          {VIS.map(({ value, icon: Icon, label, desc }) => {
-            const active = visibility === value
+          {VIS.map(({
+            id, icon: Icon, label, description: desc,
+            disabled, disabledReason, requiresApproval, approvalHint,
+          }) => {
+            const active = visibility === id
             return (
               <button
-                key={value}
+                key={id}
                 type="button"
-                onClick={() => setVisibility(value)}
+                onClick={() => { if (!disabled) setVisibility(id) }}
+                disabled={disabled}
+                title={disabledReason ?? approvalHint}
                 className={cn(
                   'w-full flex items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors',
                   active
                     ? 'border-accent-lineage/50 bg-accent-lineage/[0.06]'
                     : 'border-glass-border bg-black/[0.02] dark:bg-white/[0.02] hover:border-accent-lineage/30',
+                  disabled && 'opacity-50 cursor-not-allowed hover:border-glass-border',
                 )}
               >
                 <span className={cn('w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border', active ? 'bg-accent-lineage/10 border-accent-lineage/20 text-accent-lineage' : 'border-glass-border text-ink-muted')}>
                   <Icon className="h-4 w-4" />
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-semibold text-ink">{label}</span>
-                  <span className="block text-xs text-ink-muted">{desc}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-sm font-semibold text-ink">{label}</span>
+                    {requiresApproval && (
+                      <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-px text-[9px] font-bold uppercase tracking-wide text-amber-600 dark:text-amber-400">
+                        Needs approval
+                      </span>
+                    )}
+                  </span>
+                  <span className="block text-xs text-ink-muted">
+                    {disabled && disabledReason
+                      ? disabledReason
+                      : requiresApproval && approvalHint
+                        ? approvalHint
+                        : desc}
+                  </span>
                 </span>
                 <span className={cn('w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center', active ? 'border-accent-lineage bg-accent-lineage' : 'border-ink-muted/30')}>
                   {active && <Check className="h-2.5 w-2.5 text-white" strokeWidth={3} />}
@@ -159,6 +213,19 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
             )
           })}
         </div>
+
+        {/* This panel is a FORM — the tier above is a draft until Save,
+            so the before/after is real here and worth stating. The
+            counts ride on the view we already fetched; no extra call. */}
+        <VisibilityImpact
+          className="mt-3"
+          selected={visibility}
+          saved={view.visibility}
+          counts={view.audience}
+          workspaceName={view.workspaceName}
+          requiresApproval={VIS.find(o => o.id === visibility)?.requiresApproval}
+          approvalHint={VIS.find(o => o.id === visibility)?.approvalHint}
+        />
       </div>
 
       {onEditLayout && (

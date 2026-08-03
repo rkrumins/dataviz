@@ -45,6 +45,7 @@ import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useToast } from '@/components/ui/toast'
+import { useCopyViewLink } from '@/lib/viewShareLink'
 import { AggregationProgressBanner } from '@/components/explorer/AggregationProgressBanner'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
@@ -161,7 +162,7 @@ export function ExplorerPage() {
 
   const [previewView, setPreviewView] = useState<View | null>(null)
   const [previewEditMode, setPreviewEditMode] = useState(false)
-  const [shareView, setShareView] = useState<{ id: string; name: string; visibility: 'private' | 'workspace' | 'enterprise' } | null>(null)
+  const [shareView, setShareView] = useState<{ id: string; name: string; visibility: 'private' | 'workspace' | 'enterprise'; workspaceId?: string } | null>(null)
 
   // Card click → open the detail drawer to view; the pencil → open it in
   // details-edit mode. The full builder stays behind "Edit layout & scope".
@@ -255,6 +256,7 @@ export function ExplorerPage() {
     isLoading,
     toggleFavourite,
     removeView: removeViewFromList,
+    patchView,
     refetch,
     loadMore,
     hasMore,
@@ -369,15 +371,27 @@ export function ExplorerPage() {
 
   const { showToast } = useToast()
 
+  const copyViewLink = useCopyViewLink()
   const handleShare = useCallback((view: View) => {
-    navigator.clipboard.writeText(`${window.location.origin}/views/${view.id}`)
-      .then(() => showToast('success', `Link copied for "${view.name}"`))
-      .catch(() => showToast('error', 'Failed to copy link'))
-  }, [showToast])
+    void copyViewLink(view.id)
+  }, [copyViewLink])
 
   const handleShareDialog = useCallback((view: View) => {
-    setShareView({ id: view.id, name: view.name, visibility: view.visibility })
+    setShareView({ id: view.id, name: view.name, visibility: view.visibility, workspaceId: view.workspaceId })
   }, [])
+
+  /**
+   * The card menu changed a view's tier. Patch it in place rather than
+   * refetching: the menu has already confirmed with a toast naming the
+   * new audience, and a round trip during which the card still shows the
+   * OLD badge is exactly what made this feel like nothing happened.
+   */
+  const handleVisibilityChanged = useCallback(
+    (viewId: string) => (visibility: 'private' | 'workspace' | 'enterprise') => {
+      patchView(viewId, { visibility })
+    },
+    [patchView],
+  )
 
   // BE rule (views.py: can_delete_view): creator OR
   // workspace:view:delete on the view's workspace. Mirror that
@@ -448,14 +462,31 @@ export function ExplorerPage() {
   const handleBulkVisibility = useCallback(async (visibility: 'private' | 'workspace' | 'enterprise') => {
     const ids = Array.from(selectedIds)
     if (ids.length === 0) return
-    const count = ids.length
-    try {
-      await Promise.all(ids.map(id => updateViewVisibility(id, visibility)))
-      setSelectedIds(new Set())
-      refetch()
-      showToast('success', `Updated visibility to "${visibility}" for ${count} view${count !== 1 ? 's' : ''}`)
-    } catch {
-      showToast('error', 'Some views could not be updated')
+    // allSettled: one failed view (say, a publish-permission miss) must
+    // not mask how many succeeded, nor swallow the reason.
+    const results = await Promise.allSettled(ids.map(id => updateViewVisibility(id, visibility)))
+    const failed = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[]
+    setSelectedIds(new Set())
+    refetch()
+    if (failed.length === 0) {
+      showToast('success', `Updated visibility to "${visibility}" for ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
+    } else {
+      const reason = failed[0].reason
+      const detail = reason instanceof Error ? reason.message : 'unknown error'
+      // A bulk selection can span workspaces, so a partial failure is
+      // normal and the REASON is the whole value of the message —
+      // "3 failed" with no cause leaves someone re-clicking. The three
+      // refusals a person can act on differently get named.
+      const cause =
+        detail.includes('enterpriseViewPolicy') || detail.includes('feature_disabled')
+          ? 'your organisation does not allow publishing to everyone'
+          : detail.includes('workspace:view:publish')
+            ? 'publishing those needs approval — open each view to ask'
+            : detail
+      showToast(
+        'error',
+        `Updated ${ids.length - failed.length} of ${ids.length} views — ${failed.length} failed: ${cause}`,
+      )
     }
   }, [selectedIds, showToast, refetch])
 
@@ -698,6 +729,8 @@ export function ExplorerPage() {
                     view={v}
                     onToggleFavourite={() => toggleFavourite(v.id)}
                     onShare={() => handleShare(v)}
+                    onManageSharing={() => handleShareDialog(v)}
+                    onVisibilityChange={handleVisibilityChanged(v.id)}
                     onPreview={() => openViewPreview(v)}
                     onEdit={() => openViewDetailsEdit(v)}
                     onEditLayout={() => openViewEditor(v.id)}
@@ -786,6 +819,8 @@ export function ExplorerPage() {
                       view={v}
                       onToggleFavourite={() => toggleFavourite(v.id)}
                       onShare={() => handleShare(v)}
+                      onManageSharing={() => handleShareDialog(v)}
+                      onVisibilityChange={handleVisibilityChanged(v.id)}
                       onPreview={() => openViewPreview(v)}
                       onEdit={() => openViewDetailsEdit(v)}
                       onEditLayout={() => openViewEditor(v.id)}
@@ -880,7 +915,14 @@ export function ExplorerPage() {
         onClearSelection={() => setSelectedIds(new Set())}
       />
       {shareView && (
-        <ShareViewDialog viewId={shareView.id} viewName={shareView.name} currentVisibility={shareView.visibility} isOpen={true} onClose={() => setShareView(null)} />
+        <ShareViewDialog
+          viewId={shareView.id}
+          viewName={shareView.name}
+          currentVisibility={shareView.visibility}
+          workspaceId={shareView.workspaceId}
+          isOpen={true}
+          onClose={() => setShareView(null)}
+        />
       )}
       {deleteView && (
         <DeleteViewDialog viewId={deleteView.id} viewName={deleteView.name} favouriteCount={deleteView.favouriteCount} isOpen={true} onClose={() => setDeleteView(null)} onDeleted={handleDeleted} permanent={deleteView.permanent} />

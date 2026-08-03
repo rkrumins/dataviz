@@ -324,7 +324,12 @@ async def test_introspection_returns_schema_stats(graph_client, db_session):
     assert the schema stats surface under ``data``."""
     import json
     from datetime import datetime, timezone
-    from backend.app.db.models import DataSourceStatsORM
+    from backend.app.db.models import (
+        DataSourceStatsORM,
+        ProviderORM,
+        WorkspaceDataSourceORM,
+        WorkspaceORM,
+    )
 
     client, _ = graph_client
 
@@ -332,6 +337,17 @@ async def test_introspection_returns_schema_stats(graph_client, db_session):
         "entityTypeStats": [{"entityType": "dataset", "count": 3}],
         "edgeTypeStats": [{"edgeType": "TRANSFORMS", "count": 1}],
     }
+    # The data-plane gate verifies dataSourceId belongs to the path
+    # workspace, so the source must exist as a real bound row.
+    if (await db_session.get(WorkspaceORM, "test-ws")) is None:
+        db_session.add(WorkspaceORM(id="test-ws", name="Test WS"))
+    db_session.add(ProviderORM(
+        id="prov_introspect", name="P", provider_type="falkordb",
+    ))
+    db_session.add(WorkspaceDataSourceORM(
+        id="ds_introspect", workspace_id="test-ws",
+        provider_id="prov_introspect", graph_name="g_introspect",
+    ))
     db_session.add(DataSourceStatsORM(
         data_source_id="ds_introspect",
         schema_stats=json.dumps(schema),

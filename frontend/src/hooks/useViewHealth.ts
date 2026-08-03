@@ -1,8 +1,16 @@
 /**
- * useViewHealth — Cross-references views against workspace/datasource stores
- * to detect broken, stale, or warning views.
+ * useViewHealth — scope integrity (broken / warning / stale) per view.
  *
- * Computed client-side from existing Zustand store data — no new API calls.
+ * The server decides. It used to be computed here by cross-referencing
+ * the workspace store, which lists ONLY workspaces the caller is bound
+ * to — so every view the caller could see but wasn't a member of (any
+ * shared or enterprise view, and everything an admin sees) failed the
+ * lookup and was branded "Source deleted". "Not mine" is not "gone",
+ * and the browser cannot tell them apart.
+ *
+ * The store path survives only for views that never came from the API
+ * (locally-created configs), and only when their workspace IS present —
+ * so it can no longer manufacture false alarms.
  */
 import { useMemo } from 'react'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -25,11 +33,22 @@ export function useViewHealth(views: View[]): Map<string, ViewHealthInfo> {
     const wsMap = new Map(workspaces.map(ws => [ws.id, ws]))
 
     for (const view of views) {
+      // Server verdict wins whenever the API supplied one.
+      if (view.health?.status) {
+        healthMap.set(view.id, {
+          status: view.health.status,
+          reason: view.health.reason ?? undefined,
+        })
+        continue
+      }
+
       const ws = wsMap.get(view.workspaceId)
 
-      // Check if workspace exists
+      // Workspace absent from the caller's store proves nothing about
+      // the view — it usually just means "not a member". Stay silent
+      // rather than guess.
       if (!ws) {
-        healthMap.set(view.id, { status: 'broken', reason: 'Workspace no longer exists' })
+        healthMap.set(view.id, { status: 'healthy' })
         continue
       }
 

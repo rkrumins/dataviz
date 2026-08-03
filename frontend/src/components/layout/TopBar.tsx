@@ -5,7 +5,8 @@ import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { BrandLogo } from '@/components/brand/BrandLogo'
 import { BrandName } from '@/components/brand/BrandName'
 import { BookmarksPopover } from '@/components/layout/BookmarksPopover'
-import { NotificationBell } from '@/components/layout/NotificationBell'
+import { NotificationBell as InviteActivityBell } from '@/components/layout/NotificationBell'
+import { NotificationBell } from '@/components/notifications/NotificationBell'
 import { AvatarPickerDialog, useAvatarContent } from '@/components/layout/AvatarPickerDialog'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaStore } from '@/store/persona'
@@ -207,6 +208,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
 
           {/* Group 2: Content shortcuts */}
           <BookmarksPopover />
+          <InviteActivityBell />
           <NotificationBell />
 
           <div className="w-px h-6 bg-glass-border mx-1" />

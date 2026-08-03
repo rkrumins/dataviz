@@ -59,6 +59,18 @@ export const POLLING_INTERVALS = {
    */
   permissions: 60_000,
   /**
+   * The bell (``GET /me/notifications``). Like announcements and
+   * permissions this is an always-mounted, idle poll, so it belongs to
+   * the same fleet-cost class: one small query per minute per tab. 60s
+   * is chosen for that reason rather than for latency — a notification
+   * is a message that already waited on someone else's action, so
+   * arriving up to a minute later changes nothing for the reader. The
+   * poll pauses on hidden tabs and refetches immediately on focus, so
+   * the case people actually notice (come back to the tab, see the
+   * badge) is covered by the focus refetch, not by the interval.
+   */
+  notifications: 60_000,
+  /**
    * Canvas auto-retry cadence while the graph provider is warming up
    * (loading its dataset) or briefly unavailable. Deliberately NOT tight:
    * a graph that's reloading takes seconds-to-minutes, so hammering every

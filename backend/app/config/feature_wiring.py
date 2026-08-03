@@ -169,7 +169,30 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "withdrawn from NEW views, not deleted",
         ),
     ),
-    # ── Authentication ─────────────────────────────────────────────────────────
+    # ── Sharing reach ──────────────────────────────────────────────────────────
+    "enterpriseViewPolicy": FeatureWiring(
+        key="enterpriseViewPolicy",
+        # Capability, so it fails OPEN to "workspaces decide". A flag that
+        # cannot be read must not silently become an org-wide publishing
+        # freeze — the failure a person would report is "sharing broke",
+        # with no clue a database hiccup caused it.
+        posture="capability",
+        server_gates=(
+            "PUT /views/{id}/visibility — refuses a move TO enterprise the ceiling forbids",
+            "POST /views — refuses creating one directly as enterprise",
+            "POST /views/{id}/publish-request/approve — refuses to complete the publish",
+        ),
+        ui_surfaces=(
+            "Enterprise tile in the View wizard, Share dialog and Details panel",
+            "Bulk 'Publish to everyone' in the Explorer",
+        ),
+        still_allowed=(
+            "Views already published keep working and stay readable",
+            "UNPUBLISHING is never blocked — closing something down must always be possible",
+            "Private and workspace sharing, and sharing with named people or groups",
+        ),
+    ),
+    # ── Authentication ─────────────────────────────────────────
     "signupEnabled": FeatureWiring(
         key="signupEnabled",
         posture="security",
