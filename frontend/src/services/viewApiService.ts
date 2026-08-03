@@ -579,9 +579,16 @@ export async function restoreView(viewId: string): Promise<View> {
 
 /** Change the visibility of a view */
 export async function updateViewVisibility(viewId: string, visibility: string): Promise<View> {
+    // silent403 on purpose: EVERY caller of this catches and renders its
+    // own message, and several of them say something the generic card
+    // cannot — which view of a bulk selection failed, or that the details
+    // saved but the visibility did not. Without this the user gets the
+    // same refusal twice, once as a global card and once as a toast, and
+    // the vaguer of the two is the one that stays on screen longest.
     return apiFetch<View>(`/api/v1/views/${viewId}/visibility`, {
         method: 'PUT',
         body: JSON.stringify({ visibility }),
+        silent403: true,
     })
 }
 

@@ -381,3 +381,60 @@ describe('people picker', () => {
     )
   })
 })
+
+describe('a host that passes no access prop (the Explorer)', () => {
+  /** The Explorer opens this dialog with only id/name/visibility/
+   *  workspaceId. The envelope arrives a moment later from the view
+   *  read, and until it does `canManageGrants` falls back to its
+   *  optimistic default. */
+  function renderWithoutAccess() {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    return render(
+      <QueryClientProvider client={qc}>
+        <ShareViewDialog
+          viewId="view_1"
+          viewName="Test View"
+          currentVisibility="enterprise"
+          workspaceId="ws_1"
+          isOpen={true}
+          onClose={() => {}}
+        />
+      </QueryClientProvider>,
+    )
+  }
+
+  it('does not fire a doomed grants request before the envelope lands', async () => {
+    // Observed: a global "Access denied — only the creator or a
+    // workspace admin can manage grants" card landed on top of a dialog
+    // whose own footer was already saying exactly that, calmly.
+    mockGetView.mockResolvedValue(viewResponse({
+      access: { ...MANAGER_ACCESS, canManageGrants: false, canChangeVisibility: false },
+    }))
+    renderWithoutAccess()
+    await screen.findByText(/only the view.s owner or a workspace admin/i)
+    expect(mockList).not.toHaveBeenCalled()
+  })
+
+  it('still loads grants once the envelope says it may', async () => {
+    mockGetView.mockResolvedValue(viewResponse({ access: MANAGER_ACCESS }))
+    renderWithoutAccess()
+    await waitFor(() => expect(mockList).toHaveBeenCalledWith('view_1'))
+  })
+
+  it('blames ownership, not the publish permission, on a view that is not theirs', async () => {
+    // "Unpublishing needs the Publish views permission — ask a workspace
+    // admin" sent people to request a permission that would still not
+    // let them touch this view: can_change_visibility gates first.
+    mockGetView.mockResolvedValue(viewResponse({
+      access: {
+        ...MANAGER_ACCESS,
+        canManageGrants: false, canChangeVisibility: false, canPublish: false,
+      },
+    }))
+    renderWithoutAccess()
+    const privateTile = (await screen.findByText('Private')).closest('button')!
+    await waitFor(() =>
+      expect(privateTile.textContent).toMatch(/creator or a workspace admin/i))
+    expect(privateTile.textContent).not.toMatch(/Publish views/)
+  })
+})

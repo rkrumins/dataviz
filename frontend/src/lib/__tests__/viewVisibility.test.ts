@@ -167,3 +167,50 @@ describe('a restricted source', () => {
         expect(enterprise.approvalHint).toMatch(/source/i)
     })
 })
+
+describe('someone who does not own the view at all', () => {
+    /** Not the creator, not a workspace admin — the envelope says
+     *  canChangeVisibility: false. The publish permission is irrelevant
+     *  to them: even holding it, `can_change_visibility` gates first. */
+    const outsider = {
+        canPublish: false,
+        canChangeVisibility: false,
+        saved: 'enterprise' as const,
+    }
+
+    it('does not blame the publish permission, which would not help them', () => {
+        // Observed on a published view someone else created: every tile
+        // said "Unpublishing needs the Publish views permission — ask a
+        // workspace admin", sending the reader to request a permission
+        // that would still not let them touch this view.
+        for (const opt of buildVisibilityOptions(outsider)) {
+            expect(opt.disabledReason ?? '').not.toMatch(/Publish views/)
+        }
+    })
+
+    it('says the real reason: this is not their view to re-share', () => {
+        const priv = buildVisibilityOptions(outsider).find(o => o.id === 'private')!
+        expect(priv.disabled).toBe(true)
+        expect(priv.disabledReason).toMatch(/creator|owner/i)
+    })
+
+    it('never dangles a request they are not entitled to make', () => {
+        const ent = buildVisibilityOptions({
+            canPublish: false, canChangeVisibility: false, canRequestPublish: true,
+        }).find(o => o.id === 'enterprise')!
+        expect(ent.requiresApproval).toBeFalsy()
+        expect(ent.disabled).toBe(true)
+    })
+})
+
+describe('an owner who simply lacks the publish permission', () => {
+    it('still gets the publish-permission explanation', () => {
+        // The distinction matters: this person CAN change visibility,
+        // and the permission is genuinely the thing in their way.
+        const opts = buildVisibilityOptions({
+            canPublish: false, canChangeVisibility: true, saved: 'enterprise',
+        })
+        expect(opts.find(o => o.id === 'private')!.disabledReason)
+            .toMatch(/Publish views/)
+    })
+})

@@ -135,7 +135,15 @@ function MiniPreview({ viewType }: { viewType: string }) {
 export interface ExplorerViewCardProps {
   view: View
   onToggleFavourite: () => void
+  /** The hover button: copies the shareable link, no dialog. */
   onShare: () => void
+  /** Opens the Share dialog, where the audience panel and the request
+   *  flow live. The overflow menu routes here — a menu is the wrong
+   *  place to publish something to everyone. */
+  onManageSharing?: () => void
+  /** The tier settled on the server. Without this the card keeps showing
+   *  the old one until a full reload — the change appeared to do nothing. */
+  onVisibilityChange?: (visibility: 'private' | 'workspace' | 'enterprise') => void
   onPreview?: () => void
   onEdit?: () => void
   /** Opens the full builder (ViewWizard) — entity scope, layers, layout. */
@@ -168,6 +176,8 @@ export function ExplorerViewCard({
   view,
   onToggleFavourite,
   onShare,
+  onManageSharing,
+  onVisibilityChange,
   onPreview,
   onEdit,
   onEditLayout,
@@ -358,11 +368,14 @@ export function ExplorerViewCard({
             viewId={view.id}
             viewName={view.name}
             visibility={view.visibility}
+            workspaceId={view.workspaceId}
+            dataSourceId={view.dataSourceId}
+            onVisibilityChange={onVisibilityChange}
             onEdit={onEdit}
             onEditLayout={onEditLayout}
             editDisabled={editDisabled}
             onDelete={() => onDelete?.()}
-            onShare={onShare}
+            onShare={onManageSharing ?? onShare}
           />
             </>
           )}

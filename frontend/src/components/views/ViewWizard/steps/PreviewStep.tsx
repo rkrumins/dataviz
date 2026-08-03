@@ -16,13 +16,15 @@ import {
     GitBranch,
     Check,
     Sparkles,
-    Lock,
-    Users,
-    Globe,
     Tag,
     Server,
     Database
 } from 'lucide-react'
+import { useBrand } from '@/store/branding'
+import { usePublishGate } from '@/hooks/usePublishGate'
+import {
+    VISIBILITY_ICON, visibilityDescription, visibilityLabel,
+} from '@/lib/viewVisibility'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { slugifyGraphName } from '../blankModel'
@@ -42,16 +44,24 @@ interface PreviewStepProps {
 // Component
 // ============================================
 
-const VISIBILITY_META = {
-    private: { label: 'Private', icon: Lock, color: 'slate' },
-    workspace: { label: 'Workspace', icon: Users, color: 'blue' },
-    enterprise: { label: 'Enterprise', icon: Globe, color: 'green' },
-} as const
+// Icons and labels come from lib/viewVisibility — this file used to keep
+// a tenth private copy, which is how the review step ended up announcing
+// "Enterprise" with a green tick and no word about what that does.
 
 export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
     const schema = useSchemaStore(s => s.schema)
+    const { appName } = useBrand()
     const activeWorkspace = useWorkspacesStore(s => s.getActiveWorkspace())
     const activeDataSource = useWorkspacesStore(s => s.getActiveDataSource())
+
+    // This is the last screen before the view exists. A tier NAME under a
+    // green tick reads as "confirmed, nothing to think about" — which is
+    // wrong twice over when the tier is Enterprise: it does not say what
+    // that exposes, and where publishing needs approval nothing is
+    // confirmed at all.
+    const wsId = scopeContext?.workspaceId ?? activeWorkspace?.id
+    const gate = usePublishGate(wsId, formData.dataSourceId ?? scopeContext?.dataSourceId)
+    const needsApproval = formData.visibility === 'enterprise' && !gate.canPublish
 
     // Use scopeContext when provided (create mode), fall back to globals (edit mode)
     const workspaceName = scopeContext?.workspaceName ?? activeWorkspace?.name
@@ -265,17 +275,28 @@ export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
                         <div className="flex items-center gap-3 mb-4">
                             <div className="w-10 h-10 rounded-lg bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-600 dark:text-indigo-400">
                                 {(() => {
-                                    const V = VISIBILITY_META[formData.visibility]
-                                    return <V.icon className="w-5 h-5" />
+                                    const VisIcon = VISIBILITY_ICON[formData.visibility]
+                                    return <VisIcon className="w-5 h-5" />
                                 })()}
                             </div>
-                            <div className="flex-1">
+                            <div className="flex-1 min-w-0">
                                 <p className="text-sm font-medium text-slate-500 uppercase tracking-wide">Sharing</p>
                                 <p className="font-semibold text-slate-800 dark:text-slate-200">
-                                    {VISIBILITY_META[formData.visibility].label}
+                                    {visibilityLabel(formData.visibility)}
+                                </p>
+                                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
+                                    {visibilityDescription(formData.visibility, {
+                                        appName, workspaceName,
+                                    })}
                                 </p>
                             </div>
-                            <Check className="w-5 h-5 text-green-500" />
+                            {needsApproval ? (
+                                <span className="shrink-0 inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-600 dark:text-amber-400">
+                                    Needs approval
+                                </span>
+                            ) : (
+                                <Check className="w-5 h-5 text-green-500 shrink-0" />
+                            )}
                         </div>
                         <div className="flex flex-wrap gap-2">
                             {workspaceName && (
