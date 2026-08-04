@@ -44,7 +44,6 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { toPng } from 'html-to-image'
 import * as LucideIcons from 'lucide-react'
 import type { LineageEdge } from '@/store/canvas'
 import { IMPACT_DEPTH, type LensImpact } from '@/hooks/useLensImpact'
@@ -660,6 +659,10 @@ function GraphControls({ reducedMotion, exportName }: { reducedMotion: boolean; 
 
   // PNG export: re-project the whole graph into a fixed frame and
   // rasterize the viewport pane (the standard React Flow recipe).
+  // The rasterizer is imported LAZILY — it is only needed when someone
+  // actually exports, it keeps ~30KB out of the initial chunk, and a
+  // missing/not-yet-installed module degrades to "this one button
+  // doesn't work" instead of taking the whole lens down.
   const exportPng = async (e: React.MouseEvent) => {
     const viewport = (e.currentTarget as HTMLElement)
       .closest('.react-flow')
@@ -667,6 +670,7 @@ function GraphControls({ reducedMotion, exportName }: { reducedMotion: boolean; 
     if (!viewport || exporting) return
     setExporting(true)
     try {
+      const { toPng } = await import('html-to-image')
       const bounds = getNodesBounds(rf.getNodes())
       const width = Math.min(Math.ceil(bounds.width) + 160, 3200)
       const height = Math.min(Math.ceil(bounds.height) + 160, 2400)
