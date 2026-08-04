@@ -485,6 +485,41 @@ describe('LineageLens graph mode', () => {
     expect(onRecenter).toHaveBeenCalledWith('c')
   })
 
+  it('a rolled-up partner offers an expand pill that drills to its constituents', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [
+          { id: 'CONTAINER', hierarchy: { canContain: ['DATASET'] } },
+          { id: 'DATASET', hierarchy: { canContain: [] } },
+        ],
+      },
+    } as never)
+    try {
+      const agg = {
+        id: 'agg1', source: 'plat', target: 'ds',
+        data: { edgeType: 'FLOWS_TO', isAggregated: true, sourceEdgeCount: 3, sourceEdges: ['r1', 'r2', 'r3'] },
+      } as unknown as LineageEdge
+      useCanvasStore.setState({
+        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
+        edges: [],
+        visibleEdges: [agg],
+      } as never)
+      const onDrillFetch = vi.fn()
+      renderLens(['ds'], {}, { onDrillFetch })
+      // The coarse partner is not a dead end: it offers the open pill,
+      // worded as "what inside this connects to me".
+      const pill = screen.getByTitle(/Open label-plat — show the 3 entities inside it/)
+      fireEvent.click(pill)
+      // Opening it fetches the underlying connections on demand.
+      expect(onDrillFetch).toHaveBeenCalledWith(expect.objectContaining({ id: 'agg1' }))
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
   it('the header toggle switches to the list body and persists the preference', () => {
     renderLens(['b'])
     // The graph shows band headers ("Data Sources") too — the LIST

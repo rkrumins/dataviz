@@ -18,6 +18,14 @@ import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 
 /** Bounded trace depth per direction — stated in the UI copy. */
 export const IMPACT_DEPTH = 10
+/**
+ * Settle time before a focal's reach is measured. This is the single
+ * heaviest query the lens makes, and firing it on every hop put it on
+ * the critical path of navigation — walking five nodes deep queued five
+ * multi-hop traces the user never waited to read. Walking stays
+ * instant; only the focal you actually stop on gets measured.
+ */
+export const IMPACT_DEBOUNCE_MS = 300
 
 export interface LensImpact {
   /** Distinct entities transitively upstream / downstream (at the
@@ -101,7 +109,9 @@ export function useLensImpact(
       }
       return
     }
-    if (!startedRef.current.has(focalId)) void fetchImpact(focalId)
+    if (startedRef.current.has(focalId)) return
+    const t = window.setTimeout(() => void fetchImpact(focalId), IMPACT_DEBOUNCE_MS)
+    return () => window.clearTimeout(t)
   }, [focalId, fetchImpact])
 
   const retry = useCallback((nodeId: string) => void fetchImpact(nodeId), [fetchImpact])

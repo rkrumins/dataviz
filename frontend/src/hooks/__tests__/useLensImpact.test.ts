@@ -75,6 +75,23 @@ describe('useLensImpact', () => {
     expect(result.current.impact.get('a')).toEqual({ up: 0, down: 1, truncated: true })
   })
 
+  it('walking past a node does not measure it — only the focal you stop on', async () => {
+    const { provider, traceAtLevel } = makeProvider()
+    const { result, rerender } = renderHook(
+      ({ focal }: { focal: string | null }) => useLensImpact(focal, provider),
+      { initialProps: { focal: 'a' as string | null } },
+    )
+    // Walk a → b → c faster than the settle time: the two hops passed
+    // through must never fire their own multi-hop traces.
+    rerender({ focal: 'b' })
+    rerender({ focal: 'c' })
+    await waitFor(() => expect(result.current.status.get('c')).toBe('done'))
+    expect(traceAtLevel).toHaveBeenCalledTimes(1)
+    expect(traceAtLevel).toHaveBeenCalledWith(expect.objectContaining({ urn: 'c' }))
+    expect(result.current.status.has('a')).toBe(false)
+    expect(result.current.status.has('b')).toBe(false)
+  })
+
   it('a provider without the capability yields nothing — no invented zeros', async () => {
     const provider = {} as unknown as GraphDataProvider
     const { result } = renderHook(() => useLensImpact('a', provider))

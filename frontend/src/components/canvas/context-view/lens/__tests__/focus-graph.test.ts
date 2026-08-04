@@ -140,8 +140,58 @@ describe('buildFocusGraph — grouping and rollups', () => {
     expect(g.cards.find(c => c.id === 'g:in:P')).toBeUndefined()
     expect(card(g, 'n:C').rollup).toBe(true)
     expect(card(g, 'n:C2').rollup).toBe(true)
-    // Rollups sort after finer/peer cards and never get a frontier pill.
-    expect(card(g, 'n:C').frontier).toBe(false)
+    // A rollup is demoted, but NOT a dead end — it stays expandable.
+    expect(card(g, 'n:C').frontier).toBe(true)
+  })
+
+  it('a rolled-up connection expands via DRILL into the children carrying lineage to the focal', () => {
+    // A platform-grain partner reached by an aggregated edge: the card
+    // must offer drill (its constituents), not a next-hop fetch.
+    const agg = edge('agg1', 'Snowflake', 'F', {
+      isAggregated: true, sourceEdgeCount: 2, sourceEdges: ['r1', 'r2'],
+    })
+    // The constituent connects a DESCENDANT of the focal, as real
+    // aggregated edges do — so it is not itself a direct neighbour.
+    const collapsed = build({
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM'), node('kid1', 'dataset')],
+      edges: [agg, edge('r1', 'kid1', 'F_field')],
+      isCoarser: (t) => t === 'DATAPLATFORM',
+    })
+    const rollup = card(collapsed, 'n:Snowflake')
+    expect(rollup.rollup).toBe(true)
+    expect(rollup.expandKind).toBe('drill')
+    expect(rollup.frontier).toBe(true)          // offers the expand pill
+    expect(rollup.frontierExpanded).toBe(false) // not yet opened
+    // Children stay hidden until it's expanded.
+    expect(collapsed.cards.find(c => c.nodeId === 'kid1')).toBeUndefined()
+
+    const opened = build({
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM'), node('kid1', 'dataset'), node('kid2', 'dataset')],
+      edges: [agg, edge('r1', 'kid1', 'F_field')],
+      isCoarser: (t) => t === 'DATAPLATFORM',
+      over: {
+        drilledRows: new Set(['g:in:agg1']),
+        drillEdges: new Map([['agg1', [edge('r2', 'kid2', 'F_field')]]]),
+      },
+    })
+    const openedRollup = card(opened, 'n:Snowflake')
+    expect(openedRollup.frontierExpanded).toBe(true)
+    // Exactly the constituents that carry lineage to the focal — the
+    // locally-known one plus the fetched one, no other platform content.
+    expect(card(opened, 'x:agg1:kid1').nodeId).toBe('kid1')
+    expect(card(opened, 'x:agg1:kid2').nodeId).toBe('kid2')
+  })
+
+  it('a plain entity expands via HOP; a known-zero degree offers nothing', () => {
+    const g = build({
+      nodes: [node('F'), node('U'), node('Z')],
+      edges: [edge('e1', 'U', 'F'), edge('e2', 'Z', 'F')],
+      over: { degreeHints: new Map([['Z', { in: 0, out: 4 }]]) },
+    })
+    expect(card(g, 'n:U').expandKind).toBe('hop')
+    // Z's KNOWN upstream degree is zero — nothing to fetch, no pill.
+    expect(card(g, 'n:Z').expandKind).toBeNull()
+    expect(card(g, 'n:Z').frontier).toBe(false)
   })
 
   it('expands a group into a slim header plus exactly the lineage-participating members', () => {

@@ -59,6 +59,20 @@ export type FocusDirection = 'in' | 'out'
 
 export type FocusCardKind = 'focal' | 'entity' | 'group' | 'contains' | 'overflow'
 
+/**
+ * What a card's ONE expand affordance does. Every expandable card
+ * offers the same gesture — "show me what's inside / what's next" —
+ * and this says which meaning applies:
+ *   group → reveal the members grouped under this parent
+ *   drill → resolve a rolled-up connection into the constituent
+ *           entities that actually carry lineage to the focal
+ *           (this is what makes a CONTAINER / platform rollup card
+ *           openable, not a dead end)
+ *   hop   → fetch and reveal this entity's own next hop
+ *   more  → page in the rest of a capped band
+ */
+export type FocusExpandKind = 'group' | 'drill' | 'hop' | 'more' | null
+
 export interface FocusCard {
   /** Stable across rebuilds so shared cards glide between focal swaps:
    *  'f' | n:urn | g:dir:parentUrn | c:urn | x:edgeId:urn | more:dir:band */
@@ -99,9 +113,12 @@ export interface FocusCard {
   expandKey: string | null
   /** True when this group card is currently expanded (header form). */
   expanded: boolean
-  /** Card can fetch-and-reveal its own next hop (the ⊕ pill side). */
+  /** What this card's expand affordance means (null = not expandable). */
+  expandKind: FocusExpandKind
+  /** Card shows an outward expand pill (a 'hop' or 'drill' card). */
   frontier: boolean
-  /** True when this card's next hop is already expanded. */
+  /** True when this card is already expanded open (hop revealed, or
+   *  aggregate drilled). */
   frontierExpanded: boolean
   /** Expanded, fetch completed, and NOTHING further exists — the walk
    *  genuinely ends here (a data-source claim, never a guess). */
@@ -268,7 +285,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     rollup: false, unresolved: false,
     aggregated: false, aggregateEdge: null,
     drillKey: null, drilled: false, expandKey: null, expanded: false,
-    frontier: false, frontierExpanded: false, deadEnd: false,
+    expandKind: null, frontier: false, frontierExpanded: false, deadEnd: false,
     degreeHint: null, fetch: null,
     dimmed: false, matchesInside: 0,
     overflowCount: 0, missingConstituents: 0,
@@ -339,6 +356,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       label: `+${(containsTotalAll - containsShown.length).toLocaleString()} more contained`,
       type: 'entity',
       expandKey: 'contains',
+      expandKind: 'more',
       overflowCount: containsTotalAll - containsShown.length,
     })
   }
@@ -487,6 +505,16 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         const frontierKey = `${dir}:${entry.nodeId}`
         const frontierExpanded = expandedFrontier.has(frontierKey)
         const drillKey = entry.agg.canDrill && entry.agg.aggregateEdge ? `g:${dir}:${entry.agg.aggregateEdge.id}` : null
+        const drilled = drillKey != null && drilledRows.has(drillKey)
+        // ONE expand gesture per card. A rolled-up connection (a
+        // CONTAINER / platform partner, or any aggregated edge) opens
+        // into the constituent entities that actually carry lineage to
+        // the focal — that IS "which children of this thing touch me",
+        // and it's the answer a coarse rollup card otherwise withholds.
+        // Anything else expands to its own next hop, until the band cap
+        // or a known-zero degree says there's nothing to fetch.
+        const canHop = !isOutermost && (degreeHints?.get(entry.nodeId)?.[dir] ?? -1) !== 0
+        const expandKind: FocusExpandKind = drillKey ? 'drill' : canHop ? 'hop' : null
         const card: FocusCard = {
           ...baseCard(),
           id: `n:${entry.nodeId}`,
@@ -505,15 +533,11 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           aggregated: entry.agg.aggregated,
           aggregateEdge: entry.agg.aggregateEdge,
           drillKey,
-          drilled: drillKey != null && drilledRows.has(drillKey),
+          drilled,
           expandKey: frontierKey,
-          // Any entity card can walk its own next hop until the hard
-          // band stop — except rollups (they summarize flows already
-          // shown at finer grain) and nodes whose KNOWN outward degree
-          // is zero (nothing to fetch; absent hint ≠ zero).
-          frontier: !isOutermost && !entry.rollup
-            && (degreeHints?.get(entry.nodeId)?.[dir] ?? -1) !== 0,
-          frontierExpanded,
+          expandKind,
+          frontier: expandKind === 'hop' || expandKind === 'drill',
+          frontierExpanded: expandKind === 'drill' ? drilled : frontierExpanded,
           degreeHint: degreeHints?.get(entry.nodeId) ?? null,
           fetch: fetchStatus?.get(entry.nodeId) === 'loading' ? 'loading'
             : fetchStatus?.get(entry.nodeId) === 'error' ? 'error' : null,
@@ -610,6 +634,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           sumCount: sum,
           unresolved: !pNode,
           expandKey: groupKey,
+          expandKind: 'group',
           expanded,
           dimmed: q !== '' && memberMatches === 0 && !matches(pLabel),
           matchesInside: expanded ? 0 : memberMatches,
@@ -643,6 +668,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           label: `+${(items.length - cap).toLocaleString()} more`,
           type: 'entity',
           expandKey: bandKey,
+          expandKind: 'more',
           overflowCount: items.length - cap,
         })
       }

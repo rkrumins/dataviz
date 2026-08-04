@@ -6,22 +6,33 @@
  * build as rich entity cards in hop bands. All semantics live in
  * focus-graph.ts; this file is presentation and gestures only:
  *   single click  = select (detail strip)     double click = focus
- *   group header  = expand/collapse           ⊕ pill       = next hop
- *   ×N badge      = drill the aggregate       pane click   = deselect
+ *   group header  = expand/collapse           pane click   = deselect
  *   hover a card  = light up its connections
+ *   ⊕ pill        = open this card — its constituents when the
+ *                   connection is rolled up, otherwise its next hop
  *
  * Positions come pre-baked from the builder, so React Flow does no
  * layout of its own — card ids are stable across rebuilds and a CSS
  * transform transition (killed under .reduce-motion) makes shared
  * cards glide when the focal changes.
  *
- * Perf contract: the card context is identity-stable across selection
- * and hover, selection is stamped through React Flow's own `selected`
- * flag, and hover touches only the (small) edge array — so selecting
- * or sweeping the pointer re-renders a couple of memoized cards, never
- * the whole board.
+ * PERF CONTRACT — the graph must stay snappy while browsing, so no
+ * frequent interaction may rebuild the node or edge arrays:
+ *   • hover   → HoverContext; the edges array keeps its identity and
+ *               only the SVG paths re-render.
+ *   • impact  → ImpactContext; a resolving measurement re-renders the
+ *               focal card alone, not all N nodes.
+ *   • select  → React Flow's own `selected` flag, node identity kept
+ *               for every unaffected card.
+ *   • rebuild → cards memo on card CONTENT, not on the freshly-built
+ *               object's identity, so an arriving fetch re-renders only
+ *               the cards that actually changed.
+ *   • visuals → resolved once per schema, O(1) per card, no per-card
+ *               store subscription.
+ * The viewport re-frames on FOCAL change only: expanding grows the
+ * picture in place instead of yanking it away from what you opened.
  */
-import { memo, useEffect, useMemo, useState } from 'react'
+import { createContext, memo, useContext, useEffect, useMemo, useState } from 'react'
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -59,8 +70,26 @@ const TINT_UP = '#0ea5e9'
 const TINT_DOWN = '#f59e0b'
 const TINT_CONTAIN = '#94a3b8'
 
+/**
+ * Live interaction values delivered by CONTEXT rather than through node
+ * data — the difference between a snappy graph and a sluggish one.
+ *
+ * Hover emphasis and the focal's impact line both change often and
+ * matter to a tiny slice of the graph, but folding them into node/edge
+ * data made every change rebuild the whole nodes or edges array, which
+ * React Flow then reconciled element by element. Routed through
+ * context, a hover re-renders only the edge paths, and an impact result
+ * re-renders only the focal card. The arrays keep their identity.
+ */
+const HoverContext = createContext<string | null>(null)
+const ImpactContext = createContext<{ impact?: LensImpact | null; loading?: boolean }>({})
+
 interface CardCtx {
   edgeTypeInfo?: EdgeTypeInfoMap
+  /** type id → {color, icon}, resolved ONCE for the whole graph. Cards
+   *  used to each subscribe to the schema store and linear-scan the
+   *  entity-type list, so every card paid for every schema touch. */
+  visualFor: (typeId: string) => { color: string; Icon: LucideIcons.LucideIcon }
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
   onToggleGroup: (expandKey: string) => void
@@ -98,12 +127,24 @@ interface FocusGraphViewProps {
   onOpenDetails?: (nodeId: string) => void
 }
 
+const iconByName = (name: string): LucideIcons.LucideIcon =>
+  (LucideIcons as unknown as Record<string, LucideIcons.LucideIcon>)[name] ?? LucideIcons.Box
+
+/** Flat equality over a built card. Every field is a primitive except
+ *  `aggregateEdge`, which is compared by reference — so this is exact,
+ *  and cheap enough to run per card per rebuild. */
+function sameCard(a: FocusCard, b: FocusCard): boolean {
+  if (a === b) return true
+  const keys = Object.keys(a) as Array<keyof FocusCard>
+  if (keys.length !== Object.keys(b).length) return false
+  for (const k of keys) if (a[k] !== b[k]) return false
+  return true
+}
+
 // ── Card node ────────────────────────────────────────────────────────
 
-function TypeIcon({ typeId, color, className }: { typeId: string; color: string; className?: string }) {
-  const schema = useSchemaStore((s) => s.schema)
-  const visual = useMemo(() => getEntityVisual(schema ? { schema } : null, typeId), [schema, typeId])
-  const Icon = (LucideIcons as unknown as Record<string, LucideIcons.LucideIcon>)[visual.icon] ?? LucideIcons.Box
+function TypeIcon({ ctx, typeId, color, className }: { ctx: CardCtx; typeId: string; color: string; className?: string }) {
+  const Icon = ctx.visualFor(typeId).Icon
   return <Icon className={className} style={{ color }} />
 }
 
@@ -167,10 +208,12 @@ function CardActions({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   )
 }
 
-/** The ⊕ / +N pill on a frontier card's outward side — fetches and
- *  reveals that entity's own next hop. Never invents a number: the
- *  count renders only when the backend reported a real degree; a
- *  completed-empty expansion becomes an explicit end-of-lineage mark. */
+/** The one expand pill on a card's outward side. What it opens depends
+ *  on the card: a rolled-up connection resolves into the constituent
+ *  entities that actually carry lineage to the focal ('drill'), while a
+ *  plain entity fetches its own next hop ('hop'). Never invents a
+ *  number — the count renders only when the backend reported a real
+ *  degree — and a completed-empty hop becomes an end-of-lineage mark. */
 function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   if (!card.nodeId || !card.expandKey || (!card.frontier && !card.frontierExpanded)) return null
   const outLeft = card.band < 0
@@ -208,45 +251,52 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
     )
   }
   const expanded = card.frontierExpanded
+  const isDrill = card.expandKind === 'drill'
+  const openPill = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (isDrill && card.drillKey && card.aggregateEdge) ctx.onToggleDrill(card.drillKey, card.aggregateEdge)
+    else ctx.onExpandFrontier(card.expandKey!, card.nodeId!)
+  }
   return (
     <button
       type="button"
-      onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier(card.expandKey!, card.nodeId!) }}
+      onClick={openPill}
       title={expanded
-        ? `Collapse ${outLeft ? 'upstream of' : 'downstream of'} ${card.label}`
-        : `Expand the next hop ${outLeft ? 'upstream' : 'downstream'} of ${card.label}${hint != null ? ` (${hint.toLocaleString()} known)` : ''}`}
+        ? isDrill ? `Collapse ${card.label} back to one rolled-up connection` : `Collapse ${outLeft ? 'upstream of' : 'downstream of'} ${card.label}`
+        : isDrill
+          ? `Open ${card.label} — show the ${card.count.toLocaleString()} entit${card.count === 1 ? 'y' : 'ies'} inside it that connect to this one`
+          : `Expand the next hop ${outLeft ? 'upstream' : 'downstream'} of ${card.label}${hint != null ? ` (${hint.toLocaleString()} known)` : ''}`}
       className={cn(
         'absolute top-1/2 -translate-y-1/2 flex items-center justify-center gap-0.5 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors',
-        hint != null && !expanded ? 'px-1.5' : 'w-5',
+        (isDrill ? card.count > 1 : hint != null) && !expanded ? 'px-1.5' : 'w-5',
         expanded
           ? 'bg-accent-lineage/15 border-accent-lineage/50 text-accent-lineage hover:bg-accent-lineage/25'
           : 'bg-canvas-elevated border-black/15 dark:border-white/20 text-ink-muted hover:text-accent-lineage hover:border-accent-lineage/50',
         pos,
       )}
     >
-      {expanded
-        ? <LucideIcons.Minus className="w-3 h-3" />
-        : hint != null
-          ? <>{outLeft && <LucideIcons.Plus className="w-2.5 h-2.5" />}{hint.toLocaleString()}{!outLeft && <LucideIcons.Plus className="w-2.5 h-2.5" />}</>
-          : <LucideIcons.Plus className="w-3 h-3" />}
+      {(() => {
+        if (expanded) return <LucideIcons.Minus className="w-3 h-3" />
+        // A drill knows exactly how many it rolls up; a hop only knows
+        // a degree when the backend reported one.
+        const n = isDrill ? (card.count > 1 ? card.count : null) : hint
+        if (n == null) return <LucideIcons.Plus className="w-3 h-3" />
+        return <>{outLeft && <LucideIcons.Plus className="w-2.5 h-2.5" />}{n.toLocaleString()}{!outLeft && <LucideIcons.Plus className="w-2.5 h-2.5" />}</>
+      })()}
     </button>
   )
 }
 
 function FocusGraphCard({ data, selected }: NodeProps) {
-  const { card, ctx, focalStats, focalImpact, focalImpactLoading } = data as unknown as {
+  const { card, ctx, focalStats } = data as unknown as {
     card: FocusCard
     ctx: CardCtx
     focalStats?: { in: number; out: number }
-    focalImpact?: LensImpact | null
-    focalImpactLoading?: boolean
   }
-  const schema = useSchemaStore((s) => s.schema)
-  const visual = useMemo(
-    () => getEntityVisual(schema ? { schema } : null, card.type === 'not loaded' ? 'entity' : card.type),
-    [schema, card.type],
-  )
-  const accent = card.type === 'not loaded' ? '#94a3b8' : visual.color
+  // Impact arrives via context so a resolving measurement re-renders
+  // ONLY this card — it used to invalidate every node in the graph.
+  const { impact: focalImpact, loading: focalImpactLoading } = useContext(ImpactContext)
+  const accent = card.type === 'not loaded' ? '#94a3b8' : ctx.visualFor(card.type).color
 
   const activate = () => {
     if (card.kind === 'overflow') { if (card.expandKey) ctx.onShowMore(card.expandKey); return }
@@ -296,7 +346,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       >
         <PortHandles focal />
         <div className="flex items-center gap-1.5">
-          <TypeIcon typeId={card.type} color={accent} className="w-3.5 h-3.5" />
+          <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5" />
           <p className="text-[9.5px] font-bold uppercase tracking-[0.12em] truncate" style={{ color: accent }}>
             {card.type}
           </p>
@@ -498,7 +548,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
           className="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0"
           style={{ backgroundColor: `${accent}1f` }}
         >
-          <TypeIcon typeId={card.type} color={accent} className="w-3.5 h-3.5" />
+          <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5" />
         </div>
       )}
       <div className="flex-1 min-w-0">
@@ -563,7 +613,24 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   )
 }
 
-const MemoFocusGraphCard = memo(FocusGraphCard)
+/**
+ * Content-based memo boundary. The builder returns fresh card objects
+ * on every rebuild, so a reference-equality memo never held and one
+ * arriving fetch re-rendered the whole board. Comparing the card's
+ * fields instead means only genuinely-changed cards re-render — and it
+ * does so without caching anything across renders. This component
+ * reads exactly `data` and `selected`; React Flow applies position
+ * itself, so nothing else can affect the output.
+ */
+const MemoFocusGraphCard = memo(FocusGraphCard, (prev, next) => {
+  if (prev.selected !== next.selected) return false
+  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { in: number; out: number } }
+  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { in: number; out: number } }
+  return a.ctx === b.ctx
+    && a.focalStats?.in === b.focalStats?.in
+    && a.focalStats?.out === b.focalStats?.out
+    && sameCard(a.card, b.card)
+})
 
 // ── Band labels ──────────────────────────────────────────────────────
 
@@ -600,22 +667,26 @@ const NODE_TYPES = { focusCard: MemoFocusGraphCard, bandLabel: BandLabelNode }
 
 // ── Edge ─────────────────────────────────────────────────────────────
 
-function FocusGraphEdgeComp({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd, data }: EdgeProps) {
+function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd, data }: EdgeProps) {
   const d = data as unknown as {
     count: number
     aggregated: boolean
     containment: boolean
     dimmed: boolean
     tint: string
-    emphasized: boolean
-    hoverActive: boolean
   }
+  // Hover emphasis is derived here from context: the edges ARRAY stays
+  // identity-stable, so sweeping the pointer never rebuilds it (nor
+  // makes React Flow reconcile every edge).
+  const hoveredId = useContext(HoverContext)
+  const hoverActive = hoveredId != null
+  const emphasized = hoverActive && (source === hoveredId || target === hoveredId)
   const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
   // Hovering a card lights up ITS connections and quiets the rest —
   // the read-your-neighborhood gesture.
   const opacity = d.dimmed ? 0.12
-    : d.emphasized ? 1
-      : d.hoverActive ? 0.2
+    : emphasized ? 1
+      : hoverActive ? 0.2
         : d.containment ? 0.45 : 0.7
   return (
     <>
@@ -625,7 +696,7 @@ function FocusGraphEdgeComp({ id, sourceX, sourceY, targetX, targetY, sourcePosi
         markerEnd={markerEnd}
         style={{
           stroke: d.tint,
-          strokeWidth: d.emphasized ? (d.aggregated ? 3 : 2.5) : d.aggregated ? 2 : 1.5,
+          strokeWidth: emphasized ? (d.aggregated ? 3 : 2.5) : d.aggregated ? 2 : 1.5,
           strokeDasharray: d.containment ? '4 4' : undefined,
           opacity,
           transition: 'opacity 120ms, stroke-width 120ms',
@@ -634,7 +705,7 @@ function FocusGraphEdgeComp({ id, sourceX, sourceY, targetX, targetY, sourcePosi
       {d.count > 1 && !d.dimmed && (
         <EdgeLabelRenderer>
           <div
-            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`, opacity: d.hoverActive && !d.emphasized ? 0.3 : 1 }}
+            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`, opacity: hoverActive && !emphasized ? 0.3 : 1 }}
             className="absolute pointer-events-none px-1 py-px rounded-full bg-canvas-elevated border border-black/10 dark:border-white/10 text-[8.5px] font-semibold tabular-nums text-ink-muted shadow-sm"
           >
             ×{d.count.toLocaleString()}
@@ -732,6 +803,7 @@ function GraphControls({ reducedMotion, exportName }: { reducedMotion: boolean; 
   )
 }
 
+
 // ── View ─────────────────────────────────────────────────────────────
 
 export function FocusGraphView({
@@ -755,10 +827,32 @@ export function FocusGraphView({
   onRevealOnCanvas,
   onOpenDetails,
 }: FocusGraphViewProps) {
-  // Identity-stable across selection & hover — see the perf contract
-  // in the file header.
+  // Type visuals resolved ONCE per schema for the whole graph. Cards
+  // used to each subscribe to the schema store and linear-scan the
+  // entity-type list, so every card paid for every schema touch; now
+  // it's a single O(1) lookup built eagerly here.
+  const schema = useSchemaStore((s) => s.schema)
+  const visualFor = useMemo(() => {
+    const known = new Map<string, { color: string; Icon: LucideIcons.LucideIcon }>()
+    for (const et of schema?.entityTypes ?? []) {
+      // `visual` is absent for types an ontology hasn't styled — those
+      // fall through to the deterministic generator below rather than
+      // taking the graph down.
+      if (et?.visual) known.set(et.id, { color: et.visual.color, Icon: iconByName(et.visual.icon) })
+    }
+    return (typeId: string) => {
+      const key = typeId === 'not loaded' ? 'entity' : typeId
+      const hit = known.get(key)
+      if (hit) return hit
+      // Type the ontology doesn't define — deterministic fallback.
+      const v = getEntityVisual(schema ? { schema } : null, key)
+      return { color: v.color, Icon: iconByName(v.icon) }
+    }
+  }, [schema])
+
   const ctx = useMemo<CardCtx>(() => ({
     edgeTypeInfo,
+    visualFor,
     onSelect,
     onFocus,
     onToggleGroup,
@@ -768,10 +862,11 @@ export function FocusGraphView({
     onRetryFetch,
     onRevealOnCanvas,
     onOpenDetails,
-  }), [edgeTypeInfo, onSelect, onFocus, onToggleGroup, onToggleDrill, onExpandFrontier, onShowMore, onRetryFetch, onRevealOnCanvas, onOpenDetails])
+  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleGroup, onToggleDrill, onExpandFrontier, onShowMore, onRetryFetch, onRevealOnCanvas, onOpenDetails])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out
+
 
   const baseNodes = useMemo((): Node[] => {
     const minYByBand = new Map<number, number>()
@@ -787,7 +882,7 @@ export function FocusGraphView({
       selectable: false,
       focusable: false,
       data: card.kind === 'focal'
-        ? { card, ctx, focalStats: { in: focalIn, out: focalOut }, focalImpact, focalImpactLoading }
+        ? { card, ctx, focalStats: { in: focalIn, out: focalOut } }
         : { card, ctx },
     }))
     // Hop-band headers with honest shown/total counts.
@@ -826,7 +921,7 @@ export function FocusGraphView({
       }
     }
     return nodes
-  }, [graph.cards, graph.bandTotals, ctx, focalIn, focalOut, focalFetch, focalImpact, focalImpactLoading])
+  }, [graph.cards, graph.bandTotals, ctx, focalIn, focalOut, focalFetch])
 
   // Selection rides React Flow's own `selected` flag so changing it
   // re-renders exactly the affected memoized cards.
@@ -856,18 +951,15 @@ export function FocusGraphView({
         markerEnd: e.containment
           ? undefined
           : { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
-        data: {
-          count: e.count,
-          aggregated: e.aggregated,
-          containment: e.containment,
-          dimmed: e.dimmed,
-          tint,
-          emphasized: hoveredId != null && (e.source === hoveredId || e.target === hoveredId),
-          hoverActive: hoveredId != null,
-        },
+        data: { count: e.count, aggregated: e.aggregated, containment: e.containment, dimmed: e.dimmed, tint },
       }
     })
-  }, [graph.cards, graph.edges, hoveredId])
+  }, [graph.cards, graph.edges])
+
+  const impactValue = useMemo(
+    () => ({ impact: focalImpact, loading: focalImpactLoading }),
+    [focalImpact, focalImpactLoading],
+  )
 
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
   // Re-frame on focal swaps and expansion changes — the graph's shape
@@ -878,7 +970,10 @@ export function FocusGraphView({
       void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: 1 })
     }, 30)
     return () => window.clearTimeout(t)
-  }, [rf, focalId, graph.cards.length, reducedMotion])
+    // Deliberately NOT keyed on card count: expanding a card must grow
+    // the picture in place rather than yank the viewport off what you
+    // just opened (and re-frame-per-expansion was pure animation churn).
+  }, [rf, focalId, reducedMotion])
 
   return (
     <div
@@ -890,6 +985,8 @@ export function FocusGraphView({
         !reducedMotion && '[&_.react-flow__node]:transition-transform [&_.react-flow__node]:duration-300',
       )}
     >
+      <ImpactContext.Provider value={impactValue}>
+      <HoverContext.Provider value={hoveredId}>
       <ReactFlowProvider>
         <ReactFlow
           nodes={nodes}
@@ -918,6 +1015,8 @@ export function FocusGraphView({
           <GraphControls reducedMotion={reducedMotion} exportName={exportName} />
         </ReactFlow>
       </ReactFlowProvider>
+      </HoverContext.Provider>
+      </ImpactContext.Provider>
     </div>
   )
 }
