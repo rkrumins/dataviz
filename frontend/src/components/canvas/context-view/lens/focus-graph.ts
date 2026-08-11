@@ -243,6 +243,11 @@ export interface FocusCard {
    *  not tell `int_clean_orders_t1` from `int_clean_orders_t2`, which is
    *  precisely the "where does this column come from" complaint. */
   ancestry: string[]
+  /** Coarser grains this card also arrived as, folded into it — the
+   *  same connection restated at its ancestors' levels. Named so the
+   *  card can say what it now stands for instead of silently dropping
+   *  three cards the header still counts. */
+  alsoAtGrains: string[]
   /** This card's expansion completed and reached only entities that
    *  were already drawn — it contributed edges, not cards. Said out
    *  loud, because otherwise the click looks like it did nothing. */
@@ -356,6 +361,16 @@ export interface FocusGraphInput {
    *  offers; an open that finds nothing says so, which is a real
    *  answer rather than a missing button. */
   canContain: (type: string | undefined) => boolean
+  /**
+   * Fold a coarser partner into the finer one it is an ancestor of.
+   *
+   * `expandAggregated` reports one real connection at EVERY grain above
+   * it, so a single column→column fact arrives four times: the column,
+   * its table, its container, its platform. All four were drawn as
+   * separate cards ("4 connections · 3 rolled-up"), which is the same
+   * answer restated, not four answers. On, the finest card survives and
+   * says which grains it also stands for. */
+  foldCoarserRestatements?: boolean
   expandedGroups: ReadonlySet<string>
   expandedFrontier: ReadonlySet<string>
   /** Containers the user has opened, keyed `${dir}:${urn}`. */
@@ -453,7 +468,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     focalId, incomingRecords, outgoingRecords, edgesByEndpoint, nodeMap,
     containmentEdgeTypes, containsChildren, containsTotal, containsLoading, resolveParent,
     containsChildrenOf, openContains = EMPTY_SET, containsStatusOf,
-    isCoarser, canContain, expandedGroups, expandedFrontier, openContainers,
+    isCoarser, canContain, foldCoarserRestatements = false, expandedGroups, expandedFrontier, openContainers,
     containerResults, containerStatus, frameShowAll, frameAllResults,
     frameAllStatus, frameQueries, framePages, entityLevels,
     bandPages, query, hiddenTypes, degreeHints, fetchStatus,
@@ -516,7 +531,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
    * cannot stall a build.
    */
   const ancestryCache = new Map<string, string[]>()
-  const ancestryOf = (id: string): string[] => {
+  const ancestryIdsOf = (id: string): string[] => {
     const hit = ancestryCache.get(id)
     if (hit) return hit
     const out: string[] = []
@@ -524,13 +539,15 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     let p = resolveParent(id)
     while (p && !seen.has(p) && out.length < ANCESTRY_CAP) {
       seen.add(p)
-      out.push(labelOf(p, nodeMap.get(p)))
+      out.push(p)
       p = resolveParent(p)
     }
     out.reverse()
     ancestryCache.set(id, out)
     return out
   }
+  const ancestryOf = (id: string): string[] =>
+    ancestryIdsOf(id).map(a => labelOf(a, nodeMap.get(a)))
 
   /**
    * The ONE way a card reaches the output.
@@ -574,7 +591,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     count: 1, edgeTypeNorm: '', sumCount: 0,
     rollup: false, unresolved: false,
     aggregated: false,
-    frameId: null, depth: 0, ancestry: EMPTY_STRINGS, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
+    frameId: null, depth: 0, ancestry: EMPTY_STRINGS, alsoAtGrains: EMPTY_STRINGS, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
     connected: true, frameShowingAll: false, frameConnectedCount: 0,
     frameLoaded: 0, frameTotal: -1, frameHasMore: false, alreadyShown: false,
     framePage: 0, framePageSize: FRAME_ALL_CAP,
@@ -869,6 +886,33 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       }
 
       // Bucket by immediate known parent: ≥2 members → a group card.
+      // Fold coarser RESTATEMENTS of a connection into the finest one.
+      // `expandAggregated` reports the same fact at every grain above it,
+      // so one column→column connection arrives as the column, its table,
+      // its container and its platform — four cards for one answer, which
+      // is what "4 connections · 3 rolled-up" was counting. Keep the
+      // finest and let it say which grains it also stands for.
+      const foldedInto = new Map<string, string[]>()
+      if (foldCoarserRestatements) {
+        const present = new Map<string, BandEntry>()
+        for (const e of entryMap.values()) present.set(e.nodeId, e)
+        for (const e of [...entryMap.values()]) {
+          // Every ancestor of this entry that is ALSO a partner in this
+          // band is the same connection one grain coarser.
+          // Nearest ancestor first, so the marker reads outward: this
+          // column, also its table, its container, its platform.
+          for (const anc of [...ancestryIdsOf(e.nodeId)].reverse()) {
+            const coarser = present.get(anc)
+            if (!coarser) continue
+            entryMap.delete(anc)
+            present.delete(anc)
+            const t = (coarser.node?.data?.type as string) ?? UNRESOLVED_TYPE
+            const list = foldedInto.get(e.nodeId) ?? []
+            if (!list.includes(t)) list.push(t)
+            foldedInto.set(e.nodeId, list)
+          }
+        }
+      }
       const entries = [...entryMap.values()]
       const groups = new Map<string, BandEntry[]>()
       const standalone: BandEntry[] = []
@@ -970,6 +1014,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           parentId,
           parentLabel: parentId ? labelOf(parentId, nodeMap.get(parentId)) : null,
           ancestry: ancestryOf(entry.nodeId),
+          alsoAtGrains: foldedInto.get(entry.nodeId) ?? EMPTY_STRINGS,
           count: entry.count,
           edgeTypeNorm: entry.edgeTypeNorm,
           rollup: entry.rollup,

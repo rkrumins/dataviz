@@ -799,6 +799,35 @@ export function LineageLens({
     }
   }, [nodeId, graphCur.frameShowAll, onLoadAllChildren, containerResults])
 
+  /**
+   * Which grain the picture is drawn at.
+   *
+   * 'auto' folds a connection's coarser restatements into the finest one
+   * — `expandAggregated` reports the same fact at every level above it,
+   * so one column→column connection arrived as four cards. Choosing a
+   * specific grain shows only partners at that level, reusing the type
+   * chips' own hide-and-report-the-count machinery so nothing is ever
+   * lost silently.
+   */
+  const [grainState, setGrainState] = useState<{ nodeId: string | null; grain: string }>(
+    () => ({ nodeId: null, grain: 'auto' }),
+  )
+  const grain = grainState.nodeId === nodeId ? grainState.grain : 'auto'
+  const setGrain = useCallback((g: string) => setGrainState({ nodeId, grain: g }), [nodeId])
+
+  /** The chips' own hidden set, plus every type that is not the chosen
+   *  grain. One mechanism, so the "N hidden by the type chips" report
+   *  stays true whichever way something came to be hidden. */
+  const grainHidden = useMemo(() => {
+    if (grain === 'auto') return hiddenTypes
+    const next = new Set(hiddenTypes)
+    for (const r of [...incomingRecords, ...outgoingRecords]) {
+      const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
+      if (t !== grain) next.add(t)
+    }
+    return next
+  }, [grain, hiddenTypes, incomingRecords, outgoingRecords])
+
   // The pure graph build — every semantic decision (grouping, rollups,
   // drills, frontier hops, caps, filter dimming, layout) lives in
   // focus-graph.ts where it's unit-tested without React Flow.
@@ -833,7 +862,8 @@ export function LineageLens({
       entityLevels,
       bandPages: graphCur.bandPages,
       query,
-      hiddenTypes,
+      hiddenTypes: grainHidden,
+      foldCoarserRestatements: grain === 'auto',
       degreeHints,
       fetchStatus,
     })
@@ -845,7 +875,7 @@ export function LineageLens({
     graphCur.framePages, graphCur.bandPages, graphCur.frameShowAll, childrenStatusOf,
     graphCur.openContains, containsKidsById, containsStatusById,
     containerResults, containerStatus, frameAllResults, frameAllStatus,
-    entityLevels, query, hiddenTypes, degreeHints, fetchStatus,
+    entityLevels, query, grainHidden, grain, degreeHints, fetchStatus,
   ])
 
   // Any frame on the board with no answer and no fetch in flight gets
@@ -1417,6 +1447,38 @@ export function LineageLens({
                 is exactly where the tallest bands start. */}
             {(graphTypeChips.length > 1 || focusGraph.hiddenByChips > 0) && (
               <div className="flex-shrink-0 flex flex-wrap items-center gap-x-2 gap-y-1 px-3 pt-2 pb-1">
+                {/* GRAIN — the answer to "at what level am I looking?".
+                    One real connection is reported at every level above
+                    it, so Auto keeps the finest and folds the rest into
+                    it; picking a level shows only partners there. */}
+                {graphTypeChips.length > 1 && (
+                  <div
+                    role="group"
+                    aria-label="Grain to show connections at"
+                    className="flex items-center gap-0.5 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.03]"
+                  >
+                    <span className="pl-1.5 pr-1 text-[9px] font-semibold uppercase tracking-wide text-ink-muted/60">Grain</span>
+                    {([['auto', 'Auto'] as const, ...graphTypeChips.map(([t]) => [t, t] as const)]).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setGrain(value)}
+                        aria-pressed={grain === value}
+                        title={value === 'auto'
+                          ? 'Finest grain per connection — a connection also reported at coarser levels is folded into it'
+                          : `Show only ${label} connections`}
+                        className={cn(
+                          'px-1.5 py-0.5 rounded-md text-[9px] font-semibold uppercase tracking-wide transition-colors',
+                          grain === value
+                            ? 'bg-accent-lineage/15 text-accent-lineage'
+                            : 'text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]',
+                        )}
+                      >
+                        {label === 'not loaded' ? 'unresolved' : label}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {graphTypeChips.length > 1 && (
                   <TypeChips chips={graphTypeChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} />
                 )}

@@ -179,7 +179,7 @@ function sameCard(a: FocusCard, b: FocusCard): boolean {
   const keys = Object.keys(a) as Array<keyof FocusCard>
   if (keys.length !== Object.keys(b).length) return false
   for (const k of keys) {
-    if (k === 'frameBreadcrumb' || k === 'previewLabels' || k === 'partnerIds' || k === 'ancestry') {
+    if (k === 'frameBreadcrumb' || k === 'previewLabels' || k === 'partnerIds' || k === 'ancestry' || k === 'alsoAtGrains') {
       const x = a[k], y = b[k]
       if (x.length !== y.length || x.some((v, i) => v !== y[i])) return false
       continue
@@ -781,6 +781,21 @@ function FocusGraphCard({ data, selected }: NodeProps) {
               >
                 {edgeLabelFor(card.edgeTypeNorm, ctx.edgeTypeInfo)}
               </span>
+            </>
+          )}
+          {card.alsoAtGrains.length > 0 && (
+            <>
+              {/* This card absorbed the same connection restated at its
+                  ancestors' grains. Say so — three cards vanishing while
+                  the header still counts them would be silent loss. */}
+              <span
+                className="flex-shrink-0 flex items-center gap-0.5 px-1 rounded bg-black/[0.04] dark:bg-white/[0.06] text-[8.5px] uppercase tracking-wide text-ink-muted/70"
+                title={`Also reported at ${card.alsoAtGrains.join(', ')} grain — the same connection, one level coarser each time`}
+              >
+                <LucideIcons.Layers2 className="w-2.5 h-2.5" />
+                +{card.alsoAtGrains.length}
+              </span>
+              <span className="text-ink-muted/40">·</span>
             </>
           )}
           {card.count > 1 && (

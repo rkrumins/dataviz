@@ -1147,6 +1147,63 @@ describe('buildFocusGraph — caps, chips, filter', () => {
   })
 })
 
+describe('buildFocusGraph — grain', () => {
+  /** The reported shape: ONE column→column connection, reported again at
+   *  the column's table, its container and its platform. Four cards, one
+   *  answer — "4 connections · 3 rolled-up". */
+  const restated = {
+    nodes: [
+      node('F', 'schemaField'), node('up', 'schemaField'),
+      node('tbl', 'dataset'), node('CTR', 'CONTAINER'), node('Plat', 'DATAPLATFORM'),
+    ],
+    edges: [
+      edge('e1', 'up', 'F'),
+      edge('e2', 'tbl', 'F'), edge('e3', 'CTR', 'F'), edge('e4', 'Plat', 'F'),
+      contains('k1', 'Plat', 'CTR'), contains('k2', 'CTR', 'tbl'), contains('k3', 'tbl', 'up'),
+    ],
+    isCoarser: (t?: string) => t === 'CONTAINER' || t === 'DATAPLATFORM' || t === 'dataset',
+  }
+
+  it('folds coarser restatements into the finest connection', () => {
+    const g = build({ ...restated, over: { foldCoarserRestatements: true } })
+    // One card, not four.
+    expect(g.cards.filter(c => c.band === -1)).toHaveLength(1)
+    const kept = card(g, 'n:up')
+    // And it SAYS what it now stands for — three cards vanishing while
+    // the header still counts them would be silent loss.
+    expect(kept.alsoAtGrains).toEqual(['dataset', 'CONTAINER', 'DATAPLATFORM'])
+  })
+
+  it('leaves them alone when folding is off', () => {
+    const g = build({ ...restated, over: { foldCoarserRestatements: false } })
+    expect(g.cards.filter(c => c.band === -1)).toHaveLength(4)
+    expect(card(g, 'n:up').alsoAtGrains).toEqual([])
+  })
+
+  it('never folds a coarser partner that is NOT an ancestor of a finer one', () => {
+    // An unrelated platform is a real, separate connection.
+    const g = build({
+      nodes: [node('F', 'schemaField'), node('up', 'schemaField'), node('Other', 'DATAPLATFORM')],
+      edges: [edge('e1', 'up', 'F'), edge('e2', 'Other', 'F')],
+      isCoarser: (t?: string) => t === 'DATAPLATFORM',
+      over: { foldCoarserRestatements: true },
+    })
+    expect(g.cards.filter(c => c.band === -1)).toHaveLength(2)
+    expect(card(g, 'n:up').alsoAtGrains).toEqual([])
+  })
+
+  it('choosing one grain hides the others and reports how many', () => {
+    // What the Grain control does: everything but the chosen level goes
+    // through the chips' own hide-and-report path, never silent loss.
+    const g = build({
+      ...restated,
+      over: { hiddenTypes: new Set(['schemaField', 'CONTAINER', 'DATAPLATFORM']) },
+    })
+    expect(g.cards.filter(c => c.band === -1).map(c => c.nodeId)).toEqual(['tbl'])
+    expect(g.hiddenByChipsIn).toBe(3)
+  })
+})
+
 describe('buildFocusGraph — provenance', () => {
   // REGRESSION: the card carried ONE parent, rendered end-truncated at
   // 80px, so `int_clean_orders_t1` and `int_clean_orders_t2` were both
