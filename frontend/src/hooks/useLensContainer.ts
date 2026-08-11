@@ -89,6 +89,9 @@ export interface LensContainerData {
    *  container. No-op until that open has resolved — the anchor to ask
    *  about is only known once the pass-through walk has finished. */
   loadAllChildren: (openKey: string, focalUrn: string) => void
+  /** Fetch (or page further into) any entity's children — the focal's
+   *  own contents, or a contained child's, without leaving the lens. */
+  loadChildrenOf: (nodeUrn: string, focalUrn: string) => void
   /** Open a container against the entity it is actually connected to
    *  (idempotent per key). `partnerUrn` is the focal only at the first
    *  hop — further out it is the card's previous-band partner, and
@@ -132,6 +135,10 @@ export const openKeyOf = (
   containerUrn: string,
   direction: ContainerDirection,
 ): string => `${direction}:${containerUrn}`
+
+/** Cache key for "the children of this entity", deliberately outside
+ *  the `${dir}:${urn}` space that opened containers use. */
+export const childrenKeyOf = (nodeUrn: string): string => `kids:${nodeUrn}`
 
 /**
  * Answers are stored per focal, because an answer only means anything
@@ -312,28 +319,24 @@ export function useLensContainer(
    * endpoint returns are scoped to the page's own siblings and never
    * include the focal — the pair-filtered open already answered that.
    */
-  const loadAllChildren = useCallback((openKey: string, focalUrn: string) => {
-    const open = stateRef.current.results.get(focalUrn)?.get(openKey)
-    // Until the open resolves we don't know WHICH container to ask about
-    // — pass-through levels may still be being walked.
-    if (!open) return
+  const pageChildren = useCallback((cacheKey: string, anchorUrn: string, focalUrn: string) => {
     if (!provider) {
-      setState(prev => ({ ...prev, allStatus: setIn(prev.allStatus, focalUrn, openKey, 'unsupported') }))
+      setState(prev => ({ ...prev, allStatus: setIn(prev.allStatus, focalUrn, cacheKey, 'unsupported') }))
       return
     }
-    const inFlightKey = `${focalUrn}|${openKey}`
+    const inFlightKey = `${focalUrn}|${cacheKey}`
     if (inFlightRef.current.has(inFlightKey)) return
 
-    const loaded = stateRef.current.allResults.get(focalUrn)?.get(openKey)
+    const loaded = stateRef.current.allResults.get(focalUrn)?.get(cacheKey)
     if (loaded && !loaded.hasMore) return // fully drained already
 
     const session = sessionRef.current
     inFlightRef.current.add(inFlightKey)
-    setState(prev => ({ ...prev, allStatus: setIn(prev.allStatus, focalUrn, openKey, 'loading') }))
+    setState(prev => ({ ...prev, allStatus: setIn(prev.allStatus, focalUrn, cacheKey, 'loading') }))
 
     void (async () => {
       try {
-        const res = await provider.getChildrenWithEdges(open.anchorUrn, {
+        const res = await provider.getChildrenWithEdges(anchorUrn, {
           limit: CHILDREN_PAGE_SIZE,
           offset: loaded?.children.length ?? 0,
           includeLineageEdges: false,
@@ -341,11 +344,11 @@ export function useLensContainer(
         if (session !== sessionRef.current) return
         const page = res.children.map(n => toCanvasNode(n))
         setState(prev => {
-          const prevPage = prev.allResults.get(focalUrn)?.get(openKey)
+          const prevPage = prev.allResults.get(focalUrn)?.get(cacheKey)
           const children = [...(prevPage?.children ?? []), ...page]
           return {
             ...prev,
-            allResults: setIn(prev.allResults, focalUrn, openKey, {
+            allResults: setIn(prev.allResults, focalUrn, cacheKey, {
               children,
               hasMore: res.hasMore,
               // Draining the last page is the one moment we know the
@@ -353,17 +356,40 @@ export function useLensContainer(
               // endpoint's own totalChildren is a paging heuristic.
               total: res.hasMore ? null : children.length,
             }),
-            allStatus: setIn(prev.allStatus, focalUrn, openKey, 'done'),
+            allStatus: setIn(prev.allStatus, focalUrn, cacheKey, 'done'),
           }
         })
       } catch {
         if (session !== sessionRef.current) return
-        setState(prev => ({ ...prev, allStatus: setIn(prev.allStatus, focalUrn, openKey, 'error') }))
+        setState(prev => ({ ...prev, allStatus: setIn(prev.allStatus, focalUrn, cacheKey, 'error') }))
       } finally {
         inFlightRef.current.delete(inFlightKey)
       }
     })()
   }, [provider])
+
+  const loadAllChildren = useCallback((openKey: string, focalUrn: string) => {
+    const open = stateRef.current.results.get(focalUrn)?.get(openKey)
+    // Until the open resolves we don't know WHICH container to ask
+    // about — pass-through levels may still be being walked.
+    if (!open) return
+    pageChildren(openKey, open.anchorUrn, focalUrn)
+  }, [pageChildren])
+
+  /**
+   * The children of ANY entity, asked for directly.
+   *
+   * The lens used to derive an entity's children purely from
+   * containment edges that happened to be loaded on the canvas, while
+   * reading the real total from `childCount`. So it would say "contains
+   * 128" and have no way to show one of them: you had to leave Focus
+   * mode, expand the node on the canvas, and come back. This is the
+   * fetch that was missing.
+   */
+  const loadChildrenOf = useCallback(
+    (nodeUrn: string, focalUrn: string) => pageChildren(childrenKeyOf(nodeUrn), nodeUrn, focalUrn),
+    [pageChildren],
+  )
 
   // Session lifecycle: clear everything when the lens closes so a new
   // session starts from the data source, not from a stale picture.
@@ -385,5 +411,5 @@ export function useLensContainer(
   const allResults = (focalId ? state.allResults.get(focalId) : undefined) ?? EMPTY_ALL
   const allStatus = (focalId ? state.allStatus.get(focalId) : undefined) ?? EMPTY_STATUS
 
-  return { results, status, allResults, allStatus, loadAllChildren, openContainer, retry }
+  return { results, status, allResults, allStatus, loadAllChildren, loadChildrenOf, openContainer, retry }
 }

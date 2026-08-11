@@ -152,6 +152,12 @@ export interface LineageLensProps {
   frameAllStatus?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
   /** Fetch (or page further into) an opened container's full child list. */
   onLoadAllChildren?: (openKey: string) => void
+  /** Children the lens fetched for an entity in its own right, keyed by
+   *  entity id — the focal's contents, and any contained child's. */
+  childrenOf?: Map<string, { children: LineageNode[]; hasMore: boolean; total: number | null }>
+  childrenStatusOf?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
+  /** Ask for an entity's children without leaving the lens. */
+  onLoadChildrenOf?: (nodeId: string) => void
   /** Ask the server what's inside a container that connects to
    *  `partnerUrn` — the card's partner in the picture, which is the
    *  focal only at the first hop. */
@@ -200,6 +206,9 @@ export function LineageLens({
   frameAllResults,
   frameAllStatus,
   onLoadAllChildren,
+  childrenOf,
+  childrenStatusOf,
+  onLoadChildrenOf,
   onOpenContainer,
   onRetryOpenContainer,
   impact,
@@ -268,10 +277,13 @@ export function LineageLens({
     if (frameAllResults) for (const r of frameAllResults.values()) {
       for (const n of r.children) m.set(n.id, n)
     }
+    if (childrenOf) for (const r of childrenOf.values()) {
+      for (const n of r.children) m.set(n.id, n)
+    }
     if (supplementalNodes) for (const [id, n] of supplementalNodes) m.set(id, n)
     for (const n of nodes) m.set(n.id, n)
     return m
-  }, [nodes, supplementalNodes, containerResults, frameAllResults, lensOpen])
+  }, [nodes, supplementalNodes, containerResults, frameAllResults, childrenOf, lensOpen])
 
   // Store edges (canvas truth) merged with on-demand fetched edges
   // (data-source truth). A fetched edge is redundant — and skipped —
@@ -355,8 +367,18 @@ export function LineageLens({
         children.push(e.target)
       }
     }
+    // Children the lens FETCHED itself. Without this the stack could
+    // only ever show children that happened to be loaded on the canvas
+    // already — so an entity would say "contains 128" and show none of
+    // them until you left Focus mode, expanded it on the canvas, and
+    // came back.
+    for (const n of childrenOf?.get(nodeId)?.children ?? []) {
+      if (seen.has(n.id)) continue
+      seen.add(n.id)
+      children.push(n.id)
+    }
     return children
-  }, [nodeId, edgesByEndpoint, containmentEdgeTypes])
+  }, [nodeId, edgesByEndpoint, containmentEdgeTypes, childrenOf])
 
   // ── Grain machinery — data-driven from the schema's entity-type
   // hierarchy. closure(T) = every type T can transitively contain; a
@@ -628,6 +650,20 @@ export function LineageLens({
   // A restored link on a wide table paged itself to the end with no
   // user action. Paging past the first page is a deliberate gesture
   // now: the frame's "Load more" control.
+  // The focal's own contents, asked for once. `childCount` is the
+  // entity's own claim about how many it has; when it says "some" and
+  // the canvas happens to have loaded none, the lens fetches them
+  // rather than showing a count it cannot open.
+  const focalKidsAskedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!nodeId || !onLoadChildrenOf) return
+    if (focalKidsAskedRef.current === nodeId) return
+    const known = (nodeMap.get(nodeId)?.data?.childCount as number | undefined) ?? 0
+    if (known <= 0) return
+    focalKidsAskedRef.current = nodeId
+    onLoadChildrenOf(nodeId)
+  }, [nodeId, nodeMap, onLoadChildrenOf])
+
   const firstPageAskedRef = useRef<Set<string>>(new Set())
   useEffect(() => {
     if (!nodeId) { firstPageAskedRef.current.clear(); return }
@@ -654,6 +690,7 @@ export function LineageLens({
       containmentEdgeTypes,
       containsChildren: focalChildren,
       containsTotal: (nodeMap.get(nodeId)?.data?.childCount as number | undefined) ?? 0,
+      containsLoading: childrenStatusOf?.get(nodeId) === 'loading',
       resolveParent,
       isCoarser: isCoarserThan,
       expandedGroups: graphCur.expandedGroups,
@@ -678,7 +715,7 @@ export function LineageLens({
     edgesByEndpoint, nodeMap, containmentEdgeTypes, focalChildren,
     resolveParent, isCoarserThan, graphCur.expandedGroups,
     graphCur.expandedFrontier, graphCur.openContainers, graphCur.frameQueries,
-    graphCur.framePages, graphCur.bandPages, graphCur.frameShowAll,
+    graphCur.framePages, graphCur.bandPages, graphCur.frameShowAll, childrenStatusOf,
     containerResults, containerStatus, frameAllResults, frameAllStatus,
     entityLevels, query, hiddenTypes, degreeHints, fetchStatus,
   ])

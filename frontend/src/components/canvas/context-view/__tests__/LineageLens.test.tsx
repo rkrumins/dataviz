@@ -588,6 +588,61 @@ describe('LineageLens graph mode', () => {
     expect(screen.queryByText('+5 more')).toBeNull()
   })
 
+  // REGRESSION: the contains stack was derived ONLY from containment
+  // edges already on the canvas, while its total came from childCount.
+  // So the lens would say "contains 128" and show none of them: you had
+  // to leave Focus mode, expand the node on the canvas, and come back.
+  it('asks for the focal\'s children, and shows them, without visiting the canvas', () => {
+    const withKids = { ...node('ds'), data: { ...node('ds').data, childCount: 3 } } as LineageNode
+    useCanvasStore.setState({
+      nodes: [withKids],
+      edges: [],                      // no containment edges loaded at all
+      visibleEdges: [],
+    } as never)
+    const onLoadChildrenOf = vi.fn()
+    const { rerender } = render(
+      <LineageLens
+        history={{ entries: ['ds'], cursor: 0 }}
+        onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
+        onLoadChildrenOf={onLoadChildrenOf}
+      />,
+    )
+    // It asks, because the entity says it has children.
+    expect(onLoadChildrenOf).toHaveBeenCalledWith('ds')
+
+    // And once the answer lands, they are on screen — no canvas trip.
+    rerender(
+      <LineageLens
+        history={{ entries: ['ds'], cursor: 0 }}
+        onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
+        onLoadChildrenOf={onLoadChildrenOf}
+        childrenOf={new Map([['ds', {
+          children: [node('col_a'), node('col_b'), node('col_c')],
+          hasMore: false,
+          total: 3,
+        }]])}
+        childrenStatusOf={new Map([['ds', 'done' as const]])}
+      />,
+    )
+    // The stack starts collapsed, but it now names a real, openable
+    // total rather than a count with nothing behind it.
+    fireEvent.click(screen.getByText('contains 3'))
+    // Named, not rendered as a urn tail — fetched children reach the
+    // lens's node map like any other resolved entity.
+    expect(screen.getByText('label-col_a')).toBeTruthy()
+    expect(screen.getByText('label-col_b')).toBeTruthy()
+    expect(screen.getByText('label-col_c')).toBeTruthy()
+  })
+
+  it('does not ask for children of an entity that reports none', () => {
+    useCanvasStore.setState({
+      nodes: [node('ds')], edges: [], visibleEdges: [],
+    } as never)
+    const onLoadChildrenOf = vi.fn()
+    renderLens(['ds'], {}, { onLoadChildrenOf })
+    expect(onLoadChildrenOf).not.toHaveBeenCalled()
+  })
+
   // REGRESSION: container answers were passed straight into the graph
   // builder and nowhere else, so entities the server had just NAMED for
   // an opened frame were unknown to the rest of the lens — they rendered

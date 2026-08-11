@@ -107,7 +107,15 @@ import {
 import { decodeLensShare } from './lens/shareCodec'
 import { useLensLineage } from '@/hooks/useLensLineage'
 import { useLensImpact } from '@/hooks/useLensImpact'
-import { useLensContainer } from '@/hooks/useLensContainer'
+import {
+  useLensContainer,
+  childrenKeyOf,
+  type ContainerAllResult,
+  type LensContainerStatus,
+} from '@/hooks/useLensContainer'
+
+/** `childrenKeyOf('')` — the prefix its keys carry. */
+const CHILDREN_KEY_PREFIX = childrenKeyOf('')
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -3141,6 +3149,23 @@ export function ContextViewCanvas({
   // "What's inside this container that connects to my focus" — the
   // descendant-pair expansion, held lens-locally like everything else.
   const lensContainer = useLensContainer(lensFocalOf(lensHistory), provider, lineageEdgeTypes)
+  // The hook caches "children of X" under a `kids:` key alongside the
+  // container answers; the lens thinks in entity ids, so re-key here.
+  const lensChildren = useMemo(() => {
+    const results = new Map<string, ContainerAllResult>()
+    const status = new Map<string, LensContainerStatus>()
+    for (const [k, v] of lensContainer.allResults) {
+      if (k.startsWith(CHILDREN_KEY_PREFIX)) results.set(k.slice(CHILDREN_KEY_PREFIX.length), v)
+    }
+    for (const [k, v] of lensContainer.allStatus) {
+      if (k.startsWith(CHILDREN_KEY_PREFIX)) status.set(k.slice(CHILDREN_KEY_PREFIX.length), v)
+    }
+    return { results, status }
+  }, [lensContainer.allResults, lensContainer.allStatus])
+  const loadLensChildrenOf = useCallback((entityId: string) => {
+    const focal = lensFocalOf(lensHistory)
+    if (focal) lensContainer.loadChildrenOf(entityId, focal)
+  }, [lensContainer, lensHistory])
   useEffect(() => {
     focusLensRef.current = () => {
       const target = selectedNodeId ?? drawerNodeId
@@ -3926,6 +3951,9 @@ export function ContextViewCanvas({
           containerStatus={lensContainer.status}
           frameAllResults={lensContainer.allResults}
           frameAllStatus={lensContainer.allStatus}
+          childrenOf={lensChildren.results}
+          childrenStatusOf={lensChildren.status}
+          onLoadChildrenOf={loadLensChildrenOf}
           onLoadAllChildren={(openKey) => {
             const focal = lensFocalOf(lensHistory)
             if (focal) lensContainer.loadAllChildren(openKey, focal)

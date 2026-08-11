@@ -211,6 +211,9 @@ export interface FocusGraphInput {
   containsChildren: string[]
   /** Honest total for the contains stack (childCount can exceed loaded). */
   containsTotal?: number
+  /** The focal's own children are being fetched — say so rather than
+   *  printing a count the user cannot open yet. */
+  containsLoading?: boolean
   resolveParent: (id: string) => string | null
   /** isCoarser(partnerType, baseType) — coarser-grain rollup test. */
   isCoarser: (type: string | undefined, baseType: string) => boolean
@@ -303,7 +306,7 @@ const recordCount = (r: NeighborRecord): number => Math.max(r.bundledCount, 1)
 export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const {
     focalId, incomingRecords, outgoingRecords, edgesByEndpoint, nodeMap,
-    containmentEdgeTypes, containsChildren, containsTotal, resolveParent,
+    containmentEdgeTypes, containsChildren, containsTotal, containsLoading, resolveParent,
     isCoarser, expandedGroups, expandedFrontier, openContainers,
     containerResults, containerStatus, frameShowAll, frameAllResults,
     frameAllStatus, frameQueries, framePages, entityLevels,
@@ -477,9 +480,11 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       nodeId: null,
       band: 0,
       h: OVERFLOW_H,
-      label: containsShown.length === 0
-        ? `contains ${containsTotalAll.toLocaleString()}`
-        : `+${(containsTotalAll - containsShown.length).toLocaleString()} more contained`,
+      label: containsLoading && containsShown.length === 0
+        ? `loading ${containsTotalAll.toLocaleString()} contained…`
+        : containsShown.length === 0
+          ? `contains ${containsTotalAll.toLocaleString()}`
+          : `+${(containsTotalAll - containsShown.length).toLocaleString()} more contained`,
       type: 'entity',
       expandKey: 'contains',
       expandKind: 'more',
