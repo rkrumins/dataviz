@@ -396,10 +396,12 @@ describe('buildFocusGraph — grouping and rollups', () => {
 
     // Page 2 REPLACES page 1 — the window moves, the frame does not grow.
     const paged = build({ ...base, over: { ...over, framePages: new Map([['in:Snowflake', 1]]) } })
-    expect(inFrame(paged)).toHaveLength(3)
-    expect(inFrame(paged).map(c => c.nodeId)).toEqual(['k12', 'k13', 'k14'])
+    const tail = kids.slice(FRAME_CHILD_CAP).map(k => k.id)
+    expect(inFrame(paged).map(c => c.nodeId)).toEqual(tail)
     expect(inFrame(paged).some(c => c.nodeId === 'k00')).toBe(false)
-    expect(framePager(card(paged, 'fr:in:Snowflake'))).toMatchObject({ from: 13, to: 15, canPrev: true, canNext: false })
+    expect(framePager(card(paged, 'fr:in:Snowflake'))).toMatchObject({
+      from: FRAME_CHILD_CAP + 1, to: kids.length, canPrev: true, canNext: false,
+    })
     // And there is no "+N more" card raising a cap any more.
     expect(paged.cards.find(c => c.id === 'more:fr:in:Snowflake')).toBeUndefined()
   })
@@ -551,7 +553,8 @@ describe('buildFocusGraph — grouping and rollups', () => {
     } })
     const note = card(empty, 'note:c:col')
     expect(note.label).toBe('Nothing inside label-col')
-    expect(note.expandKey).toBeNull()          // a statement, not a button
+    expect(note.expandKind).toBeNull()         // a statement, not a button
+    expect(note.expandKey).toBeNull()
     expect(note.parentId).toBe('col')
 
     const failed = build({ ...base, over: {
@@ -559,8 +562,11 @@ describe('buildFocusGraph — grouping and rollups', () => {
       containsStatusOf: new Map([['col', 'error' as const]]),
     } })
     expect(card(failed, 'c:col').fetch).toBe('error')
-    expect(card(failed, 'note:c:col').label).toBe("Couldn't look inside label-col")
-    expect(card(failed, 'note:c:col').expandKey).toBe('kids:col')   // retry works
+    expect(card(failed, 'note:c:col').label).toBe("Couldn't look inside label-col — retry")
+    // A real retry, not a 'more' whose key routes to the band pager —
+    // which reads nothing of the sort, so that retry was itself dead.
+    expect(card(failed, 'note:c:col').expandKind).toBe('retry')
+    expect(card(failed, 'note:c:col').parentId).toBe('col')
 
     // Still loading is the chevron's own spinner — no premature verdict.
     const loading = build({ ...base, over: {

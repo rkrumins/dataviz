@@ -114,6 +114,9 @@ interface CardCtx {
   /** Open / close a contains-stack row into what IT holds. Pure
    *  containment — no partner, no lineage question. */
   onToggleContains: (nodeId: string) => void
+  /** Re-ask for a contains row's children after a failed fetch, without
+   *  toggling the row shut. */
+  onRetryContains: (nodeId: string) => void
   onShowMore: (bandKey: string) => void
   /** Move a frame's fixed page window to `page` (0-based), fetching the
    *  next server page when the window runs past what has loaded. */
@@ -152,6 +155,7 @@ interface FocusGraphViewProps {
   onOpenContainer: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
   onExpandFrontier: (expandKey: string, nodeId: string) => void
   onToggleContains: (nodeId: string) => void
+  onRetryContains: (nodeId: string) => void
   onShowMore: (bandKey: string) => void
   onSetFramePage: (openKey: string, page: number) => void
   onFrameQuery: (openKey: string, q: string) => void
@@ -373,6 +377,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       // A 'focus' overflow is the door at the end of the contains stack:
       // it re-centers rather than paging a column that cannot page.
       if (card.expandKind === 'focus' && card.parentId) ctx.onFocus(card.parentId)
+      else if (card.expandKind === 'retry' && card.parentId) ctx.onRetryContains(card.parentId)
       else if (card.expandKey) ctx.onShowMore(card.expandKey)
       return
     }
@@ -386,11 +391,14 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   // ── Overflow: the honest "+N more" card ──
   if (card.kind === 'overflow') {
     const toFocus = card.expandKind === 'focus'
+    const toRetry = card.expandKind === 'retry'
     // A card with nothing to do is a STATEMENT, not a button — an
     // "Nothing inside X" row that looked clickable and did nothing was
     // the thing this whole pass is removing.
-    const inert = !toFocus && !card.expandKey
-    const Icon = toFocus ? LucideIcons.Focus : LucideIcons.ChevronDown
+    const inert = !toFocus && !toRetry && !card.expandKey
+    const Icon = toFocus ? LucideIcons.Focus
+      : toRetry ? LucideIcons.RotateCw
+      : LucideIcons.ChevronDown
     if (inert) {
       return (
         <p
@@ -407,7 +415,9 @@ function FocusGraphCard({ data, selected }: NodeProps) {
         onClick={activate}
         title={toFocus
           ? `Focus ${card.label.replace(/ — focus it$/, '')} — its contents become the top level`
-          : `Show more (${card.overflowCount.toLocaleString()} not shown)`}
+          : toRetry
+            ? 'Ask the data source again'
+            : `Show more (${card.overflowCount.toLocaleString()} not shown)`}
         style={{ width: card.w, height: card.h }}
         className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-muted/35 text-[11px] font-medium text-ink-muted hover:text-ink hover:border-ink-muted/60 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
       >
@@ -1204,6 +1214,7 @@ export function FocusGraphView({
   onOpenContainer,
   onExpandFrontier,
   onToggleContains,
+  onRetryContains,
   onShowMore,
   onSetFramePage,
   onFrameQuery,
@@ -1247,6 +1258,7 @@ export function FocusGraphView({
     onOpenContainer,
     onExpandFrontier,
     onToggleContains,
+    onRetryContains,
     onShowMore,
     onSetFramePage,
     onFrameQuery,
@@ -1257,7 +1269,7 @@ export function FocusGraphView({
     onRetryFetch,
     onRevealOnCanvas,
     onOpenDetails,
-  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleGroup, onOpenContainer, onExpandFrontier, onToggleContains, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
+  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleGroup, onOpenContainer, onExpandFrontier, onToggleContains, onRetryContains, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out

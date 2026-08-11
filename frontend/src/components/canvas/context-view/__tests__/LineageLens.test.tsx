@@ -14,6 +14,7 @@ import { deriveNeighborRecords } from '@/lib/lineage-neighbors'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
+import { FRAME_ALL_CAP } from '../lens/focus-graph'
 
 const node = (id: string, type = 'dataset'): LineageNode => ({
   id,
@@ -872,21 +873,23 @@ describe('LineageLens graph mode', () => {
       })
 
       const atMount = onLoadAllChildren.mock.calls.length
+      const rows = cols.length + 1        // + the connected child the open found
+      const pages = Math.ceil(rows / FRAME_ALL_CAP)
       // 429, not 428: the one child the pair-filtered open found is
       // appended to the server's child list, and the pager counts the
       // rows it can actually reach rather than stranding it.
-      expect(screen.getByText(/showing 1–20 of 429/)).toBeTruthy()
-      expect(screen.getByText('page 1 of 22')).toBeTruthy()
+      expect(screen.getByText(new RegExp(`showing 1–${FRAME_ALL_CAP} of ${rows}`))).toBeTruthy()
+      expect(screen.getByText(`page 1 of ${pages}`)).toBeTruthy()
       expect(screen.getByText('label-col000')).toBeTruthy()
-      expect(screen.queryByText('label-col020')).toBeNull()
+      expect(screen.queryByText(`label-col${String(FRAME_ALL_CAP).padStart(3, '0')}`)).toBeNull()
       // Nothing to go back to yet.
       expect(screen.getByTitle('Previous page').hasAttribute('disabled')).toBe(true)
 
       fireEvent.click(screen.getByTitle('Next page'))
-      expect(screen.getByText(/showing 21–40 of 429/)).toBeTruthy()
-      expect(screen.getByText('page 2 of 22')).toBeTruthy()
+      expect(screen.getByText(new RegExp(`showing ${FRAME_ALL_CAP + 1}–${FRAME_ALL_CAP * 2} of ${rows}`))).toBeTruthy()
+      expect(screen.getByText(`page 2 of ${pages}`)).toBeTruthy()
       // The window MOVED — page 1's rows are gone, not stacked above.
-      expect(screen.getByText('label-col020')).toBeTruthy()
+      expect(screen.getByText(`label-col${String(FRAME_ALL_CAP).padStart(3, '0')}`)).toBeTruthy()
       expect(screen.queryByText('label-col000')).toBeNull()
       // Everything is already loaded, so turning a page asks for nothing
       // beyond the frame's own first-page kick at mount.
@@ -894,7 +897,8 @@ describe('LineageLens graph mode', () => {
     }))
 
     it('asks the server for one more page only when the window runs past what is loaded', () => withSchema(() => {
-      const cols = Array.from({ length: 40 }, (_, i) => node(`col${String(i).padStart(3, '0')}`, 'DATASET'))
+      // Exactly one window's worth fetched, with more on the server.
+      const cols = Array.from({ length: FRAME_ALL_CAP }, (_, i) => node(`col${String(i).padStart(3, '0')}`, 'DATASET'))
       const onLoadAllChildren = vi.fn()
       openFrame({
         onLoadAllChildren,
@@ -906,18 +910,14 @@ describe('LineageLens graph mode', () => {
         frameAllStatus: new Map([['in:plat', 'done' as const]]),
       })
       // Total unknown while the server still has more — the page count
-      // is a floor, never a guess. (41 loaded: 40 columns plus the one
-      // connected child the open found.)
-      expect(screen.getByText('page 1 of 3+')).toBeTruthy()
+      // is a floor, never a guess.
+      expect(screen.getByText(/^page 1 of \d+\+$/)).toBeTruthy()
       const atMount = onLoadAllChildren.mock.calls.length
 
-      // Page 2 is inside the fetched set: no further fetch.
-      fireEvent.click(screen.getByTitle('Next page'))
-      expect(onLoadAllChildren).toHaveBeenCalledTimes(atMount)
-      // Page 3 needs rows 41-60, one past what loaded: exactly one fetch.
+      // Page 2 runs past the fetched set: exactly one fetch.
       fireEvent.click(screen.getByTitle('Next page'))
       expect(onLoadAllChildren).toHaveBeenCalledTimes(atMount + 1)
-      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat')
+      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat', '')
     }))
 
     // REGRESSION: Find dimmed the loaded page client-side, so a column
@@ -937,7 +937,7 @@ describe('LineageLens graph mode', () => {
           frameAllStatus: new Map([['in:plat', 'done' as const]]),
         })
         fireEvent.click(screen.getByTitle('Next page'))
-        expect(screen.getByText('page 2 of 4')).toBeTruthy()
+        expect(screen.getByText(/^page 2 of /)).toBeTruthy()
         onLoadAllChildren.mockClear()
 
         fireEvent.change(screen.getByPlaceholderText('Find…'), { target: { value: 'order' } })
@@ -959,9 +959,9 @@ describe('LineageLens graph mode', () => {
     // then re-ran the search 300ms later. One click, two round trips, a
     // flash of unrelated rows, and the window snapped back to page 1.
     it('keeps an active search when you turn the page or retry', () => withSchema(() => {
-      // 30 matches loaded with more on the server: page 2 wants rows
-      // 21-40, which runs past them, so the turn DOES ask the server.
-      const cols = Array.from({ length: 30 }, (_, i) => node(`col${String(i).padStart(3, '0')}`, 'DATASET'))
+      // One window of matches loaded with more on the server, so page 2
+      // runs past them and the turn DOES ask the server.
+      const cols = Array.from({ length: FRAME_ALL_CAP }, (_, i) => node(`col${String(i).padStart(3, '0')}`, 'DATASET'))
       const onLoadAllChildren = vi.fn()
       openFrame({
         onLoadAllChildren,

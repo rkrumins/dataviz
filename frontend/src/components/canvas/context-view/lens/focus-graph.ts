@@ -45,11 +45,17 @@ export const CONTAINS_CAP = 8
 export const CONTAINS_MAX_DEPTH = 3
 /** Hard stop for hop expansion per direction. */
 export const MAX_BAND = 4
-/** Children per page inside an opened container frame. */
-export const FRAME_CHILD_CAP = 12
-/** Same, but in "show all children" mode — rows are shorter there, and
- *  the whole point is scanning a table's columns, so more fit. */
-export const FRAME_ALL_CAP = 20
+/** Children per page inside an opened container frame.
+ *
+ *  Sized so the frame stays a CARD, not a column. At 12/20 one page of
+ *  a wide table came out ~1,030px tall — the viewport's fitView then
+ *  zoomed to ~0.4 and every label on the board became unreadable. The
+ *  fixed window stopped the frame growing per click; it also has to be
+ *  small enough that the frame is legible next to the focal. */
+export const FRAME_CHILD_CAP = 8
+/** Same, but in "show all children" mode — rows are shorter there, so a
+ *  couple more fit in the same height. */
+export const FRAME_ALL_CAP = 10
 
 export const FRAME_HEADER_H = 46
 /** The Prev · page N of M · Next strip, present only when there is more
@@ -136,12 +142,13 @@ export type FocusCardKind = 'focal' | 'entity' | 'group' | 'contains' | 'overflo
  *           by guessing from locally-loaded edges.
  *   hop   → fetch and reveal this entity's own next hop
  *   more  → page in the rest of a capped band or frame
+ *   retry → the fetch behind this row failed; ask again
  *   focus → the stack ends here; re-center the lens on this entity so
  *           its own contents become the new top level. A door, not a
  *           wall: the alternative was a chevron that fetched and then
  *           rendered nothing.
  */
-export type FocusExpandKind = 'group' | 'open' | 'hop' | 'more' | 'focus' | null
+export type FocusExpandKind = 'group' | 'open' | 'hop' | 'more' | 'retry' | 'focus' | null
 
 export interface FocusCard {
   /** Stable across rebuilds so shared cards glide between focal swaps:
@@ -609,12 +616,13 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           h: OVERFLOW_H,
           depth: depth + 1,
           label: status === 'error'
-            ? `Couldn't look inside ${cLabel}`
+            ? `Couldn't look inside ${cLabel} — retry`
             : `Nothing inside ${cLabel}`,
           type: 'entity',
-          // Retry is the same gesture that opened it.
-          expandKey: status === 'error' ? `kids:${cid}` : null,
-          expandKind: status === 'error' ? 'more' : null,
+          // NOT `expandKind: 'more'` with a `kids:` key — that routed to
+          // the band pager, which reads nothing of the sort, so the
+          // retry was itself a dead control.
+          expandKind: status === 'error' ? 'retry' : null,
         })
         continue
       }

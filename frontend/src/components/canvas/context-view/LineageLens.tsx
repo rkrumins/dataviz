@@ -604,6 +604,10 @@ export function LineageLens({
     }
   }, [nodeId, seededFresh, entityLevels, onOpenContainer, onLoadAllChildren, lensFrameChildren])
 
+  /** Ask again for a row whose children fetch failed — WITHOUT toggling
+   *  the row shut, which is what a plain re-click would do. */
+  const retryContains = useCallback((urn: string) => { onLoadChildrenOf?.(urn) }, [onLoadChildrenOf])
+
   /** Open / close one contains row, fetching its children the first
    *  time. Collapsing keeps the answer cached for re-opening. */
   const toggleContains = useCallback((urn: string) => {
@@ -1406,6 +1410,7 @@ export function LineageLens({
                 onOpenContainer={toggleContainer}
                 onExpandFrontier={toggleGraphFrontier}
                 onToggleContains={toggleContains}
+                onRetryContains={retryContains}
                 onShowMore={bumpBandPage}
                 onSetFramePage={setFramePage}
                 onFrameQuery={setFrameQuery}
