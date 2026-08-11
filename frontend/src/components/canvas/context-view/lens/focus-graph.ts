@@ -43,6 +43,9 @@ export const CONTAINS_CAP = 8
 export const MAX_BAND = 4
 /** Children shown inside an opened container frame before "+N more". */
 export const FRAME_CHILD_CAP = 12
+/** Same, but in "show all children" mode — rows are shorter there, and
+ *  the whole point is scanning a table's columns, so more fit. */
+export const FRAME_ALL_CAP = 20
 
 export const FRAME_HEADER_H = 46
 export const FRAME_PAD = 10
@@ -55,6 +58,9 @@ export const CARD_H = 64
 export const GROUP_HEADER_H = 40
 export const CONTAINS_H = 36
 export const OVERFLOW_H = 36
+/** A frame child with no lineage to the focal: present, scannable, but
+ *  carrying no counts or edges, so it needs far less room than a card. */
+export const CHILD_ROW_H = 36
 export const BAND_GAP = 130
 export const CARD_GAP = 10
 /** Indent for cards nested under a header (group members, constituents). */
@@ -120,6 +126,21 @@ export interface FocusCard {
   frameTruncated: boolean
   /** Frame cards only — opened, and nothing inside connects to the focal. */
   frameEmpty: boolean
+  /** Frame CHILD only: does this carry lineage to the focal? False for a
+   *  child that merely lives inside the container, shown in "all" mode
+   *  so the picture is the whole table rather than an edited version. */
+  connected: boolean
+  /** Frame cards only — showing every child, not just connected ones. */
+  frameShowingAll: boolean
+  /** Frame cards only — how many of the shown children connect. */
+  frameConnectedCount: number
+  /** Frame cards only — children fetched so far. */
+  frameLoaded: number
+  /** Frame cards only — the container's real child count, or -1 when
+   *  genuinely unknown (render a floor, never a fabricated total). */
+  frameTotal: number
+  /** Frame cards only — more children exist on the server than loaded. */
+  frameHasMore: boolean
   /** Group toggle key into expandedGroups / open key into
    *  openContainers / frontier key into expandedFrontier. */
   expandKey: string | null
@@ -190,6 +211,18 @@ export interface FocusGraphInput {
     empty: boolean
   }>
   containerStatus?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
+  /** Frames switched from "only what connects" to "everything inside",
+   *  keyed like openContainers. */
+  frameShowAll?: ReadonlySet<string>
+  /** Every child of those containers (useLensContainer), same keys. The
+   *  server cannot flag children by whether they reach the focal, so
+   *  this answers membership and containerResults answers lineage. */
+  frameAllResults?: Map<string, {
+    children: LineageNode[]
+    hasMore: boolean
+    total: number | null
+  }>
+  frameAllStatus?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
   /** Per-frame filter text, keyed like openContainers. */
   frameQueries?: ReadonlyMap<string, string>
   /** Extra pages unlocked inside a frame, keyed like openContainers. */
@@ -255,7 +288,8 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     focalId, incomingRecords, outgoingRecords, edgesByEndpoint, nodeMap,
     containmentEdgeTypes, containsChildren, containsTotal, resolveParent,
     isCoarser, expandedGroups, expandedFrontier, openContainers,
-    containerResults, containerStatus, frameQueries, framePages, entityLevels,
+    containerResults, containerStatus, frameShowAll, frameAllResults,
+    frameAllStatus, frameQueries, framePages, entityLevels,
     bandPages, query, hiddenTypes, degreeHints, fetchStatus,
   } = input
 
@@ -308,6 +342,8 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     rollup: false, unresolved: false,
     aggregated: false,
     frameId: null, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
+    connected: true, frameShowingAll: false, frameConnectedCount: 0,
+    frameLoaded: 0, frameTotal: -1, frameHasMore: false,
     expandKey: null, expanded: false,
     expandKind: null, frontier: false, frontierExpanded: false, deadEnd: false,
     degreeHint: null, fetch: null,
@@ -585,11 +621,18 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
 
       /**
        * An OPENED container: a frame standing for the container, holding
-       * the entities inside it that carry lineage to the focal. Children
-       * go through the same card shape as any neighbour — they get their
-       * own expand affordance, counts, edges and hover actions — so
-       * exploration continues through them instead of dead-ending, which
-       * is what the old terminal constituent cards did.
+       * what's inside it. Children go through the same card shape as any
+       * neighbour — they get their own expand affordance, counts, edges
+       * and hover actions — so exploration continues through them
+       * instead of dead-ending, which is what the old terminal
+       * constituent cards did.
+       *
+       * Two modes. By default the frame holds only the entities that
+       * carry lineage to the focal — the answer you opened it for. In
+       * "show all" it holds every child in the server's own order, with
+       * the connected ones marked in place and the rest present but
+       * carrying no counts and no edges. Nothing is ever invented: a
+       * child without lineage is drawn as having none.
        */
       const placeOpenContainer = (entry: BandEntry, openKey: string) => {
         const label = labelOf(entry.nodeId, entry.node)
@@ -597,12 +640,42 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         const res = containerResults?.get(openKey)
         const status = containerStatus?.get(openKey)
         const frameId = `fr:${dir}:${entry.nodeId}`
+        const showAll = frameShowAll?.has(openKey) ?? false
+        const all = frameAllResults?.get(openKey)
 
         // Only entities we haven't already placed elsewhere on the board.
         const inside = (res?.nodes ?? []).filter(n => !placed.has(n.id))
+        const connectedIds = new Set(inside.map(n => n.id))
+        // In "all" mode the roster is the server's child order. A
+        // connected entity missing from it is still shown (appended):
+        // the pair-filtered open can resolve a grain deeper than direct
+        // children, and dropping a real connection would be a lie.
+        const roster = showAll
+          ? (() => {
+              const seen = new Set<string>()
+              const list: LineageNode[] = []
+              for (const c of all?.children ?? []) {
+                if (placed.has(c.id) || seen.has(c.id)) continue
+                seen.add(c.id)
+                list.push(c)
+              }
+              for (const c of inside) {
+                if (seen.has(c.id)) continue
+                seen.add(c.id)
+                list.push(c)
+              }
+              return list
+            })()
+          : inside
         const fq = (frameQueries?.get(openKey) ?? '').trim().toLowerCase()
-        const frameCap = FRAME_CHILD_CAP * (1 + (framePages?.get(openKey) ?? 0))
-        const shownInside = inside.slice(0, frameCap)
+        const frameCap = (showAll ? FRAME_ALL_CAP : FRAME_CHILD_CAP) * (1 + (framePages?.get(openKey) ?? 0))
+        const shownInside = roster.slice(0, frameCap)
+
+        // The container we actually opened may be deeper than the card
+        // clicked, so its child count lives on the last skipped level.
+        const anchorNode = res?.passedThrough?.[res.passedThrough.length - 1] ?? entry.node
+        const anchorChildCount = anchorNode?.data?.childCount as number | undefined
+        const allStatusHere = frameAllStatus?.get(openKey)
 
         const frame: FocusCard = {
           ...baseCard(),
@@ -624,7 +697,15 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           frameBreadcrumb: (res?.passedThrough ?? []).map(n => labelOf(n.id, n)),
           frameTruncated: res?.truncated ?? false,
           frameEmpty: res?.empty ?? false,
-          fetch: status === 'loading' ? 'loading' : status === 'error' ? 'error' : null,
+          frameShowingAll: showAll,
+          frameConnectedCount: inside.length,
+          frameLoaded: roster.length,
+          // Known only once the last page lands, or from the container's
+          // own childCount. Otherwise -1 — the view shows a floor.
+          frameTotal: all?.total ?? (anchorChildCount && anchorChildCount > 0 ? anchorChildCount : -1),
+          frameHasMore: all?.hasMore ?? false,
+          fetch: status === 'loading' || (showAll && allStatusHere === 'loading') ? 'loading'
+            : status === 'error' || (showAll && allStatusHere === 'error') ? 'error' : null,
           dimmed: !matches(label),
         }
         placed.set(entry.nodeId, frameId)
@@ -646,9 +727,13 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         for (const child of shownInside) {
           const cLabel = labelOf(child.id, child)
           const cType = (child.data?.type as string) ?? 'not loaded'
+          const connected = connectedIds.has(child.id)
           const childOpenKey = `${dir}:${child.id}`
-          const childCanOpen = isCoarser(cType, focalType) && entityLevels?.get(cType) !== undefined
-          const childCanHop = !isOutermost && (degreeHints?.get(child.id)?.[dir] ?? -1) !== 0
+          // A child with no lineage to the focal has nothing to expand
+          // TOWARDS it — offering a pill there would promise an answer
+          // that is empty by construction.
+          const childCanOpen = connected && isCoarser(cType, focalType) && entityLevels?.get(cType) !== undefined
+          const childCanHop = connected && !isOutermost && (degreeHints?.get(child.id)?.[dir] ?? -1) !== 0
           const childKind: FocusExpandKind = childCanOpen ? 'open' : childCanHop ? 'hop' : null
           const childFrontierKey = `${dir}:${child.id}`
           const childExpanded = expandedFrontier.has(childFrontierKey)
@@ -658,19 +743,21 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             kind: 'entity',
             nodeId: child.id,
             band: sign * band,
+            h: connected ? CARD_H : CHILD_ROW_H,
             label: cLabel,
             description: (child.data?.description as string | undefined) ?? null,
             type: cType,
             parentId: entry.nodeId,
             parentLabel: label,
-            count: countFor(child.id),
-            edgeTypeNorm: edgeTypeFor(child.id),
+            connected,
+            count: connected ? countFor(child.id) : 0,
+            edgeTypeNorm: connected ? edgeTypeFor(child.id) : '',
             frameId,
             expandKey: childCanOpen ? childOpenKey : childFrontierKey,
             expandKind: childKind,
             frontier: childKind !== null,
             frontierExpanded: childExpanded,
-            degreeHint: degreeHints?.get(child.id) ?? null,
+            degreeHint: connected ? (degreeHints?.get(child.id) ?? null) : null,
             fetch: fetchStatus?.get(child.id) === 'loading' ? 'loading'
               : fetchStatus?.get(child.id) === 'error' ? 'error' : null,
             // The frame's own filter dims, exactly like the global one.
@@ -678,15 +765,20 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           }
           placed.set(child.id, cCard.id)
           cards.push(cCard)
-          // Children carry the flow to whatever the container connected to.
-          for (const [refId, stat] of entry.refs) {
-            const refCard = placed.get(refId)
-            if (refCard) addFlowEdge(dir, refCard, cCard.id, stat.count, cCard.edgeTypeNorm, false, cCard.dimmed)
+          // Only a child that actually carries lineage gets an edge.
+          if (connected) {
+            for (const [refId, stat] of entry.refs) {
+              const refCard = placed.get(refId)
+              if (refCard) addFlowEdge(dir, refCard, cCard.id, stat.count, cCard.edgeTypeNorm, false, cCard.dimmed)
+            }
           }
-          if (childExpanded && !isOutermost) nextRefs.push({ nodeId: child.id, type: cType })
+          if (connected && childExpanded && !isOutermost) nextRefs.push({ nodeId: child.id, type: cType })
         }
 
-        if (inside.length > frameCap) {
+        // One control for both kinds of "there is more": more already
+        // fetched than the cap shows, or more still on the server.
+        const beyondCap = roster.length - frameCap
+        if (beyondCap > 0 || (showAll && frame.frameHasMore)) {
           cards.push({
             ...baseCard(),
             id: `more:fr:${dir}:${entry.nodeId}`,
@@ -694,12 +786,14 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             nodeId: null,
             band: sign * band,
             h: OVERFLOW_H,
-            label: `+${(inside.length - frameCap).toLocaleString()} more inside`,
+            label: beyondCap > 0
+              ? `+${beyondCap.toLocaleString()} more inside`
+              : 'Load more',
             type: 'entity',
             frameId,
             expandKey: openKey,
             expandKind: 'more',
-            overflowCount: inside.length - frameCap,
+            overflowCount: Math.max(beyondCap, 0),
           })
         }
 

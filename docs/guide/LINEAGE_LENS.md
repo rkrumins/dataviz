@@ -17,6 +17,8 @@ Here you'll learn to:
   Back/Forward to retrace every step.
 - **Expand the picture** one hop at a time, exactly like dedicated lineage
   tools.
+- **Open a container** into just the entities inside it that touch your focus
+  — or into everything it holds, with the connected ones marked.
 - **See lineage beyond a View's boundary** and preview what sits outside it.
 
 ## What the Lens shows
@@ -101,13 +103,24 @@ The Lens is built for exploring, not just reading:
   the pill shows it (**+12**); the Lens never invents a number.
 - **Open a card that stands for many things** — a parent group, a container,
   a whole platform — and it unfolds into a frame holding **only the entities
-  inside it that connect to the entity you're focused on**, never its full
-  contents. Those children are ordinary cards: focus them, open them in turn,
-  reveal them on the canvas. A platform that merely passes lineage through a
-  single container is walked through for you, with the levels it skipped
-  shown in the frame's header. Frames say how many they hold, offer a **Find**
-  box once there are more than a few, and state plainly when nothing inside
-  connects rather than leaving you guessing.
+  inside it that connect to the entity you're focused on**. Those children are
+  ordinary cards: focus them, open them in turn, reveal them on the canvas. A
+  platform that merely passes lineage through a single container is walked
+  through for you, with the levels it skipped shown in the frame's header.
+  Frames say how many they hold, offer a **Find** box once there are more than
+  a few, and state plainly when nothing inside connects rather than leaving
+  you guessing.
+- **Show everything inside**, not just the connected part, with the small
+  toggle in a frame's header (**⛓ Connected** | **▤ All**). "All" lists every
+  column, table or dataset the container holds, in the source system's own
+  order, with the lineage-carrying ones highlighted exactly where they sit and
+  the rest present but quiet — no counts, no edges, labelled *no lineage*.
+  That's the honest picture: a column with no lineage is drawn as having none.
+  Long lists load a page at a time, and the header always says what it's
+  showing ("3 connected · 100 of 428 shown"); a total it doesn't actually know
+  yet appears as a floor ("100+"), never as a guess. Frames open **Connected**
+  by default — the header's own **Connected | All** control changes which mode
+  the *next* frame you open starts in, and it's remembered between sessions.
 - **Filter connections** with the search box in the header — matching cards
   stay bright while the rest dim (a collapsed parent card tells you how many
   matches it's holding), so a match can never silently vanish.
@@ -117,8 +130,9 @@ The Lens is built for exploring, not just reading:
   canvas** live at the end of the trail.
 - **Share the exploration** with the link button in the header: it copies a
   URL that reopens this exact picture — the walked path, the focused entity,
-  and everything you expanded — for a colleague. And the **image button** in
-  the corner controls downloads the graph as a PNG for a deck or a doc.
+  everything you expanded, and which frames you left showing all their
+  children — for a colleague. And the **image button** in the corner controls
+  downloads the graph as a PNG for a deck or a doc.
 
 All of this follows you as you explore: double-click a card to focus it and
 the same opening, expanding and filtering apply to that entity's own

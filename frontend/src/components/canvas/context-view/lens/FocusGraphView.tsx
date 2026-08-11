@@ -100,6 +100,10 @@ interface CardCtx {
   onFrameQuery: (openKey: string, q: string) => void
   /** Current text typed into a frame's own filter. */
   frameQueryFor?: (openKey: string) => string
+  /** Flip one frame between "only what connects" and "everything inside". */
+  onToggleFrameAll?: (openKey: string) => void
+  /** Re-kick a failed "everything inside" fetch. */
+  onRetryFrameAll?: (openKey: string) => void
   onRetryOpen?: (openKey: string, nodeId: string, entityType: string) => void
   onRetryFetch?: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
@@ -129,6 +133,8 @@ interface FocusGraphViewProps {
   onShowMore: (bandKey: string) => void
   onFrameQuery: (openKey: string, q: string) => void
   frameQueryFor?: (openKey: string) => string
+  onToggleFrameAll?: (openKey: string) => void
+  onRetryFrameAll?: (openKey: string) => void
   onRetryOpen?: (openKey: string, nodeId: string, entityType: string) => void
   onRetryFetch?: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
@@ -543,6 +549,34 @@ function FocusGraphCard({ data, selected }: NodeProps) {
     )
   }
 
+  // ── Inside a frame, with no lineage to the focal ──
+  // Shown only in "everything inside" mode. Deliberately quiet: it is
+  // context, not an answer, and it must never look like a connection.
+  if (card.frameId && !card.connected) {
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={activate}
+        onKeyDown={keyActivate}
+        onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
+        title={`${card.label}${card.description ? ` — ${card.description}` : ''} — inside this, but no lineage with the focused entity · double-click to focus`}
+        style={{ width: card.w, height: card.h }}
+        className={cn(
+          'group relative flex items-center gap-1.5 rounded-lg border border-dashed border-black/[0.08] dark:border-white/[0.09] bg-transparent px-2.5 cursor-pointer transition-colors hover:border-accent-lineage/40 hover:bg-black/[0.02] dark:hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+          selected && 'ring-2 ring-accent-lineage',
+          card.dimmed ? 'opacity-20' : 'opacity-60 hover:opacity-100',
+        )}
+      >
+        <PortHandles />
+        <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3 h-3 flex-shrink-0 opacity-60" />
+        <span className="min-w-0 truncate text-[11px] text-ink-secondary">{card.label}</span>
+        <span className="flex-shrink-0 ml-auto text-[9px] text-ink-muted/50 group-hover:hidden">no lineage</span>
+        <CardActions card={card} ctx={ctx} />
+      </div>
+    )
+  }
+
   // ── Entity: the rich neighbor card ──
   const isConstituent = card.id.startsWith('x:')
   return (
@@ -651,6 +685,14 @@ function FocusFrameNode({ data }: NodeProps) {
   const { card, ctx } = data as unknown as { card: FocusCard; ctx: CardCtx }
   const accent = ctx.visualFor(card.type).color
   const q = ctx.frameQueryFor?.(card.expandKey ?? '') ?? ''
+  // A total is a claim: state it only when the last page has landed (or
+  // the container reported its own count). Otherwise say "at least".
+  const total = card.frameTotal >= 0
+    ? card.frameTotal.toLocaleString()
+    : `${card.frameLoaded.toLocaleString()}+`
+  const inside = card.frameShowingAll
+    ? `${card.frameConnectedCount.toLocaleString()} connected · ${card.frameLoaded.toLocaleString()} of ${total} shown`
+    : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected inside`
   return (
     <div
       style={{ width: card.w, height: card.h, borderColor: `${accent}55` }}
@@ -681,19 +723,58 @@ function FocusFrameNode({ data }: NodeProps) {
             )}
             {card.fetch === 'loading'
               ? 'Looking inside…'
-              : card.frameEmpty
+              : card.frameEmpty && !card.frameShowingAll
                 ? 'nothing connected inside'
-                : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected inside`}
+                : inside}
           </p>
         </div>
-        {/* Find one by name without opening everything. */}
-        {!card.frameEmpty && card.count > 4 && (
+        {/* Connected ⇄ All. The default answers "what in here touches my
+            entity"; All answers "what else is in here", with lineage
+            still drawn wherever it exists. */}
+        {ctx.onToggleFrameAll && (
+          <div
+            role="group"
+            aria-label={`What to show inside ${card.label}`}
+            className="flex-shrink-0 flex items-center rounded-md border border-black/10 dark:border-white/10 p-0.5"
+          >
+            {([
+              { all: false, Icon: LucideIcons.Link2, label: 'Only what connects to this entity' },
+              { all: true, Icon: LucideIcons.Rows3, label: 'Everything inside, lineage marked' },
+            ] as const).map(({ all, Icon, label }) => (
+              <button
+                key={String(all)}
+                type="button"
+                disabled={card.fetch === 'loading'}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (all !== card.frameShowingAll) ctx.onToggleFrameAll?.(card.expandKey ?? '')
+                }}
+                title={card.fetch === 'loading' ? 'Looking inside…' : label}
+                aria-label={label}
+                aria-pressed={card.frameShowingAll === all}
+                className={cn(
+                  'p-0.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
+                  card.frameShowingAll === all
+                    ? 'bg-accent-lineage/12 text-accent-lineage'
+                    : 'text-ink-muted hover:text-ink',
+                )}
+              >
+                <Icon className="w-3 h-3" />
+              </button>
+            ))}
+          </div>
+        )}
+        {/* Find one by name without reading everything. */}
+        {Math.max(card.count, card.frameLoaded) > 4 && (
           <input
             value={q}
             onChange={(e) => ctx.onFrameQuery(card.expandKey ?? '', e.target.value)}
             onClick={(e) => e.stopPropagation()}
             placeholder="Find…"
-            className="flex-shrink-0 w-20 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
+            title={card.frameHasMore
+              ? `Filters the ${card.frameLoaded.toLocaleString()} loaded so far — load more to search further`
+              : 'Filter what is inside'}
+            className="flex-shrink-0 w-16 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
           />
         )}
         <button
@@ -719,16 +800,22 @@ function FocusFrameNode({ data }: NodeProps) {
           <span className="truncate">Couldn&apos;t look inside.</span>
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onRetryOpen?.(card.expandKey!, card.nodeId, card.type) }}
+            onClick={(e) => {
+              e.stopPropagation()
+              // Two fetches back this frame; re-kick whichever failed.
+              if (card.frameShowingAll) ctx.onRetryFrameAll?.(card.expandKey ?? '')
+              else if (card.nodeId) ctx.onRetryOpen?.(card.expandKey!, card.nodeId, card.type)
+            }}
             className="font-semibold hover:underline"
           >
             Retry
           </button>
         </div>
       )}
-      {card.frameEmpty && (
+      {card.frameEmpty && card.frameLoaded === 0 && card.fetch === null && (
         <p className="absolute inset-x-2.5 top-[52px] text-[10px] text-ink-muted/70 italic leading-snug">
           Nothing inside {card.label} connects to this entity.
+          {ctx.onToggleFrameAll && ' Show everything inside to see what it holds.'}
         </p>
       )}
     </div>
@@ -944,6 +1031,8 @@ export function FocusGraphView({
   onShowMore,
   onFrameQuery,
   frameQueryFor,
+  onToggleFrameAll,
+  onRetryFrameAll,
   onRetryOpen,
   onRetryFetch,
   onRevealOnCanvas,
@@ -983,11 +1072,13 @@ export function FocusGraphView({
     onShowMore,
     onFrameQuery,
     frameQueryFor,
+    onToggleFrameAll,
+    onRetryFrameAll,
     onRetryOpen,
     onRetryFetch,
     onRevealOnCanvas,
     onOpenDetails,
-  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleGroup, onOpenContainer, onExpandFrontier, onShowMore, onFrameQuery, frameQueryFor, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
+  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleGroup, onOpenContainer, onExpandFrontier, onShowMore, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out

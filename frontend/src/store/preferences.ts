@@ -176,6 +176,14 @@ interface PreferencesState {
   lensViewMode: 'graph' | 'list'
   setLensViewMode: (mode: 'graph' | 'list') => void
 
+  /** What a newly opened container frame shows: only the entities inside
+   *  it that carry lineage to the focused entity (default — that is the
+   *  question the lens exists to answer), or everything inside it with
+   *  the connected ones marked. Each frame can still be flipped on its
+   *  own; this is only the starting point. */
+  lensFrameChildren: 'connected' | 'all'
+  setLensFrameChildren: (mode: 'connected' | 'all') => void
+
   // Icon picker — recently used Lucide icon names (most recent first).
   recentIcons: string[]
   addRecentIcon: (name: string) => void
@@ -346,6 +354,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       // Lineage Lens body mode
       lensViewMode: 'graph',
       setLensViewMode: (lensViewMode) => set({ lensViewMode }),
+      lensFrameChildren: 'connected',
+      setLensFrameChildren: (lensFrameChildren) => set({ lensFrameChildren }),
 
       // Icon picker recents
       recentIcons: [],

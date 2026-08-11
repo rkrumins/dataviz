@@ -3106,6 +3106,7 @@ export function ContextViewCanvas({
     expandedGroups: string[]
     expandedFrontier: string[]
     openContainers: string[]
+    frameAll: string[]
   } | null>(() => (
     initialLensShare
       ? {
@@ -3113,6 +3114,7 @@ export function ContextViewCanvas({
           expandedGroups: initialLensShare.groups,
           expandedFrontier: initialLensShare.frontier,
           openContainers: initialLensShare.containers,
+          frameAll: initialLensShare.frameAll,
         }
       : null
   ))
@@ -3922,6 +3924,12 @@ export function ContextViewCanvas({
           impactStatus={lensImpact.status}
           containerResults={lensContainer.results}
           containerStatus={lensContainer.status}
+          frameAllResults={lensContainer.allResults}
+          frameAllStatus={lensContainer.allStatus}
+          onLoadAllChildren={(openKey) => {
+            const focal = lensFocalOf(lensHistory)
+            if (focal) lensContainer.loadAllChildren(openKey, focal)
+          }}
           onOpenContainer={(urn, dir, level) => {
             const focal = lensFocalOf(lensHistory)
             if (focal) lensContainer.openContainer(urn, focal, dir, level)

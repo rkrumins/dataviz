@@ -21,6 +21,9 @@ import {
   FOCAL_H,
   GROUP_HEADER_H,
   FRAME_CHILD_CAP,
+  FRAME_ALL_CAP,
+  CARD_H,
+  CHILD_ROW_H,
   type FocusGraphInput,
 } from '../focus-graph'
 
@@ -276,6 +279,156 @@ describe('buildFocusGraph — grouping and rollups', () => {
     })
     expect(card(g, 'n:alpha').dimmed).toBe(false)
     expect(card(g, 'n:beta').dimmed).toBe(true)   // present, just dimmed
+  })
+})
+
+describe('buildFocusGraph — a frame showing every child', () => {
+  const base = {
+    nodes: [node('F'), node('Snowflake', 'DATAPLATFORM')],
+    edges: [edge('e1', 'Snowflake', 'F')],
+    isCoarser: (t?: string) => t === 'DATAPLATFORM',
+  }
+  /** Two of the four children carry lineage to F. */
+  const opened = {
+    openContainers: new Set(['in:Snowflake']),
+    containerResults: new Map([['in:Snowflake', {
+      nodes: [node('b_conn'), node('d_conn')],
+      edges: [edge('r1', 'b_conn', 'F'), edge('r2', 'd_conn', 'F')],
+      passedThrough: [], truncated: false, empty: false,
+    }]]),
+    containerStatus: new Map([['in:Snowflake', 'done' as const]]),
+  }
+
+  it('holds every child in server order, marking the connected ones in place', () => {
+    const g = build({
+      ...base,
+      over: {
+        ...opened,
+        frameShowAll: new Set(['in:Snowflake']),
+        frameAllResults: new Map([['in:Snowflake', {
+          children: [node('a_plain'), node('b_conn'), node('c_plain'), node('d_conn')],
+          hasMore: false,
+          total: 4,
+        }]]),
+        frameAllStatus: new Map([['in:Snowflake', 'done' as const]]),
+      },
+    })
+
+    // Server order is preserved — connected entries are NOT hoisted.
+    const kids = g.cards.filter(c => c.frameId === 'fr:in:Snowflake' && c.kind === 'entity')
+    expect(kids.map(c => c.nodeId)).toEqual(['a_plain', 'b_conn', 'c_plain', 'd_conn'])
+
+    // A child that carries lineage keeps its full card and its edge.
+    const conn = card(g, 'n:b_conn')
+    expect(conn.connected).toBe(true)
+    expect(conn.h).toBe(CARD_H)
+    expect(conn.count).toBe(1)
+    expect(g.edges.find(e => e.id === 'fe:n:b_conn->f')).toBeTruthy()
+
+    // One that doesn't is present and scannable, but claims nothing:
+    // no count, no edge, no expand affordance that would come up empty.
+    const plain = card(g, 'n:a_plain')
+    expect(plain.connected).toBe(false)
+    expect(plain.h).toBe(CHILD_ROW_H)
+    expect(plain.count).toBe(0)
+    expect(plain.expandKind).toBeNull()
+    expect(plain.frontier).toBe(false)
+    expect(g.edges.some(e => e.source === 'n:a_plain' || e.target === 'n:a_plain')).toBe(false)
+
+    const frame = card(g, 'fr:in:Snowflake')
+    expect(frame.frameShowingAll).toBe(true)
+    expect(frame.frameConnectedCount).toBe(2)
+    expect(frame.frameLoaded).toBe(4)
+    expect(frame.frameTotal).toBe(4)
+    expect(frame.frameHasMore).toBe(false)
+  })
+
+  it('shows only the connected children until the toggle is flipped', () => {
+    const g = build({ ...base, over: opened })
+    const kids = g.cards.filter(c => c.frameId === 'fr:in:Snowflake' && c.kind === 'entity')
+    expect(kids.map(c => c.nodeId)).toEqual(['b_conn', 'd_conn'])
+    expect(card(g, 'fr:in:Snowflake').frameShowingAll).toBe(false)
+    expect(kids.every(c => c.connected)).toBe(true)
+  })
+
+  it('never drops a connected child missing from the children page', () => {
+    // The pair-filtered open can resolve a grain deeper than direct
+    // children, so the two sets are not always subset-related.
+    const g = build({
+      ...base,
+      over: {
+        ...opened,
+        frameShowAll: new Set(['in:Snowflake']),
+        frameAllResults: new Map([['in:Snowflake', {
+          children: [node('a_plain'), node('b_conn')],
+          hasMore: false,
+          total: 2,
+        }]]),
+        frameAllStatus: new Map([['in:Snowflake', 'done' as const]]),
+      },
+    })
+    const kids = g.cards.filter(c => c.frameId === 'fr:in:Snowflake' && c.kind === 'entity')
+    // d_conn is not in the page, but it demonstrably connects — append
+    // it rather than silently losing a real connection.
+    expect(kids.map(c => c.nodeId)).toEqual(['a_plain', 'b_conn', 'd_conn'])
+    expect(card(g, 'n:d_conn').connected).toBe(true)
+  })
+
+  it('reports an unknown total as a floor, and offers to load more', () => {
+    const g = build({
+      ...base,
+      over: {
+        ...opened,
+        frameShowAll: new Set(['in:Snowflake']),
+        frameAllResults: new Map([['in:Snowflake', {
+          children: [node('a_plain'), node('b_conn')],
+          hasMore: true,
+          total: null,
+        }]]),
+        frameAllStatus: new Map([['in:Snowflake', 'done' as const]]),
+      },
+    })
+    const frame = card(g, 'fr:in:Snowflake')
+    expect(frame.frameTotal).toBe(-1)      // unknown, never a fabricated number
+    expect(frame.frameHasMore).toBe(true)
+    expect(card(g, 'more:fr:in:Snowflake').label).toBe('Load more')
+  })
+
+  it('caps a long child list and pages it', () => {
+    const kids = Array.from({ length: FRAME_ALL_CAP + 5 }, (_, i) => node(`k${String(i).padStart(2, '0')}`))
+    const over = {
+      ...opened,
+      frameShowAll: new Set(['in:Snowflake']),
+      frameAllResults: new Map([['in:Snowflake', {
+        children: kids, hasMore: false, total: kids.length,
+      }]]),
+      frameAllStatus: new Map([['in:Snowflake', 'done' as const]]),
+    }
+    const g = build({ ...base, over })
+    // FRAME_ALL_CAP children, plus the two connected ones appended
+    // because they are absent from this page.
+    expect(g.cards.filter(c => c.frameId === 'fr:in:Snowflake' && c.kind === 'entity')).toHaveLength(FRAME_ALL_CAP)
+    expect(card(g, 'more:fr:in:Snowflake').overflowCount).toBe(7)
+
+    const paged = build({ ...base, over: { ...over, framePages: new Map([['in:Snowflake', 1]]) } })
+    expect(paged.cards.find(c => c.id === 'more:fr:in:Snowflake')).toBeUndefined()
+  })
+
+  it('dims a filter miss across both kinds of child, never removing one', () => {
+    const g = build({
+      ...base,
+      over: {
+        ...opened,
+        frameShowAll: new Set(['in:Snowflake']),
+        frameAllResults: new Map([['in:Snowflake', {
+          children: [node('a_plain'), node('b_conn')], hasMore: false, total: 2,
+        }]]),
+        frameAllStatus: new Map([['in:Snowflake', 'done' as const]]),
+        frameQueries: new Map([['in:Snowflake', 'b_conn']]),
+      },
+    })
+    expect(card(g, 'n:b_conn').dimmed).toBe(false)
+    expect(card(g, 'n:a_plain').dimmed).toBe(true)
   })
 
   it('a plain entity expands via HOP; a known-zero degree offers nothing', () => {

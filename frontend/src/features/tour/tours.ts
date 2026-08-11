@@ -380,6 +380,12 @@ TOURS.push({
       body: '**Click** a card to inspect it. **Double-click** to focus there. The **⊕** on a card\'s outer edge reveals its next hop; **×N** opens the connections a rolled-up flow summarizes.',
     },
     {
+      target: '[data-tour="lens-children-mode"]',
+      placement: 'bottom',
+      title: 'Open a container your way',
+      body: 'Opening a table or platform shows just the parts that **connect** to your focus. Switch to **All** to see everything it holds — every column stays listed, with the ones carrying lineage highlighted in place.',
+    },
+    {
       target: '[data-tour="lens-toggle"]',
       placement: 'bottom',
       title: 'Two ways to read it',

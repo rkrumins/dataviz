@@ -23,6 +23,9 @@ export interface LensShareState {
   /** Current focal's opened containers (`${dir}:${urn}`). Absent in
    *  links written before containers existed — decodes to []. */
   containers: string[]
+  /** Of those, the ones switched to "everything inside". Absent in
+   *  older links — decodes to []. */
+  frameAll: string[]
 }
 
 export function encodeLensShare(state: Omit<LensShareState, 'v'>): string {
@@ -45,9 +48,11 @@ export function decodeLensShare(raw: string): LensShareState | null {
     if (s.mode !== 'graph' && s.mode !== 'list') return null
     if (!Array.isArray(s.groups) || !s.groups.every(e => typeof e === 'string')) return null
     if (!Array.isArray(s.frontier) || !s.frontier.every(e => typeof e === 'string')) return null
-    // Optional so links written before containers existed still open.
+    // Optional so links written before these existed still open.
     const containers = s.containers === undefined ? [] : s.containers
     if (!Array.isArray(containers) || !containers.every(e => typeof e === 'string')) return null
+    const frameAll = s.frameAll === undefined ? [] : s.frameAll
+    if (!Array.isArray(frameAll) || !frameAll.every(e => typeof e === 'string')) return null
     return {
       v: 1,
       entries: s.entries as string[],
@@ -56,6 +61,7 @@ export function decodeLensShare(raw: string): LensShareState | null {
       groups: s.groups as string[],
       frontier: s.frontier as string[],
       containers: containers as string[],
+      frameAll: frameAll as string[],
     }
   } catch {
     return null

@@ -587,6 +587,95 @@ describe('LineageLens graph mode', () => {
     expect(screen.queryByText('+5 more')).toBeNull()
   })
 
+  describe('showing everything inside an opened frame', () => {
+    const withSchema = (fn: () => void) => {
+      const prevSchema = useSchemaStore.getState().schema
+      useSchemaStore.setState({
+        schema: {
+          ...(prevSchema ?? {}),
+          containmentEdgeTypes: ['CONTAINS'],
+          entityTypes: [
+            { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
+            { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
+          ],
+        },
+      } as never)
+      try { fn() } finally { useSchemaStore.setState({ schema: prevSchema } as never) }
+    }
+
+    const openFrame = (extra: Partial<ComponentProps<typeof LineageLens>> = {}) => {
+      useCanvasStore.setState({
+        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
+        edges: [edge('e1', 'plat', 'ds')],
+        visibleEdges: [],
+      } as never)
+      return renderLens(['ds'], {}, {
+        onOpenContainer: vi.fn(),
+        graphSeed: { nodeId: 'ds', expandedGroups: [], expandedFrontier: [], openContainers: ['in:plat'] },
+        containerResults: new Map([['in:plat', {
+          nodes: [node('kid1', 'DATASET')],
+          edges: [edge('r1', 'kid1', 'ds')],
+          passedThrough: [], truncated: false, empty: false,
+        }]]),
+        containerStatus: new Map([['in:plat', 'done' as const]]),
+        ...extra,
+      })
+    }
+
+    it('flips one frame to everything inside and fetches its children', () => withSchema(() => {
+      const onLoadAllChildren = vi.fn()
+      openFrame({ onLoadAllChildren })
+
+      fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
+      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat')
+      // Flipping one frame is not a preference change.
+      expect(usePreferencesStore.getState().lensFrameChildren).toBe('connected')
+    }))
+
+    it('shows unconnected children as present but claiming nothing', () => withSchema(() => {
+      openFrame({
+        onLoadAllChildren: vi.fn(),
+        frameAllResults: new Map([['in:plat', {
+          children: [node('kid1', 'DATASET'), node('spare', 'DATASET')],
+          hasMore: false,
+          total: 2,
+        }]]),
+        frameAllStatus: new Map([['in:plat', 'done' as const]]),
+      })
+      fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
+
+      expect(screen.getByText('label-kid1')).toBeTruthy()
+      expect(screen.getByText('label-spare')).toBeTruthy()
+      expect(screen.getByText('no lineage')).toBeTruthy()
+      expect(screen.getByText(/1 connected · 2 of 2 shown/)).toBeTruthy()
+    }))
+
+    it('opens new frames in whichever mode the header default names', () => withSchema(() => {
+      usePreferencesStore.setState({ lensFrameChildren: 'all' })
+      const onLoadAllChildren = vi.fn()
+      // No seed here — the frame is opened by clicking, as a user would.
+      useCanvasStore.setState({
+        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
+        edges: [edge('e1', 'plat', 'ds')],
+        visibleEdges: [],
+      } as never)
+      renderLens(['ds'], {}, { onOpenContainer: vi.fn(), onLoadAllChildren })
+
+      fireEvent.click(screen.getByTitle(/Open label-plat/))
+      // The frame comes up already in "everything inside".
+      expect(screen.getByLabelText('Everything inside, lineage marked').getAttribute('aria-pressed')).toBe('true')
+      usePreferencesStore.setState({ lensFrameChildren: 'connected' })
+    }))
+  })
+
+  it('the header default is a preference, persisted like the body mode', () => {
+    renderLens(['b'])
+    expect(usePreferencesStore.getState().lensFrameChildren).toBe('connected')
+    fireEvent.click(screen.getByTitle(/Opened containers show everything inside/))
+    expect(usePreferencesStore.getState().lensFrameChildren).toBe('all')
+    usePreferencesStore.setState({ lensFrameChildren: 'connected' })
+  })
+
   it('the header toggle switches to the list body and persists the preference', () => {
     renderLens(['b'])
     // The graph shows band headers ("Data Sources") too — the LIST

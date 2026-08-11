@@ -68,6 +68,8 @@ interface LensGraphState {
   expandedFrontier: ReadonlySet<string>
   /** Coarse containers opened into their focal-relevant contents. */
   openContainers: ReadonlySet<string>
+  /** Frames switched to "everything inside", keyed like openContainers. */
+  frameShowAll: ReadonlySet<string>
   /** Per-frame filter text and paging, keyed like openContainers. */
   frameQueries: ReadonlyMap<string, string>
   framePages: ReadonlyMap<string, number>
@@ -76,7 +78,8 @@ interface LensGraphState {
 const EMPTY_QUERY_MAP: ReadonlyMap<string, string> = new Map()
 const freshGraphState = (nodeId: string | null): LensGraphState => ({
   nodeId, selection: null, expandedGroups: EMPTY_TYPE_SET, expandedFrontier: EMPTY_TYPE_SET,
-  openContainers: EMPTY_TYPE_SET, frameQueries: EMPTY_QUERY_MAP, framePages: EMPTY_PAGE_MAP,
+  openContainers: EMPTY_TYPE_SET, frameShowAll: EMPTY_TYPE_SET,
+  frameQueries: EMPTY_QUERY_MAP, framePages: EMPTY_PAGE_MAP,
   bandPages: EMPTY_PAGE_MAP,
 })
 
@@ -139,6 +142,16 @@ export interface LineageLensProps {
     empty: boolean
   }>
   containerStatus?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
+  /** Every child of an opened container, keyed the same way — the
+   *  "show all" answer, which the server cannot flag by connectivity. */
+  frameAllResults?: Map<string, {
+    children: LineageNode[]
+    hasMore: boolean
+    total: number | null
+  }>
+  frameAllStatus?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
+  /** Fetch (or page further into) an opened container's full child list. */
+  onLoadAllChildren?: (openKey: string) => void
   /** Ask the server what's inside a container that connects to the focal. */
   onOpenContainer?: (containerUrn: string, dir: 'in' | 'out', containerLevel: number) => void
   onRetryOpenContainer?: (containerUrn: string, dir: 'in' | 'out', containerLevel: number) => void
@@ -148,7 +161,13 @@ export interface LineageLensProps {
   impactStatus?: Map<string, 'loading' | 'done' | 'error'>
   /** Exploration restored from a share link: expansion state to seed
    *  the graph with when this focal first renders. */
-  graphSeed?: { nodeId: string; expandedGroups: string[]; expandedFrontier: string[]; openContainers?: string[] } | null
+  graphSeed?: {
+    nodeId: string
+    expandedGroups: string[]
+    expandedFrontier: string[]
+    openContainers?: string[]
+    frameAll?: string[]
+  } | null
 }
 
 export function LineageLens({
@@ -176,6 +195,9 @@ export function LineageLens({
   degreeHints,
   containerResults,
   containerStatus,
+  frameAllResults,
+  frameAllStatus,
+  onLoadAllChildren,
   onOpenContainer,
   onRetryOpenContainer,
   impact,
@@ -433,6 +455,8 @@ export function LineageLens({
   // starts clean without reset effects.
   const lensViewMode = usePreferencesStore((s) => s.lensViewMode)
   const setLensViewMode = usePreferencesStore((s) => s.setLensViewMode)
+  const lensFrameChildren = usePreferencesStore((s) => s.lensFrameChildren)
+  const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
   const [graphState, setGraphState] = useState<LensGraphState>(() => freshGraphState(null))
   // A share-link seed pre-expands the restored focal's groups/frontier
@@ -445,6 +469,7 @@ export function LineageLens({
           expandedGroups: new Set(graphSeed.expandedGroups),
           expandedFrontier: new Set(graphSeed.expandedFrontier),
           openContainers: new Set(graphSeed.openContainers ?? []),
+          frameShowAll: new Set(graphSeed.frameAll ?? []),
           frameQueries: EMPTY_QUERY_MAP,
           framePages: EMPTY_PAGE_MAP,
           bandPages: EMPTY_PAGE_MAP,
@@ -492,10 +517,29 @@ export function LineageLens({
       wasOpen = next.has(openKey)
       if (wasOpen) next.delete(openKey)
       else next.add(openKey)
-      return { ...base, openContainers: next }
+      // A new frame starts in whichever mode the header default says.
+      const all = new Set(base.frameShowAll)
+      if (!wasOpen && lensFrameChildren === 'all') all.add(openKey)
+      return { ...base, openContainers: next, frameShowAll: all }
     })
     if (!wasOpen) onOpenContainer?.(containerNodeId, dir, level)
-  }, [nodeId, seededFresh, entityLevels, onOpenContainer])
+  }, [nodeId, seededFresh, entityLevels, onOpenContainer, lensFrameChildren])
+
+  /** Flip one frame between "only what connects" and "everything
+   *  inside". Turning it on fetches that container's child list; turning
+   *  it off keeps the answer cached for flipping back. */
+  const toggleFrameAll = useCallback((openKey: string) => {
+    let turningOn = false
+    setGraphState(prev => {
+      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
+      const next = new Set(base.frameShowAll)
+      turningOn = !next.has(openKey)
+      if (turningOn) next.add(openKey)
+      else next.delete(openKey)
+      return { ...base, frameShowAll: next }
+    })
+    if (turningOn) onLoadAllChildren?.(openKey)
+  }, [nodeId, seededFresh, onLoadAllChildren])
 
   const retryContainer = useCallback((openKey: string, containerNodeId: string, entityType: string) => {
     const level = entityLevels.get(entityType)
@@ -514,13 +558,27 @@ export function LineageLens({
   }, [nodeId, seededFresh])
 
   const bumpFramePage = useCallback((openKey: string) => {
+    let showingAll = false
     setGraphState(prev => {
       const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
+      showingAll = base.frameShowAll.has(openKey)
       const next = new Map(base.framePages)
       next.set(openKey, (next.get(openKey) ?? 0) + 1)
       return { ...base, framePages: next }
     })
-  }, [nodeId, seededFresh])
+    // "Show more" inside an all-children frame may need the next page
+    // from the server, not just a higher cap. The fetch is a no-op once
+    // the list is drained.
+    if (showingAll) onLoadAllChildren?.(openKey)
+  }, [nodeId, seededFresh, onLoadAllChildren])
+
+  /** Stable per-frame query getter. An inline arrow here re-created the
+   *  card context on every render, which re-rendered every card in the
+   *  graph — see the PERF CONTRACT in FocusGraphView. */
+  const frameQueryFor = useCallback(
+    (openKey: string) => graphCur.frameQueries.get(openKey) ?? '',
+    [graphCur.frameQueries],
+  )
 
   const bumpBandPage = useCallback((bandKey: string) => {
     setGraphState(prev => {
@@ -548,6 +606,15 @@ export function LineageLens({
       onOpenContainer(urn, k.startsWith('in:') ? 'in' : 'out', level)
     }
   }, [graphSeed, nodeId, onOpenContainer, entityLevels, nodeMap])
+  // A restored "everything inside" frame needs its child list too. The
+  // fetch is a no-op until the open above resolves (it supplies the
+  // anchor), so re-run it as the container answers land.
+  useEffect(() => {
+    if (!graphSeed || graphSeed.nodeId !== nodeId || !onLoadAllChildren) return
+    for (const k of graphSeed.frameAll ?? []) {
+      if (containerResults?.has(k)) onLoadAllChildren(k)
+    }
+  }, [graphSeed, nodeId, onLoadAllChildren, containerResults])
 
   // The pure graph build — every semantic decision (grouping, rollups,
   // drills, frontier hops, caps, filter dimming, layout) lives in
@@ -570,6 +637,9 @@ export function LineageLens({
       openContainers: graphCur.openContainers,
       containerResults,
       containerStatus,
+      frameShowAll: graphCur.frameShowAll,
+      frameAllResults,
+      frameAllStatus,
       frameQueries: graphCur.frameQueries,
       framePages: graphCur.framePages,
       entityLevels,
@@ -584,7 +654,8 @@ export function LineageLens({
     edgesByEndpoint, nodeMap, containmentEdgeTypes, focalChildren,
     resolveParent, isCoarserThan, graphCur.expandedGroups,
     graphCur.expandedFrontier, graphCur.openContainers, graphCur.frameQueries,
-    graphCur.framePages, graphCur.bandPages, containerResults, containerStatus,
+    graphCur.framePages, graphCur.bandPages, graphCur.frameShowAll,
+    containerResults, containerStatus, frameAllResults, frameAllStatus,
     entityLevels, query, hiddenTypes, degreeHints, fetchStatus,
   ])
 
@@ -625,6 +696,7 @@ export function LineageLens({
       groups: [...graphCur.expandedGroups],
       frontier: [...graphCur.expandedFrontier],
       containers: [...graphCur.openContainers],
+      frameAll: [...graphCur.frameShowAll],
     })
     const url = new URL(window.location.href)
     url.searchParams.set('lens', token)
@@ -829,6 +901,41 @@ export function LineageLens({
                   {shareCopied ? <LucideIcons.Check className="w-4 h-4" /> : <LucideIcons.Link2 className="w-4 h-4" />}
                 </button>
               </InfoTooltip>
+              {/* What a container opens into, by default. Each frame can
+                  still be flipped on its own; this sets the starting
+                  point for the next one you open (persisted). */}
+              {lensViewMode === 'graph' && (
+                <div
+                  data-tour="lens-children-mode"
+                  role="group"
+                  aria-label="What opened containers show"
+                  className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  {([
+                    { mode: 'connected', Icon: LucideIcons.Link2, label: 'Connected',
+                      title: 'Opened containers show only what connects to the focused entity' },
+                    { mode: 'all', Icon: LucideIcons.Rows3, label: 'All',
+                      title: 'Opened containers show everything inside, with lineage marked where it exists' },
+                  ] as const).map(({ mode, Icon, label, title }) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setLensFrameChildren(mode)}
+                      title={title}
+                      aria-pressed={lensFrameChildren === mode}
+                      className={cn(
+                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                        lensFrameChildren === mode
+                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                          : 'text-ink-muted hover:text-ink',
+                      )}
+                    >
+                      <Icon className="w-3 h-3" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
               {/* Graph | List body toggle — the graph is the premium
                   default; the columns stay one click away (persisted). */}
               <div data-tour="lens-toggle" className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]">
@@ -1095,7 +1202,9 @@ export function LineageLens({
                 onExpandFrontier={toggleGraphFrontier}
                 onShowMore={(key) => (key.startsWith('band:') || key === 'contains' ? bumpBandPage(key) : bumpFramePage(key))}
                 onFrameQuery={setFrameQuery}
-                frameQueryFor={(key) => graphCur.frameQueries.get(key) ?? ''}
+                frameQueryFor={frameQueryFor}
+                onToggleFrameAll={toggleFrameAll}
+                onRetryFrameAll={onLoadAllChildren}
                 onRetryOpen={retryContainer}
                 onRetryFetch={onRetryFetch}
                 onRevealOnCanvas={onRevealOnCanvas}
