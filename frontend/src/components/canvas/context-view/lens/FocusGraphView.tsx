@@ -42,7 +42,7 @@
  * The viewport re-frames on FOCAL change only: expanding grows the
  * picture in place instead of yanking it away from what you opened.
  */
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useMemo, useState } from 'react'
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -73,6 +73,7 @@ import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { CARD_W, BAND_GAP, FRAME_FOOTER_H, framePager, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph } from './focus-graph'
+import { useFrameCamera } from './useFrameCamera'
 
 /** Direction tints — the house semantics: upstream = sky, downstream
  *  = amber (matches the list columns and the canvas). */
@@ -1509,53 +1510,7 @@ export function FocusGraphView({
   )
 
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
-  /**
-   * Keep the camera honest about what just happened.
-   *
-   * A new focal is a new picture, so frame all of it. An EXPANSION is
-   * different: new cards land a whole band out — 370px past the card
-   * you clicked, growing the graph by ~30% in one click — and the
-   * camera used to stay pinned, so the only feedback was the pill
-   * changing glyph and the result was very often off screen. That is
-   * the whole of "I can't expand anything".
-   *
-   * Re-fitting everything would yank you off what you just opened,
-   * which is why it was pinned in the first place. So ease to exactly
-   * the cards that ARRIVED plus the cards they attached to — the thing
-   * you clicked stays in frame and the answer comes to you. The anchors
-   * come free from `partnerIds`, which every card already carries.
-   */
-  const framedRef = useRef<{ focal: string; ids: Set<string> } | null>(null)
-  useEffect(() => {
-    if (!rf) return
-    const ids = new Set(graph.cards.map(c => c.id))
-    const prev = framedRef.current
-    framedRef.current = { focal: focalId, ids }
-
-    if (!prev || prev.focal !== focalId) {
-      const t = window.setTimeout(() => {
-        void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: 1 })
-      }, 30)
-      return () => window.clearTimeout(t)
-    }
-
-    const arrived = graph.cards.filter(c => !prev.ids.has(c.id))
-    if (arrived.length === 0) return
-    const anchors = new Set(arrived.flatMap(c => c.partnerIds))
-    const frame = [
-      ...arrived.map(c => c.id),
-      ...graph.cards.filter(c => c.nodeId && anchors.has(c.nodeId)).map(c => c.id),
-    ]
-    const t = window.setTimeout(() => {
-      void rf.fitView({
-        nodes: frame.map(id => ({ id })),
-        padding: 0.25,
-        duration: reducedMotion ? 0 : 320,
-        maxZoom: 1,
-      })
-    }, 30)
-    return () => window.clearTimeout(t)
-  }, [rf, focalId, graph.cards, reducedMotion])
+  useFrameCamera(rf, focalId, graph.cards, reducedMotion)
 
   return (
     <div
