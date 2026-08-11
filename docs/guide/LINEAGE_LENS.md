@@ -30,11 +30,12 @@ direction-tinted edges.
 Data flows **left to right** throughout, so the layout reads the same way the
 canvas does. Neighbors that belong to the same parent — say, six fields of one
 dataset — arrive **rolled up into a single parent card** with a count, so a
-busy entity reads as "which datasets touch me" first; expanding the card
-reveals exactly the children that really participate in lineage, never the
-parent's full contents. Coarser-grain partners (a container or platform
-summarizing finer flows) keep a muted, dashed **rollup** treatment so they
-can't read as extra data. The focal card shows a quick tally — how many
+busy entity reads as "which datasets touch me" first. Coarser partners — a
+container, a platform — arrive the same way, as one muted card standing for
+everything inside them. Closed cards **name a few of the things they hold**,
+so you can often tell what's in there without opening it, and the focal's own
+fields start tucked behind a single "contains N" card rather than fanning
+across the middle of the picture. The focal card shows a quick tally — how many
 connections come *in* and how many go *out* — and, once measured, its
 **reach**: how many distinct entities it touches transitively upstream and
 downstream ("Reaches 12 upstream · 47 downstream"), the change-impact answer
@@ -98,9 +99,15 @@ The Lens is built for exploring, not just reading:
   reveal *that* entity's next hop of lineage — growing the graph outward from
   your focus point, one deliberate step at a time. When the total is known,
   the pill shows it (**+12**); the Lens never invents a number.
-- **Refine a rolled-up flow** with the **×N badge** on an aggregated
-  connection to see the underlying entity-level links it summarizes, with any
-  unloaded remainder reported honestly.
+- **Open a card that stands for many things** — a parent group, a container,
+  a whole platform — and it unfolds into a frame holding **only the entities
+  inside it that connect to the entity you're focused on**, never its full
+  contents. Those children are ordinary cards: focus them, open them in turn,
+  reveal them on the canvas. A platform that merely passes lineage through a
+  single container is walked through for you, with the levels it skipped
+  shown in the frame's header. Frames say how many they hold, offer a **Find**
+  box once there are more than a few, and state plainly when nothing inside
+  connects rather than leaving you guessing.
 - **Filter connections** with the search box in the header — matching cards
   stay bright while the rest dim (a collapsed parent card tells you how many
   matches it's holding), so a match can never silently vanish.
@@ -112,6 +119,10 @@ The Lens is built for exploring, not just reading:
   URL that reopens this exact picture — the walked path, the focused entity,
   and everything you expanded — for a colleague. And the **image button** in
   the corner controls downloads the graph as a PNG for a deck or a doc.
+
+All of this follows you as you explore: double-click a card to focus it and
+the same opening, expanding and filtering apply to that entity's own
+neighbours.
 
 First time here? The Lens offers a **one-minute guided tour** when the graph
 opens; replay it any time from the **Help** panel while you're on a view.
