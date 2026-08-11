@@ -34,7 +34,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
-import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType, useEntityTypeHierarchyMap, useRelationshipTypes } from '@/store/schema'
+import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType, useEntityTypeHierarchyMap, useEntityTypeLevels, useRelationshipTypes } from '@/store/schema'
 import { relationshipLabel } from '@/lib/relationshipLabel'
 import {
   deriveNeighborRecords,
@@ -66,10 +66,18 @@ interface LensGraphState {
   selection: string | null
   expandedGroups: ReadonlySet<string>
   expandedFrontier: ReadonlySet<string>
+  /** Coarse containers opened into their focal-relevant contents. */
+  openContainers: ReadonlySet<string>
+  /** Per-frame filter text and paging, keyed like openContainers. */
+  frameQueries: ReadonlyMap<string, string>
+  framePages: ReadonlyMap<string, number>
   bandPages: ReadonlyMap<string, number>
 }
+const EMPTY_QUERY_MAP: ReadonlyMap<string, string> = new Map()
 const freshGraphState = (nodeId: string | null): LensGraphState => ({
-  nodeId, selection: null, expandedGroups: EMPTY_TYPE_SET, expandedFrontier: EMPTY_TYPE_SET, bandPages: EMPTY_PAGE_MAP,
+  nodeId, selection: null, expandedGroups: EMPTY_TYPE_SET, expandedFrontier: EMPTY_TYPE_SET,
+  openContainers: EMPTY_TYPE_SET, frameQueries: EMPTY_QUERY_MAP, framePages: EMPTY_PAGE_MAP,
+  bandPages: EMPTY_PAGE_MAP,
 })
 
 
@@ -121,13 +129,26 @@ export interface LineageLensProps {
   /** Known total lineage degrees (in/out) per node — used for honest
    *  "+N" frontier pills. Absent node = UNKNOWN, never zero. */
   degreeHints?: Map<string, { in: number; out: number }>
+  /** Server answers for opened containers (useLensContainer), keyed
+   *  `${dir}:${urn}` — what's inside that connects to the focal. */
+  containerResults?: Map<string, {
+    nodes: LineageNode[]
+    edges: LineageEdge[]
+    passedThrough: LineageNode[]
+    truncated: boolean
+    empty: boolean
+  }>
+  containerStatus?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
+  /** Ask the server what's inside a container that connects to the focal. */
+  onOpenContainer?: (containerUrn: string, dir: 'in' | 'out', containerLevel: number) => void
+  onRetryOpenContainer?: (containerUrn: string, dir: 'in' | 'out', containerLevel: number) => void
   /** Transitive reach per visited focal (useLensImpact). Absent =
    *  unknown or unsupported — nothing is shown, never a fake zero. */
   impact?: Map<string, LensImpact>
   impactStatus?: Map<string, 'loading' | 'done' | 'error'>
   /** Exploration restored from a share link: expansion state to seed
    *  the graph with when this focal first renders. */
-  graphSeed?: { nodeId: string; expandedGroups: string[]; expandedFrontier: string[] } | null
+  graphSeed?: { nodeId: string; expandedGroups: string[]; expandedFrontier: string[]; openContainers?: string[] } | null
 }
 
 export function LineageLens({
@@ -153,6 +174,10 @@ export function LineageLens({
   onDrillFetch,
   onEnsureFetched,
   degreeHints,
+  containerResults,
+  containerStatus,
+  onOpenContainer,
+  onRetryOpenContainer,
   impact,
   impactStatus,
   graphSeed,
@@ -317,6 +342,7 @@ export function LineageLens({
   }, [relationshipTypes])
 
   const hierarchyMap = useEntityTypeHierarchyMap()
+  const entityLevels = useEntityTypeLevels()
   const canContainClosure = useMemo(() => buildCanContainClosure(hierarchyMap), [hierarchyMap])
   const isCoarserThan = useCallback(
     (partnerType: string | undefined, baseType: string): boolean =>
@@ -418,6 +444,9 @@ export function LineageLens({
           selection: null,
           expandedGroups: new Set(graphSeed.expandedGroups),
           expandedFrontier: new Set(graphSeed.expandedFrontier),
+          openContainers: new Set(graphSeed.openContainers ?? []),
+          frameQueries: EMPTY_QUERY_MAP,
+          framePages: EMPTY_PAGE_MAP,
           bandPages: EMPTY_PAGE_MAP,
         }
       : freshGraphState(id)
@@ -449,6 +478,50 @@ export function LineageLens({
     // 1-hop neighborhood (idempotent; no-op when already fetched).
     if (!wasExpanded) onEnsureFetched?.(frontierNodeId)
   }, [nodeId, seededFresh, onEnsureFetched])
+  /** Toggle a coarse container open. Opening asks the server what's
+   *  inside it that connects to the focal (idempotent per key); closing
+   *  only drops the key — the answer stays cached for re-opening. */
+  const toggleContainer = useCallback((openKey: string, containerNodeId: string, entityType: string) => {
+    const level = entityLevels.get(entityType)
+    if (level === undefined) return
+    const dir: 'in' | 'out' = openKey.startsWith('in:') ? 'in' : 'out'
+    let wasOpen = false
+    setGraphState(prev => {
+      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
+      const next = new Set(base.openContainers)
+      wasOpen = next.has(openKey)
+      if (wasOpen) next.delete(openKey)
+      else next.add(openKey)
+      return { ...base, openContainers: next }
+    })
+    if (!wasOpen) onOpenContainer?.(containerNodeId, dir, level)
+  }, [nodeId, seededFresh, entityLevels, onOpenContainer])
+
+  const retryContainer = useCallback((openKey: string, containerNodeId: string, entityType: string) => {
+    const level = entityLevels.get(entityType)
+    if (level === undefined) return
+    onRetryOpenContainer?.(containerNodeId, openKey.startsWith('in:') ? 'in' : 'out', level)
+  }, [entityLevels, onRetryOpenContainer])
+
+  const setFrameQuery = useCallback((openKey: string, q: string) => {
+    setGraphState(prev => {
+      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
+      const next = new Map(base.frameQueries)
+      if (q) next.set(openKey, q)
+      else next.delete(openKey)
+      return { ...base, frameQueries: next }
+    })
+  }, [nodeId, seededFresh])
+
+  const bumpFramePage = useCallback((openKey: string) => {
+    setGraphState(prev => {
+      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
+      const next = new Map(base.framePages)
+      next.set(openKey, (next.get(openKey) ?? 0) + 1)
+      return { ...base, framePages: next }
+    })
+  }, [nodeId, seededFresh])
+
   const bumpBandPage = useCallback((bandKey: string) => {
     setGraphState(prev => {
       const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
@@ -482,9 +555,12 @@ export function LineageLens({
       isCoarser: isCoarserThan,
       expandedGroups: graphCur.expandedGroups,
       expandedFrontier: graphCur.expandedFrontier,
-      drilledRows,
-      drillEdges,
-      rawEdgeById,
+      openContainers: graphCur.openContainers,
+      containerResults,
+      containerStatus,
+      frameQueries: graphCur.frameQueries,
+      framePages: graphCur.framePages,
+      entityLevels,
       bandPages: graphCur.bandPages,
       query,
       hiddenTypes,
@@ -495,8 +571,9 @@ export function LineageLens({
     lensOpen, lensViewMode, nodeId, incomingRecords, outgoingRecords,
     edgesByEndpoint, nodeMap, containmentEdgeTypes, focalChildren,
     resolveParent, isCoarserThan, graphCur.expandedGroups,
-    graphCur.expandedFrontier, graphCur.bandPages, drilledRows,
-    drillEdges, rawEdgeById, query, hiddenTypes, degreeHints, fetchStatus,
+    graphCur.expandedFrontier, graphCur.openContainers, graphCur.frameQueries,
+    graphCur.framePages, graphCur.bandPages, containerResults, containerStatus,
+    entityLevels, query, hiddenTypes, degreeHints, fetchStatus,
   ])
 
   // Type chips for graph mode — one row across both directions (the
@@ -535,6 +612,7 @@ export function LineageLens({
       mode: lensViewMode,
       groups: [...graphCur.expandedGroups],
       frontier: [...graphCur.expandedFrontier],
+      containers: [...graphCur.openContainers],
     })
     const url = new URL(window.location.href)
     url.searchParams.set('lens', token)
@@ -1001,9 +1079,12 @@ export function LineageLens({
                 onSelect={setGraphSelection}
                 onFocus={onRecenter}
                 onToggleGroup={toggleGraphGroup}
-                onToggleDrill={toggleDrillWithFetch}
+                onOpenContainer={toggleContainer}
                 onExpandFrontier={toggleGraphFrontier}
-                onShowMore={bumpBandPage}
+                onShowMore={(key) => (key.startsWith('in:') || key.startsWith('out:') ? bumpFramePage(key) : bumpBandPage(key))}
+                onFrameQuery={setFrameQuery}
+                frameQueryFor={(key) => graphCur.frameQueries.get(key) ?? ''}
+                onRetryOpen={retryContainer}
                 onRetryFetch={onRetryFetch}
                 onRevealOnCanvas={onRevealOnCanvas}
                 onOpenDetails={onOpenDetails}

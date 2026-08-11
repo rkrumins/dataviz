@@ -8,8 +8,9 @@
  *   single click  = select (detail strip)     double click = focus
  *   group header  = expand/collapse           pane click   = deselect
  *   hover a card  = light up its connections
- *   ⊕ pill        = open this card — its constituents when the
- *                   connection is rolled up, otherwise its next hop
+ *   ⊕ pill        = open this card — a coarse container reveals what
+ *                   is inside it that connects to the focal; anything
+ *                   else reveals its own next hop
  *
  * Positions come pre-baked from the builder, so React Flow does no
  * layout of its own — card ids are stable across rebuilds and a CSS
@@ -56,7 +57,6 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import * as LucideIcons from 'lucide-react'
-import type { LineageEdge } from '@/store/canvas'
 import { IMPACT_DEPTH, type LensImpact } from '@/hooks/useLensImpact'
 import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
@@ -93,9 +93,14 @@ interface CardCtx {
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
   onToggleGroup: (expandKey: string) => void
-  onToggleDrill: (drillKey: string, edge: LineageEdge) => void
+  /** Open / close a coarse container into its focal-relevant contents. */
+  onOpenContainer: (openKey: string, nodeId: string, entityType: string) => void
   onExpandFrontier: (expandKey: string, nodeId: string) => void
   onShowMore: (bandKey: string) => void
+  onFrameQuery: (openKey: string, q: string) => void
+  /** Current text typed into a frame's own filter. */
+  frameQueryFor?: (openKey: string) => string
+  onRetryOpen?: (openKey: string, nodeId: string, entityType: string) => void
   onRetryFetch?: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
@@ -119,9 +124,12 @@ interface FocusGraphViewProps {
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
   onToggleGroup: (expandKey: string) => void
-  onToggleDrill: (drillKey: string, edge: LineageEdge) => void
+  onOpenContainer: (openKey: string, nodeId: string, entityType: string) => void
   onExpandFrontier: (expandKey: string, nodeId: string) => void
   onShowMore: (bandKey: string) => void
+  onFrameQuery: (openKey: string, q: string) => void
+  frameQueryFor?: (openKey: string) => string
+  onRetryOpen?: (openKey: string, nodeId: string, entityType: string) => void
   onRetryFetch?: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
@@ -130,14 +138,21 @@ interface FocusGraphViewProps {
 const iconByName = (name: string): LucideIcons.LucideIcon =>
   (LucideIcons as unknown as Record<string, LucideIcons.LucideIcon>)[name] ?? LucideIcons.Box
 
-/** Flat equality over a built card. Every field is a primitive except
- *  `aggregateEdge`, which is compared by reference — so this is exact,
- *  and cheap enough to run per card per rebuild. */
+/** Flat equality over a built card. Every field is a primitive or a
+ *  frozen string array, so this is exact and cheap enough to run per
+ *  card per rebuild. */
 function sameCard(a: FocusCard, b: FocusCard): boolean {
   if (a === b) return true
   const keys = Object.keys(a) as Array<keyof FocusCard>
   if (keys.length !== Object.keys(b).length) return false
-  for (const k of keys) if (a[k] !== b[k]) return false
+  for (const k of keys) {
+    if (k === 'frameBreadcrumb') {
+      const x = a.frameBreadcrumb, y = b.frameBreadcrumb
+      if (x.length !== y.length || x.some((v, i) => v !== y[i])) return false
+      continue
+    }
+    if (a[k] !== b[k]) return false
+  }
   return true
 }
 
@@ -251,10 +266,10 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
     )
   }
   const expanded = card.frontierExpanded
-  const isDrill = card.expandKind === 'drill'
+  const isOpen = card.expandKind === 'open'
   const openPill = (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (isDrill && card.drillKey && card.aggregateEdge) ctx.onToggleDrill(card.drillKey, card.aggregateEdge)
+    if (isOpen) ctx.onOpenContainer(card.expandKey!, card.nodeId!, card.type)
     else ctx.onExpandFrontier(card.expandKey!, card.nodeId!)
   }
   return (
@@ -262,13 +277,13 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
       type="button"
       onClick={openPill}
       title={expanded
-        ? isDrill ? `Collapse ${card.label} back to one rolled-up connection` : `Collapse ${outLeft ? 'upstream of' : 'downstream of'} ${card.label}`
-        : isDrill
-          ? `Open ${card.label} — show the ${card.count.toLocaleString()} entit${card.count === 1 ? 'y' : 'ies'} inside it that connect to this one`
+        ? isOpen ? `Close ${card.label}` : `Collapse ${outLeft ? 'upstream of' : 'downstream of'} ${card.label}`
+        : isOpen
+          ? `Open ${card.label} — show what's inside it that connects to this entity`
           : `Expand the next hop ${outLeft ? 'upstream' : 'downstream'} of ${card.label}${hint != null ? ` (${hint.toLocaleString()} known)` : ''}`}
       className={cn(
         'absolute top-1/2 -translate-y-1/2 flex items-center justify-center gap-0.5 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors',
-        (isDrill ? card.count > 1 : hint != null) && !expanded ? 'px-1.5' : 'w-5',
+        (isOpen ? false : hint != null) && !expanded ? 'px-1.5' : 'w-5',
         expanded
           ? 'bg-accent-lineage/15 border-accent-lineage/50 text-accent-lineage hover:bg-accent-lineage/25'
           : 'bg-canvas-elevated border-black/15 dark:border-white/20 text-ink-muted hover:text-accent-lineage hover:border-accent-lineage/50',
@@ -277,9 +292,9 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
     >
       {(() => {
         if (expanded) return <LucideIcons.Minus className="w-3 h-3" />
-        // A drill knows exactly how many it rolls up; a hop only knows
-        // a degree when the backend reported one.
-        const n = isDrill ? (card.count > 1 ? card.count : null) : hint
+        // An open doesn't know its size until the server answers; a hop
+        // only knows a degree when the backend reported one.
+        const n = isOpen ? null : hint
         if (n == null) return <LucideIcons.Plus className="w-3 h-3" />
         return <>{outLeft && <LucideIcons.Plus className="w-2.5 h-2.5" />}{n.toLocaleString()}{!outLeft && <LucideIcons.Plus className="w-2.5 h-2.5" />}</>
       })()}
@@ -586,26 +601,16 @@ function FocusGraphCard({ data, selected }: NodeProps) {
               </span>
             </>
           )}
-          {card.drillKey && card.aggregateEdge ? (
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); ctx.onToggleDrill(card.drillKey!, card.aggregateEdge!) }}
-              title={`Refine — see the ${card.count.toLocaleString()} underlying connection${card.count === 1 ? '' : 's'} this rolls up`}
-              className="flex items-center gap-0.5 tabular-nums font-semibold text-ink-muted hover:text-accent-lineage transition-colors"
+          {card.count > 1 && (
+            <span
+              className="tabular-nums font-semibold text-ink-muted flex-shrink-0"
+              title={`${card.count.toLocaleString()} connections to this entity`}
             >
               ×{card.count.toLocaleString()}
-              <LucideIcons.ChevronDown className={cn('w-2.5 h-2.5 transition-transform', !card.drilled && '-rotate-90')} />
-            </button>
-          ) : (
-            card.count > 1 && <span className="tabular-nums font-semibold text-ink-muted flex-shrink-0">×{card.count.toLocaleString()}</span>
+            </span>
           )}
           {card.unresolved && <span className="italic flex-shrink-0">· not on canvas</span>}
         </p>
-        {card.missingConstituents > 0 && (
-          <p className="text-[8.5px] text-ink-muted/60 leading-none">
-            +{card.missingConstituents.toLocaleString()} more not loaded
-          </p>
-        )}
       </div>
       <CardActions card={card} ctx={ctx} />
       <FrontierPill card={card} ctx={ctx} />
@@ -622,6 +627,106 @@ function FocusGraphCard({ data, selected }: NodeProps) {
  * reads exactly `data` and `selected`; React Flow applies position
  * itself, so nothing else can affect the output.
  */
+/**
+ * A container opened into what's inside it that connects to the focal.
+ * Rendered BEHIND its children (see zIndex where nodes are built), with
+ * a header that stays interactive while the body lets clicks through to
+ * the child cards sitting on top.
+ */
+function FocusFrameNode({ data }: NodeProps) {
+  const { card, ctx } = data as unknown as { card: FocusCard; ctx: CardCtx }
+  const accent = ctx.visualFor(card.type).color
+  const q = ctx.frameQueryFor?.(card.expandKey ?? '') ?? ''
+  return (
+    <div
+      style={{ width: card.w, height: card.h, borderColor: `${accent}55` }}
+      className="relative rounded-xl border-2 border-dashed bg-black/[0.02] dark:bg-white/[0.03] pointer-events-none"
+    >
+      <PortHandles />
+      {/* Header — the only interactive part; the body is click-through
+          so the child cards above stay reachable. */}
+      <div className="pointer-events-auto absolute inset-x-0 top-0 h-[46px] px-2.5 flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onOpenContainer(card.expandKey!, card.nodeId, card.type) }}
+          title={`Close ${card.label}`}
+          className="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+        >
+          <LucideIcons.ChevronDown className="w-3.5 h-3.5" />
+        </button>
+        <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5 flex-shrink-0" />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[11.5px] font-semibold text-ink leading-tight" title={card.label}>
+            {card.label}
+          </p>
+          <p className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate">
+            {card.frameBreadcrumb.length > 0 && (
+              <span className="truncate" title={`Opened through ${card.frameBreadcrumb.join(' › ')}`}>
+                {card.frameBreadcrumb.join(' › ')} ·{' '}
+              </span>
+            )}
+            {card.fetch === 'loading'
+              ? 'Looking inside…'
+              : card.frameEmpty
+                ? 'nothing connected inside'
+                : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected inside`}
+          </p>
+        </div>
+        {/* Find one by name without opening everything. */}
+        {!card.frameEmpty && card.count > 4 && (
+          <input
+            value={q}
+            onChange={(e) => ctx.onFrameQuery(card.expandKey ?? '', e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            placeholder="Find…"
+            className="flex-shrink-0 w-20 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
+          />
+        )}
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
+          title={`Focus ${card.label}`}
+          className="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+        >
+          <LucideIcons.Focus className="w-3 h-3" />
+        </button>
+      </div>
+
+      {card.fetch === 'loading' && (
+        <div className="absolute inset-x-2.5 top-[52px] space-y-1.5">
+          {[0, 1].map(i => (
+            <div key={i} className="h-8 rounded-lg bg-black/[0.05] dark:bg-white/[0.06] animate-pulse" />
+          ))}
+        </div>
+      )}
+      {card.fetch === 'error' && (
+        <div className="pointer-events-auto absolute inset-x-2.5 top-[52px] flex items-center gap-1.5 text-[10px] text-amber-700 dark:text-amber-400">
+          <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
+          <span className="truncate">Couldn&apos;t look inside.</span>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onRetryOpen?.(card.expandKey!, card.nodeId, card.type) }}
+            className="font-semibold hover:underline"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {card.frameEmpty && (
+        <p className="absolute inset-x-2.5 top-[52px] text-[10px] text-ink-muted/70 italic leading-snug">
+          Nothing inside {card.label} connects to this entity.
+        </p>
+      )}
+    </div>
+  )
+}
+
+const MemoFocusFrameNode = memo(FocusFrameNode, (prev, next) => {
+  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx }
+  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx }
+  return a.ctx === b.ctx && sameCard(a.card, b.card)
+})
+
 const MemoFocusGraphCard = memo(FocusGraphCard, (prev, next) => {
   if (prev.selected !== next.selected) return false
   const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { in: number; out: number } }
@@ -663,7 +768,7 @@ function BandLabelNode({ data }: NodeProps) {
   )
 }
 
-const NODE_TYPES = { focusCard: MemoFocusGraphCard, bandLabel: BandLabelNode }
+const NODE_TYPES = { focusCard: MemoFocusGraphCard, focusFrame: MemoFocusFrameNode, bandLabel: BandLabelNode }
 
 // ── Edge ─────────────────────────────────────────────────────────────
 
@@ -820,9 +925,12 @@ export function FocusGraphView({
   onSelect,
   onFocus,
   onToggleGroup,
-  onToggleDrill,
+  onOpenContainer,
   onExpandFrontier,
   onShowMore,
+  onFrameQuery,
+  frameQueryFor,
+  onRetryOpen,
   onRetryFetch,
   onRevealOnCanvas,
   onOpenDetails,
@@ -856,13 +964,16 @@ export function FocusGraphView({
     onSelect,
     onFocus,
     onToggleGroup,
-    onToggleDrill,
+    onOpenContainer,
     onExpandFrontier,
     onShowMore,
+    onFrameQuery,
+    frameQueryFor,
+    onRetryOpen,
     onRetryFetch,
     onRevealOnCanvas,
     onOpenDetails,
-  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleGroup, onToggleDrill, onExpandFrontier, onShowMore, onRetryFetch, onRevealOnCanvas, onOpenDetails])
+  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleGroup, onOpenContainer, onExpandFrontier, onShowMore, onFrameQuery, frameQueryFor, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out
@@ -876,7 +987,8 @@ export function FocusGraphView({
     }
     const nodes: Node[] = graph.cards.map((card) => ({
       id: card.id,
-      type: 'focusCard',
+      type: card.kind === 'frame' ? 'focusFrame' : 'focusCard',
+      zIndex: card.kind === 'frame' ? 0 : 1,
       position: { x: card.x, y: card.y },
       draggable: false,
       selectable: false,

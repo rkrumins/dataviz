@@ -485,36 +485,77 @@ describe('LineageLens graph mode', () => {
     expect(onRecenter).toHaveBeenCalledWith('c')
   })
 
-  it('a rolled-up partner offers an expand pill that drills to its constituents', () => {
+  it('a coarse partner offers an open pill that asks what is inside it', () => {
     const prevSchema = useSchemaStore.getState().schema
     useSchemaStore.setState({
       schema: {
         ...(prevSchema ?? {}),
         containmentEdgeTypes: ['CONTAINS'],
         entityTypes: [
-          { id: 'CONTAINER', hierarchy: { canContain: ['DATASET'] } },
-          { id: 'DATASET', hierarchy: { canContain: [] } },
+          { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
+          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
         ],
       },
     } as never)
     try {
-      const agg = {
-        id: 'agg1', source: 'plat', target: 'ds',
-        data: { edgeType: 'FLOWS_TO', isAggregated: true, sourceEdgeCount: 3, sourceEdges: ['r1', 'r2', 'r3'] },
-      } as unknown as LineageEdge
       useCanvasStore.setState({
         nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
-        edges: [],
-        visibleEdges: [agg],
+        edges: [edge('e1', 'plat', 'ds')],
+        visibleEdges: [],
       } as never)
-      const onDrillFetch = vi.fn()
-      renderLens(['ds'], {}, { onDrillFetch })
-      // The coarse partner is not a dead end: it offers the open pill,
-      // worded as "what inside this connects to me".
-      const pill = screen.getByTitle(/Open label-plat — show the 3 entities inside it/)
+      const onOpenContainer = vi.fn()
+      renderLens(['ds'], {}, { onOpenContainer })
+
+      // The coarse partner is not a dead end — it offers to open, worded
+      // as "what inside this connects to me".
+      const pill = screen.getByTitle(/Open label-plat — show what's inside it that connects to this entity/)
       fireEvent.click(pill)
-      // Opening it fetches the underlying connections on demand.
-      expect(onDrillFetch).toHaveBeenCalledWith(expect.objectContaining({ id: 'agg1' }))
+      // Opening asks the server for the next grain down (container level 2 → 3).
+      expect(onOpenContainer).toHaveBeenCalledWith('plat', 'in', 2)
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
+  it('renders an opened container as a frame holding its connected children', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [
+          { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
+          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
+        ],
+      },
+    } as never)
+    try {
+      useCanvasStore.setState({
+        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
+        edges: [edge('e1', 'plat', 'ds')],
+        visibleEdges: [],
+      } as never)
+      const onRecenter = vi.fn()
+      renderLens(['ds'], { onRecenter }, {
+        onOpenContainer: vi.fn(),
+        graphSeed: { nodeId: 'ds', expandedGroups: [], expandedFrontier: [], openContainers: ['in:plat'] },
+        containerResults: new Map([['in:plat', {
+          nodes: [node('kid1', 'DATASET'), node('kid2', 'DATASET')],
+          edges: [edge('r1', 'kid1', 'ds'), edge('r2', 'kid2', 'ds')],
+          passedThrough: [],
+          truncated: false,
+          empty: false,
+        }]]),
+        containerStatus: new Map([['in:plat', 'done' as const]]),
+      })
+
+      // Only the children that connect show, and they are real cards you
+      // can keep exploring from.
+      expect(screen.getByText('label-kid1')).toBeTruthy()
+      expect(screen.getByText('label-kid2')).toBeTruthy()
+      expect(screen.getByText(/2 connected inside/)).toBeTruthy()
+      fireEvent.doubleClick(screen.getByText('label-kid1'))
+      expect(onRecenter).toHaveBeenCalledWith('kid1')
     } finally {
       useSchemaStore.setState({ schema: prevSchema } as never)
     }

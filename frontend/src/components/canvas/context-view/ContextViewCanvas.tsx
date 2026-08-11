@@ -107,6 +107,7 @@ import {
 import { decodeLensShare } from './lens/shareCodec'
 import { useLensLineage } from '@/hooks/useLensLineage'
 import { useLensImpact } from '@/hooks/useLensImpact'
+import { useLensContainer } from '@/hooks/useLensContainer'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -3104,12 +3105,14 @@ export function ContextViewCanvas({
     nodeId: string
     expandedGroups: string[]
     expandedFrontier: string[]
+    openContainers: string[]
   } | null>(() => (
     initialLensShare
       ? {
           nodeId: initialLensShare.entries[initialLensShare.cursor],
           expandedGroups: initialLensShare.groups,
           expandedFrontier: initialLensShare.frontier,
+          openContainers: initialLensShare.containers,
         }
       : null
   ))
@@ -3133,6 +3136,9 @@ export function ContextViewCanvas({
   // Transitive reach of the current focal — one bounded trace per
   // visited focal per session (lens-local, same invariants).
   const lensImpact = useLensImpact(lensFocalOf(lensHistory), provider)
+  // "What's inside this container that connects to my focus" — the
+  // descendant-pair expansion, held lens-locally like everything else.
+  const lensContainer = useLensContainer(lensFocalOf(lensHistory), provider, lineageEdgeTypes)
   useEffect(() => {
     focusLensRef.current = () => {
       const target = selectedNodeId ?? drawerNodeId
@@ -3914,6 +3920,16 @@ export function ContextViewCanvas({
           degreeHints={externalDegrees}
           impact={lensImpact.impact}
           impactStatus={lensImpact.status}
+          containerResults={lensContainer.results}
+          containerStatus={lensContainer.status}
+          onOpenContainer={(urn, dir, level) => {
+            const focal = lensFocalOf(lensHistory)
+            if (focal) lensContainer.openContainer(urn, focal, dir, level)
+          }}
+          onRetryOpenContainer={(urn, dir, level) => {
+            const focal = lensFocalOf(lensHistory)
+            if (focal) lensContainer.retry(urn, focal, dir, level)
+          }}
           graphSeed={lensShareSeed}
           externalPreview={externalPreview && lensFocalOf(lensHistory) === externalPreview.nodeId ? externalPreview : null}
           onRecenter={lensRecenter}
