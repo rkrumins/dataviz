@@ -1014,7 +1014,7 @@ export function FocusGraphView({
     // Hop-band headers with honest shown/total counts.
     for (const [band, minY] of minYByBand) {
       if (band === 0) continue
-      const totals = graph.bandTotals.get(`${band < 0 ? 'in' : 'out'}:${Math.abs(band)}`)
+      const totals = graph.bandTotals.get(`band:${band < 0 ? 'in' : 'out'}:${Math.abs(band)}`)
       const sub = totals
         ? totals.total > totals.shown ? `${totals.shown} of ${totals.total}` : `${totals.total}`
         : undefined

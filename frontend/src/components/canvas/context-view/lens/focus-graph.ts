@@ -514,7 +514,10 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       ]
 
       // Band cap + paging → overflow card, totals stay honest.
-      const bandKey = `${dir}:${band}`
+      // `band:` prefix, not `${dir}:${band}` — a bare `in:1` collides
+      // with the `${dir}:${urn}` space that frames and groups use, and
+      // the caller routes "show more" by key prefix.
+      const bandKey = `band:${dir}:${band}`
       const cap = GRAPH_BAND_CAP * (1 + (bandPages.get(bandKey) ?? 0))
       const shown = items.slice(0, cap)
       bandTotals.set(bandKey, { shown: Math.min(items.length, cap), total: items.length })

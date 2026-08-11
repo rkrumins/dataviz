@@ -10,7 +10,7 @@
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
-import { useLensContainer, containerKey, FRAME_AUTO_STEPS } from '../useLensContainer'
+import { useLensContainer, openKeyOf, FRAME_AUTO_STEPS } from '../useLensContainer'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 
 const gn = (urn: string, entityType = 'dataset') => ({
@@ -28,9 +28,18 @@ const result = (nodes: unknown[], edges: unknown[], over: Record<string, unknown
   ...over,
 })
 
-function makeProvider(impl: (req: { sourceUrn: string; targetUrn: string; nextLevel: number | string }) => unknown) {
+function makeProvider(
+  impl: (req: { sourceUrn: string; targetUrn: string; nextLevel: number | string }) => unknown,
+  children?: (req: { urn: string; offset: number; limit: number }) => unknown,
+) {
   const expandAggregated = vi.fn(async (req: { sourceUrn: string; targetUrn: string; nextLevel: number | string }) => impl(req))
-  return { provider: { expandAggregated } as unknown as GraphDataProvider, expandAggregated }
+  const getChildrenWithEdges = vi.fn(async (urn: string, o?: { offset?: number; limit?: number }) =>
+    children?.({ urn, offset: o?.offset ?? 0, limit: o?.limit ?? 0 }) ?? { children: [], hasMore: false })
+  return {
+    provider: { expandAggregated, getChildrenWithEdges } as unknown as GraphDataProvider,
+    expandAggregated,
+    getChildrenWithEdges,
+  }
 }
 
 describe('useLensContainer', () => {
@@ -38,7 +47,7 @@ describe('useLensContainer', () => {
     const { provider, expandAggregated } = makeProvider(() =>
       result([gn('C', 'container'), gn('kid1'), gn('kid2'), gn('F')], [ge('e1', 'kid1', 'F'), ge('e2', 'kid2', 'F')]))
     const { result: hook } = renderHook(() => useLensContainer('F', provider, ['FLOWS_TO']))
-    const key = containerKey('C', 'F', 'in')
+    const key = openKeyOf('C', 'in')
 
     act(() => hook.current.openContainer('C', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('done'))
@@ -60,7 +69,7 @@ describe('useLensContainer', () => {
       result([gn('kid1'), gn('F')], [ge('e1', 'F', 'kid1')]))
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
     act(() => hook.current.openContainer('C', 'F', 'out', 1))
-    await waitFor(() => expect(hook.current.status.get(containerKey('C', 'F', 'out'))).toBe('done'))
+    await waitFor(() => expect(hook.current.status.get(openKeyOf('C', 'out'))).toBe('done'))
     expect(expandAggregated).toHaveBeenCalledWith(expect.objectContaining({ sourceUrn: 'F', targetUrn: 'C' }))
   })
 
@@ -71,7 +80,7 @@ describe('useLensContainer', () => {
     const { provider } = makeProvider(() =>
       result([gn('kid1'), gn('kid2'), gn('kid3'), gn('kid4'), gn('kid5')], []))
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
-    const key = containerKey('C', 'F', 'in')
+    const key = openKeyOf('C', 'in')
     act(() => hook.current.openContainer('C', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('done'))
 
@@ -89,7 +98,7 @@ describe('useLensContainer', () => {
         ? result([gn('mid', 'container'), gn('F')], [ge('e1', 'mid', 'F')])
         : result([gn('kid1'), gn('kid2'), gn('F')], [ge('e2', 'kid1', 'F'), ge('e3', 'kid2', 'F')]))
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
-    const key = containerKey('C', 'F', 'in')
+    const key = openKeyOf('C', 'in')
 
     act(() => hook.current.openContainer('C', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('done'))
@@ -108,7 +117,7 @@ describe('useLensContainer', () => {
       result([gn(`c${++n}`, 'container'), gn('F')], [ge(`e${n}`, `c${n}`, 'F')]))
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
     act(() => hook.current.openContainer('C', 'F', 'in', 1))
-    await waitFor(() => expect(hook.current.status.get(containerKey('C', 'F', 'in'))).toBe('done'))
+    await waitFor(() => expect(hook.current.status.get(openKeyOf('C', 'in'))).toBe('done'))
     expect(expandAggregated).toHaveBeenCalledTimes(FRAME_AUTO_STEPS)
   })
 
@@ -116,7 +125,7 @@ describe('useLensContainer', () => {
     const { provider } = makeProvider(() =>
       result([gn('kid1'), gn('F')], [ge('e1', 'kid1', 'F')], { truncated: true, truncationReason: 'max_nodes' }))
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
-    const key = containerKey('C', 'F', 'in')
+    const key = openKeyOf('C', 'in')
     act(() => hook.current.openContainer('C', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('done'))
     expect(hook.current.results.get(key)!.truncated).toBe(true)
@@ -125,7 +134,7 @@ describe('useLensContainer', () => {
   it('degrades to unsupported when the provider lacks the capability', async () => {
     const provider = {} as unknown as GraphDataProvider
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
-    const key = containerKey('C', 'F', 'in')
+    const key = openKeyOf('C', 'in')
     act(() => hook.current.openContainer('C', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('unsupported'))
     expect(hook.current.results.has(key)).toBe(false)
@@ -140,7 +149,7 @@ describe('useLensContainer', () => {
       return result([gn('kid1'), gn('kid2'), gn('F')], [ge('e1', 'kid1', 'F'), ge('e2', 'kid2', 'F')])
     })
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
-    const key = containerKey('C', 'F', 'in')
+    const key = openKeyOf('C', 'in')
 
     act(() => hook.current.openContainer('C', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('error'))
@@ -171,5 +180,131 @@ describe('useLensContainer', () => {
     rerender({ focal: null })
     expect(hook.current.results.size).toBe(0)
     expect(hook.current.status.size).toBe(0)
+  })
+
+  // REGRESSION: the hook once exposed its internal cache keys
+  // (`${dir}:${container}->${focal}`) while every caller looks results up
+  // by `${dir}:${urn}`. Nothing hit, so every opened frame rendered as a
+  // permanently empty "0 connected inside".
+  it('exposes answers under the caller key, scoped to the current focal', async () => {
+    // Two children, so the pass-through auto-skip stays out of the way.
+    const { provider } = makeProvider(({ targetUrn }) =>
+      result([gn('C', 'container'), gn(`kid-of-${targetUrn}`), gn(`kid2-of-${targetUrn}`), gn(targetUrn)],
+        [ge('e1', `kid-of-${targetUrn}`, targetUrn), ge('e2', `kid2-of-${targetUrn}`, targetUrn)]))
+    const { result: hook, rerender } = renderHook(
+      ({ focal }: { focal: string }) => useLensContainer(focal, provider, []),
+      { initialProps: { focal: 'F' } },
+    )
+
+    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    await waitFor(() => expect(hook.current.status.get('in:C')).toBe('done'))
+    expect(hook.current.results.get('in:C')!.nodes.map(n => n.id)).toEqual(['kid-of-F', 'kid2-of-F'])
+
+    // Hop to another entity: F's answer must NOT show through, because
+    // "what's inside C that connects to F" says nothing about G.
+    rerender({ focal: 'G' })
+    expect(hook.current.results.get('in:C')).toBeUndefined()
+    expect(hook.current.status.get('in:C')).toBeUndefined()
+
+    act(() => hook.current.openContainer('C', 'G', 'in', 1))
+    await waitFor(() => expect(hook.current.results.get('in:C')?.nodes[0]?.id).toBe('kid-of-G'))
+
+    // Stepping back finds F's answer still cached — no refetch.
+    rerender({ focal: 'F' })
+    expect(hook.current.results.get('in:C')!.nodes.map(n => n.id)).toEqual(['kid-of-F', 'kid2-of-F'])
+  })
+})
+
+describe('useLensContainer — every child ("show all")', () => {
+  /** Opens C against F, then hands back the settled hook. */
+  const openedHook = async (
+    children?: (req: { urn: string; offset: number; limit: number }) => unknown,
+    expand = () => result(
+      [gn('C', 'container'), gn('kid1'), gn('kid2'), gn('F')],
+      [ge('e1', 'kid1', 'F'), ge('e2', 'kid2', 'F')],
+    ),
+  ) => {
+    const made = makeProvider(expand, children)
+    const { result: hook } = renderHook(() => useLensContainer('F', made.provider, []))
+    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    await waitFor(() => expect(hook.current.status.get('in:C')).toBe('done'))
+    return { hook, ...made }
+  }
+
+  it('asks about the container actually opened, and pages by offset', async () => {
+    const page = (o: number, n: number) => Array.from({ length: n }, (_, i) => gn(`c${o + i}`))
+    const { hook, getChildrenWithEdges } = await openedHook(({ offset }) =>
+      offset === 0
+        ? { children: page(0, 100), hasMore: true }
+        : { children: page(100, 3), hasMore: false })
+
+    act(() => hook.current.loadAllChildren('in:C', 'F'))
+    await waitFor(() => expect(hook.current.allStatus.get('in:C')).toBe('done'))
+    expect(getChildrenWithEdges).toHaveBeenCalledWith('C', expect.objectContaining({
+      offset: 0, limit: 100, includeLineageEdges: false,
+    }))
+    let all = hook.current.allResults.get('in:C')!
+    expect(all.children).toHaveLength(100)
+    expect(all.hasMore).toBe(true)
+    // Still paging ⇒ the count is genuinely unknown, never fabricated.
+    expect(all.total).toBeNull()
+
+    act(() => hook.current.loadAllChildren('in:C', 'F'))
+    await waitFor(() => expect(hook.current.allResults.get('in:C')!.children).toHaveLength(103))
+    expect(getChildrenWithEdges).toHaveBeenLastCalledWith('C', expect.objectContaining({ offset: 100 }))
+    all = hook.current.allResults.get('in:C')!
+    // Drained ⇒ and only now is the total actually known.
+    expect(all.hasMore).toBe(false)
+    expect(all.total).toBe(103)
+
+    // Drained means drained — no further round trips.
+    act(() => hook.current.loadAllChildren('in:C', 'F'))
+    expect(getChildrenWithEdges).toHaveBeenCalledTimes(2)
+  })
+
+  it('anchors on the container the pass-through walk landed on', async () => {
+    // C holds exactly one relevant child (mid), so the open descends
+    // through it — "all children" must be asked of mid, not of C.
+    const expand = vi.fn()
+      .mockReturnValueOnce(result([gn('C', 'container'), gn('mid'), gn('F')], [ge('e1', 'mid', 'F')]))
+      .mockReturnValue(result([gn('mid'), gn('leaf1'), gn('leaf2'), gn('F')],
+        [ge('e2', 'leaf1', 'F'), ge('e3', 'leaf2', 'F')]))
+    const { hook, getChildrenWithEdges } = await openedHook(
+      () => ({ children: [gn('leaf1'), gn('leaf2'), gn('leaf3')], hasMore: false }),
+      expand as unknown as () => ReturnType<typeof result>,
+    )
+    expect(hook.current.results.get('in:C')!.anchorUrn).toBe('mid')
+
+    act(() => hook.current.loadAllChildren('in:C', 'F'))
+    await waitFor(() => expect(hook.current.allStatus.get('in:C')).toBe('done'))
+    expect(getChildrenWithEdges).toHaveBeenCalledWith('mid', expect.anything())
+  })
+
+  it('is a no-op until the open resolves — the anchor is not known yet', async () => {
+    const { getChildrenWithEdges, provider } = makeProvider(
+      () => result([gn('kid1'), gn('F')], [ge('e1', 'kid1', 'F')]),
+      () => ({ children: [gn('x')], hasMore: false }),
+    )
+    const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
+    act(() => hook.current.loadAllChildren('in:C', 'F'))
+    expect(getChildrenWithEdges).not.toHaveBeenCalled()
+    expect(hook.current.allStatus.get('in:C')).toBeUndefined()
+  })
+
+  it('reports a failed fetch and lets the user re-kick it', async () => {
+    let fail = true
+    const { hook, getChildrenWithEdges } = await openedHook(() => {
+      if (fail) throw new Error('nope')
+      return { children: [gn('c1')], hasMore: false }
+    })
+
+    act(() => hook.current.loadAllChildren('in:C', 'F'))
+    await waitFor(() => expect(hook.current.allStatus.get('in:C')).toBe('error'))
+    expect(getChildrenWithEdges).toHaveBeenCalledTimes(1)
+
+    fail = false
+    act(() => hook.current.loadAllChildren('in:C', 'F'))
+    await waitFor(() => expect(hook.current.allStatus.get('in:C')).toBe('done'))
+    expect(hook.current.allResults.get('in:C')!.children.map(n => n.id)).toEqual(['c1'])
   })
 })

@@ -536,6 +536,18 @@ export function LineageLens({
     if (!graphSeed || graphSeed.nodeId !== nodeId || !onEnsureFetched) return
     for (const k of graphSeed.expandedFrontier) onEnsureFetched(k.replace(/^(in|out):/, ''))
   }, [graphSeed, nodeId, onEnsureFetched])
+  // Restored OPEN containers need the same kick, or a shared link
+  // reopens frames that stay empty forever. Unknown level = we cannot
+  // ask the server for the next grain, so skip rather than guess.
+  useEffect(() => {
+    if (!graphSeed || graphSeed.nodeId !== nodeId || !onOpenContainer) return
+    for (const k of graphSeed.openContainers ?? []) {
+      const urn = k.replace(/^(in|out):/, '')
+      const level = entityLevels.get((nodeMap.get(urn)?.data?.type as string) ?? '')
+      if (level === undefined) continue
+      onOpenContainer(urn, k.startsWith('in:') ? 'in' : 'out', level)
+    }
+  }, [graphSeed, nodeId, onOpenContainer, entityLevels, nodeMap])
 
   // The pure graph build — every semantic decision (grouping, rollups,
   // drills, frontier hops, caps, filter dimming, layout) lives in
@@ -1081,7 +1093,7 @@ export function LineageLens({
                 onToggleGroup={toggleGraphGroup}
                 onOpenContainer={toggleContainer}
                 onExpandFrontier={toggleGraphFrontier}
-                onShowMore={(key) => (key.startsWith('in:') || key.startsWith('out:') ? bumpFramePage(key) : bumpBandPage(key))}
+                onShowMore={(key) => (key.startsWith('band:') || key === 'contains' ? bumpBandPage(key) : bumpFramePage(key))}
                 onFrameQuery={setFrameQuery}
                 frameQueryFor={(key) => graphCur.frameQueries.get(key) ?? ''}
                 onRetryOpen={retryContainer}

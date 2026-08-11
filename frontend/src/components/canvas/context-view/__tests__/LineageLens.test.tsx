@@ -536,8 +536,9 @@ describe('LineageLens graph mode', () => {
         visibleEdges: [],
       } as never)
       const onRecenter = vi.fn()
+      const onOpenContainer = vi.fn()
       renderLens(['ds'], { onRecenter }, {
-        onOpenContainer: vi.fn(),
+        onOpenContainer,
         graphSeed: { nodeId: 'ds', expandedGroups: [], expandedFrontier: [], openContainers: ['in:plat'] },
         containerResults: new Map([['in:plat', {
           nodes: [node('kid1', 'DATASET'), node('kid2', 'DATASET')],
@@ -556,9 +557,34 @@ describe('LineageLens graph mode', () => {
       expect(screen.getByText(/2 connected inside/)).toBeTruthy()
       fireEvent.doubleClick(screen.getByText('label-kid1'))
       expect(onRecenter).toHaveBeenCalledWith('kid1')
+      // REGRESSION: a restored open must re-ask the server, or a shared
+      // link reopens frames that stay empty forever.
+      expect(onOpenContainer).toHaveBeenCalledWith('plat', 'in', 2)
     } finally {
       useSchemaStore.setState({ schema: prevSchema } as never)
     }
+  })
+
+  // REGRESSION: band overflow keys used to be `${dir}:${band}` (e.g.
+  // "in:1"), which collides with the `${dir}:${urn}` space frames use.
+  // The prefix-based dispatch routed band paging into frame paging, so
+  // the band's "+N more" was a dead control.
+  it('the band overflow card actually reveals more of the band', () => {
+    const many = Array.from({ length: 35 }, (_, i) => node(`src${i}`))
+    useCanvasStore.setState({
+      nodes: [node('ds'), ...many],
+      edges: many.map((n, i) => edge(`e${i}`, n.id, 'ds')),
+      visibleEdges: [],
+    } as never)
+    renderLens(['ds'])
+
+    // 30 of 35 fit under the cap; the rest sit behind one overflow card.
+    expect(screen.getByText('+5 more')).toBeTruthy()
+    expect(screen.getAllByText(/^label-src\d+$/)).toHaveLength(30)
+
+    fireEvent.click(screen.getByText('+5 more'))
+    expect(screen.getAllByText(/^label-src\d+$/)).toHaveLength(35)
+    expect(screen.queryByText('+5 more')).toBeNull()
   })
 
   it('the header toggle switches to the list body and persists the preference', () => {

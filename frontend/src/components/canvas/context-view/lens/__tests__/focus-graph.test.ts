@@ -391,11 +391,11 @@ describe('buildFocusGraph — caps, chips, filter', () => {
     const g = build({ nodes, edges: es })
     const overflow = card(g, 'more:in:1')
     expect(overflow.overflowCount).toBe(5)
-    expect(g.bandTotals.get('in:1')).toEqual({ shown: GRAPH_BAND_CAP, total: GRAPH_BAND_CAP + 5 })
+    expect(g.bandTotals.get('band:in:1')).toEqual({ shown: GRAPH_BAND_CAP, total: GRAPH_BAND_CAP + 5 })
 
-    const paged = build({ nodes, edges: es, over: { bandPages: new Map([['in:1', 1]]) } })
+    const paged = build({ nodes, edges: es, over: { bandPages: new Map([['band:in:1', 1]]) } })
     expect(paged.cards.find(c => c.id === 'more:in:1')).toBeUndefined()
-    expect(paged.bandTotals.get('in:1')).toEqual({ shown: GRAPH_BAND_CAP + 5, total: GRAPH_BAND_CAP + 5 })
+    expect(paged.bandTotals.get('band:in:1')).toEqual({ shown: GRAPH_BAND_CAP + 5, total: GRAPH_BAND_CAP + 5 })
   })
 
   it('type chips REMOVE cards but report the hidden count', () => {
