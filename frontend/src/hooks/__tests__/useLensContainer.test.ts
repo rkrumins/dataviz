@@ -30,11 +30,11 @@ const result = (nodes: unknown[], edges: unknown[], over: Record<string, unknown
 
 function makeProvider(
   impl: (req: { sourceUrn: string; targetUrn: string; nextLevel: number | string }) => unknown,
-  children?: (req: { urn: string; offset: number; limit: number }) => unknown,
+  children?: (req: { urn: string; offset: number; limit: number; searchQuery?: string }) => unknown,
 ) {
   const expandAggregated = vi.fn(async (req: { sourceUrn: string; targetUrn: string; nextLevel: number | string }) => impl(req))
-  const getChildrenWithEdges = vi.fn(async (urn: string, o?: { offset?: number; limit?: number }) =>
-    children?.({ urn, offset: o?.offset ?? 0, limit: o?.limit ?? 0 }) ?? { children: [], hasMore: false })
+  const getChildrenWithEdges = vi.fn(async (urn: string, o?: { offset?: number; limit?: number; searchQuery?: string }) =>
+    children?.({ urn, offset: o?.offset ?? 0, limit: o?.limit ?? 0, searchQuery: o?.searchQuery }) ?? { children: [], hasMore: false })
   return {
     provider: { expandAggregated, getChildrenWithEdges } as unknown as GraphDataProvider,
     expandAggregated,
@@ -256,7 +256,7 @@ describe('useLensContainer', () => {
 describe('useLensContainer — every child ("show all")', () => {
   /** Opens C against F, then hands back the settled hook. */
   const openedHook = async (
-    children?: (req: { urn: string; offset: number; limit: number }) => unknown,
+    children?: (req: { urn: string; offset: number; limit: number; searchQuery?: string }) => unknown,
     expand = () => result(
       [gn('C', 'container'), gn('kid1'), gn('kid2'), gn('F')],
       [ge('e1', 'kid1', 'F'), ge('e2', 'kid2', 'F')],
@@ -298,6 +298,44 @@ describe('useLensContainer — every child ("show all")', () => {
     // Drained means drained — no further round trips.
     act(() => hook.current.loadAllChildren('in:C', 'F'))
     expect(getChildrenWithEdges).toHaveBeenCalledTimes(2)
+  })
+
+  // REGRESSION: Find filtered the loaded page in the browser, so on a
+  // wide table you could not find a column you had not paged to — the
+  // one thing a Find box is for.
+  it('sends a search to the server, and a new search restarts the list', async () => {
+    const { hook, getChildrenWithEdges } = await openedHook(({ offset, searchQuery }) =>
+      searchQuery
+        ? { children: [gn('order_id'), gn('order_ts')], hasMore: false }
+        : offset === 0
+          ? { children: Array.from({ length: 100 }, (_, i) => gn(`c${i}`)), hasMore: true }
+          : { children: [gn('c100')], hasMore: false })
+
+    act(() => hook.current.loadAllChildren('in:C', 'F'))
+    await waitFor(() => expect(hook.current.allResults.get('in:C')!.children).toHaveLength(100))
+
+    act(() => hook.current.loadAllChildren('in:C', 'F', 'order'))
+    await waitFor(() => expect(hook.current.allResults.get('in:C')!.query).toBe('order'))
+    expect(getChildrenWithEdges).toHaveBeenLastCalledWith('C', expect.objectContaining({
+      offset: 0, searchQuery: 'order',
+    }))
+    // The matches REPLACE the unfiltered page — they are the answer to a
+    // different question, not more of the same one.
+    const found = hook.current.allResults.get('in:C')!
+    expect(found.children.map(c => c.id)).toEqual(['order_id', 'order_ts'])
+    expect(found.total).toBe(2)
+
+    // A drained search does not block going back to the full list.
+    act(() => hook.current.loadAllChildren('in:C', 'F'))
+    await waitFor(() => expect(hook.current.allResults.get('in:C')!.children).toHaveLength(100))
+    expect(hook.current.allResults.get('in:C')!.query).toBe('')
+  })
+
+  it('never sends searchQuery when nothing is typed', async () => {
+    const { hook, getChildrenWithEdges } = await openedHook(() => ({ children: [gn('c0')], hasMore: false }))
+    act(() => hook.current.loadAllChildren('in:C', 'F'))
+    await waitFor(() => expect(hook.current.allStatus.get('in:C')).toBe('done'))
+    expect(getChildrenWithEdges.mock.calls[0][1]).not.toHaveProperty('searchQuery')
   })
 
   it('anchors on the container the pass-through walk landed on', async () => {

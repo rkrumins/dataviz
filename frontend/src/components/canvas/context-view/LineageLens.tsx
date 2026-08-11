@@ -51,7 +51,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useTourStore } from '@/features/tour/tourStore'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { lensFocalOf, type LensHistory } from './lens/lensHistory'
-import { buildFocusGraph, labelOf, edgeLabelFor, type EdgeTypeInfoMap } from './lens/focus-graph'
+import { buildFocusGraph, labelOf, edgeLabelFor, FRAME_ALL_CAP, type EdgeTypeInfoMap } from './lens/focus-graph'
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
 
@@ -148,10 +148,15 @@ export interface LineageLensProps {
     children: LineageNode[]
     hasMore: boolean
     total: number | null
+    /** The search this page set answers; absent for the full list. */
+    query?: string
   }>
   frameAllStatus?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
   /** Fetch (or page further into) an opened container's full child list. */
-  onLoadAllChildren?: (openKey: string) => void
+  /** Fetch (or page further into) every child of an opened frame.
+   *  `searchQuery` goes to the server, so Find reaches rows that have
+   *  not been paged to yet. */
+  onLoadAllChildren?: (openKey: string, searchQuery?: string) => void
   /** Children the lens fetched for an entity in its own right, keyed by
    *  entity id — the focal's contents, and any contained child's. */
   childrenOf?: Map<string, { children: LineageNode[]; hasMore: boolean; total: number | null }>
@@ -607,24 +612,62 @@ export function LineageLens({
       const next = new Map(base.frameQueries)
       if (q) next.set(openKey, q)
       else next.delete(openKey)
-      return { ...base, frameQueries: next }
+      // A new search is a new list — start it at the top rather than
+      // leaving the window parked on a page the matches may not reach.
+      const pages = new Map(base.framePages)
+      pages.delete(openKey)
+      return { ...base, frameQueries: next, framePages: pages }
     })
   }, [nodeId, seededFresh])
 
-  const bumpFramePage = useCallback((openKey: string) => {
+  /**
+   * Find, debounced into the server.
+   *
+   * The in-frame box used to filter the loaded page in the browser, so
+   * on a 500-column table you could not find a column you had not paged
+   * to — the one thing a Find box is for. `getChildrenWithEdges` matches
+   * displayName/urn server-side; this sends the query there, and the
+   * hook resets that frame's pages because a different query is a
+   * different list. Connected mode is unaffected: its set is small,
+   * fully loaded, and already the answer you opened for.
+   */
+  const frameQueriesNow = graphCur.frameQueries
+  const frameShowAllNow = graphCur.frameShowAll
+  useEffect(() => {
+    if (!onLoadAllChildren || frameShowAllNow.size === 0) return
+    const t = setTimeout(() => {
+      for (const key of frameShowAllNow) {
+        const want = (frameQueriesNow.get(key) ?? '').trim()
+        const have = frameAllResults?.get(key)
+        // Only when the question CHANGED — otherwise this would race the
+        // frame's own first-page fetch and quietly page past it.
+        if (!have || (have.query ?? '') === want) continue
+        onLoadAllChildren(key, want)
+      }
+    }, 300)
+    return () => clearTimeout(t)
+  }, [frameQueriesNow, frameShowAllNow, frameAllResults, onLoadAllChildren])
+
+  /** Move a frame's fixed window to an absolute page. Fetching is
+   *  decoupled from the window: one 100-child server page backs five
+   *  20-row render pages, so we only ask for more when the requested
+   *  window actually runs past what is loaded. */
+  const setFramePage = useCallback((openKey: string, page: number) => {
     let showingAll = false
     setGraphState(prev => {
       const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
       showingAll = base.frameShowAll.has(openKey)
       const next = new Map(base.framePages)
-      next.set(openKey, (next.get(openKey) ?? 0) + 1)
+      next.set(openKey, Math.max(0, page))
       return { ...base, framePages: next }
     })
-    // "Show more" inside an all-children frame may need the next page
-    // from the server, not just a higher cap. The fetch is a no-op once
-    // the list is drained.
-    if (showingAll) onLoadAllChildren?.(openKey)
-  }, [nodeId, seededFresh, onLoadAllChildren])
+    if (!showingAll) return
+    const loaded = frameAllResults?.get(openKey)
+    const wanted = (Math.max(0, page) + 1) * FRAME_ALL_CAP
+    // The hook is idempotent and no-ops once the list is drained; this
+    // just keeps a page turn inside the fetched set from asking at all.
+    if (!loaded || (loaded.hasMore && loaded.children.length < wanted)) onLoadAllChildren?.(openKey)
+  }, [nodeId, seededFresh, onLoadAllChildren, frameAllResults])
 
   /** Stable per-frame query getter. An inline arrow here re-created the
    *  card context on every render, which re-rendered every card in the
@@ -1292,7 +1335,8 @@ export function LineageLens({
                 onToggleGroup={toggleGraphGroup}
                 onOpenContainer={toggleContainer}
                 onExpandFrontier={toggleGraphFrontier}
-                onShowMore={(key) => (key.startsWith('band:') || key === 'contains' ? bumpBandPage(key) : bumpFramePage(key))}
+                onShowMore={bumpBandPage}
+                onSetFramePage={setFramePage}
                 onFrameQuery={setFrameQuery}
                 frameQueryFor={frameQueryFor}
                 onToggleFrameAll={toggleFrameAll}

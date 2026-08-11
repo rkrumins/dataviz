@@ -22,6 +22,7 @@ import {
   GROUP_HEADER_H,
   FRAME_CHILD_CAP,
   FRAME_ALL_CAP,
+  framePager,
   CARD_H,
   CHILD_ROW_H,
   type FocusGraphInput,
@@ -302,7 +303,7 @@ describe('buildFocusGraph — grouping and rollups', () => {
     expect(g.edges.find(e => e.target === 'f' && e.source === 'fr:in:Snowflake')).toBeTruthy()
   })
 
-  it('caps children inside a frame with an overflow card, and paging raises it', () => {
+  it('shows ONE fixed page of children, and paging MOVES the window', () => {
     const kids = Array.from({ length: FRAME_CHILD_CAP + 3 }, (_, i) => node(`k${String(i).padStart(2, '0')}`))
     const over = {
       openContainers: new Set(['in:Snowflake']),
@@ -319,11 +320,87 @@ describe('buildFocusGraph — grouping and rollups', () => {
       isCoarser: (t?: string) => t === 'DATAPLATFORM',
     }
     const g = build({ ...base, over })
-    expect(g.cards.filter(c => c.frameId === 'fr:in:Snowflake' && c.kind === 'entity')).toHaveLength(FRAME_CHILD_CAP)
-    expect(card(g, 'more:fr:in:Snowflake').overflowCount).toBe(3)
+    const inFrame = (gr: ReturnType<typeof build>) =>
+      gr.cards.filter(c => c.frameId === 'fr:in:Snowflake' && c.kind === 'entity')
+    expect(inFrame(g)).toHaveLength(FRAME_CHILD_CAP)
+    expect(inFrame(g)[0].nodeId).toBe('k00')
+    const frame = card(g, 'fr:in:Snowflake')
+    expect(frame.framePage).toBe(0)
+    expect(framePager(frame)).toMatchObject({ from: 1, to: FRAME_CHILD_CAP, pageCount: 2, canPrev: false, canNext: true })
 
+    // Page 2 REPLACES page 1 — the window moves, the frame does not grow.
     const paged = build({ ...base, over: { ...over, framePages: new Map([['in:Snowflake', 1]]) } })
+    expect(inFrame(paged)).toHaveLength(3)
+    expect(inFrame(paged).map(c => c.nodeId)).toEqual(['k12', 'k13', 'k14'])
+    expect(inFrame(paged).some(c => c.nodeId === 'k00')).toBe(false)
+    expect(framePager(card(paged, 'fr:in:Snowflake'))).toMatchObject({ from: 13, to: 15, canPrev: true, canNext: false })
+    // And there is no "+N more" card raising a cap any more.
     expect(paged.cards.find(c => c.id === 'more:fr:in:Snowflake')).toBeUndefined()
+  })
+
+  it('holds the last loaded page when asked for one past it, rather than blanking', () => {
+    const kids = Array.from({ length: FRAME_CHILD_CAP + 1 }, (_, i) => node(`k${String(i).padStart(2, '0')}`))
+    const g = build({
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM')],
+      edges: [edge('e1', 'Snowflake', 'F')],
+      isCoarser: (t?: string) => t === 'DATAPLATFORM',
+      over: {
+        openContainers: new Set(['in:Snowflake']),
+        containerResults: new Map([['in:Snowflake', {
+          nodes: kids,
+          edges: kids.map((k, i) => edge(`r${i}`, k.id, 'F')),
+          passedThrough: [], truncated: false, empty: false,
+        }]]),
+        containerStatus: new Map([['in:Snowflake', 'done' as const]]),
+        framePages: new Map([['in:Snowflake', 7]]),   // way past the data
+      },
+    })
+    expect(card(g, 'fr:in:Snowflake').framePage).toBe(1)
+    expect(g.cards.filter(c => c.frameId === 'fr:in:Snowflake' && c.kind === 'entity')).toHaveLength(1)
+  })
+
+  // The drill has to go table → column → field without re-centering.
+  // Sizing must run deepest-first: an outer frame sums its children's
+  // heights, so an inner frame sized after its host would leave the host
+  // short and the two would overlap.
+  it('nests a frame inside a frame, with the outer rect actually enclosing the inner', () => {
+    const g = build({
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM'), node('tbl', 'CONTAINER'), node('col', 'dataset')],
+      edges: [edge('e1', 'Snowflake', 'F')],
+      isCoarser: (t) => t === 'DATAPLATFORM',
+      canContain: (t) => t === 'CONTAINER' || t === 'DATAPLATFORM',
+      over: {
+        openContainers: new Set(['in:Snowflake', 'in:tbl']),
+        containerResults: new Map([
+          ['in:Snowflake', {
+            nodes: [node('tbl', 'CONTAINER')], edges: [edge('r1', 'tbl', 'F')],
+            passedThrough: [], truncated: false, empty: false,
+          }],
+          ['in:tbl', {
+            nodes: [node('col', 'dataset')], edges: [edge('r2', 'col', 'F')],
+            passedThrough: [], truncated: false, empty: false,
+          }],
+        ]),
+        containerStatus: new Map([
+          ['in:Snowflake', 'done' as const], ['in:tbl', 'done' as const],
+        ]),
+      },
+    })
+    const outer = card(g, 'fr:in:Snowflake')
+    const inner = card(g, 'fr:in:tbl')
+    const leaf = card(g, 'n:col')
+    // The inner frame is a CHILD of the outer one, not a sibling in the band.
+    expect(inner.frameId).toBe('fr:in:Snowflake')
+    expect(inner.kind).toBe('frame')
+    expect(leaf.frameId).toBe('fr:in:tbl')
+    // The table is not ALSO drawn as a plain card next to its own frame.
+    expect(g.cards.filter(c => c.nodeId === 'tbl')).toHaveLength(1)
+
+    const encloses = (a: typeof outer, b: typeof inner) =>
+      b.x >= a.x && b.y >= a.y && b.x + b.w <= a.x + a.w && b.y + b.h <= a.y + a.h
+    expect(encloses(outer, inner)).toBe(true)
+    expect(encloses(inner, leaf)).toBe(true)
+    expect(encloses(outer, leaf)).toBe(true)
   })
 
   it('the in-frame filter dims children without removing them', () => {
@@ -531,10 +608,12 @@ describe('buildFocusGraph — a frame showing every child', () => {
     const frame = card(g, 'fr:in:Snowflake')
     expect(frame.frameTotal).toBe(-1)      // unknown, never a fabricated number
     expect(frame.frameHasMore).toBe(true)
-    expect(card(g, 'more:fr:in:Snowflake').label).toBe('Load more')
+    // An unknown total makes the page COUNT a floor too, and the pager
+    // still offers Next because the server says there is more.
+    expect(framePager(frame)).toMatchObject({ exact: false, pageCount: 1, paged: true, canNext: true })
   })
 
-  it('caps a long child list and pages it', () => {
+  it('windows a long child list at a constant size', () => {
     const kids = Array.from({ length: FRAME_ALL_CAP + 5 }, (_, i) => node(`k${String(i).padStart(2, '0')}`))
     const over = {
       ...opened,
@@ -545,13 +624,21 @@ describe('buildFocusGraph — a frame showing every child', () => {
       frameAllStatus: new Map([['in:Snowflake', 'done' as const]]),
     }
     const g = build({ ...base, over })
-    // FRAME_ALL_CAP children, plus the two connected ones appended
-    // because they are absent from this page.
-    expect(g.cards.filter(c => c.frameId === 'fr:in:Snowflake' && c.kind === 'entity')).toHaveLength(FRAME_ALL_CAP)
-    expect(card(g, 'more:fr:in:Snowflake').overflowCount).toBe(7)
+    const inFrame = (gr: ReturnType<typeof build>) =>
+      gr.cards.filter(c => c.frameId === 'fr:in:Snowflake' && c.kind === 'entity')
+    // A full window, drawn from the server's child order.
+    expect(inFrame(g)).toHaveLength(FRAME_ALL_CAP)
+    // Roster is the 25 children plus the two connected ones appended.
+    expect(framePager(card(g, 'fr:in:Snowflake'))).toMatchObject({
+      from: 1, to: FRAME_ALL_CAP, pageCount: 2, exact: true,
+    })
 
     const paged = build({ ...base, over: { ...over, framePages: new Map([['in:Snowflake', 1]]) } })
-    expect(paged.cards.find(c => c.id === 'more:fr:in:Snowflake')).toBeUndefined()
+    expect(inFrame(paged)).toHaveLength(7)
+    expect(inFrame(paged).some(c => c.nodeId === 'k00')).toBe(false)
+    // Frame height is the page's, not the cumulative list's — page 2 is
+    // no taller than page 1 was.
+    expect(card(paged, 'fr:in:Snowflake').h).toBeLessThan(card(g, 'fr:in:Snowflake').h)
   })
 
   it('dims a filter miss across both kinds of child, never removing one', () => {

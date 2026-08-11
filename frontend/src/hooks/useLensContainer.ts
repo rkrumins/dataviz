@@ -77,6 +77,10 @@ export interface ContainerAllResult {
    *  (The endpoint's own `totalChildren` is a paging heuristic, not a
    *  count, so it is deliberately ignored.) */
   total: number | null
+  /** The search this page set answers; absent or '' for the unfiltered
+   *  list. A new query is a new question: pages reset rather than
+   *  appending to the previous answer. */
+  query?: string
 }
 
 export interface LensContainerData {
@@ -88,7 +92,7 @@ export interface LensContainerData {
   /** Fetch (or page further into) every child of an already-open
    *  container. No-op until that open has resolved — the anchor to ask
    *  about is only known once the pass-through walk has finished. */
-  loadAllChildren: (openKey: string, focalUrn: string) => void
+  loadAllChildren: (openKey: string, focalUrn: string, searchQuery?: string) => void
   /** Fetch (or page further into) any entity's children — the focal's
    *  own contents, or a contained child's, without leaving the lens. */
   loadChildrenOf: (nodeUrn: string, focalUrn: string) => void
@@ -319,7 +323,7 @@ export function useLensContainer(
    * endpoint returns are scoped to the page's own siblings and never
    * include the focal — the pair-filtered open already answered that.
    */
-  const pageChildren = useCallback((cacheKey: string, anchorUrn: string, focalUrn: string) => {
+  const pageChildren = useCallback((cacheKey: string, anchorUrn: string, focalUrn: string, searchQuery = '') => {
     if (!provider) {
       setState(prev => ({ ...prev, allStatus: setIn(prev.allStatus, focalUrn, cacheKey, 'unsupported') }))
       return
@@ -327,8 +331,12 @@ export function useLensContainer(
     const inFlightKey = `${focalUrn}|${cacheKey}`
     if (inFlightRef.current.has(inFlightKey)) return
 
+    const q = searchQuery.trim()
     const loaded = stateRef.current.allResults.get(focalUrn)?.get(cacheKey)
-    if (loaded && !loaded.hasMore) return // fully drained already
+    // A changed search is a different question — page it from zero
+    // instead of appending matches to the previous answer.
+    const sameQuery = (loaded?.query ?? '') === q
+    if (loaded && sameQuery && !loaded.hasMore) return // fully drained already
 
     const session = sessionRef.current
     inFlightRef.current.add(inFlightKey)
@@ -338,14 +346,18 @@ export function useLensContainer(
       try {
         const res = await provider.getChildrenWithEdges(anchorUrn, {
           limit: CHILDREN_PAGE_SIZE,
-          offset: loaded?.children.length ?? 0,
+          offset: sameQuery ? (loaded?.children.length ?? 0) : 0,
           includeLineageEdges: false,
+          // Server-side, so Find reaches a column on page 7 of a wide
+          // table without paging to it. Filtering the loaded page in the
+          // browser could only ever search what you had already read.
+          ...(q ? { searchQuery: q } : {}),
         })
         if (session !== sessionRef.current) return
         const page = res.children.map(n => toCanvasNode(n))
         setState(prev => {
           const prevPage = prev.allResults.get(focalUrn)?.get(cacheKey)
-          const children = [...(prevPage?.children ?? []), ...page]
+          const children = sameQuery ? [...(prevPage?.children ?? []), ...page] : page
           return {
             ...prev,
             allResults: setIn(prev.allResults, focalUrn, cacheKey, {
@@ -355,6 +367,7 @@ export function useLensContainer(
               // real count. Until then it is genuinely unknown — the
               // endpoint's own totalChildren is a paging heuristic.
               total: res.hasMore ? null : children.length,
+              query: q,
             }),
             allStatus: setIn(prev.allStatus, focalUrn, cacheKey, 'done'),
           }
@@ -368,12 +381,12 @@ export function useLensContainer(
     })()
   }, [provider])
 
-  const loadAllChildren = useCallback((openKey: string, focalUrn: string) => {
+  const loadAllChildren = useCallback((openKey: string, focalUrn: string, searchQuery = '') => {
     const open = stateRef.current.results.get(focalUrn)?.get(openKey)
     // Until the open resolves we don't know WHICH container to ask
     // about — pass-through levels may still be being walked.
     if (!open) return
-    pageChildren(openKey, open.anchorUrn, focalUrn)
+    pageChildren(openKey, open.anchorUrn, focalUrn, searchQuery)
   }, [pageChildren])
 
   /**

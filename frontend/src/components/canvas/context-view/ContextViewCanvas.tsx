@@ -3954,9 +3954,9 @@ export function ContextViewCanvas({
           childrenOf={lensChildren.results}
           childrenStatusOf={lensChildren.status}
           onLoadChildrenOf={loadLensChildrenOf}
-          onLoadAllChildren={(openKey) => {
+          onLoadAllChildren={(openKey, searchQuery) => {
             const focal = lensFocalOf(lensHistory)
-            if (focal) lensContainer.loadAllChildren(openKey, focal)
+            if (focal) lensContainer.loadAllChildren(openKey, focal, searchQuery)
           }}
           onOpenContainer={(urn, partner, dir, level) => {
             // The focal buckets the cache; the PARTNER is the question.

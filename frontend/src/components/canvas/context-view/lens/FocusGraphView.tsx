@@ -72,7 +72,7 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph } from './focus-graph'
+import { CARD_W, BAND_GAP, FRAME_FOOTER_H, framePager, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph } from './focus-graph'
 
 /** Direction tints — the house semantics: upstream = sky, downstream
  *  = amber (matches the list columns and the canvas). */
@@ -112,6 +112,9 @@ interface CardCtx {
   onOpenContainer: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
   onExpandFrontier: (expandKey: string, nodeId: string) => void
   onShowMore: (bandKey: string) => void
+  /** Move a frame's fixed page window to `page` (0-based), fetching the
+   *  next server page when the window runs past what has loaded. */
+  onSetFramePage: (openKey: string, page: number) => void
   onFrameQuery: (openKey: string, q: string) => void
   /** Current text typed into a frame's own filter. */
   frameQueryFor?: (openKey: string) => string
@@ -146,6 +149,7 @@ interface FocusGraphViewProps {
   onOpenContainer: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
   onExpandFrontier: (expandKey: string, nodeId: string) => void
   onShowMore: (bandKey: string) => void
+  onSetFramePage: (openKey: string, page: number) => void
   onFrameQuery: (openKey: string, q: string) => void
   frameQueryFor?: (openKey: string) => string
   onToggleFrameAll?: (openKey: string) => void
@@ -722,17 +726,22 @@ function FocusFrameNode({ data }: NodeProps) {
   const q = ctx.frameQueryFor?.(card.expandKey ?? '') ?? ''
   // A total is a claim: state it only when the last page has landed (or
   // the container reported its own count). Otherwise say "at least".
-  const total = card.frameTotal >= 0
-    ? card.frameTotal.toLocaleString()
-    : `${card.frameLoaded.toLocaleString()}+`
+  const pager = framePager(card)
+  const total = pager.exact ? pager.rows.toLocaleString() : `${pager.rows.toLocaleString()}+`
   // Name what the open actually matched against. At the first hop that
   // is the focused entity and the plain wording reads better; further
   // out it is the card's own partner, and saying "this entity" there
   // would claim something the server was never asked.
   const to = card.partnerLabel ? ` to ${card.partnerLabel}` : ''
+  // Say which rows are on screen, not just how many exist — "showing
+  // 21–40 of 428" is the sentence a 428-column table needs.
+  const range = pager.paged ? `showing ${pager.from.toLocaleString()}–${pager.to.toLocaleString()} of ${total}` : null
+  // In "everything inside" the search runs on the SERVER, so the counts
+  // describe the matches, not the container — say which.
+  const searching = card.frameShowingAll && q.trim().length > 0
   const inside = card.frameShowingAll
-    ? `${card.frameConnectedCount.toLocaleString()} connected${to} · ${card.frameLoaded.toLocaleString()} of ${total} shown`
-    : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected${to || ' inside'}`
+    ? `${card.frameConnectedCount.toLocaleString()} connected${to} · ${range ?? `${card.frameLoaded.toLocaleString()} of ${total} shown`}${searching ? ` matching "${q.trim()}"` : ''}`
+    : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected${to || ' inside'}${range ? ` · ${range}` : ''}`
   return (
     <div
       style={{ width: card.w, height: card.h, borderColor: `${accent}55` }}
@@ -811,8 +820,8 @@ function FocusFrameNode({ data }: NodeProps) {
             onChange={(e) => ctx.onFrameQuery(card.expandKey ?? '', e.target.value)}
             onClick={(e) => e.stopPropagation()}
             placeholder="Find…"
-            title={card.frameHasMore
-              ? `Filters the ${card.frameLoaded.toLocaleString()} loaded so far — load more to search further`
+            title={card.frameShowingAll
+              ? `Search every entity inside ${card.label}, not only the page on screen`
               : 'Filter what is inside'}
             className="nodrag flex-shrink-0 w-16 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
           />
@@ -878,6 +887,40 @@ function FocusFrameNode({ data }: NodeProps) {
           Nothing inside {card.label} connects to {card.partnerLabel ?? 'this entity'}.
           {ctx.onToggleFrameAll && ' Show everything inside to see what it holds.'}
         </p>
+      )}
+      {/* Fixed-window pager. The frame keeps its size as you move
+          through it, so a 500-column table sits on the board like any
+          other card. Next past the fetched set asks the server for one
+          more page and holds this one until it lands. */}
+      {pager.paged && (
+        <div
+          className="pointer-events-auto absolute inset-x-0 bottom-0 flex items-center justify-center gap-2 px-2.5"
+          style={{ height: FRAME_FOOTER_H }}
+        >
+          <button
+            type="button"
+            disabled={!pager.canPrev}
+            onClick={(e) => { e.stopPropagation(); ctx.onSetFramePage(card.expandKey ?? '', card.framePage - 1) }}
+            title="Previous page"
+            className="nodrag w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08] disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+          >
+            <LucideIcons.ChevronLeft className="w-3 h-3" />
+          </button>
+          <span className="text-[9.5px] tabular-nums text-ink-muted/80">
+            {card.fetch === 'loading'
+              ? 'loading…'
+              : `page ${(card.framePage + 1).toLocaleString()} of ${pager.pageCount.toLocaleString()}${pager.exact ? '' : '+'}`}
+          </span>
+          <button
+            type="button"
+            disabled={!pager.canNext || card.fetch === 'loading'}
+            onClick={(e) => { e.stopPropagation(); ctx.onSetFramePage(card.expandKey ?? '', card.framePage + 1) }}
+            title="Next page"
+            className="nodrag w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08] disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+          >
+            <LucideIcons.ChevronRight className="w-3 h-3" />
+          </button>
+        </div>
       )}
     </div>
   )
@@ -1117,6 +1160,7 @@ export function FocusGraphView({
   onOpenContainer,
   onExpandFrontier,
   onShowMore,
+  onSetFramePage,
   onFrameQuery,
   frameQueryFor,
   onToggleFrameAll,
@@ -1158,6 +1202,7 @@ export function FocusGraphView({
     onOpenContainer,
     onExpandFrontier,
     onShowMore,
+    onSetFramePage,
     onFrameQuery,
     frameQueryFor,
     onToggleFrameAll,
@@ -1166,7 +1211,7 @@ export function FocusGraphView({
     onRetryFetch,
     onRevealOnCanvas,
     onOpenDetails,
-  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleGroup, onOpenContainer, onExpandFrontier, onShowMore, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
+  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleGroup, onOpenContainer, onExpandFrontier, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out
@@ -1182,12 +1227,21 @@ export function FocusGraphView({
     // dragging the frame carries its whole contents — positions become
     // relative to it, and their edges re-route themselves.
     const frameById = new Map(graph.cards.filter(c => c.kind === 'frame').map(c => [c.id, c]))
+    // Frames nest, so a fixed frame-behind-cards pair of z-indices is not
+    // enough: an inner frame has to sit ABOVE its host's backdrop while
+    // still sitting below its own children.
+    const depthOf = (card: FocusCard) => {
+      let d = 0
+      let host = card.frameId
+      while (host && d < 32) { d++; host = frameById.get(host)?.frameId ?? null }
+      return d
+    }
     const nodes: Node[] = graph.cards.map((card) => {
       const parent = card.frameId ? frameById.get(card.frameId) : undefined
       return {
         id: card.id,
         type: card.kind === 'frame' ? 'focusFrame' : 'focusCard',
-        zIndex: card.kind === 'frame' ? 0 : 1,
+        zIndex: depthOf(card) * 2 + (card.kind === 'frame' ? 0 : 1),
         ...(parent ? { parentId: parent.id } : {}),
         position: parent
           ? { x: card.x - parent.x, y: card.y - parent.y }

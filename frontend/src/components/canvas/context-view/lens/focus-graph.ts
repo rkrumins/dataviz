@@ -41,13 +41,16 @@ export const GRAPH_BAND_CAP = 30
 export const CONTAINS_CAP = 8
 /** Hard stop for hop expansion per direction. */
 export const MAX_BAND = 4
-/** Children shown inside an opened container frame before "+N more". */
+/** Children per page inside an opened container frame. */
 export const FRAME_CHILD_CAP = 12
 /** Same, but in "show all children" mode — rows are shorter there, and
  *  the whole point is scanning a table's columns, so more fit. */
 export const FRAME_ALL_CAP = 20
 
 export const FRAME_HEADER_H = 46
+/** The Prev · page N of M · Next strip, present only when there is more
+ *  than one page. */
+export const FRAME_FOOTER_H = 26
 export const FRAME_PAD = 10
 
 const EMPTY_STRINGS: string[] = []
@@ -72,6 +75,38 @@ export const CARD_GAP = 10
 export const NEST_INDENT = 16
 /** Vertical gap between the focal card and its contains stack. */
 export const CONTAINS_STACK_GAP = 18
+
+/**
+ * What a frame's pager knows — derived, so the layout that reserves the
+ * footer's room and the view that draws it can never disagree.
+ *
+ * `pageCount` is a FLOOR whenever `exact` is false: with pages still on
+ * the server the honest statement is "of 6+", not a guess at the rest.
+ */
+export function framePager(card: FocusCard) {
+  const size = Math.max(1, card.framePageSize)
+  // `frameTotal` is set only from a drained list or the container's own
+  // reported count — never from a paging heuristic — so >= 0 means known.
+  const exact = card.frameTotal >= 0
+  // Rows the frame can actually reach. The connected children an open
+  // found are appended to the server's child list, so the roster can run
+  // one or two past the container's own count; paging to `frameTotal`
+  // alone would strand them on a page that does not exist.
+  const rows = Math.max(card.frameLoaded, exact ? card.frameTotal : 0)
+  const from = rows === 0 ? 0 : card.framePage * size + 1
+  const to = Math.min(card.framePage * size + size, rows)
+  const pageCount = Math.max(1, Math.ceil(rows / size))
+  return {
+    rows,
+    from,
+    to,
+    pageCount,
+    exact,
+    paged: pageCount > 1 || card.frameHasMore,
+    canPrev: card.framePage > 0,
+    canNext: to < rows || card.frameHasMore,
+  }
+}
 
 export type FocusDirection = 'in' | 'out'
 
@@ -146,6 +181,14 @@ export interface FocusCard {
   frameTotal: number
   /** Frame cards only — more children exist on the server than loaded. */
   frameHasMore: boolean
+  /** Frame cards only — which page of children is on screen (0-based),
+   *  already clamped to what has actually loaded. Paging shows ONE page
+   *  at a time so a 500-column table and a 5-column one occupy the same
+   *  room: raising a cap instead grew the frame past ~2,000px and
+   *  multiplied the card count with every click. */
+  framePage: number
+  /** Frame cards only — children per page. */
+  framePageSize: number
   /** The entities THIS card is connected to in the picture — its
    *  previous-band partners (the focal, at band 1). Opening a container
    *  must ask what inside it connects to a PARTNER: a band-2 card has
@@ -421,6 +464,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     frameId: null, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
     connected: true, frameShowingAll: false, frameConnectedCount: 0,
     frameLoaded: 0, frameTotal: -1, frameHasMore: false,
+    framePage: 0, framePageSize: FRAME_ALL_CAP,
     partnerIds: EMPTY_STRINGS, partnerLabel: null,
     canOpenChildren: false, childrenOpen: false,
     expandKey: null, expanded: false,
@@ -759,7 +803,11 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
        * carrying no counts and no edges. Nothing is ever invented: a
        * child without lineage is drawn as having none.
        */
-      const placeOpenContainer = (entry: BandEntry, openKey: string) => {
+      /** What an open needs to know about its subject. A band entry
+       *  satisfies it; a frame child opened one level deeper is
+       *  synthesised, which is what lets frames nest. */
+      type OpenSubject = Pick<BandEntry, 'nodeId' | 'node' | 'rollup' | 'refs'>
+      const placeOpenContainer = (entry: OpenSubject, openKey: string, hostFrameId: string | null = null) => {
         const label = labelOf(entry.nodeId, entry.node)
         const type = (entry.node?.data?.type as string) ?? UNRESOLVED_TYPE
         const res = containerResults?.get(openKey)
@@ -793,8 +841,14 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             })()
           : inside
         const fq = (frameQueries?.get(openKey) ?? '').trim().toLowerCase()
-        const frameCap = (showAll ? FRAME_ALL_CAP : FRAME_CHILD_CAP) * (1 + (framePages?.get(openKey) ?? 0))
-        const shownInside = roster.slice(0, frameCap)
+        // ONE page on screen at a time, at a fixed size. The page index
+        // is clamped to what has loaded, so paging past the fetched set
+        // holds the last real page (and shows the frame's loading state)
+        // instead of rendering an empty window.
+        const pageSize = showAll ? FRAME_ALL_CAP : FRAME_CHILD_CAP
+        const lastLoadedPage = Math.max(0, Math.ceil(roster.length / pageSize) - 1)
+        const framePage = Math.min(Math.max(0, framePages?.get(openKey) ?? 0), lastLoadedPage)
+        const shownInside = roster.slice(framePage * pageSize, framePage * pageSize + pageSize)
 
         // The container we actually opened may be deeper than the card
         // clicked, so its child count lives on the last skipped level.
@@ -808,6 +862,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           kind: 'frame',
           nodeId: entry.nodeId,
           band: sign * band,
+          frameId: hostFrameId,
           label,
           description: (entry.node?.data?.description as string | undefined) ?? null,
           type,
@@ -838,6 +893,8 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           // own childCount. Otherwise -1 — the view shows a floor.
           frameTotal: all?.total ?? (anchorChildCount && anchorChildCount > 0 ? anchorChildCount : -1),
           frameHasMore: all?.hasMore ?? false,
+          framePage,
+          framePageSize: pageSize,
           fetch: status === 'loading' || (showAll && allStatusHere === 'loading') ? 'loading'
             : status === 'error' || (showAll && allStatusHere === 'error') ? 'error' : null,
           dimmed: !matches(label),
@@ -871,6 +928,18 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           // lens. Its lineage hop stays gated on actually having
           // lineage; its CONTENTS do not depend on that.
           const childCanOpenKids = canContain(cType) && entityLevels?.get(cType) !== undefined
+          // Opened → the child becomes a frame of its own, drawn inside
+          // this one. Frames nest to whatever depth the ontology allows,
+          // which is what makes the drill go table → column → field
+          // without ever re-centering the lens.
+          if (childCanOpenKids && openContainers.has(childOpenKey) && !placed.has(child.id)) {
+            placeOpenContainer(
+              { nodeId: child.id, node: child, rollup: false, refs: entry.refs },
+              childOpenKey,
+              frameId,
+            )
+            continue
+          }
           const childCanHop = connected && !isOutermost && (degreeHints?.get(child.id)?.[dir] ?? -1) !== 0
           const childKind: FocusExpandKind = childCanHop ? 'hop' : null
           const childFrontierKey = `${dir}:${child.id}`
@@ -916,27 +985,9 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           if (connected && childExpanded && !isOutermost) nextRefs.push({ nodeId: child.id, type: cType })
         }
 
-        // One control for both kinds of "there is more": more already
-        // fetched than the cap shows, or more still on the server.
-        const beyondCap = roster.length - frameCap
-        if (beyondCap > 0 || (showAll && frame.frameHasMore)) {
-          pushCard({
-            ...baseCard(),
-            id: `more:fr:${dir}:${entry.nodeId}`,
-            kind: 'overflow',
-            nodeId: null,
-            band: sign * band,
-            h: OVERFLOW_H,
-            label: beyondCap > 0
-              ? `+${beyondCap.toLocaleString()} more inside`
-              : 'Load more',
-            type: 'entity',
-            frameId,
-            expandKey: openKey,
-            expandKind: 'more',
-            overflowCount: Math.max(beyondCap, 0),
-          })
-        }
+        // No "+N more inside" card: it raised the cap, so five clicks on
+        // a 500-column table left a ~2,000px frame and 100 live cards.
+        // The frame's own footer pager moves a fixed window instead.
 
         // With nothing rendered inside (loading, empty, error) the frame
         // would float unconnected — keep its own edge so the picture
@@ -1062,12 +1113,33 @@ function layoutBands(cards: FocusCard[]) {
     if (list) list.push(c)
     else childrenByFrame.set(c.frameId, [c])
   }
-  for (const c of cards) {
-    if (c.kind !== 'frame') continue
+  // Frames nest — a column opened inside an opened table. Sizing has to
+  // run DEEPEST-FIRST: an outer frame's height sums its children's, so
+  // a child frame whose own height had not been computed yet would size
+  // its parent short and the two would overlap.
+  const frameById = new Map(cards.filter(c => c.kind === 'frame').map(c => [c.id, c]))
+  const depthOf = (frame: FocusCard): number => {
+    let d = 0
+    let host = frame.frameId
+    while (host && d < 32) { d++; host = frameById.get(host)?.frameId ?? null }
+    return d
+  }
+  const frames = [...frameById.values()]
+    .map(f => ({ f, depth: depthOf(f) }))
+    .sort((a, b) => b.depth - a.depth)
+  for (const { f: c } of frames) {
     const kids = childrenByFrame.get(c.id) ?? []
     const inner = kids.reduce((acc, k) => acc + k.h, 0) + CARD_GAP * Math.max(0, kids.length - 1)
     c.w = CARD_W + FRAME_PAD * 2
     c.h = FRAME_HEADER_H + FRAME_PAD + Math.max(inner, kids.length === 0 ? CARD_H : 0) + FRAME_PAD
+      + (framePager(c).paged ? FRAME_FOOTER_H : 0)
+  }
+  // A nested frame is wider than a plain child row (it carries its own
+  // padding), so its host has to widen to hold it.
+  for (const { f: c } of frames) {
+    const kids = childrenByFrame.get(c.id) ?? []
+    const widest = kids.reduce((acc, k) => Math.max(acc, k.w), CARD_W)
+    c.w = widest + FRAME_PAD * 2
   }
 
   const byBand = new Map<number, FocusCard[]>()
@@ -1100,11 +1172,11 @@ function layoutBands(cards: FocusCard[]) {
     }
   }
 
-  // Frames are positioned; now lay their children out inside them.
-  const frameById = new Map(cards.filter(c => c.kind === 'frame').map(c => [c.id, c]))
-  for (const [frameId, kids] of childrenByFrame) {
-    const frame = frameById.get(frameId)
-    if (!frame) continue
+  // Frames are positioned; now lay their children out inside them —
+  // OUTERMOST-FIRST, the mirror of the sizing order, so a nested frame
+  // already has its own absolute position before its children read it.
+  for (const { f: frame } of [...frames].reverse()) {
+    const kids = childrenByFrame.get(frame.id) ?? []
     let y = frame.y + FRAME_HEADER_H
     for (const k of kids) {
       k.x = frame.x + FRAME_PAD

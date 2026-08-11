@@ -7,7 +7,7 @@
  * and ESC/close handling.
  */
 import type { ComponentProps } from 'react'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { LineageLens } from '../LineageLens'
 import { deriveNeighborRecords } from '@/lib/lineage-neighbors'
@@ -853,6 +853,104 @@ describe('LineageLens graph mode', () => {
       expect(screen.getByText('label-spare')).toBeTruthy()
       expect(screen.getByText('no lineage')).toBeTruthy()
       expect(screen.getByText(/1 connected · 2 of 2 shown/)).toBeTruthy()
+    }))
+
+    // A 428-column table used to grow the frame by a page per click
+    // ("+N more inside" raised a cap), so five clicks left a ~2,000px
+    // frame and 100 live cards. One window, moved.
+    it('pages a wide table one fixed window at a time, and says which rows', () => withSchema(() => {
+      const cols = Array.from({ length: 428 }, (_, i) => node(`col${String(i).padStart(3, '0')}`, 'DATASET'))
+      const onLoadAllChildren = vi.fn()
+      openFrame({
+        onLoadAllChildren,
+        graphSeed: {
+          nodeId: 'ds', expandedGroups: [], expandedFrontier: [],
+          openContainers: ['in:plat'], frameAll: ['in:plat'],
+        },
+        frameAllResults: new Map([['in:plat', { children: cols, hasMore: false, total: 428 }]]),
+        frameAllStatus: new Map([['in:plat', 'done' as const]]),
+      })
+
+      const atMount = onLoadAllChildren.mock.calls.length
+      // 429, not 428: the one child the pair-filtered open found is
+      // appended to the server's child list, and the pager counts the
+      // rows it can actually reach rather than stranding it.
+      expect(screen.getByText(/showing 1–20 of 429/)).toBeTruthy()
+      expect(screen.getByText('page 1 of 22')).toBeTruthy()
+      expect(screen.getByText('label-col000')).toBeTruthy()
+      expect(screen.queryByText('label-col020')).toBeNull()
+      // Nothing to go back to yet.
+      expect(screen.getByTitle('Previous page').hasAttribute('disabled')).toBe(true)
+
+      fireEvent.click(screen.getByTitle('Next page'))
+      expect(screen.getByText(/showing 21–40 of 429/)).toBeTruthy()
+      expect(screen.getByText('page 2 of 22')).toBeTruthy()
+      // The window MOVED — page 1's rows are gone, not stacked above.
+      expect(screen.getByText('label-col020')).toBeTruthy()
+      expect(screen.queryByText('label-col000')).toBeNull()
+      // Everything is already loaded, so turning a page asks for nothing
+      // beyond the frame's own first-page kick at mount.
+      expect(onLoadAllChildren).toHaveBeenCalledTimes(atMount)
+    }))
+
+    it('asks the server for one more page only when the window runs past what is loaded', () => withSchema(() => {
+      const cols = Array.from({ length: 40 }, (_, i) => node(`col${String(i).padStart(3, '0')}`, 'DATASET'))
+      const onLoadAllChildren = vi.fn()
+      openFrame({
+        onLoadAllChildren,
+        graphSeed: {
+          nodeId: 'ds', expandedGroups: [], expandedFrontier: [],
+          openContainers: ['in:plat'], frameAll: ['in:plat'],
+        },
+        frameAllResults: new Map([['in:plat', { children: cols, hasMore: true, total: null }]]),
+        frameAllStatus: new Map([['in:plat', 'done' as const]]),
+      })
+      // Total unknown while the server still has more — the page count
+      // is a floor, never a guess. (41 loaded: 40 columns plus the one
+      // connected child the open found.)
+      expect(screen.getByText('page 1 of 3+')).toBeTruthy()
+      const atMount = onLoadAllChildren.mock.calls.length
+
+      // Page 2 is inside the fetched set: no further fetch.
+      fireEvent.click(screen.getByTitle('Next page'))
+      expect(onLoadAllChildren).toHaveBeenCalledTimes(atMount)
+      // Page 3 needs rows 41-60, one past what loaded: exactly one fetch.
+      fireEvent.click(screen.getByTitle('Next page'))
+      expect(onLoadAllChildren).toHaveBeenCalledTimes(atMount + 1)
+      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat')
+    }))
+
+    // REGRESSION: Find dimmed the loaded page client-side, so a column
+    // on page 7 of a 428-column table could not be found at all.
+    it('sends Find to the server and restarts the window at page 1', () => withSchema(() => {
+      vi.useFakeTimers()
+      try {
+        const cols = Array.from({ length: 60 }, (_, i) => node(`col${String(i).padStart(3, '0')}`, 'DATASET'))
+        const onLoadAllChildren = vi.fn()
+        openFrame({
+          onLoadAllChildren,
+          graphSeed: {
+            nodeId: 'ds', expandedGroups: [], expandedFrontier: [],
+            openContainers: ['in:plat'], frameAll: ['in:plat'],
+          },
+          frameAllResults: new Map([['in:plat', { children: cols, hasMore: false, total: 60, query: '' }]]),
+          frameAllStatus: new Map([['in:plat', 'done' as const]]),
+        })
+        fireEvent.click(screen.getByTitle('Next page'))
+        expect(screen.getByText('page 2 of 4')).toBeTruthy()
+        onLoadAllChildren.mockClear()
+
+        fireEvent.change(screen.getByPlaceholderText('Find…'), { target: { value: 'order' } })
+        // A new list starts at the top, immediately — no waiting on the
+        // debounce to stop showing a page the matches may not reach.
+        expect(screen.getByText(/^page 1 of/)).toBeTruthy()
+        expect(onLoadAllChildren).not.toHaveBeenCalled()   // still debouncing
+
+        act(() => { vi.advanceTimersByTime(300) })
+        expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat', 'order')
+      } finally {
+        vi.useRealTimers()
+      }
     }))
 
     it('opens new frames in whichever mode the header default names', () => withSchema(() => {
