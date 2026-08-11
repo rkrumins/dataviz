@@ -42,7 +42,9 @@ container, a platform — arrive the same way, as one muted card standing for
 everything inside them. Closed cards **name a few of the things they hold**,
 so you can often tell what's in there without opening it, and the focal's own
 fields start tucked behind a single "contains N" card rather than fanning
-across the middle of the picture. The focal card shows a quick tally — how many
+across the middle of the picture. Open that and each field carries its own
+chevron, so the focal's structure unfolds as deep as it goes without leaving
+the entity you focused. The focal card shows a quick tally — how many
 connections come *in* and how many go *out* — and, once measured, its
 **reach**: how many distinct entities it touches transitively upstream and
 downstream ("Reaches 12 upstream · 47 downstream"), the change-impact answer
@@ -106,28 +108,44 @@ The Lens is built for exploring, not just reading:
   reveal *that* entity's next hop of lineage — growing the graph outward from
   your focus point, one deliberate step at a time. When the total is known,
   the pill shows it (**+12**); the Lens never invents a number.
-- **Open a card that stands for many things** — a parent group, a container,
-  a whole platform — and it unfolds into a frame holding **only the entities
-  inside it that connect to the card it hangs off**. At the first hop that's
-  the entity you focused; further out it's the card's own partner, and the
-  frame's header names it ("4 connected to `STG_ORDERS`") so you always know
-  which question was answered. Those children are ordinary cards: focus them,
-  open them in turn, reveal them on the canvas. A platform that merely passes
-  lineage through a single container is walked through for you, with the
-  levels it skipped shown in the frame's header. Frames say how many they
-  hold, offer a **Find** box once there are more than a few, and state plainly
-  when nothing inside connects rather than leaving you guessing.
+- **Open any card into what's inside it** with the **chevron** on its body —
+  a column of a table, the tables of a platform, the fields of a column. This
+  is a different question from the ⊕ pill next to it, and the two never
+  interfere: a card can offer both, and looking inside something never ends
+  the walk through it. The chevron appears whenever the *ontology* says that
+  type can hold something, so it is offered consistently rather than only
+  where a count happened to be loaded — an open that finds nothing says so,
+  which is a real answer.
+
+  The card unfolds into a frame holding **only the entities inside it that
+  connect to the card it hangs off**. At the first hop that's the entity you
+  focused; further out it's the card's own partner, and the frame's header
+  names it ("4 connected to `STG_ORDERS`") so you always know which question
+  was answered. Those children are ordinary cards with chevrons of their own,
+  so frames nest: table → column → field, without ever re-centering. A
+  platform that merely passes lineage through a single container is walked
+  through for you, with the levels it skipped shown in the frame's header.
+  Frames say how many they hold and state plainly when nothing inside
+  connects rather than leaving you guessing.
 - **Show everything inside**, not just the connected part, with the small
   toggle in a frame's header (**⛓ Connected** | **▤ All**). "All" lists every
   column, table or dataset the container holds, in the source system's own
   order, with the lineage-carrying ones highlighted exactly where they sit and
   the rest present but quiet — no counts, no edges, labelled *no lineage*.
   That's the honest picture: a column with no lineage is drawn as having none.
-  Long lists load a page at a time, and the header always says what it's
-  showing ("3 connected · 100 of 428 shown"); a total it doesn't actually know
-  yet appears as a floor ("100+"), never as a guess. Frames open **Connected**
-  by default — the header's own **Connected | All** control changes which mode
-  the *next* frame you open starts in, and it's remembered between sessions.
+  Frames open **Connected** by default — the header's own **Connected | All**
+  control changes which mode the *next* frame you open starts in, and it's
+  remembered between sessions.
+- **Page a wide table** with the frame's own footer (**‹ Prev · page 2 of 22 ·
+  Next ›**). One page shows at a time at a fixed size, so a 500-column table
+  takes no more room on the board than a five-column one, and the header says
+  which rows you are looking at ("3 connected · showing 21–40 of 428"). A
+  count still being paged in from the source appears as a floor ("of 3+"),
+  never as a guess.
+- **Find a column you haven't paged to.** The **Find** box in a frame's header
+  searches the *whole* container in the data source, not just the page on
+  screen, so a column on page 7 is one keystroke away. A new search starts
+  the list again at page 1, and the counts say what they're scoped to.
 - **Drag a card anywhere** to arrange the picture the way you read it. Every
   connection follows the card it belongs to — moving things changes only where
   they sit, never what connects to what. An opened container moves as one

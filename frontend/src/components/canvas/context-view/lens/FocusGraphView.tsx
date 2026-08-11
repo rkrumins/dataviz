@@ -111,6 +111,9 @@ interface CardCtx {
    *  which is the focal only at the first hop. */
   onOpenContainer: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
   onExpandFrontier: (expandKey: string, nodeId: string) => void
+  /** Open / close a contains-stack row into what IT holds. Pure
+   *  containment — no partner, no lineage question. */
+  onToggleContains: (nodeId: string) => void
   onShowMore: (bandKey: string) => void
   /** Move a frame's fixed page window to `page` (0-based), fetching the
    *  next server page when the window runs past what has loaded. */
@@ -148,6 +151,7 @@ interface FocusGraphViewProps {
   onToggleGroup: (expandKey: string) => void
   onOpenContainer: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
   onExpandFrontier: (expandKey: string, nodeId: string) => void
+  onToggleContains: (nodeId: string) => void
   onShowMore: (bandKey: string) => void
   onSetFramePage: (openKey: string, page: number) => void
   onFrameQuery: (openKey: string, q: string) => void
@@ -261,7 +265,11 @@ function CardActions({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
  *  comes back empty says so; a hidden control cannot. */
 function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   if (!card.canOpenChildren || !card.nodeId || !card.expandKey) return null
-  const Icon = card.childrenOpen ? LucideIcons.ChevronDown : LucideIcons.ChevronRight
+  // `kids:` is pure containment (the focal's own stack, at any depth);
+  // everything else asks what inside it connects to a partner.
+  const pureContainment = card.expandKey.startsWith('kids:')
+  const Icon = card.fetch === 'loading' ? LucideIcons.Loader2
+    : card.childrenOpen ? LucideIcons.ChevronDown : LucideIcons.ChevronRight
   return (
     <button
       type="button"
@@ -271,10 +279,11 @@ function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
         : `Show what's inside ${card.label}`}
       onClick={(e) => {
         e.stopPropagation()
-        ctx.onOpenContainer(card.expandKey!, card.nodeId!, card.type, card.partnerIds[0] ?? null)
+        if (pureContainment) ctx.onToggleContains(card.nodeId!)
+        else ctx.onOpenContainer(card.expandKey!, card.nodeId!, card.type, card.partnerIds[0] ?? null)
       }}
     >
-      <Icon className="w-3 h-3" />
+      <Icon className={cn('w-3 h-3', card.fetch === 'loading' && 'animate-spin')} />
     </button>
   )
 }
@@ -581,6 +590,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
         )}
       >
         <PortHandles />
+        <ContentsChevron card={card} ctx={ctx} />
         <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
         <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: accent }} />
         <span className="min-w-0 truncate text-[11px] text-ink">{card.label}</span>
@@ -1159,6 +1169,7 @@ export function FocusGraphView({
   onToggleGroup,
   onOpenContainer,
   onExpandFrontier,
+  onToggleContains,
   onShowMore,
   onSetFramePage,
   onFrameQuery,
@@ -1201,6 +1212,7 @@ export function FocusGraphView({
     onToggleGroup,
     onOpenContainer,
     onExpandFrontier,
+    onToggleContains,
     onShowMore,
     onSetFramePage,
     onFrameQuery,
@@ -1211,7 +1223,7 @@ export function FocusGraphView({
     onRetryFetch,
     onRevealOnCanvas,
     onOpenDetails,
-  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleGroup, onOpenContainer, onExpandFrontier, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
+  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleGroup, onOpenContainer, onExpandFrontier, onToggleContains, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out

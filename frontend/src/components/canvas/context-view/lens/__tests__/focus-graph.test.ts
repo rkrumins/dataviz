@@ -403,6 +403,59 @@ describe('buildFocusGraph — grouping and rollups', () => {
     expect(encloses(outer, leaf)).toBe(true)
   })
 
+  // "No matter how many levels deep": the focal's own stack was one
+  // flat level of terminal rows, so a column's fields were reachable
+  // only by re-centering the whole lens on the column.
+  it("nests the focal's contains stack, opening a row into what IT holds", () => {
+    const base = {
+      nodes: [node('F'), node('col', 'dataset'), node('sub', 'schemaField')],
+      edges: [contains('c1', 'F', 'col')],
+      canContain: (t?: string) => t === 'dataset',
+    }
+    const shown = { bandPages: new Map([['contains', 1]]) }
+
+    // Closed: the row is there, offering to open, with nothing under it.
+    const closed = build({ ...base, over: shown })
+    const row = card(closed, 'c:col')
+    expect(row.kind).toBe('contains')
+    expect(row.canOpenChildren).toBe(true)
+    expect(row.childrenOpen).toBe(false)
+    expect(row.depth).toBe(0)
+    expect(closed.cards.find(c => c.id === 'c:sub')).toBeUndefined()
+
+    // Open: its children hang off IT, not off the focal, and indent.
+    const open = build({
+      ...base,
+      over: {
+        ...shown,
+        openContains: new Set(['col']),
+        containsChildrenOf: new Map([['col', ['sub']]]),
+      },
+    })
+    const kid = card(open, 'c:sub')
+    expect(kid.depth).toBe(1)
+    expect(kid.x).toBeGreaterThan(card(open, 'c:col').x)
+    expect(open.edges.find(e => e.id === 'ce:c:col->c:sub')?.containment).toBe(true)
+    // A schemaField holds nothing, so it offers nothing — no dead control.
+    expect(kid.canOpenChildren).toBe(false)
+  })
+
+  it('caps each contains level and says what it capped', () => {
+    const kids = Array.from({ length: CONTAINS_CAP + 4 }, (_, i) => `k${String(i).padStart(2, '0')}`)
+    const g = build({
+      nodes: [node('F'), node('col', 'dataset'), ...kids.map(k => node(k, 'schemaField'))],
+      edges: [contains('c1', 'F', 'col')],
+      canContain: (t?: string) => t === 'dataset',
+      over: {
+        bandPages: new Map([['contains', 1]]),
+        openContains: new Set(['col']),
+        containsChildrenOf: new Map([['col', kids]]),
+      },
+    })
+    expect(g.cards.filter(c => c.kind === 'contains' && c.depth === 1)).toHaveLength(CONTAINS_CAP)
+    expect(card(g, 'more:c:col').overflowCount).toBe(4)
+  })
+
   it('the in-frame filter dims children without removing them', () => {
     const g = build({
       nodes: [node('F'), node('Snowflake', 'DATAPLATFORM')],

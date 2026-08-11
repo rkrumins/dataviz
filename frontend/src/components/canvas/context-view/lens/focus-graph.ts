@@ -39,6 +39,10 @@ export const edgeLabelFor = (norm: string, info?: EdgeTypeInfoMap): string =>
 export const GRAPH_BAND_CAP = 30
 /** Focal containment children shown before the overflow card. */
 export const CONTAINS_CAP = 8
+/** How deep the focal's contains stack nests before it stops offering
+ *  to go further. Deep structure belongs in a frame, not in a stack
+ *  hanging off the focal — and an unbounded stack can outgrow the board. */
+export const CONTAINS_MAX_DEPTH = 3
 /** Hard stop for hop expansion per direction. */
 export const MAX_BAND = 4
 /** Children per page inside an opened container frame. */
@@ -54,6 +58,7 @@ export const FRAME_FOOTER_H = 26
 export const FRAME_PAD = 10
 
 const EMPTY_STRINGS: string[] = []
+const EMPTY_SET: ReadonlySet<string> = new Set()
 
 /** Placeholder type for an entity the lens could not resolve. Named so
  *  grain comparisons can recognise it instead of silently treating it
@@ -159,6 +164,9 @@ export interface FocusCard {
   aggregated: boolean
   /** Frame this card is nested inside (`fr:${dir}:${urn}`), else null. */
   frameId: string | null
+  /** Contains-stack nesting level, 0 for a direct child of the focal.
+   *  Drives the indent; the tree itself is derived, never stored. */
+  depth: number
   /** Frame cards only — the pass-through levels the open walked
    *  through, so a skipped level is shown rather than hidden. */
   frameBreadcrumb: string[]
@@ -265,6 +273,15 @@ export interface FocusGraphInput {
   /** The focal's own children are being fetched — say so rather than
    *  printing a count the user cannot open yet. */
   containsLoading?: boolean
+  /** Children already loaded for any entity, keyed by urn. Lets the
+   *  contains stack go deeper than the focal's own row: a column that
+   *  holds fields opens in place, at any depth. */
+  containsChildrenOf?: ReadonlyMap<string, string[]>
+  /** Contains rows the user has opened, by urn. Depth is not encoded —
+   *  it emerges from the walk, so any level composes with any other. */
+  openContains?: ReadonlySet<string>
+  /** Urns whose children fetch is in flight. */
+  containsLoadingOf?: ReadonlySet<string>
   resolveParent: (id: string) => string | null
   /** isCoarser(partnerType, baseType) — coarser-grain rollup test. */
   isCoarser: (type: string | undefined, baseType: string) => boolean
@@ -368,6 +385,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const {
     focalId, incomingRecords, outgoingRecords, edgesByEndpoint, nodeMap,
     containmentEdgeTypes, containsChildren, containsTotal, containsLoading, resolveParent,
+    containsChildrenOf, openContains = EMPTY_SET, containsLoadingOf,
     isCoarser, canContain, expandedGroups, expandedFrontier, openContainers,
     containerResults, containerStatus, frameShowAll, frameAllResults,
     frameAllStatus, frameQueries, framePages, entityLevels,
@@ -461,7 +479,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     count: 1, edgeTypeNorm: '', sumCount: 0,
     rollup: false, unresolved: false,
     aggregated: false,
-    frameId: null, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
+    frameId: null, depth: 0, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
     connected: true, frameShowingAll: false, frameConnectedCount: 0,
     frameLoaded: 0, frameTotal: -1, frameHasMore: false,
     framePage: 0, framePageSize: FRAME_ALL_CAP,
@@ -501,39 +519,78 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const containsPages = bandPages.get('contains') ?? 0
   const containsCap = containsPages > 0 ? CONTAINS_CAP * containsPages : 0
   const containsShown = containsChildren.slice(0, containsCap)
-  for (const cid of containsShown) {
-    if (placed.has(cid)) continue
-    const cNode = nodeMap.get(cid)
-    const cLabel = labelOf(cid, cNode)
-    const card: FocusCard = {
-      ...baseCard(),
-      id: `c:${cid}`,
-      kind: 'contains',
-      nodeId: cid,
-      band: 0,
-      h: CONTAINS_H,
-      label: cLabel,
-      type: (cNode?.data?.type as string) ?? 'entity',
-      unresolved: !cNode,
-      dimmed: !matches(cLabel),
+
+  /**
+   * The stack, walked. Depth is NOT state — it emerges from the walk,
+   * so a column that holds fields opens in place exactly like the focal
+   * does, at whatever level it sits. `openContains` is one flat set of
+   * urns; every level composes with every other.
+   */
+  const emitContains = (ids: string[], depth: number, tetherTo: string) => {
+    for (const cid of ids) {
+      if (placed.has(cid)) continue
+      const cNode = nodeMap.get(cid)
+      const cLabel = labelOf(cid, cNode)
+      const cType = (cNode?.data?.type as string) ?? 'entity'
+      const kids = containsChildrenOf?.get(cid)
+      const open = openContains.has(cid)
+      const card: FocusCard = {
+        ...baseCard(),
+        id: `c:${cid}`,
+        kind: 'contains',
+        nodeId: cid,
+        band: 0,
+        h: CONTAINS_H,
+        depth,
+        label: cLabel,
+        type: cType,
+        unresolved: !cNode,
+        // Offered from the ontology, like every other contents control.
+        canOpenChildren: canContain(cType),
+        childrenOpen: open,
+        expandKey: `kids:${cid}`,
+        fetch: containsLoadingOf?.has(cid) ? 'loading' : null,
+        dimmed: !matches(cLabel),
+      }
+      pushCard(card)
+      // `ce:` not `fe:` — a containment tether and a LINEAGE edge between
+      // the same pair are different facts and must both be drawable. They
+      // shared an id space until now, so a contained child that also
+      // carried downstream lineage produced two edges with one id, and
+      // React Flow (which keys on id) silently dropped one of them.
+      addRawEdge({
+        id: `ce:${tetherTo}->${card.id}`,
+        source: tetherTo,
+        target: card.id,
+        count: 1,
+        edgeTypeNorm: 'contains',
+        aggregated: false,
+        containment: true,
+        dimmed: card.dimmed,
+      })
+      // A level opens to CONTAINS_CAP rows; the rest is an honest
+      // overflow card rather than a silently shortened list.
+      if (open && kids && depth < CONTAINS_MAX_DEPTH) {
+        emitContains(kids.slice(0, CONTAINS_CAP), depth + 1, card.id)
+        if (kids.length > CONTAINS_CAP) {
+          pushCard({
+            ...baseCard(),
+            id: `more:c:${cid}`,
+            kind: 'overflow',
+            nodeId: null,
+            band: 0,
+            h: OVERFLOW_H,
+            depth: depth + 1,
+            label: `+${(kids.length - CONTAINS_CAP).toLocaleString()} more inside ${cLabel}`,
+            type: 'entity',
+            expandKind: 'more',
+            overflowCount: kids.length - CONTAINS_CAP,
+          })
+        }
+      }
     }
-    pushCard(card)
-    // `ce:` not `fe:` — a containment tether and a LINEAGE edge between
-    // the same pair are different facts and must both be drawable. They
-    // shared an id space until now, so a contained child that also
-    // carried downstream lineage produced two edges with one id, and
-    // React Flow (which keys on id) silently dropped one of them.
-    addRawEdge({
-      id: `ce:f->${card.id}`,
-      source: 'f',
-      target: card.id,
-      count: 1,
-      edgeTypeNorm: 'contains',
-      aggregated: false,
-      containment: true,
-      dimmed: card.dimmed,
-    })
   }
+  emitContains(containsShown, 0, 'f')
   const containsTotalAll = Math.max(containsChildren.length, containsTotal ?? 0)
   // While the fetch is in flight we know neither the children nor the
   // count — but the affordance must still be there, or the focal reads
@@ -1156,7 +1213,7 @@ function layoutBands(cards: FocusCard[]) {
       // Focal first (builder inserts it first), contains stack below.
       let y = -FOCAL_H / 2
       for (const c of list) {
-        c.x = c.kind === 'focal' ? x : x + NEST_INDENT
+        c.x = c.kind === 'focal' ? x : x + NEST_INDENT * (c.depth + 1)
         c.y = y
         y += c.h + (c.kind === 'focal' ? CONTAINS_STACK_GAP : CARD_GAP)
       }

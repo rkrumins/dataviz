@@ -68,6 +68,9 @@ interface LensGraphState {
   expandedFrontier: ReadonlySet<string>
   /** Coarse containers opened into their focal-relevant contents. */
   openContainers: ReadonlySet<string>
+  /** Contains-stack rows opened, by urn. One flat set — nesting depth
+   *  emerges from the walk, exactly as it does on the canvas. */
+  openContains: ReadonlySet<string>
   /** Frames switched to "everything inside", keyed like openContainers. */
   frameShowAll: ReadonlySet<string>
   /** Per-frame filter text and paging, keyed like openContainers. */
@@ -79,6 +82,7 @@ const EMPTY_QUERY_MAP: ReadonlyMap<string, string> = new Map()
 const freshGraphState = (nodeId: string | null): LensGraphState => ({
   nodeId, selection: null, expandedGroups: EMPTY_TYPE_SET, expandedFrontier: EMPTY_TYPE_SET,
   openContainers: EMPTY_TYPE_SET, frameShowAll: EMPTY_TYPE_SET,
+  openContains: EMPTY_TYPE_SET,
   frameQueries: EMPTY_QUERY_MAP, framePages: EMPTY_PAGE_MAP,
   bandPages: EMPTY_PAGE_MAP,
 })
@@ -385,6 +389,20 @@ export function LineageLens({
     return children
   }, [nodeId, edgesByEndpoint, containmentEdgeTypes, childrenOf])
 
+  /** Loaded children per urn, for the contains stack's deeper levels.
+   *  Only entities the user actually opened are fetched, so this stays
+   *  as small as the stack the user built. */
+  const containsKidsById = useMemo(() => {
+    const m = new Map<string, string[]>()
+    for (const [urn, page] of childrenOf ?? []) m.set(urn, page.children.map(n => n.id))
+    return m
+  }, [childrenOf])
+  const containsLoadingIds = useMemo(() => {
+    const s = new Set<string>()
+    for (const [urn, st] of childrenStatusOf ?? []) if (st === 'loading') s.add(urn)
+    return s
+  }, [childrenStatusOf])
+
   // ── Grain machinery — data-driven from the schema's entity-type
   // hierarchy. closure(T) = every type T can transitively contain; a
   // partner is a COARSER-grain rollup relative to a base node when the
@@ -517,6 +535,7 @@ export function LineageLens({
           expandedFrontier: new Set(graphSeed.expandedFrontier),
           openContainers: new Set(graphSeed.openContainers ?? []),
           frameShowAll: new Set(graphSeed.frameAll ?? []),
+          openContains: EMPTY_TYPE_SET,
           frameQueries: EMPTY_QUERY_MAP,
           framePages: EMPTY_PAGE_MAP,
           bandPages: EMPTY_PAGE_MAP,
@@ -582,6 +601,21 @@ export function LineageLens({
       if (lensFrameChildren === 'all') onLoadAllChildren?.(openKey)
     }
   }, [nodeId, seededFresh, entityLevels, onOpenContainer, onLoadAllChildren, lensFrameChildren])
+
+  /** Open / close one contains row, fetching its children the first
+   *  time. Collapsing keeps the answer cached for re-opening. */
+  const toggleContains = useCallback((urn: string) => {
+    let opening = false
+    setGraphState(prev => {
+      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
+      const next = new Set(base.openContains)
+      opening = !next.has(urn)
+      if (opening) next.add(urn)
+      else next.delete(urn)
+      return { ...base, openContains: next }
+    })
+    if (opening) onLoadChildrenOf?.(urn)
+  }, [nodeId, seededFresh, onLoadChildrenOf])
 
   /** Flip one frame between "only what connects" and "everything
    *  inside". Turning it on fetches that container's child list; turning
@@ -743,6 +777,9 @@ export function LineageLens({
       containsChildren: focalChildren,
       containsTotal: (nodeMap.get(nodeId)?.data?.childCount as number | undefined) ?? 0,
       containsLoading: childrenStatusOf?.get(nodeId) === 'loading',
+      containsChildrenOf: containsKidsById,
+      openContains: graphCur.openContains,
+      containsLoadingOf: containsLoadingIds,
       resolveParent,
       isCoarser: isCoarserThan,
       canContain: canContainAnything,
@@ -769,6 +806,7 @@ export function LineageLens({
     resolveParent, isCoarserThan, canContainAnything, graphCur.expandedGroups,
     graphCur.expandedFrontier, graphCur.openContainers, graphCur.frameQueries,
     graphCur.framePages, graphCur.bandPages, graphCur.frameShowAll, childrenStatusOf,
+    graphCur.openContains, containsKidsById, containsLoadingIds,
     containerResults, containerStatus, frameAllResults, frameAllStatus,
     entityLevels, query, hiddenTypes, degreeHints, fetchStatus,
   ])
@@ -1335,6 +1373,7 @@ export function LineageLens({
                 onToggleGroup={toggleGraphGroup}
                 onOpenContainer={toggleContainer}
                 onExpandFrontier={toggleGraphFrontier}
+                onToggleContains={toggleContains}
                 onShowMore={bumpBandPage}
                 onSetFramePage={setFramePage}
                 onFrameQuery={setFrameQuery}
