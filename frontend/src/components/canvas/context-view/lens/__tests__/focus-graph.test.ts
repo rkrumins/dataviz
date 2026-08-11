@@ -23,6 +23,7 @@ import {
   FRAME_CHILD_CAP,
   FRAME_ALL_CAP,
   GROUP_MEMBER_CAP,
+  ANCESTRY_CAP,
   framePager,
   CARD_H,
   CHILD_ROW_H,
@@ -1143,6 +1144,110 @@ describe('buildFocusGraph — caps, chips, filter', () => {
       },
     })
     expect(card(withCache, 'n:Snowflake').previewLabels).toEqual(['label-kid1', 'label-kid2'])
+  })
+})
+
+describe('buildFocusGraph — provenance', () => {
+  // REGRESSION: the card carried ONE parent, rendered end-truncated at
+  // 80px, so `int_clean_orders_t1` and `int_clean_orders_t2` were both
+  // "int_clean_order…" — a column's owner was genuinely unreadable, and
+  // that is the reported complaint.
+  it('carries the whole containment chain, root-first', () => {
+    const g = build({
+      nodes: [
+        node('F'), node('col', 'schemaField'),
+        node('Snowflake', 'DATAPLATFORM'), node('GOLD', 'CONTAINER'), node('fact_orders'),
+      ],
+      edges: [
+        edge('e1', 'col', 'F'),
+        contains('c1', 'Snowflake', 'GOLD'),
+        contains('c2', 'GOLD', 'fact_orders'),
+        contains('c3', 'fact_orders', 'col'),
+      ],
+    })
+    expect(card(g, 'n:col').ancestry).toEqual(['label-Snowflake', 'label-GOLD', 'label-fact_orders'])
+    // The immediate parent still resolves as before.
+    expect(card(g, 'n:col').parentId).toBe('fact_orders')
+  })
+
+  it('survives a containment cycle and a chain longer than the cap', () => {
+    const deep = Array.from({ length: 12 }, (_, i) => node(`lvl${i}`))
+    const g = build({
+      nodes: [node('F'), node('leaf'), ...deep],
+      edges: [
+        edge('e1', 'leaf', 'F'),
+        ...deep.slice(1).map((n, i) => contains(`c${i}`, deep[i].id, n.id)),
+        contains('cl', 'lvl11', 'leaf'),
+        // A cycle back to the root — malformed data must not hang the build.
+        contains('cyc', 'lvl11', 'lvl0'),
+      ],
+    })
+    const chain = card(g, 'n:leaf').ancestry
+    expect(chain.length).toBeLessThanOrEqual(ANCESTRY_CAP)
+    expect(new Set(chain).size).toBe(chain.length)   // no repeats
+  })
+
+  it('gives the focal and its contained rows a chain too', () => {
+    const g = build({
+      nodes: [node('F'), node('db', 'CONTAINER'), node('kid', 'schemaField')],
+      edges: [contains('c1', 'db', 'F'), contains('c2', 'F', 'kid')],
+      over: { bandPages: new Map([['contains', 1]]) },
+    })
+    expect(card(g, 'f').ancestry).toEqual(['label-db'])
+    expect(card(g, 'c:kid').ancestry).toEqual(['label-db', 'label-F'])
+  })
+})
+
+describe('buildFocusGraph — expansion feedback', () => {
+  // REGRESSION: expanding a card whose neighbours are ALL already drawn
+  // adds edges and no cards. The pill still flipped to an accent Minus,
+  // so the click changed a glyph and the picture appeared frozen — one
+  // of the two reasons "I am unable to expand any of the entities".
+  it('marks an expansion that reached only what was already on the board', () => {
+    // A and B are both upstream of the focal, and A is also upstream of
+    // B — so expanding B upstream reaches A, which already has a card.
+    const g = build({
+      nodes: [node('F'), node('A'), node('B')],
+      edges: [edge('e1', 'A', 'F'), edge('e2', 'B', 'F'), edge('e3', 'A', 'B')],
+      over: {
+        expandedFrontier: new Set(['in:B']),
+        fetchStatus: new Map([['B', 'done' as const]]),
+      },
+    })
+    const b = card(g, 'n:B')
+    expect(b.alreadyShown).toBe(true)
+    // Not a dead end — it genuinely connects, the connection was just
+    // already on screen.
+    expect(b.deadEnd).toBe(false)
+    // Exactly one card per entity, as ever — and the edge WAS drawn.
+    expect(g.cards.filter(c => c.nodeId === 'A')).toHaveLength(1)
+    expect(g.edges.some(e => e.source === 'n:A' && e.target === 'n:B')).toBe(true)
+  })
+
+  it('does not mark an expansion that actually brought something new', () => {
+    const g = build({
+      nodes: [node('F'), node('U'), node('UU')],
+      edges: [edge('e1', 'U', 'F'), edge('e2', 'UU', 'U')],
+      over: {
+        expandedFrontier: new Set(['in:U']),
+        fetchStatus: new Map([['U', 'done' as const]]),
+      },
+    })
+    expect(card(g, 'n:U').alreadyShown).toBe(false)
+    expect(card(g, 'n:UU').band).toBe(-2)
+  })
+
+  it('does not mark a dead end as already-shown', () => {
+    const g = build({
+      nodes: [node('F'), node('U')],
+      edges: [edge('e1', 'U', 'F')],
+      over: {
+        expandedFrontier: new Set(['in:U']),
+        fetchStatus: new Map([['U', 'done' as const]]),
+      },
+    })
+    expect(card(g, 'n:U').deadEnd).toBe(true)
+    expect(card(g, 'n:U').alreadyShown).toBe(false)
   })
 })
 

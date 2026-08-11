@@ -258,8 +258,26 @@ export function useLensContainer(
 
         // Keep only entities that are actually inside the container we
         // opened — the response also carries the focal side's endpoints.
-        const focalSide = new Set<string>([partnerUrn])
-        const inside = res.nodes.filter(n => n.urn !== anchor && !focalSide.has(n.urn))
+        //
+        // Filtering the two ANCHORS alone was not enough: the partner's
+        // own DESCENDANTS passed straight through, so the focal's columns
+        // were drawn as children of the upstream container's frame. With
+        // the contains stack collapsed by default, the one-card-per-
+        // entity gate never caught them either. Walk the containment
+        // edges the response already carries.
+        const parentOf = new Map<string, string>()
+        for (const ce of res.containmentEdges ?? []) parentOf.set(ce.targetUrn, ce.sourceUrn)
+        const onPartnerSide = (urn: string): boolean => {
+          let cur: string | undefined = urn
+          const seen = new Set<string>()
+          while (cur && !seen.has(cur)) {
+            if (cur === partnerUrn) return true
+            seen.add(cur)
+            cur = parentOf.get(cur)
+          }
+          return false
+        }
+        const inside = res.nodes.filter(n => n.urn !== anchor && !onPartnerSide(n.urn))
 
         // Explicit arrows: toCanvasNode takes an options 2nd arg, so a
         // bare `.map(toCanvasNode)` would hand it the array index.

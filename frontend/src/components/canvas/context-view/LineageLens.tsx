@@ -501,16 +501,14 @@ export function LineageLens({
   // the graph cards and the classic-mode rows. Memoized — it rides
   // into every graph card's context, which must stay identity-stable.
   const toggleDrillWithFetch = useCallback((key: string, edge: LineageEdge) => {
-    const aggData = edge.data as { sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
-    if (!drilledRows.has(key) && onDrillFetch && !drillEdges?.has(edge.id)) {
-      let localCount = 0
-      for (const eid of aggData?.sourceEdges ?? []) {
-        if (rawEdgeById.has(eid)) localCount++
-      }
-      if (localCount < (aggData?.sourceEdgeCount ?? 0)) onDrillFetch(edge)
-    }
+    // No local-resolution shortcut: `sourceEdges` is never populated at
+    // runtime — nothing in the backend materializes a constituent-id
+    // list, and nothing client-side writes one outside test fixtures —
+    // so the branch that counted already-loaded constituents was dead
+    // and only made this look cheaper than it is.
+    if (!drilledRows.has(key) && onDrillFetch && !drillEdges?.has(edge.id)) onDrillFetch(edge)
     toggleDrill(key)
-  }, [drilledRows, onDrillFetch, drillEdges, rawEdgeById, toggleDrill])
+  }, [drilledRows, onDrillFetch, drillEdges, toggleDrill])
 
   const { incomingRecords, outgoingRecords } = useMemo(
     () => (nodeId
@@ -1024,8 +1022,14 @@ export function LineageLens({
                 )}
               </div>
               <p className="flex items-center gap-1.5 text-[10.5px] text-ink-muted leading-tight">
-                <span>
-                  {`${focalDirectTotal} direct connection${focalDirectTotal === 1 ? '' : 's'}${focalRollupTotal > 0 ? ` · ${focalRollupTotal} rolled-up` : ''}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
+                {/* The total, not the total-minus-rollups. "28 direct
+                    connections" beside a focal card reading "17 in · 15
+                    out" (= 32) could not be reconciled by a reader: the
+                    two counted different sets and neither said so. */}
+                <span title={focalRollupTotal > 0
+                  ? `${focalDirectTotal} concrete and ${focalRollupTotal} rolled-up — a rolled-up connection stands for finer ones beneath it`
+                  : undefined}>
+                  {`${focalDirectTotal + focalRollupTotal} connection${focalDirectTotal + focalRollupTotal === 1 ? '' : 's'}${focalRollupTotal > 0 ? ` · ${focalRollupTotal} rolled-up` : ''}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
                 </span>
                 {focalFetch === 'loading' && (
                   <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
@@ -1405,6 +1409,24 @@ export function LineageLens({
               three-column LIST, switched from the header toggle. ── */}
           {lensViewMode === 'graph' && focusGraph ? (
           <div className="flex-1 min-h-0 flex flex-col">
+            {/* Grain chips — same explicit, reversible filter contract as
+                the list columns, one row for the whole graph, and hidden
+                counts stay visible (never silent loss). In their OWN row
+                rather than floating over the canvas: as an overlay they
+                sat on top of the first card of the upstream band, which
+                is exactly where the tallest bands start. */}
+            {(graphTypeChips.length > 1 || focusGraph.hiddenByChips > 0) && (
+              <div className="flex-shrink-0 flex flex-wrap items-center gap-x-2 gap-y-1 px-3 pt-2 pb-1">
+                {graphTypeChips.length > 1 && (
+                  <TypeChips chips={graphTypeChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} />
+                )}
+                {focusGraph.hiddenByChips > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-md bg-black/[0.04] dark:bg-white/[0.06] text-[9.5px] text-ink-muted">
+                    {focusGraph.hiddenByChips} hidden by the type chips
+                  </span>
+                )}
+              </div>
+            )}
             <div data-tour="lens-graph" className="relative flex-1 min-h-0">
               <FocusGraphView
                 graph={focusGraph}
@@ -1435,23 +1457,6 @@ export function LineageLens({
                 onRevealOnCanvas={onRevealOnCanvas}
                 onOpenDetails={onOpenDetails}
               />
-              {/* Floating grain chips — same explicit, reversible filter
-                  contract as the list columns, one row for the whole
-                  graph. Hidden counts stay visible (never silent loss). */}
-              {(graphTypeChips.length > 1 || focusGraph.hiddenByChips > 0) && (
-                <div className="absolute top-2 left-3 right-14 z-10 flex flex-wrap items-center gap-x-2 gap-y-1 pointer-events-none">
-                  {graphTypeChips.length > 1 && (
-                    <div className="pointer-events-auto rounded-lg bg-canvas-elevated/90 border border-black/[0.07] dark:border-white/[0.08] shadow-sm px-1.5 py-1">
-                      <TypeChips chips={graphTypeChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} />
-                    </div>
-                  )}
-                  {focusGraph.hiddenByChips > 0 && (
-                    <span className="pointer-events-auto px-1.5 py-0.5 rounded-md bg-canvas-elevated/90 border border-black/[0.07] dark:border-white/[0.08] text-[9.5px] text-ink-muted shadow-sm">
-                      {focusGraph.hiddenByChips} hidden by the type chips
-                    </span>
-                  )}
-                </div>
-              )}
               {/* Empty/loading state — a lone focal card floating in
                   space explains nothing. In-flight fetches narrate;
                   a store-only empty view says what it is (the DONE +
@@ -1673,11 +1678,11 @@ export function LineageLens({
                   {focalImpact && (
                     <p
                       className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted tabular-nums"
-                      title={`Distinct entities connected within ${IMPACT_DEPTH} hops, at this entity's level${focalImpact.truncated ? ' — measurement capped, true totals may be higher' : ''}`}
+                      title={`Distinct entities connected within ${IMPACT_DEPTH} hops, measured at this entity's OWN grain — so it counts different things from the connections listed beside it, which are at whatever grain they arrived at${focalImpact.truncated ? '. Measurement capped, true totals may be higher' : ''}`}
                     >
                       <LucideIcons.Radar className="w-3 h-3 text-accent-lineage/70" />
                       <span>
-                        Reaches {focalImpact.up.toLocaleString()}{focalImpact.truncated ? '+' : ''} upstream
+                        Reach at this grain: {focalImpact.up.toLocaleString()}{focalImpact.truncated ? '+' : ''} upstream
                         {' · '}{focalImpact.down.toLocaleString()}{focalImpact.truncated ? '+' : ''} downstream
                       </span>
                     </p>
@@ -1809,7 +1814,9 @@ export function LineageLens({
           <div className="flex items-center gap-2 px-4 py-2.5 border-t border-black/[0.08] dark:border-white/[0.08]">
             <p className="text-[10.5px] text-ink-muted/80">
               {lensViewMode === 'graph'
-                ? 'Click a card to inspect · Double-click to focus · Drag to pan · Esc to close'
+                // Expansion was missing from this list entirely — the one
+                // gesture people go looking for.
+                ? 'Click a card to inspect · ＋ to expand a hop · ▸ to open what is inside · Double-click to focus · Esc to close'
                 : 'Click a connection to re-center · Esc to close'}
             </p>
             <div className="ml-auto flex items-center gap-2">

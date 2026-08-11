@@ -41,6 +41,15 @@ export function toCanvasNode(n: GraphNode, opts?: { randomPosition?: boolean }):
 
 /** Convert a backend GraphEdge to a canvas LineageEdge using real backend edge data. */
 export function toCanvasEdge(e: GraphEdge): LineageEdge {
+    // `properties` was dropped wholesale, which quietly cost every
+    // rolled-up edge its identity: a materialized AGGREGATED edge arrived
+    // looking like one plain connection, so it showed no ×N badge and
+    // offered no drill. Carry the two facts the UI actually reads.
+    // `isAggregated` / `sourceEdgeCount` are client-only — both
+    // stagedChangesToOps and EdgeDetailPanel strip them before any write.
+    const props = e.properties ?? {}
+    const rolledUp = Array.isArray(props.sourceEdgeTypes)
+    const weight = typeof props.weight === 'number' && props.weight > 1 ? props.weight : undefined
     return {
         id: e.id,
         source: e.sourceUrn,
@@ -51,6 +60,8 @@ export function toCanvasEdge(e: GraphEdge): LineageEdge {
             relationship: e.edgeType,
             confidence: e.confidence,
             version: e.version,   // OCC token — echoed as baseVersion on an edit
+            ...(rolledUp ? { isAggregated: true } : {}),
+            ...(weight !== undefined ? { sourceEdgeCount: weight } : {}),
         },
     }
 }

@@ -42,7 +42,7 @@
  * The viewport re-frames on FOCAL change only: expanding grows the
  * picture in place instead of yanking it away from what you opened.
  */
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -179,7 +179,7 @@ function sameCard(a: FocusCard, b: FocusCard): boolean {
   const keys = Object.keys(a) as Array<keyof FocusCard>
   if (keys.length !== Object.keys(b).length) return false
   for (const k of keys) {
-    if (k === 'frameBreadcrumb' || k === 'previewLabels' || k === 'partnerIds') {
+    if (k === 'frameBreadcrumb' || k === 'previewLabels' || k === 'partnerIds' || k === 'ancestry') {
       const x = a[k], y = b[k]
       if (x.length !== y.length || x.some((v, i) => v !== y[i])) return false
       continue
@@ -214,6 +214,42 @@ function PortHandles({ focal }: { focal?: boolean }) {
         />
       )}
     </>
+  )
+}
+
+/**
+ * Where this entity lives — the containment chain, not one truncated
+ * parent.
+ *
+ * `int_clean_orders_t1` and `int_clean_orders_t2` both rendered as
+ * `int_clean_order…` in an 80px end-truncated label, so a column's owner
+ * was genuinely unreadable. Two fixes: show the chain, and truncate the
+ * MIDDLE so the distinguishing suffix survives — names in a warehouse
+ * differ at the end far more often than at the start.
+ */
+function middleTruncate(s: string, max: number): string {
+  if (s.length <= max) return s
+  const head = Math.ceil((max - 1) / 2)
+  return `${s.slice(0, head)}…${s.slice(s.length - (max - 1 - head))}`
+}
+
+function ProvenanceRibbon({ card }: { card: FocusCard }) {
+  if (card.ancestry.length === 0 && !card.parentLabel) return null
+  // The chain can be six deep; the card is 240px. Show the owner in
+  // full-ish and let the tail of the chain give it context.
+  const chain = card.ancestry.length > 0 ? card.ancestry : [card.parentLabel!]
+  const owner = chain[chain.length - 1]
+  const above = chain.slice(0, -1)
+  return (
+    <span className="flex items-center gap-1 min-w-0" title={`in ${chain.join(' › ')}`}>
+      <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/50" />
+      {above.length > 0 && (
+        <span className="flex-shrink-0 text-ink-muted/45">
+          {above.length > 1 ? '…› ' : ''}{middleTruncate(above[above.length - 1], 10)} ›
+        </span>
+      )}
+      <span className="truncate max-w-[132px] text-ink-muted">{middleTruncate(owner, 22)}</span>
+    </span>
   )
 }
 
@@ -343,8 +379,17 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
       type="button"
       onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier(card.expandKey!, card.nodeId!) }}
       title={expanded
-        ? `Collapse ${outLeft ? 'upstream of' : 'downstream of'} ${card.label}`
+        // An expansion that reached only cards already on the board adds
+        // edges and nothing else. Saying so is the difference between
+        // "this control is broken" and "you already had the answer".
+        ? card.alreadyShown
+          ? `Everything ${outLeft ? 'upstream of' : 'downstream of'} ${card.label} is already on the board — expanding drew the connections to it (click to collapse)`
+          : `Collapse ${outLeft ? 'upstream of' : 'downstream of'} ${card.label}`
         : `Expand the next hop ${outLeft ? 'upstream' : 'downstream'} of ${card.label}${hint != null ? ` (${hint.toLocaleString()} known)` : ''}`}
+      aria-label={expanded
+        ? `Collapse ${outLeft ? 'upstream of' : 'downstream of'} ${card.label}`
+        : `Expand the next hop ${outLeft ? 'upstream' : 'downstream'} of ${card.label}`}
+      aria-expanded={expanded}
       className={cn(
         'absolute top-1/2 -translate-y-1/2 flex items-center justify-center gap-0.5 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors',
         hint != null && !expanded ? 'px-1.5' : 'w-5',
@@ -355,6 +400,7 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
       )}
     >
       {(() => {
+        if (expanded && card.alreadyShown) return <LucideIcons.Link2 className="w-3 h-3" />
         if (expanded) return <LucideIcons.Minus className="w-3 h-3" />
         // A hop only knows a degree when the backend reported one.
         if (hint == null) return <LucideIcons.Plus className="w-3 h-3" />
@@ -501,11 +547,11 @@ function FocusGraphCard({ data, selected }: NodeProps) {
         {focalImpact && (
           <p
             className="flex items-center gap-1 mt-0.5 text-[9px] text-ink-muted tabular-nums truncate"
-            title={`Distinct entities connected within ${IMPACT_DEPTH} hops, at this entity's level${focalImpact.truncated ? ' — measurement capped, true totals may be higher' : ''}`}
+            title={`Distinct entities connected within ${IMPACT_DEPTH} hops, measured at this entity's OWN grain — so it counts different things from the connections listed beside it, which are at whatever grain they arrived at${focalImpact.truncated ? '. Measurement capped, true totals may be higher' : ''}`}
           >
             <LucideIcons.Radar className="w-2.5 h-2.5 flex-shrink-0 text-accent-lineage/70" />
             <span className="truncate">
-              Reaches {focalImpact.up.toLocaleString()}{focalImpact.truncated ? '+' : ''} upstream
+              Reach at this grain: {focalImpact.up.toLocaleString()}{focalImpact.truncated ? '+' : ''} upstream
               {' · '}{focalImpact.down.toLocaleString()}{focalImpact.truncated ? '+' : ''} downstream
             </span>
           </p>
@@ -717,10 +763,9 @@ function FocusGraphCard({ data, selected }: NodeProps) {
           )}
         </p>
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug min-w-0">
-          {card.parentLabel && (
+          {(card.ancestry.length > 0 || card.parentLabel) && (
             <>
-              <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/50" />
-              <span className="truncate max-w-[80px]">{card.parentLabel}</span>
+              <ProvenanceRibbon card={card} />
               <span className="text-ink-muted/40">·</span>
             </>
           )}
@@ -1449,18 +1494,53 @@ export function FocusGraphView({
   )
 
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
-  // Re-frame on focal swaps and expansion changes — the graph's shape
-  // changed, so bring it back into view (instant under reduced motion).
+  /**
+   * Keep the camera honest about what just happened.
+   *
+   * A new focal is a new picture, so frame all of it. An EXPANSION is
+   * different: new cards land a whole band out — 370px past the card
+   * you clicked, growing the graph by ~30% in one click — and the
+   * camera used to stay pinned, so the only feedback was the pill
+   * changing glyph and the result was very often off screen. That is
+   * the whole of "I can't expand anything".
+   *
+   * Re-fitting everything would yank you off what you just opened,
+   * which is why it was pinned in the first place. So ease to exactly
+   * the cards that ARRIVED plus the cards they attached to — the thing
+   * you clicked stays in frame and the answer comes to you. The anchors
+   * come free from `partnerIds`, which every card already carries.
+   */
+  const framedRef = useRef<{ focal: string; ids: Set<string> } | null>(null)
   useEffect(() => {
     if (!rf) return
+    const ids = new Set(graph.cards.map(c => c.id))
+    const prev = framedRef.current
+    framedRef.current = { focal: focalId, ids }
+
+    if (!prev || prev.focal !== focalId) {
+      const t = window.setTimeout(() => {
+        void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: 1 })
+      }, 30)
+      return () => window.clearTimeout(t)
+    }
+
+    const arrived = graph.cards.filter(c => !prev.ids.has(c.id))
+    if (arrived.length === 0) return
+    const anchors = new Set(arrived.flatMap(c => c.partnerIds))
+    const frame = [
+      ...arrived.map(c => c.id),
+      ...graph.cards.filter(c => c.nodeId && anchors.has(c.nodeId)).map(c => c.id),
+    ]
     const t = window.setTimeout(() => {
-      void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: 1 })
+      void rf.fitView({
+        nodes: frame.map(id => ({ id })),
+        padding: 0.25,
+        duration: reducedMotion ? 0 : 320,
+        maxZoom: 1,
+      })
     }, 30)
     return () => window.clearTimeout(t)
-    // Deliberately NOT keyed on card count: expanding a card must grow
-    // the picture in place rather than yank the viewport off what you
-    // just opened (and re-frame-per-expansion was pure animation churn).
-  }, [rf, focalId, reducedMotion])
+  }, [rf, focalId, graph.cards, reducedMotion])
 
   return (
     <div

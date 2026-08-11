@@ -35,13 +35,24 @@ export type EdgeTypeInfoMap = Map<string, { label: string; description?: string 
 export const edgeLabelFor = (norm: string, info?: EdgeTypeInfoMap): string =>
   norm ? (info?.get(norm)?.label ?? relationshipLabel(norm)) : 'relationship'
 
-/** Cards per band before the "+N more" overflow card (paged). */
-export const GRAPH_BAND_CAP = 30
+/** Cards per band before the "+N more" overflow card (paged).
+ *
+ *  Sized to the VIEWPORT, not picked as a round number. A card is
+ *  CARD_H 64 + CARD_GAP 10 = 74px, so a band fills a ~950px lens body at
+ *  about twelve. At 30 a band of fifteen was never capped: no overflow
+ *  card was emitted, five cards sat silently below the fold, and the
+ *  band header printed a bare "15" over ten visible cards as the only
+ *  cue that anything was missing. That is where a focal's rolled-up
+ *  platform and container partners went — `rollups` is the last segment
+ *  of the band, so they stack at the bottom. */
+export const GRAPH_BAND_CAP = 12
 /** Members revealed when a parent group is expanded, before its own
  *  "+N more" card. Groups sit INSIDE the band cap as one item, so
  *  without this an expanded group of a wide table's columns added
  *  hundreds of cards to one band in a single click. */
 export const GROUP_MEMBER_CAP = 12
+/** How far up the containment chain a card's provenance ribbon walks. */
+export const ANCESTRY_CAP = 6
 /** Focal containment children shown before the overflow card. */
 export const CONTAINS_CAP = 8
 /** How deep the focal's contains stack nests before it stops offering
@@ -227,6 +238,15 @@ export interface FocusCard {
   frameTotal: number
   /** Frame cards only — more children exist on the server than loaded. */
   frameHasMore: boolean
+  /** The containment chain ABOVE this entity, root-first, as labels —
+   *  `['Snowflake', 'GOLD', 'fact_orders']`. One truncated parent could
+   *  not tell `int_clean_orders_t1` from `int_clean_orders_t2`, which is
+   *  precisely the "where does this column come from" complaint. */
+  ancestry: string[]
+  /** This card's expansion completed and reached only entities that
+   *  were already drawn — it contributed edges, not cards. Said out
+   *  loud, because otherwise the click looks like it did nothing. */
+  alreadyShown: boolean
   /** Frame cards only — which page of children is on screen (0-based),
    *  already clamped to what has actually loaded. Paging shows ONE page
    *  at a time so a 500-column table and a 5-column one occupy the same
@@ -486,6 +506,33 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const placed = new Map<string, string>()
 
   /**
+   * The containment chain above an entity, root-first, as labels.
+   *
+   * `resolveParent` gives one level; a column's owner is only legible
+   * with the chain, because sibling tables routinely share every
+   * character but the last (`..._t1` / `..._t2`). Memoized because it is
+   * called once per card and `resolveParent` is O(degree); guarded
+   * against cyclic containment and capped so a pathological chain
+   * cannot stall a build.
+   */
+  const ancestryCache = new Map<string, string[]>()
+  const ancestryOf = (id: string): string[] => {
+    const hit = ancestryCache.get(id)
+    if (hit) return hit
+    const out: string[] = []
+    const seen = new Set<string>([id])
+    let p = resolveParent(id)
+    while (p && !seen.has(p) && out.length < ANCESTRY_CAP) {
+      seen.add(p)
+      out.push(labelOf(p, nodeMap.get(p)))
+      p = resolveParent(p)
+    }
+    out.reverse()
+    ancestryCache.set(id, out)
+    return out
+  }
+
+  /**
    * The ONE way a card reaches the output.
    *
    * "One entity, one card" used to be a convention that every call site
@@ -527,9 +574,9 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     count: 1, edgeTypeNorm: '', sumCount: 0,
     rollup: false, unresolved: false,
     aggregated: false,
-    frameId: null, depth: 0, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
+    frameId: null, depth: 0, ancestry: EMPTY_STRINGS, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
     connected: true, frameShowingAll: false, frameConnectedCount: 0,
-    frameLoaded: 0, frameTotal: -1, frameHasMore: false,
+    frameLoaded: 0, frameTotal: -1, frameHasMore: false, alreadyShown: false,
     framePage: 0, framePageSize: FRAME_ALL_CAP,
     partnerIds: EMPTY_STRINGS, partnerLabel: null,
     canOpenChildren: false, childrenOpen: false,
@@ -559,6 +606,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     dimmed: !matches(focalLabel),
   }
   focal.parentLabel = focal.parentId ? labelOf(focal.parentId, nodeMap.get(focal.parentId)) : null
+  focal.ancestry = ancestryOf(focalId)
   pushCard(focal)
 
   // The focal's fields are structure, not lineage — showing a dozen of
@@ -601,6 +649,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         label: cLabel,
         type: cType,
         unresolved: !cNode,
+        ancestry: ancestryOf(cid),
         // Offered from the ontology, like every other contents control.
         canOpenChildren: canGoDeeper && !atLimit,
         childrenOpen: open,
@@ -718,6 +767,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       // must say so rather than let an expansion silently no-op.
       // (Counted before the chip filter: hidden ≠ nonexistent.)
       const refContrib = new Map<string, number>()
+      const refFresh = new Map<string, number>()
       const entryMap = new Map<string, BandEntry>()
       for (const ref of refs) {
         const recs = ref.nodeId === focalId
@@ -733,6 +783,10 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           // anywhere (any band, either side, the focal itself) gets an
           // edge to its existing card instead of a duplicate.
           refContrib.set(ref.nodeId, (refContrib.get(ref.nodeId) ?? 0) + 1)
+          // Separately: did it reach anything NOT already on the board?
+          // An expansion whose neighbours are all placed adds edges and
+          // no cards, and the only feedback was the pill changing glyph.
+          if (!placed.has(r.neighborId)) refFresh.set(ref.nodeId, (refFresh.get(ref.nodeId) ?? 0) + 1)
           const t = (r.neighborNode?.data?.type as string) ?? UNRESOLVED_TYPE
           if (hiddenTypes.has(t)) { if (dir === 'in') hiddenByChipsIn++; else hiddenByChipsOut++; continue }
           // From the RECORD, not the edge: the derivation folds a
@@ -783,6 +837,20 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             entry.refs.set(ref.nodeId, { count: n, edgeTypeNorm: r.edgeTypeNorm, aggregated: isAgg })
           }
         }
+      }
+
+      // Stamp "already on the board" onto an expansion that fetched
+      // fine and reached only cards that were drawn already: it added
+      // edges and nothing else, so without saying so the click changed
+      // a glyph and the picture appeared frozen.
+      for (const ref of refs) {
+        if (ref.nodeId === focalId) continue
+        if ((refContrib.get(ref.nodeId) ?? 0) === 0) continue
+        if ((refFresh.get(ref.nodeId) ?? 0) > 0) continue
+        if (fetchStatus?.get(ref.nodeId) !== 'done') continue
+        const cardId = placed.get(ref.nodeId)
+        const shownCard = cardId ? cards.find(c => c.id === cardId) : undefined
+        if (shownCard) shownCard.alreadyShown = true
       }
 
       // Stamp dead ends onto the previous band's expanded cards: fetch
@@ -901,6 +969,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           type,
           parentId,
           parentLabel: parentId ? labelOf(parentId, nodeMap.get(parentId)) : null,
+          ancestry: ancestryOf(entry.nodeId),
           count: entry.count,
           edgeTypeNorm: entry.edgeTypeNorm,
           rollup: entry.rollup,
@@ -1020,6 +1089,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           unresolved: !entry.node,
           partnerIds: [...entry.refs.keys()],
           partnerLabel: partnerLabelOf([...entry.refs.keys()]),
+          ancestry: ancestryOf(entry.nodeId),
           expandKey: openKey,
           expandKind: 'open',
           canOpenChildren: true,
@@ -1110,6 +1180,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             type: cType,
             parentId: entry.nodeId,
             parentLabel: label,
+            ancestry: ancestryOf(child.id),
             partnerIds: [...entry.refs.keys()],
             partnerLabel: partnerLabelOf([...entry.refs.keys()]),
             connected,

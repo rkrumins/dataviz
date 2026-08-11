@@ -14,7 +14,7 @@ import { deriveNeighborRecords } from '@/lib/lineage-neighbors'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
-import { FRAME_ALL_CAP } from '../lens/focus-graph'
+import { FRAME_ALL_CAP, GRAPH_BAND_CAP } from '../lens/focus-graph'
 
 const node = (id: string, type = 'dataset'): LineageNode => ({
   id,
@@ -235,8 +235,11 @@ describe('LineageLens on-demand fetch merge', () => {
       expect(screen.getByText('Rollups')).toBeTruthy()
       expect(screen.getByText('label-plat')).toBeTruthy()
       expect(screen.getByText('rollup')).toBeTruthy()
-      // Headline counts split by grain — units never mix.
-      expect(screen.getByText(/1 direct connection · 1 rolled-up/)).toBeTruthy()
+      // The headline total reconciles with the focal card's in/out
+      // tally: 2 connections, of which 1 is a rollup. "1 direct
+      // connection · 1 rolled-up" beside a card reading 2 could not be
+      // reconciled by a reader.
+      expect(screen.getByText(/2 connections · 1 rolled-up/)).toBeTruthy()
       // The header row toggles collapse; navigation lives on the
       // dedicated re-center button beside it.
       fireEvent.click(screen.getByTitle('Re-center on label-parentDs'))
@@ -442,7 +445,7 @@ describe('LineageLens on-demand fetch merge', () => {
       })
       expect(screen.getByText('Contains')).toBeTruthy()
       // Containment must NOT count as a flow connection.
-      expect(screen.getByText(/0 direct connections · contains 1/)).toBeTruthy()
+      expect(screen.getByText(/0 connections · contains 1/)).toBeTruthy()
       fireEvent.click(screen.getByText('label-kid'))
       expect(onRecenter).toHaveBeenCalledWith('kid')
     } finally {
@@ -617,7 +620,8 @@ describe('LineageLens graph mode', () => {
   // The prefix-based dispatch routed band paging into frame paging, so
   // the band's "+N more" was a dead control.
   it('the band overflow card actually reveals more of the band', () => {
-    const many = Array.from({ length: 35 }, (_, i) => node(`src${i}`))
+    const extra = 5
+    const many = Array.from({ length: GRAPH_BAND_CAP + extra }, (_, i) => node(`src${i}`))
     useCanvasStore.setState({
       nodes: [node('ds'), ...many],
       edges: many.map((n, i) => edge(`e${i}`, n.id, 'ds')),
@@ -625,13 +629,13 @@ describe('LineageLens graph mode', () => {
     } as never)
     renderLens(['ds'])
 
-    // 30 of 35 fit under the cap; the rest sit behind one overflow card.
-    expect(screen.getByText('+5 more')).toBeTruthy()
-    expect(screen.getAllByText(/^label-src\d+$/)).toHaveLength(30)
+    // One viewport's worth fits; the rest sit behind one overflow card.
+    expect(screen.getByText(`+${extra} more`)).toBeTruthy()
+    expect(screen.getAllByText(/^label-src\d+$/)).toHaveLength(GRAPH_BAND_CAP)
 
-    fireEvent.click(screen.getByText('+5 more'))
-    expect(screen.getAllByText(/^label-src\d+$/)).toHaveLength(35)
-    expect(screen.queryByText('+5 more')).toBeNull()
+    fireEvent.click(screen.getByText(`+${extra} more`))
+    expect(screen.getAllByText(/^label-src\d+$/)).toHaveLength(many.length)
+    expect(screen.queryByText(`+${extra} more`)).toBeNull()
   })
 
   // REGRESSION: the contains stack was derived ONLY from containment

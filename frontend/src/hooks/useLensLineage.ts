@@ -227,9 +227,19 @@ export function useLensLineage(
     }
   }, [provider, lineageEdgeTypes, containmentEdgeTypes, resolveNames])
 
-  /** Fetch the raw edges an aggregated row rolls up — the same
-   *  source×target pair query the canvas's expandEdge uses, so the
-   *  backend resolves descendants of both endpoints. */
+  /**
+   * Fetch the raw edges an aggregated row rolls up.
+   *
+   * KNOWN LIMITATION, stated because the docstring used to claim the
+   * opposite: `getEdges` is an EXACT urn match on both ends
+   * (`a.urn IN $sourceUrns AND b.urn IN $targetUrns`), so it does NOT
+   * resolve descendants. It therefore only finds constituents when the
+   * aggregate's own endpoints are the concrete ones. Resolving a
+   * table→table rollup into its column pairs needs `expandAggregated`,
+   * which is what `useLensContainer` already calls — see the Phase 2
+   * drill work. Until then this returns what it can and the row reports
+   * the remainder honestly rather than inventing it.
+   */
   const fetchDrill = useCallback((edge: LineageEdge) => {
     if (!provider || drillStartedRef.current.has(edge.id)) return
     drillStartedRef.current.add(edge.id)

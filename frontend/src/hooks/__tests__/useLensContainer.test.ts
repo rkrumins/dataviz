@@ -253,6 +253,37 @@ describe('useLensContainer', () => {
   })
 })
 
+  // REGRESSION: expand_aggregated returns BOTH sides' endpoints. The
+  // filter removed only the two anchors, so the partner's own children
+  // came back as children of the container being opened — the focal's
+  // columns drawn inside an upstream table's frame.
+  it('keeps the partner\'s descendants out of the container it opened', async () => {
+    const { provider } = makeProvider(() => result(
+      [
+        gn('C', 'container'), gn('c_col1'), gn('c_col2'),
+        gn('F'), gn('f_col1'), gn('f_col2'),
+      ],
+      [ge('e1', 'c_col1', 'f_col1'), ge('e2', 'c_col2', 'f_col2')],
+      {
+        containmentEdges: [
+          ge('k1', 'C', 'c_col1'), ge('k2', 'C', 'c_col2'),
+          ge('k3', 'F', 'f_col1'), ge('k4', 'F', 'f_col2'),
+        ],
+      },
+    ))
+    const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 1))
+    await waitFor(() => expect(hook.current.status.get('in:C')).toBe('done'))
+
+    const ids = hook.current.results.get('in:C')!.nodes.map(n => n.id)
+    expect(ids).toEqual(['c_col1', 'c_col2'])
+    expect(ids).not.toContain('f_col1')
+    expect(ids).not.toContain('f_col2')
+    // The pair edges still come back in full — they are what column-level
+    // lineage is drawn from.
+    expect(hook.current.results.get('in:C')!.edges).toHaveLength(2)
+  })
+
 describe('useLensContainer — every child ("show all")', () => {
   /** Opens C against F, then hands back the settled hook. */
   const openedHook = async (
