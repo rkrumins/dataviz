@@ -146,8 +146,8 @@ function sameCard(a: FocusCard, b: FocusCard): boolean {
   const keys = Object.keys(a) as Array<keyof FocusCard>
   if (keys.length !== Object.keys(b).length) return false
   for (const k of keys) {
-    if (k === 'frameBreadcrumb') {
-      const x = a.frameBreadcrumb, y = b.frameBreadcrumb
+    if (k === 'frameBreadcrumb' || k === 'previewLabels') {
+      const x = a[k], y = b[k]
       if (x.length !== y.length || x.some((v, i) => v !== y[i])) return false
       continue
     }
@@ -495,6 +495,12 @@ function FocusGraphCard({ data, selected }: NodeProps) {
               </span>
             )}
           </p>
+          {card.previewLabels.length > 0 && (
+            <p className="truncate text-[9px] text-ink-muted/60 leading-snug" title={card.previewLabels.join(', ')}>
+              {card.previewLabels.join(', ')}
+              {card.count > card.previewLabels.length && ` +${card.count - card.previewLabels.length}`}
+            </p>
+          )}
         </div>
         <LucideIcons.ChevronRight className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted/40 group-hover:hidden" />
         <span className="hidden group-hover:flex flex-shrink-0 items-center">
@@ -571,11 +577,12 @@ function FocusGraphCard({ data, selected }: NodeProps) {
           <span className="truncate">{card.label}</span>
           {card.rollup && (
             <span
-              className="flex-shrink-0 flex items-center gap-0.5 px-1 py-px rounded bg-black/[0.05] dark:bg-white/[0.07] text-[8.5px] font-semibold uppercase tracking-wide text-ink-muted/70"
-              title="A coarser-grain summary of finer flows — not an additional connection"
+              className="flex-shrink-0 flex items-center"
+              title={card.expandKind === 'open'
+                ? `${card.label} holds other entities — open it to see the ones that connect to this entity. It stands for those flows rather than adding one of its own.`
+                : 'Stands for finer flows beneath it — not an additional connection'}
             >
-              <LucideIcons.Layers className="w-2.5 h-2.5" />
-              rollup
+              <LucideIcons.Layers className="w-2.5 h-2.5 text-ink-muted/50" />
             </span>
           )}
         </p>
@@ -611,6 +618,13 @@ function FocusGraphCard({ data, selected }: NodeProps) {
           )}
           {card.unresolved && <span className="italic flex-shrink-0">· not on canvas</span>}
         </p>
+        {/* Name a few of the things a closed container stands for, so
+            you can often skip opening it. Cached data only. */}
+        {card.previewLabels.length > 0 && (
+          <p className="truncate text-[9px] text-ink-muted/60 leading-snug" title={card.previewLabels.join(', ')}>
+            {card.previewLabels.join(', ')}
+          </p>
+        )}
       </div>
       <CardActions card={card} ctx={ctx} />
       <FrontierPill card={card} ctx={ctx} />

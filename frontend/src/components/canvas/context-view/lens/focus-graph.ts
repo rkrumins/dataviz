@@ -142,6 +142,10 @@ export interface FocusCard {
   matchesInside: number
   /** Overflow card only: how many more cards the band holds. */
   overflowCount: number
+  /** Up to 3 names of what this card stands for, shown while it is
+   *  still closed so you can often skip opening it. Only ever from
+   *  data already in hand — never a speculative fetch. */
+  previewLabels: string[]
 }
 
 export interface FocusEdge {
@@ -308,7 +312,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     expandKind: null, frontier: false, frontierExpanded: false, deadEnd: false,
     degreeHint: null, fetch: null,
     dimmed: false, matchesInside: 0,
-    overflowCount: 0,
+    overflowCount: 0, previewLabels: EMPTY_STRINGS,
   })
 
   // ── Focal card + contains stack (band 0) ───────────────────────────
@@ -333,7 +337,11 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   placed.set(focalId, 'f')
   cards.push(focal)
 
-  const containsCap = CONTAINS_CAP * (1 + (bandPages.get('contains') ?? 0))
+  // The focal's fields are structure, not lineage — showing a dozen of
+  // them by default buried the middle of the graph in dashed tethers.
+  // Start as one summary card; opening it reveals them.
+  const containsPages = bandPages.get('contains') ?? 0
+  const containsCap = containsPages > 0 ? CONTAINS_CAP * containsPages : 0
   const containsShown = containsChildren.slice(0, containsCap)
   for (const cid of containsShown) {
     if (placed.has(cid)) continue
@@ -373,7 +381,9 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       nodeId: null,
       band: 0,
       h: OVERFLOW_H,
-      label: `+${(containsTotalAll - containsShown.length).toLocaleString()} more contained`,
+      label: containsShown.length === 0
+        ? `contains ${containsTotalAll.toLocaleString()}`
+        : `+${(containsTotalAll - containsShown.length).toLocaleString()} more contained`,
       type: 'entity',
       expandKey: 'contains',
       expandKind: 'more',
@@ -549,6 +559,9 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           aggregated: entry.agg.aggregated,
           expandKey: canOpen ? openKey : frontierKey,
           expandKind,
+          previewLabels: canOpen
+            ? (containerResults?.get(openKey)?.nodes ?? []).slice(0, 3).map(n => labelOf(n.id, n))
+            : EMPTY_STRINGS,
           frontier: expandKind === 'hop' || expandKind === 'open',
           frontierExpanded,
           degreeHint: degreeHints?.get(entry.nodeId) ?? null,
@@ -726,6 +739,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           type: (pNode?.data?.type as string) ?? 'entity',
           count: item.members.length,
           sumCount: sum,
+          previewLabels: item.members.slice(0, 3).map(m => labelOf(m.nodeId, m.node)),
           unresolved: !pNode,
           expandKey: groupKey,
           expandKind: 'group',

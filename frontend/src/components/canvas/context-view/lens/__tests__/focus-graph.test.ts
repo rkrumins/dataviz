@@ -434,9 +434,53 @@ describe('buildFocusGraph — caps, chips, filter', () => {
       nodes.push(node(id))
       edges_.push(contains(`c${i}`, 'F', id))
     }
+    // Collapsed by default: one summary card, no field cards cluttering
+    // the middle of the graph.
     const g = build({ nodes, edges: edges_, over: { containsTotal: CONTAINS_CAP + 4 } })
-    expect(g.cards.filter(c => c.kind === 'contains')).toHaveLength(CONTAINS_CAP)
-    expect(card(g, 'more:contains').overflowCount).toBe(4)  // childCount wins
+    expect(g.cards.filter(c => c.kind === 'contains')).toHaveLength(0)
+    expect(card(g, 'more:contains').label).toBe(`contains ${CONTAINS_CAP + 4}`)
+
+    // Opening it reveals them, still capped and still honest.
+    const opened = build({
+      nodes, edges: edges_,
+      over: { containsTotal: CONTAINS_CAP + 4, bandPages: new Map([['contains', 1]]) },
+    })
+    expect(opened.cards.filter(c => c.kind === 'contains')).toHaveLength(CONTAINS_CAP)
+    expect(card(opened, 'more:contains').overflowCount).toBe(4)  // childCount wins
+  })
+
+  it('a group card previews a few of its members before you open it', () => {
+    const g = build({
+      nodes: [node('F'), node('f1', 'schemaField'), node('f2', 'schemaField'), node('PD')],
+      edges: [
+        edge('e1', 'f1', 'F'), edge('e2', 'f2', 'F'),
+        contains('c1', 'PD', 'f1'), contains('c2', 'PD', 'f2'),
+      ],
+    })
+    expect(card(g, 'g:in:PD').previewLabels).toEqual(['label-f1', 'label-f2'])
+  })
+
+  it('a closed container previews from a previous open, never a fresh fetch', () => {
+    const base = {
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM')],
+      edges: [edge('e1', 'Snowflake', 'F')],
+      isCoarser: (t?: string) => t === 'DATAPLATFORM',
+    }
+    // Never opened → nothing to preview, and we do not invent one.
+    expect(card(build(base), 'n:Snowflake').previewLabels).toEqual([])
+
+    // Opened once, then closed → the cached answer previews.
+    const withCache = build({
+      ...base,
+      over: {
+        containerResults: new Map([['in:Snowflake', {
+          nodes: [node('kid1'), node('kid2')],
+          edges: [edge('r1', 'kid1', 'F')],
+          passedThrough: [], truncated: false, empty: false,
+        }]]),
+      },
+    })
+    expect(card(withCache, 'n:Snowflake').previewLabels).toEqual(['label-kid1', 'label-kid2'])
   })
 })
 
