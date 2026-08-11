@@ -387,6 +387,13 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/DEPLOYMENT.md?raw'),
   },
   {
+    slug: 'migrations',
+    section: 'operations',
+    title: 'Database Migrations',
+    description: 'How the schema is built, and the rules a new migration follows',
+    importFn: () => import('@docs/MIGRATIONS.md?raw'),
+  },
+  {
     slug: 'falkordb-deployment',
     section: 'operations',
     title: 'FalkorDB Deployment',

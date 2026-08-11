@@ -36,6 +36,7 @@ export const filenameMap: Record<string, string> = {
   'MULTI_ENVIRONMENT_SESSIONS.md': 'multi-environment-sessions',
   'SSO_INTEGRATION.md': 'sso-integration',
   'DEPLOYMENT.md': 'deployment',
+  'MIGRATIONS.md': 'migrations',
   'FALKORDB_DEPLOYMENT.md': 'falkordb-deployment',
   'FALKORDB_DR_RUNBOOK.md': 'falkordb-dr',
   'INFRASTRUCTURE_LAUNCH_SCALE.md': 'infra-launch-scale',

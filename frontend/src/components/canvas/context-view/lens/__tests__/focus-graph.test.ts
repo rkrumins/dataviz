@@ -318,6 +318,43 @@ describe('buildFocusGraph — one card per entity', () => {
     expect(card(g, 'g:in:PD').kind).toBe('group')
     expect(g.cards.some(c => c.id === 'n:PD')).toBe(false)
   })
+
+  // REGRESSION: the containment tether from the focal to a contained
+  // child used the same id space as lineage edges (`fe:f->c:id`). A
+  // child that ALSO carried downstream lineage produced two edges with
+  // one id, and React Flow — which keys on id — silently dropped one.
+  it('never emits two edges with the same id', () => {
+    const g = build({
+      nodes: [node('F'), node('kid', 'schemaField')],
+      edges: [
+        contains('c1', 'F', 'kid'),
+        // ...and the same child is a downstream consumer of the focal.
+        edge('e1', 'F', 'kid'),
+      ],
+      over: { bandPages: new Map([['contains', 1]]) },
+    })
+    const ids = g.edges.map(e => e.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    // Both facts survive: the structural tether and the flow.
+    expect(g.edges.some(e => e.containment)).toBe(true)
+    expect(g.edges.some(e => !e.containment)).toBe(true)
+  })
+
+  // REGRESSION: "one entity, one card" was a convention each call site
+  // had to remember. The group header skipped it and drew a duplicate.
+  it('never emits two cards for one entity', () => {
+    const many = Array.from({ length: 6 }, (_, i) => node(`f${i}`, 'schemaField'))
+    const g = build({
+      nodes: [node('F'), node('PD'), ...many],
+      edges: [
+        { ...edge('agg1', 'PD', 'F'), data: { edgeType: 'AGGREGATED', isAggregated: true, edgeCount: 6 } } as LineageEdge,
+        ...many.map((n, i) => edge(`e${i}`, n.id, 'F')),
+        ...many.map((n, i) => contains(`c${i}`, 'PD', n.id)),
+      ],
+    })
+    const byNode = g.cards.filter(c => c.nodeId !== null).map(c => c.nodeId)
+    expect(new Set(byNode).size).toBe(byNode.length)
+  })
 })
 
 describe('buildFocusGraph — a frame showing every child', () => {

@@ -29,7 +29,7 @@
  * Lens-local ESC handling runs in the capture phase so canvas keyboard
  * shortcuts don't fire underneath.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
@@ -538,8 +538,16 @@ export function LineageLens({
       if (!wasOpen && lensFrameChildren === 'all') all.add(openKey)
       return { ...base, openContainers: next, frameShowAll: all }
     })
-    if (!wasOpen) onOpenContainer?.(containerNodeId, partner, dir, level)
-  }, [nodeId, seededFresh, entityLevels, onOpenContainer, lensFrameChildren])
+    if (!wasOpen) {
+      onOpenContainer?.(containerNodeId, partner, dir, level)
+      // Opening straight into "everything inside" has to ASK for
+      // everything inside; without this the frame claimed to show every
+      // child while rendering only the connected ones. The fetch is a
+      // no-op until the open resolves and supplies the anchor, and the
+      // effect below re-runs it once that lands.
+      if (lensFrameChildren === 'all') onLoadAllChildren?.(openKey)
+    }
+  }, [nodeId, seededFresh, entityLevels, onOpenContainer, onLoadAllChildren, lensFrameChildren])
 
   /** Flip one frame between "only what connects" and "everything
    *  inside". Turning it on fetches that container's child list; turning
@@ -611,15 +619,26 @@ export function LineageLens({
     if (!graphSeed || graphSeed.nodeId !== nodeId || !onEnsureFetched) return
     for (const k of graphSeed.expandedFrontier) onEnsureFetched(k.replace(/^(in|out):/, ''))
   }, [graphSeed, nodeId, onEnsureFetched])
-  // A restored "everything inside" frame needs its child list too. The
-  // fetch is a no-op until the open above resolves (it supplies the
-  // anchor), so re-run it as the container answers land.
+  // A frame in "everything inside" mode needs its FIRST page of
+  // children once its open has resolved (the open supplies the anchor).
+  //
+  // Exactly once per frame. This used to re-run on every render — its
+  // deps include a handler that is a fresh closure each time — and each
+  // run fetched the next page, which re-rendered, which fetched again.
+  // A restored link on a wide table paged itself to the end with no
+  // user action. Paging past the first page is a deliberate gesture
+  // now: the frame's "Load more" control.
+  const firstPageAskedRef = useRef<Set<string>>(new Set())
   useEffect(() => {
-    if (!graphSeed || graphSeed.nodeId !== nodeId || !onLoadAllChildren) return
-    for (const k of graphSeed.frameAll ?? []) {
-      if (containerResults?.has(k)) onLoadAllChildren(k)
+    if (!nodeId) { firstPageAskedRef.current.clear(); return }
+    if (!onLoadAllChildren) return
+    for (const k of graphCur.frameShowAll) {
+      if (firstPageAskedRef.current.has(k)) continue
+      if (!containerResults?.has(k)) continue
+      firstPageAskedRef.current.add(k)
+      onLoadAllChildren(k)
     }
-  }, [graphSeed, nodeId, onLoadAllChildren, containerResults])
+  }, [nodeId, graphCur.frameShowAll, onLoadAllChildren, containerResults])
 
   // The pure graph build — every semantic decision (grouping, rollups,
   // drills, frontier hops, caps, filter dimming, layout) lives in

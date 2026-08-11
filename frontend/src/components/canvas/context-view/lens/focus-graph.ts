@@ -319,6 +319,16 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const bandTotals = new Map<string, { shown: number; total: number }>()
   let hiddenByChips = 0
 
+  /** The ONE way an edge reaches the output. Every id passes through
+   *  `edgeById`, so a collision is impossible rather than merely
+   *  unlikely — a duplicate id would be silently dropped downstream,
+   *  because React Flow keys on it. */
+  const addRawEdge = (e: FocusEdge) => {
+    if (edgeById.has(e.id)) return
+    edgeById.set(e.id, e)
+    edges.push(e)
+  }
+
   // Bundles duplicates (same source→target) into one edge, summed.
   // Data flows left → right: for an upstream neighbor the edge runs
   // neighbor → reference; downstream it runs reference → neighbor.
@@ -337,15 +347,37 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       existing.dimmed = existing.dimmed && dimmed
       return
     }
-    const e: FocusEdge = { id, source, target, count, edgeTypeNorm, aggregated, containment: false, dimmed }
-    edgeById.set(id, e)
-    edges.push(e)
+    addRawEdge({ id, source, target, count, edgeTypeNorm, aggregated, containment: false, dimmed })
   }
 
   /** Every placed entity: nodeId → card id. A node is never placed
    *  twice — a repeat sighting only adds an edge to the existing card
    *  (this is what makes cyclic lineage safe to expand). */
   const placed = new Map<string, string>()
+
+  /**
+   * The ONE way a card reaches the output.
+   *
+   * "One entity, one card" used to be a convention that every call site
+   * had to remember, enforced by a `placed` lookup near some pushes and
+   * not others — and the group header, which skipped it entirely, drew
+   * the same entity twice. Routing every push through here makes the
+   * invariant structural instead: a second card for an entity already
+   * on the board is refused, whatever new path finds it.
+   *
+   * Returns the id of the card representing that entity — the existing
+   * one when a duplicate was refused — so callers can still wire edges
+   * to it. Overflow cards (nodeId === null) stand for no entity and are
+   * always appended.
+   */
+  const pushCard = (card: FocusCard): string => {
+    if (card.nodeId === null) { cards.push(card); return card.id }
+    const existing = placed.get(card.nodeId)
+    if (existing) return existing
+    placed.set(card.nodeId, card.id)
+    cards.push(card)
+    return card.id
+  }
   /** The partner an open should ask about, named for the UI. Null when
    *  it is the focal — band 1 keeps the unqualified wording. */
   const partnerLabelOf = (refIds: string[]): string | null => {
@@ -395,8 +427,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     dimmed: !matches(focalLabel),
   }
   focal.parentLabel = focal.parentId ? labelOf(focal.parentId, nodeMap.get(focal.parentId)) : null
-  placed.set(focalId, 'f')
-  cards.push(focal)
+  pushCard(focal)
 
   // The focal's fields are structure, not lineage — showing a dozen of
   // them by default buried the middle of the graph in dashed tethers.
@@ -420,10 +451,14 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       unresolved: !cNode,
       dimmed: !matches(cLabel),
     }
-    placed.set(cid, card.id)
-    cards.push(card)
-    edges.push({
-      id: `fe:f->${card.id}`,
+    pushCard(card)
+    // `ce:` not `fe:` — a containment tether and a LINEAGE edge between
+    // the same pair are different facts and must both be drawable. They
+    // shared an id space until now, so a contained child that also
+    // carried downstream lineage produced two edges with one id, and
+    // React Flow (which keys on id) silently dropped one of them.
+    addRawEdge({
+      id: `ce:f->${card.id}`,
       source: 'f',
       target: card.id,
       count: 1,
@@ -435,7 +470,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   }
   const containsTotalAll = Math.max(containsChildren.length, containsTotal ?? 0)
   if (containsTotalAll > containsShown.length) {
-    cards.push({
+    pushCard({
       ...baseCard(),
       id: 'more:contains',
       kind: 'overflow',
@@ -659,8 +694,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             : fetchStatus?.get(entry.nodeId) === 'error' ? 'error' : null,
           dimmed: !matches(label),
         }
-        placed.set(entry.nodeId, card.id)
-        cards.push(card)
+        pushCard(card)
         for (const [refId, stat] of entry.refs) {
           const refCard = placed.get(refId)
           if (refCard) addFlowEdge(dir, refCard, card.id, stat.count, stat.edgeTypeNorm, stat.aggregated, card.dimmed)
@@ -761,8 +795,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             : status === 'error' || (showAll && allStatusHere === 'error') ? 'error' : null,
           dimmed: !matches(label),
         }
-        placed.set(entry.nodeId, frameId)
-        cards.push(frame)
+        pushCard(frame)
 
         // Connection counts come from the server's pair-filtered edges.
         const countFor = (id: string) => {
@@ -818,8 +851,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             // The frame's own filter dims, exactly like the global one.
             dimmed: !matches(cLabel) || (fq !== '' && !cLabel.toLowerCase().includes(fq)),
           }
-          placed.set(child.id, cCard.id)
-          cards.push(cCard)
+          pushCard(cCard)
           // Only a child that actually carries lineage gets an edge.
           if (connected) {
             for (const [refId, stat] of entry.refs) {
@@ -834,7 +866,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         // fetched than the cap shows, or more still on the server.
         const beyondCap = roster.length - frameCap
         if (beyondCap > 0 || (showAll && frame.frameHasMore)) {
-          cards.push({
+          pushCard({
             ...baseCard(),
             id: `more:fr:${dir}:${entry.nodeId}`,
             kind: 'overflow',
@@ -899,12 +931,11 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           dimmed: q !== '' && memberMatches === 0 && !matches(pLabel),
           matchesInside: expanded ? 0 : memberMatches,
         }
-        cards.push(gCard)
-        // The group card STANDS FOR its parent entity, so register it
-        // like any other placed node: a later band (or the other
-        // direction) that meets the same parent draws an edge to this
-        // card instead of minting a second one for it.
-        placed.set(item.parentId, gCard.id)
+        // The group card STANDS FOR its parent entity, so it goes
+        // through the same gate as any other card: a later band (or the
+        // other direction) that meets the same parent draws an edge to
+        // this card instead of minting a second one for it.
+        pushCard(gCard)
         if (!expanded) {
           // Bundled edges: one per reference node the members touch.
           const refSums = new Map<string, number>()
@@ -923,7 +954,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       }
 
       if (items.length > cap) {
-        cards.push({
+        pushCard({
           ...baseCard(),
           id: `more:${dir}:${band}`,
           kind: 'overflow',
