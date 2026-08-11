@@ -184,6 +184,9 @@ export interface LineageLensProps {
     expandedFrontier: string[]
     openContainers?: string[]
     frameAll?: string[]
+    contains?: string[]
+    framePages?: Array<[string, number]>
+    frameQueries?: Array<[string, string]>
   } | null
 }
 
@@ -537,9 +540,9 @@ export function LineageLens({
           expandedFrontier: new Set(graphSeed.expandedFrontier),
           openContainers: new Set(graphSeed.openContainers ?? []),
           frameShowAll: new Set(graphSeed.frameAll ?? []),
-          openContains: EMPTY_TYPE_SET,
-          frameQueries: EMPTY_QUERY_MAP,
-          framePages: EMPTY_PAGE_MAP,
+          openContains: new Set(graphSeed.contains ?? []),
+          frameQueries: new Map(graphSeed.frameQueries ?? []),
+          framePages: new Map(graphSeed.framePages ?? []),
           bandPages: EMPTY_PAGE_MAP,
         }
       : freshGraphState(id)
@@ -905,6 +908,9 @@ export function LineageLens({
       frontier: [...graphCur.expandedFrontier],
       containers: [...graphCur.openContainers],
       frameAll: [...graphCur.frameShowAll],
+      contains: [...graphCur.openContains],
+      framePages: [...graphCur.framePages],
+      frameQueries: [...graphCur.frameQueries],
     })
     const url = new URL(window.location.href)
     url.searchParams.set('lens', token)
@@ -1276,9 +1282,16 @@ export function LineageLens({
                             className="flex items-center"
                             title={`${meta.edgeType ? edgeLabelFor(meta.edgeType.toUpperCase(), edgeTypeInfo) : 'Connection'} — walked ${meta.downstream ? 'downstream' : 'upstream'}`}
                           >
+                            {/* Amber is DOWNSTREAM everywhere else in the
+                                lens — TINT_DOWN, the band arrows, the
+                                focal's "out" tally, the Data Consumers
+                                column. The trail had it on the upstream
+                                hop, so a reader who had learned the
+                                colour reconstructed their own walk
+                                backwards. Sky upstream, amber down. */}
                             {meta.downstream
-                              ? <LucideIcons.MoveRight className={cn('w-3.5 h-3.5 text-accent-lineage/70', isForward && 'opacity-50')} />
-                              : <LucideIcons.MoveLeft className={cn('w-3.5 h-3.5 text-amber-500/80', isForward && 'opacity-50')} />}
+                              ? <LucideIcons.MoveRight className={cn('w-3.5 h-3.5 text-amber-500/80', isForward && 'opacity-50')} />
+                              : <LucideIcons.MoveLeft className={cn('w-3.5 h-3.5 text-sky-500/80', isForward && 'opacity-50')} />}
                           </span>
                         ) : (
                           <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />

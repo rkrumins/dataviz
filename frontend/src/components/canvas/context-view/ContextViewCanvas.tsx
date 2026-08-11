@@ -3115,6 +3115,9 @@ export function ContextViewCanvas({
     expandedFrontier: string[]
     openContainers: string[]
     frameAll: string[]
+    contains: string[]
+    framePages: Array<[string, number]>
+    frameQueries: Array<[string, string]>
   } | null>(() => (
     initialLensShare
       ? {
@@ -3123,6 +3126,9 @@ export function ContextViewCanvas({
           expandedFrontier: initialLensShare.frontier,
           openContainers: initialLensShare.containers,
           frameAll: initialLensShare.frameAll,
+          contains: initialLensShare.contains,
+          framePages: initialLensShare.framePages,
+          frameQueries: initialLensShare.frameQueries,
         }
       : null
   ))

@@ -278,6 +278,9 @@ function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
     <button
       type="button"
       className="nodrag flex-shrink-0 -ml-1 w-4 h-full flex items-center justify-center text-ink-muted/50 hover:text-accent-lineage focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded"
+      // A disclosure: assistive tech needs the state, not just a tooltip.
+      aria-expanded={card.childrenOpen}
+      aria-label={card.childrenOpen ? `Hide what's inside ${card.label}` : `Show what's inside ${card.label}`}
       title={card.childrenOpen
         ? `Hide what's inside ${card.label}`
         : `Show what's inside ${card.label}`}
@@ -672,7 +675,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   }
 
   // ── Entity: the rich neighbor card ──
-  const isConstituent = card.id.startsWith('x:')
+
   return (
     <div
       role="button"
@@ -693,7 +696,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
     >
       <PortHandles />
       <ContentsChevron card={card} ctx={ctx} />
-      {!isConstituent && (
+      {(
         <div
           className="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0"
           style={{ backgroundColor: `${accent}1f` }}
@@ -827,7 +830,7 @@ function FocusFrameNode({ data }: NodeProps) {
             {card.fetch === 'loading'
               ? 'Looking inside…'
               : card.frameEmpty && !card.frameShowingAll
-                ? `nothing connected${to || ' inside'}`
+                ? card.frameTruncated ? `cut short before finding anything connected${to}` : `nothing connected${to || ' inside'}`
                 : inside}
           </p>
         </div>
@@ -874,6 +877,7 @@ function FocusFrameNode({ data }: NodeProps) {
             onChange={(e) => ctx.onFrameQuery(card.expandKey ?? '', e.target.value)}
             onClick={(e) => e.stopPropagation()}
             placeholder="Find…"
+            aria-label={card.frameShowingAll ? `Search inside ${card.label}` : `Filter what is inside ${card.label}`}
             title={card.frameShowingAll
               ? `Search every entity inside ${card.label}, not only the page on screen`
               : 'Filter what is inside'}
@@ -888,6 +892,10 @@ function FocusFrameNode({ data }: NodeProps) {
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier(card.expandKey!, card.nodeId!) }}
+            aria-expanded={card.frontierExpanded}
+            aria-label={card.frontierExpanded
+              ? `Collapse ${card.band < 0 ? 'upstream of' : 'downstream of'} ${card.label}`
+              : `Expand the next hop ${card.band < 0 ? 'upstream' : 'downstream'} of ${card.label}`}
             title={card.frontierExpanded
               ? `Collapse ${card.band < 0 ? 'upstream of' : 'downstream of'} ${card.label}`
               : `Expand the next hop ${card.band < 0 ? 'upstream' : 'downstream'} of ${card.label}`}
@@ -938,7 +946,12 @@ function FocusFrameNode({ data }: NodeProps) {
       )}
       {card.frameEmpty && card.frameLoaded === 0 && card.fetch === null && (
         <p className="absolute inset-x-2.5 top-[52px] text-[10px] text-ink-muted/70 italic leading-snug">
-          Nothing inside {card.label} connects to {card.partnerLabel ?? 'this entity'}.
+          {/* A truncated expansion is NOT a verified negative — the
+              server stopped early, and `empty` and `truncated` are set
+              together when it does. */}
+          {card.frameTruncated
+            ? `The search inside ${card.label} was cut short before finding anything that connects to ${card.partnerLabel ?? 'this entity'}.`
+            : `Nothing inside ${card.label} connects to ${card.partnerLabel ?? 'this entity'}.`}
           {ctx.onToggleFrameAll && ' Show everything inside to see what it holds.'}
         </p>
       )}
@@ -955,6 +968,7 @@ function FocusFrameNode({ data }: NodeProps) {
             type="button"
             disabled={!pager.canPrev}
             onClick={(e) => { e.stopPropagation(); ctx.onSetFramePage(card.expandKey ?? '', card.framePage - 1) }}
+            aria-label={`Previous page of ${card.label}`}
             title="Previous page"
             className="nodrag w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08] disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed"
           >
@@ -969,6 +983,7 @@ function FocusFrameNode({ data }: NodeProps) {
             type="button"
             disabled={!pager.canNext || card.fetch === 'loading'}
             onClick={(e) => { e.stopPropagation(); ctx.onSetFramePage(card.expandKey ?? '', card.framePage + 1) }}
+            aria-label={`Next page of ${card.label}`}
             title="Next page"
             className="nodrag w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08] disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed"
           >
@@ -1333,24 +1348,38 @@ export function FocusGraphView({
     }
     // A COMPLETED fetch with an empty direction is a data-source claim
     // — whisper it where the band would be, instead of blank space.
+    // The user's own type chips REMOVE cards, so an empty band can be
+    // their filter rather than the data source's answer. Saying "in the
+    // data source" there reported the filter as a fact — chip out the
+    // only upstream type and the graph asserted the table has no
+    // producers. The builder's own honesty rule already said chips are
+    // reported, not silent.
     if (focalFetch === 'done') {
       if (!minYByBand.has(-1)) {
         nodes.push({
           id: 'blw:in', type: 'bandLabel', position: { x: -(CARD_W + BAND_GAP), y: -10 },
           draggable: false, selectable: false, focusable: false,
-          data: { whisper: 'No upstream sources in the data source' },
+          data: {
+            whisper: graph.hiddenByChipsIn > 0
+              ? `${graph.hiddenByChipsIn.toLocaleString()} upstream hidden by the type chips`
+              : 'No upstream sources in the data source',
+          },
         })
       }
       if (!minYByBand.has(1)) {
         nodes.push({
           id: 'blw:out', type: 'bandLabel', position: { x: CARD_W + BAND_GAP, y: -10 },
           draggable: false, selectable: false, focusable: false,
-          data: { whisper: 'No downstream consumers in the data source' },
+          data: {
+            whisper: graph.hiddenByChipsOut > 0
+              ? `${graph.hiddenByChipsOut.toLocaleString()} downstream hidden by the type chips`
+              : 'No downstream consumers in the data source',
+          },
         })
       }
     }
     return nodes
-  }, [graph.cards, graph.bandTotals, ctx, focalIn, focalOut, focalFetch])
+  }, [graph.cards, graph.bandTotals, graph.hiddenByChipsIn, graph.hiddenByChipsOut, ctx, focalIn, focalOut, focalFetch])
 
   /**
    * Cards the user has dragged, by card id. The builder keeps producing

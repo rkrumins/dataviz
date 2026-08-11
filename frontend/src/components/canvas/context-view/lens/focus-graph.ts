@@ -37,6 +37,11 @@ export const edgeLabelFor = (norm: string, info?: EdgeTypeInfoMap): string =>
 
 /** Cards per band before the "+N more" overflow card (paged). */
 export const GRAPH_BAND_CAP = 30
+/** Members revealed when a parent group is expanded, before its own
+ *  "+N more" card. Groups sit INSIDE the band cap as one item, so
+ *  without this an expanded group of a wide table's columns added
+ *  hundreds of cards to one band in a single click. */
+export const GROUP_MEMBER_CAP = 12
 /** Focal containment children shown before the overflow card. */
 export const CONTAINS_CAP = 8
 /** How deep the focal's contains stack nests before it stops offering
@@ -57,6 +62,13 @@ export const FRAME_CHILD_CAP = 8
  *  couple more fit in the same height. */
 export const FRAME_ALL_CAP = 10
 
+/** Content width inside a frame. Wider than a band card because a
+ *  frame's header carries the container's name PLUS the Connected|All
+ *  toggle, a Find box, a hop and a Focus control — at plain CARD_W the
+ *  name truncated to "s..." and the frame lost its identity, which is
+ *  the single most important thing it states. Kept small enough that
+ *  two levels of nesting still fit inside one band slot
+ *  (CARD_W + BAND_GAP). */
 export const FRAME_HEADER_H = 46
 /** The Prev · page N of M · Next strip, present only when there is more
  *  than one page. */
@@ -72,6 +84,14 @@ const EMPTY_SET: ReadonlySet<string> = new Set()
 export const UNRESOLVED_TYPE = 'not loaded'
 
 export const CARD_W = 240
+/** Content width inside a frame. Wider than a band card because a
+ *  frame's header carries the container's name PLUS the Connected|All
+ *  toggle, a Find box, a hop and a Focus control — at plain CARD_W the
+ *  name truncated to "s..." and the frame lost its identity, which is
+ *  the single most important thing it states. Kept small enough that
+ *  two levels of nesting still fit inside one band slot
+ *  (CARD_W + BAND_GAP). */
+export const FRAME_CONTENT_W = CARD_W + 50
 export const FOCAL_H = 120
 export const CARD_H = 64
 export const GROUP_HEADER_H = 40
@@ -362,6 +382,12 @@ export interface FocusGraph {
   edges: FocusEdge[]
   /** Records removed by the type chips (reported next to the chips). */
   hiddenByChips: number
+  /** Per-direction split of the above. An empty band is only a claim
+   *  about the DATA SOURCE when the user's own type chips did not empty
+   *  it — otherwise "No upstream sources in the data source" reports the
+   *  filter as a fact. */
+  hiddenByChipsIn: number
+  hiddenByChipsOut: number
   /** Per band key `${dir}:${band}`: cards shown vs total available. */
   bandTotals: Map<string, { shown: number; total: number }>
 }
@@ -420,7 +446,8 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const edges: FocusEdge[] = []
   const edgeById = new Map<string, FocusEdge>()
   const bandTotals = new Map<string, { shown: number; total: number }>()
-  let hiddenByChips = 0
+  let hiddenByChipsIn = 0
+  let hiddenByChipsOut = 0
 
   /** The ONE way an edge reaches the output. Every id passes through
    *  `edgeById`, so a collision is impossible rather than merely
@@ -707,7 +734,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           // edge to its existing card instead of a duplicate.
           refContrib.set(ref.nodeId, (refContrib.get(ref.nodeId) ?? 0) + 1)
           const t = (r.neighborNode?.data?.type as string) ?? UNRESOLVED_TYPE
-          if (hiddenTypes.has(t)) { hiddenByChips++; continue }
+          if (hiddenTypes.has(t)) { if (dir === 'in') hiddenByChipsIn++; else hiddenByChipsOut++; continue }
           // From the RECORD, not the edge: the derivation folds a
           // synthetic rollup into its concrete sibling, so the flag no
           // longer lives on the surviving edge's data.
@@ -1203,7 +1230,30 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             if (refCard) addFlowEdge(dir, refCard, gCard.id, count, '', false, gCard.dimmed)
           }
         } else {
-          for (const m of item.members) placeEntity(m)
+          // The band cap counts a GROUP as one item, so its members were
+          // emitted outside that budget entirely: one click on a header
+          // for a 400-column table put 400 cards in a single band — the
+          // only unbounded-in-one-gesture term left, and the input to the
+          // O(band²) group-member scan in layout. Same honesty contract
+          // the bands use: cap, then say what was capped.
+          const memberCap = GROUP_MEMBER_CAP * (1 + (bandPages.get(`${groupKey}:members`) ?? 0))
+          for (const m of item.members.slice(0, memberCap)) placeEntity(m)
+          if (item.members.length > memberCap) {
+            pushCard({
+              ...baseCard(),
+              id: `more:g:${dir}:${item.parentId}`,
+              kind: 'overflow',
+              nodeId: null,
+              band: sign * band,
+              h: OVERFLOW_H,
+              label: `+${(item.members.length - memberCap).toLocaleString()} more in ${pLabel}`,
+              type: 'entity',
+              parentId: item.parentId,
+              expandKey: `${groupKey}:members`,
+              expandKind: 'more',
+              overflowCount: item.members.length - memberCap,
+            })
+          }
         }
       }
 
@@ -1232,7 +1282,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
 
   layoutBands(cards)
 
-  return { cards, edges, hiddenByChips, bandTotals }
+  return { cards, edges, hiddenByChips: hiddenByChipsIn + hiddenByChipsOut, hiddenByChipsIn, hiddenByChipsOut, bandTotals }
 }
 
 /**
@@ -1279,11 +1329,12 @@ function layoutBands(cards: FocusCard[]) {
     c.h = FRAME_HEADER_H + FRAME_PAD + Math.max(inner, kids.length === 0 ? CARD_H : 0) + FRAME_PAD
       + (framePager(c).paged ? FRAME_FOOTER_H : 0)
   }
-  // A nested frame is wider than a plain child row (it carries its own
-  // padding), so its host has to widen to hold it.
+  // Children FILL their frame, and a nested frame is wider still (it
+  // carries its own padding), so each host widens to hold what it holds.
   for (const { f: c } of frames) {
     const kids = childrenByFrame.get(c.id) ?? []
-    const widest = kids.reduce((acc, k) => Math.max(acc, k.w), CARD_W)
+    for (const k of kids) if (k.kind !== 'frame') k.w = FRAME_CONTENT_W
+    const widest = kids.reduce((acc, k) => Math.max(acc, k.w), FRAME_CONTENT_W)
     c.w = widest + FRAME_PAD * 2
   }
 

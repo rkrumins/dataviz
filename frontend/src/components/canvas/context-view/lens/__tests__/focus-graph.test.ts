@@ -22,6 +22,7 @@ import {
   GROUP_HEADER_H,
   FRAME_CHILD_CAP,
   FRAME_ALL_CAP,
+  GROUP_MEMBER_CAP,
   framePager,
   CARD_H,
   CHILD_ROW_H,
@@ -1142,6 +1143,60 @@ describe('buildFocusGraph — caps, chips, filter', () => {
       },
     })
     expect(card(withCache, 'n:Snowflake').previewLabels).toEqual(['label-kid1', 'label-kid2'])
+  })
+})
+
+describe('buildFocusGraph — honesty', () => {
+  // REGRESSION: an empty band whispered "No upstream sources in the data
+  // source" even when the user's own type chips had emptied it, reporting
+  // the filter as a fact about the warehouse.
+  it('splits chip-hidden counts per direction so an empty band is not misread', () => {
+    const g = build({
+      nodes: [node('F'), node('u', 'schemaField'), node('d', 'dataset')],
+      edges: [edge('e1', 'u', 'F'), edge('e2', 'F', 'd')],
+      over: { hiddenTypes: new Set(['schemaField']) },
+    })
+    expect(g.hiddenByChipsIn).toBe(1)
+    expect(g.hiddenByChipsOut).toBe(0)
+    expect(g.hiddenByChips).toBe(1)
+    // Upstream is empty ONLY because of the chip; downstream genuinely has one.
+    expect(g.cards.some(c => c.band === -1)).toBe(false)
+    expect(g.cards.some(c => c.band === 1)).toBe(true)
+  })
+
+  // REGRESSION: the band cap counts a group as ONE item, so its members
+  // were emitted outside the budget — one click on a wide table's group
+  // header put hundreds of cards in a single band.
+  it('caps expanded group members and says what it capped', () => {
+    const members = Array.from({ length: GROUP_MEMBER_CAP + 6 }, (_, i) => node(`m${String(i).padStart(2, '0')}`, 'schemaField'))
+    const g = build({
+      nodes: [node('F'), node('P'), ...members],
+      edges: [
+        ...members.map((m, i) => edge(`e${i}`, m.id, 'F')),
+        ...members.map((m, i) => contains(`c${i}`, 'P', m.id)),
+      ],
+      over: { expandedGroups: new Set(['in:P']) },
+    })
+    const shown = g.cards.filter(c => c.kind === 'entity' && c.parentId === 'P')
+    expect(shown).toHaveLength(GROUP_MEMBER_CAP)
+    const more = card(g, 'more:g:in:P')
+    expect(more.overflowCount).toBe(6)
+    expect(more.expandKey).toBe('in:P:members')   // routes to the band pager, which reads it
+
+    // And paging it reveals the rest rather than promising forever.
+    const paged = build({
+      nodes: [node('F'), node('P'), ...members],
+      edges: [
+        ...members.map((m, i) => edge(`e${i}`, m.id, 'F')),
+        ...members.map((m, i) => contains(`c${i}`, 'P', m.id)),
+      ],
+      over: {
+        expandedGroups: new Set(['in:P']),
+        bandPages: new Map([['in:P:members', 1]]),
+      },
+    })
+    expect(paged.cards.filter(c => c.kind === 'entity' && c.parentId === 'P')).toHaveLength(members.length)
+    expect(paged.cards.find(c => c.id === 'more:g:in:P')).toBeUndefined()
   })
 })
 
