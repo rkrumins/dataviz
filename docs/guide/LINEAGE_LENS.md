@@ -17,6 +17,7 @@ Here you'll learn to:
   Back/Forward to retrace every step.
 - **Expand the picture** one hop at a time, exactly like dedicated lineage
   tools.
+- **Rearrange it** by dragging cards around, with every connection following.
 - **Open a container** into just the entities inside it that touch your focus
   — or into everything it holds, with the connected ones marked.
 - **See lineage beyond a View's boundary** and preview what sits outside it.
@@ -121,6 +122,13 @@ The Lens is built for exploring, not just reading:
   yet appears as a floor ("100+"), never as a guess. Frames open **Connected**
   by default — the header's own **Connected | All** control changes which mode
   the *next* frame you open starts in, and it's remembered between sessions.
+- **Drag a card anywhere** to arrange the picture the way you read it. Every
+  connection follows the card it belongs to — moving things changes only where
+  they sit, never what connects to what. An opened container moves as one
+  piece, carrying its contents with it. Your arrangement survives expanding,
+  opening and loading more, so the picture grows around it instead of
+  resetting; **Tidy up** in the corner controls puts everything back where the
+  Lens placed it.
 - **Filter connections** with the search box in the header — matching cards
   stay bright while the rest dim (a collapsed parent card tells you how many
   matches it's holding), so a match can never silently vanish.

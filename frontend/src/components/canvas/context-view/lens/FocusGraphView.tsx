@@ -8,6 +8,7 @@
  *   single click  = select (detail strip)     double click = focus
  *   group header  = expand/collapse           pane click   = deselect
  *   hover a card  = light up its connections
+ *   drag a card   = rearrange it; a frame carries its children
  *   ⊕ pill        = open this card — a coarse container reveals what
  *                   is inside it that connects to the focal; anything
  *                   else reveals its own next hop
@@ -15,7 +16,12 @@
  * Positions come pre-baked from the builder, so React Flow does no
  * layout of its own — card ids are stable across rebuilds and a CSS
  * transform transition (killed under .reduce-motion) makes shared
- * cards glide when the focal changes.
+ * cards glide when the focal changes. Anything the user drags is held
+ * in a per-focal overlay ON TOP of that layout, so an arriving fetch
+ * grows the picture without discarding the arrangement; "Tidy up" in
+ * the corner controls drops the overlay. Frame children ride along as
+ * React Flow child nodes (parentId), which is what makes a frame move
+ * as one piece and its edges re-route themselves.
  *
  * PERF CONTRACT — the graph must stay snappy while browsing, so no
  * frequent interaction may rebuild the node or edge arrays:
@@ -30,10 +36,13 @@
  *               the cards that actually changed.
  *   • visuals → resolved once per schema, O(1) per card, no per-card
  *               store subscription.
+ *   • drag    → React Flow moves the card during the gesture; only the
+ *               FINAL position is committed, so a drag costs one state
+ *               update rather than one per animation frame.
  * The viewport re-frames on FOCAL change only: expanding grows the
  * picture in place instead of yanking it away from what you opened.
  */
-import { createContext, memo, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -54,6 +63,7 @@ import {
   type Node,
   type NodeProps,
   type ReactFlowInstance,
+  type XYPosition,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import * as LucideIcons from 'lucide-react'
@@ -83,6 +93,9 @@ const TINT_CONTAIN = '#94a3b8'
  */
 const HoverContext = createContext<string | null>(null)
 const ImpactContext = createContext<{ impact?: LensImpact | null; loading?: boolean }>({})
+
+/** Shared empty overlay — a fresh Map would churn the nodes memo. */
+const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
 
 interface CardCtx {
   edgeTypeInfo?: EdgeTypeInfoMap
@@ -196,7 +209,7 @@ function CardActions({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   const id = card.nodeId
   const btn = 'w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
   return (
-    <span className="absolute -top-2.5 right-1.5 hidden group-hover:flex items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5 z-10">
+    <span className="nodrag absolute -top-2.5 right-1.5 hidden group-hover:flex items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5 z-10">
       <button
         type="button"
         title="Focus here — re-center the lens on this entity"
@@ -706,7 +719,7 @@ function FocusFrameNode({ data }: NodeProps) {
           type="button"
           onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onOpenContainer(card.expandKey!, card.nodeId, card.type) }}
           title={`Close ${card.label}`}
-          className="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+          className="nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
         >
           <LucideIcons.ChevronDown className="w-3.5 h-3.5" />
         </button>
@@ -735,7 +748,7 @@ function FocusFrameNode({ data }: NodeProps) {
           <div
             role="group"
             aria-label={`What to show inside ${card.label}`}
-            className="flex-shrink-0 flex items-center rounded-md border border-black/10 dark:border-white/10 p-0.5"
+            className="nodrag flex-shrink-0 flex items-center rounded-md border border-black/10 dark:border-white/10 p-0.5"
           >
             {([
               { all: false, Icon: LucideIcons.Link2, label: 'Only what connects to this entity' },
@@ -774,14 +787,14 @@ function FocusFrameNode({ data }: NodeProps) {
             title={card.frameHasMore
               ? `Filters the ${card.frameLoaded.toLocaleString()} loaded so far — load more to search further`
               : 'Filter what is inside'}
-            className="flex-shrink-0 w-16 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
+            className="nodrag flex-shrink-0 w-16 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
           />
         )}
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
           title={`Focus ${card.label}`}
-          className="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+          className="nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
         >
           <LucideIcons.Focus className="w-3 h-3" />
         </button>
@@ -928,7 +941,12 @@ const EDGE_TYPES = { focusEdge: FocusGraphEdgeComp }
 
 /** House-styled zoom cluster (React Flow's default chrome doesn't
  *  match the lens). Must render inside <ReactFlow> for useReactFlow. */
-function GraphControls({ reducedMotion, exportName }: { reducedMotion: boolean; exportName?: string }) {
+function GraphControls({ reducedMotion, exportName, onResetLayout }: {
+  reducedMotion: boolean
+  exportName?: string
+  /** Present only once something has been dragged. */
+  onResetLayout?: () => void
+}) {
   const rf = useReactFlow()
   const [exporting, setExporting] = useState(false)
   const dur = reducedMotion ? 0 : 200
@@ -948,7 +966,11 @@ function GraphControls({ reducedMotion, exportName }: { reducedMotion: boolean; 
     setExporting(true)
     try {
       const { toPng } = await import('html-to-image')
-      const bounds = getNodesBounds(rf.getNodes())
+      // Frame children are positioned RELATIVE to their frame, so
+      // feeding them to getNodesBounds would drag the box toward the
+      // origin. They always sit inside their frame's rect anyway, so
+      // the frames already account for them.
+      const bounds = getNodesBounds(rf.getNodes().filter(n => !n.parentId))
       const width = Math.min(Math.ceil(bounds.width) + 160, 3200)
       const height = Math.min(Math.ceil(bounds.height) + 160, 2400)
       const vp = getViewportForBounds(bounds, width, height, 0.25, 2, 0.08)
@@ -993,6 +1015,24 @@ function GraphControls({ reducedMotion, exportName }: { reducedMotion: boolean; 
         >
           <LucideIcons.Maximize2 className="w-3.5 h-3.5" />
         </button>
+        {/* Only offered once there is an arrangement to undo. */}
+        {onResetLayout && (
+          <button
+            type="button"
+            title="Tidy up — put every card back where the lens placed it"
+            aria-label="Reset layout"
+            onClick={() => {
+              onResetLayout()
+              window.setTimeout(
+                () => void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: 1 }),
+                reducedMotion ? 0 : 60,
+              )
+            }}
+            className={cn(btn, 'text-accent-lineage hover:text-accent-lineage')}
+          >
+            <LucideIcons.LayoutGrid className="w-3.5 h-3.5" />
+          </button>
+        )}
         <button
           type="button"
           title="Download this lineage as an image (for decks and docs)"
@@ -1090,18 +1130,30 @@ export function FocusGraphView({
       const cur = minYByBand.get(c.band)
       if (cur === undefined || c.y < cur) minYByBand.set(c.band, c.y)
     }
-    const nodes: Node[] = graph.cards.map((card) => ({
-      id: card.id,
-      type: card.kind === 'frame' ? 'focusFrame' : 'focusCard',
-      zIndex: card.kind === 'frame' ? 0 : 1,
-      position: { x: card.x, y: card.y },
-      draggable: false,
-      selectable: false,
-      focusable: false,
-      data: card.kind === 'focal'
-        ? { card, ctx, focalStats: { in: focalIn, out: focalOut } }
-        : { card, ctx },
-    }))
+    // A frame's children ride along as React Flow child nodes, so
+    // dragging the frame carries its whole contents — positions become
+    // relative to it, and their edges re-route themselves.
+    const frameById = new Map(graph.cards.filter(c => c.kind === 'frame').map(c => [c.id, c]))
+    const nodes: Node[] = graph.cards.map((card) => {
+      const parent = card.frameId ? frameById.get(card.frameId) : undefined
+      return {
+        id: card.id,
+        type: card.kind === 'frame' ? 'focusFrame' : 'focusCard',
+        zIndex: card.kind === 'frame' ? 0 : 1,
+        ...(parent ? { parentId: parent.id } : {}),
+        position: parent
+          ? { x: card.x - parent.x, y: card.y - parent.y }
+          : { x: card.x, y: card.y },
+        // Rearrange the picture freely; a frame's children move with it
+        // rather than out of it, so a table never sheds its columns.
+        draggable: parent === undefined,
+        selectable: false,
+        focusable: false,
+        data: card.kind === 'focal'
+          ? { card, ctx, focalStats: { in: focalIn, out: focalOut } }
+          : { card, ctx },
+      }
+    })
     // Hop-band headers with honest shown/total counts.
     for (const [band, minY] of minYByBand) {
       if (band === 0) continue
@@ -1140,13 +1192,42 @@ export function FocusGraphView({
     return nodes
   }, [graph.cards, graph.bandTotals, ctx, focalIn, focalOut, focalFetch])
 
+  /**
+   * Cards the user has dragged, by card id. The builder keeps producing
+   * its tidy baked layout; this overlays whatever was moved on top, so
+   * an arriving fetch or a newly opened container grows the picture
+   * without throwing away the arrangement someone just made.
+   *
+   * Only the final position is committed (onNodeDragStop) — React Flow
+   * moves the node itself during the gesture, so a drag costs exactly
+   * one state update rather than one per frame.
+   */
+  // Stamped with the focal it belongs to and read through, rather than
+  // cleared by an effect: a different focal is a different picture, and
+  // its arrangement should never leak into the next one.
+  const [movedState, setMovedState] = useState<{ focalId: string; positions: ReadonlyMap<string, XYPosition> }>(
+    () => ({ focalId, positions: EMPTY_POSITIONS }),
+  )
+  const moved = movedState.focalId === focalId ? movedState.positions : EMPTY_POSITIONS
+  const commitDrag = useCallback((_: unknown, node: Node) => {
+    setMovedState(prev => {
+      const base = prev.focalId === focalId ? prev.positions : EMPTY_POSITIONS
+      const positions = new Map(base)
+      positions.set(node.id, { x: node.position.x, y: node.position.y })
+      return { focalId, positions }
+    })
+  }, [focalId])
+  const resetLayout = useCallback(() => setMovedState({ focalId, positions: EMPTY_POSITIONS }), [focalId])
+
   // Selection rides React Flow's own `selected` flag so changing it
   // re-renders exactly the affected memoized cards.
   const nodes = useMemo(() => baseNodes.map((n) => {
     const cardNodeId = (n.data as { card?: FocusCard }).card?.nodeId ?? null
     const sel = cardNodeId != null && cardNodeId === selectedId
-    return sel === !!n.selected ? n : { ...n, selected: sel }
-  }), [baseNodes, selectedId])
+    const pos = moved.get(n.id)
+    if (sel === !!n.selected && !pos) return n
+    return { ...n, selected: sel, ...(pos ? { position: pos } : {}) }
+  }), [baseNodes, selectedId, moved])
 
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const edges = useMemo((): Edge[] => {
@@ -1197,9 +1278,9 @@ export function FocusGraphView({
       className={cn(
         'relative h-full w-full min-h-0 text-black/[0.16] dark:text-white/[0.14]',
         // Baked positions + stable card ids: a CSS transform transition
-        // makes shared cards glide when the focal changes. The canvas
-        // pans via the viewport pane, so this never fights dragging.
-        !reducedMotion && '[&_.react-flow__node]:transition-transform [&_.react-flow__node]:duration-300',
+        // makes shared cards glide when the focal changes. The card
+        // being dragged opts out — an eased transform lags the pointer.
+        !reducedMotion && '[&_.react-flow__node]:transition-transform [&_.react-flow__node]:duration-300 [&_.react-flow__node.dragging]:transition-none',
       )}
     >
       <ImpactContext.Provider value={impactValue}>
@@ -1218,10 +1299,17 @@ export function FocusGraphView({
           panOnDrag
           zoomOnScroll
           zoomOnDoubleClick={false}
-          nodesDraggable={false}
+          // Rearrange the picture to suit how you read it. Edges are
+          // anchored to card ids, so every connection re-routes and
+          // nothing about the lineage changes — only where it sits.
+          nodesDraggable
+          // Small movements stay clicks, so dragging never eats the
+          // click-to-inspect / double-click-to-focus gestures.
+          nodeDragThreshold={4}
           nodesConnectable={false}
           elementsSelectable={false}
           edgesFocusable={false}
+          onNodeDragStop={commitDrag}
           onPaneClick={() => onSelect(null)}
           onNodeMouseEnter={(_, n) => { if (n.type === 'focusCard') setHoveredId(n.id) }}
           onNodeMouseLeave={() => setHoveredId(null)}
@@ -1229,7 +1317,11 @@ export function FocusGraphView({
           style={{ background: 'transparent' }}
         >
           <Background variant={BackgroundVariant.Dots} gap={26} size={1.25} color="currentColor" />
-          <GraphControls reducedMotion={reducedMotion} exportName={exportName} />
+          <GraphControls
+            reducedMotion={reducedMotion}
+            exportName={exportName}
+            onResetLayout={moved.size > 0 ? resetLayout : undefined}
+          />
         </ReactFlow>
       </ReactFlowProvider>
       </HoverContext.Provider>

@@ -863,7 +863,8 @@ export function LineageLens({
                         <li><span className="font-medium text-ink">⊕</span> on a card's outer edge — reveal its next hop</li>
                         <li><span className="font-medium text-ink">×N</span> — show the underlying connections</li>
                         <li><span className="font-medium text-ink">← / →</span> — step back / forward</li>
-                        <li><span className="font-medium text-ink">Drag · scroll</span> — pan and zoom</li>
+                        <li><span className="font-medium text-ink">Drag a card</span> — move it; connections follow</li>
+                        <li><span className="font-medium text-ink">Drag · scroll</span> the background — pan and zoom</li>
                       </ul>
                     ) : (
                       <ul className="space-y-0.5 text-ink-muted">

@@ -377,7 +377,7 @@ TOURS.push({
       placement: 'top',
       padding: -8,
       title: 'Explore the lineage',
-      body: '**Click** a card to inspect it. **Double-click** to focus there. The **⊕** on a card\'s outer edge reveals its next hop; **×N** opens the connections a rolled-up flow summarizes.',
+      body: '**Click** a card to inspect it. **Double-click** to focus there. The **⊕** on a card\'s outer edge reveals its next hop; **×N** opens the connections a rolled-up flow summarizes. **Drag** any card to arrange the picture — the connections follow it.',
     },
     {
       target: '[data-tour="lens-children-mode"]',

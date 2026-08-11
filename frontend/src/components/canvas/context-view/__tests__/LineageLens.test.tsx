@@ -668,6 +668,63 @@ describe('LineageLens graph mode', () => {
     }))
   })
 
+  it('cards can be dragged to rearrange the picture', () => {
+    useCanvasStore.setState({
+      nodes: [node('ds'), node('src')],
+      edges: [edge('e1', 'src', 'ds')],
+      visibleEdges: [],
+    } as never)
+    renderLens(['ds'])
+    // Every card is movable; the lineage is anchored to card ids, so
+    // nothing about the connections depends on where they sit.
+    // (The Lens portals to body, so query the document, not container.)
+    const cards = document.querySelectorAll('.react-flow__node-focusCard')
+    expect(cards.length).toBeGreaterThan(0)
+    for (const c of cards) expect(c.className).toContain('draggable')
+  })
+
+  it('a frame moves as one piece — its children are not dragged out of it', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [
+          { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
+          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
+        ],
+      },
+    } as never)
+    try {
+      useCanvasStore.setState({
+        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
+        edges: [edge('e1', 'plat', 'ds')],
+        visibleEdges: [],
+      } as never)
+      renderLens(['ds'], {}, {
+        onOpenContainer: vi.fn(),
+        graphSeed: { nodeId: 'ds', expandedGroups: [], expandedFrontier: [], openContainers: ['in:plat'] },
+        containerResults: new Map([['in:plat', {
+          nodes: [node('kid1', 'DATASET')],
+          edges: [edge('r1', 'kid1', 'ds')],
+          passedThrough: [], truncated: false, empty: false,
+        }]]),
+        containerStatus: new Map([['in:plat', 'done' as const]]),
+      })
+
+      // The frame itself is movable...
+      const frame = document.querySelector('.react-flow__node-focusFrame')
+      expect(frame?.className).toContain('draggable')
+      // ...and carries its children, which are therefore not draggable
+      // on their own — a table never sheds a column.
+      const child = screen.getByText('label-kid1').closest('.react-flow__node')
+      expect(child).toBeTruthy()
+      expect(child!.className).not.toContain('draggable')
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
   it('the header default is a preference, persisted like the body mode', () => {
     renderLens(['b'])
     expect(usePreferencesStore.getState().lensFrameChildren).toBe('connected')
