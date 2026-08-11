@@ -3162,10 +3162,37 @@ export function ContextViewCanvas({
     }
     return { results, status }
   }, [lensContainer.allResults, lensContainer.allStatus])
+  // PERF: the hook returns a fresh object literal every render while the
+  // methods inside it are stable useCallbacks. Depending on the OBJECT
+  // made each handler below new on every render, which changed the Lens's
+  // card context identity — and both card memo comparators start with
+  // `a.ctx === b.ctx &&`, so the 48-field content comparison was never
+  // reached and every card re-rendered on every canvas tick. It also
+  // churned the deps of the in-frame search debounce, which could keep
+  // the 300ms timer resetting forever. Depend on the methods.
+  const {
+    loadChildrenOf: lensLoadChildrenOf,
+    loadAllChildren: lensLoadAllChildren,
+    openContainer: lensOpenContainerFetch,
+    retry: lensRetryContainerFetch,
+  } = lensContainer
   const loadLensChildrenOf = useCallback((entityId: string) => {
     const focal = lensFocalOf(lensHistory)
-    if (focal) lensContainer.loadChildrenOf(entityId, focal)
-  }, [lensContainer, lensHistory])
+    if (focal) lensLoadChildrenOf(entityId, focal)
+  }, [lensLoadChildrenOf, lensHistory])
+  const loadLensAllChildren = useCallback((openKey: string, searchQuery?: string) => {
+    const focal = lensFocalOf(lensHistory)
+    if (focal) lensLoadAllChildren(openKey, focal, searchQuery)
+  }, [lensLoadAllChildren, lensHistory])
+  const openLensContainer = useCallback((urn: string, partner: string, dir: 'in' | 'out', level: number) => {
+    // The focal buckets the cache; the PARTNER is the question.
+    const focal = lensFocalOf(lensHistory)
+    if (focal) lensOpenContainerFetch(urn, focal, partner, dir, level)
+  }, [lensOpenContainerFetch, lensHistory])
+  const retryLensContainer = useCallback((urn: string, partner: string, dir: 'in' | 'out', level: number) => {
+    const focal = lensFocalOf(lensHistory)
+    if (focal) lensRetryContainerFetch(urn, focal, partner, dir, level)
+  }, [lensRetryContainerFetch, lensHistory])
   useEffect(() => {
     focusLensRef.current = () => {
       const target = selectedNodeId ?? drawerNodeId
@@ -3954,19 +3981,9 @@ export function ContextViewCanvas({
           childrenOf={lensChildren.results}
           childrenStatusOf={lensChildren.status}
           onLoadChildrenOf={loadLensChildrenOf}
-          onLoadAllChildren={(openKey, searchQuery) => {
-            const focal = lensFocalOf(lensHistory)
-            if (focal) lensContainer.loadAllChildren(openKey, focal, searchQuery)
-          }}
-          onOpenContainer={(urn, partner, dir, level) => {
-            // The focal buckets the cache; the PARTNER is the question.
-            const focal = lensFocalOf(lensHistory)
-            if (focal) lensContainer.openContainer(urn, focal, partner, dir, level)
-          }}
-          onRetryOpenContainer={(urn, partner, dir, level) => {
-            const focal = lensFocalOf(lensHistory)
-            if (focal) lensContainer.retry(urn, focal, partner, dir, level)
-          }}
+          onLoadAllChildren={loadLensAllChildren}
+          onOpenContainer={openLensContainer}
+          onRetryOpenContainer={retryLensContainer}
           graphSeed={lensShareSeed}
           externalPreview={externalPreview && lensFocalOf(lensHistory) === externalPreview.nodeId ? externalPreview : null}
           onRecenter={lensRecenter}

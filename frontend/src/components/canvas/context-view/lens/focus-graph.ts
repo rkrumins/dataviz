@@ -90,26 +90,33 @@ export const CONTAINS_STACK_GAP = 18
  */
 export function framePager(card: FocusCard) {
   const size = Math.max(1, card.framePageSize)
-  // `frameTotal` is set only from a drained list or the container's own
-  // reported count — never from a paging heuristic — so >= 0 means known.
-  const exact = card.frameTotal >= 0
-  // Rows the frame can actually reach. The connected children an open
-  // found are appended to the server's child list, so the roster can run
-  // one or two past the container's own count; paging to `frameTotal`
-  // alone would strand them on a page that does not exist.
-  const rows = Math.max(card.frameLoaded, exact ? card.frameTotal : 0)
+  // `frameTotal` is the CONTAINER's child count — every column of the
+  // table, not the connected ones. It only describes the frame's extent
+  // in "everything inside" mode. Applying it in Connected mode said
+  // "3 connected · showing 1–12 of 428 · page 1 of 36" over three rows,
+  // with 35 pages that hold nothing and a Next that could not move
+  // (Connected mode has no further pages to fetch).
+  const exact = card.frameShowingAll ? card.frameTotal >= 0 : true
+  // Rows the frame can actually reach. In "all" mode the connected
+  // children an open found are appended to the server's child list, so
+  // the roster can run past the container's own count; paging to
+  // `frameTotal` alone would strand them on a page that does not exist.
+  const rows = card.frameShowingAll
+    ? Math.max(card.frameLoaded, card.frameTotal >= 0 ? card.frameTotal : 0)
+    : card.frameLoaded
   const from = rows === 0 ? 0 : card.framePage * size + 1
   const to = Math.min(card.framePage * size + size, rows)
   const pageCount = Math.max(1, Math.ceil(rows / size))
+  const hasMore = card.frameShowingAll && card.frameHasMore
   return {
     rows,
     from,
     to,
     pageCount,
     exact,
-    paged: pageCount > 1 || card.frameHasMore,
+    paged: pageCount > 1 || hasMore,
     canPrev: card.framePage > 0,
-    canNext: to < rows || card.frameHasMore,
+    canNext: to < rows || hasMore,
   }
 }
 
@@ -129,8 +136,12 @@ export type FocusCardKind = 'focal' | 'entity' | 'group' | 'contains' | 'overflo
  *           by guessing from locally-loaded edges.
  *   hop   → fetch and reveal this entity's own next hop
  *   more  → page in the rest of a capped band or frame
+ *   focus → the stack ends here; re-center the lens on this entity so
+ *           its own contents become the new top level. A door, not a
+ *           wall: the alternative was a chevron that fetched and then
+ *           rendered nothing.
  */
-export type FocusExpandKind = 'group' | 'open' | 'hop' | 'more' | null
+export type FocusExpandKind = 'group' | 'open' | 'hop' | 'more' | 'focus' | null
 
 export interface FocusCard {
   /** Stable across rebuilds so shared cards glide between focal swaps:
@@ -280,8 +291,11 @@ export interface FocusGraphInput {
   /** Contains rows the user has opened, by urn. Depth is not encoded —
    *  it emerges from the walk, so any level composes with any other. */
   openContains?: ReadonlySet<string>
-  /** Urns whose children fetch is in flight. */
-  containsLoadingOf?: ReadonlySet<string>
+  /** Fetch state per urn for the contains stack, so a row that came back
+   *  EMPTY and a row that FAILED are distinguishable from one that is
+   *  still loading — all three used to render as an open chevron with
+   *  nothing under it. */
+  containsStatusOf?: ReadonlyMap<string, 'loading' | 'done' | 'error' | 'unsupported'>
   resolveParent: (id: string) => string | null
   /** isCoarser(partnerType, baseType) — coarser-grain rollup test. */
   isCoarser: (type: string | undefined, baseType: string) => boolean
@@ -385,7 +399,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const {
     focalId, incomingRecords, outgoingRecords, edgesByEndpoint, nodeMap,
     containmentEdgeTypes, containsChildren, containsTotal, containsLoading, resolveParent,
-    containsChildrenOf, openContains = EMPTY_SET, containsLoadingOf,
+    containsChildrenOf, openContains = EMPTY_SET, containsStatusOf,
     isCoarser, canContain, expandedGroups, expandedFrontier, openContainers,
     containerResults, containerStatus, frameShowAll, frameAllResults,
     frameAllStatus, frameQueries, framePages, entityLevels,
@@ -534,6 +548,14 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       const cType = (cNode?.data?.type as string) ?? 'entity'
       const kids = containsChildrenOf?.get(cid)
       const open = openContains.has(cid)
+      const status = containsStatusOf?.get(cid)
+      // The stack stops nesting at CONTAINS_MAX_DEPTH — a single column
+      // hanging off the focal cannot grow forever. But the control must
+      // not stop meaning something: at the limit it becomes "focus this",
+      // which re-centers the lens so this entity's contents are the new
+      // top level. Offering the chevron here fetched and rendered nothing.
+      const canGoDeeper = canContain(cType)
+      const atLimit = depth >= CONTAINS_MAX_DEPTH
       const card: FocusCard = {
         ...baseCard(),
         id: `c:${cid}`,
@@ -546,10 +568,11 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         type: cType,
         unresolved: !cNode,
         // Offered from the ontology, like every other contents control.
-        canOpenChildren: canContain(cType),
+        canOpenChildren: canGoDeeper && !atLimit,
         childrenOpen: open,
         expandKey: `kids:${cid}`,
-        fetch: containsLoadingOf?.has(cid) ? 'loading' : null,
+        expandKind: canGoDeeper && atLimit ? 'focus' : null,
+        fetch: status === 'loading' ? 'loading' : status === 'error' ? 'error' : null,
         dimmed: !matches(cLabel),
       }
       pushCard(card)
@@ -568,25 +591,54 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         containment: true,
         dimmed: card.dimmed,
       })
-      // A level opens to CONTAINS_CAP rows; the rest is an honest
-      // overflow card rather than a silently shortened list.
-      if (open && kids && depth < CONTAINS_MAX_DEPTH) {
-        emitContains(kids.slice(0, CONTAINS_CAP), depth + 1, card.id)
-        if (kids.length > CONTAINS_CAP) {
-          pushCard({
-            ...baseCard(),
-            id: `more:c:${cid}`,
-            kind: 'overflow',
-            nodeId: null,
-            band: 0,
-            h: OVERFLOW_H,
-            depth: depth + 1,
-            label: `+${(kids.length - CONTAINS_CAP).toLocaleString()} more inside ${cLabel}`,
-            type: 'entity',
-            expandKind: 'more',
-            overflowCount: kids.length - CONTAINS_CAP,
-          })
-        }
+      if (!open || atLimit) continue
+      // An opened row must always SAY something. Loading is the chevron's
+      // own spinner; done-and-empty and failed each get a row, because
+      // silence under an open chevron reads as a broken control.
+      if (status === 'error' || (status === 'done' && (kids?.length ?? 0) === 0)) {
+        pushCard({
+          ...baseCard(),
+          id: `note:c:${cid}`,
+          kind: 'overflow',
+          // NOT `nodeId` — that means "this card IS this entity" and
+          // would be refused by the one-entity-one-card gate, silently
+          // dropping the note. `parentId` is what it stands beneath.
+          nodeId: null,
+          parentId: cid,
+          band: 0,
+          h: OVERFLOW_H,
+          depth: depth + 1,
+          label: status === 'error'
+            ? `Couldn't look inside ${cLabel}`
+            : `Nothing inside ${cLabel}`,
+          type: 'entity',
+          // Retry is the same gesture that opened it.
+          expandKey: status === 'error' ? `kids:${cid}` : null,
+          expandKind: status === 'error' ? 'more' : null,
+        })
+        continue
+      }
+      if (!kids?.length) continue
+      // A level shows CONTAINS_CAP rows. Beyond that the honest move is
+      // not a "+N more" that pages this column deeper — it is to focus
+      // the entity, where its children become the top level and get the
+      // focal's own paging, Find and counts.
+      emitContains(kids.slice(0, CONTAINS_CAP), depth + 1, card.id)
+      if (kids.length > CONTAINS_CAP) {
+        pushCard({
+          ...baseCard(),
+          id: `more:c:${cid}`,
+          kind: 'overflow',
+          nodeId: null,
+          parentId: cid,
+          band: 0,
+          h: OVERFLOW_H,
+          depth: depth + 1,
+          label: `+${(kids.length - CONTAINS_CAP).toLocaleString()} more inside ${cLabel} — focus it`,
+          type: 'entity',
+          expandKind: 'focus',
+          overflowCount: kids.length - CONTAINS_CAP,
+        })
       }
     }
   }
@@ -874,6 +926,9 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         const all = frameAllResults?.get(openKey)
 
         // Only entities we haven't already placed elsewhere on the board.
+        // With frames claiming first (see the dispatch below) this now
+        // strips only cross-band repeats, which are genuinely elsewhere.
+        const connectedTotal = (res?.nodes ?? []).length
         const inside = (res?.nodes ?? []).filter(n => !placed.has(n.id))
         const connectedIds = new Set(inside.map(n => n.id))
         // In "all" mode the roster is the server's child order. A
@@ -923,7 +978,9 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           label,
           description: (entry.node?.data?.description as string | undefined) ?? null,
           type,
-          count: inside.length,
+          // What the SERVER said connects, not what survived deduping —
+          // the frame used to under-report and hide the difference.
+          count: connectedTotal,
           rollup: entry.rollup,
           unresolved: !entry.node,
           partnerIds: [...entry.refs.keys()],
@@ -944,7 +1001,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           frameTruncated: res?.truncated ?? false,
           frameEmpty: res?.empty ?? false,
           frameShowingAll: showAll,
-          frameConnectedCount: inside.length,
+          frameConnectedCount: connectedTotal,
           frameLoaded: roster.length,
           // Known only once the last page lands, or from the container's
           // own childCount. Otherwise -1 — the view shows a floor.
@@ -956,7 +1013,12 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             : status === 'error' || (showAll && allStatusHere === 'error') ? 'error' : null,
           dimmed: !matches(label),
         }
-        pushCard(frame)
+        // If this entity is already on the board (an earlier band drew
+        // it), `pushCard` refuses the frame and returns the existing id.
+        // Placing children under a frame that does not exist left them
+        // with a dangling `frameId`: skipped by BOTH layout passes, so
+        // they kept `x:0, y:0` and rendered stacked on top of the focal.
+        if (pushCard(frame) !== frameId) return
 
         // Connection counts come from the server's pair-filtered edges.
         const countFor = (id: string) => {
@@ -1032,11 +1094,16 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             dimmed: !matches(cLabel) || (fq !== '' && !cLabel.toLowerCase().includes(fq)),
           }
           pushCard(cCard)
-          // Only a child that actually carries lineage gets an edge.
+          // Only a child that actually carries lineage gets an edge, and
+          // it carries ITS OWN count. `stat.count` is the CONTAINER's
+          // bundled total, so every column inside a table reading ×57
+          // used to draw a ×57 wire while its own badge said ×1 — one
+          // edge asserting two different grains of truth, and a reader
+          // counting wires concluding 12 × 57.
           if (connected) {
-            for (const [refId, stat] of entry.refs) {
+            for (const [refId] of entry.refs) {
               const refCard = placed.get(refId)
-              if (refCard) addFlowEdge(dir, refCard, cCard.id, stat.count, cCard.edgeTypeNorm, false, cCard.dimmed)
+              if (refCard) addFlowEdge(dir, refCard, cCard.id, cCard.count, cCard.edgeTypeNorm, false, cCard.dimmed)
             }
           }
           if (connected && childExpanded && !isOutermost) nextRefs.push({ nodeId: child.id, type: cType })
@@ -1061,11 +1128,24 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         if (frame.frontierExpanded && !isOutermost) nextRefs.push({ nodeId: entry.nodeId, type })
       }
 
+      // OPENED containers claim their contents before anything else in
+      // the band draws a plain card. `shown` is ordered [groups,
+      // standalone, rollups] and a container is always a rollup, so its
+      // children — which are often direct neighbours in their own right —
+      // were placed first and then filtered OUT of the frame by the
+      // one-entity-one-card rule. The user opened a container and got an
+      // empty dashed box captioned "0 connected", right after the closed
+      // card had previewed those very children. An explicit open beats
+      // the default layout.
+      for (const item of shown) {
+        if (item.kind !== 'entity') continue
+        const openKey = `${dir}:${item.entry.nodeId}`
+        if (openContainers.has(openKey)) placeOpenContainer(item.entry, openKey)
+      }
       for (const item of shown) {
         if (item.kind === 'entity') {
           const openKey = `${dir}:${item.entry.nodeId}`
-          if (openContainers.has(openKey)) placeOpenContainer(item.entry, openKey)
-          else placeEntity(item.entry)
+          if (!openContainers.has(openKey)) placeEntity(item.entry)
           continue
         }
         // Parent group — collapsed: ONE card standing for its members

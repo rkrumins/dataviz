@@ -51,7 +51,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useTourStore } from '@/features/tour/tourStore'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { lensFocalOf, type LensHistory } from './lens/lensHistory'
-import { buildFocusGraph, labelOf, edgeLabelFor, FRAME_ALL_CAP, type EdgeTypeInfoMap } from './lens/focus-graph'
+import { buildFocusGraph, labelOf, edgeLabelFor, FRAME_ALL_CAP, CONTAINS_CAP, type EdgeTypeInfoMap } from './lens/focus-graph'
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
 
@@ -397,11 +397,13 @@ export function LineageLens({
     for (const [urn, page] of childrenOf ?? []) m.set(urn, page.children.map(n => n.id))
     return m
   }, [childrenOf])
-  const containsLoadingIds = useMemo(() => {
-    const s = new Set<string>()
-    for (const [urn, st] of childrenStatusOf ?? []) if (st === 'loading') s.add(urn)
-    return s
-  }, [childrenStatusOf])
+  /** Fetch state per urn, so a row that came back EMPTY and one that
+   *  FAILED are distinguishable from one still loading. All three used
+   *  to render as an open chevron with nothing under it. */
+  const containsStatusById = useMemo(
+    () => childrenStatusOf ?? new Map<string, 'loading' | 'done' | 'error' | 'unsupported'>(),
+    [childrenStatusOf],
+  )
 
   // ── Grain machinery — data-driven from the schema's entity-type
   // hierarchy. closure(T) = every type T can transitively contain; a
@@ -688,9 +690,16 @@ export function LineageLens({
    *  window actually runs past what is loaded. */
   const setFramePage = useCallback((openKey: string, page: number) => {
     let showingAll = false
+    let query = ''
     setGraphState(prev => {
       const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
       showingAll = base.frameShowAll.has(openKey)
+      // The page we turn to belongs to whatever list is on screen. Asking
+      // without the query made the hook see a DIFFERENT question, refetch
+      // page 1 unfiltered, replace the matches — and the debounce then
+      // re-ran the search 300ms later. One Next click cost two round
+      // trips, a flash of unrelated rows, and the window snapped home.
+      query = base.frameQueries.get(openKey) ?? ''
       const next = new Map(base.framePages)
       next.set(openKey, Math.max(0, page))
       return { ...base, framePages: next }
@@ -700,8 +709,14 @@ export function LineageLens({
     const wanted = (Math.max(0, page) + 1) * FRAME_ALL_CAP
     // The hook is idempotent and no-ops once the list is drained; this
     // just keeps a page turn inside the fetched set from asking at all.
-    if (!loaded || (loaded.hasMore && loaded.children.length < wanted)) onLoadAllChildren?.(openKey)
+    if (!loaded || (loaded.hasMore && loaded.children.length < wanted)) onLoadAllChildren?.(openKey, query)
   }, [nodeId, seededFresh, onLoadAllChildren, frameAllResults])
+
+  /** Re-kick a failed "everything inside" fetch — under whatever search
+   *  is active, for the same reason a page turn must. */
+  const retryFrameAll = useCallback((openKey: string) => {
+    onLoadAllChildren?.(openKey, graphCur.frameQueries.get(openKey) ?? '')
+  }, [onLoadAllChildren, graphCur.frameQueries])
 
   /** Stable per-frame query getter. An inline arrow here re-created the
    *  card context on every render, which re-rendered every card in the
@@ -712,13 +727,24 @@ export function LineageLens({
   )
 
   const bumpBandPage = useCallback((bandKey: string) => {
+    let page = 0
     setGraphState(prev => {
       const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
       const next = new Map(base.bandPages)
-      next.set(bandKey, (next.get(bandKey) ?? 0) + 1)
+      page = (next.get(bandKey) ?? 0) + 1
+      next.set(bandKey, page)
       return { ...base, bandPages: next }
     })
-  }, [nodeId, seededFresh])
+    // The contains stack pages a FETCHED list, not just a render cap.
+    // Raising the cap past what has loaded used to show the same rows
+    // again while the label still promised "+328 more contained".
+    if (bandKey === 'contains' && nodeId) {
+      const loaded = childrenOf?.get(nodeId)
+      if (!loaded || (loaded.hasMore && loaded.children.length < CONTAINS_CAP * (page + 1))) {
+        onLoadChildrenOf?.(nodeId)
+      }
+    }
+  }, [nodeId, seededFresh, childrenOf, onLoadChildrenOf])
   // Restored frontier expansions need their nodes' lineage fetched —
   // the same idempotent kick a live ⊕ click performs.
   useEffect(() => {
@@ -750,14 +776,20 @@ export function LineageLens({
     onLoadChildrenOf(nodeId)
   }, [nodeId, nodeMap, onLoadChildrenOf, canContainAnything])
 
+  // Keyed by FOCAL as well as frame: the fetch caches are per focal, so
+  // a bare `${dir}:${urn}` key meant re-centering to a second focal and
+  // opening the same container there was treated as already-asked. That
+  // frame then showed only its connected children, with no loading
+  // state, while its own toggle read "Everything inside".
   const firstPageAskedRef = useRef<Set<string>>(new Set())
   useEffect(() => {
     if (!nodeId) { firstPageAskedRef.current.clear(); return }
     if (!onLoadAllChildren) return
     for (const k of graphCur.frameShowAll) {
-      if (firstPageAskedRef.current.has(k)) continue
+      const asked = `${nodeId}\u0000${k}`
+      if (firstPageAskedRef.current.has(asked)) continue
       if (!containerResults?.has(k)) continue
-      firstPageAskedRef.current.add(k)
+      firstPageAskedRef.current.add(asked)
       onLoadAllChildren(k)
     }
   }, [nodeId, graphCur.frameShowAll, onLoadAllChildren, containerResults])
@@ -779,7 +811,7 @@ export function LineageLens({
       containsLoading: childrenStatusOf?.get(nodeId) === 'loading',
       containsChildrenOf: containsKidsById,
       openContains: graphCur.openContains,
-      containsLoadingOf: containsLoadingIds,
+      containsStatusOf: containsStatusById,
       resolveParent,
       isCoarser: isCoarserThan,
       canContain: canContainAnything,
@@ -806,7 +838,7 @@ export function LineageLens({
     resolveParent, isCoarserThan, canContainAnything, graphCur.expandedGroups,
     graphCur.expandedFrontier, graphCur.openContainers, graphCur.frameQueries,
     graphCur.framePages, graphCur.bandPages, graphCur.frameShowAll, childrenStatusOf,
-    graphCur.openContains, containsKidsById, containsLoadingIds,
+    graphCur.openContains, containsKidsById, containsStatusById,
     containerResults, containerStatus, frameAllResults, frameAllStatus,
     entityLevels, query, hiddenTypes, degreeHints, fetchStatus,
   ])
@@ -1379,7 +1411,7 @@ export function LineageLens({
                 onFrameQuery={setFrameQuery}
                 frameQueryFor={frameQueryFor}
                 onToggleFrameAll={toggleFrameAll}
-                onRetryFrameAll={onLoadAllChildren}
+                onRetryFrameAll={retryFrameAll}
                 onRetryOpen={retryContainer}
                 onRetryFetch={onRetryFetch}
                 onRevealOnCanvas={onRevealOnCanvas}

@@ -243,6 +243,72 @@ describe('buildFocusGraph — grouping and rollups', () => {
     expect(card(walked, 'n:kid1').frameId).toBe('fr:in:Snowflake')
   })
 
+  // REGRESSION: `frameTotal` is the CONTAINER's child count — every
+  // column of the table. Applying it to the pager in Connected mode said
+  // "showing 1-12 of 428 / page 1 of 36" over three rows, with 35 pages
+  // holding nothing and a Next that could not move. Default mode,
+  // commonest shape, and no test covered it because they all set
+  // frameShowAll.
+  it('a Connected frame states its OWN extent, never the container\'s', () => {
+    const connected = [node('c1'), node('c2'), node('c3')]
+    const g = build({
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM'), ...connected],
+      edges: [edge('e1', 'Snowflake', 'F')],
+      isCoarser: (t) => t === 'DATAPLATFORM',
+      over: {
+        openContainers: new Set(['in:Snowflake']),
+        containerResults: new Map([['in:Snowflake', {
+          nodes: connected,
+          edges: connected.map((c, i) => edge(`r${i}`, c.id, 'F')),
+          passedThrough: [
+            // The anchor claims 428 children — true, and irrelevant to
+            // the three that connect.
+            { ...node('anchor', 'CONTAINER'), data: { ...node('anchor').data, childCount: 428 } } as never,
+          ],
+          truncated: false, empty: false,
+        }]]),
+        containerStatus: new Map([['in:Snowflake', 'done' as const]]),
+      },
+    })
+    const frame = card(g, 'fr:in:Snowflake')
+    expect(frame.frameShowingAll).toBe(false)
+    expect(frame.frameTotal).toBe(428)          // the container's own claim, kept
+    const pager = framePager(frame)
+    expect(pager.rows).toBe(3)                  // but the FRAME holds three
+    expect(pager.pageCount).toBe(1)
+    expect(pager.paged).toBe(false)             // no footer at all
+    expect(pager.canNext).toBe(false)           // and nothing to move to
+  })
+
+  // REGRESSION: every child's edge was stamped with the CONTAINER's
+  // bundled count, so a table reading x57 drew twelve x57 wires while
+  // each column's own badge said x1 — one edge, two grains of truth.
+  it('a frame child edge carries the CHILD\'s count, not the container\'s', () => {
+    const g = build({
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM'), node('kid1'), node('kid2')],
+      // The container's bundled connection to the focal is 3 edges.
+      edges: [
+        edge('e1', 'Snowflake', 'F'), edge('e2', 'Snowflake', 'F'), edge('e3', 'Snowflake', 'F'),
+      ],
+      isCoarser: (t) => t === 'DATAPLATFORM',
+      over: {
+        openContainers: new Set(['in:Snowflake']),
+        containerResults: new Map([['in:Snowflake', {
+          nodes: [node('kid1'), node('kid2')],
+          // kid1 carries two of them, kid2 one.
+          edges: [edge('r1', 'kid1', 'F'), edge('r2', 'kid1', 'F'), edge('r3', 'kid2', 'F')],
+          passedThrough: [], truncated: false, empty: false,
+        }]]),
+        containerStatus: new Map([['in:Snowflake', 'done' as const]]),
+      },
+    })
+    expect(card(g, 'n:kid1').count).toBe(2)
+    expect(card(g, 'n:kid2').count).toBe(1)
+    // The wire agrees with the badge sitting next to it.
+    expect(g.edges.find(e => e.id === 'fe:n:kid1->f')?.count).toBe(2)
+    expect(g.edges.find(e => e.id === 'fe:n:kid2->f')?.count).toBe(1)
+  })
+
   it('opening a container renders a FRAME holding only the focal-relevant children', () => {
     const g = build({
       nodes: [node('F'), node('Snowflake', 'DATAPLATFORM')],
@@ -440,6 +506,71 @@ describe('buildFocusGraph — grouping and rollups', () => {
     expect(kid.canOpenChildren).toBe(false)
   })
 
+  // REGRESSION: the chevron was offered at every depth while the walk
+  // stopped recursing at CONTAINS_MAX_DEPTH, so the deepest row fetched
+  // over the network, flipped to "open", and rendered nothing.
+  it('offers a DOOR at the deepest level, never a chevron that does nothing', () => {
+    const chain = ['l0', 'l1', 'l2', 'l3']
+    const g = build({
+      nodes: [node('F'), ...chain.map(c => node(c, 'dataset'))],
+      edges: [contains('c1', 'F', 'l0')],
+      canContain: (t?: string) => t === 'dataset',
+      over: {
+        bandPages: new Map([['contains', 1]]),
+        openContains: new Set(chain),
+        containsChildrenOf: new Map([['l0', ['l1']], ['l1', ['l2']], ['l2', ['l3']], ['l3', ['deeper']]]),
+      },
+    })
+    // Depths 0-2 open in place.
+    for (const [i, id] of ['l0', 'l1', 'l2'].entries()) {
+      expect(card(g, `c:${id}`).depth).toBe(i)
+      expect(card(g, `c:${id}`).canOpenChildren).toBe(true)
+      expect(card(g, `c:${id}`).expandKind).toBeNull()
+    }
+    // The deepest offers to re-center instead — and does NOT claim to open.
+    const deepest = card(g, 'c:l3')
+    expect(deepest.depth).toBe(3)
+    expect(deepest.canOpenChildren).toBe(false)
+    expect(deepest.expandKind).toBe('focus')
+    // Its children are genuinely not drawn, and nothing pretends they are.
+    expect(g.cards.find(c => c.id === 'c:deeper')).toBeUndefined()
+  })
+
+  it('says so when an opened row is empty or failed, instead of going silent', () => {
+    const base = {
+      nodes: [node('F'), node('col', 'dataset')],
+      edges: [contains('c1', 'F', 'col')],
+      canContain: (t?: string) => t === 'dataset',
+    }
+    const shown = { bandPages: new Map([['contains', 1]]), openContains: new Set(['col']) }
+
+    const empty = build({ ...base, over: {
+      ...shown,
+      containsChildrenOf: new Map([['col', []]]),
+      containsStatusOf: new Map([['col', 'done' as const]]),
+    } })
+    const note = card(empty, 'note:c:col')
+    expect(note.label).toBe('Nothing inside label-col')
+    expect(note.expandKey).toBeNull()          // a statement, not a button
+    expect(note.parentId).toBe('col')
+
+    const failed = build({ ...base, over: {
+      ...shown,
+      containsStatusOf: new Map([['col', 'error' as const]]),
+    } })
+    expect(card(failed, 'c:col').fetch).toBe('error')
+    expect(card(failed, 'note:c:col').label).toBe("Couldn't look inside label-col")
+    expect(card(failed, 'note:c:col').expandKey).toBe('kids:col')   // retry works
+
+    // Still loading is the chevron's own spinner — no premature verdict.
+    const loading = build({ ...base, over: {
+      ...shown,
+      containsStatusOf: new Map([['col', 'loading' as const]]),
+    } })
+    expect(card(loading, 'c:col').fetch).toBe('loading')
+    expect(loading.cards.find(c => c.id === 'note:c:col')).toBeUndefined()
+  })
+
   it('caps each contains level and says what it capped', () => {
     const kids = Array.from({ length: CONTAINS_CAP + 4 }, (_, i) => `k${String(i).padStart(2, '0')}`)
     const g = build({
@@ -453,7 +584,73 @@ describe('buildFocusGraph — grouping and rollups', () => {
       },
     })
     expect(g.cards.filter(c => c.kind === 'contains' && c.depth === 1)).toHaveLength(CONTAINS_CAP)
-    expect(card(g, 'more:c:col').overflowCount).toBe(4)
+    const more = card(g, 'more:c:col')
+    expect(more.overflowCount).toBe(4)
+    // NOT a "+N more" that pages this column — that card had no
+    // expandKey and no handler could raise a nested level's cap, so it
+    // was inert. It re-centers, where the rest get real paging.
+    expect(more.expandKind).toBe('focus')
+    expect(more.parentId).toBe('col')
+    expect(more.label).toContain('focus it')
+  })
+
+  // REGRESSION: `shown` is ordered [groups, standalone, rollups] and an
+  // opened container is always a rollup, so a child that ALSO has direct
+  // lineage to the focal was drawn as a band card first and then filtered
+  // out of the frame by the one-entity-one-card rule. The user opened the
+  // container and got an empty box captioned "0 connected" — right after
+  // the closed card had previewed those very children.
+  it('an opened frame OWNS a child that is also a direct neighbour', () => {
+    const g = build({
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM'), node('shared')],
+      // `shared` reaches the focal directly AND lives inside Snowflake.
+      edges: [edge('e1', 'Snowflake', 'F'), edge('e2', 'shared', 'F')],
+      isCoarser: (t) => t === 'DATAPLATFORM',
+      over: {
+        openContainers: new Set(['in:Snowflake']),
+        containerResults: new Map([['in:Snowflake', {
+          nodes: [node('shared')],
+          edges: [edge('r1', 'shared', 'F')],
+          passedThrough: [], truncated: false, empty: false,
+        }]]),
+        containerStatus: new Map([['in:Snowflake', 'done' as const]]),
+      },
+    })
+    const frame = card(g, 'fr:in:Snowflake')
+    // The frame is not empty, and it counts what the SERVER said.
+    expect(frame.count).toBe(1)
+    expect(frame.frameConnectedCount).toBe(1)
+    // The child lives inside the frame, exactly once.
+    expect(g.cards.filter(c => c.nodeId === 'shared')).toHaveLength(1)
+    expect(card(g, 'n:shared').frameId).toBe('fr:in:Snowflake')
+  })
+
+  // REGRESSION: when pushCard refused the frame (its entity was already
+  // drawn in an earlier band) the children kept a frameId pointing at a
+  // card that did not exist — skipped by both layout passes, so they kept
+  // x:0,y:0 and rendered stacked on top of the focal.
+  it('never leaves a child pointing at a frame that was not placed', () => {
+    const g = build({
+      nodes: [node('F'), node('U'), node('C', 'CONTAINER'), node('kid')],
+      edges: [edge('e1', 'U', 'F'), edge('e2', 'C', 'F')],
+      isCoarser: (t) => t === 'CONTAINER',
+      over: {
+        expandedFrontier: new Set(['in:U']),
+        openContainers: new Set(['in:C']),
+        containerResults: new Map([['in:C', {
+          nodes: [node('kid')], edges: [edge('r1', 'kid', 'F')],
+          passedThrough: [], truncated: false, empty: false,
+        }]]),
+        containerStatus: new Map([['in:C', 'done' as const]]),
+      },
+    })
+    const frameIds = new Set(g.cards.filter(c => c.kind === 'frame').map(c => c.id))
+    for (const c of g.cards) {
+      if (c.frameId) expect(frameIds.has(c.frameId)).toBe(true)
+    }
+    // And nothing but the focal sits on the focal's own spot.
+    const onOrigin = g.cards.filter(c => c.x === 0 && c.y === 0 && c.kind !== 'focal')
+    expect(onOrigin).toEqual([])
   })
 
   it('the in-frame filter dims children without removing them', () => {

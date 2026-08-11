@@ -953,6 +953,71 @@ describe('LineageLens graph mode', () => {
       }
     }))
 
+    // REGRESSION: a page turn called onLoadAllChildren(openKey) with no
+    // query while a search was active. The hook saw a different question,
+    // refetched page 1 unfiltered and replaced the matches; the debounce
+    // then re-ran the search 300ms later. One click, two round trips, a
+    // flash of unrelated rows, and the window snapped back to page 1.
+    it('keeps an active search when you turn the page or retry', () => withSchema(() => {
+      // 30 matches loaded with more on the server: page 2 wants rows
+      // 21-40, which runs past them, so the turn DOES ask the server.
+      const cols = Array.from({ length: 30 }, (_, i) => node(`col${String(i).padStart(3, '0')}`, 'DATASET'))
+      const onLoadAllChildren = vi.fn()
+      openFrame({
+        onLoadAllChildren,
+        graphSeed: {
+          nodeId: 'ds', expandedGroups: [], expandedFrontier: [],
+          openContainers: ['in:plat'], frameAll: ['in:plat'],
+        },
+        frameAllResults: new Map([['in:plat', { children: cols, hasMore: true, total: null, query: 'order' }]]),
+        frameAllStatus: new Map([['in:plat', 'done' as const]]),
+      })
+      fireEvent.change(screen.getByPlaceholderText('Find…'), { target: { value: 'order' } })
+      onLoadAllChildren.mockClear()
+
+      fireEvent.click(screen.getByTitle('Next page'))
+      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat', 'order')
+      // Never the unfiltered list — that replaced the matches and cost a
+      // second round trip when the debounce noticed.
+      expect(onLoadAllChildren.mock.calls.every(c => c[1] === 'order')).toBe(true)
+    }))
+
+    // REGRESSION: firstPageAskedRef was keyed `${dir}:${urn}` with no
+    // focal and cleared only when nodeId went null — which re-centering
+    // never does. The second focal's frame never got its first page.
+    it('still fetches a frame\'s first page after re-centering', () => withSchema(() => {
+      useCanvasStore.setState({
+        nodes: [node('ds', 'DATASET'), node('other', 'DATASET'), node('plat', 'CONTAINER')],
+        edges: [edge('e1', 'plat', 'ds'), edge('e2', 'plat', 'other')],
+        visibleEdges: [],
+      } as never)
+      const onLoadAllChildren = vi.fn()
+      const seed = (focal: string) => ({
+        nodeId: focal, expandedGroups: [], expandedFrontier: [],
+        openContainers: ['in:plat'], frameAll: ['in:plat'],
+      })
+      const props = (focal: string) => ({
+        history: { entries: [focal], cursor: 0 },
+        onRecenter: vi.fn(), onBack: vi.fn(), onForward: vi.fn(), onClose: vi.fn(),
+        onOpenContainer: vi.fn(),
+        onLoadAllChildren,
+        graphSeed: seed(focal),
+        containerResults: new Map([['in:plat', {
+          nodes: [node('kid1', 'DATASET')], edges: [edge('r1', 'kid1', focal)],
+          passedThrough: [], truncated: false, empty: false,
+        }]]),
+        containerStatus: new Map([['in:plat', 'done' as const]]),
+      })
+      const { rerender } = render(<LineageLens {...props('ds')} />)
+      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat')
+      onLoadAllChildren.mockClear()
+
+      // Same container, different focal — a different question, and the
+      // caches are per focal, so it must be asked again.
+      rerender(<LineageLens {...props('other')} />)
+      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat')
+    }))
+
     it('opens new frames in whichever mode the header default names', () => withSchema(() => {
       usePreferencesStore.setState({ lensFrameChildren: 'all' })
       const onLoadAllChildren = vi.fn()

@@ -369,7 +369,13 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   const accent = card.type === 'not loaded' ? '#94a3b8' : ctx.visualFor(card.type).color
 
   const activate = () => {
-    if (card.kind === 'overflow') { if (card.expandKey) ctx.onShowMore(card.expandKey); return }
+    if (card.kind === 'overflow') {
+      // A 'focus' overflow is the door at the end of the contains stack:
+      // it re-centers rather than paging a column that cannot page.
+      if (card.expandKind === 'focus' && card.parentId) ctx.onFocus(card.parentId)
+      else if (card.expandKey) ctx.onShowMore(card.expandKey)
+      return
+    }
     if (card.kind === 'group') { if (card.expandKey) ctx.onToggleGroup(card.expandKey); return }
     ctx.onSelect(card.nodeId)
   }
@@ -379,15 +385,33 @@ function FocusGraphCard({ data, selected }: NodeProps) {
 
   // ── Overflow: the honest "+N more" card ──
   if (card.kind === 'overflow') {
+    const toFocus = card.expandKind === 'focus'
+    // A card with nothing to do is a STATEMENT, not a button — an
+    // "Nothing inside X" row that looked clickable and did nothing was
+    // the thing this whole pass is removing.
+    const inert = !toFocus && !card.expandKey
+    const Icon = toFocus ? LucideIcons.Focus : LucideIcons.ChevronDown
+    if (inert) {
+      return (
+        <p
+          style={{ width: card.w, height: card.h }}
+          className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-muted/25 text-[11px] italic text-ink-muted/70"
+        >
+          {card.label}
+        </p>
+      )
+    }
     return (
       <button
         type="button"
         onClick={activate}
-        title={`Show more (${card.overflowCount.toLocaleString()} not shown)`}
+        title={toFocus
+          ? `Focus ${card.label.replace(/ — focus it$/, '')} — its contents become the top level`
+          : `Show more (${card.overflowCount.toLocaleString()} not shown)`}
         style={{ width: card.w, height: card.h }}
         className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-muted/35 text-[11px] font-medium text-ink-muted hover:text-ink hover:border-ink-muted/60 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
       >
-        <LucideIcons.ChevronDown className="w-3.5 h-3.5" />
+        <Icon className="w-3.5 h-3.5" />
         {card.label}
       </button>
     )
@@ -591,6 +615,16 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       >
         <PortHandles />
         <ContentsChevron card={card} ctx={ctx} />
+        {card.expandKind === 'focus' && card.nodeId && (
+          <button
+            type="button"
+            title={`${card.label} holds more — focus it to make its contents the top level`}
+            onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.nodeId!) }}
+            className="nodrag flex-shrink-0 -ml-1 w-4 h-full flex items-center justify-center text-ink-muted/50 hover:text-accent-lineage focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded"
+          >
+            <LucideIcons.Focus className="w-3 h-3" />
+          </button>
+        )}
         <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
         <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: accent }} />
         <span className="min-w-0 truncate text-[11px] text-ink">{card.label}</span>
