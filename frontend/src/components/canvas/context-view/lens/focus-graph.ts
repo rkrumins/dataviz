@@ -6,8 +6,9 @@
  * focal at band 0, direct upstream at band -1, downstream at +1, and
  * user-expanded hops at ±2..±MAX_BAND. Everything here is deliberately
  * framework-free (no React, no React Flow) so the entire graph
- * semantics — grouping, rollups, drills, frontier expansion, caps,
- * filters, layout — is unit-testable in plain functions.
+ * semantics — grouping, rollups, opening a container into its
+ * focal-relevant contents, frontier expansion, caps, filters, layout —
+ * is unit-testable in plain functions.
  *
  * Honesty rules carried over from the list body:
  *  - band caps surface as an explicit "+N more" overflow card and
@@ -15,9 +16,9 @@
  *  - the text filter DIMS non-matching cards (and reports matches
  *    hidden inside collapsed groups) — it never removes them;
  *  - type chips REMOVE cards but the removed count is reported;
- *  - a drilled aggregate reports its unloaded remainder, and grouping
- *    is derived from real lineage records only — children that don't
- *    participate in lineage never appear.
+ *  - an opened container reports what it capped, and its contents come
+ *    from the server's pair-filtered expansion — entities that don't
+ *    participate in lineage with the focal never appear.
  */
 import type { LineageNode, LineageEdge } from '@/store/canvas'
 import { deriveNeighborRecords, type NeighborRecord } from '@/lib/lineage-neighbors'
@@ -40,6 +41,13 @@ export const GRAPH_BAND_CAP = 30
 export const CONTAINS_CAP = 8
 /** Hard stop for hop expansion per direction. */
 export const MAX_BAND = 4
+/** Children shown inside an opened container frame before "+N more". */
+export const FRAME_CHILD_CAP = 12
+
+export const FRAME_HEADER_H = 46
+export const FRAME_PAD = 10
+
+const EMPTY_STRINGS: string[] = []
 
 export const CARD_W = 240
 export const FOCAL_H = 120
@@ -47,7 +55,6 @@ export const CARD_H = 64
 export const GROUP_HEADER_H = 40
 export const CONTAINS_H = 36
 export const OVERFLOW_H = 36
-export const CONSTITUENT_H = 44
 export const BAND_GAP = 130
 export const CARD_GAP = 10
 /** Indent for cards nested under a header (group members, constituents). */
@@ -57,25 +64,26 @@ export const CONTAINS_STACK_GAP = 18
 
 export type FocusDirection = 'in' | 'out'
 
-export type FocusCardKind = 'focal' | 'entity' | 'group' | 'contains' | 'overflow'
+export type FocusCardKind = 'focal' | 'entity' | 'group' | 'contains' | 'overflow' | 'frame'
 
 /**
  * What a card's ONE expand affordance does. Every expandable card
  * offers the same gesture — "show me what's inside / what's next" —
  * and this says which meaning applies:
  *   group → reveal the members grouped under this parent
- *   drill → resolve a rolled-up connection into the constituent
- *           entities that actually carry lineage to the focal
- *           (this is what makes a CONTAINER / platform rollup card
- *           openable, not a dead end)
+ *   open  → open a COARSER partner (a container, a platform) into the
+ *           entities inside it that carry lineage to the focal. This is
+ *           what stops a coarse card being a dead end, and it is
+ *           answered by the server's descendant-pair expansion — never
+ *           by guessing from locally-loaded edges.
  *   hop   → fetch and reveal this entity's own next hop
- *   more  → page in the rest of a capped band
+ *   more  → page in the rest of a capped band or frame
  */
-export type FocusExpandKind = 'group' | 'drill' | 'hop' | 'more' | null
+export type FocusExpandKind = 'group' | 'open' | 'hop' | 'more' | null
 
 export interface FocusCard {
   /** Stable across rebuilds so shared cards glide between focal swaps:
-   *  'f' | n:urn | g:dir:parentUrn | c:urn | x:edgeId:urn | more:dir:band */
+   *  'f' | n:urn | g:dir:parentUrn | c:urn | fr:dir:urn | more:dir:band */
   id: string
   kind: FocusCardKind
   /** Backing entity urn; null only for overflow cards. */
@@ -103,22 +111,25 @@ export interface FocusCard {
   /** Entity not resolvable from store or fetches ("not on canvas"). */
   unresolved: boolean
   aggregated: boolean
-  aggregateEdge: LineageEdge | null
-  /** Key into drilledRows when the ×N badge can drill; null otherwise. */
-  drillKey: string | null
-  /** True when this card's aggregate is currently drilled open. */
-  drilled: boolean
-  /** Group toggle key into expandedGroups / frontier key into
-   *  expandedFrontier; null when the card has no expansion. */
+  /** Frame this card is nested inside (`fr:${dir}:${urn}`), else null. */
+  frameId: string | null
+  /** Frame cards only — the pass-through levels the open walked
+   *  through, so a skipped level is shown rather than hidden. */
+  frameBreadcrumb: string[]
+  /** Frame cards only — server capped the expansion (counts are floors). */
+  frameTruncated: boolean
+  /** Frame cards only — opened, and nothing inside connects to the focal. */
+  frameEmpty: boolean
+  /** Group toggle key into expandedGroups / open key into
+   *  openContainers / frontier key into expandedFrontier. */
   expandKey: string | null
   /** True when this group card is currently expanded (header form). */
   expanded: boolean
   /** What this card's expand affordance means (null = not expandable). */
   expandKind: FocusExpandKind
-  /** Card shows an outward expand pill (a 'hop' or 'drill' card). */
+  /** Card shows an outward expand pill (an 'open' or 'hop' card). */
   frontier: boolean
-  /** True when this card is already expanded open (hop revealed, or
-   *  aggregate drilled). */
+  /** True when this card is already expanded open. */
   frontierExpanded: boolean
   /** Expanded, fetch completed, and NOTHING further exists — the walk
    *  genuinely ends here (a data-source claim, never a guess). */
@@ -131,8 +142,6 @@ export interface FocusCard {
   matchesInside: number
   /** Overflow card only: how many more cards the band holds. */
   overflowCount: number
-  /** Drilled aggregate: constituents not loaded (reported, not invented). */
-  missingConstituents: number
 }
 
 export interface FocusEdge {
@@ -166,9 +175,25 @@ export interface FocusGraphInput {
   isCoarser: (type: string | undefined, baseType: string) => boolean
   expandedGroups: ReadonlySet<string>
   expandedFrontier: ReadonlySet<string>
-  drilledRows: ReadonlySet<string>
-  drillEdges?: Map<string, LineageEdge[]>
-  rawEdgeById: Map<string, LineageEdge>
+  /** Containers the user has opened, keyed `${dir}:${urn}`. */
+  openContainers: ReadonlySet<string>
+  /** Server answers to those opens (useLensContainer), same keys. */
+  containerResults?: Map<string, {
+    nodes: LineageNode[]
+    edges: LineageEdge[]
+    passedThrough: LineageNode[]
+    truncated: boolean
+    empty: boolean
+  }>
+  containerStatus?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
+  /** Per-frame filter text, keyed like openContainers. */
+  frameQueries?: ReadonlyMap<string, string>
+  /** Extra pages unlocked inside a frame, keyed like openContainers. */
+  framePages?: ReadonlyMap<string, number>
+  /** Entity-type id → hierarchy level. A type absent here is UNKNOWN,
+   *  and an unknown level means we cannot ask the server for the next
+   *  grain down — so the card offers no open rather than guessing. */
+  entityLevels?: Map<string, number>
   /** Extra pages unlocked per band key `${dir}:${band}`. */
   bandPages: ReadonlyMap<string, number>
   query: string
@@ -202,8 +227,6 @@ export function labelOf(id: string, node: LineageNode | undefined): string {
 
 interface AggInfo {
   aggregated: boolean
-  aggregateEdge: LineageEdge | null
-  canDrill: boolean
 }
 
 /** One deduped neighbor of a band's reference node(s). */
@@ -223,17 +246,13 @@ const recordCount = (r: NeighborRecord): number => {
   return d?.isAggregated ? Math.max(d.sourceEdgeCount ?? 1, 1) : 1
 }
 
-const canDrillEdge = (e: LineageEdge): boolean => {
-  const d = e.data as { isAggregated?: boolean; sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
-  return !!d?.isAggregated && ((d.sourceEdges?.length ?? 0) > 0 || (d.sourceEdgeCount ?? 0) > 1)
-}
-
 export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const {
     focalId, incomingRecords, outgoingRecords, edgesByEndpoint, nodeMap,
     containmentEdgeTypes, containsChildren, containsTotal, resolveParent,
-    isCoarser, expandedGroups, expandedFrontier, drilledRows, drillEdges,
-    rawEdgeById, bandPages, query, hiddenTypes, degreeHints, fetchStatus,
+    isCoarser, expandedGroups, expandedFrontier, openContainers,
+    containerResults, containerStatus, frameQueries, framePages, entityLevels,
+    bandPages, query, hiddenTypes, degreeHints, fetchStatus,
   } = input
 
   const q = query.trim().toLowerCase()
@@ -283,12 +302,13 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     parentId: null, parentLabel: null,
     count: 1, edgeTypeNorm: '', sumCount: 0,
     rollup: false, unresolved: false,
-    aggregated: false, aggregateEdge: null,
-    drillKey: null, drilled: false, expandKey: null, expanded: false,
+    aggregated: false,
+    frameId: null, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
+    expandKey: null, expanded: false,
     expandKind: null, frontier: false, frontierExpanded: false, deadEnd: false,
     degreeHint: null, fetch: null,
     dimmed: false, matchesInside: 0,
-    overflowCount: 0, missingConstituents: 0,
+    overflowCount: 0,
   })
 
   // ── Focal card + contains stack (band 0) ───────────────────────────
@@ -409,20 +429,14 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
               node: r.neighborNode,
               count: 0,
               edgeTypeNorm: r.edgeTypeNorm,
-              agg: { aggregated: false, aggregateEdge: null, canDrill: false },
+              agg: { aggregated: false },
               rollup: isCoarser(r.neighborNode?.data?.type as string | undefined, ref.type),
               refs: new Map(),
             }
             entryMap.set(r.neighborId, entry)
           }
           entry.count += n
-          if (aggData?.isAggregated && !entry.agg.aggregateEdge) {
-            entry.agg = {
-              aggregated: true,
-              aggregateEdge: r.edge,
-              canDrill: canDrillEdge(r.edge),
-            }
-          }
+          if (aggData?.isAggregated) entry.agg = { aggregated: true }
           const refStat = entry.refs.get(ref.nodeId)
           if (refStat) refStat.count += n
           else entry.refs.set(ref.nodeId, { count: n, edgeTypeNorm: r.edgeTypeNorm, aggregated: !!aggData?.isAggregated })
@@ -504,17 +518,19 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         const parentId = resolveParent(entry.nodeId)
         const frontierKey = `${dir}:${entry.nodeId}`
         const frontierExpanded = expandedFrontier.has(frontierKey)
-        const drillKey = entry.agg.canDrill && entry.agg.aggregateEdge ? `g:${dir}:${entry.agg.aggregateEdge.id}` : null
-        const drilled = drillKey != null && drilledRows.has(drillKey)
-        // ONE expand gesture per card. A rolled-up connection (a
-        // CONTAINER / platform partner, or any aggregated edge) opens
-        // into the constituent entities that actually carry lineage to
-        // the focal — that IS "which children of this thing touch me",
-        // and it's the answer a coarse rollup card otherwise withholds.
-        // Anything else expands to its own next hop, until the band cap
-        // or a known-zero degree says there's nothing to fetch.
+        // ONE expand gesture per card. A COARSER partner (a container, a
+        // platform) opens into the entities inside it that carry lineage
+        // to the focal — the question such a card otherwise withholds.
+        // This deliberately does NOT key off `isAggregated`: that flag
+        // is absent from projected canvas edges, which is why coarse
+        // cards used to fall through to a hop and fetch the container's
+        // whole neighbourhood instead. An unknown type level means we
+        // cannot ask the server for the next grain, so we offer nothing
+        // rather than guess. Everything else expands to its own next hop.
+        const canOpen = entry.rollup && entityLevels?.get(type) !== undefined
         const canHop = !isOutermost && (degreeHints?.get(entry.nodeId)?.[dir] ?? -1) !== 0
-        const expandKind: FocusExpandKind = drillKey ? 'drill' : canHop ? 'hop' : null
+        const expandKind: FocusExpandKind = canOpen ? 'open' : canHop ? 'hop' : null
+        const openKey = `${dir}:${entry.nodeId}`
         const card: FocusCard = {
           ...baseCard(),
           id: `n:${entry.nodeId}`,
@@ -531,13 +547,10 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           rollup: entry.rollup,
           unresolved: !entry.node,
           aggregated: entry.agg.aggregated,
-          aggregateEdge: entry.agg.aggregateEdge,
-          drillKey,
-          drilled,
-          expandKey: frontierKey,
+          expandKey: canOpen ? openKey : frontierKey,
           expandKind,
-          frontier: expandKind === 'hop' || expandKind === 'drill',
-          frontierExpanded: expandKind === 'drill' ? drilled : frontierExpanded,
+          frontier: expandKind === 'hop' || expandKind === 'open',
+          frontierExpanded,
           degreeHint: degreeHints?.get(entry.nodeId) ?? null,
           fetch: fetchStatus?.get(entry.nodeId) === 'loading' ? 'loading'
             : fetchStatus?.get(entry.nodeId) === 'error' ? 'error' : null,
@@ -551,64 +564,145 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         }
         if (frontierExpanded && !isOutermost) nextRefs.push({ nodeId: entry.nodeId, type })
 
-        // Drilled aggregate → constituent cards (local ∪ fetched raw
-        // edges), each tethered to this card; remainder reported.
-        if (drillKey && drilledRows.has(drillKey) && entry.agg.aggregateEdge) {
-          const aggEdge = entry.agg.aggregateEdge
-          const aggData = aggEdge.data as { sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
-          const local = (aggData?.sourceEdges ?? [])
-            .map(eid => rawEdgeById.get(eid))
-            .filter((e): e is LineageEdge => !!e)
-          const seen = new Set(local.map(e => e.id))
-          const fetched = (drillEdges?.get(aggEdge.id) ?? []).filter(e => !seen.has(e.id))
-          const all = [...local, ...fetched]
-          const constituents = all.slice(0, 50)
-          card.missingConstituents = Math.max(0, Math.max(aggData?.sourceEdgeCount ?? 0, all.length) - constituents.length)
-          for (const ce of constituents) {
-            const otherId = dir === 'in' ? ce.source : ce.target
-            if (otherId === entry.nodeId) continue
-            const ceType = ((ce.data?.edgeType as string) ?? '').toUpperCase()
-            if (placed.has(otherId)) {
-              // Fine endpoint already on the board — tether, don't dupe.
-              addFlowEdge(dir, card.id, placed.get(otherId)!, 1, ceType, false, card.dimmed)
-              continue
-            }
-            const oNode = nodeMap.get(otherId)
-            const oLabel = labelOf(otherId, oNode)
-            const cCard: FocusCard = {
-              ...baseCard(),
-              id: `x:${aggEdge.id}:${otherId}`,
-              kind: 'entity',
-              nodeId: otherId,
-              band: sign * band,
-              h: CONSTITUENT_H,
-              label: oLabel,
-              type: (oNode?.data?.type as string) ?? 'not loaded',
-              parentId: entry.nodeId,
-              parentLabel: label,
-              unresolved: !oNode,
-              dimmed: !matches(oLabel),
-            }
-            placed.set(otherId, cCard.id)
-            cards.push(cCard)
-            edges.push({
-              id: `fe:${cCard.id}~${card.id}`,
-              source: dir === 'in' ? cCard.id : card.id,
-              target: dir === 'in' ? card.id : cCard.id,
-              count: 1,
-              edgeTypeNorm: ceType,
-              aggregated: false,
-              containment: false,
-              dimmed: cCard.dimmed,
-            })
+        return card
+      }
+
+      /**
+       * An OPENED container: a frame standing for the container, holding
+       * the entities inside it that carry lineage to the focal. Children
+       * go through the same card shape as any neighbour — they get their
+       * own expand affordance, counts, edges and hover actions — so
+       * exploration continues through them instead of dead-ending, which
+       * is what the old terminal constituent cards did.
+       */
+      const placeOpenContainer = (entry: BandEntry, openKey: string) => {
+        const label = labelOf(entry.nodeId, entry.node)
+        const type = (entry.node?.data?.type as string) ?? 'not loaded'
+        const res = containerResults?.get(openKey)
+        const status = containerStatus?.get(openKey)
+        const frameId = `fr:${dir}:${entry.nodeId}`
+
+        // Only entities we haven't already placed elsewhere on the board.
+        const inside = (res?.nodes ?? []).filter(n => !placed.has(n.id))
+        const fq = (frameQueries?.get(openKey) ?? '').trim().toLowerCase()
+        const frameCap = FRAME_CHILD_CAP * (1 + (framePages?.get(openKey) ?? 0))
+        const shownInside = inside.slice(0, frameCap)
+
+        const frame: FocusCard = {
+          ...baseCard(),
+          id: frameId,
+          kind: 'frame',
+          nodeId: entry.nodeId,
+          band: sign * band,
+          label,
+          description: (entry.node?.data?.description as string | undefined) ?? null,
+          type,
+          count: inside.length,
+          rollup: entry.rollup,
+          unresolved: !entry.node,
+          expandKey: openKey,
+          expandKind: 'open',
+          expanded: true,
+          frontier: true,
+          frontierExpanded: true,
+          frameBreadcrumb: (res?.passedThrough ?? []).map(n => labelOf(n.id, n)),
+          frameTruncated: res?.truncated ?? false,
+          frameEmpty: res?.empty ?? false,
+          fetch: status === 'loading' ? 'loading' : status === 'error' ? 'error' : null,
+          dimmed: !matches(label),
+        }
+        placed.set(entry.nodeId, frameId)
+        cards.push(frame)
+
+        // Connection counts come from the server's pair-filtered edges.
+        const countFor = (id: string) => {
+          let n = 0
+          for (const e of res?.edges ?? []) if (e.source === id || e.target === id) n++
+          return Math.max(n, 1)
+        }
+        const edgeTypeFor = (id: string) => {
+          for (const e of res?.edges ?? []) {
+            if (e.source === id || e.target === id) return ((e.data?.edgeType as string) ?? '').toUpperCase()
+          }
+          return ''
+        }
+
+        for (const child of shownInside) {
+          const cLabel = labelOf(child.id, child)
+          const cType = (child.data?.type as string) ?? 'not loaded'
+          const childOpenKey = `${dir}:${child.id}`
+          const childCanOpen = isCoarser(cType, focalType) && entityLevels?.get(cType) !== undefined
+          const childCanHop = !isOutermost && (degreeHints?.get(child.id)?.[dir] ?? -1) !== 0
+          const childKind: FocusExpandKind = childCanOpen ? 'open' : childCanHop ? 'hop' : null
+          const childFrontierKey = `${dir}:${child.id}`
+          const childExpanded = expandedFrontier.has(childFrontierKey)
+          const cCard: FocusCard = {
+            ...baseCard(),
+            id: `n:${child.id}`,
+            kind: 'entity',
+            nodeId: child.id,
+            band: sign * band,
+            label: cLabel,
+            description: (child.data?.description as string | undefined) ?? null,
+            type: cType,
+            parentId: entry.nodeId,
+            parentLabel: label,
+            count: countFor(child.id),
+            edgeTypeNorm: edgeTypeFor(child.id),
+            frameId,
+            expandKey: childCanOpen ? childOpenKey : childFrontierKey,
+            expandKind: childKind,
+            frontier: childKind !== null,
+            frontierExpanded: childExpanded,
+            degreeHint: degreeHints?.get(child.id) ?? null,
+            fetch: fetchStatus?.get(child.id) === 'loading' ? 'loading'
+              : fetchStatus?.get(child.id) === 'error' ? 'error' : null,
+            // The frame's own filter dims, exactly like the global one.
+            dimmed: !matches(cLabel) || (fq !== '' && !cLabel.toLowerCase().includes(fq)),
+          }
+          placed.set(child.id, cCard.id)
+          cards.push(cCard)
+          // Children carry the flow to whatever the container connected to.
+          for (const [refId, stat] of entry.refs) {
+            const refCard = placed.get(refId)
+            if (refCard) addFlowEdge(dir, refCard, cCard.id, stat.count, cCard.edgeTypeNorm, false, cCard.dimmed)
+          }
+          if (childExpanded && !isOutermost) nextRefs.push({ nodeId: child.id, type: cType })
+        }
+
+        if (inside.length > frameCap) {
+          cards.push({
+            ...baseCard(),
+            id: `more:fr:${dir}:${entry.nodeId}`,
+            kind: 'overflow',
+            nodeId: null,
+            band: sign * band,
+            h: OVERFLOW_H,
+            label: `+${(inside.length - frameCap).toLocaleString()} more inside`,
+            type: 'entity',
+            frameId,
+            expandKey: openKey,
+            expandKind: 'more',
+            overflowCount: inside.length - frameCap,
+          })
+        }
+
+        // With nothing rendered inside (loading, empty, error) the frame
+        // would float unconnected — keep its own edge so the picture
+        // still reads.
+        if (shownInside.length === 0) {
+          for (const [refId, stat] of entry.refs) {
+            const refCard = placed.get(refId)
+            if (refCard) addFlowEdge(dir, refCard, frameId, stat.count, stat.edgeTypeNorm, stat.aggregated, frame.dimmed)
           }
         }
-        return card
       }
 
       for (const item of shown) {
         if (item.kind === 'entity') {
-          placeEntity(item.entry)
+          const openKey = `${dir}:${item.entry.nodeId}`
+          if (item.entry.rollup && openContainers.has(openKey)) placeOpenContainer(item.entry, openKey)
+          else placeEntity(item.entry)
           continue
         }
         // Parent group — collapsed: ONE card standing for its members
@@ -689,13 +783,37 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
  * Deterministic hop-band layout, baked into the cards in place:
  * x from the band index; y by stacking each band's cards (in insertion
  * order — the builder already sorted them) centered on the focal's
- * midline (y = 0). Nested cards (group members, drill constituents)
- * indent by NEST_INDENT. The focal band centers the FOCAL card itself
- * on the midline and hangs the contains stack below it.
+ * midline (y = 0). Group members indent by NEST_INDENT. The focal band
+ * centers the FOCAL card itself on the midline and hangs the contains
+ * stack below it.
+ *
+ * A container FRAME is one stacking unit: its own height covers its
+ * children, so the children are pulled out of the band's stacking pass
+ * and positioned inside the frame afterwards. That keeps the band maths
+ * (and its determinism) exactly as it was.
  */
 function layoutBands(cards: FocusCard[]) {
+  // Size every frame to its children first, so the band can stack it as
+  // a single unit.
+  const childrenByFrame = new Map<string, FocusCard[]>()
+  for (const c of cards) {
+    if (!c.frameId) continue
+    const list = childrenByFrame.get(c.frameId)
+    if (list) list.push(c)
+    else childrenByFrame.set(c.frameId, [c])
+  }
+  for (const c of cards) {
+    if (c.kind !== 'frame') continue
+    const kids = childrenByFrame.get(c.id) ?? []
+    const inner = kids.reduce((acc, k) => acc + k.h, 0) + CARD_GAP * Math.max(0, kids.length - 1)
+    c.w = CARD_W + FRAME_PAD * 2
+    c.h = FRAME_HEADER_H + FRAME_PAD + Math.max(inner, kids.length === 0 ? CARD_H : 0) + FRAME_PAD
+  }
+
   const byBand = new Map<number, FocusCard[]>()
   for (const c of cards) {
+    // Frame children are placed relative to their frame, not the band.
+    if (c.frameId) continue
     const list = byBand.get(c.band)
     if (list) list.push(c)
     else byBand.set(c.band, [c])
@@ -712,13 +830,26 @@ function layoutBands(cards: FocusCard[]) {
       }
       continue
     }
-    const nested = (c: FocusCard) => c.id.startsWith('x:') || (c.kind === 'entity' && isGroupMember(c, list))
+    const nested = (c: FocusCard) => c.kind === 'entity' && isGroupMember(c, list)
     const total = list.reduce((acc, c) => acc + c.h, 0) + CARD_GAP * Math.max(0, list.length - 1)
     let y = -total / 2
     for (const c of list) {
       c.x = x + (nested(c) ? NEST_INDENT : 0)
       c.y = y
       y += c.h + CARD_GAP
+    }
+  }
+
+  // Frames are positioned; now lay their children out inside them.
+  const frameById = new Map(cards.filter(c => c.kind === 'frame').map(c => [c.id, c]))
+  for (const [frameId, kids] of childrenByFrame) {
+    const frame = frameById.get(frameId)
+    if (!frame) continue
+    let y = frame.y + FRAME_HEADER_H
+    for (const k of kids) {
+      k.x = frame.x + FRAME_PAD
+      k.y = y
+      y += k.h + CARD_GAP
     }
   }
 }

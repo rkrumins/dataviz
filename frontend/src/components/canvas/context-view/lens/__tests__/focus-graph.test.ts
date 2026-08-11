@@ -4,9 +4,9 @@
  * Everything the interactive graph promises is asserted here against
  * the framework-free builder: parent rollup grouping, coarser-grain
  * demotion, group expansion (lineage-participating children only),
- * aggregate drilling with honest remainders, cycle-safe frontier hop
- * expansion, band caps with overflow cards, dim-don't-drop filtering,
- * and deterministic band layout.
+ * opening a coarse container into only its focal-relevant children,
+ * cycle-safe frontier hop expansion, band caps with overflow cards,
+ * dim-don't-drop filtering, and deterministic band layout.
  */
 import { describe, it, expect } from 'vitest'
 import type { LineageNode, LineageEdge } from '@/store/canvas'
@@ -20,7 +20,7 @@ import {
   BAND_GAP,
   FOCAL_H,
   GROUP_HEADER_H,
-  CONSTITUENT_H,
+  FRAME_CHILD_CAP,
   type FocusGraphInput,
 } from '../focus-graph'
 
@@ -85,8 +85,8 @@ function build(opts: {
     isCoarser: opts.isCoarser ?? (() => false),
     expandedGroups: new Set(),
     expandedFrontier: new Set(),
-    drilledRows: new Set(),
-    rawEdgeById: new Map(opts.edges.map(e => [e.id, e])),
+    openContainers: new Set(),
+    entityLevels: new Map([['CONTAINER', 2], ['DATAPLATFORM', 1], ['dataset', 3], ['schemaField', 4]]),
     bandPages: new Map(),
     query: '',
     hiddenTypes: new Set(),
@@ -144,42 +144,138 @@ describe('buildFocusGraph — grouping and rollups', () => {
     expect(card(g, 'n:C').frontier).toBe(true)
   })
 
-  it('a rolled-up connection expands via DRILL into the children carrying lineage to the focal', () => {
-    // A platform-grain partner reached by an aggregated edge: the card
-    // must offer drill (its constituents), not a next-hop fetch.
-    const agg = edge('agg1', 'Snowflake', 'F', {
-      isAggregated: true, sourceEdgeCount: 2, sourceEdges: ['r1', 'r2'],
-    })
-    // The constituent connects a DESCENDANT of the focal, as real
-    // aggregated edges do — so it is not itself a direct neighbour.
-    const collapsed = build({
-      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM'), node('kid1', 'dataset')],
-      edges: [agg, edge('r1', 'kid1', 'F_field')],
+  it('a coarse partner offers OPEN — without needing any isAggregated flag', () => {
+    // The old predicate keyed off edge.data.isAggregated, which projected
+    // canvas edges do not carry; coarse cards silently became hop cards
+    // and fetched their whole neighbourhood. Grain alone must decide.
+    const g = build({
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM')],
+      edges: [edge('e1', 'Snowflake', 'F')],
       isCoarser: (t) => t === 'DATAPLATFORM',
     })
-    const rollup = card(collapsed, 'n:Snowflake')
+    const rollup = card(g, 'n:Snowflake')
     expect(rollup.rollup).toBe(true)
-    expect(rollup.expandKind).toBe('drill')
-    expect(rollup.frontier).toBe(true)          // offers the expand pill
-    expect(rollup.frontierExpanded).toBe(false) // not yet opened
-    // Children stay hidden until it's expanded.
-    expect(collapsed.cards.find(c => c.nodeId === 'kid1')).toBeUndefined()
+    expect(rollup.expandKind).toBe('open')
+    expect(rollup.expandKey).toBe('in:Snowflake')
+    expect(rollup.frontier).toBe(true)
+    // Nothing inside is shown until it is opened.
+    expect(g.cards.some(c => c.kind === 'frame')).toBe(false)
+  })
 
-    const opened = build({
-      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM'), node('kid1', 'dataset'), node('kid2', 'dataset')],
-      edges: [agg, edge('r1', 'kid1', 'F_field')],
+  it('declines to offer OPEN when the ontology has not leveled the type', () => {
+    // Without a level we cannot ask the server for the next grain down,
+    // and guessing would query the wrong thing.
+    const g = build({
+      nodes: [node('F'), node('Mystery', 'UNLEVELED')],
+      edges: [edge('e1', 'Mystery', 'F')],
+      isCoarser: (t) => t === 'UNLEVELED',
+      over: { entityLevels: new Map() },
+    })
+    expect(card(g, 'n:Mystery').expandKind).not.toBe('open')
+  })
+
+  it('opening a container renders a FRAME holding only the focal-relevant children', () => {
+    const g = build({
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM')],
+      edges: [edge('e1', 'Snowflake', 'F')],
       isCoarser: (t) => t === 'DATAPLATFORM',
       over: {
-        drilledRows: new Set(['g:in:agg1']),
-        drillEdges: new Map([['agg1', [edge('r2', 'kid2', 'F_field')]]]),
+        openContainers: new Set(['in:Snowflake']),
+        containerResults: new Map([['in:Snowflake', {
+          nodes: [node('kid1'), node('kid2')],
+          edges: [edge('r1', 'kid1', 'F'), edge('r2', 'kid2', 'F')],
+          passedThrough: [node('mid', 'CONTAINER')],
+          truncated: false,
+          empty: false,
+        }]]),
+        containerStatus: new Map([['in:Snowflake', 'done' as const]]),
       },
     })
-    const openedRollup = card(opened, 'n:Snowflake')
-    expect(openedRollup.frontierExpanded).toBe(true)
-    // Exactly the constituents that carry lineage to the focal — the
-    // locally-known one plus the fetched one, no other platform content.
-    expect(card(opened, 'x:agg1:kid1').nodeId).toBe('kid1')
-    expect(card(opened, 'x:agg1:kid2').nodeId).toBe('kid2')
+    const frame = card(g, 'fr:in:Snowflake')
+    expect(frame.kind).toBe('frame')
+    expect(frame.count).toBe(2)
+    // A skipped pass-through level is shown, never hidden.
+    expect(frame.frameBreadcrumb).toEqual(['label-mid'])
+
+    // Children are FIRST-CLASS: real ids, own expand affordance, own
+    // edges to what the container connected to.
+    const kid = card(g, 'n:kid1')
+    expect(kid.frameId).toBe('fr:in:Snowflake')
+    expect(kid.expandKind).toBe('hop')
+    expect(kid.frontier).toBe(true)
+    expect(g.edges.find(e => e.id === 'fe:n:kid1->f')).toBeTruthy()
+    // The collapsed rollup card is replaced by the frame.
+    expect(g.cards.find(c => c.id === 'n:Snowflake')).toBeUndefined()
+    // The frame encloses its children.
+    for (const k of [card(g, 'n:kid1'), card(g, 'n:kid2')]) {
+      expect(k.x).toBeGreaterThanOrEqual(frame.x)
+      expect(k.y).toBeGreaterThanOrEqual(frame.y)
+      expect(k.y + k.h).toBeLessThanOrEqual(frame.y + frame.h)
+    }
+  })
+
+  it('an empty open says so instead of rendering unrelated children', () => {
+    const g = build({
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM')],
+      edges: [edge('e1', 'Snowflake', 'F')],
+      isCoarser: (t) => t === 'DATAPLATFORM',
+      over: {
+        openContainers: new Set(['in:Snowflake']),
+        containerResults: new Map([['in:Snowflake', {
+          nodes: [], edges: [], passedThrough: [], truncated: false, empty: true,
+        }]]),
+        containerStatus: new Map([['in:Snowflake', 'done' as const]]),
+      },
+    })
+    const frame = card(g, 'fr:in:Snowflake')
+    expect(frame.frameEmpty).toBe(true)
+    expect(frame.count).toBe(0)
+    // Empty frame keeps its own edge so it stays connected to the picture.
+    expect(g.edges.find(e => e.target === 'f' && e.source === 'fr:in:Snowflake')).toBeTruthy()
+  })
+
+  it('caps children inside a frame with an overflow card, and paging raises it', () => {
+    const kids = Array.from({ length: FRAME_CHILD_CAP + 3 }, (_, i) => node(`k${String(i).padStart(2, '0')}`))
+    const over = {
+      openContainers: new Set(['in:Snowflake']),
+      containerResults: new Map([['in:Snowflake', {
+        nodes: kids,
+        edges: kids.map((k, i) => edge(`r${i}`, k.id, 'F')),
+        passedThrough: [], truncated: false, empty: false,
+      }]]),
+      containerStatus: new Map([['in:Snowflake', 'done' as const]]),
+    }
+    const base = {
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM')],
+      edges: [edge('e1', 'Snowflake', 'F')],
+      isCoarser: (t?: string) => t === 'DATAPLATFORM',
+    }
+    const g = build({ ...base, over })
+    expect(g.cards.filter(c => c.frameId === 'fr:in:Snowflake' && c.kind === 'entity')).toHaveLength(FRAME_CHILD_CAP)
+    expect(card(g, 'more:fr:in:Snowflake').overflowCount).toBe(3)
+
+    const paged = build({ ...base, over: { ...over, framePages: new Map([['in:Snowflake', 1]]) } })
+    expect(paged.cards.find(c => c.id === 'more:fr:in:Snowflake')).toBeUndefined()
+  })
+
+  it('the in-frame filter dims children without removing them', () => {
+    const g = build({
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM')],
+      edges: [edge('e1', 'Snowflake', 'F')],
+      isCoarser: (t) => t === 'DATAPLATFORM',
+      over: {
+        openContainers: new Set(['in:Snowflake']),
+        containerResults: new Map([['in:Snowflake', {
+          nodes: [node('alpha'), node('beta')],
+          edges: [edge('r1', 'alpha', 'F'), edge('r2', 'beta', 'F')],
+          passedThrough: [], truncated: false, empty: false,
+        }]]),
+        containerStatus: new Map([['in:Snowflake', 'done' as const]]),
+        frameQueries: new Map([['in:Snowflake', 'alpha']]),
+      },
+    })
+    expect(card(g, 'n:alpha').dimmed).toBe(false)
+    expect(card(g, 'n:beta').dimmed).toBe(true)   // present, just dimmed
   })
 
   it('a plain entity expands via HOP; a known-zero degree offers nothing', () => {
@@ -215,31 +311,6 @@ describe('buildFocusGraph — grouping and rollups', () => {
     // Members carry their own edges; the bundled group edge is gone.
     expect(g.edges.find(e => e.id === 'fe:n:f1->f')).toBeTruthy()
     expect(g.edges.find(e => e.id === 'fe:g:in:PD->f')).toBeUndefined()
-  })
-})
-
-describe('buildFocusGraph — aggregate drill', () => {
-  it('drills an aggregate into constituent cards and reports the unloaded remainder', () => {
-    const agg = edge('agg1', 'P', 'F', { isAggregated: true, sourceEdgeCount: 3, sourceEdges: ['r1', 'r2', 'r3'] })
-    const r1 = edge('r1', 'p1', 'F')
-    const g = build({
-      nodes: [node('F'), node('P'), node('p1', 'schemaField'), node('p2', 'schemaField')],
-      edges: [agg, r1],
-      over: {
-        drilledRows: new Set(['g:in:agg1']),
-        drillEdges: new Map([['agg1', [edge('r2', 'p2', 'F')]]]),
-      },
-    })
-    const drilled = card(g, 'n:P')
-    expect(drilled.count).toBe(3)              // ×N from sourceEdgeCount
-    expect(drilled.drillKey).toBe('g:in:agg1')
-    expect(drilled.missingConstituents).toBe(1) // r3 not loaded — reported
-    const c1 = card(g, 'x:agg1:p1')
-    expect(c1.h).toBe(CONSTITUENT_H)
-    expect(c1.parentLabel).toBe('label-P')
-    expect(card(g, 'x:agg1:p2')).toBeTruthy()
-    // Constituents tether to the drilled card, flowing toward it.
-    expect(g.edges.find(e => e.source === 'x:agg1:p1' && e.target === 'n:P')).toBeTruthy()
   })
 })
 
