@@ -157,8 +157,16 @@ export interface FocusCard {
    *  "connects to this entity" wording at the first hop and name the
    *  actual partner further out. */
   partnerLabel: string | null
+  /** This entity can hold things, so it offers to open its contents.
+   *  Independent of `expandKind`: "what is inside this" and "what
+   *  connects to this next" are different questions and get different
+   *  controls, rather than one pill whose meaning depends on grain. */
+  canOpenChildren: boolean
+  /** Its contents are currently open (it renders as a frame). */
+  childrenOpen: boolean
   /** Group toggle key into expandedGroups / open key into
-   *  openContainers / frontier key into expandedFrontier. */
+   *  openContainers / frontier key into expandedFrontier. All three are
+   *  `${dir}:${urn}`, so one key serves whichever set applies. */
   expandKey: string | null
   /** True when this group card is currently expanded (header form). */
   expanded: boolean
@@ -217,6 +225,16 @@ export interface FocusGraphInput {
   resolveParent: (id: string) => string | null
   /** isCoarser(partnerType, baseType) — coarser-grain rollup test. */
   isCoarser: (type: string | undefined, baseType: string) => boolean
+  /** Can this entity type hold anything, per the ontology? Decides
+   *  whether a card offers to open its contents.
+   *
+   *  Deliberately the ONTOLOGY and not `childCount`: that field is
+   *  populated by a real count on some read paths and by an unreliable
+   *  stored property on others, so gating on it hid the affordance
+   *  exactly where it was needed. A type that can contain always
+   *  offers; an open that finds nothing says so, which is a real
+   *  answer rather than a missing button. */
+  canContain: (type: string | undefined) => boolean
   expandedGroups: ReadonlySet<string>
   expandedFrontier: ReadonlySet<string>
   /** Containers the user has opened, keyed `${dir}:${urn}`. */
@@ -307,7 +325,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const {
     focalId, incomingRecords, outgoingRecords, edgesByEndpoint, nodeMap,
     containmentEdgeTypes, containsChildren, containsTotal, containsLoading, resolveParent,
-    isCoarser, expandedGroups, expandedFrontier, openContainers,
+    isCoarser, canContain, expandedGroups, expandedFrontier, openContainers,
     containerResults, containerStatus, frameShowAll, frameAllResults,
     frameAllStatus, frameQueries, framePages, entityLevels,
     bandPages, query, hiddenTypes, degreeHints, fetchStatus,
@@ -404,6 +422,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     connected: true, frameShowingAll: false, frameConnectedCount: 0,
     frameLoaded: 0, frameTotal: -1, frameHasMore: false,
     partnerIds: EMPTY_STRINGS, partnerLabel: null,
+    canOpenChildren: false, childrenOpen: false,
     expandKey: null, expanded: false,
     expandKind: null, frontier: false, frontierExpanded: false, deadEnd: false,
     degreeHint: null, fetch: null,
@@ -472,7 +491,12 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     })
   }
   const containsTotalAll = Math.max(containsChildren.length, containsTotal ?? 0)
-  if (containsTotalAll > containsShown.length) {
+  // While the fetch is in flight we know neither the children nor the
+  // count — but the affordance must still be there, or the focal reads
+  // as "contains nothing" for as long as the request takes. `childCount`
+  // is absent on every lineage/trace read path, so that was the common
+  // case, not the rare one.
+  if (containsTotalAll > containsShown.length || (containsLoading && containsShown.length === 0)) {
     pushCard({
       ...baseCard(),
       id: 'more:contains',
@@ -481,7 +505,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       band: 0,
       h: OVERFLOW_H,
       label: containsLoading && containsShown.length === 0
-        ? `loading ${containsTotalAll.toLocaleString()} contained…`
+        ? containsTotalAll > 0 ? `loading ${containsTotalAll.toLocaleString()} contained…` : 'loading contents…'
         : containsShown.length === 0
           ? `contains ${containsTotalAll.toLocaleString()}`
           : `+${(containsTotalAll - containsShown.length).toLocaleString()} more contained`,
@@ -665,9 +689,18 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         // whole neighbourhood instead. An unknown type level means we
         // cannot ask the server for the next grain, so we offer nothing
         // rather than guess. Everything else expands to its own next hop.
-        const canOpen = entry.rollup && entityLevels?.get(type) !== undefined
+        // TWO questions, TWO controls. "What is inside this" was only
+        // ever offered to coarser-grain partners (`entry.rollup`), so an
+        // ordinary same-grain neighbour — a dataset upstream of your
+        // dataset — could never show its columns: the one pill it had
+        // did a lineage hop instead. They are independent now, and a
+        // card may offer both.
+        // `entry.rollup` is itself a canContain-closure test against the
+        // ref's grain, so a coarser partner can contain by construction
+        // even when the caller's ontology predicate has no entry for it.
+        const canOpenKids = (canContain(type) || entry.rollup) && entityLevels?.get(type) !== undefined
         const canHop = !isOutermost && (degreeHints?.get(entry.nodeId)?.[dir] ?? -1) !== 0
-        const expandKind: FocusExpandKind = canOpen ? 'open' : canHop ? 'hop' : null
+        const expandKind: FocusExpandKind = canHop ? 'hop' : null
         const openKey = `${dir}:${entry.nodeId}`
         const card: FocusCard = {
           ...baseCard(),
@@ -687,12 +720,14 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           partnerIds: [...entry.refs.keys()],
           partnerLabel: partnerLabelOf([...entry.refs.keys()]),
           aggregated: entry.agg.aggregated,
-          expandKey: canOpen ? openKey : frontierKey,
+          expandKey: frontierKey,
           expandKind,
-          previewLabels: canOpen
+          canOpenChildren: canOpenKids,
+          childrenOpen: false,
+          previewLabels: canOpenKids
             ? (containerResults?.get(openKey)?.nodes ?? []).slice(0, 3).map(n => labelOf(n.id, n))
             : EMPTY_STRINGS,
-          frontier: expandKind === 'hop' || expandKind === 'open',
+          frontier: expandKind === 'hop',
           frontierExpanded,
           degreeHint: degreeHints?.get(entry.nodeId) ?? null,
           fetch: fetchStatus?.get(entry.nodeId) === 'loading' ? 'loading'
@@ -783,9 +818,16 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           partnerLabel: partnerLabelOf([...entry.refs.keys()]),
           expandKey: openKey,
           expandKind: 'open',
+          canOpenChildren: true,
+          childrenOpen: true,
           expanded: true,
-          frontier: true,
-          frontierExpanded: true,
+          // Opening a card's CONTENTS must not cost it its lineage hop:
+          // the two questions are independent, and a frame that swallowed
+          // the ⊕ ended the walk at whatever you happened to look inside.
+          // `openKey` and the frontier key are the same string, kept in
+          // different sets — so the pill reads the right state.
+          frontier: !isOutermost && (degreeHints?.get(entry.nodeId)?.[dir] ?? -1) !== 0,
+          frontierExpanded: expandedFrontier.has(openKey),
           frameBreadcrumb: (res?.passedThrough ?? []).map(n => labelOf(n.id, n)),
           frameTruncated: res?.truncated ?? false,
           frameEmpty: res?.empty ?? false,
@@ -823,9 +865,14 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           // A child with no lineage to the focal has nothing to expand
           // TOWARDS it — offering a pill there would promise an answer
           // that is empty by construction.
-          const childCanOpen = connected && isCoarser(cType, focalType) && entityLevels?.get(cType) !== undefined
+          // A child that can itself hold things offers the same
+          // chevron — that is what makes the drill go arbitrarily deep
+          // (dataset → columns → nested fields) without leaving the
+          // lens. Its lineage hop stays gated on actually having
+          // lineage; its CONTENTS do not depend on that.
+          const childCanOpenKids = canContain(cType) && entityLevels?.get(cType) !== undefined
           const childCanHop = connected && !isOutermost && (degreeHints?.get(child.id)?.[dir] ?? -1) !== 0
-          const childKind: FocusExpandKind = childCanOpen ? 'open' : childCanHop ? 'hop' : null
+          const childKind: FocusExpandKind = childCanHop ? 'hop' : null
           const childFrontierKey = `${dir}:${child.id}`
           const childExpanded = expandedFrontier.has(childFrontierKey)
           const cCard: FocusCard = {
@@ -846,8 +893,10 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             count: connected ? countFor(child.id) : 0,
             edgeTypeNorm: connected ? edgeTypeFor(child.id) : '',
             frameId,
-            expandKey: childCanOpen ? childOpenKey : childFrontierKey,
+            expandKey: childFrontierKey,
             expandKind: childKind,
+            canOpenChildren: childCanOpenKids,
+            childrenOpen: openContainers.has(childOpenKey),
             frontier: childKind !== null,
             frontierExpanded: childExpanded,
             degreeHint: connected ? (degreeHints?.get(child.id) ?? null) : null,
@@ -898,12 +947,16 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             if (refCard) addFlowEdge(dir, refCard, frameId, stat.count, stat.edgeTypeNorm, stat.aggregated, frame.dimmed)
           }
         }
+        // Same rule as a plain card: an expanded frontier feeds the next
+        // band. Opened frames used to be terminal, so the walk stopped
+        // dead at anything you had looked inside.
+        if (frame.frontierExpanded && !isOutermost) nextRefs.push({ nodeId: entry.nodeId, type })
       }
 
       for (const item of shown) {
         if (item.kind === 'entity') {
           const openKey = `${dir}:${item.entry.nodeId}`
-          if (item.entry.rollup && openContainers.has(openKey)) placeOpenContainer(item.entry, openKey)
+          if (openContainers.has(openKey)) placeOpenContainer(item.entry, openKey)
           else placeEntity(item.entry)
           continue
         }

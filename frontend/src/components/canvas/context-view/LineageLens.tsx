@@ -401,6 +401,13 @@ export function LineageLens({
   const hierarchyMap = useEntityTypeHierarchyMap()
   const entityLevels = useEntityTypeLevels()
   const canContainClosure = useMemo(() => buildCanContainClosure(hierarchyMap), [hierarchyMap])
+  /** Can this type hold anything at all? Straight from the ontology —
+   *  NOT from childCount, which is absent often enough that gating on
+   *  it hid the "open its contents" control exactly where it mattered. */
+  const canContainAnything = useCallback(
+    (type: string | undefined) => (type ? (hierarchyMap[type]?.canContain.length ?? 0) > 0 : false),
+    [hierarchyMap],
+  )
   const isCoarserThan = useCallback(
     (partnerType: string | undefined, baseType: string): boolean =>
       isCoarserGrain(canContainClosure, partnerType, baseType),
@@ -650,19 +657,21 @@ export function LineageLens({
   // A restored link on a wide table paged itself to the end with no
   // user action. Paging past the first page is a deliberate gesture
   // now: the frame's "Load more" control.
-  // The focal's own contents, asked for once. `childCount` is the
-  // entity's own claim about how many it has; when it says "some" and
-  // the canvas happens to have loaded none, the lens fetches them
-  // rather than showing a count it cannot open.
+  // The focal's own contents, asked for once. This used to be gated on
+  // `childCount > 0` — but every lineage and trace read path strips
+  // childCount server-side (`include_child_count=False`; absent entirely
+  // in trace v2), and that is how a focal normally arrives on the canvas.
+  // So the gate read "no children" for the common case and the focal's
+  // contents never loaded. The ontology is the reliable authority on
+  // whether a type contains anything at all; ask it instead.
   const focalKidsAskedRef = useRef<string | null>(null)
   useEffect(() => {
     if (!nodeId || !onLoadChildrenOf) return
     if (focalKidsAskedRef.current === nodeId) return
-    const known = (nodeMap.get(nodeId)?.data?.childCount as number | undefined) ?? 0
-    if (known <= 0) return
+    if (!canContainAnything(nodeMap.get(nodeId)?.data?.type as string | undefined)) return
     focalKidsAskedRef.current = nodeId
     onLoadChildrenOf(nodeId)
-  }, [nodeId, nodeMap, onLoadChildrenOf])
+  }, [nodeId, nodeMap, onLoadChildrenOf, canContainAnything])
 
   const firstPageAskedRef = useRef<Set<string>>(new Set())
   useEffect(() => {
@@ -693,6 +702,7 @@ export function LineageLens({
       containsLoading: childrenStatusOf?.get(nodeId) === 'loading',
       resolveParent,
       isCoarser: isCoarserThan,
+      canContain: canContainAnything,
       expandedGroups: graphCur.expandedGroups,
       expandedFrontier: graphCur.expandedFrontier,
       openContainers: graphCur.openContainers,
@@ -713,7 +723,7 @@ export function LineageLens({
   }, [
     lensOpen, lensViewMode, nodeId, incomingRecords, outgoingRecords,
     edgesByEndpoint, nodeMap, containmentEdgeTypes, focalChildren,
-    resolveParent, isCoarserThan, graphCur.expandedGroups,
+    resolveParent, isCoarserThan, canContainAnything, graphCur.expandedGroups,
     graphCur.expandedFrontier, graphCur.openContainers, graphCur.frameQueries,
     graphCur.framePages, graphCur.bandPages, graphCur.frameShowAll, childrenStatusOf,
     containerResults, containerStatus, frameAllResults, frameAllStatus,

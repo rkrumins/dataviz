@@ -244,6 +244,37 @@ function CardActions({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   )
 }
 
+/** "What's inside this?" — the containment gesture, on the card body.
+ *
+ *  Deliberately a different control in a different place from the
+ *  FrontierPill, which answers the other question ("what connects to
+ *  this next?"). They used to share one ⊕ whose meaning flipped with
+ *  the card's grain, so an ordinary neighbour's columns were simply
+ *  unreachable. A card may now offer both, and each means one thing.
+ *
+ *  Offered from the ontology — whether the TYPE can contain anything —
+ *  not from `childCount`, which most read paths strip. An open that
+ *  comes back empty says so; a hidden control cannot. */
+function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
+  if (!card.canOpenChildren || !card.nodeId || !card.expandKey) return null
+  const Icon = card.childrenOpen ? LucideIcons.ChevronDown : LucideIcons.ChevronRight
+  return (
+    <button
+      type="button"
+      className="nodrag flex-shrink-0 -ml-1 w-4 h-full flex items-center justify-center text-ink-muted/50 hover:text-accent-lineage focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded"
+      title={card.childrenOpen
+        ? `Hide what's inside ${card.label}`
+        : `Show what's inside ${card.label}`}
+      onClick={(e) => {
+        e.stopPropagation()
+        ctx.onOpenContainer(card.expandKey!, card.nodeId!, card.type, card.partnerIds[0] ?? null)
+      }}
+    >
+      <Icon className="w-3 h-3" />
+    </button>
+  )
+}
+
 /** The one expand pill on a card's outward side. What it opens depends
  *  on the card: a rolled-up connection resolves into the constituent
  *  entities that actually carry lineage to the focal ('drill'), while a
@@ -287,24 +318,16 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
     )
   }
   const expanded = card.frontierExpanded
-  const isOpen = card.expandKind === 'open'
-  const openPill = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (isOpen) ctx.onOpenContainer(card.expandKey!, card.nodeId!, card.type, card.partnerIds[0] ?? null)
-    else ctx.onExpandFrontier(card.expandKey!, card.nodeId!)
-  }
   return (
     <button
       type="button"
-      onClick={openPill}
+      onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier(card.expandKey!, card.nodeId!) }}
       title={expanded
-        ? isOpen ? `Close ${card.label}` : `Collapse ${outLeft ? 'upstream of' : 'downstream of'} ${card.label}`
-        : isOpen
-          ? `Open ${card.label} — show what's inside it that connects to ${card.partnerLabel ?? 'this entity'}`
-          : `Expand the next hop ${outLeft ? 'upstream' : 'downstream'} of ${card.label}${hint != null ? ` (${hint.toLocaleString()} known)` : ''}`}
+        ? `Collapse ${outLeft ? 'upstream of' : 'downstream of'} ${card.label}`
+        : `Expand the next hop ${outLeft ? 'upstream' : 'downstream'} of ${card.label}${hint != null ? ` (${hint.toLocaleString()} known)` : ''}`}
       className={cn(
         'absolute top-1/2 -translate-y-1/2 flex items-center justify-center gap-0.5 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors',
-        (isOpen ? false : hint != null) && !expanded ? 'px-1.5' : 'w-5',
+        hint != null && !expanded ? 'px-1.5' : 'w-5',
         expanded
           ? 'bg-accent-lineage/15 border-accent-lineage/50 text-accent-lineage hover:bg-accent-lineage/25'
           : 'bg-canvas-elevated border-black/15 dark:border-white/20 text-ink-muted hover:text-accent-lineage hover:border-accent-lineage/50',
@@ -313,11 +336,9 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
     >
       {(() => {
         if (expanded) return <LucideIcons.Minus className="w-3 h-3" />
-        // An open doesn't know its size until the server answers; a hop
-        // only knows a degree when the backend reported one.
-        const n = isOpen ? null : hint
-        if (n == null) return <LucideIcons.Plus className="w-3 h-3" />
-        return <>{outLeft && <LucideIcons.Plus className="w-2.5 h-2.5" />}{n.toLocaleString()}{!outLeft && <LucideIcons.Plus className="w-2.5 h-2.5" />}</>
+        // A hop only knows a degree when the backend reported one.
+        if (hint == null) return <LucideIcons.Plus className="w-3 h-3" />
+        return <>{outLeft && <LucideIcons.Plus className="w-2.5 h-2.5" />}{hint.toLocaleString()}{!outLeft && <LucideIcons.Plus className="w-2.5 h-2.5" />}</>
       })()}
     </button>
   )
@@ -613,6 +634,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       )}
     >
       <PortHandles />
+      <ContentsChevron card={card} ctx={ctx} />
       {!isConstituent && (
         <div
           className="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0"
@@ -627,9 +649,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
           {card.rollup && (
             <span
               className="flex-shrink-0 flex items-center"
-              title={card.expandKind === 'open'
-                ? `${card.label} holds other entities — open it to see the ones that connect to this entity. It stands for those flows rather than adding one of its own.`
-                : 'Stands for finer flows beneath it — not an additional connection'}
+              title="Stands for finer flows beneath it — not an additional connection"
             >
               <LucideIcons.Layers className="w-2.5 h-2.5 text-ink-muted/50" />
             </span>
@@ -796,6 +816,27 @@ function FocusFrameNode({ data }: NodeProps) {
               : 'Filter what is inside'}
             className="nodrag flex-shrink-0 w-16 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
           />
+        )}
+        {/* The lineage hop, kept in the header rather than as a
+            FrontierPill: the frame's `fetch` tracks the LOOK-INSIDE
+            request, so the pill's loading state would report the wrong
+            fetch. Looking inside something must never end the walk. */}
+        {(card.frontier || card.frontierExpanded) && card.nodeId && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier(card.expandKey!, card.nodeId!) }}
+            title={card.frontierExpanded
+              ? `Collapse ${card.band < 0 ? 'upstream of' : 'downstream of'} ${card.label}`
+              : `Expand the next hop ${card.band < 0 ? 'upstream' : 'downstream'} of ${card.label}`}
+            className={cn(
+              'nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center hover:bg-black/[0.06] dark:hover:bg-white/[0.08]',
+              card.frontierExpanded ? 'text-accent-lineage' : 'text-ink-muted hover:text-accent-lineage',
+            )}
+          >
+            {card.frontierExpanded
+              ? <LucideIcons.Minus className="w-3 h-3" />
+              : <LucideIcons.Plus className="w-3 h-3" />}
+          </button>
         )}
         <button
           type="button"

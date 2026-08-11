@@ -452,7 +452,9 @@ describe('LineageLens on-demand fetch merge', () => {
 
 describe('LineageLens graph mode', () => {
   beforeEach(() => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    // Both are persisted preferences — pin them, or one test's header
+    // click decides the next test's starting state.
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' })
     useCanvasStore.setState({
       nodes: [node('a'), node('b'), node('c')],
       edges: [edge('e1', 'a', 'b'), edge('e2', 'b', 'c')],
@@ -485,7 +487,7 @@ describe('LineageLens graph mode', () => {
     expect(onRecenter).toHaveBeenCalledWith('c')
   })
 
-  it('a coarse partner offers an open pill that asks what is inside it', () => {
+  it('a coarse partner offers a chevron that asks what is inside it', () => {
     const prevSchema = useSchemaStore.getState().schema
     useSchemaStore.setState({
       schema: {
@@ -506,14 +508,57 @@ describe('LineageLens graph mode', () => {
       const onOpenContainer = vi.fn()
       renderLens(['ds'], {}, { onOpenContainer })
 
-      // The coarse partner is not a dead end — it offers to open, worded
-      // as "what inside this connects to me".
-      const pill = screen.getByTitle(/Open label-plat — show what's inside it that connects to this entity/)
-      fireEvent.click(pill)
+      // The coarse partner is not a dead end — it offers its contents,
+      // on a control separate from the lineage hop.
+      fireEvent.click(screen.getByTitle("Show what's inside label-plat"))
       // Opening asks the server for the next grain down (container level
       // 2 → 3), about the partner the card is connected to — the focal
       // itself at the first hop.
       expect(onOpenContainer).toHaveBeenCalledWith('plat', 'ds', 'in', 2)
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
+  // REGRESSION: "what's inside this" was only ever offered to a COARSER
+  // partner, so an ordinary dataset upstream of your dataset had one ⊕
+  // that did a lineage hop — its columns were simply unreachable, and
+  // you had to re-center the whole lens to see them.
+  it('a SAME-GRAIN neighbour offers its contents too, alongside its lineage hop', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [
+          { id: 'DATASET', hierarchy: { level: 3, canContain: ['FIELD'] } },
+          { id: 'FIELD', hierarchy: { level: 4, canContain: [] } },
+        ],
+      },
+    } as never)
+    try {
+      useCanvasStore.setState({
+        nodes: [node('ds', 'DATASET'), node('up', 'DATASET')],
+        edges: [edge('e1', 'up', 'ds')],
+        visibleEdges: [],
+      } as never)
+      const onOpenContainer = vi.fn()
+      const onEnsureFetched = vi.fn()
+      renderLens(['ds'], {}, { onOpenContainer, onEnsureFetched })
+
+      // Two controls, two questions — and using one leaves the other be.
+      fireEvent.click(screen.getByTitle("Show what's inside label-up"))
+      expect(onOpenContainer).toHaveBeenCalledWith('up', 'ds', 'in', 3)
+      expect(onEnsureFetched).not.toHaveBeenCalled()
+
+      // The frame keeps its hop control — looking inside must not end
+      // the walk. (The lens re-asserts an unresolved open on re-render,
+      // so compare across the click rather than counting from zero.)
+      const opensBefore = onOpenContainer.mock.calls.length
+      fireEvent.click(screen.getByTitle(/Expand the next hop upstream of label-up/))
+      expect(onEnsureFetched).toHaveBeenCalledWith('up')
+      expect(onOpenContainer.mock.calls.filter(c => c[0] !== 'up')).toHaveLength(0)
+      expect(onOpenContainer.mock.calls.length).toBeGreaterThanOrEqual(opensBefore)
     } finally {
       useSchemaStore.setState({ schema: prevSchema } as never)
     }
@@ -592,55 +637,83 @@ describe('LineageLens graph mode', () => {
   // edges already on the canvas, while its total came from childCount.
   // So the lens would say "contains 128" and show none of them: you had
   // to leave Focus mode, expand the node on the canvas, and come back.
+  // And the ASK is driven by the ontology, not by childCount: every
+  // lineage and trace read path strips childCount server-side, so a
+  // focal that arrived by a trace claims zero children it in fact has.
   it('asks for the focal\'s children, and shows them, without visiting the canvas', () => {
-    const withKids = { ...node('ds'), data: { ...node('ds').data, childCount: 3 } } as LineageNode
-    useCanvasStore.setState({
-      nodes: [withKids],
-      edges: [],                      // no containment edges loaded at all
-      visibleEdges: [],
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [
+          { id: 'dataset', hierarchy: { level: 3, canContain: ['schemaField'] } },
+          { id: 'schemaField', hierarchy: { level: 4, canContain: [] } },
+        ],
+      },
     } as never)
-    const onLoadChildrenOf = vi.fn()
-    const { rerender } = render(
-      <LineageLens
-        history={{ entries: ['ds'], cursor: 0 }}
-        onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
-        onLoadChildrenOf={onLoadChildrenOf}
-      />,
-    )
-    // It asks, because the entity says it has children.
-    expect(onLoadChildrenOf).toHaveBeenCalledWith('ds')
+    try {
+      useCanvasStore.setState({
+        nodes: [node('ds')],            // no childCount at all
+        edges: [],                      // no containment edges loaded either
+        visibleEdges: [],
+      } as never)
+      const onLoadChildrenOf = vi.fn()
+      const { rerender } = render(
+        <LineageLens
+          history={{ entries: ['ds'], cursor: 0 }}
+          onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
+          onLoadChildrenOf={onLoadChildrenOf}
+        />,
+      )
+      // It asks, because a dataset is a type that holds columns.
+      expect(onLoadChildrenOf).toHaveBeenCalledWith('ds')
 
-    // And once the answer lands, they are on screen — no canvas trip.
-    rerender(
-      <LineageLens
-        history={{ entries: ['ds'], cursor: 0 }}
-        onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
-        onLoadChildrenOf={onLoadChildrenOf}
-        childrenOf={new Map([['ds', {
-          children: [node('col_a'), node('col_b'), node('col_c')],
-          hasMore: false,
-          total: 3,
-        }]])}
-        childrenStatusOf={new Map([['ds', 'done' as const]])}
-      />,
-    )
-    // The stack starts collapsed, but it now names a real, openable
-    // total rather than a count with nothing behind it.
-    fireEvent.click(screen.getByText('contains 3'))
-    // Named, not rendered as a urn tail — fetched children reach the
-    // lens's node map like any other resolved entity.
-    expect(screen.getByText('label-col_a')).toBeTruthy()
-    expect(screen.getByText('label-col_b')).toBeTruthy()
-    expect(screen.getByText('label-col_c')).toBeTruthy()
+      // And once the answer lands, they are on screen — no canvas trip.
+      rerender(
+        <LineageLens
+          history={{ entries: ['ds'], cursor: 0 }}
+          onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
+          onLoadChildrenOf={onLoadChildrenOf}
+          childrenOf={new Map([['ds', {
+            children: [node('col_a'), node('col_b'), node('col_c')],
+            hasMore: false,
+            total: 3,
+          }]])}
+          childrenStatusOf={new Map([['ds', 'done' as const]])}
+        />,
+      )
+      // The stack starts collapsed, but it now names a real, openable
+      // total rather than a count with nothing behind it.
+      fireEvent.click(screen.getByText('contains 3'))
+      // Named, not rendered as a urn tail — fetched children reach the
+      // lens's node map like any other resolved entity.
+      expect(screen.getByText('label-col_a')).toBeTruthy()
+      expect(screen.getByText('label-col_b')).toBeTruthy()
+      expect(screen.getByText('label-col_c')).toBeTruthy()
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
   })
 
-  it('does not ask for children of an entity that reports none', () => {
-    useCanvasStore.setState({
-      nodes: [node('ds')], edges: [], visibleEdges: [],
+  it('does not ask for children of a type that can hold nothing', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        entityTypes: [{ id: 'schemaField', hierarchy: { level: 4, canContain: [] } }],
+      },
     } as never)
-    const onLoadChildrenOf = vi.fn()
-    renderLens(['ds'], {}, { onLoadChildrenOf })
-    expect(onLoadChildrenOf).not.toHaveBeenCalled()
+    try {
+      useCanvasStore.setState({
+        nodes: [node('col', 'schemaField')], edges: [], visibleEdges: [],
+      } as never)
+      const onLoadChildrenOf = vi.fn()
+      renderLens(['col'], {}, { onLoadChildrenOf })
+      expect(onLoadChildrenOf).not.toHaveBeenCalled()
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
   })
 
   // REGRESSION: container answers were passed straight into the graph
@@ -793,7 +866,7 @@ describe('LineageLens graph mode', () => {
       } as never)
       renderLens(['ds'], {}, { onOpenContainer: vi.fn(), onLoadAllChildren })
 
-      fireEvent.click(screen.getByTitle(/Open label-plat/))
+      fireEvent.click(screen.getByTitle("Show what's inside label-plat"))
       // The frame comes up already in "everything inside".
       expect(screen.getByLabelText('Everything inside, lineage marked').getAttribute('aria-pressed')).toBe('true')
       usePreferencesStore.setState({ lensFrameChildren: 'connected' })

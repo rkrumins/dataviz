@@ -51,6 +51,7 @@ function build(opts: {
   nodes: LineageNode[]
   edges: LineageEdge[]
   isCoarser?: (t: string | undefined, base: string) => boolean
+  canContain?: (t: string | undefined) => boolean
   over?: Partial<FocusGraphInput>
 }) {
   const focalId = opts.focal ?? 'F'
@@ -86,6 +87,7 @@ function build(opts: {
     containsChildren,
     resolveParent,
     isCoarser: opts.isCoarser ?? (() => false),
+    canContain: opts.canContain ?? (() => false),
     expandedGroups: new Set(),
     expandedFrontier: new Set(),
     openContainers: new Set(),
@@ -147,7 +149,7 @@ describe('buildFocusGraph — grouping and rollups', () => {
     expect(card(g, 'n:C').frontier).toBe(true)
   })
 
-  it('a coarse partner offers OPEN — without needing any isAggregated flag', () => {
+  it('a coarse partner can open its contents — without needing any isAggregated flag', () => {
     // The old predicate keyed off edge.data.isAggregated, which projected
     // canvas edges do not carry; coarse cards silently became hop cards
     // and fetched their whole neighbourhood. Grain alone must decide.
@@ -158,23 +160,86 @@ describe('buildFocusGraph — grouping and rollups', () => {
     })
     const rollup = card(g, 'n:Snowflake')
     expect(rollup.rollup).toBe(true)
-    expect(rollup.expandKind).toBe('open')
+    expect(rollup.canOpenChildren).toBe(true)
+    expect(rollup.childrenOpen).toBe(false)
     expect(rollup.expandKey).toBe('in:Snowflake')
-    expect(rollup.frontier).toBe(true)
     // Nothing inside is shown until it is opened.
     expect(g.cards.some(c => c.kind === 'frame')).toBe(false)
   })
 
-  it('declines to offer OPEN when the ontology has not leveled the type', () => {
+  it('declines to offer contents when the ontology has not leveled the type', () => {
     // Without a level we cannot ask the server for the next grain down,
     // and guessing would query the wrong thing.
     const g = build({
       nodes: [node('F'), node('Mystery', 'UNLEVELED')],
       edges: [edge('e1', 'Mystery', 'F')],
       isCoarser: (t) => t === 'UNLEVELED',
+      canContain: (t) => t === 'UNLEVELED',
       over: { entityLevels: new Map() },
     })
-    expect(card(g, 'n:Mystery').expandKind).not.toBe('open')
+    expect(card(g, 'n:Mystery').canOpenChildren).toBe(false)
+  })
+
+  it('offers contents to a SAME-GRAIN neighbour — the reported failure', () => {
+    // A dataset upstream of your dataset is not coarser, so the old
+    // `entry.rollup` gate gave it a lineage hop and nothing else: its
+    // columns were unreachable without re-centering the whole lens.
+    const g = build({
+      nodes: [node('F'), node('U', 'dataset')],
+      edges: [edge('e1', 'U', 'F')],
+      canContain: (t) => t === 'dataset',
+    })
+    const u = card(g, 'n:U')
+    expect(u.rollup).toBe(false)
+    expect(u.canOpenChildren).toBe(true)
+    // The two gestures are independent — it still offers its lineage hop.
+    expect(u.expandKind).toBe('hop')
+    expect(u.frontier).toBe(true)
+  })
+
+  it('offers no contents when the type can contain nothing', () => {
+    const g = build({
+      nodes: [node('F'), node('c1', 'schemaField')],
+      edges: [edge('e1', 'c1', 'F')],
+      canContain: () => false,
+    })
+    expect(card(g, 'n:c1').canOpenChildren).toBe(false)
+    expect(card(g, 'n:c1').expandKind).toBe('hop')
+  })
+
+  // REGRESSION: an opened frame carried `frontier/frontierExpanded: true`
+  // unconditionally, rendered no hop control, and never fed the next
+  // band — so looking inside anything ended the walk there.
+  it('an opened frame keeps its own lineage hop, and expanding it reaches the next band', () => {
+    const base = {
+      nodes: [node('F'), node('Snowflake', 'DATAPLATFORM'), node('Up')],
+      edges: [edge('e1', 'Snowflake', 'F'), edge('e2', 'Up', 'Snowflake')],
+      isCoarser: (t?: string) => t === 'DATAPLATFORM',
+      openRes: {
+        openContainers: new Set(['in:Snowflake']),
+        containerResults: new Map([['in:Snowflake', {
+          nodes: [node('kid1')], edges: [edge('r1', 'kid1', 'F')],
+          passedThrough: [], truncated: false, empty: false,
+        }]]),
+        containerStatus: new Map([['in:Snowflake', 'done' as const]]),
+      },
+    }
+    const closed = build({ ...base, over: base.openRes })
+    const frame = card(closed, 'fr:in:Snowflake')
+    // Offered, not yet taken — and the hop is a separate question.
+    expect(frame.frontier).toBe(true)
+    expect(frame.frontierExpanded).toBe(false)
+    expect(closed.cards.some(c => c.nodeId === 'Up')).toBe(false)
+
+    const walked = build({
+      ...base,
+      over: { ...base.openRes, expandedFrontier: new Set(['in:Snowflake']) },
+    })
+    expect(card(walked, 'fr:in:Snowflake').frontierExpanded).toBe(true)
+    // The frame's own upstream now sits a band further out, and the
+    // frame's children are still there — both answers at once.
+    expect(card(walked, 'n:Up').band).toBe(-2)
+    expect(card(walked, 'n:kid1').frameId).toBe('fr:in:Snowflake')
   })
 
   it('opening a container renders a FRAME holding only the focal-relevant children', () => {
@@ -572,7 +637,7 @@ describe('buildFocusGraph — frontier hop expansion', () => {
     })
     const c = card(g, 'n:C')
     expect(c.band).toBe(2)
-    expect(c.expandKind).toBe('open')
+    expect(c.canOpenChildren).toBe(true)
     // The question is about B, and the frame says so.
     expect(c.partnerIds).toEqual(['B'])
     expect(c.partnerLabel).toBe('label-B')
