@@ -588,6 +588,49 @@ describe('LineageLens graph mode', () => {
     expect(screen.queryByText('+5 more')).toBeNull()
   })
 
+  // REGRESSION: container answers were passed straight into the graph
+  // builder and nowhere else, so entities the server had just NAMED for
+  // an opened frame were unknown to the rest of the lens — they rendered
+  // as a urn tail ("a random id"), typed "not loaded", flagged not on
+  // canvas, and blank when focused.
+  it('resolves names the canvas store never had from the container answer', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [
+          { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
+          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
+        ],
+      },
+    } as never)
+    try {
+      // The canvas knows nothing about `deep-kid`.
+      useCanvasStore.setState({
+        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
+        edges: [edge('e1', 'plat', 'ds')],
+        visibleEdges: [],
+      } as never)
+      renderLens(['ds'], {}, {
+        onOpenContainer: vi.fn(),
+        graphSeed: { nodeId: 'ds', expandedGroups: [], expandedFrontier: [], openContainers: ['in:plat'] },
+        containerResults: new Map([['in:plat', {
+          nodes: [node('urn:li:dataset:(sf,warehouse.public.deep_kid,PROD)', 'DATASET')],
+          edges: [edge('r1', 'urn:li:dataset:(sf,warehouse.public.deep_kid,PROD)', 'ds')],
+          passedThrough: [], truncated: false, empty: false,
+        }]]),
+        containerStatus: new Map([['in:plat', 'done' as const]]),
+      })
+      // Its real label — not "PROD", the urn tail the unresolved
+      // fallback produces and which reads as a random id.
+      expect(screen.getByText('label-urn:li:dataset:(sf,warehouse.public.deep_kid,PROD)')).toBeTruthy()
+      expect(screen.queryByText('PROD')).toBeNull()
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
   // REGRESSION: a restored exploration put its open containers into
   // state but never re-asked the server, so a shared link reopened
   // frames that stayed empty forever. The kick is driven off the built

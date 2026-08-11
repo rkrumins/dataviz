@@ -31,9 +31,13 @@ left and its **data consumers** (downstream) to the right, connected by
 direction-tinted edges.
 
 Data flows **left to right** throughout, so the layout reads the same way the
-canvas does. Neighbors that belong to the same parent — say, six fields of one
-dataset — arrive **rolled up into a single parent card** with a count, so a
-busy entity reads as "which datasets touch me" first. Coarser partners — a
+canvas does. Each connected entity appears **once per direction**, however many
+relationships reach it: when a rolled-up summary and a direct relationship both
+describe the same connection, they read as one card, with the extra
+relationship named on it rather than given a second card of its own. Neighbors
+that belong to the same parent — say, six fields of one dataset — arrive
+**rolled up into a single parent card** with a count, so a busy entity reads as
+"which datasets touch me" first. Coarser partners — a
 container, a platform — arrive the same way, as one muted card standing for
 everything inside them. Closed cards **name a few of the things they hold**,
 so you can often tell what's in there without opening it, and the focal's own
@@ -104,13 +108,15 @@ The Lens is built for exploring, not just reading:
   the pill shows it (**+12**); the Lens never invents a number.
 - **Open a card that stands for many things** — a parent group, a container,
   a whole platform — and it unfolds into a frame holding **only the entities
-  inside it that connect to the entity you're focused on**. Those children are
-  ordinary cards: focus them, open them in turn, reveal them on the canvas. A
-  platform that merely passes lineage through a single container is walked
-  through for you, with the levels it skipped shown in the frame's header.
-  Frames say how many they hold, offer a **Find** box once there are more than
-  a few, and state plainly when nothing inside connects rather than leaving
-  you guessing.
+  inside it that connect to the card it hangs off**. At the first hop that's
+  the entity you focused; further out it's the card's own partner, and the
+  frame's header names it ("4 connected to `STG_ORDERS`") so you always know
+  which question was answered. Those children are ordinary cards: focus them,
+  open them in turn, reveal them on the canvas. A platform that merely passes
+  lineage through a single container is walked through for you, with the
+  levels it skipped shown in the frame's header. Frames say how many they
+  hold, offer a **Find** box once there are more than a few, and state plainly
+  when nothing inside connects rather than leaving you guessing.
 - **Show everything inside**, not just the connected part, with the small
   toggle in a frame's header (**⛓ Connected** | **▤ All**). "All" lists every
   column, table or dataset the container holds, in the source system's own

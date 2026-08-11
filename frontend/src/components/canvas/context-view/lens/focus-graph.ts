@@ -52,6 +52,11 @@ export const FRAME_PAD = 10
 
 const EMPTY_STRINGS: string[] = []
 
+/** Placeholder type for an entity the lens could not resolve. Named so
+ *  grain comparisons can recognise it instead of silently treating it
+ *  as a real type that nothing is coarser than. */
+export const UNRESOLVED_TYPE = 'not loaded'
+
 export const CARD_W = 240
 export const FOCAL_H = 120
 export const CARD_H = 64
@@ -476,7 +481,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           // anywhere (any band, either side, the focal itself) gets an
           // edge to its existing card instead of a duplicate.
           refContrib.set(ref.nodeId, (refContrib.get(ref.nodeId) ?? 0) + 1)
-          const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
+          const t = (r.neighborNode?.data?.type as string) ?? UNRESOLVED_TYPE
           if (hiddenTypes.has(t)) { hiddenByChips++; continue }
           // From the RECORD, not the edge: the derivation folds a
           // synthetic rollup into its concrete sibling, so the flag no
@@ -499,7 +504,15 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
               count: 0,
               edgeTypeNorm: r.edgeTypeNorm,
               agg: { aggregated: false },
-              rollup: isCoarser(r.neighborNode?.data?.type as string | undefined, ref.type),
+              // An unresolved reference has the placeholder type, and
+              // nothing is ever "coarser than 'not loaded'" — which
+              // silently downgraded every rollup behind it from an
+              // open into a hop. Fall back to the focal's grain: the
+              // walk is anchored there, so it is the honest baseline.
+              rollup: isCoarser(
+                r.neighborNode?.data?.type as string | undefined,
+                ref.type === UNRESOLVED_TYPE ? focalType : ref.type,
+              ),
               refs: new Map(),
             }
             entryMap.set(r.neighborId, entry)
@@ -599,7 +612,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
 
       const placeEntity = (entry: BandEntry) => {
         const label = labelOf(entry.nodeId, entry.node)
-        const type = (entry.node?.data?.type as string) ?? 'not loaded'
+        const type = (entry.node?.data?.type as string) ?? UNRESOLVED_TYPE
         const parentId = resolveParent(entry.nodeId)
         const frontierKey = `${dir}:${entry.nodeId}`
         const frontierExpanded = expandedFrontier.has(frontierKey)
@@ -674,7 +687,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
        */
       const placeOpenContainer = (entry: BandEntry, openKey: string) => {
         const label = labelOf(entry.nodeId, entry.node)
-        const type = (entry.node?.data?.type as string) ?? 'not loaded'
+        const type = (entry.node?.data?.type as string) ?? UNRESOLVED_TYPE
         const res = containerResults?.get(openKey)
         const status = containerStatus?.get(openKey)
         const frameId = `fr:${dir}:${entry.nodeId}`
@@ -766,7 +779,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
 
         for (const child of shownInside) {
           const cLabel = labelOf(child.id, child)
-          const cType = (child.data?.type as string) ?? 'not loaded'
+          const cType = (child.data?.type as string) ?? UNRESOLVED_TYPE
           const connected = connectedIds.has(child.id)
           const childOpenKey = `${dir}:${child.id}`
           // A child with no lineage to the focal has nothing to expand

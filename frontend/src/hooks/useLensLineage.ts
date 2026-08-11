@@ -200,7 +200,13 @@ export function useLensLineage(
           }
         }
       }
-      const named = await resolveNames(edges.flatMap(e => [e.source, e.target]).filter(p => p !== urn))
+      // The node ITSELF is in the batch, not just its partners. Walking
+      // to an entity the canvas never loaded used to leave the focal
+      // card with a urn-tail label and type "not loaded" — the lens
+      // looked blank at exactly the moment the user asked about it.
+      // resolveNames already skips anything the store has, so this is
+      // free whenever the node was on the canvas anyway.
+      const named = await resolveNames([urn, ...edges.flatMap(e => [e.source, e.target])])
       if (session !== sessionRef.current) return
       setState(prev => {
         const edgesByNode = new Map(prev.edgesByNode)

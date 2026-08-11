@@ -84,6 +84,24 @@ describe('useLensLineage', () => {
     expect(getEdges).toHaveBeenCalledTimes(4)
   })
 
+  // REGRESSION: the name batch explicitly excluded the node itself, so
+  // walking to an entity the canvas never loaded left the FOCAL card
+  // with a urn-tail label and type "not loaded" — the lens looked blank
+  // at exactly the moment the user asked about that entity.
+  it('names the walked-to node itself, not just its partners', async () => {
+    const { provider, getNodes } = makeProvider(
+      (q) => (q.sourceUrns?.length ? [ge('e-out', 'a', 'x')] : []),
+      (q) => (q.urns ?? []).map(u => gn(u, `Name of ${u}`)),
+    )
+    const { result } = renderHook(() => useLensLineage(['a'], provider, []))
+    await waitFor(() => expect(result.current.status.get('a')).toBe('done'))
+
+    expect(getNodes).toHaveBeenCalledWith(expect.objectContaining({
+      urns: expect.arrayContaining(['a']),
+    }))
+    expect(result.current.supplementalNodes.get('a')?.data.label).toBe('Name of a')
+  })
+
   it('does not cache URNs getNodes failed to return (they stay retryable)', async () => {
     // getNodes returns ONLY 'x', never 'z' — 'z' must not be marked as
     // resolved, so a later fetch can try again instead of stranding it

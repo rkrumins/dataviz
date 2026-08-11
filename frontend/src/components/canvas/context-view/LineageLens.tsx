@@ -256,11 +256,22 @@ export function LineageLens({
   const nodeMap = useMemo(() => {
     const m = new Map<string, LineageNode>()
     if (!lensOpen) return m
-    // Fetched partners first; store nodes win (they carry full canvas data).
+    // Lowest precedence first; store nodes win (they carry full canvas
+    // data). Container answers are folded in because otherwise the
+    // entities the server just named for an opened frame stay unknown
+    // to the rest of the lens — rendering as a URN tail ("a random id"),
+    // typed "not loaded", and blank when focused.
+    if (containerResults) for (const r of containerResults.values()) {
+      for (const n of r.nodes) m.set(n.id, n)
+      for (const n of r.passedThrough) m.set(n.id, n)
+    }
+    if (frameAllResults) for (const r of frameAllResults.values()) {
+      for (const n of r.children) m.set(n.id, n)
+    }
     if (supplementalNodes) for (const [id, n] of supplementalNodes) m.set(id, n)
     for (const n of nodes) m.set(n.id, n)
     return m
-  }, [nodes, supplementalNodes, lensOpen])
+  }, [nodes, supplementalNodes, containerResults, frameAllResults, lensOpen])
 
   // Store edges (canvas truth) merged with on-demand fetched edges
   // (data-source truth). A fetched edge is redundant — and skipped —
