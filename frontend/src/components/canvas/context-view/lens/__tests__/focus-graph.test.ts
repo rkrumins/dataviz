@@ -282,6 +282,44 @@ describe('buildFocusGraph — grouping and rollups', () => {
   })
 })
 
+describe('buildFocusGraph — one card per entity', () => {
+  // REGRESSION: group header cards used to be pushed without registering
+  // in `placed` — the only card kind that skipped the guard. So a parent
+  // that was BOTH a neighbour in its own right (via the synthetic
+  // AGGREGATED rollup edge to the container) and the resolved parent of
+  // ≥2 other neighbours (via their raw edges) produced two cards with
+  // the same label: `n:PD` and `g:in:PD`.
+  it('does not draw a parent twice when it is also a neighbour', () => {
+    const g = build({
+      nodes: [node('F'), node('PD'), node('f1', 'schemaField'), node('f2', 'schemaField')],
+      edges: [
+        // The rollup edge makes the parent a neighbour of the focal...
+        { ...edge('agg1', 'PD', 'F'), data: { edgeType: 'AGGREGATED', isAggregated: true, edgeCount: 2 } } as LineageEdge,
+        // ...while its children carry the raw flows.
+        edge('e1', 'f1', 'F'), edge('e2', 'f2', 'F'),
+        contains('c1', 'PD', 'f1'), contains('c2', 'PD', 'f2'),
+      ],
+    })
+    const forPD = g.cards.filter(c => c.nodeId === 'PD')
+    expect(forPD).toHaveLength(1)
+    // Its children hang off that one card rather than a second one.
+    expect(g.cards.some(c => c.id === 'g:in:PD')).toBe(false)
+    expect(card(g, 'n:PD')).toBeTruthy()
+  })
+
+  it('still groups children under a parent that is NOT itself a neighbour', () => {
+    const g = build({
+      nodes: [node('F'), node('PD'), node('f1', 'schemaField'), node('f2', 'schemaField')],
+      edges: [
+        edge('e1', 'f1', 'F'), edge('e2', 'f2', 'F'),
+        contains('c1', 'PD', 'f1'), contains('c2', 'PD', 'f2'),
+      ],
+    })
+    expect(card(g, 'g:in:PD').kind).toBe('group')
+    expect(g.cards.some(c => c.id === 'n:PD')).toBe(false)
+  })
+})
+
 describe('buildFocusGraph — a frame showing every child', () => {
   const base = {
     nodes: [node('F'), node('Snowflake', 'DATAPLATFORM')],

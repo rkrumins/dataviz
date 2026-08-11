@@ -1765,6 +1765,18 @@ function NeighborRow({
           >
             {edgeLabelFor(r.edgeTypeNorm, edgeTypeInfo)}
           </span>
+          {/* Relationships folded into this one connection — the row is
+              per connection, so the extra types are named rather than
+              given a duplicate row of their own. */}
+          {r.alsoTypes.map(t => (
+            <span
+              key={t}
+              className="flex-shrink-0 px-1 rounded bg-black/[0.04] dark:bg-white/[0.06] uppercase tracking-wide text-ink-muted/60"
+              title={`Also connected by ${edgeLabelFor(t, edgeTypeInfo)} — shown as one connection, not two`}
+            >
+              +{edgeLabelFor(t, edgeTypeInfo)}
+            </span>
+          ))}
           {drill ? (
             // The ×N badge IS the drill toggle — same refine gesture as
             // the walk columns (stopPropagation: card click re-centers).

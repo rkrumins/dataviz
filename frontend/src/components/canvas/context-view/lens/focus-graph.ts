@@ -278,10 +278,11 @@ interface BandEntry {
   refs: Map<string, { count: number; edgeTypeNorm: string; aggregated: boolean }>
 }
 
-const recordCount = (r: NeighborRecord): number => {
-  const d = r.edge.data as { isAggregated?: boolean; sourceEdgeCount?: number } | undefined
-  return d?.isAggregated ? Math.max(d.sourceEdgeCount ?? 1, 1) : 1
-}
+/** How many underlying connections a record stands for. The derivation
+ *  already folded synthetic rollups into their concrete sibling and put
+ *  the honest floor on `bundledCount` — re-deriving it from the edge
+ *  here would lose the absorbed weight. */
+const recordCount = (r: NeighborRecord): number => Math.max(r.bundledCount, 1)
 
 export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const {
@@ -484,8 +485,16 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           entry.count += n
           if (aggData?.isAggregated) entry.agg = { aggregated: true }
           const refStat = entry.refs.get(ref.nodeId)
-          if (refStat) refStat.count += n
-          else entry.refs.set(ref.nodeId, { count: n, edgeTypeNorm: r.edgeTypeNorm, aggregated: !!aggData?.isAggregated })
+          if (refStat) {
+            refStat.count += n
+            // Mixed relationship types bundle into one edge, so the
+            // edge stops claiming a single type rather than reporting
+            // whichever record happened to arrive first.
+            if (refStat.edgeTypeNorm !== r.edgeTypeNorm) refStat.edgeTypeNorm = ''
+            if (aggData?.isAggregated) refStat.aggregated = true
+          } else {
+            entry.refs.set(ref.nodeId, { count: n, edgeTypeNorm: r.edgeTypeNorm, aggregated: !!aggData?.isAggregated })
+          }
         }
       }
 
@@ -512,7 +521,12 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       for (const e of entries) {
         if (e.rollup) { rollups.push(e); continue }
         const p = resolveParent(e.nodeId)
-        if (p && p !== focalId && !refs.some(r => r.nodeId === p)) {
+        // A parent that is ITSELF a neighbour already has (or will get)
+        // its own card — grouping under it too would draw the same
+        // entity twice, which is exactly what a rollup edge to the
+        // container plus raw edges to its children used to produce.
+        const parentHasOwnCard = p != null && (entryMap.has(p) || placed.has(p))
+        if (p && p !== focalId && !parentHasOwnCard && !refs.some(r => r.nodeId === p)) {
           const g = groups.get(p)
           if (g) g.push(e)
           else groups.set(p, [e])
@@ -845,6 +859,11 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           matchesInside: expanded ? 0 : memberMatches,
         }
         cards.push(gCard)
+        // The group card STANDS FOR its parent entity, so register it
+        // like any other placed node: a later band (or the other
+        // direction) that meets the same parent draws an edge to this
+        // card instead of minting a second one for it.
+        placed.set(item.parentId, gCard.id)
         if (!expanded) {
           // Bundled edges: one per reference node the members touch.
           const refSums = new Map<string, number>()
