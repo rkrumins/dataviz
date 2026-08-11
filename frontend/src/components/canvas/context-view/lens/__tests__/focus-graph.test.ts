@@ -521,6 +521,31 @@ describe('buildFocusGraph — frontier hop expansion', () => {
     expect(g.edges.find(e => e.id === 'fe:n:B->n:C')).toBeTruthy()
   })
 
+  // REGRESSION: opening a container always asked "what inside it
+  // connects to the FOCAL". At band 2+ the card has no lineage with the
+  // focal at all, so the server answered "nothing" — correctly — and
+  // every deeper open read "Nothing inside X connects to this entity".
+  // The card must carry the partner it is ACTUALLY connected to.
+  it('names the partner an open should ask about — the previous band, not the focal', () => {
+    const g = build({
+      nodes: [node('F'), node('B'), node('C', 'CONTAINER')],
+      edges: [edge('e1', 'F', 'B'), edge('e2', 'B', 'C')],
+      isCoarser: (t) => t === 'CONTAINER',
+      over: { expandedFrontier: new Set(['out:B']) },
+    })
+    const c = card(g, 'n:C')
+    expect(c.band).toBe(2)
+    expect(c.expandKind).toBe('open')
+    // The question is about B, and the frame says so.
+    expect(c.partnerIds).toEqual(['B'])
+    expect(c.partnerLabel).toBe('label-B')
+
+    // A band-1 card's partner IS the focal, so the wording stays plain.
+    const b = card(g, 'n:B')
+    expect(b.partnerIds).toEqual(['F'])
+    expect(b.partnerLabel).toBeNull()
+  })
+
   it('never places a node twice — a cycle adds an edge to the existing card', () => {
     const g = build({
       nodes: [node('F'), node('B')],

@@ -141,6 +141,17 @@ export interface FocusCard {
   frameTotal: number
   /** Frame cards only — more children exist on the server than loaded. */
   frameHasMore: boolean
+  /** The entities THIS card is connected to in the picture — its
+   *  previous-band partners (the focal, at band 1). Opening a container
+   *  must ask what inside it connects to a PARTNER: a band-2 card has
+   *  no direct lineage with the focal, so anchoring the question there
+   *  is answered honestly, and uselessly, with "nothing". */
+  partnerIds: string[]
+  /** Human name of the partner an open would ask about — NULL when that
+   *  partner is the focal itself, which lets the UI keep its plain
+   *  "connects to this entity" wording at the first hop and name the
+   *  actual partner further out. */
+  partnerLabel: string | null
   /** Group toggle key into expandedGroups / open key into
    *  openContainers / frontier key into expandedFrontier. */
   expandKey: string | null
@@ -330,6 +341,13 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
    *  twice — a repeat sighting only adds an edge to the existing card
    *  (this is what makes cyclic lineage safe to expand). */
   const placed = new Map<string, string>()
+  /** The partner an open should ask about, named for the UI. Null when
+   *  it is the focal — band 1 keeps the unqualified wording. */
+  const partnerLabelOf = (refIds: string[]): string | null => {
+    const first = refIds[0]
+    if (!first || first === focalId) return null
+    return labelOf(first, nodeMap.get(first))
+  }
 
   const focalNode = nodeMap.get(focalId)
   const focalType = (focalNode?.data?.type as string) ?? 'entity'
@@ -345,6 +363,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     frameId: null, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
     connected: true, frameShowingAll: false, frameConnectedCount: 0,
     frameLoaded: 0, frameTotal: -1, frameHasMore: false,
+    partnerIds: EMPTY_STRINGS, partnerLabel: null,
     expandKey: null, expanded: false,
     expandKind: null, frontier: false, frontierExpanded: false, deadEnd: false,
     degreeHint: null, fetch: null,
@@ -459,13 +478,16 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           refContrib.set(ref.nodeId, (refContrib.get(ref.nodeId) ?? 0) + 1)
           const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
           if (hiddenTypes.has(t)) { hiddenByChips++; continue }
-          const aggData = r.edge.data as { isAggregated?: boolean } | undefined
+          // From the RECORD, not the edge: the derivation folds a
+          // synthetic rollup into its concrete sibling, so the flag no
+          // longer lives on the surviving edge's data.
+          const isAgg = r.aggregated
           const n = recordCount(r)
           if (placed.has(r.neighborId)) {
             const existing = placed.get(r.neighborId)!
             const refCard = placed.get(ref.nodeId)
             if (refCard && existing !== refCard) {
-              addFlowEdge(dir, refCard, existing, n, r.edgeTypeNorm, !!aggData?.isAggregated, false)
+              addFlowEdge(dir, refCard, existing, n, r.edgeTypeNorm, isAgg, false)
             }
             continue
           }
@@ -483,7 +505,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             entryMap.set(r.neighborId, entry)
           }
           entry.count += n
-          if (aggData?.isAggregated) entry.agg = { aggregated: true }
+          if (isAgg) entry.agg = { aggregated: true }
           const refStat = entry.refs.get(ref.nodeId)
           if (refStat) {
             refStat.count += n
@@ -491,9 +513,9 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             // edge stops claiming a single type rather than reporting
             // whichever record happened to arrive first.
             if (refStat.edgeTypeNorm !== r.edgeTypeNorm) refStat.edgeTypeNorm = ''
-            if (aggData?.isAggregated) refStat.aggregated = true
+            if (isAgg) refStat.aggregated = true
           } else {
-            entry.refs.set(ref.nodeId, { count: n, edgeTypeNorm: r.edgeTypeNorm, aggregated: !!aggData?.isAggregated })
+            entry.refs.set(ref.nodeId, { count: n, edgeTypeNorm: r.edgeTypeNorm, aggregated: isAgg })
           }
         }
       }
@@ -609,6 +631,8 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           edgeTypeNorm: entry.edgeTypeNorm,
           rollup: entry.rollup,
           unresolved: !entry.node,
+          partnerIds: [...entry.refs.keys()],
+          partnerLabel: partnerLabelOf([...entry.refs.keys()]),
           aggregated: entry.agg.aggregated,
           expandKey: canOpen ? openKey : frontierKey,
           expandKind,
@@ -703,6 +727,8 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           count: inside.length,
           rollup: entry.rollup,
           unresolved: !entry.node,
+          partnerIds: [...entry.refs.keys()],
+          partnerLabel: partnerLabelOf([...entry.refs.keys()]),
           expandKey: openKey,
           expandKind: 'open',
           expanded: true,
@@ -763,6 +789,8 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             type: cType,
             parentId: entry.nodeId,
             parentLabel: label,
+            partnerIds: [...entry.refs.keys()],
+            partnerLabel: partnerLabelOf([...entry.refs.keys()]),
             connected,
             count: connected ? countFor(child.id) : 0,
             edgeTypeNorm: connected ? edgeTypeFor(child.id) : '',

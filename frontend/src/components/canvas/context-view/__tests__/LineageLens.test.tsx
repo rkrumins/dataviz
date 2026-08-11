@@ -510,8 +510,10 @@ describe('LineageLens graph mode', () => {
       // as "what inside this connects to me".
       const pill = screen.getByTitle(/Open label-plat — show what's inside it that connects to this entity/)
       fireEvent.click(pill)
-      // Opening asks the server for the next grain down (container level 2 → 3).
-      expect(onOpenContainer).toHaveBeenCalledWith('plat', 'in', 2)
+      // Opening asks the server for the next grain down (container level
+      // 2 → 3), about the partner the card is connected to — the focal
+      // itself at the first hop.
+      expect(onOpenContainer).toHaveBeenCalledWith('plat', 'ds', 'in', 2)
     } finally {
       useSchemaStore.setState({ schema: prevSchema } as never)
     }
@@ -557,9 +559,8 @@ describe('LineageLens graph mode', () => {
       expect(screen.getByText(/2 connected inside/)).toBeTruthy()
       fireEvent.doubleClick(screen.getByText('label-kid1'))
       expect(onRecenter).toHaveBeenCalledWith('kid1')
-      // REGRESSION: a restored open must re-ask the server, or a shared
-      // link reopens frames that stay empty forever.
-      expect(onOpenContainer).toHaveBeenCalledWith('plat', 'in', 2)
+      // The answer is already in hand, so nothing is re-asked.
+      expect(onOpenContainer).not.toHaveBeenCalled()
     } finally {
       useSchemaStore.setState({ schema: prevSchema } as never)
     }
@@ -585,6 +586,39 @@ describe('LineageLens graph mode', () => {
     fireEvent.click(screen.getByText('+5 more'))
     expect(screen.getAllByText(/^label-src\d+$/)).toHaveLength(35)
     expect(screen.queryByText('+5 more')).toBeNull()
+  })
+
+  // REGRESSION: a restored exploration put its open containers into
+  // state but never re-asked the server, so a shared link reopened
+  // frames that stayed empty forever. The kick is driven off the built
+  // graph now, so it also names each frame's real partner.
+  it('asks the server for a restored open that has no answer yet', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [
+          { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
+          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
+        ],
+      },
+    } as never)
+    try {
+      useCanvasStore.setState({
+        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
+        edges: [edge('e1', 'plat', 'ds')],
+        visibleEdges: [],
+      } as never)
+      const onOpenContainer = vi.fn()
+      renderLens(['ds'], {}, {
+        onOpenContainer,
+        graphSeed: { nodeId: 'ds', expandedGroups: [], expandedFrontier: [], openContainers: ['in:plat'] },
+      })
+      expect(onOpenContainer).toHaveBeenCalledWith('plat', 'ds', 'in', 2)
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
   })
 
   describe('showing everything inside an opened frame', () => {

@@ -152,9 +152,11 @@ export interface LineageLensProps {
   frameAllStatus?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
   /** Fetch (or page further into) an opened container's full child list. */
   onLoadAllChildren?: (openKey: string) => void
-  /** Ask the server what's inside a container that connects to the focal. */
-  onOpenContainer?: (containerUrn: string, dir: 'in' | 'out', containerLevel: number) => void
-  onRetryOpenContainer?: (containerUrn: string, dir: 'in' | 'out', containerLevel: number) => void
+  /** Ask the server what's inside a container that connects to
+   *  `partnerUrn` — the card's partner in the picture, which is the
+   *  focal only at the first hop. */
+  onOpenContainer?: (containerUrn: string, partnerUrn: string, dir: 'in' | 'out', containerLevel: number) => void
+  onRetryOpenContainer?: (containerUrn: string, partnerUrn: string, dir: 'in' | 'out', containerLevel: number) => void
   /** Transitive reach per visited focal (useLensImpact). Absent =
    *  unknown or unsupported — nothing is shown, never a fake zero. */
   impact?: Map<string, LensImpact>
@@ -506,9 +508,12 @@ export function LineageLens({
   /** Toggle a coarse container open. Opening asks the server what's
    *  inside it that connects to the focal (idempotent per key); closing
    *  only drops the key — the answer stays cached for re-opening. */
-  const toggleContainer = useCallback((openKey: string, containerNodeId: string, entityType: string) => {
+  const toggleContainer = useCallback((openKey: string, containerNodeId: string, entityType: string, partnerId: string | null) => {
     const level = entityLevels.get(entityType)
     if (level === undefined) return
+    // No partner means the card connects to the focal (band 1).
+    const partner = partnerId ?? nodeId
+    if (!partner) return
     const dir: 'in' | 'out' = openKey.startsWith('in:') ? 'in' : 'out'
     let wasOpen = false
     setGraphState(prev => {
@@ -522,7 +527,7 @@ export function LineageLens({
       if (!wasOpen && lensFrameChildren === 'all') all.add(openKey)
       return { ...base, openContainers: next, frameShowAll: all }
     })
-    if (!wasOpen) onOpenContainer?.(containerNodeId, dir, level)
+    if (!wasOpen) onOpenContainer?.(containerNodeId, partner, dir, level)
   }, [nodeId, seededFresh, entityLevels, onOpenContainer, lensFrameChildren])
 
   /** Flip one frame between "only what connects" and "everything
@@ -541,11 +546,12 @@ export function LineageLens({
     if (turningOn) onLoadAllChildren?.(openKey)
   }, [nodeId, seededFresh, onLoadAllChildren])
 
-  const retryContainer = useCallback((openKey: string, containerNodeId: string, entityType: string) => {
+  const retryContainer = useCallback((openKey: string, containerNodeId: string, entityType: string, partnerId: string | null) => {
     const level = entityLevels.get(entityType)
-    if (level === undefined) return
-    onRetryOpenContainer?.(containerNodeId, openKey.startsWith('in:') ? 'in' : 'out', level)
-  }, [entityLevels, onRetryOpenContainer])
+    const partner = partnerId ?? nodeId
+    if (level === undefined || !partner) return
+    onRetryOpenContainer?.(containerNodeId, partner, openKey.startsWith('in:') ? 'in' : 'out', level)
+  }, [nodeId, entityLevels, onRetryOpenContainer])
 
   const setFrameQuery = useCallback((openKey: string, q: string) => {
     setGraphState(prev => {
@@ -594,18 +600,6 @@ export function LineageLens({
     if (!graphSeed || graphSeed.nodeId !== nodeId || !onEnsureFetched) return
     for (const k of graphSeed.expandedFrontier) onEnsureFetched(k.replace(/^(in|out):/, ''))
   }, [graphSeed, nodeId, onEnsureFetched])
-  // Restored OPEN containers need the same kick, or a shared link
-  // reopens frames that stay empty forever. Unknown level = we cannot
-  // ask the server for the next grain, so skip rather than guess.
-  useEffect(() => {
-    if (!graphSeed || graphSeed.nodeId !== nodeId || !onOpenContainer) return
-    for (const k of graphSeed.openContainers ?? []) {
-      const urn = k.replace(/^(in|out):/, '')
-      const level = entityLevels.get((nodeMap.get(urn)?.data?.type as string) ?? '')
-      if (level === undefined) continue
-      onOpenContainer(urn, k.startsWith('in:') ? 'in' : 'out', level)
-    }
-  }, [graphSeed, nodeId, onOpenContainer, entityLevels, nodeMap])
   // A restored "everything inside" frame needs its child list too. The
   // fetch is a no-op until the open above resolves (it supplies the
   // anchor), so re-run it as the container answers land.
@@ -658,6 +652,26 @@ export function LineageLens({
     containerResults, containerStatus, frameAllResults, frameAllStatus,
     entityLevels, query, hiddenTypes, degreeHints, fetchStatus,
   ])
+
+  // Any frame on the board with no answer and no fetch in flight gets
+  // asked. Driven off the BUILT graph rather than the share seed, so it
+  // covers a restored link (which otherwise reopened frames that stayed
+  // empty forever) and knows each frame's real partner — a container
+  // two hops out has no lineage with the focal, so asking about the
+  // focal there would be answered correctly, and uselessly, with
+  // "nothing". Idempotent: the hook fetches once per key per session,
+  // and the status it sets immediately closes this condition.
+  useEffect(() => {
+    if (!focusGraph || !onOpenContainer) return
+    for (const c of focusGraph.cards) {
+      if (c.kind !== 'frame' || !c.nodeId || !c.expandKey) continue
+      if (containerStatus?.has(c.expandKey) || containerResults?.has(c.expandKey)) continue
+      const level = entityLevels.get(c.type)
+      const partner = c.partnerIds[0] ?? nodeId
+      if (level === undefined || !partner) continue
+      onOpenContainer(c.nodeId, partner, c.expandKey.startsWith('in:') ? 'in' : 'out', level)
+    }
+  }, [focusGraph, nodeId, onOpenContainer, entityLevels, containerStatus, containerResults])
 
   // Type chips for graph mode — one row across both directions (the
   // list columns render their own per-column rows).
@@ -1721,10 +1735,10 @@ function NeighborRow({
   onOpenDetails?: (nodeId: string) => void
 }) {
   const edgeColor = generateEdgeColorFromType(r.edgeTypeNorm)
-  const aggCount = (r.edge.data as { sourceEdgeCount?: number } | undefined)?.sourceEdgeCount
-  const bundleCount = (r.edge as { edgeCount?: number }).edgeCount
-    ?? (r.edge.data as { edgeCount?: number } | undefined)?.edgeCount
-    ?? aggCount
+  // From the RECORD: a folded rollup carries its weight on
+  // `bundledCount`, and the concrete edge that survived the fold has no
+  // count of its own — reading the edge would silently drop the ×N.
+  const bundleCount = r.bundledCount > 1 ? r.bundledCount : undefined
   const unloaded = !r.neighborNode
   return (
     <div className="min-w-0">
@@ -1785,7 +1799,7 @@ function NeighborRow({
               onClick={(e) => { e.stopPropagation(); drill.onToggle() }}
               title={drill.drilled
                 ? 'Collapse back to the rolled-up connection'
-                : `Refine — see the ${(aggCount ?? bundleCount ?? 0).toLocaleString()} underlying connection${(aggCount ?? bundleCount ?? 0) === 1 ? '' : 's'} this rolls up`}
+                : `Refine — see the ${(bundleCount ?? 0).toLocaleString()} underlying connection${bundleCount === 1 ? '' : 's'} this rolls up`}
               className="flex items-center gap-0.5 tabular-nums font-semibold text-ink-muted hover:text-accent-lineage transition-colors"
             >
               ×{(bundleCount ?? 0).toLocaleString()}
@@ -2000,11 +2014,15 @@ function NeighborColumn({
   // Drill payload for an aggregated row — local raw edges ∪ on-demand
   // fetched, mirroring the walk-column computation exactly.
   const buildDrill = (r: NeighborRecord): NeighborRowDrill | undefined => {
-    const aggData = r.edge.data as { isAggregated?: boolean; sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
+    // The ROLLUP edge is what the server can expand into constituents;
+    // after the fold it is no longer `r.edge`, so drilling must follow
+    // it or the refine gesture disappears from every folded row.
+    const drillEdge = r.rollupEdge ?? r.edge
+    const aggData = drillEdge.data as { isAggregated?: boolean; sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
     const canDrill = !!aggData?.isAggregated
       && ((aggData.sourceEdges?.length ?? 0) > 0 || (aggData.sourceEdgeCount ?? 0) > 1)
     if (!canDrill) return undefined
-    const key = `c:${direction}:${r.edge.id}`
+    const key = `c:${direction}:${drillEdge.id}`
     const drilled = drilledRows.has(key)
     let constituents: LineageEdge[] = []
     let missing = 0
@@ -2013,18 +2031,18 @@ function NeighborColumn({
         .map(eid => rawEdgeById.get(eid))
         .filter((e): e is LineageEdge => !!e)
       const seenConstituent = new Set(local.map(e => e.id))
-      const fetched = (drillEdges?.get(r.edge.id) ?? []).filter(e => !seenConstituent.has(e.id))
+      const fetched = (drillEdges?.get(drillEdge.id) ?? []).filter(e => !seenConstituent.has(e.id))
       const all = [...local, ...fetched]
       constituents = all.slice(0, 50)
       missing = Math.max(0, Math.max(aggData.sourceEdgeCount ?? 0, all.length) - constituents.length)
     }
     return {
       drilled,
-      onToggle: () => onToggleDrill(key, r.edge),
+      onToggle: () => onToggleDrill(key, drillEdge),
       constituents,
       missing,
-      state: drilled ? drillStatus?.get(r.edge.id) : undefined,
-      onRetry: onDrillFetch ? () => onDrillFetch(r.edge) : undefined,
+      state: drilled ? drillStatus?.get(drillEdge.id) : undefined,
+      onRetry: onDrillFetch ? () => onDrillFetch(drillEdge) : undefined,
     }
   }
 

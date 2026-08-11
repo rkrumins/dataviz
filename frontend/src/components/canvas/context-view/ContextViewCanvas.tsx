@@ -3930,13 +3930,14 @@ export function ContextViewCanvas({
             const focal = lensFocalOf(lensHistory)
             if (focal) lensContainer.loadAllChildren(openKey, focal)
           }}
-          onOpenContainer={(urn, dir, level) => {
+          onOpenContainer={(urn, partner, dir, level) => {
+            // The focal buckets the cache; the PARTNER is the question.
             const focal = lensFocalOf(lensHistory)
-            if (focal) lensContainer.openContainer(urn, focal, dir, level)
+            if (focal) lensContainer.openContainer(urn, focal, partner, dir, level)
           }}
-          onRetryOpenContainer={(urn, dir, level) => {
+          onRetryOpenContainer={(urn, partner, dir, level) => {
             const focal = lensFocalOf(lensHistory)
-            if (focal) lensContainer.retry(urn, focal, dir, level)
+            if (focal) lensContainer.retry(urn, focal, partner, dir, level)
           }}
           graphSeed={lensShareSeed}
           externalPreview={externalPreview && lensFocalOf(lensHistory) === externalPreview.nodeId ? externalPreview : null}

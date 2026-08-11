@@ -45,8 +45,11 @@ describe('deriveNeighborRecords — collapsing synthetic rollups', () => {
     expect(r.edgeTypeNorm).toBe('FLOWS_TO')
     expect(r.alsoTypes).toEqual(['AGGREGATED'])
     // The rollup knew about 14 underlying flows the raw edge doesn't —
-    // folding it away must not lose that.
+    // folding it away must not lose that, nor the rollup styling, nor
+    // the edge the server can actually drill into.
     expect(r.bundledCount).toBe(14)
+    expect(r.aggregated).toBe(true)
+    expect(r.rollupEdge?.id).toBe('agg1')
   })
 
   it('keeps a lone rollup — between coarse entities it is the only evidence', () => {
@@ -58,13 +61,15 @@ describe('deriveNeighborRecords — collapsing synthetic rollups', () => {
   })
 
   it('collapses the same relationship arriving twice under different edge ids', () => {
-    // The store and the projection can both carry one connection.
+    // The store and the projection can both carry ONE connection — the
+    // weight is the larger of the two, not their sum, or a duplicate
+    // would read as extra lineage.
     const { incomingRecords } = derive([
       edge('store-1', 'A', 'F'),
       edge('projected-1', 'A', 'F'),
     ])
     expect(incomingRecords).toHaveLength(1)
-    expect(incomingRecords[0].bundledCount).toBe(2)
+    expect(incomingRecords[0].bundledCount).toBe(1)
   })
 
   it('keeps genuinely different business relationships apart', () => {
@@ -84,10 +89,14 @@ describe('deriveNeighborRecords — collapsing synthetic rollups', () => {
     expect(incomingRecords).toHaveLength(2)
     const absorbed = incomingRecords.filter(r => r.alsoTypes.includes('AGGREGATED'))
     expect(absorbed).toHaveLength(1)
-    expect(absorbed[0].edgeTypeNorm).toBe('FLOWS_TO')
+    // Deterministic host: most underlying flows first, then type name
+    // ascending — so the same input never lands the rollup elsewhere.
+    expect(absorbed[0].edgeTypeNorm).toBe('DERIVES_FROM')
+    expect(absorbed[0].aggregated).toBe(true)
     // The other record is untouched — the weight is counted once.
-    const other = incomingRecords.find(r => r.edgeTypeNorm === 'DERIVES_FROM')!
+    const other = incomingRecords.find(r => r.edgeTypeNorm === 'FLOWS_TO')!
     expect(other.bundledCount).toBe(1)
+    expect(other.aggregated).toBe(false)
   })
 
   it('collapses per direction — the same entity on both sides is two connections', () => {

@@ -106,8 +106,10 @@ interface CardCtx {
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
   onToggleGroup: (expandKey: string) => void
-  /** Open / close a coarse container into its focal-relevant contents. */
-  onOpenContainer: (openKey: string, nodeId: string, entityType: string) => void
+  /** Open / close a coarse container into the entities inside it that
+   *  connect to `partnerId` — the card's own partner in the picture,
+   *  which is the focal only at the first hop. */
+  onOpenContainer: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
   onExpandFrontier: (expandKey: string, nodeId: string) => void
   onShowMore: (bandKey: string) => void
   onFrameQuery: (openKey: string, q: string) => void
@@ -117,7 +119,7 @@ interface CardCtx {
   onToggleFrameAll?: (openKey: string) => void
   /** Re-kick a failed "everything inside" fetch. */
   onRetryFrameAll?: (openKey: string) => void
-  onRetryOpen?: (openKey: string, nodeId: string, entityType: string) => void
+  onRetryOpen?: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
   onRetryFetch?: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
@@ -141,14 +143,14 @@ interface FocusGraphViewProps {
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
   onToggleGroup: (expandKey: string) => void
-  onOpenContainer: (openKey: string, nodeId: string, entityType: string) => void
+  onOpenContainer: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
   onExpandFrontier: (expandKey: string, nodeId: string) => void
   onShowMore: (bandKey: string) => void
   onFrameQuery: (openKey: string, q: string) => void
   frameQueryFor?: (openKey: string) => string
   onToggleFrameAll?: (openKey: string) => void
   onRetryFrameAll?: (openKey: string) => void
-  onRetryOpen?: (openKey: string, nodeId: string, entityType: string) => void
+  onRetryOpen?: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
   onRetryFetch?: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
@@ -165,7 +167,7 @@ function sameCard(a: FocusCard, b: FocusCard): boolean {
   const keys = Object.keys(a) as Array<keyof FocusCard>
   if (keys.length !== Object.keys(b).length) return false
   for (const k of keys) {
-    if (k === 'frameBreadcrumb' || k === 'previewLabels') {
+    if (k === 'frameBreadcrumb' || k === 'previewLabels' || k === 'partnerIds') {
       const x = a[k], y = b[k]
       if (x.length !== y.length || x.some((v, i) => v !== y[i])) return false
       continue
@@ -288,7 +290,7 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   const isOpen = card.expandKind === 'open'
   const openPill = (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (isOpen) ctx.onOpenContainer(card.expandKey!, card.nodeId!, card.type)
+    if (isOpen) ctx.onOpenContainer(card.expandKey!, card.nodeId!, card.type, card.partnerIds[0] ?? null)
     else ctx.onExpandFrontier(card.expandKey!, card.nodeId!)
   }
   return (
@@ -298,7 +300,7 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
       title={expanded
         ? isOpen ? `Close ${card.label}` : `Collapse ${outLeft ? 'upstream of' : 'downstream of'} ${card.label}`
         : isOpen
-          ? `Open ${card.label} — show what's inside it that connects to this entity`
+          ? `Open ${card.label} — show what's inside it that connects to ${card.partnerLabel ?? 'this entity'}`
           : `Expand the next hop ${outLeft ? 'upstream' : 'downstream'} of ${card.label}${hint != null ? ` (${hint.toLocaleString()} known)` : ''}`}
       className={cn(
         'absolute top-1/2 -translate-y-1/2 flex items-center justify-center gap-0.5 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors',
@@ -703,9 +705,14 @@ function FocusFrameNode({ data }: NodeProps) {
   const total = card.frameTotal >= 0
     ? card.frameTotal.toLocaleString()
     : `${card.frameLoaded.toLocaleString()}+`
+  // Name what the open actually matched against. At the first hop that
+  // is the focused entity and the plain wording reads better; further
+  // out it is the card's own partner, and saying "this entity" there
+  // would claim something the server was never asked.
+  const to = card.partnerLabel ? ` to ${card.partnerLabel}` : ''
   const inside = card.frameShowingAll
-    ? `${card.frameConnectedCount.toLocaleString()} connected · ${card.frameLoaded.toLocaleString()} of ${total} shown`
-    : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected inside`
+    ? `${card.frameConnectedCount.toLocaleString()} connected${to} · ${card.frameLoaded.toLocaleString()} of ${total} shown`
+    : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected${to || ' inside'}`
   return (
     <div
       style={{ width: card.w, height: card.h, borderColor: `${accent}55` }}
@@ -717,7 +724,7 @@ function FocusFrameNode({ data }: NodeProps) {
       <div className="pointer-events-auto absolute inset-x-0 top-0 h-[46px] px-2.5 flex items-center gap-1.5">
         <button
           type="button"
-          onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onOpenContainer(card.expandKey!, card.nodeId, card.type) }}
+          onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onOpenContainer(card.expandKey!, card.nodeId, card.type, card.partnerIds[0] ?? null) }}
           title={`Close ${card.label}`}
           className="nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
         >
@@ -737,7 +744,7 @@ function FocusFrameNode({ data }: NodeProps) {
             {card.fetch === 'loading'
               ? 'Looking inside…'
               : card.frameEmpty && !card.frameShowingAll
-                ? 'nothing connected inside'
+                ? `nothing connected${to || ' inside'}`
                 : inside}
           </p>
         </div>
@@ -751,7 +758,7 @@ function FocusFrameNode({ data }: NodeProps) {
             className="nodrag flex-shrink-0 flex items-center rounded-md border border-black/10 dark:border-white/10 p-0.5"
           >
             {([
-              { all: false, Icon: LucideIcons.Link2, label: 'Only what connects to this entity' },
+              { all: false, Icon: LucideIcons.Link2, label: `Only what connects to ${card.partnerLabel ?? 'this entity'}` },
               { all: true, Icon: LucideIcons.Rows3, label: 'Everything inside, lineage marked' },
             ] as const).map(({ all, Icon, label }) => (
               <button
@@ -817,7 +824,7 @@ function FocusFrameNode({ data }: NodeProps) {
               e.stopPropagation()
               // Two fetches back this frame; re-kick whichever failed.
               if (card.frameShowingAll) ctx.onRetryFrameAll?.(card.expandKey ?? '')
-              else if (card.nodeId) ctx.onRetryOpen?.(card.expandKey!, card.nodeId, card.type)
+              else if (card.nodeId) ctx.onRetryOpen?.(card.expandKey!, card.nodeId, card.type, card.partnerIds[0] ?? null)
             }}
             className="font-semibold hover:underline"
           >
@@ -827,7 +834,7 @@ function FocusFrameNode({ data }: NodeProps) {
       )}
       {card.frameEmpty && card.frameLoaded === 0 && card.fetch === null && (
         <p className="absolute inset-x-2.5 top-[52px] text-[10px] text-ink-muted/70 italic leading-snug">
-          Nothing inside {card.label} connects to this entity.
+          Nothing inside {card.label} connects to {card.partnerLabel ?? 'this entity'}.
           {ctx.onToggleFrameAll && ' Show everything inside to see what it holds.'}
         </p>
       )}

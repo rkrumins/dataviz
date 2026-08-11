@@ -49,7 +49,7 @@ describe('useLensContainer', () => {
     const { result: hook } = renderHook(() => useLensContainer('F', provider, ['FLOWS_TO']))
     const key = openKeyOf('C', 'in')
 
-    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('done'))
 
     // Upstream ⇒ the container is the SOURCE anchor, and we ask one
@@ -68,7 +68,7 @@ describe('useLensContainer', () => {
     const { provider, expandAggregated } = makeProvider(() =>
       result([gn('kid1'), gn('F')], [ge('e1', 'F', 'kid1')]))
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
-    act(() => hook.current.openContainer('C', 'F', 'out', 1))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'out', 1))
     await waitFor(() => expect(hook.current.status.get(openKeyOf('C', 'out'))).toBe('done'))
     expect(expandAggregated).toHaveBeenCalledWith(expect.objectContaining({ sourceUrn: 'F', targetUrn: 'C' }))
   })
@@ -81,7 +81,7 @@ describe('useLensContainer', () => {
       result([gn('kid1'), gn('kid2'), gn('kid3'), gn('kid4'), gn('kid5')], []))
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
     const key = openKeyOf('C', 'in')
-    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('done'))
 
     const res = hook.current.results.get(key)!
@@ -100,7 +100,7 @@ describe('useLensContainer', () => {
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
     const key = openKeyOf('C', 'in')
 
-    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('done'))
 
     const res = hook.current.results.get(key)!
@@ -116,7 +116,7 @@ describe('useLensContainer', () => {
     const { provider, expandAggregated } = makeProvider(() =>
       result([gn(`c${++n}`, 'container'), gn('F')], [ge(`e${n}`, `c${n}`, 'F')]))
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
-    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(openKeyOf('C', 'in'))).toBe('done'))
     expect(expandAggregated).toHaveBeenCalledTimes(FRAME_AUTO_STEPS)
   })
@@ -126,7 +126,7 @@ describe('useLensContainer', () => {
       result([gn('kid1'), gn('F')], [ge('e1', 'kid1', 'F')], { truncated: true, truncationReason: 'max_nodes' }))
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
     const key = openKeyOf('C', 'in')
-    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('done'))
     expect(hook.current.results.get(key)!.truncated).toBe(true)
   })
@@ -135,7 +135,7 @@ describe('useLensContainer', () => {
     const provider = {} as unknown as GraphDataProvider
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
     const key = openKeyOf('C', 'in')
-    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('unsupported'))
     expect(hook.current.results.has(key)).toBe(false)
   })
@@ -151,7 +151,7 @@ describe('useLensContainer', () => {
     const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
     const key = openKeyOf('C', 'in')
 
-    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('error'))
     expect(expandAggregated).toHaveBeenCalledTimes(1)
 
@@ -160,12 +160,12 @@ describe('useLensContainer', () => {
     expect(expandAggregated).toHaveBeenCalledTimes(1)
 
     fail = false
-    act(() => hook.current.retry('C', 'F', 'in', 1))
+    act(() => hook.current.retry('C', 'F', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get(key)).toBe('done'))
     expect(expandAggregated).toHaveBeenCalledTimes(2)
 
     // A completed open is never refetched.
-    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 1))
     expect(expandAggregated).toHaveBeenCalledTimes(2)
   })
 
@@ -175,7 +175,7 @@ describe('useLensContainer', () => {
       ({ focal }: { focal: string | null }) => useLensContainer(focal, provider, []),
       { initialProps: { focal: 'F' as string | null } },
     )
-    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.results.size).toBe(1))
     rerender({ focal: null })
     expect(hook.current.results.size).toBe(0)
@@ -196,7 +196,7 @@ describe('useLensContainer', () => {
       { initialProps: { focal: 'F' } },
     )
 
-    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get('in:C')).toBe('done'))
     expect(hook.current.results.get('in:C')!.nodes.map(n => n.id)).toEqual(['kid-of-F', 'kid2-of-F'])
 
@@ -206,12 +206,50 @@ describe('useLensContainer', () => {
     expect(hook.current.results.get('in:C')).toBeUndefined()
     expect(hook.current.status.get('in:C')).toBeUndefined()
 
-    act(() => hook.current.openContainer('C', 'G', 'in', 1))
+    act(() => hook.current.openContainer('C', 'G', 'G', 'in', 1))
     await waitFor(() => expect(hook.current.results.get('in:C')?.nodes[0]?.id).toBe('kid-of-G'))
 
     // Stepping back finds F's answer still cached — no refetch.
     rerender({ focal: 'F' })
     expect(hook.current.results.get('in:C')!.nodes.map(n => n.id)).toEqual(['kid-of-F', 'kid2-of-F'])
+  })
+
+  // REGRESSION: the open used to anchor on the FOCAL no matter which
+  // card was clicked. A container two hops out has no lineage with the
+  // focal, so the server answered "no edges" — correctly — and the
+  // frame read "Nothing inside X connects to this entity" on every
+  // deeper hop. The question has to be about the card's real partner.
+  it('asks about the PARTNER, not the focal, and buckets by focal', async () => {
+    const { provider, expandAggregated } = makeProvider(() =>
+      result([gn('kid1'), gn('kid2'), gn('B')], [ge('e1', 'kid1', 'B'), ge('e2', 'kid2', 'B')]))
+    const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
+
+    // Focal F, but this container hangs off band-1 node B.
+    act(() => hook.current.openContainer('C', 'F', 'B', 'in', 1))
+    await waitFor(() => expect(hook.current.status.get(openKeyOf('C', 'in'))).toBe('done'))
+
+    expect(expandAggregated).toHaveBeenCalledWith(expect.objectContaining({
+      sourceUrn: 'C', targetUrn: 'B',
+    }))
+    const res = hook.current.results.get(openKeyOf('C', 'in'))!
+    expect(res.partnerUrn).toBe('B')
+    // B is the partner, so it is not "inside" the container.
+    expect(res.nodes.map(n => n.id).sort()).toEqual(['kid1', 'kid2'])
+  })
+
+  it('does not let one partner\'s answer swallow another partner\'s question', async () => {
+    const { provider, expandAggregated } = makeProvider(({ targetUrn }) =>
+      result([gn(`kid-${targetUrn}-1`), gn(`kid-${targetUrn}-2`), gn(targetUrn)],
+        [ge('e1', `kid-${targetUrn}-1`, targetUrn), ge('e2', `kid-${targetUrn}-2`, targetUrn)]))
+    const { result: hook } = renderHook(() => useLensContainer('F', provider, []))
+
+    act(() => hook.current.openContainer('C', 'F', 'B', 'in', 1))
+    await waitFor(() => expect(expandAggregated).toHaveBeenCalledTimes(1))
+    // Same container, different partner — a focal-only guard key would
+    // treat this as already answered.
+    act(() => hook.current.openContainer('C', 'F', 'D', 'in', 1))
+    await waitFor(() => expect(expandAggregated).toHaveBeenCalledTimes(2))
+    expect(expandAggregated).toHaveBeenLastCalledWith(expect.objectContaining({ targetUrn: 'D' }))
   })
 })
 
@@ -226,7 +264,7 @@ describe('useLensContainer — every child ("show all")', () => {
   ) => {
     const made = makeProvider(expand, children)
     const { result: hook } = renderHook(() => useLensContainer('F', made.provider, []))
-    act(() => hook.current.openContainer('C', 'F', 'in', 1))
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 1))
     await waitFor(() => expect(hook.current.status.get('in:C')).toBe('done'))
     return { hook, ...made }
   }

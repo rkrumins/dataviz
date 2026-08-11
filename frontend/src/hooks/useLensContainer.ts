@@ -38,6 +38,10 @@ export interface ContainerOpenResult {
    *  clicked whenever pass-through levels were auto-skipped, and it is
    *  the anchor any follow-up question about "what's in here" must use. */
   anchorUrn: string
+  /** The entity this answer is ABOUT — what the contents connect to.
+   *  Stamped so a caller can tell an answer for one partner from an
+   *  answer for another. */
+  partnerUrn: string
   /** Entities inside the container that connect to the focal. Empty when
    *  the container genuinely has no lineage with it (see `empty`). */
   nodes: LineageNode[]
@@ -85,10 +89,15 @@ export interface LensContainerData {
    *  container. No-op until that open has resolved — the anchor to ask
    *  about is only known once the pass-through walk has finished. */
   loadAllChildren: (openKey: string, focalUrn: string) => void
-  /** Open a container against the current focal (idempotent per key). */
+  /** Open a container against the entity it is actually connected to
+   *  (idempotent per key). `partnerUrn` is the focal only at the first
+   *  hop — further out it is the card's previous-band partner, and
+   *  asking about the focal there is answered, correctly and uselessly,
+   *  with "nothing connects". `focalUrn` only buckets the cache. */
   openContainer: (
     containerUrn: string,
     focalUrn: string,
+    partnerUrn: string,
     direction: ContainerDirection,
     /** Hierarchy level of the CONTAINER's entity type. The fetch asks for
      *  level+1 — one grain finer. Callers must not invent this. */
@@ -98,6 +107,7 @@ export interface LensContainerData {
   retry: (
     containerUrn: string,
     focalUrn: string,
+    partnerUrn: string,
     direction: ContainerDirection,
     containerLevel: number,
   ) => void
@@ -109,9 +119,9 @@ export interface LensContainerData {
  */
 export const containerKey = (
   containerUrn: string,
-  focalUrn: string,
+  partnerUrn: string,
   direction: ContainerDirection,
-): string => `${direction}:${containerUrn}->${focalUrn}`
+): string => `${direction}:${containerUrn}->${partnerUrn}`
 
 /**
  * The key callers use. They are already scoped to one focal, so they
@@ -179,10 +189,11 @@ export function useLensContainer(
   const runOpen = useCallback(async (
     containerUrn: string,
     focalUrn: string,
+    partnerUrn: string,
     direction: ContainerDirection,
     containerLevel: number,
   ) => {
-    const key = containerKey(containerUrn, focalUrn, direction)
+    const key = containerKey(containerUrn, partnerUrn, direction)
     const openKey = openKeyOf(containerUrn, direction)
     // Optional provider capability — absent means we cannot answer, and
     // saying so beats rendering a wrong or empty picture.
@@ -213,8 +224,8 @@ export function useLensContainer(
         const res = await provider.expandAggregated({
           // Direction decides which anchor is the source: upstream means
           // the container feeds the focal.
-          sourceUrn: direction === 'in' ? anchor : focalUrn,
-          targetUrn: direction === 'in' ? focalUrn : anchor,
+          sourceUrn: direction === 'in' ? anchor : partnerUrn,
+          targetUrn: direction === 'in' ? partnerUrn : anchor,
           nextLevel: level + 1,
           lineageEdgeTypes: types,
           includeContainmentEdges: true,
@@ -236,7 +247,7 @@ export function useLensContainer(
 
         // Keep only entities that are actually inside the container we
         // opened — the response also carries the focal side's endpoints.
-        const focalSide = new Set<string>([focalUrn])
+        const focalSide = new Set<string>([partnerUrn])
         const inside = res.nodes.filter(n => n.urn !== anchor && !focalSide.has(n.urn))
 
         // Explicit arrows: toCanvasNode takes an options 2nd arg, so a
@@ -258,7 +269,7 @@ export function useLensContainer(
       setState(prev => ({
         ...prev,
         results: setIn(prev.results, focalUrn, openKey,
-          { anchorUrn: anchor, nodes, edges, containmentEdges, passedThrough, truncated, empty }),
+          { anchorUrn: anchor, partnerUrn, nodes, edges, containmentEdges, passedThrough, truncated, empty }),
         status: setIn(prev.status, focalUrn, openKey, 'done'),
       }))
     } catch {
@@ -272,20 +283,25 @@ export function useLensContainer(
   const openContainer = useCallback((
     containerUrn: string,
     focalUrn: string,
+    partnerUrn: string,
     direction: ContainerDirection,
     containerLevel: number,
   ) => {
-    const key = containerKey(containerUrn, focalUrn, direction)
+    // Keyed by PARTNER: the same container opened from two different
+    // places is two different questions, and a focal-only key would let
+    // the first answer swallow the second.
+    const key = containerKey(containerUrn, partnerUrn, direction)
     if (startedRef.current.has(key)) return
-    void runOpen(containerUrn, focalUrn, direction, containerLevel)
+    void runOpen(containerUrn, focalUrn, partnerUrn, direction, containerLevel)
   }, [runOpen])
 
   const retry = useCallback((
     containerUrn: string,
     focalUrn: string,
+    partnerUrn: string,
     direction: ContainerDirection,
     containerLevel: number,
-  ) => void runOpen(containerUrn, focalUrn, direction, containerLevel), [runOpen])
+  ) => void runOpen(containerUrn, focalUrn, partnerUrn, direction, containerLevel), [runOpen])
 
   /**
    * Every child of an opened container — the "show all" answer.
