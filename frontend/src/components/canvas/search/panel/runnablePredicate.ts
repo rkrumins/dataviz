@@ -46,6 +46,28 @@ export function buildRunnablePredicate(
     // branch above).
     const rootOp: 'and' | 'or' =
         draft.kind === 'group' && draft.op === 'or' ? 'or' : 'and'
+
+    // A `descendantOf` row is only legal in the top-level AND group —
+    // the compiler hoists it into the root-URN clamp and hard-rejects
+    // it anywhere else. `setScopeCondition` places it correctly, but
+    // the user can invalidate that afterwards by flipping the root op
+    // to ANY. Rather than 400, hoist the scope back out: "inside X" is
+    // a scope, and scoping the whole disjunction is the only reading
+    // that makes sense ("A or B, inside X").
+    if (rootOp === 'or') {
+        const scoped = conditions.filter((c) => c.kind === 'descendantOf')
+        const rest = conditions.filter((c) => c.kind !== 'descendantOf')
+        if (scoped.length > 0 && rest.length > 0) {
+            const disjunction: Predicate = rest.length === 1
+                ? rest[0]
+                : { kind: 'group', op: 'or', children: rest }
+            const predicate: Predicate = {
+                kind: 'group', op: 'and', children: [disjunction, ...scoped],
+            }
+            return { predicate, hash: JSON.stringify(predicate) }
+        }
+    }
+
     const predicate: Predicate = {
         kind: 'group', op: rootOp, children: conditions,
     }

@@ -13,6 +13,10 @@
  *   - effectiveRootUrns is empty (search ran unclamped — usually a
  *     non-issue, just informational)
  *   - droppedRootUrns is non-empty (client URNs were filtered out)
+ *   - the query carries a `descendantOf` scope row, so it is only
+ *     looking inside one container (the most common cause by far —
+ *     one click on a result group adds it, and it then applies to
+ *     every query composed afterwards until it is removed)
  *   - candidateCount === 0 (the predicate matched nothing in the
  *     data source — usually a content issue or a NOT/AND that's too
  *     restrictive)
@@ -31,6 +35,7 @@ import {
 } from 'lucide-react'
 import { type FC, useMemo, useState } from 'react'
 
+import { formatUrnLabel } from '@/lib/urnLabels'
 import { cn } from '@/lib/utils'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
@@ -41,6 +46,8 @@ import type {
     SearchResultPage,
     ScopeDiagnostics,
 } from '@/types/search'
+
+import { findScopeCondition } from './panel/predicateComposition'
 
 
 export interface ZeroResultsDiagnosticProps {
@@ -202,7 +209,27 @@ function diagnose(result: SearchResultPage, query: SearchQuery): Cause[] {
         })
     }
 
-    // Cause 4: predicate matched zero candidates (content-level mismatch).
+    // Cause 4: the query is scoped to a container. This is far and away
+    // the most common reason a query that "should" match returns
+    // nothing, because the scope arrives from a single click on a
+    // result group and then applies to every query composed afterwards
+    // — so it must be named before the vaguer content-level causes.
+    const scope = findScopeCondition(query.predicate)
+    if (scope && scope.urns.length > 0 && causes.length === 0) {
+        const where = scope.urns.length === 1
+            ? formatUrnLabel(scope.urns[0])
+            : `${scope.urns.length} containers`
+        causes.push({
+            severity: 'warn',
+            title: `Your query only looks inside ${where}.`,
+            body: 'Matches elsewhere in the view are excluded. This filter is '
+                + 'added when you search inside a result group, and it stays '
+                + 'until you remove it.',
+            action: `Delete the "inside ${where}" row from the query to search the whole view.`,
+        })
+    }
+
+    // Cause 5: predicate matched zero candidates (content-level mismatch).
     if (result.candidateCount === 0 && causes.length === 0) {
         causes.push({
             severity: 'warn',
@@ -214,7 +241,7 @@ function diagnose(result: SearchResultPage, query: SearchQuery): Cause[] {
         })
     }
 
-    // Cause 5 (informational): unclamped view scope.
+    // Cause 6 (informational): unclamped view scope.
     if (diag && diag.effectiveRootUrns.length === 0 && diag.droppedRootUrns.length === 0) {
         causes.push({
             severity: 'info',
