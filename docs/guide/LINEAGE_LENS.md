@@ -41,8 +41,12 @@ and their own wires. A column is never a peer of its own table: where it comes
 from is the box it sits in, not a caption you have to squint at. Wide tables
 page a **fixed window** through the frame ("page 3 of 12") rather than growing
 it, so a 500-column source sits on the board like any other card. Coarser
-partners — a container, a platform — arrive as one muted card standing for
-everything inside them, which you can open into a frame the same way. Closed
+partners connected **directly to your focal** — a domain, a platform — resolve
+on their own: the Lens walks down through the levels between you and them and
+shows the entities at **your grain** inside a frame, with the walked path as
+its breadcrumb (`⋯ › PROD › CURATED › RISK_DB`). Focus a table and the picture
+is tables, however many containment levels the estate stacks above them.
+Coarser cards further out stay summarized until you open them. Closed
 frames **name a few of the things they hold**, so you can often tell what's in
 there without opening one, and the focal's own
 fields start tucked behind a single "contains N" card rather than fanning

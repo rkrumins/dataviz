@@ -61,7 +61,13 @@ export function useFrameCamera(
     const ids = new Set(cards.map(c => c.id))
     const prev = framedRef.current
     const newFocal = !prev || prev.focal !== focalId
-    const arrived = newFocal ? [] : cards.filter(c => !prev!.ids.has(c.id))
+    // Rows INSIDE a frame do not count as arrivals. A resolving
+    // container replaces its rows on every step of the server walk
+    // (pass-through levels come and go), and easing to each batch
+    // yanked the viewport once per step — reported, accurately, as
+    // "it all turns into chaos". The FRAME appearing is the event;
+    // what happens inside it is its own business.
+    const arrived = newFocal ? [] : cards.filter(c => !prev!.ids.has(c.id) && !c.frameId)
     if (!newFocal && arrived.length === 0) {
       // Nothing to move to, so nothing to cancel: safe to stamp now.
       framedRef.current = { focal: focalId, ids }

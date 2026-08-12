@@ -64,6 +64,39 @@ describe('useLensContainer', () => {
     expect(res.empty).toBe(false)
   })
 
+  // The WIRE CONTRACT — pinned because it broke in production while
+  // every layer's own tests were green. The request must name the
+  // anchor being OPENED (only that side descends server-side), and a
+  // container whose type has no honest level must OMIT nextLevel
+  // entirely: `nextLevel: null` 422'd at request validation, which is
+  // how "unable to walk the tree for any entity" happened on a real
+  // ontology with undeclared levels.
+  it('sends drillAnchor, and omits nextLevel when the type has no level', async () => {
+    const { provider, expandAggregated } = makeProvider(() =>
+      result([gn('C', 'container'), gn('kid1'), gn('F')], [ge('e1', 'kid1', 'F')]))
+    const { result: hook } = renderHook(() => useLensContainer('F', provider, ['FLOWS_TO']))
+
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', null))
+    await waitFor(() => expect(hook.current.status.get(openKeyOf('C', 'in'))).toBe('done'))
+
+    const req = expandAggregated.mock.calls[0][0] as Record<string, unknown>
+    expect(req.drillAnchor).toBe('C')
+    expect('nextLevel' in req).toBe(false)
+  })
+
+  it('asks one grain finer when the type DOES declare a level', async () => {
+    const { provider, expandAggregated } = makeProvider(() =>
+      result([gn('C', 'container'), gn('kid1'), gn('F')], [ge('e1', 'kid1', 'F')]))
+    const { result: hook } = renderHook(() => useLensContainer('F', provider, ['FLOWS_TO']))
+
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', 2))
+    await waitFor(() => expect(hook.current.status.get(openKeyOf('C', 'in'))).toBe('done'))
+
+    const req = expandAggregated.mock.calls[0][0] as Record<string, unknown>
+    expect(req.nextLevel).toBe(3)
+    expect(req.drillAnchor).toBe('C')
+  })
+
   it('reverses the anchors for a downstream container', async () => {
     const { provider, expandAggregated } = makeProvider(() =>
       result([gn('kid1'), gn('F')], [ge('e1', 'F', 'kid1')]))

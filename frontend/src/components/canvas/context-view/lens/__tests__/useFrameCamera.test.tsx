@@ -84,6 +84,24 @@ describe('useFrameCamera', () => {
     expect(fitView.mock.calls[1][0].nodes).toEqual([{ id: 'n:new' }, { id: 'n:x' }])
   })
 
+  it('holds still while a frame churns its rows', () => {
+    // A resolving container replaces its rows on every step of the
+    // server walk. Easing to each batch yanked the viewport once per
+    // step — the reported "chaos". Rows are the frame's business.
+    const withFrame = (rows: string[]) => [
+      card('f'),
+      card('fr:in:dom'),
+      ...rows.map(id => ({ ...card(id), frameId: 'fr:in:dom' }) as unknown as FocusCard),
+    ]
+    const { rerender } = render(<Harness rf={rf} focalId="a" cards={withFrame(['r1'])} />)
+    flush()
+    expect(fitView).toHaveBeenCalledTimes(1)
+    rerender(<Harness rf={rf} focalId="a" cards={withFrame(['r2', 'r3'])} />)
+    flush()
+    // New row ids arrived, but nothing outside the frame did.
+    expect(fitView).toHaveBeenCalledTimes(1)
+  })
+
   it('does not move the camera when nothing arrived', () => {
     const cards = [card('f'), card('n:x')]
     const { rerender } = render(<Harness rf={rf} focalId="a" cards={cards} />)

@@ -1383,16 +1383,27 @@ class ContextEngine:
 
     async def expand_aggregated_edge(self, req: ExpandRequest) -> TraceResult:
         resolved = await self._resolve_ontology()
-        # next_level can be int or entity-type-id; resolve to int
-        level = await self._resolve_level(req.next_level, req.source_urn, resolved)
+        # next_level can be int, entity-type-id, or ABSENT. Absent must
+        # survive to the provider as None — it means "drill structurally,
+        # one containment step", the only honest ask when the ontology
+        # repeats a type at two depths. _resolve_level would coerce None
+        # through its "auto" branch into the source's own level, which
+        # silently turned a structural request back into the level-pair
+        # query the caller was trying to avoid.
+        level = (
+            None if req.next_level is None
+            else await self._resolve_level(req.next_level, req.source_urn, resolved)
+        )
         edge_types = req.lineage_edge_types or list(resolved.lineage_edge_types or [])
         containment_types = list(resolved.containment_edge_types or [])
 
         # Use raw edges when next_level is the finest level in the ontology
         # — at that level AGGREGATED is 1:1 with raw lineage anyway, but
-        # raw is safer (no dependency on materialization having run).
+        # raw is safer (no dependency on materialization having run). A
+        # structural drill (level None) lets the provider's own
+        # agg-first / empty→raw fallback decide instead.
         finest_level = self._finest_level(resolved)
-        use_raw = (finest_level is not None and level >= finest_level)
+        use_raw = (level is not None and finest_level is not None and level >= finest_level)
 
         async with self._trace_semaphore():
             return await self.provider.expand_aggregated(

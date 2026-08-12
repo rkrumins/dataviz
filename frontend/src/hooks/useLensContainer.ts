@@ -250,7 +250,11 @@ export function useLensContainer(
           // the container feeds the focal.
           sourceUrn: direction === 'in' ? anchor : partnerUrn,
           targetUrn: direction === 'in' ? partnerUrn : anchor,
-          nextLevel: level === null ? null : level + 1,
+          // No honest level → no key at all. The field is OMITTED, not
+          // null: absent survives every serialization and validation
+          // layer identically, and the server reads it as "drill
+          // structurally, one containment step".
+          ...(level === null ? {} : { nextLevel: level + 1 }),
           // Only the container descends. The partner is the QUESTION —
           // stepping it too is why opening a Domain against a table five
           // levels below returned "nothing connects" about lineage that

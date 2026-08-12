@@ -926,12 +926,20 @@ export function LineageLens({
     // user click it, five times, to reach the grain they focused at is
     // not a picture of their lineage, it is a filing cabinet.
     //
+    // BAND ±1 ONLY — the focal's own partners. The first cut resolved
+    // every rollup anywhere on the board, so one ⊕ hop spawned a frame
+    // (and a multi-step server walk) for each coarse card the new band
+    // brought with it: frames erupting three bands out about questions
+    // nobody had asked, the camera chasing every asynchronous arrival.
+    // Deeper rollups keep their chevron; they open when asked.
+    //
     // Fetch only. Whether the answer RENDERS as a frame is derived in
     // the builder from having one, so this cannot fight an explicit
     // close, and the "one fetch per key per session" contract holds.
     // Each partner's walk is independent, so they run concurrently.
     for (const c of focusGraph.cards) {
       if (c.kind !== 'entity' || !c.rollup || !c.canOpenChildren) continue
+      if (Math.abs(c.band) !== 1) continue
       if (!c.nodeId || !c.expandKey) continue
       if (containerStatus?.has(c.expandKey) || containerResults?.has(c.expandKey)) continue
       const partner = c.partnerIds[0] ?? nodeId
