@@ -437,6 +437,12 @@ export interface FocusGraphInput {
   /** Entity-type id → hierarchy level. A type absent here is UNKNOWN,
    *  and an unknown level means we cannot ask the server for the next
    *  grain down — so the card offers no open rather than guessing. */
+  /** Type → declared hierarchy level. Retained for callers that still
+   *  pass it, and deliberately UNUSED by the builder: a type appearing
+   *  at two containment depths has no single level, so gating anything
+   *  on this map made real ontologies undrillable. Grain decisions use
+   *  `canContain` / `isCoarser`, which are closure-based and survive
+   *  self-nesting. */
   entityLevels?: Map<string, number>
   /** Extra pages unlocked per band key `${dir}:${band}`. */
   bandPages: ReadonlyMap<string, number>
@@ -520,7 +526,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     containsChildrenOf, openContains = EMPTY_SET, containsStatusOf,
     isCoarser, canContain, foldCoarserRestatements = false, collapsedFrames, expandedFrontier, openContainers,
     containerResults, containerStatus, frameShowAll, frameAllResults,
-    frameAllStatus, frameQueries, framePages, entityLevels,
+    frameAllStatus, frameQueries, framePages,
     bandPages, query, hiddenTypes, degreeHints, fetchStatus,
   } = input
 
@@ -1104,7 +1110,13 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         // `entry.rollup` is itself a canContain-closure test against the
         // ref's grain, so a coarser partner can contain by construction
         // even when the caller's ontology predicate has no entry for it.
-        const canOpenKids = (canContain(type) || entry.rollup) && entityLevels?.get(type) !== undefined
+        // The ONTOLOGY decides, or the server's own child count does —
+        // never a declared hierarchy LEVEL. A type that appears at two
+        // containment depths (a Container inside a Container) has no
+        // single level, so requiring one made whole branches of a real
+        // estate silently unopenable: no chevron, no explanation.
+        const canOpenKids = canContain(type) || entry.rollup
+          || ((entry.node?.data?.childCount as number | undefined) ?? 0) > 0
         const canHop = !isOutermost && (degreeHints?.get(entry.nodeId)?.[dir] ?? -1) !== 0
         const expandKind: FocusExpandKind = canHop ? 'hop' : null
         const openKey = `${dir}:${entry.nodeId}`
@@ -1190,7 +1202,13 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         // connected entity missing from it is still shown (appended):
         // the pair-filtered open can resolve a grain deeper than direct
         // children, and dropping a real connection would be a lie.
-        const roster = showAll
+        // Connected found NOTHING but the children are loaded → show
+        // them. A container the user opened must never render as a
+        // blank box: "nothing here connects" is an answer, and the
+        // roster beneath it is how they keep going without leaving.
+        const fellBackToRoster = !showAll && inside.length === 0
+          && (all?.children.length ?? 0) > 0
+        const roster = showAll || fellBackToRoster
           ? (() => {
               const seen = new Set<string>()
               const list: LineageNode[] = []
@@ -1212,7 +1230,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         // is clamped to what has loaded, so paging past the fetched set
         // holds the last real page (and shows the frame's loading state)
         // instead of rendering an empty window.
-        const pageSize = showAll ? FRAME_ALL_CAP : FRAME_CHILD_CAP
+        const pageSize = showAll || fellBackToRoster ? FRAME_ALL_CAP : FRAME_CHILD_CAP
         const lastLoadedPage = Math.max(0, Math.ceil(roster.length / pageSize) - 1)
         const framePage = Math.min(Math.max(0, framePages?.get(openKey) ?? 0), lastLoadedPage)
         const shownInside = roster.slice(framePage * pageSize, framePage * pageSize + pageSize)
@@ -1256,7 +1274,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           frameBreadcrumb: (res?.passedThrough ?? []).map(n => labelOf(n.id, n)),
           frameTruncated: res?.truncated ?? false,
           frameEmpty: res?.empty ?? false,
-          frameShowingAll: showAll,
+          frameShowingAll: showAll || fellBackToRoster,
           frameConnectedCount: connectedTotal,
           frameLoaded: roster.length,
           // Known only once the last page lands, or from the container's
@@ -1311,7 +1329,8 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           // (dataset → columns → nested fields) without leaving the
           // lens. Its lineage hop stays gated on actually having
           // lineage; its CONTENTS do not depend on that.
-          const childCanOpenKids = canContain(cType) && entityLevels?.get(cType) !== undefined
+          const childCanOpenKids = canContain(cType)
+            || ((child.data?.childCount as number | undefined) ?? 0) > 0
           // Opened → the child becomes a frame of its own, drawn inside
           // this one. Frames nest to whatever depth the ontology allows,
           // which is what makes the drill go table → column → field
@@ -1539,7 +1558,8 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             // door, not another box drawn inside this one.
             expandKey: `${dir}:${m.nodeId}`,
             expandKind: (!isOutermost && (degreeHints?.get(m.nodeId)?.[dir] ?? -1) !== 0) ? 'hop' : null,
-            canOpenChildren: canContain(mType) && entityLevels?.get(mType) !== undefined,
+            canOpenChildren: canContain(mType)
+              || ((m.node?.data?.childCount as number | undefined) ?? 0) > 0,
             childrenOpen: false,
             frontier: !isOutermost && (degreeHints?.get(m.nodeId)?.[dir] ?? -1) !== 0,
             frontierExpanded: expandedFrontier.has(`${dir}:${m.nodeId}`),

@@ -243,9 +243,15 @@ describe('buildFocusGraph — grouping and rollups', () => {
     expect(g.cards.some(c => c.kind === 'frame')).toBe(false)
   })
 
-  it('declines to offer contents when the ontology has not leveled the type', () => {
-    // Without a level we cannot ask the server for the next grain down,
-    // and guessing would query the wrong thing.
+  // REGRESSION: this used to assert the OPPOSITE — no declared level,
+  // no chevron — on the reasoning that we could not name a grain to ask
+  // the server for. That reasoning was wrong, and it cost a whole
+  // estate: `Data Domain > Application > Container > Container >
+  // Database > Table > Column` repeats a type at two containment
+  // depths, so no `hierarchy.level` can describe it and entire branches
+  // were silently unopenable. A caller with no honest level to send now
+  // sends none, and the server drills structurally.
+  it('offers contents on the ONTOLOGY, never on a declared hierarchy level', () => {
     const g = build({
       nodes: [node('F'), node('Mystery', 'UNLEVELED')],
       edges: [edge('e1', 'Mystery', 'F')],
@@ -253,7 +259,21 @@ describe('buildFocusGraph — grouping and rollups', () => {
       canContain: (t) => t === 'UNLEVELED',
       over: { entityLevels: new Map() },
     })
-    expect(card(g, 'n:Mystery').canOpenChildren).toBe(false)
+    expect(card(g, 'n:Mystery').canOpenChildren).toBe(true)
+  })
+
+  it('offers contents when the SERVER says there are children, whatever the ontology claims', () => {
+    // `canContain` is the ontology's opinion; `childCount` is the data
+    // source's. Either is enough — a container that demonstrably holds
+    // things is not a dead end because a type was declared childless.
+    const withKids = node('Holder', 'UNDECLARED')
+    ;(withKids.data as Record<string, unknown>).childCount = 12
+    const g = build({
+      nodes: [node('F'), withKids],
+      edges: [edge('e1', 'Holder', 'F')],
+      canContain: () => false,
+    })
+    expect(card(g, 'n:Holder').canOpenChildren).toBe(true)
   })
 
   it('offers contents to a SAME-GRAIN neighbour — the reported failure', () => {
@@ -1228,6 +1248,50 @@ describe('buildFocusGraph — caps, chips, filter', () => {
       },
     })
     expect(card(withCache, 'n:Snowflake').previewLabels).toEqual(['label-kid1', 'label-kid2'])
+  })
+
+  // REGRESSION: opening a container asks two questions at once — "what
+  // is in here" and "which of it reaches my focal" — and the frame
+  // rendered NOTHING unless the second succeeded. So a Data Domain
+  // whose lineage query came back empty was a dead end: the only way on
+  // was to leave the Lens, expand on the canvas, and come back. The
+  // first question is cheap and always answerable; it must never be
+  // held hostage by the second.
+  it('falls back to the child roster when nothing inside connects', () => {
+    const base = {
+      nodes: [node('F'), node('Dom', 'DATADOMAIN')],
+      edges: [edge('e1', 'Dom', 'F')],
+      isCoarser: (t?: string) => t === 'DATADOMAIN',
+      canContain: (t?: string) => t === 'DATADOMAIN',
+    }
+    const over = {
+      openContainers: new Set(['in:Dom']),
+      containerResults: new Map([['in:Dom', {
+        nodes: [], edges: [], passedThrough: [], truncated: false, empty: true,
+      }]]),
+      containerStatus: new Map([['in:Dom', 'done' as const]]),
+    }
+
+    // Nothing loaded yet — the frame is honestly empty, not pretending.
+    const bare = build({ ...base, over })
+    expect(bare.cards.filter(c => c.frameId === 'fr:in:Dom')).toHaveLength(0)
+
+    // Children arrive → they render, and the frame SAYS it is showing
+    // the roster so "0 connected" never sits above a list of things.
+    const withKids = build({
+      ...base,
+      over: {
+        ...over,
+        frameAllResults: new Map([['in:Dom', {
+          children: [node('app1'), node('app2')], hasMore: false, total: 2,
+        }]]),
+      },
+    })
+    const rows = withKids.cards.filter(c => c.frameId === 'fr:in:Dom')
+    expect(rows.map(c => c.nodeId)).toEqual(['app1', 'app2'])
+    expect(card(withKids, 'fr:in:Dom').frameShowingAll).toBe(true)
+    // And they claim nothing they cannot back up.
+    expect(rows.every(c => !c.connected && c.count === 0)).toBe(true)
   })
 })
 

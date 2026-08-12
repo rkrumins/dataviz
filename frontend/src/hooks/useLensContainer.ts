@@ -106,9 +106,12 @@ export interface LensContainerData {
     focalUrn: string,
     partnerUrn: string,
     direction: ContainerDirection,
-    /** Hierarchy level of the CONTAINER's entity type. The fetch asks for
-     *  level+1 — one grain finer. Callers must not invent this. */
-    containerLevel: number,
+    /** Hierarchy level of the CONTAINER's entity type, when the ontology
+     *  declares one. `null` is a legitimate answer, not a missing value:
+     *  a type that appears at two containment depths (a Container inside
+     *  a Container) has no single level, and the server drills
+     *  structurally when none is sent. Callers must not invent one. */
+    containerLevel: number | null,
   ) => void
   /** Re-kick a failed open. */
   retry: (
@@ -116,7 +119,7 @@ export interface LensContainerData {
     focalUrn: string,
     partnerUrn: string,
     direction: ContainerDirection,
-    containerLevel: number,
+    containerLevel: number | null,
   ) => void
 }
 
@@ -202,7 +205,7 @@ export function useLensContainer(
     focalUrn: string,
     partnerUrn: string,
     direction: ContainerDirection,
-    containerLevel: number,
+    containerLevel: number | null,
   ) => {
     const key = containerKey(containerUrn, partnerUrn, direction)
     const openKey = openKeyOf(containerUrn, direction)
@@ -237,7 +240,12 @@ export function useLensContainer(
           // the container feeds the focal.
           sourceUrn: direction === 'in' ? anchor : partnerUrn,
           targetUrn: direction === 'in' ? partnerUrn : anchor,
-          nextLevel: level + 1,
+          nextLevel: level === null ? null : level + 1,
+          // Only the container descends. The partner is the QUESTION —
+          // stepping it too is why opening a Domain against a table five
+          // levels below returned "nothing connects" about lineage that
+          // exists.
+          drillAnchor: anchor,
           lineageEdgeTypes: types,
           includeContainmentEdges: true,
         })
@@ -291,7 +299,7 @@ export function useLensContainer(
         // Exactly one child: descend through it, recording the step.
         passedThrough.push(nodes[0])
         anchor = nodes[0].id
-        level += 1
+        if (level !== null) level += 1
       }
 
       if (session !== sessionRef.current) return
@@ -314,7 +322,7 @@ export function useLensContainer(
     focalUrn: string,
     partnerUrn: string,
     direction: ContainerDirection,
-    containerLevel: number,
+    containerLevel: number | null,
   ) => {
     // Keyed by PARTNER: the same container opened from two different
     // places is two different questions, and a focal-only key would let
@@ -329,7 +337,7 @@ export function useLensContainer(
     focalUrn: string,
     partnerUrn: string,
     direction: ContainerDirection,
-    containerLevel: number,
+    containerLevel: number | null,
   ) => void runOpen(containerUrn, focalUrn, partnerUrn, direction, containerLevel), [runOpen])
 
   /**

@@ -1405,6 +1405,7 @@ class ContextEngine:
                 timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
                 use_raw_edges=use_raw,
                 include_containment_edges=req.include_containment_edges,
+                drill_anchor=getattr(req, "drill_anchor", None),
             )
 
     async def _resolve_level(self, level_input: Any, source_urn: str, ontology: Any) -> int:

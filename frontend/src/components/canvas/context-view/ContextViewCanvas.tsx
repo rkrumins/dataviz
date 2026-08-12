@@ -3190,12 +3190,12 @@ export function ContextViewCanvas({
     const focal = lensFocalOf(lensHistory)
     if (focal) lensLoadAllChildren(openKey, focal, searchQuery)
   }, [lensLoadAllChildren, lensHistory])
-  const openLensContainer = useCallback((urn: string, partner: string, dir: 'in' | 'out', level: number) => {
+  const openLensContainer = useCallback((urn: string, partner: string, dir: 'in' | 'out', level: number | null) => {
     // The focal buckets the cache; the PARTNER is the question.
     const focal = lensFocalOf(lensHistory)
     if (focal) lensOpenContainerFetch(urn, focal, partner, dir, level)
   }, [lensOpenContainerFetch, lensHistory])
-  const retryLensContainer = useCallback((urn: string, partner: string, dir: 'in' | 'out', level: number) => {
+  const retryLensContainer = useCallback((urn: string, partner: string, dir: 'in' | 'out', level: number | null) => {
     const focal = lensFocalOf(lensHistory)
     if (focal) lensRetryContainerFetch(urn, focal, partner, dir, level)
   }, [lensRetryContainerFetch, lensHistory])

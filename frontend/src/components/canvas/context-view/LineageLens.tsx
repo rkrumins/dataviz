@@ -172,8 +172,8 @@ export interface LineageLensProps {
   /** Ask the server what's inside a container that connects to
    *  `partnerUrn` — the card's partner in the picture, which is the
    *  focal only at the first hop. */
-  onOpenContainer?: (containerUrn: string, partnerUrn: string, dir: 'in' | 'out', containerLevel: number) => void
-  onRetryOpenContainer?: (containerUrn: string, partnerUrn: string, dir: 'in' | 'out', containerLevel: number) => void
+  onOpenContainer?: (containerUrn: string, partnerUrn: string, dir: 'in' | 'out', containerLevel: number | null) => void
+  onRetryOpenContainer?: (containerUrn: string, partnerUrn: string, dir: 'in' | 'out', containerLevel: number | null) => void
   /** Transitive reach per visited focal (useLensImpact). Absent =
    *  unknown or unsupported — nothing is shown, never a fake zero. */
   impact?: Map<string, LensImpact>
@@ -578,8 +578,12 @@ export function LineageLens({
    *  inside it that connects to the focal (idempotent per key); closing
    *  only drops the key — the answer stays cached for re-opening. */
   const toggleContainer = useCallback((openKey: string, containerNodeId: string, entityType: string, partnerId: string | null) => {
-    const level = entityLevels.get(entityType)
-    if (level === undefined) return
+    // An UNDECLARED level is not a reason to refuse. A type that appears
+    // at two containment depths — a Container inside a Container — has
+    // no single `hierarchy.level`, so requiring one made whole branches
+    // of a real ontology silently unopenable. `null` says "no honest
+    // level to send" and the server drills structurally instead.
+    const level = entityLevels.get(entityType) ?? null
     // No partner means the card connects to the focal (band 1).
     const partner = partnerId ?? nodeId
     if (!partner) return
@@ -643,9 +647,9 @@ export function LineageLens({
   }, [nodeId, seededFresh, onLoadAllChildren])
 
   const retryContainer = useCallback((openKey: string, containerNodeId: string, entityType: string, partnerId: string | null) => {
-    const level = entityLevels.get(entityType)
+    const level = entityLevels.get(entityType) ?? null
     const partner = partnerId ?? nodeId
-    if (level === undefined || !partner) return
+    if (!partner) return
     onRetryOpenContainer?.(containerNodeId, partner, openKey.startsWith('in:') ? 'in' : 'out', level)
   }, [nodeId, entityLevels, onRetryOpenContainer])
 
@@ -901,12 +905,38 @@ export function LineageLens({
       // thing a green suite covering both halves separately misses.
       if (c.frameLocal) continue
       if (containerStatus?.has(c.expandKey) || containerResults?.has(c.expandKey)) continue
-      const level = entityLevels.get(c.type)
       const partner = c.partnerIds[0] ?? nodeId
-      if (level === undefined || !partner) continue
-      onOpenContainer(c.nodeId, partner, c.expandKey.startsWith('in:') ? 'in' : 'out', level)
+      if (!partner) continue
+      onOpenContainer(c.nodeId, partner, c.expandKey.startsWith('in:') ? 'in' : 'out',
+        entityLevels.get(c.type) ?? null)
     }
   }, [focusGraph, nodeId, onOpenContainer, entityLevels, containerStatus, containerResults])
+
+  /**
+   * An open that finds no lineage falls back to WHAT IS INSIDE.
+   *
+   * Opening a container asks two questions at once — "what is in here"
+   * and "which of it reaches my focal" — and the frame used to render
+   * nothing unless the second succeeded. So a Domain whose lineage
+   * query came back empty became a dead end: the only way on was to
+   * leave the Lens, expand on the canvas, and come back. The first
+   * question is cheap, always answerable, and already implemented; it
+   * should never be held hostage by the second.
+   *
+   * This effect only FETCHES. Whether to render the roster is derived
+   * in the builder from "connected is empty and children are loaded",
+   * not stored — so it cannot fight the user's own Connected|All
+   * choice, and Connected stays the default everywhere it has an
+   * answer to give.
+   */
+  useEffect(() => {
+    if (!containerResults || !onLoadAllChildren) return
+    for (const [key, res] of containerResults) {
+      if (!res.empty || containerStatus?.get(key) !== 'done') continue
+      if (frameAllResults?.has(key) || frameAllStatus?.has(key)) continue
+      onLoadAllChildren(key, '')
+    }
+  }, [containerResults, containerStatus, frameAllResults, frameAllStatus, onLoadAllChildren])
 
   // Type chips for graph mode — one row across both directions (the
   // list columns render their own per-column rows).

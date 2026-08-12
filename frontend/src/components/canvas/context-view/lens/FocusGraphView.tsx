@@ -859,8 +859,13 @@ function FocusFrameNode({ data }: NodeProps) {
   const via = card.frameSharedEdgeType
     ? ` · ${edgeLabelFor(card.frameSharedEdgeType, ctx.edgeTypeInfo)}`
     : ''
+  // Showing everything BECAUSE the lineage answer was empty — say so,
+  // or the roster reads as an answer to a question nobody asked.
+  const fellBack = card.frameShowingAll && card.frameEmpty && card.frameConnectedCount === 0
   const inside = card.frameShowingAll
-    ? `${card.frameConnectedCount.toLocaleString()} connected${to} · ${range ?? `${card.frameLoaded.toLocaleString()} of ${total} shown`}${searching ? ` matching "${q.trim()}"` : ''}`
+    ? fellBack
+      ? `${card.frameTruncated ? 'the search was cut short' : `nothing here connects${to}`} · showing everything inside${range ? ` · ${range}` : ''}`
+      : `${card.frameConnectedCount.toLocaleString()} connected${to} · ${range ?? `${card.frameLoaded.toLocaleString()} of ${total} shown`}${searching ? ` matching "${q.trim()}"` : ''}`
     : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected${to || ' inside'}${via}${card.childrenOpen ? (range ? ` · ${range}` : '') : preview}`
   return (
     <div
