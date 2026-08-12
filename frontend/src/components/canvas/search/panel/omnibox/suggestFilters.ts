@@ -404,13 +404,16 @@ function startHere(input: SuggestInput, perGroup: number): SuggestSection[] {
         return assemble(browseBuckets(input, perGroup * 3), input.activeGroup, perGroup * 3)
     }
     const items: FilterSuggestion[] = []
-    for (const tag of input.tagValues.slice(0, 2)) {
+    input.tagValues.slice(0, 2).forEach((tag, i) => {
         items.push(suggestion({
             id: `tag:${tag}`, group: 'tag', icon: 'Tag', score: 0,
-            title: `Tagged #${tag}`, hint: 'most used tag in this view',
+            title: `Tagged #${tag}`,
+            // Only the first — repeating "most used" on the runner-up
+            // reads as a bug.
+            hint: i === 0 ? 'most used tag in this view' : undefined,
             predicate: { kind: 'tag', op: 'hasAny', values: [tag] } as Predicate,
         }))
-    }
+    })
     for (const type of input.entityTypes.slice(0, 2)) {
         items.push(suggestion({
             id: `type:${type}`, group: 'type', icon: 'Boxes', score: 0,

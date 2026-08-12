@@ -123,9 +123,9 @@ export const SearchOmnibox: FC<SearchOmniboxProps> = ({
             onKeyDown={handleKeyDown}
             className={cn(
                 'w-full rounded-xl overflow-hidden',
-                'bg-canvas-elevated/70 border border-glass-border',
-                'focus-within:border-accent-lineage/60',
-                'focus-within:shadow-[0_0_0_3px_rgba(99,102,241,0.12)]',
+                'bg-canvas-elevated border border-slate-200 dark:border-glass-border',
+                'focus-within:border-indigo-500/60',
+                'focus-within:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]',
                 'transition-shadow duration-150',
             )}
         >
@@ -152,7 +152,7 @@ export const SearchOmnibox: FC<SearchOmniboxProps> = ({
                             : 'Add another filter…'}
                     className={cn(
                         'flex-1 min-w-0 bg-transparent text-ink',
-                        'placeholder:text-ink-muted/60 focus:outline-none',
+                        'placeholder:text-ink-muted focus:outline-none',
                         isHero ? 'text-[13.5px]' : 'text-[12.5px]',
                     )}
                 />
@@ -162,18 +162,21 @@ export const SearchOmnibox: FC<SearchOmniboxProps> = ({
                         onClick={() => { setActiveGroup(null); inputRef.current?.focus() }}
                         className={cn(
                             'shrink-0 inline-flex items-center gap-1 h-6 px-2 rounded-md',
-                            'bg-accent-lineage/15 text-accent-lineage text-[10.5px] font-medium',
-                            'hover:bg-accent-lineage/25 transition-colors',
+                            'bg-indigo-500/15 text-indigo-600 dark:text-indigo-300',
+                            'text-[10.5px] font-medium',
+                            'hover:bg-indigo-500/25 transition-colors',
                         )}
                     >
                         {labelFor(activeGroup)}
                         <X className="w-3 h-3" />
                     </button>
                 )}
-                {itemCount > 0 && listOpen && (
+                {/* Only once there's something to add — an empty
+                    input needs the width for its placeholder. */}
+                {itemCount > 0 && listOpen && query.length > 0 && (
                     <kbd className={cn(
                         'shrink-0 hidden sm:inline-flex items-center gap-1',
-                        'text-[9.5px] text-ink-muted/70',
+                        'text-[9.5px] text-ink-muted',
                     )}>
                         <CornerDownLeft className="w-3 h-3" /> add
                     </kbd>
@@ -188,7 +191,7 @@ export const SearchOmnibox: FC<SearchOmniboxProps> = ({
                     {!query && (
                         <div className={cn(
                             'flex flex-wrap gap-1 px-3 pb-2 pt-0.5',
-                            'border-b border-glass-border/50',
+                            'border-b border-slate-200 dark:border-glass-border',
                         )}>
                             {BROWSE_FACETS.map((facet) => (
                                 <button
@@ -202,8 +205,12 @@ export const SearchOmnibox: FC<SearchOmniboxProps> = ({
                                         'inline-flex items-center gap-1 h-6 px-2 rounded-md',
                                         'text-[10.5px] font-medium transition-colors',
                                         activeGroup === facet.group
-                                            ? 'bg-accent-lineage/20 text-accent-lineage'
-                                            : 'bg-glass/40 text-ink-secondary hover:text-ink hover:bg-glass/70',
+                                            ? 'bg-indigo-500/15 text-indigo-600 dark:text-indigo-300'
+                                            : cn(
+                                                'bg-slate-100 dark:bg-white/[0.06]',
+                                                'text-ink-secondary hover:text-ink',
+                                                'hover:bg-slate-200 dark:hover:bg-white/[0.1]',
+                                            ),
                                     )}
                                 >
                                     <DynamicIcon name={facet.icon} className="w-3 h-3" />
@@ -247,12 +254,12 @@ export const SearchOmnibox: FC<SearchOmniboxProps> = ({
                                     <span className="flex flex-col gap-0.5 px-2 pt-2 pb-1">
                                         <span className={cn(
                                             'text-[9.5px] uppercase tracking-[0.12em]',
-                                            'font-semibold text-ink-muted/70',
+                                            'font-semibold text-ink-secondary',
                                         )}>
                                             {section.heading}
                                         </span>
                                         {section.note && (
-                                            <span className="text-[10px] text-ink-muted/60 normal-case tracking-normal leading-snug">
+                                            <span className="text-[10px] text-ink-muted normal-case tracking-normal leading-snug">
                                                 {section.note}
                                             </span>
                                         )}
@@ -267,13 +274,13 @@ export const SearchOmnibox: FC<SearchOmniboxProps> = ({
                                         className={cn(
                                             'flex items-center gap-2.5 px-2 py-1.5 rounded-lg',
                                             'cursor-pointer select-none',
-                                            'data-[selected=true]:bg-accent-lineage/12',
+                                            'data-[selected=true]:bg-indigo-500/10',
                                         )}
                                     >
                                         <span className={cn(
                                             'shrink-0 inline-flex items-center justify-center',
                                             'w-6 h-6 rounded-md',
-                                            'bg-accent-lineage/12 text-accent-lineage',
+                                            'bg-indigo-500/10 text-indigo-600 dark:text-indigo-300',
                                         )}>
                                             <DynamicIcon name={item.icon} className="w-3.5 h-3.5" />
                                         </span>
@@ -284,13 +291,13 @@ export const SearchOmnibox: FC<SearchOmniboxProps> = ({
                                                         <HighlightedText
                                                             text={item.title}
                                                             query={item.match}
-                                                            matchClassName="bg-accent-lineage/20 text-accent-lineage font-semibold rounded px-0.5"
+                                                            matchClassName="bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 font-semibold rounded px-0.5"
                                                         />
                                                     )
                                                     : item.title}
                                             </span>
                                             {item.hint && (
-                                                <span className="text-[10px] text-ink-muted/70 truncate">
+                                                <span className="text-[10px] text-ink-muted truncate">
                                                     {item.hint}
                                                 </span>
                                             )}
