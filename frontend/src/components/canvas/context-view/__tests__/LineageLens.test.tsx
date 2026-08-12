@@ -665,6 +665,82 @@ describe('LineageLens graph mode', () => {
     }
   })
 
+  /**
+   * THE BUSINESS JOURNEY, end to end at the component level: select a
+   * node, see the real upstream at your grain with no clicks, walk to
+   * one of those upstream entities, walk back, and keep going. This is
+   * the sentence the user reported as impossible — every gesture in it
+   * is pinned here, through the real component, builder and renderer.
+   */
+  it('walks the tree: focus → upstream tables appear → walk to one → back → onward', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [
+          // The reported estate shape: a domain far above the tables,
+          // with the repeated middle levels carrying NO declared levels.
+          { id: 'DATADOMAIN', hierarchy: { level: 0, canContain: ['CONTAINER'] } },
+          { id: 'CONTAINER', hierarchy: { canContain: ['CONTAINER', 'DATASET'] } },
+          { id: 'DATASET', hierarchy: { level: 5, canContain: [] } },
+        ],
+      },
+    } as never)
+    try {
+      useCanvasStore.setState({
+        nodes: [node('collaterals', 'DATASET'), node('finance', 'DATADOMAIN')],
+        edges: [edge('u1', 'finance', 'collaterals')],
+        visibleEdges: [],
+      } as never)
+      const onRecenter = vi.fn()
+      const onBack = vi.fn()
+      // The container answer as the (fixed) wire now delivers it — the
+      // walk resolved the domain down to the tables, naming each level
+      // it stepped through. NO graphSeed, NO openContainers: nothing
+      // was clicked.
+      renderLens(['collaterals'], { onRecenter, onBack }, {
+        containerResults: new Map([['in:finance', {
+          nodes: [node('loan_positions', 'DATASET'), node('fx_rates', 'DATASET')],
+          edges: [edge('r1', 'loan_positions', 'collaterals'), edge('r2', 'fx_rates', 'collaterals')],
+          passedThrough: [node('riskapp', 'CONTAINER'), node('risk_db', 'CONTAINER')],
+          truncated: false,
+          empty: false,
+        }]]),
+        containerStatus: new Map([['in:finance', 'done' as const]]),
+      })
+
+      // 1. Selecting the node was enough: the upstream is TABLES, inside
+      //    a frame named for the domain, walked path on show. (getAll —
+      //    a name can legitimately appear in a row and in a caption.)
+      const row = screen.getAllByText('label-loan_positions')[0]
+      expect(row).toBeTruthy()
+      expect(screen.getAllByText('label-fx_rates').length).toBeGreaterThan(0)
+      expect(screen.getByText(/label-riskapp › label-risk_db/)).toBeTruthy()
+
+      // 2. Each table is a real card: click inspects...
+      fireEvent.click(row)
+      // (detail strip appears — the row is selected, nothing jumped)
+
+      // 3. ...double-click WALKS to it.
+      fireEvent.doubleClick(row)
+      expect(onRecenter).toHaveBeenCalledWith('loan_positions')
+
+      // 4. And from a walked-to node, Back retraces the step.
+      cleanup()
+      useCanvasStore.setState({
+        nodes: [node('collaterals', 'DATASET'), node('loan_positions', 'DATASET')],
+        edges: [edge('r1', 'loan_positions', 'collaterals')],
+        visibleEdges: [],
+      } as never)
+      renderLens(['collaterals', 'loan_positions'], { onBack })
+      fireEvent.click(screen.getByText('Back'))
+      expect(onBack).toHaveBeenCalled()
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
   it('renders an opened container as a frame holding its connected children', () => {
     const prevSchema = useSchemaStore.getState().schema
     useSchemaStore.setState({
