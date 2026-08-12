@@ -892,6 +892,14 @@ export function LineageLens({
     if (!focusGraph || !onOpenContainer) return
     for (const c of focusGraph.cards) {
       if (c.kind !== 'frame' || !c.nodeId || !c.expandKey) continue
+      // A LOCAL frame is built from records already in hand — the band's
+      // own entries bucketed by parent. It never reads
+      // `containerResults`, so asking the server would spend a
+      // `/trace/expand` per table on the board, per re-center, and
+      // discard every answer. This seam predates local frames and
+      // satisfies all of its conditions, which is exactly the kind of
+      // thing a green suite covering both halves separately misses.
+      if (c.frameLocal) continue
       if (containerStatus?.has(c.expandKey) || containerResults?.has(c.expandKey)) continue
       const level = entityLevels.get(c.type)
       const partner = c.partnerIds[0] ?? nodeId
@@ -1507,7 +1515,17 @@ export function LineageLens({
               <FocusGraphView
                 graph={focusGraph}
                 focalId={nodeId}
-                focalStats={{ in: incomingRecords.length, out: outgoingRecords.length }}
+                // What the BOARD holds, not how many records arrived.
+                // The bands now report connections rather than cards, so
+                // a focal still tallying raw records would restate the
+                // very mismatch that fixed — "11 in" above a band header
+                // reading "8 connections", both true, neither reconciled.
+                // Records are still reachable: the header's own count
+                // names the fold, and the chips report what they hide.
+                focalStats={{
+                  in: focusGraph?.bandTotals.get('band:in:1')?.connections ?? incomingRecords.length,
+                  out: focusGraph?.bandTotals.get('band:out:1')?.connections ?? outgoingRecords.length,
+                }}
                 focalFetch={focalFetch}
                 focalImpact={focalImpact}
                 focalImpactLoading={focalImpactLoading}

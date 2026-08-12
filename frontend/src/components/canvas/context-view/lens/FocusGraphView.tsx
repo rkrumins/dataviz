@@ -100,12 +100,6 @@ const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
 
 interface CardCtx {
   edgeTypeInfo?: EdgeTypeInfoMap
-  /** Frame id → the one relationship type all its rows share, when
-   *  they do. Eight columns each reading `● DERIVES FROM` is eight
-   *  identical lines that say nothing and squeeze out the name beside
-   *  them; the frame states it once instead. A row whose type DIFFERS
-   *  from its neighbours still prints it — that is information. */
-  uniformInFrame: ReadonlyMap<string, string>
   /** type id → {color, icon}, resolved ONCE for the whole graph. Cards
    *  used to each subscribe to the schema store and linear-scan the
    *  entity-type list, so every card paid for every schema touch. */
@@ -297,21 +291,35 @@ function FocalBreadcrumb({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
           <span className="flex-shrink-0 text-ink-muted/40" aria-hidden>›</span>
         </>
       )}
-      {shown.map((level, i) => (
-        <span key={`${level}-${i}`} className="flex items-center gap-1 min-w-0">
-          {i > 0 && <span className="flex-shrink-0 text-ink-muted/40" aria-hidden>›</span>}
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); ctx.onFocus(idOf(i)) }}
-            className={cn(
-              'truncate hover:text-accent-lineage transition-colors',
-              i === shown.length - 1 ? 'text-ink-muted' : 'text-ink-muted/60',
-            )}
+      {shown.map((level, i) => {
+        // The DEEPEST level identifies the entity — it is the whole
+        // difference between `int_clean_orders_t1` and `_t2` — so it
+        // never gives up room. Shallower levels are context and yield
+        // first; the tooltip keeps the chain whole either way.
+        //
+        // The rule has to sit on the WRAPPER, not just the button: a
+        // shrinkable wrapper clips an unshrinkable child, which is how
+        // an earlier attempt still rendered `int_clean_or…`.
+        const deepest = i === shown.length - 1
+        return (
+          <span
+            key={`${level}-${i}`}
+            className={cn('flex items-center gap-1', deepest ? 'flex-shrink-0' : 'min-w-0')}
           >
-            {level}
-          </button>
-        </span>
-      ))}
+            {i > 0 && <span className="flex-shrink-0 text-ink-muted/40" aria-hidden>›</span>}
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); ctx.onFocus(idOf(i)) }}
+              className={cn(
+                'hover:text-accent-lineage transition-colors',
+                deepest ? 'whitespace-nowrap text-ink-muted' : 'truncate min-w-0 text-ink-muted/60',
+              )}
+            >
+              {level}
+            </button>
+          </span>
+        )
+      })}
     </p>
   )
 }
@@ -327,7 +335,7 @@ function ProvenanceRibbon({ card }: { card: FocusCard }) {
     <span className="flex items-center gap-1 min-w-0" title={`in ${chain.join(' › ')}`}>
       <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/50" />
       {chain.length > 1 && (
-        <span className="flex-shrink-0 text-ink-muted/40">{'· '.repeat(0)}⋯›</span>
+        <span className="flex-shrink-0 text-ink-muted/40" aria-hidden>⋯›</span>
       )}
       <TailName className="text-ink-muted" title={`in ${chain.join(' › ')}`}>{owner}</TailName>
     </span>
@@ -752,7 +760,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
               <span className="text-ink-muted/40">·</span>
             </>
           )}
-          {card.edgeTypeNorm && !(card.frameId && ctx.uniformInFrame.get(card.frameId) === card.edgeTypeNorm) && (
+          {card.edgeTypeNorm && card.edgeTypeNorm !== card.frameSharedEdgeType && (
             <>
               <span
                 className="w-1 h-1 rounded-full flex-shrink-0"
@@ -847,8 +855,9 @@ function FocusFrameNode({ data }: NodeProps) {
     : ''
   // Every row shares one relationship type → the frame says it once
   // instead of the rows each repeating it.
-  const sharedType = ctx.uniformInFrame.get(card.id)
-  const via = sharedType ? ` · ${edgeLabelFor(sharedType, ctx.edgeTypeInfo)}` : ''
+  const via = card.frameSharedEdgeType
+    ? ` · ${edgeLabelFor(card.frameSharedEdgeType, ctx.edgeTypeInfo)}`
+    : ''
   const inside = card.frameShowingAll
     ? `${card.frameConnectedCount.toLocaleString()} connected${to} · ${range ?? `${card.frameLoaded.toLocaleString()} of ${total} shown`}${searching ? ` matching "${q.trim()}"` : ''}`
     : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected${to || ' inside'}${via}${card.childrenOpen ? (range ? ` · ${range}` : '') : preview}`
@@ -1327,22 +1336,8 @@ export function FocusGraphView({
     }
   }, [schema])
 
-  // Per frame: the one relationship type its rows share, if they do.
-  const uniformInFrame = useMemo(() => {
-    const seen = new Map<string, string | null>()
-    for (const c of graph.cards) {
-      if (!c.frameId || !c.edgeTypeNorm) continue
-      const prev = seen.get(c.frameId)
-      if (prev === undefined) seen.set(c.frameId, c.edgeTypeNorm)
-      else if (prev !== c.edgeTypeNorm) seen.set(c.frameId, null)
-    }
-    const out = new Map<string, string>()
-    for (const [k, v] of seen) if (v) out.set(k, v)
-    return out
-  }, [graph.cards])
   const ctx = useMemo<CardCtx>(() => ({
     edgeTypeInfo,
-    uniformInFrame,
     visualFor,
     onSelect,
     onFocus,
@@ -1361,7 +1356,7 @@ export function FocusGraphView({
     onRetryFetch,
     onRevealOnCanvas,
     onOpenDetails,
-  }), [edgeTypeInfo, uniformInFrame, visualFor, onSelect, onFocus, onToggleFrame, onOpenContainer, onExpandFrontier, onToggleContains, onRetryContains, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
+  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleFrame, onOpenContainer, onExpandFrontier, onToggleContains, onRetryContains, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out
@@ -1410,9 +1405,16 @@ export function FocusGraphView({
     for (const [band, minY] of minYByBand) {
       if (band === 0) continue
       const totals = graph.bandTotals.get(`band:${band < 0 ? 'in' : 'out'}:${Math.abs(band)}`)
-      const sub = totals
+      // Cards, and — when a card stands for more than itself — what
+      // those cards actually hold. A frame is one card and eight
+      // connections; printing only "1" beside a focal reading "11 in"
+      // left the reader to guess which number was lying.
+      const cards = totals
         ? totals.total > totals.shown ? `${totals.shown} of ${totals.total}` : `${totals.total}`
         : undefined
+      const sub = totals && cards && totals.connections > totals.total
+        ? `${cards} · ${totals.connections.toLocaleString()} connections`
+        : cards
       nodes.push({
         id: `bl:${band}`,
         type: 'bandLabel',

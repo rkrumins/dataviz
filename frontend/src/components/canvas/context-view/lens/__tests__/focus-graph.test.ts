@@ -139,6 +139,44 @@ describe('buildFocusGraph — grouping and rollups', () => {
     expect(g.edges.find(e => e.id === 'fe:n:s1->f')).toBeTruthy()
   })
 
+  // A row prints a subtitle only when it has something the frame has
+  // not already said. Layout and rendering read the SAME field for
+  // that, because a view that suppressed what the layout had reserved
+  // room for is how a frame reached 1,030px.
+  it('states a shared relationship once on the frame and sizes its rows to their names', () => {
+    const g = build({
+      nodes: [node('F'), node('f1', 'schemaField'), node('f2', 'schemaField'), node('PD')],
+      edges: [
+        edge('e1', 'f1', 'F'), edge('e2', 'f2', 'F'),
+        contains('c1', 'PD', 'f1'), contains('c2', 'PD', 'f2'),
+      ],
+    })
+    const frame = card(g, 'fr:in:PD')
+    expect(frame.frameSharedEdgeType).toBe(card(g, 'n:f1').edgeTypeNorm)
+    expect(frame.frameSharedEdgeType).not.toBe('')
+    for (const id of ['n:f1', 'n:f2']) {
+      // The row carries the frame's claim, so the field that decides its
+      // HEIGHT is the field that decides its SUBTITLE.
+      expect(card(g, id).frameSharedEdgeType).toBe(frame.frameSharedEdgeType)
+      expect(card(g, id).h).toBe(CHILD_ROW_H)
+    }
+  })
+
+  it('lets a row that DISSENTS keep its own relationship, and the room to print it', () => {
+    const g = build({
+      nodes: [node('F'), node('f1', 'schemaField'), node('f2', 'schemaField'), node('PD')],
+      edges: [
+        edge('e1', 'f1', 'F'),
+        { ...edge('e2', 'f2', 'F'), data: { edgeType: 'REFERENCES' } } as LineageEdge,
+        contains('c1', 'PD', 'f1'), contains('c2', 'PD', 'f2'),
+      ],
+    })
+    // Types differ → the frame claims none, and every row says its own.
+    expect(card(g, 'fr:in:PD').frameSharedEdgeType).toBe('')
+    expect(card(g, 'n:f1').h).toBe(CARD_H)
+    expect(card(g, 'n:f2').h).toBe(CARD_H)
+  })
+
   it('collapsing a frame bundles its rows back into one edge and hides them', () => {
     const g = build({
       nodes: [node('F'), node('f1', 'schemaField'), node('f2', 'schemaField'), node('PD')],
@@ -154,6 +192,20 @@ describe('buildFocusGraph — grouping and rollups', () => {
     // Still says what it holds, from data already in hand.
     expect(frame.previewLabels).toEqual(['label-f1', 'label-f2'])
     expect(g.edges.find(e => e.id === 'fe:fr:in:PD->f')?.count).toBe(2)
+  })
+
+  // A frame is ONE card standing for many connections, so the band
+  // header's card count stopped matching the focal's tally: "DATA
+  // SOURCES 1" above two rows, beside a focal reading "2 in".
+  it('reports what a band\'s cards HOLD, not just how many cards there are', () => {
+    const g = build({
+      nodes: [node('F'), node('f1', 'schemaField'), node('f2', 'schemaField'), node('PD')],
+      edges: [
+        edge('e1', 'f1', 'F'), edge('e2', 'f2', 'F'),
+        contains('c1', 'PD', 'f1'), contains('c2', 'PD', 'f2'),
+      ],
+    })
+    expect(g.bandTotals.get('band:in:1')).toEqual({ shown: 1, total: 1, connections: 2 })
   })
 
   it('demotes a coarser-grain partner to a standalone rollup card — never grouped', () => {
@@ -817,10 +869,14 @@ describe('buildFocusGraph — a frame showing every child', () => {
     const kids = g.cards.filter(c => c.frameId === 'fr:in:Snowflake' && c.kind === 'entity')
     expect(kids.map(c => c.nodeId)).toEqual(['a_plain', 'b_conn', 'c_plain', 'd_conn'])
 
-    // A child that carries lineage keeps its full card and its edge.
+    // A child that carries lineage keeps its count and its edge. Its
+    // HEIGHT follows what it has left to say: the frame already states
+    // the relationship all its rows share, so there is no subtitle to
+    // reserve room for and the row is sized to its name.
     const conn = card(g, 'n:b_conn')
     expect(conn.connected).toBe(true)
-    expect(conn.h).toBe(CARD_H)
+    expect(conn.h).toBe(CHILD_ROW_H)
+    expect(card(g, 'fr:in:Snowflake').frameSharedEdgeType).toBe(conn.edgeTypeNorm)
     expect(conn.count).toBe(1)
     expect(g.edges.find(e => e.id === 'fe:n:b_conn->f')).toBeTruthy()
 
@@ -1075,11 +1131,17 @@ describe('buildFocusGraph — caps, chips, filter', () => {
     const g = build({ nodes, edges: es })
     const overflow = card(g, 'more:in:1')
     expect(overflow.overflowCount).toBe(5)
-    expect(g.bandTotals.get('band:in:1')).toEqual({ shown: GRAPH_BAND_CAP, total: GRAPH_BAND_CAP + 5 })
+    // Every card here is one standalone entity with one connection, so
+    // cards and connections agree and the band header stays a bare N.
+    expect(g.bandTotals.get('band:in:1')).toEqual({
+      shown: GRAPH_BAND_CAP, total: GRAPH_BAND_CAP + 5, connections: GRAPH_BAND_CAP + 5,
+    })
 
     const paged = build({ nodes, edges: es, over: { bandPages: new Map([['band:in:1', 1]]) } })
     expect(paged.cards.find(c => c.id === 'more:in:1')).toBeUndefined()
-    expect(paged.bandTotals.get('band:in:1')).toEqual({ shown: GRAPH_BAND_CAP + 5, total: GRAPH_BAND_CAP + 5 })
+    expect(paged.bandTotals.get('band:in:1')).toEqual({
+      shown: GRAPH_BAND_CAP + 5, total: GRAPH_BAND_CAP + 5, connections: GRAPH_BAND_CAP + 5,
+    })
   })
 
   it('type chips REMOVE cards but report the hidden count', () => {
@@ -1204,6 +1266,32 @@ describe('buildFocusGraph — grain', () => {
     const g = build({ ...restated, over: { foldCoarserRestatements: true } })
     expect(g.foldedAway).toBe(3)
     expect(g.foldedGrains).toEqual(['CONTAINER', 'DATAPLATFORM', 'dataset'])
+  })
+
+  // REGRESSION: the fold records a folded ancestor against whichever
+  // entry it reaches FIRST. When a table and eight of its columns are
+  // all neighbours, that put a "+1 coarser grain" chip on one arbitrary
+  // column — inside the very table the chip was talking about. It is a
+  // fact about the group, so it belongs on the group's frame.
+  it('hoists a restatement at the frame\'s own grain onto the frame, not onto a row', () => {
+    const g = build({
+      nodes: [
+        node('F', 'schemaField'),
+        node('tbl', 'dataset'),
+        node('c1', 'schemaField'), node('c2', 'schemaField'),
+      ],
+      edges: [
+        edge('e1', 'c1', 'F'), edge('e2', 'c2', 'F'),
+        // The same lineage, restated once at the table's grain.
+        edge('e3', 'tbl', 'F'),
+        contains('k1', 'tbl', 'c1'), contains('k2', 'tbl', 'c2'),
+      ],
+      isCoarser: (t?: string) => t === 'dataset',
+      over: { foldCoarserRestatements: true },
+    })
+    expect(card(g, 'fr:in:tbl').alsoAtGrains).toEqual(['dataset'])
+    expect(card(g, 'n:c1').alsoAtGrains).toEqual([])
+    expect(card(g, 'n:c2').alsoAtGrains).toEqual([])
   })
 
   it('leaves them alone when folding is off, and reports no fold', () => {

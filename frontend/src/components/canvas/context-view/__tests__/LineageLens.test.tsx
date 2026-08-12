@@ -568,6 +568,72 @@ describe('LineageLens graph mode', () => {
     }
   })
 
+  /**
+   * The wiring test. The builder knows how to draw a table's connected
+   * columns inside it, and `focus-graph.test.ts` proves that; what was
+   * never covered is the layer BETWEEN — that the frame the builder
+   * emits from records already in hand does not get mistaken for one
+   * that needs fetching, and that its chevron reaches the state the
+   * builder reads.
+   *
+   * REGRESSION: it was. `LineageLens`'s default-framing effect fires a
+   * container expansion for every frame with no result, and a locally
+   * built frame satisfies all of its conditions — so every table on the
+   * board cost one `/trace/expand` per re-center whose answer was then
+   * discarded. Both halves passed their own tests.
+   */
+  it('draws a neighbour table\'s columns inside it, with no fetch, and collapses on the chevron', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [
+          { id: 'DATASET', hierarchy: { level: 3, canContain: ['FIELD'] } },
+          { id: 'FIELD', hierarchy: { level: 4, canContain: [] } },
+        ],
+      },
+    } as never)
+    try {
+      useCanvasStore.setState({
+        nodes: [
+          node('focal', 'FIELD'), node('src', 'DATASET'),
+          node('c1', 'FIELD'), node('c2', 'FIELD'),
+        ],
+        edges: [
+          edge('k1', 'src', 'c1'), edge('k2', 'src', 'c2'),
+          edge('u1', 'c1', 'focal'), edge('u2', 'c2', 'focal'),
+        ].map((e, i) => (i < 2 ? { ...e, data: { edgeType: 'CONTAINS' } } : e)) as never,
+        visibleEdges: [],
+      } as never)
+      const onOpenContainer = vi.fn()
+      renderLens(['focal'], {}, { onOpenContainer })
+
+      // The table is a frame; its two connected columns are rows inside
+      // it, not loose cards beside it.
+      expect(screen.getByText('label-src')).toBeInTheDocument()
+      expect(screen.getByText('label-c1')).toBeInTheDocument()
+      expect(screen.getByText('label-c2')).toBeInTheDocument()
+
+      // And nothing was asked of the server. The records were already in
+      // hand — that is what makes this frame local.
+      expect(onOpenContainer).not.toHaveBeenCalled()
+
+      // The chevron closes it: rows go, the frame stays, still no fetch.
+      fireEvent.click(screen.getByTitle('Collapse label-src'))
+      expect(screen.queryByText('label-c1')).not.toBeInTheDocument()
+      expect(screen.getByText('label-src')).toBeInTheDocument()
+      expect(onOpenContainer).not.toHaveBeenCalled()
+
+      // And re-opens it.
+      fireEvent.click(screen.getByTitle('Expand label-src'))
+      expect(screen.getByText('label-c1')).toBeInTheDocument()
+      expect(onOpenContainer).not.toHaveBeenCalled()
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
   it('renders an opened container as a frame holding its connected children', () => {
     const prevSchema = useSchemaStore.getState().schema
     useSchemaStore.setState({

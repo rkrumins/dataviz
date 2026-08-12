@@ -73,7 +73,17 @@ function buildGraph(fixture: (typeof FIXTURES)[string]) {
     foldCoarserRestatements: true,
     ...over,
   }
-  return { graph: buildFocusGraph(input), stats: { in: incomingRecords.length, out: outgoingRecords.length } }
+  // Mirror what LineageLens passes: the focal describes the BOARD, not
+  // the record count, or the harness would show a discrepancy the app
+  // does not have (and hide one it does).
+  const graph = buildFocusGraph(input)
+  return {
+    graph,
+    stats: {
+      in: graph.bandTotals.get('band:in:1')?.connections ?? incomingRecords.length,
+      out: graph.bandTotals.get('band:out:1')?.connections ?? outgoingRecords.length,
+    },
+  }
 }
 
 const noop = () => {}

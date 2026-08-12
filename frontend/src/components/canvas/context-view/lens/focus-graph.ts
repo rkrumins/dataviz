@@ -102,9 +102,24 @@ export const FOCAL_H = 120
 export const CARD_H = 64
 export const CONTAINS_H = 36
 export const OVERFLOW_H = 36
-/** A frame child with no lineage to the focal: present, scannable, but
- *  carrying no counts or edges, so it needs far less room than a card. */
+/** A frame row with nothing to say beneath its name — its relationship
+ *  is stated once on the frame, and it stands for no coarser grain.
+ *  Sized to the name alone rather than to a subtitle that will not
+ *  render. `rowHeight` below is the single place that decides. */
 export const CHILD_ROW_H = 36
+
+/** How tall a row inside a frame must be.
+ *
+ *  A row prints a subtitle only when it has something the frame has not
+ *  already said: a relationship its siblings do not share, or a coarser
+ *  grain it stands for. Otherwise the name is the whole row. Both frame
+ *  kinds ask this, so a column inside its table is one height however
+ *  the frame was built — locally from records in hand, or from a server
+ *  open. */
+export function rowHeight(sharedEdgeType: string, ownEdgeType: string, alsoAtGrains: readonly string[]): number {
+  const saysSomethingNew = (ownEdgeType !== '' && ownEdgeType !== sharedEdgeType) || alsoAtGrains.length > 0
+  return saysSomethingNew ? CARD_H : CHILD_ROW_H
+}
 export const BAND_GAP = 130
 export const CARD_GAP = 10
 /** Indent for the focal's contains-stack rows. */
@@ -236,6 +251,16 @@ export interface FocusCard {
    *  server open, so its roster is complete, its filter is local, and
    *  its chevron toggles `collapsedFrames` instead of firing a fetch. */
   frameLocal: boolean
+  /** Frame cards only — the one relationship type ALL its rows carry,
+   *  or '' when they differ.
+   *
+   *  Eight rows each reading `● DERIVES FROM` is eight identical lines
+   *  that say nothing and crowd out the name; the frame states it once
+   *  instead. Decided here rather than in the view because it also
+   *  decides the row HEIGHT — a row with nothing to put in a subtitle
+   *  needs 36px, not 64 — and a view that suppressed what the layout
+   *  had reserved room for is how the 1,030px frame happened. */
+  frameSharedEdgeType: string
   /** The containment chain ABOVE this entity, root-first, as labels —
    *  `['Snowflake', 'GOLD', 'fact_orders']`. One truncated parent could
    *  not tell `int_clean_orders_t1` from `int_clean_orders_t2`, which is
@@ -431,7 +456,15 @@ export interface FocusGraph {
   hiddenByChipsIn: number
   hiddenByChipsOut: number
   /** Per band key `${dir}:${band}`: cards shown vs total available. */
-  bandTotals: Map<string, { shown: number; total: number }>
+  bandTotals: Map<string, {
+    shown: number
+    total: number
+    /** Connections the band's CARDS stand for. A frame is one card
+     *  holding eight connected columns, so "DATA SOURCES 1" sat above
+     *  eight rows beside a focal reading "11 in" — every number true,
+     *  nothing on screen reconciling them. */
+    connections: number
+  }>
   /** Records the AUTO grain fold removed as coarser restatements of a
    *  connection already on the board, and the entity types they came
    *  in as. Without this the header counted RECORDS ("9 connections")
@@ -495,7 +528,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const cards: FocusCard[] = []
   const edges: FocusEdge[] = []
   const edgeById = new Map<string, FocusEdge>()
-  const bandTotals = new Map<string, { shown: number; total: number }>()
+  const bandTotals = new Map<string, { shown: number; total: number; connections: number }>()
   let hiddenByChipsIn = 0
   let hiddenByChipsOut = 0
   let foldedAway = 0
@@ -610,7 +643,8 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     aggregated: false,
     frameId: null, depth: 0, ancestry: EMPTY_STRINGS, ancestryIds: EMPTY_STRINGS, alsoAtGrains: EMPTY_STRINGS, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
     connected: true, frameShowingAll: false, frameConnectedCount: 0,
-    frameLoaded: 0, frameTotal: -1, frameHasMore: false, frameLocal: false, alreadyShown: false,
+    frameLoaded: 0, frameTotal: -1, frameHasMore: false, frameLocal: false,
+    frameSharedEdgeType: '', alreadyShown: false,
     framePage: 0, framePageSize: FRAME_ALL_CAP,
     partnerIds: EMPTY_STRINGS, partnerLabel: null,
     canOpenChildren: false, childrenOpen: false,
@@ -914,7 +948,12 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       // its container and its platform — four cards for one answer, which
       // is what "4 connections · 3 rolled-up" was counting. Keep the
       // finest and let it say which grains it also stands for.
-      const foldedInto = new Map<string, string[]>()
+      // Keyed by the surviving (finest) entry → the ancestors folded
+      // into it. The ID travels with the type because WHERE the marker
+      // belongs depends on it: a restatement of the whole group at its
+      // own table's grain is a fact about the group, not about whichever
+      // column the fold happened to reach first.
+      const foldedInto = new Map<string, Array<{ id: string; type: string }>>()
       if (foldCoarserRestatements) {
         const present = new Map<string, BandEntry>()
         for (const e of entryMap.values()) present.set(e.nodeId, e)
@@ -932,7 +971,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             const t = (coarser.node?.data?.type as string) ?? UNRESOLVED_TYPE
             foldedGrains.add(t)
             const list = foldedInto.get(e.nodeId) ?? []
-            if (!list.includes(t)) list.push(t)
+            if (!list.some(f => f.id === anc)) list.push({ id: anc, type: t })
             foldedInto.set(e.nodeId, list)
           }
         }
@@ -1028,7 +1067,13 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       const bandKey = `band:${dir}:${band}`
       const cap = GRAPH_BAND_CAP * (1 + (bandPages.get(bandKey) ?? 0))
       const shown = items.slice(0, cap)
-      bandTotals.set(bandKey, { shown: Math.min(items.length, cap), total: items.length })
+      bandTotals.set(bandKey, {
+        shown: Math.min(items.length, cap),
+        total: items.length,
+        connections: items.reduce((acc, it) => acc + (it.kind === 'frame'
+          ? it.members.reduce((n, m) => n + m.count, 0)
+          : it.entry.count), 0),
+      })
 
       const nextRefs: Array<{ nodeId: string; type: string }> = []
       const isOutermost = band === MAX_BAND
@@ -1073,7 +1118,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           parentId,
           parentLabel: parentId ? labelOf(parentId, nodeMap.get(parentId)) : null,
           ancestry: ancestryOf(entry.nodeId), ancestryIds: ancestryIdsOf(entry.nodeId),
-          alsoAtGrains: foldedInto.get(entry.nodeId) ?? EMPTY_STRINGS,
+          alsoAtGrains: (foldedInto.get(entry.nodeId) ?? []).map(f => f.type),
           count: entry.count,
           edgeTypeNorm: entry.edgeTypeNorm,
           rollup: entry.rollup,
@@ -1241,6 +1286,15 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           }
           return ''
         }
+        // Over the CONNECTED roster, not the page on screen: the frame's
+        // claim about its rows must not change as you page through them.
+        // Unconnected children carry no type and so cannot dissent.
+        const connectedTypes = inside.map(n => edgeTypeFor(n.id))
+        const sharedEdgeType = connectedTypes.length > 0
+          && connectedTypes.every(t => t === connectedTypes[0])
+          ? connectedTypes[0]
+          : ''
+        frame.frameSharedEdgeType = sharedEdgeType
 
         for (const child of shownInside) {
           const cLabel = labelOf(child.id, child)
@@ -1278,7 +1332,10 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             kind: 'entity',
             nodeId: child.id,
             band: sign * band,
-            h: connected ? CARD_H : CHILD_ROW_H,
+            h: connected
+              ? rowHeight(sharedEdgeType, edgeTypeFor(child.id), EMPTY_STRINGS)
+              : CHILD_ROW_H,
+            frameSharedEdgeType: sharedEdgeType,
             label: cLabel,
             description: (child.data?.description as string | undefined) ?? null,
             type: cType,
@@ -1378,6 +1435,30 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           : members.slice(framePage * pageSize, framePage * pageSize + pageSize)
         const memberMatches = members.reduce(
           (acc, m) => acc + (matches(labelOf(m.nodeId, m.node)) ? 1 : 0), 0)
+        // One relationship type across every row → the frame says it
+        // once and the rows are sized to their names alone.
+        const sharedEdgeType = members.every(m => m.edgeTypeNorm === members[0].edgeTypeNorm)
+          ? members[0].edgeTypeNorm
+          : ''
+        // A coarser restatement of a connection is a fact about whatever
+        // level it arrived at. When that level is this frame's own
+        // parent or above, it describes the GROUP — the fold recorded it
+        // against whichever member it reached first, which put a "+1
+        // coarser grain" chip on one arbitrary column inside the very
+        // table it was talking about. Hoist those to the frame; leave a
+        // member's own deeper restatements on the member.
+        const atOrAboveFrame = new Set([parentId, ...ancestryIdsOf(parentId)])
+        const frameGrains: string[] = []
+        const rowGrains = new Map<string, string[]>()
+        for (const m of members) {
+          const own: string[] = []
+          for (const f of foldedInto.get(m.nodeId) ?? []) {
+            if (atOrAboveFrame.has(f.id)) {
+              if (!frameGrains.includes(f.type)) frameGrains.push(f.type)
+            } else if (!own.includes(f.type)) own.push(f.type)
+          }
+          if (own.length > 0) rowGrains.set(m.nodeId, own)
+        }
         const frame: FocusCard = {
           ...baseCard(),
           id: frameId,
@@ -1388,7 +1469,9 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           description: (pNode?.data?.description as string | undefined) ?? null,
           type: (pNode?.data?.type as string) ?? UNRESOLVED_TYPE,
           ancestry: ancestryOf(parentId), ancestryIds: ancestryIdsOf(parentId),
-          alsoAtGrains: foldedInto.get(parentId) ?? EMPTY_STRINGS,
+          alsoAtGrains: frameGrains.length > 0
+            ? frameGrains
+            : (foldedInto.get(parentId) ?? []).map(f => f.type),
           count: members.length,
           sumCount: members.reduce((acc, m) => acc + m.count, 0),
           rollup: ownEntry?.rollup ?? false,
@@ -1409,6 +1492,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           frameHasMore: false,
           frameShowingAll: false,
           frameLocal: true,
+          frameSharedEdgeType: sharedEdgeType,
           framePage,
           framePageSize: pageSize,
           // The parent's OWN hop, when it has one. Independent of the
@@ -1424,20 +1508,22 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         for (const m of rows) {
           const mLabel = labelOf(m.nodeId, m.node)
           const mType = (m.node?.data?.type as string) ?? UNRESOLVED_TYPE
+          const mGrains = rowGrains.get(m.nodeId) ?? EMPTY_STRINGS
           const mCard: FocusCard = {
             ...baseCard(),
             id: `n:${m.nodeId}`,
             kind: 'entity',
             nodeId: m.nodeId,
             band: sign * band,
-            h: CHILD_ROW_H,
+            h: rowHeight(sharedEdgeType, m.edgeTypeNorm, mGrains),
+            frameSharedEdgeType: sharedEdgeType,
             label: mLabel,
             description: (m.node?.data?.description as string | undefined) ?? null,
             type: mType,
             parentId,
             parentLabel: pLabel,
             ancestry: ancestryOf(m.nodeId), ancestryIds: ancestryIdsOf(m.nodeId),
-            alsoAtGrains: foldedInto.get(m.nodeId) ?? EMPTY_STRINGS,
+            alsoAtGrains: mGrains,
             count: m.count,
             edgeTypeNorm: m.edgeTypeNorm,
             unresolved: !m.node,

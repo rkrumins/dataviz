@@ -38,14 +38,30 @@ if (!chromium) {
 
 mkdirSync(OUT, { recursive: true })
 
+// `--strictPort` so a server left over from an earlier run FAILS here
+// rather than being silently reused. A reused server serves the module
+// graph it started with, so the screenshots come back showing code you
+// already changed — which reads as "my fix didn't work" and costs an
+// hour. Say so plainly instead.
 const vite = spawn('npx', ['vite', '--port', String(PORT), '--strictPort'], {
-  stdio: ['ignore', 'pipe', 'inherit'],
+  stdio: ['ignore', 'pipe', 'pipe'],
 })
 const ready = new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('Vite did not start in 60s')), 60_000)
   vite.stdout.on('data', d => {
     process.stdout.write(d)
     if (String(d).includes('Local:')) { clearTimeout(timer); resolve() }
+  })
+  vite.stderr.on('data', d => {
+    const s = String(d)
+    process.stderr.write(s)
+    if (s.includes('is in use')) {
+      clearTimeout(timer)
+      reject(new Error(
+        `Port ${PORT} is already serving an older build — its screenshots would be stale.\n` +
+        `Stop it first:  pkill -f "vite --port ${PORT}"`,
+      ))
+    }
   })
 })
 
