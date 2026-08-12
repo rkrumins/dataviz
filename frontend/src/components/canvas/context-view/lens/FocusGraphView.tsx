@@ -777,12 +777,14 @@ function FocusGraphCard({ data, selected }: NodeProps) {
           )}
           {card.alsoAtGrains.length > 0 && (
             <>
-              {/* This card absorbed the same connection restated at its
-                  ancestors' grains. Say so — three cards vanishing while
-                  the header still counts them would be silent loss. */}
+              {/* This card absorbed the same connection restated at
+                  OTHER levels of the containment tree — coarser ones in
+                  Flat view, finer ones in Grouped. Say so, whichever
+                  direction: cards vanishing while the header still
+                  counts them would be silent loss. */}
               <span
                 className="flex-shrink-0 flex items-center gap-0.5 px-1 rounded bg-black/[0.04] dark:bg-white/[0.06] text-[8.5px] uppercase tracking-wide text-ink-muted/70"
-                title={`Also reported at ${card.alsoAtGrains.join(', ')} grain — the same connection, one level coarser each time`}
+                title={`Absorbed ${card.alsoAtGrains.length} restatement${card.alsoAtGrains.length === 1 ? '' : 's'} of the same connection (${[...new Set(card.alsoAtGrains)].join(', ')}) from elsewhere in the containment tree`}
               >
                 <LucideIcons.Layers2 className="w-2.5 h-2.5" />
                 +{card.alsoAtGrains.length}

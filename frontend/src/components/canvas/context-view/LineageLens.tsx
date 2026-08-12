@@ -815,34 +815,26 @@ export function LineageLens({
     }
   }, [nodeId, graphCur.frameShowAll, onLoadAllChildren, containerResults])
 
-  /**
-   * Which grain the picture is drawn at.
+  /** GROUPED | FLAT — the only view question the graph body asks, in
+   * plain words. The old control ("Grain: AUTO | SCHEMAFIELD |
+   * CONTAINER | …") asked a business user to pick an ontology level by
+   * its type name — vocabulary they never had, and on a self-nesting
+   * estate (Node ⊃ Node ⊃ Node) one type name covers three depths, so
+   * the control could not even EXPRESS the choice. It is gone.
    *
-   * 'auto' folds a connection's coarser restatements into the finest one
-   * — `expandAggregated` reports the same fact at every level above it,
-   * so one column→column connection arrived as four cards. Choosing a
-   * specific grain shows only partners at that level, reusing the type
-   * chips' own hide-and-report-the-count machinery so nothing is ever
-   * lost silently.
-   */
-  const [grainState, setGrainState] = useState<{ nodeId: string | null; grain: string }>(
-    () => ({ nodeId: null, grain: 'auto' }),
+   * Grouped (default): each connection appears once, at its outermost
+   * container, drawn as a frame that resolves into the detail — depth
+   * reads as structure. Flat: every connected entity as its own card.
+   * The type chips beside it still hide types; that is filtering, a
+   * different question, and it never needed to be fused with this one. */
+  const [lensView, setLensView] = useState<{ nodeId: string | null; view: 'grouped' | 'flat' }>(
+    () => ({ nodeId: null, view: 'grouped' }),
   )
-  const grain = grainState.nodeId === nodeId ? grainState.grain : 'auto'
-  const setGrain = useCallback((g: string) => setGrainState({ nodeId, grain: g }), [nodeId])
-
-  /** The chips' own hidden set, plus every type that is not the chosen
-   *  grain. One mechanism, so the "N hidden by the type chips" report
-   *  stays true whichever way something came to be hidden. */
-  const grainHidden = useMemo(() => {
-    if (grain === 'auto') return hiddenTypes
-    const next = new Set(hiddenTypes)
-    for (const r of [...incomingRecords, ...outgoingRecords]) {
-      const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
-      if (t !== grain) next.add(t)
-    }
-    return next
-  }, [grain, hiddenTypes, incomingRecords, outgoingRecords])
+  const graphView = lensView.nodeId === nodeId ? lensView.view : 'grouped'
+  const setGraphView = useCallback(
+    (view: 'grouped' | 'flat') => setLensView({ nodeId, view }),
+    [nodeId],
+  )
 
   // The pure graph build — every semantic decision (grouping, rollups,
   // drills, frontier hops, caps, filter dimming, layout) lives in
@@ -878,8 +870,8 @@ export function LineageLens({
       entityLevels,
       bandPages: graphCur.bandPages,
       query,
-      hiddenTypes: grainHidden,
-      foldCoarserRestatements: grain === 'auto',
+      hiddenTypes,
+      grainFold: graphView === 'grouped' ? 'topmost' : 'finest',
       degreeHints,
       fetchStatus,
     })
@@ -891,7 +883,7 @@ export function LineageLens({
     graphCur.framePages, graphCur.bandPages, graphCur.frameShowAll, childrenStatusOf,
     graphCur.openContains, containsKidsById, containsStatusById,
     containerResults, containerStatus, frameAllResults, frameAllStatus,
-    entityLevels, query, grainHidden, grain, degreeHints, fetchStatus,
+    entityLevels, query, graphView, hiddenTypes, degreeHints, fetchStatus,
   ])
 
   // Any frame on the board with no answer and no fetch in flight gets
@@ -1081,8 +1073,8 @@ export function LineageLens({
   const headerFolded = focusGraph?.foldedAway ?? 0
   const headerConnections = focalDirectTotal + focalRollupTotal - headerFolded
   const headerCountTitle = headerFolded > 0
-    ? `The data source reported ${headerConnections} connection${headerConnections === 1 ? '' : 's'} again at ${
-        (focusGraph?.foldedGrains ?? []).join(', ')} level — the same lineage, one grain coarser. Grain: AUTO keeps the finest; pick a grain to see them.`
+    ? `The data source reported the same lineage again at ${
+        (focusGraph?.foldedGrains ?? []).join(', ')} level — ${headerFolded} restatement${headerFolded === 1 ? '' : 's'} folded into the card${headerFolded === 1 ? '' : 's'} shown. Grouped shows each connection at its outermost container; Flat shows every entity as its own card.`
     : focalRollupTotal > 0
       ? `${focalDirectTotal} concrete and ${focalRollupTotal} rolled-up — a rolled-up connection stands for finer ones beneath it`
       : undefined
@@ -1534,40 +1526,36 @@ export function LineageLens({
                 rather than floating over the canvas: as an overlay they
                 sat on top of the first card of the upstream band, which
                 is exactly where the tallest bands start. */}
-            {(graphTypeChips.length > 1 || focusGraph.hiddenByChips > 0) && (
+            {(graphTypeChips.length > 0 || focusGraph.hiddenByChips > 0) && (
               <div className="flex-shrink-0 flex flex-wrap items-center gap-x-2 gap-y-1 px-3 pt-2 pb-1">
-                {/* GRAIN — the answer to "at what level am I looking?".
-                    One real connection is reported at every level above
-                    it, so Auto keeps the finest and folds the rest into
-                    it; picking a level shows only partners there. */}
-                {graphTypeChips.length > 1 && (
-                  <div
-                    role="group"
-                    aria-label="Grain to show connections at"
-                    className="flex items-center gap-0.5 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.03]"
-                  >
-                    <span className="pl-1.5 pr-1 text-[9px] font-semibold uppercase tracking-wide text-ink-muted/60">Grain</span>
-                    {([['auto', 'Auto'] as const, ...graphTypeChips.map(([t]) => [t, t] as const)]).map(([value, label]) => (
-                      <button
-                        key={value}
-                        type="button"
-                        onClick={() => setGrain(value)}
-                        aria-pressed={grain === value}
-                        title={value === 'auto'
-                          ? 'Finest grain per connection — a connection also reported at coarser levels is folded into it'
-                          : `Show only ${label} connections`}
-                        className={cn(
-                          'px-1.5 py-0.5 rounded-md text-[9px] font-semibold uppercase tracking-wide transition-colors',
-                          grain === value
-                            ? 'bg-accent-lineage/15 text-accent-lineage'
-                            : 'text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]',
-                        )}
-                      >
-                        {label === 'not loaded' ? 'unresolved' : label}
-                      </button>
-                    ))}
-                  </div>
-                )}
+                {/* GROUPED | FLAT — one question, plain words. See the
+                    lensView state for why the old Grain control died. */}
+                <div
+                  role="group"
+                  aria-label="How to draw the connections"
+                  className="flex items-center gap-0.5 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.03]"
+                >
+                  {([
+                    ['grouped', 'Grouped', 'Each connection once, at its outermost container — open the frame for the detail'],
+                    ['flat', 'Flat', 'Every connected entity as its own card'],
+                  ] as const).map(([value, label, hint]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setGraphView(value)}
+                      aria-pressed={graphView === value}
+                      title={hint}
+                      className={cn(
+                        'px-2 py-0.5 rounded-md text-[9.5px] font-semibold tracking-wide transition-colors',
+                        graphView === value
+                          ? 'bg-accent-lineage/15 text-accent-lineage'
+                          : 'text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
                 {graphTypeChips.length > 1 && (
                   <TypeChips chips={graphTypeChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} />
                 )}

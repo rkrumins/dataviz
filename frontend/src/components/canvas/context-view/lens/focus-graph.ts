@@ -389,15 +389,27 @@ export interface FocusGraphInput {
    *  answer rather than a missing button. */
   canContain: (type: string | undefined) => boolean
   /**
-   * Fold a coarser partner into the finer one it is an ancestor of.
+   * How a connection reported at several grains collapses to ONE card.
    *
    * `expandAggregated` reports one real connection at EVERY grain above
    * it, so a single column→column fact arrives four times: the column,
    * its table, its container, its platform. All four were drawn as
-   * separate cards ("4 connections · 3 rolled-up"), which is the same
-   * answer restated, not four answers. On, the finest card survives and
-   * says which grains it also stands for. */
-  foldCoarserRestatements?: boolean
+   * separate cards ("4 connections · 3 rolled-up") — the same answer
+   * restated, not four answers.
+   *
+   *   'topmost' — the OUTERMOST representative survives. The default:
+   *      it is the one that renders as a frame and resolves into the
+   *      detail, so nesting depth reads as structure. This is also the
+   *      only mode that stays legible on a SELF-NESTING ontology
+   *      (Node ⊃ Node ⊃ Node): keeping the finest there deletes every
+   *      ancestor and hands back a soup of deep descendants with the
+   *      containment structure thrown away — which is precisely what
+   *      "Auto simply doesn't work with nested levels" looked like.
+   *   'finest'  — the deepest representative survives, marked with the
+   *      grains it also stands for. The flat same-level view.
+   *   null      — no folding; every restatement draws.
+   */
+  grainFold?: 'topmost' | 'finest' | null
   /** Frames the user has COLLAPSED, keyed `${dir}:${parentUrn}`.
    *
    *  An EXCEPTION list, not a membership list, and that is the point: a
@@ -524,7 +536,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     focalId, incomingRecords, outgoingRecords, edgesByEndpoint, nodeMap,
     containmentEdgeTypes, containsChildren, containsTotal, containsLoading, resolveParent,
     containsChildrenOf, openContains = EMPTY_SET, containsStatusOf,
-    isCoarser, canContain, foldCoarserRestatements = false, collapsedFrames, expandedFrontier, openContainers,
+    isCoarser, canContain, grainFold = null, collapsedFrames, expandedFrontier, openContainers,
     containerResults, containerStatus, frameShowAll, frameAllResults,
     frameAllStatus, frameQueries, framePages,
     bandPages, query, hiddenTypes, degreeHints, fetchStatus,
@@ -962,7 +974,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       // own table's grain is a fact about the group, not about whichever
       // column the fold happened to reach first.
       const foldedInto = new Map<string, Array<{ id: string; type: string }>>()
-      if (foldCoarserRestatements) {
+      if (grainFold === 'finest') {
         const present = new Map<string, BandEntry>()
         for (const e of entryMap.values()) present.set(e.nodeId, e)
         for (const e of [...entryMap.values()]) {
@@ -982,6 +994,32 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             if (!list.some(f => f.id === anc)) list.push({ id: anc, type: t })
             foldedInto.set(e.nodeId, list)
           }
+        }
+      } else if (grainFold === 'topmost') {
+        // Two passes, because chains can be arbitrarily deep and any
+        // intermediate may itself be a neighbour: first find each
+        // entry's OUTERMOST present ancestor, then fold everything
+        // beneath a survivor into it. Ancestry is walked root-first, so
+        // the first present ancestor IS the outermost — no level maps,
+        // no type names, which is what lets Node ⊃ Node ⊃ Node work.
+        const present = new Map<string, BandEntry>()
+        for (const e of entryMap.values()) present.set(e.nodeId, e)
+        const survivorOf = (id: string): string => {
+          for (const anc of ancestryIdsOf(id)) {
+            if (present.has(anc)) return anc
+          }
+          return id
+        }
+        for (const e of [...entryMap.values()]) {
+          const top = survivorOf(e.nodeId)
+          if (top === e.nodeId) continue
+          entryMap.delete(e.nodeId)
+          foldedAway += e.count
+          const t = (e.node?.data?.type as string) ?? UNRESOLVED_TYPE
+          foldedGrains.add(t)
+          const list = foldedInto.get(top) ?? []
+          if (!list.some(f => f.id === e.nodeId)) list.push({ id: e.nodeId, type: t })
+          foldedInto.set(top, list)
         }
       }
       const entries = [...entryMap.values()]

@@ -1353,7 +1353,7 @@ describe('buildFocusGraph — grain', () => {
   }
 
   it('folds coarser restatements into the finest connection', () => {
-    const g = build({ ...restated, over: { foldCoarserRestatements: true } })
+    const g = build({ ...restated, over: { grainFold: 'finest' } })
     // One card, not four.
     expect(g.cards.filter(c => c.band === -1)).toHaveLength(1)
     const kept = card(g, 'n:up')
@@ -1367,7 +1367,7 @@ describe('buildFocusGraph — grain', () => {
   // cards and nothing on screen reconciled the two — six connections
   // appeared to have gone missing.
   it('reports how much it folded, and at which grains, so the header can reconcile', () => {
-    const g = build({ ...restated, over: { foldCoarserRestatements: true } })
+    const g = build({ ...restated, over: { grainFold: 'finest' } })
     expect(g.foldedAway).toBe(3)
     expect(g.foldedGrains).toEqual(['CONTAINER', 'DATAPLATFORM', 'dataset'])
   })
@@ -1391,15 +1391,71 @@ describe('buildFocusGraph — grain', () => {
         contains('k1', 'tbl', 'c1'), contains('k2', 'tbl', 'c2'),
       ],
       isCoarser: (t?: string) => t === 'dataset',
-      over: { foldCoarserRestatements: true },
+      over: { grainFold: 'finest' },
     })
     expect(card(g, 'fr:in:tbl').alsoAtGrains).toEqual(['dataset'])
     expect(card(g, 'n:c1').alsoAtGrains).toEqual([])
     expect(card(g, 'n:c2').alsoAtGrains).toEqual([])
   })
 
+  // THE self-nesting case, verbatim from the report: "Node contains
+  // Node contains Node contains Node". One TYPE, several depths — a
+  // type-based grain control cannot even express the choice, which is
+  // why "Auto simply doesn't work with nested levels". Grouped folds
+  // by ANCESTRY, no types anywhere: the outermost survives, everything
+  // beneath a present ancestor folds into it, however deep the chain
+  // and whatever the labels say.
+  it("Grouped keeps the OUTERMOST of a self-nesting chain — Node ⊃ Node ⊃ Node", () => {
+    const g = build({
+      nodes: [
+        node('F', 'Node'),
+        node('outer', 'Node'), node('mid', 'Node'), node('leaf', 'Node'),
+        node('other', 'Node'),
+      ],
+      edges: [
+        // All three levels of one chain are neighbours, plus one
+        // UNRELATED same-type neighbour that must not be touched.
+        edge('e1', 'outer', 'F'), edge('e2', 'mid', 'F'), edge('e3', 'leaf', 'F'),
+        edge('e4', 'other', 'F'),
+        contains('k1', 'outer', 'mid'), contains('k2', 'mid', 'leaf'),
+      ],
+      isCoarser: (t?: string) => t === 'Node',
+      canContain: (t?: string) => t === 'Node',
+      over: { grainFold: 'topmost' },
+    })
+    const inBand = g.cards.filter(c => c.band === -1 && !c.frameId)
+    expect(inBand.map(c => c.nodeId).sort()).toEqual(['other', 'outer'])
+    // The survivor says what it absorbed — one marker PER restatement,
+    // so the +N chip agrees with the header's folded tally.
+    const outer = inBand.find(c => c.nodeId === 'outer')!
+    expect(outer.alsoAtGrains).toEqual(['Node', 'Node'])
+    expect(g.foldedAway).toBe(2)
+    expect(g.foldedGrains).toEqual(['Node'])
+    // The untouched neighbour claims nothing it did not absorb.
+    expect(inBand.find(c => c.nodeId === 'other')!.alsoAtGrains).toEqual([])
+  })
+
+  it('Grouped folds a whole chain into ONE survivor even when intermediates are neighbours too', () => {
+    // The two-pass property: `mid` is both someone's ancestor and
+    // someone's descendant. A single-pass fold could mark `mid` as a
+    // survivor and then delete it, losing the markers with it.
+    const g = build({
+      nodes: [node('F', 'Node'), node('outer', 'Node'), node('mid', 'Node'), node('leaf', 'Node')],
+      edges: [
+        edge('e1', 'outer', 'F'), edge('e2', 'mid', 'F'), edge('e3', 'leaf', 'F'),
+        contains('k1', 'outer', 'mid'), contains('k2', 'mid', 'leaf'),
+      ],
+      isCoarser: (t?: string) => t === 'Node',
+      canContain: (t?: string) => t === 'Node',
+      over: { grainFold: 'topmost' },
+    })
+    const inBand = g.cards.filter(c => c.band === -1 && !c.frameId)
+    expect(inBand.map(c => c.nodeId)).toEqual(['outer'])
+    expect(g.foldedAway).toBe(2)
+  })
+
   it('leaves them alone when folding is off, and reports no fold', () => {
-    const g = build({ ...restated, over: { foldCoarserRestatements: false } })
+    const g = build({ ...restated, over: { grainFold: null } })
     expect(g.cards.filter(c => c.band === -1)).toHaveLength(4)
     expect(card(g, 'n:up').alsoAtGrains).toEqual([])
     expect(g.foldedAway).toBe(0)
@@ -1412,7 +1468,7 @@ describe('buildFocusGraph — grain', () => {
       nodes: [node('F', 'schemaField'), node('up', 'schemaField'), node('Other', 'DATAPLATFORM')],
       edges: [edge('e1', 'up', 'F'), edge('e2', 'Other', 'F')],
       isCoarser: (t?: string) => t === 'DATAPLATFORM',
-      over: { foldCoarserRestatements: true },
+      over: { grainFold: 'finest' },
     })
     expect(g.cards.filter(c => c.band === -1)).toHaveLength(2)
     expect(card(g, 'n:up').alsoAtGrains).toEqual([])

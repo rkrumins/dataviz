@@ -665,6 +665,49 @@ describe('LineageLens graph mode', () => {
     }
   })
 
+  // The Grain control is DEAD; this is what replaced it. One question
+  // in plain words — Grouped (default) or Flat — because the old
+  // type-name chips could not even express a choice on a self-nesting
+  // estate: Node ⊃ Node ⊃ Node is one type at three depths.
+  it('draws GROUPED by default and flattens on one click — self-nesting estate', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [{ id: 'Node', hierarchy: { canContain: ['Node'] } }],
+      },
+    } as never)
+    try {
+      useCanvasStore.setState({
+        nodes: [node('F', 'Node'), node('outer', 'Node'), node('mid', 'Node'), node('leaf', 'Node')],
+        edges: (() => {
+          const contains = (id: string, a: string, b: string) =>
+            ({ ...edge(id, a, b), data: { edgeType: 'CONTAINS' } })
+          return [
+            edge('e1', 'outer', 'F'), edge('e2', 'mid', 'F'), edge('e3', 'leaf', 'F'),
+            contains('k1', 'outer', 'mid'), contains('k2', 'mid', 'leaf'),
+          ]
+        })() as never,
+        visibleEdges: [],
+      } as never)
+      renderLens(['F'])
+
+      // Grouped is simply how it opens — nothing to configure.
+      expect(screen.getByRole('button', { name: 'Grouped' }).getAttribute('aria-pressed')).toBe('true')
+      // One card for the whole chain, at its outermost container.
+      expect(screen.getAllByText('label-outer').length).toBeGreaterThan(0)
+      expect(screen.queryByText('label-leaf')).toBeNull()
+
+      // Flat: every connected entity as its own card — the deepest
+      // survives the restatement fold instead.
+      fireEvent.click(screen.getByRole('button', { name: 'Flat' }))
+      expect(screen.getAllByText('label-leaf').length).toBeGreaterThan(0)
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
   /**
    * THE BUSINESS JOURNEY, end to end at the component level: select a
    * node, see the real upstream at your grain with no clicks, walk to
