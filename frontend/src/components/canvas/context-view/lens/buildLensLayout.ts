@@ -55,6 +55,9 @@ export interface LensPill {
 
 export interface LensChevron {
   state: LensFetchState | 'idle'
+  /** The ontology says this type can hold something (unknown types are
+   *  offered — an open that finds nothing says so, which is an answer). */
+  offered: boolean
   /** Known child count (server total once opened, childCount before). */
   count?: number
   hasMore?: boolean
@@ -145,6 +148,10 @@ export interface LensLayoutOptions {
   /** Ontology: can this entity type hold children? Unknown types are
    *  offered the chevron — an open that finds nothing says so. */
   canHaveChildren?: (entityType: string) => boolean
+  /** Urns whose OPENED children are presently folded away. Loaded data
+   *  is never dropped — a collapsed child that is a lineage partner in
+   *  its own right stays on the board. */
+  collapsedChildren?: ReadonlySet<string>
   pageSize?: number
   columnPageSize?: number
 }
@@ -179,6 +186,7 @@ export function buildLensLayout(state: LensSessionState, opts: LensLayoutOptions
   }
   for (const [parentUrn, kids] of state.children) {
     if (kids.state !== 'done' || !state.hops.has(parentUrn)) continue
+    if (opts.collapsedChildren?.has(parentUrn)) continue
     for (const child of kids.urns) if (state.hops.has(child)) cardUrns.add(child)
   }
 
@@ -283,8 +291,12 @@ export function buildLensLayout(state: LensSessionState, opts: LensLayoutOptions
   const chevronOf = (urn: string): LensChevron => {
     const kids = state.children.get(urn)
     const node = state.nodes.get(urn)
+    const offered = node?.entityType
+      ? (opts.canHaveChildren?.(node.entityType) ?? true)
+      : true
     return {
       state: kids?.state ?? 'idle',
+      offered: offered || Boolean(kids),
       ...(kids?.total !== undefined
         ? { count: kids.total }
         : node?.childCount !== undefined
