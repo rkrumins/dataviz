@@ -169,9 +169,21 @@ class TraceRequest(BaseModel):
 class ExpandRequest(BaseModel):
     source_urn: str = Field(alias="sourceUrn")
     target_urn: str = Field(alias="targetUrn")
-    next_level: Union[str, int] = Field(alias="nextLevel")
+    #: ``None`` is a legitimate value, not a missing one: an ontology
+    #: that repeats an entity type at two containment depths (Container
+    #: inside Container) has no single honest level to send, and the
+    #: provider drills STRUCTURALLY — one containment step — when none
+    #: is given. Requiring a level here made every such expand fail
+    #: request validation before any code ran.
+    next_level: Optional[Union[str, int]] = Field(None, alias="nextLevel")
     lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
     include_containment_edges: bool = Field(True, alias="includeContainmentEdges")
+    #: Which anchor is being OPENED. Only that side descends; the partner
+    #: contributes itself and its whole subtree, so a Data Domain and a
+    #: Table five containment levels below it can still meet. Omit for
+    #: the historical symmetric drill, which is correct only when the
+    #: pair already sits at comparable depth.
+    drill_anchor: Optional[str] = Field(None, alias="drillAnchor")
 
     class Config:
         populate_by_name = True

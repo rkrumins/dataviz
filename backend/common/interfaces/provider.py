@@ -348,13 +348,14 @@ class GraphDataProvider(ABC):
         self,
         source_urn: str,
         target_urn: str,
-        next_level: int,
+        next_level: Optional[int],
         lineage_edge_types: List[str],
         containment_edge_types: List[str],
         max_nodes: int,
         timeout_ms: int,
         use_raw_edges: bool = False,
         include_containment_edges: bool = False,
+        drill_anchor: Optional[str] = None,
     ) -> TraceResult:
         """Drill into an AGGREGATED edge: return finer-level nodes + edges
         within (source_subtree × target_subtree) at ``next_level``.
@@ -365,6 +366,16 @@ class GraphDataProvider(ABC):
         When ``use_raw_edges=True`` (typically for the finest level where
         AGGREGATED == raw lineage), the implementation skips AGGREGATED
         and reads raw lineage edges directly.
+
+        ``drill_anchor`` names the anchor being OPENED. Only that side
+        descends; the partner contributes itself and its whole subtree,
+        so anchors many containment levels apart can still meet. Omit it
+        for the historical symmetric behaviour, which is correct only
+        when the pair is already at comparable depth.
+
+        ``next_level`` may be ``None`` — a caller whose ontology repeats
+        an entity type at two containment depths has no single honest
+        level to send, and providers should drill structurally instead.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement expand_aggregated. "

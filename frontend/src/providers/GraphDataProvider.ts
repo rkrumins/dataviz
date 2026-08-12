@@ -484,9 +484,16 @@ export interface TraceV2Request {
 export interface ExpandAggregatedRequest {
     sourceUrn: URN
     targetUrn: URN
-    nextLevel: number | string
+    /** Omit when the ontology repeats an entity type at two containment
+     *  depths — there is then no single honest level to send, and the
+     *  server drills structurally instead. */
+    nextLevel?: number | string | null
     lineageEdgeTypes?: string[] | null
     includeContainmentEdges?: boolean
+    /** Which anchor is being OPENED. Only that side descends; the
+     *  partner contributes itself and its whole subtree, so a Data
+     *  Domain and a Table five levels below it can still meet. */
+    drillAnchor?: URN
 }
 
 export interface ExpandAggregatedBatchRequest {

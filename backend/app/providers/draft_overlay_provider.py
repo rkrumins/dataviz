@@ -363,15 +363,17 @@ class DraftOverlayProvider:
         return await self._overlay_trace(base)
 
     async def expand_aggregated(
-        self, source_urn: str, target_urn: str, next_level: int,
+        self, source_urn: str, target_urn: str, next_level: Optional[int],
         lineage_edge_types: List[str], containment_edge_types: List[str],
         max_nodes: int, timeout_ms: int, use_raw_edges: bool = False,
         include_containment_edges: bool = False,
+        drill_anchor: Optional[str] = None,
     ) -> TraceResult:
         base = await self._base.expand_aggregated(
             source_urn, target_urn, next_level, lineage_edge_types, containment_edge_types,
             max_nodes, timeout_ms, use_raw_edges=use_raw_edges,
-            include_containment_edges=include_containment_edges)
+            include_containment_edges=include_containment_edges,
+            drill_anchor=drill_anchor)
         return await self._overlay_trace(base)
 
     async def _overlay_trace(self, base: TraceResult) -> TraceResult:

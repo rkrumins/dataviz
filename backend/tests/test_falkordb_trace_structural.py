@@ -25,6 +25,13 @@ class _Result:
         self.result_set = result_set or []
 
 
+def _label(urn):
+    """The fake's label convention: the urn's prefix before any '_'.
+    `tbl_a` is a `tbl`, `ctr1` is a `ctr1`. Enough to exercise the
+    label-filtered branch without a real graph."""
+    return urn.split("_")[0]
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -83,10 +90,40 @@ class _TraceFake:
             return _Result(rows)
         raise AssertionError(f"unhandled proj_ro_query: {cypher}")
 
+    def _subtree(self, urn):
+        """Every descendant of `urn`, any depth — what an unstepped
+        partner side contributes."""
+        out, stack = [], list(self.children.get(urn, []))
+        while stack:
+            c = stack.pop()
+            if c in out:
+                continue
+            out.append(c)
+            stack.extend(self.children.get(c, []))
+        return out
+
     async def ro_query(self, cypher, params=None, timeout=None, **kwargs):
         params = params or {}
+        if "RETURN 'd' AS side" in cypher and "RETURN 'p' AS side" in cypher:
+            # The ASYMMETRIC collectors: one side steps, the partner
+            # contributes itself and its whole subtree.
+            drilled = params["drill"]
+            partner = params["partner"]
+            types = params.get("types")
+            if "labels(a)[0] IN $types" in cypher and types is not None:
+                # Level variant — the opened side is label-filtered.
+                kids = [c for c in self._subtree(drilled) if _label(c) in types]
+                if _label(drilled) in types:
+                    kids = [drilled, *kids]
+            else:
+                kids = list(self.children.get(drilled, []))
+            return _Result([
+                ["d", kids],
+                ["p", [partner]],
+                ["p", self._subtree(partner)],
+            ])
         if "RETURN 's' AS side" in cypher and "type(c) IN $ctypes" in cypher:
-            # _collect_children_pair
+            # _collect_children_pair, symmetric
             s_kids = list(self.children.get(params["source"], []))
             t_kids = list(self.children.get(params["target"], []))
             return _Result([["s", s_kids], ["t", t_kids]])
@@ -236,7 +273,8 @@ def test_unstamped_edge_dispatches_to_legacy_type_level_path():
     p = _make_provider(fake)
     called = {}
 
-    async def legacy(source_urn, target_urn, target_level, ctypes, limit):
+    async def legacy(source_urn, target_urn, target_level, ctypes, limit,
+                     drill_anchor=None):
         called["legacy"] = True
         return [], []
 
@@ -294,3 +332,112 @@ def test_bfs_peer_rollup_filters_cells_by_frontier_depth():
     # Only the d1↔d1 cell — the mixed-depth cells (m_a→r_b at d1→d0,
     # m_a→l_b at d1→d2) stay out of this wave.
     assert {(e["sourceUrn"], e["targetUrn"]) for e in out} == {("m_a", "m_b")}
+
+
+# ── Asymmetric drill: only the OPENED anchor descends ─────────────────
+#
+# Stepping both sides in lockstep is why opening a Data Domain against a
+# Table five containment levels below returned nothing. The level path
+# filtered the Table side to types at the Domain's next level (a Table
+# has none), and the structural path walked the Table down to its
+# columns — either way the two sets could never meet, and the caller was
+# told "nothing here connects" about lineage that plainly exists.
+
+
+def _seed_deep_chain(fake):
+    """dom ⊃ app ⊃ ctr1 ⊃ ctr2 ⊃ db ⊃ tbl_a, and a peer table tbl_b that
+    feeds it. Seven levels with `ctr` REPEATED — the shape no type→level
+    map can describe."""
+    for parent, child in [
+        ("dom", "app"), ("app", "ctr1"), ("ctr1", "ctr2"),
+        ("ctr2", "db"), ("db", "tbl_a"), ("tbl_a", "col_a"),
+        # The partner has children of its own. Without this the
+        # symmetric drill is rescued by the childless-side fallback and
+        # the fixture cannot reproduce the reported failure at all.
+        ("tbl_b", "col_b"),
+    ]:
+        fake.contain(parent, child)
+    fake.lineage.append(("tbl_a", "tbl_b", "FLOWS"))
+    fake.aggregated("dom", "tbl_b", 1, 0, 5)
+    fake.aggregated("app", "tbl_b", 1, 1, 5)
+
+
+def test_drilling_a_domain_against_a_table_five_levels_below_finds_edges():
+    """The reported bug. The partner is the QUESTION, not another thing
+    to descend — it contributes itself and its subtree so the two sides
+    can meet however far apart they sit."""
+    fake = _TraceFake()
+    _seed_deep_chain(fake)
+    p = _make_provider(fake)
+
+    result = _run(p.expand_aggregated(
+        "dom", "tbl_b", next_level=None,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=100, timeout_ms=5000,
+        drill_anchor="dom",
+    ))
+    assert result.edges, "opening the domain against a table must not come back empty"
+    assert any(e.source_urn == "app" for e in result.edges)
+
+
+def test_partner_side_is_never_stepped_away_from_the_question():
+    """Without drill_anchor both sides advance and the answer is empty —
+    the behaviour that produced 'nothing connects'. Kept as the contrast
+    so the fix cannot silently regress into it."""
+    fake = _TraceFake()
+    _seed_deep_chain(fake)
+    p = _make_provider(fake)
+
+    symmetric = _run(p.expand_aggregated(
+        "dom", "tbl_b", next_level=None,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=100, timeout_ms=5000,
+    ))
+    asymmetric = _run(p.expand_aggregated(
+        "dom", "tbl_b", next_level=None,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=100, timeout_ms=5000,
+        drill_anchor="dom",
+    ))
+    assert len(asymmetric.edges) >= len(symmetric.edges)
+
+
+def test_no_level_requests_the_structural_drill():
+    """A caller whose ontology repeats a type at two depths has no single
+    honest level to send. `None` is that admission, and it must route to
+    the structural path rather than to a type-level query for level 1."""
+    fake = _TraceFake()
+    _seed_self_nesting(fake)
+    fake.agg[("r_a", "r_b")]["sd"] = None
+    fake.agg[("r_a", "r_b")]["td"] = None
+    p = _make_provider(fake)
+    called = {}
+
+    async def legacy(source_urn, target_urn, target_level, ctypes, limit,
+                     drill_anchor=None):
+        called["legacy"] = True
+        return [], []
+
+    p._collect_descendants_pair_at_level = legacy
+    _run(p.expand_aggregated(
+        "r_a", "r_b", next_level=None,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=100, timeout_ms=5000,
+    ))
+    assert called.get("legacy") is None, "next_level=None must not reach the type-level path"
+
+
+def test_an_anchor_that_matches_nothing_falls_back_to_itself():
+    """Both collectors must end `or [anchor]`. The level helper did not,
+    so a side could come back empty and short-circuit the whole expand
+    to zero edges — the asymmetry between the two was itself a bug."""
+    fake = _TraceFake()
+    _seed_deep_chain(fake)
+    p = _make_provider(fake)
+    p._entity_type_levels = {"THING": 0}
+
+    s_urns, t_urns = _run(p._collect_descendants_pair_at_level(
+        "dom", "tbl_b", 99, ["HAS"], 100,
+    ))
+    assert s_urns == ["dom"]
+    assert t_urns == ["tbl_b"]

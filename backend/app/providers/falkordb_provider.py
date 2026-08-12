@@ -7059,13 +7059,14 @@ class FalkorDBProvider(GraphDataProvider):
         self,
         source_urn: str,
         target_urn: str,
-        next_level: int,
+        next_level: Optional[int],
         lineage_edge_types: List[str],
         containment_edge_types: List[str],
         max_nodes: int,
         timeout_ms: int,
         use_raw_edges: bool = False,
         include_containment_edges: bool = False,
+        drill_anchor: Optional[str] = None,
     ) -> TraceResult:
         await self._ensure_connected()
         deadline = time.monotonic() + (timeout_ms / 1000.0)
@@ -7091,6 +7092,27 @@ class FalkorDBProvider(GraphDataProvider):
             structural = (
                 await self._edge_depth_stamps(source_urn, target_urn)
             ) is not None
+        # No level to descend to is itself a request for the structural
+        # drill. A caller that cannot name a level is not confused — a
+        # type appearing at two containment depths (``Container`` inside
+        # ``Container``) has no single ``hierarchy.level``, so there is
+        # no number it could honestly send.
+        if next_level is None:
+            structural = True
+
+        # Which anchor is being OPENED. Only that side descends; the
+        # other contributes itself and everything beneath it.
+        #
+        # Stepping both sides in lockstep is why opening a Data Domain
+        # against a Table five levels below returned nothing: the level
+        # path filtered the Table side to types at the domain's next
+        # level (it has none), and the structural path walked the Table
+        # down to its columns. Either way the two sets could never meet,
+        # and the caller was told "nothing here connects" about lineage
+        # that plainly exists. The partner is the question, not another
+        # thing to descend.
+        if drill_anchor is not None and drill_anchor not in (source_urn, target_urn):
+            drill_anchor = None
 
         # Single-query pair fetch: source + target descendants in one
         # UNION'd Cypher round-trip. Saves one planner pass and frees a
@@ -7101,10 +7123,12 @@ class FalkorDBProvider(GraphDataProvider):
             if structural:
                 s_urns, t_urns = await self._collect_children_pair(
                     source_urn, target_urn, ctypes, max_nodes,
+                    drill_anchor=drill_anchor,
                 )
             else:
                 s_urns, t_urns = await self._collect_descendants_pair_at_level(
                     source_urn, target_urn, next_level, ctypes, max_nodes,
+                    drill_anchor=drill_anchor,
                 )
         except Exception:
             s_urns, t_urns = [], []
@@ -7167,6 +7191,14 @@ class FalkorDBProvider(GraphDataProvider):
         focus_level_actual = (
             self._get_node_level(anchor_node.entity_type) if anchor_node else next_level
         )
+        # The response model wants a concrete level. A structural drill
+        # has none to report — the caller could not name one, which is
+        # the whole reason it asked structurally — so fall back to the
+        # anchor's own resolved level and finally to 0 rather than
+        # failing validation on a `None` nobody asked to be meaningful.
+        reported_level = focus_level_actual if focus_level_actual is not None else next_level
+        if reported_level is None:
+            reported_level = 0
 
         return TraceResult(
             nodes=list(nodes_by_urn.values()),
@@ -7176,10 +7208,10 @@ class FalkorDBProvider(GraphDataProvider):
             downstreamUrns=set(),
             focus=TraceFocus(
                 urn=source_urn,
-                level=focus_level_actual if focus_level_actual is not None else next_level,
+                level=reported_level,
                 entityType=str(anchor_node.entity_type) if anchor_node else "unknown",
             ),
-            effectiveLevel=next_level,
+            effectiveLevel=next_level if next_level is not None else reported_level,
             isInherited=False,
             inheritedFromUrn=None,
             truncated=(truncation_reason is not None),
@@ -7797,13 +7829,64 @@ class FalkorDBProvider(GraphDataProvider):
         target_urn: str,
         ctypes: List[str],
         limit: int,
+        drill_anchor: Optional[str] = None,
     ) -> Tuple[List[str], List[str]]:
-        """STRUCTURAL drill: each anchor's DIRECT containment children —
-        one step below the expanded pair, each side advancing from its
-        own depth (ragged pairs included: a childless side stays at the
-        anchor itself). Label-agnostic, so self-nesting ontologies drill
-        correctly at every depth; on aligned type-structured trees the
-        children ARE the next type level, so behavior is unchanged."""
+        """STRUCTURAL drill: DIRECT containment children — one step below
+        the expanded pair. Label-agnostic, so self-nesting ontologies
+        drill correctly at every depth; on aligned type-structured trees
+        the children ARE the next type level, so behavior is unchanged.
+
+        ``drill_anchor`` names the side being OPENED. Only it descends;
+        the other contributes itself plus its whole subtree, so anchors
+        at very different depths can still meet. Without it both sides
+        advance from their own depth (ragged pairs included), which is
+        the historical behaviour and correct only for a pair that was
+        already aligned.
+
+        Either way a childless side falls back to the anchor itself."""
+        if drill_anchor is not None:
+            partner = target_urn if drill_anchor == source_urn else source_urn
+            depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
+            cypher = (
+                # The opened side — one containment step down.
+                "MATCH (a {urn: $drill})-[c]->(child) "
+                "WHERE type(c) IN $ctypes "
+                "WITH DISTINCT child.urn AS urn "
+                "LIMIT $limit "
+                "RETURN 'd' AS side, collect(urn) AS urns "
+                "UNION "
+                # The partner — itself...
+                "MATCH (b {urn: $partner}) "
+                "RETURN 'p' AS side, [b.urn] AS urns "
+                "UNION "
+                # ...and everything beneath it, at any depth.
+                f"MATCH (b {{urn: $partner}})-[c*1..{depth}]->(sub) "
+                "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
+                "WITH DISTINCT sub.urn AS urn "
+                "LIMIT $limit "
+                "RETURN 'p' AS side, collect(urn) AS urns"
+            )
+            result = await self._ro_query(
+                cypher,
+                params={"drill": drill_anchor, "partner": partner,
+                        "ctypes": ctypes, "limit": limit},
+                op="trace.children_drill",
+                timeout=2.0,
+            )
+            drilled: List[str] = []
+            partner_side: List[str] = []
+            for row in (result.result_set or []):
+                if not row or len(row) < 2:
+                    continue
+                urns = [u for u in (row[1] if isinstance(row[1], list) else []) if u]
+                if row[0] == 'd':
+                    drilled.extend(urns)
+                elif row[0] == 'p':
+                    partner_side.extend(urns)
+            drilled = list(dict.fromkeys(drilled)) or [drill_anchor]
+            partner_side = list(dict.fromkeys(partner_side)) or [partner]
+            return (drilled, partner_side) if drill_anchor == source_urn else (partner_side, drilled)
+
         cypher = (
             "MATCH (a {urn: $source})-[c]->(child) "
             "WHERE type(c) IN $ctypes "
@@ -7846,6 +7929,7 @@ class FalkorDBProvider(GraphDataProvider):
         target_level: int,
         ctypes: List[str],
         limit: int,
+        drill_anchor: Optional[str] = None,
     ) -> Tuple[List[str], List[str]]:
         """Collect descendants of both anchors in a SINGLE Cypher round-trip.
 
@@ -7860,9 +7944,28 @@ class FalkorDBProvider(GraphDataProvider):
         Returns ``(source_urns, target_urns)``. Either side may be empty if
         the anchor's label does not match ``target_level``'s type set.
         """
+        # ``drill_anchor`` names the side being OPENED. Only it is
+        # level-filtered; the partner contributes itself and its whole
+        # subtree. Level-filtering BOTH is what empties the partner side
+        # whenever it sits finer than the level asked for — a Table has
+        # no descendants at a Domain's next level, so ``t_urns`` came
+        # back empty and the expand reported "nothing connects" about
+        # lineage that exists.
+        if drill_anchor is not None:
+            return await self._collect_level_and_subtree(
+                drill_anchor,
+                target_urn if drill_anchor == source_urn else source_urn,
+                target_level, ctypes, limit,
+                drilled_is_source=drill_anchor == source_urn,
+            )
         types = self._types_at_level(target_level)
         if not types:
-            return [], []
+            # Nothing declared at that level. Returning empty here made
+            # the expand report "nothing connects" about a level the
+            # ONTOLOGY could not describe — a statement about our type
+            # map, dressed up as a statement about the data. Each anchor
+            # stands for itself instead, so the edge query still runs.
+            return [source_urn], [target_urn]
 
         if not ctypes:
             # Empty containment — descendants of each anchor reduce to
@@ -7950,7 +8053,72 @@ class FalkorDBProvider(GraphDataProvider):
                 s_set.update(urn_list)
             elif side == 't':
                 t_set.update(urn_list)
-        return list(s_set), list(t_set)
+        # An anchor that matched nothing falls back to ITSELF, mirroring
+        # ``_collect_children_pair``. Without this a side could come back
+        # empty and short-circuit the whole expand to zero edges — the
+        # asymmetry between these two helpers was itself a bug.
+        return (list(s_set) or [source_urn], list(t_set) or [target_urn])
+
+    async def _collect_level_and_subtree(
+        self,
+        drilled_urn: str,
+        partner_urn: str,
+        target_level: int,
+        ctypes: List[str],
+        limit: int,
+        *,
+        drilled_is_source: bool,
+    ) -> Tuple[List[str], List[str]]:
+        """One side descends to ``target_level``; the other contributes
+        itself plus its whole subtree, unfiltered. See the dispatch in
+        ``_collect_descendants_pair_at_level`` for why."""
+        types = self._types_at_level(target_level)
+        max_depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
+        parts = [
+            # The opened side — anchor itself when it already sits at the level
+            "MATCH (a {urn: $drill}) WHERE labels(a)[0] IN $types "
+            + "RETURN 'd' AS side, [a.urn] AS urns",
+            # ...and its descendants at that level
+            f"MATCH (a {{urn: $drill}})-[c*1..{max_depth}]->(child) "
+            + "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
+            + "  AND labels(child)[0] IN $types "
+            + "WITH DISTINCT child.urn AS urn LIMIT $limit "
+            + "RETURN 'd' AS side, collect(urn) AS urns",
+            # The partner — itself
+            "MATCH (b {urn: $partner}) RETURN 'p' AS side, [b.urn] AS urns",
+            # ...and everything beneath it, at any depth, any label
+            f"MATCH (b {{urn: $partner}})-[c*1..{max_depth}]->(sub) "
+            + "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
+            + "WITH DISTINCT sub.urn AS urn LIMIT $limit "
+            + "RETURN 'p' AS side, collect(urn) AS urns",
+        ]
+        if not types:
+            # Nothing declared at that level — the opened side still
+            # contributes itself, so the expand degrades to "does this
+            # container connect at all" rather than to silence.
+            parts = [
+                "MATCH (a {urn: $drill}) RETURN 'd' AS side, [a.urn] AS urns",
+                *parts[2:],
+            ]
+        if not ctypes:
+            parts = [p for p in parts if "*1.." not in p]
+        result = await self._ro_query(
+            " UNION ".join(parts),
+            params={"drill": drilled_urn, "partner": partner_urn,
+                    "ctypes": ctypes, "types": types, "limit": limit},
+            op="trace.level_and_subtree",
+            timeout=2.0,
+        )
+        d_set: Set[str] = set()
+        p_set: Set[str] = set()
+        for row in (result.result_set or []):
+            if not row or len(row) < 2:
+                continue
+            urns = [u for u in (row[1] if isinstance(row[1], list) else []) if u]
+            (d_set if row[0] == 'd' else p_set).update(urns)
+        drilled = list(d_set) or [drilled_urn]
+        partner = list(p_set) or [partner_urn]
+        return (drilled, partner) if drilled_is_source else (partner, drilled)
 
     async def _edges_between_sets(
         self, s_urns: List[str], t_urns: List[str], level: int,
