@@ -20,7 +20,7 @@
  * chip ("12 tags · 37 keys · 4 types") so the user sees what
  * autocomplete will offer without opening anything.
  */
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import {
     Code2,
     Eye,
@@ -43,9 +43,6 @@ import {
     Tags,
     Undo2,
     Redo2,
-    Star,
-    X,
-    CornerDownLeft,
 } from 'lucide-react'
 import {
     type FC,
@@ -63,7 +60,6 @@ import {
     useCanRedo,
     useCanUndo,
     useDraftPredicate,
-    useRecentQueries,
     useSearchStore,
     type RecentQueryEntry,
 } from '@/store/searchStore'
@@ -75,9 +71,10 @@ import { useDiscovery } from '../builder/useDiscovery'
 import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
 import type { LayerOption } from './layerOptions'
-import { topLevelConditions } from './predicateComposition'
+import { appendCondition, topLevelConditions } from './predicateComposition'
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
+import { SearchOmnibox } from './omnibox/SearchOmnibox'
 import { SaveQueryDialog } from './SaveQueryDialog'
 import { VisualQueryBuilder } from './VisualQueryBuilder'
 
@@ -158,9 +155,6 @@ export const QueryCard: FC<QueryCardProps> = ({
     const redo = useSearchStore((s) => s.redo)
     const canUndo = useCanUndo()
     const canRedo = useCanRedo()
-    const recentQueries = useRecentQueries(viewId)
-    const togglePinRecent = useSearchStore((s) => s.togglePinRecent)
-    const removeRecent = useSearchStore((s) => s.removeRecent)
     const saveDraftAsMineEntry = useSearchStore((s) => s.saveDraftAsMineEntry)
     // clearSearchResults wipes match URNs / ancestor maps but leaves
     // draft + history alone — needed by the auto-run effect so an
@@ -300,24 +294,65 @@ export const QueryCard: FC<QueryCardProps> = ({
         })
     }, [draftPredicate, viewId])
 
-    // Quick-search Enter from the empty hero → wrap the typed value
-    // in a name-substring TextPredicate and commit (pushes to history,
-    // triggers the auto-run if in Auto mode).
-    const handleQuickSearch = useCallback((value: string) => {
-        const trimmed = value.trim()
-        if (!trimmed) return
-        commitDraft({
-            kind: 'text', value: trimmed, target: 'name',
-            match: 'substring', caseSensitive: false, boost: 1,
-        })
+    // Omnibox selection → append the chosen filter as a row. Uses
+    // ``commitDraft`` (not ``seedDraftPredicate``) so adding a filter
+    // is undoable, and ``appendCondition`` so it composes with whatever
+    // is already there instead of replacing it.
+    // Autofocus target for a row the omnibox just appended. Cleared on
+    // a timeout once the row has mounted and taken focus — the same
+    // mechanism VisualQueryBuilder uses for its own palette.
+    const [freshRowKind, setFreshRowKind] = useState<string | null>(null)
+    useEffect(() => {
+        if (!freshRowKind) return
+        const t = setTimeout(() => setFreshRowKind(null), 150)
+        return () => clearTimeout(t)
+    }, [freshRowKind])
+
+    const handleAddFromOmnibox = useCallback((
+        predicate: Predicate, complete: boolean,
+    ) => {
+        commitDraft(appendCondition(useSearchStore.getState().draftPredicate, predicate))
+        // An incomplete row (e.g. "Name contains…" picked from the
+        // browse tiles) is a prompt, not an answer — send the user
+        // straight to its editor rather than leaving a dashed,
+        // unexplained card sitting there.
+        if (!complete) setFreshRowKind(predicate.kind ?? null)
     }, [commitDraft])
 
-    // Recent-query load — restore an old predicate into the draft,
-    // pushing the current draft onto the undo stack so the user can
-    // undo back if they loaded the wrong one.
-    const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
-        commitDraft(entry.predicate)
-    }, [commitDraft])
+    // Text escalated from the canvas header's quick search. That path
+    // stashes the typed string and calls "open the panel" — which is a
+    // no-op when the panel is already open, so the old consumer (a
+    // mount-only effect on the empty hero) never ran: the second
+    // escalation appeared to do nothing, and the stale seed resurfaced
+    // later when the hero next mounted. Subscribing to the store means
+    // a seed is taken whenever one arrives, open or not. The nonce
+    // remounts the omnibox so a repeat escalation actually lands.
+    const pendingSeed = useSearchStore((s) => s.pendingSearchSeed)
+    const [seed, setSeed] = useState<{ text: string; nonce: number }>(
+        { text: '', nonce: 0 },
+    )
+    useEffect(() => {
+        if (!pendingSeed) return
+        const taken = useSearchStore.getState().consumePendingSearchSeed()
+        if (taken) setSeed((prev) => ({ text: taken, nonce: prev.nonce + 1 }))
+    }, [pendingSeed])
+
+    // Property-value samples, flattened across every discovered key so
+    // the omnibox can match a bare token against values as well as
+    // names. The corpus is bounded server-side (20 values per key, 64
+    // keys per label), so a linear scan is cheaper than any index.
+    const valueSamples = useMemo(() => {
+        const out: { key: string; value: string; lc: string }[] = []
+        for (const key of discovery.allKeys) {
+            for (const raw of discovery.getValueSamples(key)) {
+                if (typeof raw !== 'string' && typeof raw !== 'number') continue
+                const value = String(raw)
+                if (!value) continue
+                out.push({ key, value, lc: value.toLowerCase() })
+            }
+        }
+        return out
+    }, [discovery])
 
     // Create a display rule from the current query — opens the shared
     // DisplayRuleEditor (in a portal modal) seeded with the runnable
@@ -328,6 +363,13 @@ export const QueryCard: FC<QueryCardProps> = ({
         if (runnable) setRuleModalOpen(true)
     }, [runnable])
 
+    // One omnibox instance, rendered in both states — as the hero when
+    // nothing is composed, and as the compact "add another filter" bar
+    // beneath the rows once something is. Before this, the empty state
+    // mounted a name-only quick search and did NOT mount the builder,
+    // so the whole filter palette was unreachable from a cold start and
+    // reaching a property filter meant composing a text search and then
+    // deleting it.
     // ─── Header summary ────────────────────────────────────────────
     const completeCount = conditions.filter((c) => !isRowIncomplete(c)).length
     const incompleteCount = conditions.length - completeCount
@@ -337,6 +379,23 @@ export const QueryCard: FC<QueryCardProps> = ({
     // a confident "start here" surface with example-led onboarding.
     const isEmptyVisual = mode === 'visual' && conditions.length === 0
     const showHeader = !isEmptyVisual
+
+    const omnibox = (
+        <SearchOmnibox
+            key={`omnibox-${seed.nonce}`}
+            variant={isEmptyVisual ? 'hero' : 'inline'}
+            onAdd={handleAddFromOmnibox}
+            onBrowseAll={onOpenAdvanced}
+            entityTypes={knownEntityTypes}
+            tagValues={discovery.tagValues}
+            propertyKeys={discovery.allKeys}
+            valueSamples={valueSamples}
+            layers={discoveredLayers}
+            initialQuery={seed.text}
+            discoveryLoading={discovery.isInitialLoading}
+            disabled={isRunning}
+        />
+    )
 
     return (
         <div
@@ -429,8 +488,8 @@ export const QueryCard: FC<QueryCardProps> = ({
                 {mode === 'visual' ? (
                     isEmptyVisual ? (
                         <PremiumEmptyHero
+                            omnibox={omnibox}
                             onSeed={(p) => commitDraft(p)}
-                            onQuickSearch={handleQuickSearch}
                             onUseCodeMode={() => setMode('code')}
                             discoveredEntityTypes={knownEntityTypes}
                             discoveredTags={discovery.tagValues}
@@ -438,32 +497,35 @@ export const QueryCard: FC<QueryCardProps> = ({
                             discoveryLoading={discovery.isInitialLoading}
                             discoveryError={discovery.error}
                             propertyKeyCount={discovery.allKeys.length}
-                            recentQueries={recentQueries}
-                            onLoadRecent={handleLoadRecent}
-                            onTogglePinRecent={togglePinRecent}
-                            onRemoveRecent={removeRecent}
                         />
                     ) : (
-                        <VisualQueryBuilder
-                            predicate={draftPredicate}
-                            onSeed={seedDraftPredicate}
-                            onCommit={commitDraft}
-                            discovery={{
-                                allKeys: discovery.allKeys,
-                                keysByEntityType: discovery.keysByEntityType,
-                                tagValues: discovery.tagValues,
-                                getValueSamples: discovery.getValueSamples,
-                            }}
-                            knownEntityTypes={knownEntityTypes}
-                            discoveredLayers={discoveredLayers}
-                            isRunning={isRunning}
-                            discoveryLoading={discovery.isInitialLoading}
-                            discoveryError={discovery.error}
-                            onSubmit={dispatchRun}
-                            onOpenAdvanced={onOpenAdvanced}
-                            onOpenCode={handleOpenCode}
-                            enableRowSelection
-                        />
+                        <>
+                            <VisualQueryBuilder
+                                predicate={draftPredicate}
+                                onSeed={seedDraftPredicate}
+                                onCommit={commitDraft}
+                                discovery={{
+                                    allKeys: discovery.allKeys,
+                                    keysByEntityType: discovery.keysByEntityType,
+                                    tagValues: discovery.tagValues,
+                                    getValueSamples: discovery.getValueSamples,
+                                }}
+                                knownEntityTypes={knownEntityTypes}
+                                discoveredLayers={discoveredLayers}
+                                isRunning={isRunning}
+                                discoveryLoading={discovery.isInitialLoading}
+                                discoveryError={discovery.error}
+                                freshKind={freshRowKind}
+                                onSubmit={dispatchRun}
+                                onOpenAdvanced={onOpenAdvanced}
+                                onOpenCode={handleOpenCode}
+                                enableRowSelection
+                            />
+                            {/* Same surface, compact: the omnibox is how
+                                you add the 2nd filter as well as the 1st,
+                                so there's one thing to learn. */}
+                            {omnibox}
+                        </>
                     )
                 ) : (
                     <CodeMode
@@ -696,15 +758,14 @@ function ParseFeedback({
  * working query against THEIR data, not a placeholder.
  */
 function PremiumEmptyHero({
-    onSeed, onQuickSearch, onUseCodeMode,
+    omnibox, onSeed, onUseCodeMode,
     discoveredEntityTypes, discoveredTags, discoveredLayers,
     discoveryLoading, discoveryError, propertyKeyCount,
-    recentQueries, onLoadRecent, onTogglePinRecent, onRemoveRecent,
 }: {
+    /** The SearchOmnibox, owned by QueryCard so the same instance can
+     *  also render beneath the rows once the query is non-empty. */
+    omnibox: ReactNode
     onSeed: (p: Predicate) => void
-    /** Quick-search Enter handler — wraps the typed string in a
-     *  name-substring TextPredicate and commits it to the draft. */
-    onQuickSearch: (value: string) => void
     onUseCodeMode: () => void
     discoveredEntityTypes: string[]
     discoveredTags: string[]
@@ -712,66 +773,7 @@ function PremiumEmptyHero({
     discoveryLoading: boolean
     discoveryError: Error | null
     propertyKeyCount: number
-    recentQueries: ReadonlyArray<RecentQueryEntry>
-    onLoadRecent: (entry: RecentQueryEntry) => void
-    onTogglePinRecent: (timestamp: number) => void
-    onRemoveRecent: (timestamp: number) => void
 }) {
-    const [quickValue, setQuickValue] = useState('')
-    // Recents dropdown: opens only on EXPLICIT user actions — mouse
-    // click inside the input, or ArrowDown when the input has
-    // keyboard focus. The previous ``onFocus`` trigger was too
-    // aggressive because ``autoFocus`` on the input fired focus on
-    // mount, opening the dropdown before the user touched anything.
-    // Closes on Escape, outside-click, or after the user submits.
-    const [recentsOpen, setRecentsOpen] = useState(false)
-    const searchContainerRef = useRef<HTMLDivElement>(null)
-    // W2.7 — when the user escalated from ContextViewHeader with a
-    // typed quick-search query, the panel set
-    // ``pendingSearchSeed`` on the store right before opening. The
-    // hero consumes + atomically clears it on mount so the input
-    // opens pre-filled with the user's text. Subsequent re-opens
-    // see ``null`` and start empty as usual.
-    useEffect(() => {
-        const seed = useSearchStore.getState().consumePendingSearchSeed()
-        if (seed) setQuickValue(seed)
-    }, [])
-    // Close the recents dropdown when the user clicks outside the
-    // search container. The blur handler alone isn't enough because
-    // hovering the dropdown's row-action buttons (pin/remove) blurs
-    // the input even though the user is still interacting with the
-    // dropdown — clicking outside is the source of truth.
-    useEffect(() => {
-        if (!recentsOpen) return
-        const onPointerDown = (e: PointerEvent) => {
-            const target = e.target as Node | null
-            if (!target) return
-            if (!searchContainerRef.current?.contains(target)) {
-                setRecentsOpen(false)
-            }
-        }
-        document.addEventListener('pointerdown', onPointerDown)
-        return () => document.removeEventListener('pointerdown', onPointerDown)
-    }, [recentsOpen])
-    const submitQuick = () => {
-        const trimmed = quickValue.trim()
-        if (!trimmed) return
-        onQuickSearch(trimmed)
-        setQuickValue('')
-        setRecentsOpen(false)
-    }
-    // Filter recents by the typed value so the dropdown also acts
-    // as autocomplete over the user's history. Compare against
-    // ``name`` (named saves) AND ``label`` (DSL string) so either
-    // surface matches the typed query.
-    const filteredRecents = useMemo(() => {
-        const q = quickValue.trim().toLowerCase()
-        if (!q) return recentQueries
-        return recentQueries.filter((e) => {
-            const hay = `${e.name ?? ''} ${e.label}`.toLowerCase()
-            return hay.includes(q)
-        })
-    }, [recentQueries, quickValue])
     type Example = {
         icon: typeof Search
         accent: string
@@ -886,101 +888,32 @@ function PremiumEmptyHero({
                             Search this view
                         </div>
                         <p className="mt-1 text-[12px] text-ink-muted leading-snug">
-                            Type a word below, pick an example, or paste DSL — your call.
-                            The examples use your real data, so a click is a working query.
+                            Type anything — a name, a tag, a type, a property, a
+                            value — and pick what you meant. Or browse by category.
+                            Everything offered comes from your real data.
                         </p>
                     </div>
                 </div>
             </div>
 
-            {/* Quick search input — the most direct entry point.
-                Wrapped in a positioned container so the focus
-                dropdown anchors to it. */}
-            <div className="relative px-5 pb-3" ref={searchContainerRef}>
-                <div className={cn(
-                    'group/qs flex items-center gap-2 px-3 h-10 rounded-xl',
-                    'bg-canvas-base/60 border border-glass-border/60',
-                    'focus-within:border-accent-lineage/70',
-                    'focus-within:shadow-[0_0_0_3px_rgba(45,150,255,0.12)]',
-                    'transition-all duration-150',
-                )}>
-                    <Search className="w-3.5 h-3.5 text-ink-muted shrink-0 group-focus-within/qs:text-accent-lineage transition-colors" />
-                    <input
-                        type="text"
-                        value={quickValue}
-                        onChange={(e) => setQuickValue(e.target.value)}
-                        onClick={() => {
-                            if (recentQueries.length > 0) setRecentsOpen(true)
-                        }}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                                e.preventDefault()
-                                submitQuick()
-                            } else if (e.key === 'Escape') {
-                                e.preventDefault()
-                                setRecentsOpen(false)
-                            } else if (e.key === 'ArrowDown' && recentQueries.length > 0) {
-                                e.preventDefault()
-                                setRecentsOpen(true)
-                            }
-                        }}
-                        autoFocus
-                        placeholder="Type to search by name across this view…"
-                        className={cn(
-                            'flex-1 min-w-0 bg-transparent border-0 outline-none',
-                            'text-[13px] text-ink placeholder:text-ink-muted/60',
-                        )}
-                    />
-                    <button
-                        type="button"
-                        onClick={submitQuick}
-                        disabled={quickValue.trim().length === 0}
-                        title="Search (Enter)"
-                        className={cn(
-                            'inline-flex items-center gap-1 px-2 h-7 rounded-md',
-                            'text-[11px] font-semibold transition-colors',
-                            quickValue.trim().length === 0
-                                ? 'bg-glass/30 text-ink-muted cursor-not-allowed'
-                                : 'bg-accent-lineage text-canvas-base hover:bg-accent-lineage/90',
-                        )}
-                    >
-                        <CornerDownLeft className="w-3 h-3" />
-                        Search
-                    </button>
-                </div>
-                <div className="mt-1.5 px-1 text-[10.5px] text-ink-muted/70">
-                    {recentQueries.length > 0
-                        ? 'Press Enter to search · ↓ to browse recent searches · or pick an example below'
-                        : 'Press Enter to search · or pick an example below'}
-                </div>
-
-                {/* Recents dropdown — anchored to the input. Only
-                    rendered when (a) the input has focus AND (b) the
-                    user has any recents to show. Doubles as
-                    autocomplete: typing filters the list in-place,
-                    so users can quickly re-run a partially-remembered
-                    query. */}
-                <AnimatePresence>
-                    {recentsOpen && filteredRecents.length > 0 && (
-                        <RecentsDropdown
-                            entries={filteredRecents}
-                            totalCount={recentQueries.length}
-                            onLoad={(e) => { onLoadRecent(e); setRecentsOpen(false) }}
-                            onTogglePin={onTogglePinRecent}
-                            onRemove={onRemoveRecent}
-                        />
-                    )}
-                </AnimatePresence>
+            {/* The omnibox is the entry point: one input that reads
+                what you type against tags, entity types, property
+                keys, sampled property VALUES, layers and lineage
+                shape at once. It replaced a name-only quick search,
+                which was why reaching a property filter used to mean
+                composing a text search and then deleting it. */}
+            <div className="relative px-5 pb-3">
+                {omnibox}
             </div>
 
-            {/* Examples — the curated discovery surface. Recents
-                used to render here as a separate static section but
-                they now live in the focus dropdown above (saves
-                permanent vertical space; surfaces them only when the
-                user actively asks). */}
+            {/* Examples — the teaching surface. The omnibox above is
+                the fast path; these explain, in a sentence each, what a
+                query of that shape actually does. Trimmed to three now
+                that the omnibox carries its own "start with something
+                real" list. Recents live in the header's Library. */}
             <div className="relative px-3 pb-3">
                 <div className="flex flex-col gap-1.5">
-                    {examples.slice(0, 5).map((ex, i) => (
+                    {examples.slice(0, 3).map((ex, i) => (
                         <ExampleCard key={i} index={i} example={ex} onSeed={onSeed} />
                     ))}
                 </div>
@@ -1090,172 +1023,6 @@ function ExampleCard({
 }
 
 
-/**
- * One row in the Recent searches strip. Click to load (commits the
- * predicate into the draft via the parent's history-aware
- * commitDraft). Pin keeps the entry from being auto-evicted by the
- * 10-cap. × removes the entry.
- */
-/**
- * RecentsDropdown — overlay panel anchored beneath the empty-hero
- * search input. Renders only when the input is focused, surfacing
- * the user's history as a quick-pick autocomplete instead of always
- * occupying vertical space in the empty hero.
- *
- * Visual identity matches the Library popover Mine tab (same card
- * chrome via ``RecentQueryRow``) so the discovery surfaces feel
- * coordinated. Scrollable when the user has > 5 entries; the
- * footer hints at the Library button for the full list.
- */
-/**
- * Compact recents dropdown. Visual density tuned DOWN from the
- * earlier "feels too aggressive" iteration: slim header strip,
- * single-line rows (no card chrome), tight padding. The dropdown
- * is a quick-pick affordance, NOT a primary surface — the full
- * library lives in the toolbar's Library button.
- */
-function RecentsDropdown({
-    entries, totalCount, onLoad, onTogglePin, onRemove,
-}: {
-    entries: ReadonlyArray<RecentQueryEntry>
-    totalCount: number
-    onLoad: (entry: RecentQueryEntry) => void
-    onTogglePin: (timestamp: number) => void
-    onRemove: (timestamp: number) => void
-}) {
-    const VISIBLE_CAP = 5
-    const visible = entries.slice(0, VISIBLE_CAP)
-    return (
-        <motion.div
-            initial={{ opacity: 0, y: -2 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -2 }}
-            transition={{ duration: 0.1, ease: [0.22, 1, 0.36, 1] }}
-            className={cn(
-                'absolute left-5 right-5 mt-1.5 z-50',
-                'rounded-lg overflow-hidden',
-                'bg-canvas-elevated',
-                'border border-slate-200 dark:border-glass-border',
-                'shadow-lg shadow-black/20',
-            )}
-            onPointerDown={(e) => e.stopPropagation()}
-            role="listbox"
-            aria-label="Recent searches"
-        >
-            <div className={cn(
-                'flex items-center justify-between gap-2 px-2.5 py-1',
-                'border-b border-slate-200/70 dark:border-glass-border/60',
-            )}>
-                <span className="text-[9.5px] font-mono uppercase tracking-[0.14em] text-ink-muted/70">
-                    Recent
-                </span>
-                <span className="text-[9.5px] text-ink-muted/60 tabular-nums">
-                    {entries.length === totalCount
-                        ? `${totalCount}`
-                        : `${entries.length}/${totalCount}`}
-                </span>
-            </div>
-            <ul className="max-h-[180px] overflow-y-auto custom-scrollbar py-0.5">
-                {visible.map((entry) => (
-                    <CompactRecentRow
-                        key={entry.timestamp}
-                        entry={entry}
-                        onLoad={() => onLoad(entry)}
-                        onTogglePin={() => onTogglePin(entry.timestamp)}
-                        onRemove={() => onRemove(entry.timestamp)}
-                    />
-                ))}
-            </ul>
-            {totalCount > VISIBLE_CAP && (
-                <div className={cn(
-                    'px-2.5 py-1 text-[10px] text-ink-muted/60',
-                    'border-t border-slate-200/70 dark:border-glass-border/60',
-                )}>
-                    Showing {VISIBLE_CAP} of {totalCount} · open Library for all.
-                </div>
-            )}
-        </motion.div>
-    )
-}
-
-
-/**
- * Single-line dropdown row. No icon-in-pill, no sublabel, no hover
- * arrow — these are the "card" affordances from RecentQueryRow that
- * made the dropdown feel oversized. Just: tiny icon, label, pin/x
- * on hover.
- */
-function CompactRecentRow({
-    entry, onLoad, onTogglePin, onRemove,
-}: {
-    entry: RecentQueryEntry
-    onLoad: () => void
-    onTogglePin: () => void
-    onRemove: () => void
-}) {
-    const isNamed = entry.source === 'mine' && Boolean(entry.name)
-    const label = isNamed ? entry.name! : (entry.label || '(empty)')
-    return (
-        <li className={cn(
-            'group/dr flex items-center gap-1.5 px-2 py-1 mx-1 rounded-md',
-            'hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
-            'transition-colors cursor-pointer',
-        )}
-            role="option"
-            onClick={onLoad}
-        >
-            {isNamed ? (
-                <Star
-                    className="w-3 h-3 text-amber-500 shrink-0"
-                    fill="currentColor"
-                />
-            ) : (
-                <Search className="w-3 h-3 text-ink-muted/60 shrink-0" />
-            )}
-            <span className={cn(
-                'flex-1 min-w-0 truncate text-[12px]',
-                isNamed ? 'font-medium text-ink' : 'font-mono text-ink',
-            )}>
-                {label}
-            </span>
-            <div className={cn(
-                'flex items-center gap-0.5 shrink-0',
-                'opacity-0 group-hover/dr:opacity-100 transition-opacity',
-            )}>
-                <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); onTogglePin() }}
-                    title={entry.pinned ? 'Unpin' : 'Pin'}
-                    aria-pressed={entry.pinned}
-                    className={cn(
-                        'inline-flex items-center justify-center w-5 h-5 rounded',
-                        'hover:bg-black/[0.06] dark:hover:bg-white/[0.08]',
-                        entry.pinned
-                            ? 'text-amber-500'
-                            : 'text-ink-muted hover:text-amber-500',
-                    )}
-                >
-                    <Star
-                        className="w-3 h-3"
-                        fill={entry.pinned ? 'currentColor' : 'none'}
-                    />
-                </button>
-                <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); onRemove() }}
-                    title="Remove"
-                    className={cn(
-                        'inline-flex items-center justify-center w-5 h-5 rounded',
-                        'text-ink-muted hover:text-rose-500',
-                        'hover:bg-black/[0.06] dark:hover:bg-white/[0.08]',
-                    )}
-                >
-                    <X className="w-3 h-3" />
-                </button>
-            </div>
-        </li>
-    )
-}
 
 
 function EmptyDiscoveryHint({
