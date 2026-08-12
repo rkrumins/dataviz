@@ -430,10 +430,18 @@ export function useLensContainer(
 
   const loadAllChildren = useCallback((openKey: string, focalUrn: string, searchQuery = '') => {
     const open = stateRef.current.results.get(focalUrn)?.get(openKey)
-    // Until the open resolves we don't know WHICH container to ask
-    // about — pass-through levels may still be being walked.
-    if (!open) return
-    pageChildren(openKey, open.anchorUrn, focalUrn, searchQuery)
+    // Prefer the resolved anchor (pass-through levels may have walked
+    // deeper than the card clicked). But a FAILED open leaves no
+    // result, and requiring one made the All toggle silently dead in
+    // the exact situation it exists for — the lineage question could
+    // not be answered, and the container's own contents were the only
+    // way to keep going. The key names the container the user opened;
+    // ask about that.
+    const status = stateRef.current.status.get(focalUrn)?.get(openKey)
+    if (!open && status !== 'error' && status !== 'done') return
+    const anchorUrn = open?.anchorUrn ?? openKey.slice(openKey.indexOf(':') + 1)
+    if (!anchorUrn) return
+    pageChildren(openKey, anchorUrn, focalUrn, searchQuery)
   }, [pageChildren])
 
   /**

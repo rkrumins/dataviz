@@ -1290,43 +1290,94 @@ describe('buildFocusGraph — caps, chips, filter', () => {
     expect(g.cards.some(c => c.id === 'n:Dom')).toBe(false)
   })
 
-  // An empty lineage answer is an ANSWER. The frame says "nothing here
-  // connects" and stops — it must never substitute the container's
-  // arbitrary children for the lineage it failed to find. That ambush
-  // shipped briefly as a "helpful" fallback, and inside a lineage view
-  // it read as random values replacing the user's real upstream. The
-  // roster stays one deliberate click away, on the frame's own
-  // Connected ⇄ All toggle.
-  it('an empty open shows NOTHING inside — the roster only on explicit All', () => {
+  // The two-sided contract on an empty lineage answer. AUTO-resolved
+  // (nobody clicked): say "nothing here connects" and STOP — arbitrary
+  // children presented as lineage is the "random values" ambush.
+  // USER-OPENED (the chevron was clicked): the click asked "show me
+  // what is inside", so the container's contents ARE the answer —
+  // the same children the canvas shows — captioned, claiming nothing.
+  it('an empty AUTO-resolved frame shows nothing; a USER-OPENED one shows its contents', () => {
     const base = {
       nodes: [node('F'), node('Dom', 'DATADOMAIN')],
       edges: [edge('e1', 'Dom', 'F')],
       isCoarser: (t?: string) => t === 'DATADOMAIN',
       canContain: (t?: string) => t === 'DATADOMAIN',
     }
-    const over = {
-      openContainers: new Set(['in:Dom']),
+    const answered = {
       containerResults: new Map([['in:Dom', {
         nodes: [], edges: [], passedThrough: [], truncated: false, empty: true,
       }]]),
       containerStatus: new Map([['in:Dom', 'done' as const]]),
-      // Children are LOADED — the ambush would have shown them.
       frameAllResults: new Map([['in:Dom', {
         children: [node('app1'), node('app2')], hasMore: false, total: 2,
       }]]),
     }
 
-    // Not asked for → honestly empty, whatever happens to be cached.
-    const honest = build({ ...base, over })
-    expect(honest.cards.filter(c => c.frameId === 'fr:in:Dom')).toHaveLength(0)
-    expect(card(honest, 'fr:in:Dom').frameEmpty).toBe(true)
-    expect(card(honest, 'fr:in:Dom').frameShowingAll).toBe(false)
+    // Auto-resolved: children are LOADED, and still not shown.
+    const auto = build({ ...base, over: answered })
+    expect(auto.cards.filter(c => c.frameId === 'fr:in:Dom')).toHaveLength(0)
+    expect(card(auto, 'fr:in:Dom').frameEmpty).toBe(true)
 
-    // The user flips to All → the roster shows, claiming nothing.
-    const all = build({ ...base, over: { ...over, frameShowAll: new Set(['in:Dom']) } })
-    const rows = all.cards.filter(c => c.frameId === 'fr:in:Dom')
+    // User-opened: the same data renders as the frame's contents.
+    const clicked = build({
+      ...base,
+      over: { ...answered, openContainers: new Set(['in:Dom']) },
+    })
+    const rows = clicked.cards.filter(c => c.frameId === 'fr:in:Dom')
     expect(rows.map(c => c.nodeId)).toEqual(['app1', 'app2'])
+    expect(card(clicked, 'fr:in:Dom').frameShowingAll).toBe(true)
     expect(rows.every(c => !c.connected && c.count === 0)).toBe(true)
+  })
+
+  it('a user-opened frame answers even when the lineage fetch ERRORED', () => {
+    // The old-backend case, end to end: /trace/expand 422s, no pair
+    // result ever lands — and the chevron must still not be a dead end.
+    const g = build({
+      nodes: [node('F'), node('Dom', 'DATADOMAIN')],
+      edges: [edge('e1', 'Dom', 'F')],
+      isCoarser: (t?: string) => t === 'DATADOMAIN',
+      canContain: (t?: string) => t === 'DATADOMAIN',
+      over: {
+        openContainers: new Set(['in:Dom']),
+        containerStatus: new Map([['in:Dom', 'error' as const]]),
+        frameAllResults: new Map([['in:Dom', {
+          children: [node('app1')], hasMore: false, total: 1,
+        }]]),
+      },
+    })
+    expect(g.cards.filter(c => c.frameId === 'fr:in:Dom').map(c => c.nodeId)).toEqual(['app1'])
+  })
+
+  it('marks a roster child connected from edges ALREADY IN THE STORE', () => {
+    // "On the canvas I can see the children" — the edges the canvas
+    // draws live in edgesByEndpoint, and the Lens must read them: a
+    // child visibly connected on the canvas must never read "no
+    // lineage" here just because the pair query failed.
+    const g = build({
+      nodes: [node('F'), node('Dom', 'DATADOMAIN'), node('tbl_a', 'dataset'), node('tbl_b', 'dataset')],
+      edges: [
+        edge('e1', 'Dom', 'F'),
+        // The canvas-loaded concrete edge: tbl_a feeds the focal.
+        edge('e2', 'tbl_a', 'F'),
+      ],
+      isCoarser: (t?: string) => t === 'DATADOMAIN',
+      canContain: (t?: string) => t === 'DATADOMAIN',
+      over: {
+        openContainers: new Set(['in:Dom']),
+        containerStatus: new Map([['in:Dom', 'error' as const]]),
+        frameAllResults: new Map([['in:Dom', {
+          children: [node('tbl_a', 'dataset'), node('tbl_b', 'dataset')], hasMore: false, total: 2,
+        }]]),
+      },
+    })
+    const rows = g.cards.filter(c => c.frameId === 'fr:in:Dom')
+    const a = rows.find(c => c.nodeId === 'tbl_a')!
+    const b = rows.find(c => c.nodeId === 'tbl_b')!
+    expect(a.connected).toBe(true)
+    expect(a.count).toBe(1)
+    expect(b.connected).toBe(false)
+    // And the connected child carries a real wire to the focal.
+    expect(g.edges.some(e => e.target === 'n:tbl_a' || e.source === 'n:tbl_a')).toBe(true)
   })
 })
 

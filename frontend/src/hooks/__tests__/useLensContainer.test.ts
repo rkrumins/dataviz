@@ -202,6 +202,22 @@ describe('useLensContainer', () => {
     expect(expandAggregated).toHaveBeenCalledTimes(2)
   })
 
+  it('still serves the All roster after the lineage open ERRORED', async () => {
+    // A failed open used to leave loadAllChildren silently dead — no
+    // pair result, no anchor, nothing fetched. The key names the
+    // container the user opened; that is the anchor.
+    const { provider, getChildrenWithEdges } = makeProvider(() => { throw new Error('422') })
+    const { result: hook } = renderHook(() => useLensContainer('F', provider, ['FLOWS_TO']))
+    const key = openKeyOf('C', 'in')
+
+    act(() => hook.current.openContainer('C', 'F', 'F', 'in', null))
+    await waitFor(() => expect(hook.current.status.get(key)).toBe('error'))
+
+    act(() => hook.current.loadAllChildren(key, 'F'))
+    await waitFor(() => expect(getChildrenWithEdges).toHaveBeenCalled())
+    expect(getChildrenWithEdges.mock.calls[0][0]).toBe('C')
+  })
+
   it('clears the session when the lens closes', async () => {
     const { provider } = makeProvider(() => result([gn('kid1'), gn('F')], [ge('e1', 'kid1', 'F')]))
     const { result: hook, rerender } = renderHook(

@@ -786,6 +786,39 @@ describe('LineageLens graph mode', () => {
     }
   })
 
+  it('fetches the contents for a user-opened frame whose lineage answer failed', () => {
+    // The wiring for the fall-through: the builder derives the display,
+    // and THIS asks for the roster it needs. Without the ask, nothing
+    // ever arrives and the chevron stays a dead end.
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [
+          { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
+          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
+        ],
+      },
+    } as never)
+    try {
+      useCanvasStore.setState({
+        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
+        edges: [edge('e1', 'plat', 'ds')],
+        visibleEdges: [],
+      } as never)
+      const onLoadAllChildren = vi.fn()
+      renderLens(['ds'], {}, {
+        onLoadAllChildren,
+        graphSeed: { nodeId: 'ds', collapsedFrames: [], expandedFrontier: [], openContainers: ['in:plat'] },
+        containerStatus: new Map([['in:plat', 'error' as const]]),
+      })
+      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat', '')
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
   it('renders an opened container as a frame holding its connected children', () => {
     const prevSchema = useSchemaStore.getState().schema
     useSchemaStore.setState({

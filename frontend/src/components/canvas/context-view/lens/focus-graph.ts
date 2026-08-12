@@ -22,6 +22,7 @@
  */
 import type { LineageNode, LineageEdge } from '@/store/canvas'
 import { deriveNeighborRecords, type NeighborRecord } from '@/lib/lineage-neighbors'
+import { normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 import { relationshipLabel } from '@/lib/relationshipLabel'
 
 /** Ontology wording for edge types, keyed by UPPERCASE id: the
@@ -1227,7 +1228,18 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         const res = containerResults?.get(openKey)
         const status = containerStatus?.get(openKey)
         const frameId = `fr:${dir}:${entry.nodeId}`
-        const showAll = frameShowAll?.has(openKey) ?? false
+        // A USER-OPENED frame whose lineage question failed or came back
+        // empty falls through to the container's contents — the same
+        // children the canvas shows, so the chevron can never be a dead
+        // end while the canvas works. DERIVED, deliberately: the user
+        // asked "open this" by clicking, and this is the best available
+        // answer, captioned as such. An AUTO-resolved frame (not in
+        // `openContainers` — nobody clicked it) never does this; a
+        // summary substituting arbitrary children for lineage is the
+        // "random values" ambush, removed once already.
+        const userOpened = openContainers.has(openKey)
+        const showAll = (frameShowAll?.has(openKey) ?? false)
+          || (userOpened && (status === 'error' || (status === 'done' && (res?.empty ?? false))))
         const all = frameAllResults?.get(openKey)
 
         // Only entities we haven't already placed elsewhere on the board.
@@ -1336,18 +1348,32 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           if (t) t.connections += surplus
         }
 
-        // Connection counts come from the server's pair-filtered edges.
+        // Connection counts come from the server's pair-filtered edges —
+        // and, equally, from edges ALREADY LOADED between a child and
+        // this frame's partner side. The store's edges are what the
+        // canvas draws; a child visibly connected there must never
+        // read "no lineage" here just because the pair query failed.
+        const refIds = new Set(entry.refs.keys())
+        const storeEdgesFor = (id: string): LineageEdge[] =>
+          (edgesByEndpoint.get(id) ?? []).filter(e => {
+            const other = e.source === id ? e.target : e.source
+            if (!refIds.has(other)) return false
+            return !isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
+          })
         const countFor = (id: string) => {
           let n = 0
           for (const e of res?.edges ?? []) if (e.source === id || e.target === id) n++
+          if (n === 0) n = storeEdgesFor(id).length
           return Math.max(n, 1)
         }
         const edgeTypeFor = (id: string) => {
           for (const e of res?.edges ?? []) {
             if (e.source === id || e.target === id) return ((e.data?.edgeType as string) ?? '').toUpperCase()
           }
-          return ''
+          const fromStore = storeEdgesFor(id)[0]
+          return fromStore ? normalizeEdgeType(fromStore) : ''
         }
+        const storeConnected = (id: string) => storeEdgesFor(id).length > 0
         // Over the CONNECTED roster, not the page on screen: the frame's
         // claim about its rows must not change as you page through them.
         // Unconnected children carry no type and so cannot dissent.
@@ -1361,7 +1387,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         for (const child of shownInside) {
           const cLabel = labelOf(child.id, child)
           const cType = (child.data?.type as string) ?? UNRESOLVED_TYPE
-          const connected = connectedIds.has(child.id)
+          const connected = connectedIds.has(child.id) || storeConnected(child.id)
           const childOpenKey = `${dir}:${child.id}`
           // A child with no lineage to the focal has nothing to expand
           // TOWARDS it — offering a pill there would promise an answer

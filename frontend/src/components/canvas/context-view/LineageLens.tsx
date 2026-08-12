@@ -950,12 +950,26 @@ export function LineageLens({
     }
   }, [focusGraph, nodeId, onOpenContainer, entityLevels, containerStatus, containerResults])
 
-  // An open that finds no lineage says so and STOPS. It used to flip
-  // itself to "everything inside" — helpful for browsing, but inside a
-  // LINEAGE view it presented a container's arbitrary children as if
-  // they were the focal's lineage: the reported "random values". The
-  // Connected ⇄ All toggle on the frame still offers the roster as a
-  // deliberate act; nothing offers it as an ambush.
+  // An AUTO-resolved frame that finds no lineage says so and STOPS —
+  // substituting arbitrary children for lineage nobody asked about is
+  // the "random values" ambush, removed once already. A USER-OPENED
+  // frame is different: the click asked "show me what is inside", and
+  // when the lineage question errors or comes back empty, the
+  // container's contents ARE the best available answer — the same
+  // children the canvas shows. The builder derives that fallback; this
+  // effect only fetches the roster it will need. Fetch-only, once per
+  // key, no state writes.
+  useEffect(() => {
+    if (!onLoadAllChildren) return
+    for (const key of graphCur.openContainers) {
+      const status = containerStatus?.get(key)
+      const failed = status === 'error'
+        || (status === 'done' && (containerResults?.get(key)?.empty ?? false))
+      if (!failed) continue
+      if (frameAllResults?.has(key) || frameAllStatus?.has(key)) continue
+      onLoadAllChildren(key, '')
+    }
+  }, [graphCur.openContainers, containerResults, containerStatus, frameAllResults, frameAllStatus, onLoadAllChildren])
 
   // Type chips for graph mode — one row across both directions (the
   // list columns render their own per-column rows).
