@@ -303,11 +303,13 @@ export interface FocusCard {
   canOpenChildren: boolean
   /** Its contents are currently open (it renders as a frame). */
   childrenOpen: boolean
-  /** Group toggle key into expandedGroups / open key into
-   *  openContainers / frontier key into expandedFrontier. All three are
-   *  `${dir}:${urn}`, so one key serves whichever set applies. */
+  /** Collapse key into collapsedFrames / open key into openContainers /
+   *  frontier key into expandedFrontier. All three are `${dir}:${urn}`,
+   *  so one key serves whichever set applies. Deliberately one
+   *  namespace: the sets answer different questions about the same
+   *  entity in the same direction. */
   expandKey: string | null
-  /** True when this group card is currently expanded (header form). */
+  /** Frame cards: its rows are on screen. Mirrors `childrenOpen`. */
   expanded: boolean
   /** What this card's expand affordance means (null = not expandable). */
   expandKind: FocusExpandKind
@@ -398,11 +400,11 @@ export interface FocusGraphInput {
   foldCoarserRestatements?: boolean
   /** Frames the user has COLLAPSED, keyed `${dir}:${parentUrn}`.
    *
-   *  Inverse of the old `expandedGroups`, and the inversion is the
-   *  point: a column's provenance is the reason the Lens exists, so a
-   *  table that has connected columns opens showing them. Closed-by-
-   *  default made "where does this field come from" a thing you had to
-   *  already suspect before you could ask it. */
+   *  An EXCEPTION list, not a membership list, and that is the point: a
+   *  column's provenance is the reason the Lens exists, so a table with
+   *  connected columns opens showing them. Opt-in disclosure made
+   *  "where does this field come from" a thing you had to already
+   *  suspect before you could ask it. */
   collapsedFrames: ReadonlySet<string>
   expandedFrontier: ReadonlySet<string>
   /** Containers the user has opened, keyed `${dir}:${urn}`. */
@@ -941,7 +943,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         }
       }
 
-      // Bucket by immediate known parent: ≥2 members → a group card.
+      // Bucket by immediate known parent: ≥2 members → a frame.
       // Fold coarser RESTATEMENTS of a connection into the finest one.
       // `expandAggregated` reports the same fact at every grain above it,
       // so one column→column connection arrives as the column, its table,

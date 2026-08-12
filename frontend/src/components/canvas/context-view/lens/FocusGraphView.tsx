@@ -6,9 +6,10 @@
  * build as rich entity cards in hop bands. All semantics live in
  * focus-graph.ts; this file is presentation and gestures only:
  *   single click  = select (detail strip)     double click = focus
- *   group header  = expand/collapse           pane click   = deselect
+ *   frame chevron = show/hide its rows         pane click   = deselect
  *   hover a card  = light up its connections
  *   drag a card   = rearrange it; a frame carries its children
+ *   breadcrumb    = re-center a level above this one
  *   ⊕ pill        = open this card — a coarse container reveals what
  *                   is inside it that connects to the focal; anything
  *                   else reveals its own next hop
