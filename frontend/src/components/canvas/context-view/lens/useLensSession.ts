@@ -40,6 +40,7 @@ import {
   mergeDrill,
   mergeExpansion,
   mergeNodes,
+  mergeReach,
   startChildren,
   startDrill,
   startExpansion,
@@ -47,6 +48,9 @@ import {
   type LensDirection,
   type LensSessionState,
 } from './lensGraph'
+
+/** Depth of the focal's transitive-reach measurement (bounded). */
+export const LENS_REACH_DEPTH = 10
 
 /** Per-direction raw-edge cap per gesture. Exported so truncation copy
  *  states the real number. */
@@ -166,9 +170,11 @@ export function useLensSession(
         apply(session, prev => mergeContainmentEdges(prev, containmentEdges, containmentOpts))
       }
       apply(session, prev => mergeDegrees(prev, degrees))
-      // Names for anything still unlabelled: partners plus the parents
-      // the containment context just surfaced.
-      const nameUrns = new Set(partnerList)
+      // Names for anything still unlabelled: the node ITSELF (walking to
+      // an entity the canvas never loaded must not leave the focal card
+      // wearing a urn-tail label), its partners, and the parents the
+      // containment context just surfaced.
+      const nameUrns = new Set([aroundUrn, ...partnerList])
       for (const e of containmentEdges) {
         nameUrns.add(e.sourceUrn)
         nameUrns.add(e.targetUrn)
@@ -346,6 +352,39 @@ export function useLensSession(
           ...rawDown,
           ...(trace && !trace.isInherited ? trace.edges : []),
         ])
+        // Transitive reach — the change-impact number the lens gets
+        // opened for. One bounded deep trace, measured not guessed;
+        // truncation renders the numbers as floors.
+        if (provider.traceAtLevel) {
+          const deep = await provider
+            .traceAtLevel({
+              urn: focal,
+              direction: 'both',
+              upstreamDepth: LENS_REACH_DEPTH,
+              downstreamDepth: LENS_REACH_DEPTH,
+              level: 'auto',
+              includeInheritedLineage: true,
+              lineageEdgeTypes: types ?? null,
+            })
+            .catch(() => null)
+          // A zero-everything measurement adds nothing the depth-1
+          // picture doesn't already say — and when rollups don't exist
+          // at this grain it would CONTRADICT a board of raw edges.
+          // Unknown stays unknown; only a real measurement renders.
+          if (
+            deep &&
+            !deep.isInherited &&
+            deep.upstreamUrns.size + deep.downstreamUrns.size > 0
+          ) {
+            apply(session, prev =>
+              mergeReach(prev, {
+                up: deep.upstreamUrns.size,
+                down: deep.downstreamUrns.size,
+                truncated: deep.truncated,
+              }),
+            )
+          }
+        }
       } catch {
         startedRef.current.delete(`up:${focal}`)
         startedRef.current.delete(`down:${focal}`)

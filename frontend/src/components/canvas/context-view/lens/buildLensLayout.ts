@@ -33,7 +33,7 @@ import {
 
 export const LENS_CARD_W = 240
 export const LENS_CARD_H = 64
-export const LENS_FOCAL_H = 92
+export const LENS_FOCAL_H = 108
 export const LENS_CARD_GAP = 10
 export const LENS_COL_GAP = 140
 export const LENS_FRAME_HEADER_H = 34
@@ -77,11 +77,16 @@ export interface LensCard {
   isFocal: boolean
   label: string
   entityType: string
+  qualifiedName?: string
   description?: string
+  /** Measured raw-lineage degree; absent = unknown, never zero. */
+  degrees?: { in: number; out: number }
   /** Nearest-parent context line for standalone cards ('' when framed). */
   parentLabel: string
   /** Clickable ancestor chain, root-first (focal card only). */
   breadcrumb: Array<{ urn: string; label: string }>
+  /** Measured transitive reach (focal card only; floors if truncated). */
+  reach?: { up: number; down: number; truncated: boolean }
   pills: { up: LensPill; down: LensPill }
   chevron: LensChevron
 }
@@ -132,6 +137,8 @@ export interface LensColumnMeta {
   pageCount: number
   totalRoots: number
   shownRoots: number
+  /** Visible connections whose outer endpoint sits in this column. */
+  connections: number
 }
 
 export interface LensLayout {
@@ -371,13 +378,16 @@ export function buildLensLayout(state: LensSessionState, opts: LensLayoutOptions
       isFocal,
       label: labelOf(state.nodes, urn),
       entityType: node?.entityType ?? '',
+      ...(node?.qualifiedName ? { qualifiedName: node.qualifiedName } : {}),
       ...(node?.description ? { description: node.description } : {}),
+      ...(state.degrees.has(urn) ? { degrees: state.degrees.get(urn)! } : {}),
       parentLabel: parentFrameId
         ? ''
         : state.parents.get(urn)
           ? labelOf(state.nodes, state.parents.get(urn)!)
           : '',
       breadcrumb: isFocal ? breadcrumbOf(urn) : [],
+      ...(isFocal && state.reach ? { reach: state.reach } : {}),
       pills: { up: pillOf(urn, 'up'), down: pillOf(urn, 'down') },
       chevron: chevronOf(urn),
     })
@@ -398,6 +408,9 @@ export function buildLensLayout(state: LensSessionState, opts: LensLayoutOptions
     })
   }
 
+  // All coordinates are ABSOLUTE board coordinates — the view renders
+  // flat nodes and never relies on React Flow subflow positioning
+  // (parentFrameId remains as pure metadata for the camera and tests).
   const placeEntry = (
     entry: Entry,
     hop: number,
@@ -417,9 +430,11 @@ export function buildLensLayout(state: LensSessionState, opts: LensLayoutOptions
     const window = members.slice(boundedPage * pageSize, (boundedPage + 1) * pageSize)
 
     const innerW = w - 2 * LENS_FRAME_PAD
-    let cursorY = LENS_FRAME_PAD
+    const innerX = x + LENS_FRAME_PAD
+    let cursorY = y + LENS_FRAME_PAD
     let headerCardId: string | undefined
-    // Reserve frame node itself first so members can parent to it.
+    // Reserve the frame's slot before its members so the render order
+    // stays outer-before-inner.
     const frameIndex = frames.length
     frames.push({
       id: frameId,
@@ -437,22 +452,33 @@ export function buildLensLayout(state: LensSessionState, opts: LensLayoutOptions
       shownMembers: window.length,
     })
     if (headerIsCard) {
-      const placed = placeCard(entry.urn, hop, LENS_FRAME_PAD, cursorY, innerW, frameId)
+      const placed = placeCard(entry.urn, hop, innerX, cursorY, innerW, frameId)
       headerCardId = lensCardId(entry.urn)
       cursorY += placed.h + LENS_CARD_GAP
     } else {
       cursorY += LENS_FRAME_HEADER_H
     }
     for (const member of window) {
-      const placed = placeEntry(member, hop, LENS_FRAME_PAD, cursorY, innerW, frameId)
+      const placed = placeEntry(member, hop, innerX, cursorY, innerW, frameId)
       cursorY += placed.h + LENS_CARD_GAP
     }
-    let h = cursorY - LENS_CARD_GAP + LENS_FRAME_PAD
+    let h = cursorY - LENS_CARD_GAP + LENS_FRAME_PAD - y
     if (pageCount > 1) h += LENS_FRAME_FOOTER_H
     const frame = frames[frameIndex]
     frame.h = h
     if (headerCardId) frame.headerCardId = headerCardId
     return { h }
+  }
+
+  // Connections per column: a record belongs to the column of its
+  // endpoint FARTHER from the focal (the side a band header describes).
+  const connectionsByHop = new Map<number, number>()
+  for (const r of records) {
+    const hs = state.hops.get(r.source)
+    const ht = state.hops.get(r.target)
+    if (hs === undefined || ht === undefined) continue
+    const outer = Math.abs(hs) >= Math.abs(ht) ? hs : ht
+    connectionsByHop.set(outer, (connectionsByHop.get(outer) ?? 0) + 1)
   }
 
   const hops = [...columnsByHop.keys()].sort((a, b) => a - b)
@@ -476,6 +502,7 @@ export function buildLensLayout(state: LensSessionState, opts: LensLayoutOptions
       pageCount,
       totalRoots: roots.length,
       shownRoots: window.length,
+      connections: connectionsByHop.get(hop) ?? 0,
     })
   }
 

@@ -58,10 +58,15 @@ export function useFrameCamera(
   items: CameraItem[],
   edges: CameraEdge[],
   reducedMotion: boolean,
+  /** React Flow's nodes-initialized signal. A fitView before nodes are
+   *  measured silently no-ops — stamping then would freeze the camera
+   *  on the default viewport forever. Until ready, do nothing and stamp
+   *  nothing. */
+  ready = true,
 ) {
   const framedRef = useRef<{ focal: string; ids: Set<string> } | null>(null)
   useEffect(() => {
-    if (!rf) return
+    if (!rf || !ready) return
     const ids = new Set(items.map(i => i.id))
     const prev = framedRef.current
     const newFocal = !prev || prev.focal !== focalCardId
@@ -99,5 +104,5 @@ export function useFrameCamera(
       })
     }, 30)
     return () => window.clearTimeout(t)
-  }, [rf, focalCardId, items, edges, reducedMotion])
+  }, [rf, focalCardId, items, edges, reducedMotion, ready])
 }

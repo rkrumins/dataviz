@@ -214,19 +214,24 @@ describe('nested containment opens', () => {
     expect(c3.hop).toBe(0)
   })
 
-  it('sizes every frame to contain its members', () => {
+  it('bounds every member inside its frame (absolute coordinates)', () => {
     const layout = buildLensLayout(nested())
     const byId = new Map(layout.frames.map(f => [f.id, f]))
     for (const card of layout.cards) {
       if (!card.parentFrameId) continue
       const frame = byId.get(card.parentFrameId)!
-      expect(card.y + card.h).toBeLessThanOrEqual(frame.h)
-      expect(card.x + card.w).toBeLessThanOrEqual(frame.w)
+      expect(card.x).toBeGreaterThanOrEqual(frame.x)
+      expect(card.y).toBeGreaterThanOrEqual(frame.y)
+      expect(card.x + card.w).toBeLessThanOrEqual(frame.x + frame.w)
+      expect(card.y + card.h).toBeLessThanOrEqual(frame.y + frame.h)
     }
     for (const frame of layout.frames) {
       if (!frame.parentFrameId) continue
       const parent = byId.get(frame.parentFrameId)!
-      expect(frame.y + frame.h).toBeLessThanOrEqual(parent.h)
+      expect(frame.x).toBeGreaterThanOrEqual(parent.x)
+      expect(frame.y).toBeGreaterThanOrEqual(parent.y)
+      expect(frame.x + frame.w).toBeLessThanOrEqual(parent.x + parent.w)
+      expect(frame.y + frame.h).toBeLessThanOrEqual(parent.y + parent.h)
     }
   })
 })

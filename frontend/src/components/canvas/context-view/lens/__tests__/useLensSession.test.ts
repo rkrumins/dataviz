@@ -133,8 +133,9 @@ describe('focal open', () => {
       expect(q.limit).toBe(LENS_EDGE_LIMIT)
     }
 
-    // Exactly one trace: both ways, depth 1 each, auto, inherited on.
-    expect(traceAtLevel).toHaveBeenCalledTimes(1)
+    // Two traces: the depth-1 both-ways picture, then the bounded
+    // reach measurement — never more.
+    await waitFor(() => expect(traceAtLevel).toHaveBeenCalledTimes(2))
     expect(traceAtLevel.mock.calls[0][0]).toMatchObject({
       urn: 'f',
       direction: 'both',
@@ -143,6 +144,12 @@ describe('focal open', () => {
       level: 'auto',
       includeInheritedLineage: true,
       lineageEdgeTypes: ['FLOWS_TO', 'CONSUMES'],
+    })
+    expect(traceAtLevel.mock.calls[1][0]).toMatchObject({
+      urn: 'f',
+      upstreamDepth: 10,
+      downstreamDepth: 10,
+      level: 'auto',
     })
 
     expect(getAncestors).toHaveBeenCalledWith('f')
@@ -160,6 +167,12 @@ describe('focal open', () => {
     expect(s.hops.get('sink')).toBe(1)
     expect(s.parents.get('f')).toBe('db')
     expect(s.degrees.get('src')).toEqual({ in: 2, out: 3 })
+
+    // The focal ITSELF is hydrated — walking to an entity the canvas
+    // never loaded must not leave the focal wearing a urn-tail label.
+    const namedBatches = getNodes.mock.calls.map(c => c[0].urns ?? [])
+    expect(namedBatches.some(b => b.includes('f'))).toBe(true)
+    await waitFor(() => expect(s.nodes.has('f') || result.current!.state.nodes.has('f')).toBe(true))
   })
 
   it('degrades to raw-only when the trace fails, still landing as done', async () => {

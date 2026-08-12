@@ -21,6 +21,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   BackgroundVariant,
+  Handle,
+  Position,
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
@@ -28,24 +30,33 @@ import {
   type EdgeProps,
   type Node,
   type NodeProps,
+  type ReactFlowInstance,
   BaseEdge,
   EdgeLabelRenderer,
   getBezierPath,
   MarkerType,
 } from '@xyflow/react'
+// The lens owns its own React Flow instance, so it must load the flow
+// stylesheet itself — the canvas's import lives in GraphCanvas, which a
+// reference view never mounts. Without it, node wrappers lose absolute
+// positioning and the board collapses into document flow.
+import '@xyflow/react/dist/style.css'
 import {
   AlertCircle,
   ChevronDown,
   ChevronRight,
   CornerUpLeft,
   Eye,
+  HelpCircle,
+  ImageDown,
   Loader2,
   Plus,
   SidebarOpen,
 } from 'lucide-react'
 import { useViewEntityTypeHierarchyMap, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { usePreferencesStore } from '@/store/preferences'
-import { generateColorFromType } from '@/lib/type-visuals'
+import { useEntityVisual } from '@/hooks/useEntityVisual'
+import { DynamicIcon } from '@/lib/viewUtils'
 import { relationshipLabel } from '@/lib/relationshipLabel'
 import type { LensSessionApi } from './useLensSession'
 import { expansionKeyOf, type LensDirection } from './lensGraph'
@@ -53,6 +64,8 @@ import {
   buildLensLayout,
   lensCardId,
   lensColumnKey,
+  LENS_COLUMN_W,
+  LENS_COL_GAP,
   type LensBanner,
   type LensCard,
   type LensChevron,
@@ -81,14 +94,22 @@ interface LensInteractions {
   select: (urn: string) => void
   focus: (urn: string) => void
   framePage: (frameId: string, delta: number) => void
+  hover: (urn: string | null) => void
 }
 
 // React Flow node/edge `data` must be serializable-ish objects; we pass
 // the layout structs plus a stable ref to the interactions. Anything a
 // node needs DURING RENDER (like selection) travels in data — the ref
 // is strictly for event handlers.
-type CardNodeData = { card: LensCard; selected: boolean; io: { current: LensInteractions } }
-type FrameNodeData = { frame: LensFrame; io: { current: LensInteractions } }
+type CardNodeData = { card: LensCard; selected: boolean; dimmed: boolean; io: { current: LensInteractions } }
+type FrameNodeData = { frame: LensFrame; entityType: string; io: { current: LensInteractions } }
+type BandNodeData = { band: { title: string; counts?: string; side: 'up' | 'down' | 'none' } }
+
+/** Direction palette — the same reading the original design used:
+ *  everything feeding the focal is cool, everything fed by it is warm. */
+const UPSTREAM_TINT = '#0ea5e9'
+const DOWNSTREAM_TINT = '#f59e0b'
+const NEUTRAL_TINT = '#94a3b8'
 type LensEdgeData = {
   label: string
   also: string[]
@@ -96,6 +117,7 @@ type LensEdgeData = {
   drillable: boolean
   drillState?: string
   recordId: string
+  emphasized: boolean
   io: { current: LensInteractions }
 }
 
@@ -184,8 +206,106 @@ function ChevronButton({ chevron, urn, io }: { chevron: LensChevron; urn: string
 // ── Node renderers ─────────────────────────────────────────────────────
 
 function CardNode({ data }: NodeProps<Node<CardNodeData>>) {
-  const { card, selected, io } = data
-  const color = generateColorFromType(card.entityType || 'entity')
+  const { card, selected, dimmed, io } = data
+  const visual = useEntityVisual(card.entityType || 'entity')
+  const accent = visual.color
+  const tooltip = [card.qualifiedName || card.urn, card.description].filter(Boolean).join('\n')
+  const gestures = (
+    <span className="flex shrink-0 items-center gap-1">
+      <PillButton pill={card.pills.up} urn={card.urn} io={io} />
+      <ChevronButton chevron={card.chevron} urn={card.urn} io={io} />
+      <PillButton pill={card.pills.down} urn={card.urn} io={io} />
+    </span>
+  )
+  const handles = (
+    <>
+      {/* Wires attach here: data flows left → right. Invisible — the
+          card edge is the visual, the handle is just the anchor. */}
+      <Handle type="target" position={Position.Left} className="!h-1 !w-1 !min-h-0 !min-w-0 !border-0 !bg-transparent" />
+      <Handle type="source" position={Position.Right} className="!h-1 !w-1 !min-h-0 !min-w-0 !border-0 !bg-transparent" />
+    </>
+  )
+
+  // ── Focal: the anchor card — bigger, gradient, in/out tally ──
+  if (card.isFocal) {
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => io.current.select(card.urn)}
+        onKeyDown={e => { if (e.key === 'Enter') io.current.select(card.urn) }}
+        onMouseEnter={() => io.current.hover(card.urn)}
+        onMouseLeave={() => io.current.hover(null)}
+        style={{
+          borderColor: accent,
+          background: `linear-gradient(150deg, ${accent}24, ${accent}08 60%)`,
+          boxShadow: selected ? `0 10px 34px ${accent}55` : `0 10px 34px ${accent}33`,
+        }}
+        className={`group relative h-full w-full cursor-pointer rounded-xl border-2 bg-canvas-elevated px-3.5 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 ${
+          selected ? 'ring-2 ring-accent-lineage ring-offset-1 ring-offset-canvas-elevated' : ''
+        } ${dimmed ? 'opacity-30' : ''}`}
+        data-lens-card={card.urn}
+      >
+        {handles}
+        <div className="flex items-center gap-1.5">
+          <span style={{ color: accent }} aria-hidden>
+            <DynamicIcon name={visual.icon} className="h-3.5 w-3.5" />
+          </span>
+          <p className="truncate text-[9.5px] font-bold uppercase tracking-[0.12em]" style={{ color: accent }}>
+            {card.entityType || 'entity'}
+          </p>
+        </div>
+        <p className="truncate text-[13.5px] font-semibold leading-snug text-ink" title={tooltip || card.label}>
+          {card.label}
+        </p>
+        <div className="flex items-center gap-1 truncate text-[9.5px] leading-snug text-ink-muted">
+          <span aria-hidden>⇡</span>
+          {card.breadcrumb.length > 0 ? (
+            card.breadcrumb.map((b, i) => (
+              <span key={b.urn} className="flex min-w-0 items-center gap-1">
+                {i > 0 ? <span aria-hidden>›</span> : null}
+                <button
+                  type="button"
+                  className="nodrag truncate hover:text-accent-lineage hover:underline"
+                  onClick={e => { e.stopPropagation(); io.current.focus(b.urn) }}
+                  title={`Focus ${b.label}`}
+                >
+                  {b.label}
+                </button>
+              </span>
+            ))
+          ) : (
+            <span className="truncate">top level</span>
+          )}
+        </div>
+        <div className="mt-1 flex items-center gap-2.5 border-t border-black/[0.07] pt-1 text-[10.5px] font-medium tabular-nums dark:border-white/[0.08]">
+          {card.degrees ? (
+            <>
+              <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400" title="Measured incoming lineage edges">
+                ↙ {card.degrees.in} in
+              </span>
+              <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400" title="Measured outgoing lineage edges">
+                ↗ {card.degrees.out} out
+              </span>
+            </>
+          ) : null}
+          {card.reach ? (
+            <span
+              className="min-w-0 truncate text-[9px] font-normal text-ink-muted"
+              title="Distinct entities reached transitively (bounded measurement; + marks a floor)"
+            >
+              reaches {card.reach.up}
+              {card.reach.truncated ? '+' : ''} upstream · {card.reach.down}
+              {card.reach.truncated ? '+' : ''} downstream
+            </span>
+          ) : null}
+          <span className="ml-auto">{gestures}</span>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Entity card: one connection partner (or child row) ──
   return (
     <div
       role="button"
@@ -193,73 +313,104 @@ function CardNode({ data }: NodeProps<Node<CardNodeData>>) {
       onClick={() => io.current.select(card.urn)}
       onDoubleClick={() => io.current.focus(card.urn)}
       onKeyDown={e => { if (e.key === 'Enter') io.current.select(card.urn) }}
-      className={`flex h-full w-full flex-col justify-center rounded-lg border bg-canvas-elevated px-2 py-1 text-left shadow-sm transition-colors ${
-        selected
-          ? 'border-accent-lineage ring-1 ring-accent-lineage'
-          : card.isFocal
-            ? 'border-accent-lineage/70'
-            : 'border-black/10 dark:border-white/10 hover:border-black/25 dark:hover:border-white/25'
-      }`}
+      onMouseEnter={() => io.current.hover(card.urn)}
+      onMouseLeave={() => io.current.hover(null)}
+      title={`${card.label}${card.description ? ` — ${card.description}` : ''} · click to inspect, double-click to focus`}
+      style={{ borderLeftWidth: 3, borderLeftColor: accent }}
+      className={`group relative flex h-full w-full cursor-pointer items-center gap-2 rounded-lg border bg-canvas-elevated px-2.5 transition-colors hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 ${
+        selected ? 'ring-2 ring-accent-lineage border-black/[0.07] dark:border-white/[0.08]' : 'border-black/[0.07] dark:border-white/[0.08]'
+      } ${dimmed ? 'opacity-30' : ''}`}
       data-lens-card={card.urn}
     >
-      {card.isFocal && card.breadcrumb.length > 0 ? (
-        <div className="mb-0.5 flex items-center gap-0.5 truncate text-2xs text-ink-muted">
-          {card.breadcrumb.map((b, i) => (
-            <span key={b.urn} className="flex min-w-0 items-center gap-0.5">
-              {i > 0 ? <span aria-hidden>›</span> : null}
-              <button
-                type="button"
-                className="truncate hover:text-accent-lineage hover:underline"
-                onClick={e => { e.stopPropagation(); io.current.focus(b.urn) }}
-                title={`Focus ${b.label}`}
-              >
-                {b.label}
-              </button>
+      {handles}
+      <div
+        className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md"
+        style={{ backgroundColor: `${accent}1f`, color: accent }}
+        aria-hidden
+      >
+        <DynamicIcon name={visual.icon} className="h-3.5 w-3.5" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="flex min-w-0 items-center gap-1.5 text-[12px] font-medium leading-snug text-ink">
+          <span className="truncate" title={tooltip || card.label}>{card.label}</span>
+        </p>
+        <p className="flex min-w-0 items-center gap-1 text-[9.5px] leading-snug text-ink-muted/70">
+          <span className="truncate">{card.entityType || 'entity'}</span>
+          {card.parentLabel ? (
+            <>
+              <span className="text-ink-muted/40">·</span>
+              <span className="truncate" title={`Inside ${card.parentLabel}`}>{card.parentLabel}</span>
+            </>
+          ) : null}
+          {card.degrees ? (
+            <span
+              className="flex-shrink-0 font-semibold tabular-nums text-ink-muted"
+              title={`Measured lineage: ${card.degrees.in} in, ${card.degrees.out} out`}
+            >
+              {card.degrees.in}↑ {card.degrees.out}↓
             </span>
-          ))}
-        </div>
-      ) : null}
-      <div className="flex items-center gap-1.5">
-        <span
-          className="inline-block h-2 w-2 shrink-0 rounded-full"
-          style={{ backgroundColor: color }}
-          aria-hidden
-        />
-        <span className={`truncate text-xs ${card.isFocal ? 'font-semibold' : 'font-medium'} text-ink`} title={card.label}>
-          {card.label}
-        </span>
+          ) : null}
+        </p>
       </div>
-      <div className="mt-0.5 flex items-center justify-between gap-1">
-        <span className="truncate text-2xs text-ink-muted">
-          {card.entityType || 'entity'}
-          {card.parentLabel ? <span title={`Inside ${card.parentLabel}`}> · {card.parentLabel}</span> : null}
-        </span>
-        <span className="flex shrink-0 items-center gap-1">
-          <PillButton pill={card.pills.up} urn={card.urn} io={io} />
-          <ChevronButton chevron={card.chevron} urn={card.urn} io={io} />
-          <PillButton pill={card.pills.down} urn={card.urn} io={io} />
-        </span>
+      {gestures}
+    </div>
+  )
+}
+
+/** Column context above each hop: which side, which hop, how many. */
+function BandNode({ data }: NodeProps<Node<BandNodeData>>) {
+  const { band } = data
+  if (band.side === 'none') {
+    return (
+      <div className="pointer-events-none flex h-full w-full items-end pb-1 text-[10.5px] italic leading-snug text-ink-muted/60">
+        {band.title}
       </div>
+    )
+  }
+  return (
+    <div className="pointer-events-none flex h-full w-full items-baseline justify-start gap-1.5 whitespace-nowrap pb-1">
+      <span
+        className="self-center text-[11px]"
+        style={{ color: band.side === 'up' ? UPSTREAM_TINT : DOWNSTREAM_TINT }}
+        aria-hidden
+      >
+        {band.side === 'up' ? '↙' : '↗'}
+      </span>
+      <span className="text-[9.5px] font-bold uppercase tracking-[0.12em] text-ink-muted/70">{band.title}</span>
+      {band.counts ? <span className="text-[9px] tabular-nums text-ink-muted/50">{band.counts}</span> : null}
     </div>
   )
 }
 
 function FrameNode({ data }: NodeProps<Node<FrameNodeData>>) {
-  const { frame, io } = data
+  const { frame, entityType, io } = data
+  const { color } = useEntityVisual(entityType || 'entity')
   const paged = frame.pageCount > 1
   return (
-    <div className="h-full w-full rounded-xl border border-dashed border-black/20 dark:border-white/20 bg-black/[0.02] dark:bg-white/[0.03]">
+    <div
+      className="h-full w-full rounded-xl border-2 border-dashed bg-black/[0.02] dark:bg-white/[0.03]"
+      style={{ borderColor: `${color}55` }}
+    >
       {!frame.headerCardId ? (
-        <div className="flex items-center justify-between gap-1 px-2 pt-1.5 text-2xs text-ink-muted">
+        <div className="flex h-[34px] items-center gap-1.5 px-2.5">
+          <span
+            className="flex h-4 w-4 shrink-0 items-center justify-center rounded"
+            style={{ backgroundColor: `${color}1f`, color }}
+            aria-hidden
+          >
+            <DynamicIcon name="Box" className="h-3 w-3" />
+          </span>
           <button
             type="button"
-            className="truncate font-medium text-ink-muted hover:text-accent-lineage hover:underline"
+            className="nodrag min-w-0 truncate text-[11.5px] font-semibold leading-tight text-ink hover:text-accent-lineage hover:underline"
             onClick={() => io.current.focus(frame.urn)}
             title={`Focus ${frame.label}`}
           >
             {frame.label}
           </button>
-          <span className="shrink-0">{frame.totalMembers}</span>
+          <span className="ml-auto shrink-0 text-[9.5px] text-ink-muted/70">
+            {frame.totalMembers} connected inside
+          </span>
         </div>
       ) : null}
       {paged ? (
@@ -295,19 +446,25 @@ function FrameNode({ data }: NodeProps<Node<FrameNodeData>>) {
 // ── Edge renderer ──────────────────────────────────────────────────────
 
 function LensEdgeComponent(props: EdgeProps<Edge<LensEdgeData>>) {
-  const { id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, markerEnd } = props
+  const { id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, markerEnd, style } = props
   const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
   if (!data) return <BaseEdge id={id} path={path} markerEnd={markerEnd} />
   const showChip = data.bundledCount > 1 || data.drillable
+  // The wire stays quiet: the relationship name appears on hover
+  // (emphasized), while the ×N drill affordance is always present.
+  const showLabel = data.emphasized
+  if (!showChip && !showLabel) return <BaseEdge id={id} path={path} markerEnd={markerEnd} style={style} />
   return (
     <>
-      <BaseEdge id={id} path={path} markerEnd={markerEnd} style={{ stroke: 'var(--lens-edge, #94a3b8)', strokeWidth: 1.25 }} />
+      <BaseEdge id={id} path={path} markerEnd={markerEnd} style={style} />
       <EdgeLabelRenderer>
         <div
           className="pointer-events-auto absolute flex items-center gap-1 rounded bg-canvas-elevated/90 px-1 py-0.5 text-2xs text-ink-muted shadow-sm"
           style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
         >
-          <span title={data.also.length > 0 ? `Also: ${data.also.join(', ')}` : undefined}>{data.label}</span>
+          {showLabel ? (
+            <span title={data.also.length > 0 ? `Also: ${data.also.join(', ')}` : undefined}>{data.label}</span>
+          ) : null}
           {showChip ? (
             data.drillState === 'loading' ? (
               <Loader2 size={10} className="animate-spin" aria-hidden />
@@ -316,12 +473,12 @@ function LensEdgeComponent(props: EdgeProps<Edge<LensEdgeData>>) {
                 type="button"
                 className="rounded-full border border-black/15 dark:border-white/15 px-1 hover:border-accent-lineage hover:text-accent-lineage"
                 onClick={() => data.io.current.drillRecord(data.recordId)}
-                title={`Rolled-up connection standing for ${data.bundledCount} underlying — show constituents`}
+                title={`${data.label} — rolled-up connection standing for ${data.bundledCount} underlying; click to show constituents`}
               >
                 ×{data.bundledCount}
               </button>
             ) : (
-              <span title={`${data.bundledCount} underlying connections`}>×{data.bundledCount}</span>
+              <span title={`${data.label} — ${data.bundledCount} underlying connections`}>×{data.bundledCount}</span>
             )
           ) : null}
         </div>
@@ -330,7 +487,7 @@ function LensEdgeComponent(props: EdgeProps<Edge<LensEdgeData>>) {
   )
 }
 
-const nodeTypes = { lensCard: CardNode, lensFrame: FrameNode }
+const nodeTypes = { lensCard: CardNode, lensFrame: FrameNode, lensBand: BandNode }
 const edgeTypes = { lensEdge: LensEdgeComponent }
 
 // ── Banners ────────────────────────────────────────────────────────────
@@ -450,14 +607,117 @@ function DetailStrip({ urn, session, onFocus, onRevealOnCanvas, onOpenDetails, o
 
 // ── The view ───────────────────────────────────────────────────────────
 
-function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails }: LensGraphViewProps) {
+/** Bottom-right corner controls: camera, gesture guide, PNG export. */
+function CornerControls({ containerRef }: { containerRef: React.RefObject<HTMLDivElement | null> }) {
   const rf = useReactFlow()
+  const [guideOpen, setGuideOpen] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const exportPng = useCallback(async () => {
+    const el = containerRef.current?.querySelector<HTMLElement>('.react-flow')
+    if (!el || exporting) return
+    setExporting(true)
+    try {
+      // Rasterizer loaded lazily — a PNG button must not weigh on the
+      // lens's open path.
+      const { toPng } = await import('html-to-image')
+      const url = await toPng(el, { pixelRatio: 2 })
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'lineage-lens.png'
+      a.click()
+    } catch {
+      // Export is a convenience; failing quietly beats breaking the lens.
+    } finally {
+      setExporting(false)
+    }
+  }, [containerRef, exporting])
+  return (
+    <div className="pointer-events-auto absolute bottom-2 right-2 z-10 flex items-center gap-1">
+      {guideOpen ? (
+        <div className="mr-1 w-64 rounded-lg border border-black/10 dark:border-white/10 bg-canvas-elevated/95 p-2 text-2xs text-ink-muted shadow-md">
+          <div className="mb-1 font-semibold text-ink">Reading the graph</div>
+          <ul className="space-y-1">
+            <li><strong className="text-ink">⊕</strong> — fetch that entity's next hop of lineage (per direction; numbers are measured, never guessed).</li>
+            <li><strong className="text-ink">›</strong> — open what's inside it, as deep as the estate goes.</li>
+            <li><strong className="text-ink">×N</strong> on a wire — a rolled-up connection; click to see its constituents.</li>
+            <li><strong className="text-ink">Click</strong> inspects · <strong className="text-ink">double-click</strong> re-centers (Back/Forward retrace).</li>
+            <li>Dashed wires are rollups; frames group entities inside their parent.</li>
+          </ul>
+        </div>
+      ) : null}
+      <div className="flex items-center overflow-hidden rounded-full border border-black/10 dark:border-white/10 bg-canvas-elevated/95 shadow-sm">
+        <button
+          type="button"
+          className="p-1.5 text-ink-muted hover:text-ink"
+          onClick={() => void rf.zoomOut({ duration: 150 })}
+          title="Zoom out"
+          aria-label="Zoom out"
+        >
+          −
+        </button>
+        <button
+          type="button"
+          className="p-1.5 text-ink-muted hover:text-ink"
+          onClick={() => void rf.fitView({ padding: 0.15, duration: 200, maxZoom: 1.5 })}
+          title="Fit the whole picture"
+          aria-label="Fit view"
+        >
+          ▣
+        </button>
+        <button
+          type="button"
+          className="p-1.5 text-ink-muted hover:text-ink"
+          onClick={() => void rf.zoomIn({ duration: 150 })}
+          title="Zoom in"
+          aria-label="Zoom in"
+        >
+          +
+        </button>
+      </div>
+      <button
+        type="button"
+        className={`rounded-full border border-black/10 dark:border-white/10 bg-canvas-elevated/95 p-1.5 shadow-sm hover:text-ink ${guideOpen ? 'text-ink' : 'text-ink-muted'}`}
+        onClick={() => setGuideOpen(o => !o)}
+        title="How to read this graph"
+        aria-label="Gesture guide"
+      >
+        <HelpCircle size={13} />
+      </button>
+      <button
+        type="button"
+        className="rounded-full border border-black/10 dark:border-white/10 bg-canvas-elevated/95 p-1.5 text-ink-muted shadow-sm hover:text-ink disabled:opacity-40"
+        onClick={() => void exportPng()}
+        disabled={exporting}
+        title="Download the graph as a PNG"
+        aria-label="Export as image"
+      >
+        {exporting ? <Loader2 size={13} className="animate-spin" /> : <ImageDown size={13} />}
+      </button>
+    </div>
+  )
+}
+
+function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails }: LensGraphViewProps) {
+  // The camera drives the LIVE instance from useReactFlow(); onInit is
+  // only the readiness signal. Two dead ends documented so they are
+  // never retried: an instance CAPTURED in onInit can be a zombie bound
+  // to a torn-down internal store (StrictMode re-mount) — its fitView
+  // mutates a dead store and the screen never moves; and
+  // useNodesInitialized never flips for this flow, so gating on it
+  // leaves every camera path dead and React Flow's own initial fit —
+  // taken while only the focal was mounted — as the viewport's final
+  // state.
+  const rfLive = useReactFlow()
+  const [flowReady, setFlowReady] = useState(false)
+  const rf: ReactFlowInstance | null = flowReady ? rfLive : null
+  const containerRef = useRef<HTMLDivElement | null>(null)
   const reducedMotion = usePreferencesStore(s => s.reducedMotion)
   const hierarchyMap = useViewEntityTypeHierarchyMap()
   const relationshipTypes = useViewRelationshipTypes()
   const [pages, setPages] = useState<ReadonlyMap<string, number>>(new Map())
   const [collapsedChildren, setCollapsedChildren] = useState<ReadonlySet<string>>(new Set())
   const [selectedUrn, setSelectedUrn] = useState<string | null>(null)
+  const [hoveredUrn, setHoveredUrn] = useState<string | null>(null)
 
   const edgeLabelFor = useCallback(
     (norm: string): string => {
@@ -493,6 +753,7 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
     select: () => {},
     focus: () => {},
     framePage: () => {},
+    hover: () => {},
   })
   useEffect(() => {
     ioRef.current = {
@@ -538,17 +799,99 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
           return next
         })
       },
+      hover: setHoveredUrn,
     }
-  })
+  }, [session, onFocus])
+
+  // Hover adjacency: the hovered card, its edge partners and the focal
+  // stay bright; everything else dims. Card ids ↔ urns are 1:1.
+  const hoverContext = useMemo(() => {
+    if (!hoveredUrn) return null
+    const hoveredCardId = lensCardId(hoveredUrn)
+    const bright = new Set<string>([hoveredCardId, lensCardId(session.state.focal)])
+    const incident = new Set<string>()
+    for (const e of layout.edges) {
+      if (e.sourceCardId === hoveredCardId || e.targetCardId === hoveredCardId) {
+        incident.add(e.id)
+        bright.add(e.sourceCardId)
+        bright.add(e.targetCardId)
+      }
+    }
+    return { bright, incident }
+  }, [hoveredUrn, layout, session.state.focal])
 
   const nodes: Node[] = useMemo(() => {
+    // The builder emits ABSOLUTE geometry, so every node is flat — no
+    // React Flow subflow parenting (dragging is off, so parenting would
+    // buy nothing and costs positioning quirks). Explicit width/height
+    // on the node itself means fitView has real dimensions immediately,
+    // before any DOM measurement.
+    const bandNodes: Node[] = layout.columns
+      .filter(col => col.hop !== 0)
+      .map(col => {
+        const side: 'up' | 'down' = col.hop < 0 ? 'up' : 'down'
+        const title =
+          col.hop === -1 ? 'Data sources' : col.hop === 1 ? 'Data consumers' : `${side === 'up' ? 'Upstream' : 'Downstream'} · hop ${Math.abs(col.hop)}`
+        const cards = col.shownRoots < col.totalRoots ? `${col.shownRoots} of ${col.totalRoots}` : `${col.totalRoots}`
+        const counts = `${cards} · ${col.connections} connection${col.connections === 1 ? '' : 's'}`
+        return {
+          id: `band:${col.hop}`,
+          type: 'lensBand',
+          position: { x: col.x, y: -44 },
+          width: LENS_COLUMN_W,
+          height: 36,
+          data: { band: { title, counts, side } } satisfies BandNodeData,
+          draggable: false,
+          selectable: false,
+          zIndex: 0,
+        }
+      })
+    // Honest empty-direction whispers live IN board space, where the
+    // column would be — they can never overlap real content.
+    const focalHop = 0
+    const emptySides: Node[] = []
+    const upDone = session.state.expansions.get(expansionKeyOf('up', session.state.focal))?.state === 'done'
+    const downDone = session.state.expansions.get(expansionKeyOf('down', session.state.focal))?.state === 'done'
+    const hasUpCol = layout.columns.some(c => c.hop < 0)
+    const hasDownCol = layout.columns.some(c => c.hop > 0)
+    if (upDone && !hasUpCol) {
+      emptySides.push({
+        id: 'band:empty-up',
+        type: 'lensBand',
+        position: { x: (focalHop - 1) * (LENS_COLUMN_W + LENS_COL_GAP), y: -44 },
+        width: LENS_COLUMN_W,
+        height: 36,
+        data: { band: { title: 'No upstream lineage in the data source', side: 'none' } } satisfies BandNodeData,
+        draggable: false,
+        selectable: false,
+        zIndex: 0,
+      })
+    }
+    if (downDone && !hasDownCol) {
+      emptySides.push({
+        id: 'band:empty-down',
+        type: 'lensBand',
+        position: { x: (focalHop + 1) * (LENS_COLUMN_W + LENS_COL_GAP), y: -44 },
+        width: LENS_COLUMN_W,
+        height: 36,
+        data: { band: { title: 'No downstream lineage in the data source', side: 'none' } } satisfies BandNodeData,
+        draggable: false,
+        selectable: false,
+        zIndex: 0,
+      })
+    }
+    bandNodes.push(...emptySides)
     const frameNodes: Node[] = layout.frames.map(frame => ({
       id: frame.id,
       type: 'lensFrame',
       position: { x: frame.x, y: frame.y },
-      ...(frame.parentFrameId ? { parentId: frame.parentFrameId } : {}),
-      data: { frame, io: ioRef } satisfies FrameNodeData,
-      style: { width: frame.w, height: frame.h },
+      width: frame.w,
+      height: frame.h,
+      data: {
+        frame,
+        entityType: session.state.nodes.get(frame.urn)?.entityType ?? '',
+        io: ioRef,
+      } satisfies FrameNodeData,
       draggable: false,
       selectable: false,
       zIndex: 0,
@@ -557,26 +900,46 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
       id: card.id,
       type: 'lensCard',
       position: { x: card.x, y: card.y },
-      ...(card.parentFrameId ? { parentId: card.parentFrameId } : {}),
-      data: { card, selected: selectedUrn === card.urn, io: ioRef } satisfies CardNodeData,
-      style: { width: card.w, height: card.h },
+      width: card.w,
+      height: card.h,
+      data: {
+        card,
+        selected: selectedUrn === card.urn,
+        dimmed: Boolean(hoverContext && !hoverContext.bright.has(card.id)),
+        io: ioRef,
+      } satisfies CardNodeData,
       draggable: false,
       zIndex: 1,
     }))
-    // Parents must precede children in React Flow's node array; frames
-    // are emitted in placement order (outer before inner) and cards
-    // never parent anything.
-    return [...frameNodes, ...cardNodes]
-  }, [layout, selectedUrn])
+    // Frames render before cards so cards paint above their frame.
+    return [...bandNodes, ...frameNodes, ...cardNodes]
+  }, [layout, selectedUrn, hoverContext, session])
 
-  const edges: Edge[] = useMemo(
-    () =>
-      layout.edges.map(e => ({
+  const edges: Edge[] = useMemo(() => {
+    // Direction tint: everything on the feeding side of the focal is
+    // cool, everything on the consuming side is warm — the reading the
+    // whole room shares. A cross-side wire (cycle) stays neutral.
+    const hopByCardId = new Map<string, number>()
+    for (const c of layout.cards) hopByCardId.set(c.id, c.hop)
+    return layout.edges.map(e => {
+      const emphasized = hoverContext?.incident.has(e.id) ?? false
+      const muted = Boolean(hoverContext) && !emphasized
+      const hs = hopByCardId.get(e.sourceCardId) ?? 0
+      const ht = hopByCardId.get(e.targetCardId) ?? 0
+      const stroke =
+        hs <= 0 && ht <= 0 ? UPSTREAM_TINT : hs >= 0 && ht >= 0 ? DOWNSTREAM_TINT : NEUTRAL_TINT
+      return {
         id: e.id,
         source: e.sourceCardId,
         target: e.targetCardId,
         type: 'lensEdge',
-        markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
+        markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: stroke },
+        style: {
+          stroke,
+          strokeWidth: emphasized ? 2.5 : 1.5,
+          opacity: muted ? 0.2 : 0.85,
+          ...(e.edgeTypeNorm === 'AGGREGATED' ? { strokeDasharray: '6 3' } : {}),
+        },
         data: {
           label: edgeLabelFor(e.edgeTypeNorm),
           also: e.alsoTypes.map(edgeLabelFor),
@@ -584,17 +947,21 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
           drillable: e.drillable,
           ...(e.drillState ? { drillState: e.drillState } : {}),
           recordId: e.recordId,
+          emphasized,
           io: ioRef,
         } satisfies LensEdgeData,
-      })),
-    [layout, edgeLabelFor],
-  )
+      }
+    })
+  }, [layout, edgeLabelFor, hoverContext])
 
   useFrameCamera(
     rf,
     lensCardId(session.state.focal),
     useMemo(
       () => [
+        // Band headers are part of the picture the camera frames — a fit
+        // that crops the column titles reads as a bug.
+        ...layout.columns.filter(c => c.hop !== 0).map(c => ({ id: `band:${c.hop}` })),
         ...layout.frames.map(f => ({ id: f.id, ...(f.parentFrameId ? { parentFrameId: f.parentFrameId } : {}) })),
         ...layout.cards.map(c => ({ id: c.id, ...(c.parentFrameId ? { parentFrameId: c.parentFrameId } : {}) })),
       ],
@@ -622,34 +989,36 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
   // Column-page controls for crowded hops ("+N more" as pages).
   const pagedColumns = layout.columns.filter(c => c.pageCount > 1)
 
-  // Honest empty-direction whispers, only once both sides are known.
+  // Empty-direction whispers render as board-space band nodes (above);
+  // the overlay only reports the initial load.
   const upState = session.state.expansions.get(expansionKeyOf('up', session.state.focal))
   const downState = session.state.expansions.get(expansionKeyOf('down', session.state.focal))
-  const hasUp = layout.columns.some(c => c.hop < 0)
-  const hasDown = layout.columns.some(c => c.hop > 0)
   const loading = upState?.state === 'loading' || downState?.state === 'loading'
 
+  // One guaranteed full fit once the first paint has actually landed.
+  // The incremental eases fire while the modal and fonts are still
+  // settling, so their arithmetic can bake in a half-laid-out pane;
+  // this final pass runs against the settled geometry exactly once.
+  const settledRef = useRef(false)
+  useEffect(() => {
+    if (!rf || loading || settledRef.current) return
+    const t = window.setTimeout(() => {
+      // Stamped only once the move actually happens — stamping when it
+      // is merely SCHEDULED means a cancelled run (StrictMode double-
+      // invocation, any rapid re-render) marks the picture settled while
+      // its timer was cleared, and the fit never fires.
+      settledRef.current = true
+      void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: 1.5 })
+    }, 120)
+    return () => window.clearTimeout(t)
+  }, [rf, loading, reducedMotion])
+
   return (
-    <div className="relative h-full w-full" data-lens-graph>
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={nodeTypes}
-        edgeTypes={edgeTypes}
-        nodesConnectable={false}
-        nodesDraggable={false}
-        zoomOnDoubleClick={false}
-        panOnScroll
-        minZoom={0.05}
-        maxZoom={2}
-        proOptions={{ hideAttribution: true }}
-        onPaneClick={() => setSelectedUrn(null)}
-      >
-        <Background variant={BackgroundVariant.Dots} gap={22} size={1} className="opacity-40" />
-      </ReactFlow>
-
-      <Banners banners={layout.banners} labelFor={labelFor} onFocus={onFocus} onRetry={retryFromBanner} />
-
+    <div ref={containerRef} className="relative h-full w-full" data-lens-graph>
+      {/* The flow mounts only once the first paint has landed, so React
+          Flow's own initial fitView — the one camera move that is
+          reliable in every environment, headless included — frames the
+          COMPLETE first picture, never a half-loaded board. */}
       {loading ? (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
           <span className="flex items-center gap-2 rounded-full bg-canvas-elevated/90 px-3 py-1.5 text-xs text-ink-muted shadow">
@@ -657,19 +1026,29 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
           </span>
         </div>
       ) : (
-        <>
-          {!hasUp && upState?.state === 'done' ? (
-            <div className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-2xs text-ink-muted/70">
-              No upstream lineage in the data source
-            </div>
-          ) : null}
-          {!hasDown && downState?.state === 'done' ? (
-            <div className="pointer-events-none absolute right-3 top-1/2 z-10 -translate-y-1/2 text-2xs text-ink-muted/70">
-              No downstream lineage in the data source
-            </div>
-          ) : null}
-        </>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          onInit={() => setFlowReady(true)}
+          fitView
+          fitViewOptions={{ padding: 0.15, maxZoom: 1.5 }}
+          nodesConnectable={false}
+          nodesDraggable={false}
+          zoomOnDoubleClick={false}
+          panOnScroll
+          minZoom={0.05}
+          maxZoom={2}
+          proOptions={{ hideAttribution: true }}
+          onPaneClick={() => setSelectedUrn(null)}
+        >
+          <Background variant={BackgroundVariant.Dots} gap={22} size={1} className="opacity-40" />
+        </ReactFlow>
       )}
+
+      <Banners banners={layout.banners} labelFor={labelFor} onFocus={onFocus} onRetry={retryFromBanner} />
+      {!selectedUrn && !loading ? <CornerControls containerRef={containerRef} /> : null}
 
       {pagedColumns.length > 0 ? (
         <div className="pointer-events-auto absolute bottom-2 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3 rounded-full border border-black/10 dark:border-white/10 bg-canvas-elevated/95 px-3 py-1 text-2xs text-ink-muted shadow-sm">
