@@ -14,6 +14,7 @@
  */
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
+import { formatUrnLabel } from '@/lib/urnLabels'
 import type { Predicate } from '@/types/search'
 
 
@@ -152,7 +153,9 @@ function describePredicate(p: Predicate): Chip {
         case 'descendantOf':
             return {
                 icon: 'FolderTree',
-                label: `inside ${p.urns.length === 1 ? truncateUrn(p.urns[0]) : `${p.urns.length} subtrees`}`,
+                label: `inside ${p.urns.length === 1
+                    ? formatUrnLabel(p.urns[0])
+                    : `${p.urns.length} subtrees`}`,
                 title: p.urns.join('\n'),
             }
 

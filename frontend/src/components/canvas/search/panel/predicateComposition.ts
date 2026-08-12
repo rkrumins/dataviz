@@ -261,6 +261,82 @@ export function duplicateConditionAt(
 }
 
 
+// ---------------------------------------------------------------------------
+// Search scope ("inside these containers")
+// ---------------------------------------------------------------------------
+
+/**
+ * A DescendantOf row plus the FE-only ``uiScope`` hint that picks its
+ * editor in ConditionRow ('roots' → view roots picker, 'any' → any
+ * canvas node). The hint never reaches the wire.
+ */
+export type ScopeCondition = Predicate & {
+    kind: 'descendantOf'
+    urns: string[]
+    uiScope?: 'roots' | 'any'
+}
+
+
+/** The draft's top-level scope row, or null when it isn't scoped. */
+export function findScopeCondition(draft: Predicate | null): ScopeCondition | null {
+    const found = topLevelConditions(draft).find((c) => c.kind === 'descendantOf')
+    return (found as ScopeCondition | undefined) ?? null
+}
+
+
+/**
+ * Set (or with ``null``, clear) the "search inside these containers"
+ * scope on a draft.
+ *
+ * Two rules, both dictated by the Cypher compiler rather than by taste
+ * (``backend/app/providers/falkordb_deep_search.py``):
+ *
+ *   1. **Top-level AND only.** A DescendantOf inside an OR or a NOT is
+ *      a hard CompileError (`_visit_predicate`, "DescendantOf is only
+ *      allowed in the top-level AND group"), so an OR-rooted draft
+ *      can't take the row as a sibling — the whole disjunction gets
+ *      nested under a new AND root instead.
+ *   2. **Replace, never accumulate.** Each URN set becomes its own
+ *      `MATCH (root)-[:CONTAINS*0..D]->(n)` continuation and Cypher
+ *      ANDs them, so a second row means "inside A *and* inside B" —
+ *      empty for any two siblings. Scoping somewhere new replaces the
+ *      previous scope rather than adding to it.
+ *
+ * Everything else keeps its order, so the user's existing rows don't
+ * jump around when they scope. Returns a new tree; never mutates.
+ *
+ * Note this row is strictly more capable than the `scope.rootUrns`
+ * clamp it replaces: hoisted sets chain in every scope mode, whereas
+ * `scope.rootUrns` is only honoured in 'view' mode, and they never go
+ * through `ViewScopeResolver._intersect_root_urns` — whose prefix
+ * heuristic can't recognise this codebase's flat URNs and so dropped
+ * any anchor below a view root, tripping the "all client URNs dropped"
+ * guard and returning a hard empty page.
+ */
+export function setScopeCondition(
+    draft: Predicate | null,
+    scope: ScopeCondition | null,
+): Predicate | null {
+    const root = ensureRootGroup(draft)
+    const rest = root.children.filter((c) => c.kind !== 'descendantOf')
+
+    if (!scope) {
+        return collapseRoot({ kind: 'group', op: root.op, children: rest })
+    }
+    if (root.op === 'or' && rest.length > 1) {
+        // Rule 1: the disjunction has to move down a level so the scope
+        // row can sit directly under a top-level AND.
+        return {
+            kind: 'group', op: 'and',
+            children: [{ kind: 'group', op: 'or', children: rest }, scope],
+        }
+    }
+    return collapseRoot({
+        kind: 'group', op: 'and', children: [...rest, scope],
+    })
+}
+
+
 /**
  * Path navigation for multi-select row grouping. A path is a
  * dot-separated string of child indices like ``""`` (root group),

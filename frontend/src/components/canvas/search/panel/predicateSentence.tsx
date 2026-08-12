@@ -24,6 +24,7 @@
 import { type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
+import { formatUrnLabel } from '@/lib/urnLabels'
 import type { GroupPredicate, Predicate } from '@/types/search'
 
 
@@ -303,7 +304,7 @@ function leafSentence(p: Predicate): ReactNode {
         case 'hasOutgoing':  return <>has outgoing lineage edges</>
         case 'descendantOf':
             return <>is inside {p.urns.length === 1
-                ? <Value>{p.urns[0]}</Value>
+                ? <Value>{formatUrnLabel(p.urns[0])}</Value>
                 : <><Value>{p.urns.length}</Value> subtrees</>}</>
         case 'withinHops': {
             const dirText =

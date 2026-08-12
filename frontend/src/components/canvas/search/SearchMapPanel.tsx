@@ -39,6 +39,7 @@ import {
 } from 'react'
 
 import { cn } from '@/lib/utils'
+import { rememberUrnLabels } from '@/lib/urnLabels'
 import { useAdvancedSearch } from '@/hooks/useAdvancedSearch'
 import {
     DEFAULT_DRAFT_OPTIONS,
@@ -62,7 +63,7 @@ import { ResultsPane } from './panel/ResultsPane'
 import { SaveQueryDialog } from './panel/SaveQueryDialog'
 import { BulkGroupActionBar } from './panel/builder-atoms/BulkGroupActionBar'
 import { ScopeModePicker } from './panel/ScopeModePicker'
-import { ScopeStrip } from './panel/ScopeStrip'
+import { setScopeCondition } from './panel/predicateComposition'
 import { usePendingSearchRun } from './usePendingSearchRun'
 import {
     defaultInputs,
@@ -146,7 +147,7 @@ function PanelInner({
     onClose, viewId, onRevealNode, onOpenNode, onFrameMatches,
 }: PanelInnerProps) {
     const {
-        view, scope, runPredicate, drillInto, popScope, cancel,
+        view, runState, runPredicate, cancel,
         resetTemplate, loadMore, isLoadingMore,
     } = useAdvancedSearch(viewId)
 
@@ -176,6 +177,16 @@ function PanelInner({
         setAdvancedTab(tab)
         setAdvancedOpen(true)
     }, [])
+
+    // Referentially stable — QueryCard's auto-run debounce keys its
+    // timer on this callback, so an inline arrow here would tear the
+    // 250ms timer down and rebuild it on every panel re-render.
+    const handleRun = useCallback((
+        p: Parameters<typeof runPredicate>[0],
+        options?: Parameters<typeof runPredicate>[1],
+    ) => {
+        void runPredicate(p, options)
+    }, [runPredicate])
 
     // Hydrate per-view canvas-filter-mode preference on mount /
     // viewId change. The store keeps a single ``canvasFilterMode``
@@ -250,6 +261,41 @@ function PanelInner({
     const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
         commitDraft(entry.predicate)
         setLibraryOpen(false)
+    }, [commitDraft])
+
+    /**
+     * "Search inside this group" — the result-pane action that used to
+     * be a hidden drill frame.
+     *
+     * It now writes an ordinary ``descendantOf`` row into the user's
+     * draft, so the scope is visible in the Query card, removable, and
+     * undoable (``commitDraft`` pushes onto the undo stack, which makes
+     * Ctrl+Z the "back out one level" gesture the old breadcrumb was).
+     * The debounced auto-run picks it up like any other edit.
+     */
+    const handleScopeToGroup = useCallback((bucket: {
+        ancestorUrn: string
+        ancestorDisplayName: string
+        ancestorEntityType: string
+    }) => {
+        // Non-parent aggregations (by entityType / property / layer)
+        // return an empty ancestor URN — there's no container to scope
+        // to, and an empty ``urns`` array is a 422.
+        if (!bucket.ancestorUrn) return
+        rememberUrnLabels([{
+            urn: bucket.ancestorUrn,
+            displayName: bucket.ancestorDisplayName,
+        }])
+        const draft = useSearchStore.getState().draftPredicate
+        commitDraft(setScopeCondition(draft, {
+            kind: 'descendantOf',
+            urns: [bucket.ancestorUrn],
+            // 'any' routes ConditionRow to InsideSubtreeEditor, whose
+            // picker covers every canvas node. The default 'roots'
+            // editor only lists top-level containers, and a result
+            // group is usually deeper than that.
+            uiScope: 'any',
+        }))
     }, [commitDraft])
 
     const frameTargetUrns = useMemo<string[]>(() => {
@@ -380,8 +426,6 @@ function PanelInner({
                 />
             ) : (
                 <>
-                    <ScopeStrip scope={scope} onPop={popScope} />
-
                     <div className={cn(
                         'flex-1 min-h-0 overflow-y-auto custom-scrollbar',
                         'px-3 py-3 flex flex-col gap-3',
@@ -389,7 +433,8 @@ function PanelInner({
                         <QueryCard
                             viewId={viewId}
                             isRunning={view.kind === 'running'}
-                            onRun={(p, options) => void runPredicate(p, options)}
+                            runState={runState}
+                            onRun={handleRun}
                             onOpenAdvanced={() => openAdvanced('options')}
                         />
 
@@ -416,7 +461,7 @@ function PanelInner({
                                 />
                                 <ResultsPane
                                     view={view}
-                                    onDrill={drillInto}
+                                    onScopeToGroup={handleScopeToGroup}
                                     onReveal={onRevealNode}
                                     onOpen={onOpenNode}
                                     onLoadMore={loadMore}

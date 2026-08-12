@@ -23,8 +23,9 @@
  * values) is invoked with ``portal={true}`` for the same reason.
  */
 import { ExternalLink, X } from 'lucide-react'
-import { type FC, type ReactNode, memo, useEffect, useState } from 'react'
+import { type FC, type ReactNode, memo, useEffect, useMemo, useState } from 'react'
 
+import { formatUrnLabel } from '@/lib/urnLabels'
 import { cn } from '@/lib/utils'
 import type {
     DescendantOfPredicate,
@@ -57,8 +58,12 @@ import { useCanvasAnchorOptions, useTopLevelCanvasContainers } from './useCanvas
 /** FE-only augmentation on DescendantOfPredicate so we can route to
  *  the two pickers without altering the wire format. ``'roots'`` (the
  *  default) shows only top-level view roots; ``'any'`` shows every
- *  canvas-loaded node. ``buildRunnablePredicate`` strips this hint
- *  before the predicate goes over the wire. */
+ *  canvas-loaded node — the shape the results pane writes when you
+ *  search inside a group.
+ *
+ *  The hint DOES travel with the predicate (the backend ignores unknown
+ *  fields), and deliberately so: it's what lets a saved or recent query
+ *  reopen in the editor the user built it in. */
 export type DescendantOfPredicateWithScope = DescendantOfPredicate & {
     uiScope?: 'roots' | 'any'
 }
@@ -103,7 +108,7 @@ const ConditionRowImpl: FC<ConditionRowProps> = ({
     isRunning, autoFocus, onChange, onRemove, onOpenAdvanced, onSubmit,
     onWrap, onDuplicate, parentPath, index,
 }) => {
-    const meta = getKindMeta(value.kind)
+    const meta = getKindMeta(value)
     const incomplete = isIncomplete(value)
     const editor = renderEditor({
         value, onChange, discovery, knownEntityTypes,
@@ -572,17 +577,35 @@ function InsideSubtreeEditor({
     value, onChange, autoFocus,
 }: Omit<EditorCtx, 'value'> & { value: DescendantOfPredicateWithScope }) {
     const anchors = useCanvasAnchorOptions()
+    // The canvas only knows about nodes it has loaded, and an anchor
+    // picked out of search results usually isn't one of them — that's
+    // often the point of scoping to it. Fold any such URN in as its own
+    // option so the picker shows "GOLD", not a bare URN or a blank.
+    const options = useMemo(() => {
+        const known = new Set(anchors.map((r) => r.urn))
+        const extra = value.urns
+            .filter((urn) => urn && !known.has(urn))
+            .map((urn) => ({
+                value: urn,
+                label: formatUrnLabel(urn),
+                description: 'not loaded on this canvas',
+            }))
+        return [
+            ...anchors.map((r) => ({
+                value: r.urn,
+                label: r.displayName,
+                description: r.entityType,
+            })),
+            ...extra,
+        ]
+    }, [anchors, value.urns])
     return (
         <Field label="Anchor nodes">
             <UnifiedPicker
                 multiple
                 value={value.urns}
                 onChange={(next) => onChange({ ...value, urns: next })}
-                options={anchors.map((r) => ({
-                    value: r.urn,
-                    label: r.displayName,
-                    description: r.entityType,
-                }))}
+                options={options}
                 placeholder="pick one or more anchors from this canvas…"
                 emptyHint={
                     'No nodes loaded on the canvas yet. Open the view '
@@ -870,8 +893,8 @@ interface KindMeta {
 }
 
 
-function getKindMeta(kind: Predicate['kind']): KindMeta {
-    switch (kind) {
+function getKindMeta(p: Predicate): KindMeta {
+    switch (p.kind) {
         case 'text': return {
             icon: '⌕', label: 'Text in name or description',
             description: 'Substring or pattern match against name, qualified name, description, or tags.',
@@ -918,12 +941,26 @@ function getKindMeta(kind: Predicate['kind']): KindMeta {
             icon: '⇡', label: 'Has downstream lineage',
             description: 'At least one outgoing lineage edge.',
         }
-        case 'descendantOf': return {
-            icon: '⌂', label: 'Root in view is…',
-            description:
-                'Restrict to entities under one of the view\'s top-level '
-                + 'containers (the same roots you see at the top of the '
-                + 'canvas tree).',
+        case 'descendantOf': {
+            // Two entry points, two vocabularies. 'any' is the row the
+            // results pane writes when you search inside a group, and
+            // its anchor is usually a mid-tree container — calling that
+            // "Root in view" would be wrong.
+            if ((p as DescendantOfPredicateWithScope).uiScope === 'any') {
+                return {
+                    icon: '⌂', label: 'Inside…',
+                    description:
+                        'Restrict to entities contained by a specific node '
+                        + 'anywhere in the graph, at any depth beneath it.',
+                }
+            }
+            return {
+                icon: '⌂', label: 'Root in view is…',
+                description:
+                    'Restrict to entities under one of the view\'s top-level '
+                    + 'containers (the same roots you see at the top of the '
+                    + 'canvas tree).',
+            }
         }
         case 'withinHops': return {
             icon: '⇿', label: 'Within N hops',
@@ -937,7 +974,7 @@ function getKindMeta(kind: Predicate['kind']): KindMeta {
             icon: '⊕', label: 'Composite group',
             description: 'OR / NOT composition — edit in Advanced builder.',
         }
-        default: return { icon: '·', label: String(kind) }
+        default: return { icon: '·', label: String(p.kind) }
     }
 }
 

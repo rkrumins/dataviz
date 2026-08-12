@@ -68,6 +68,7 @@ import {
     type RecentQueryEntry,
 } from '@/store/searchStore'
 import type { Predicate, SearchQuery } from '@/types/search'
+import type { RunState } from '@/hooks/useAdvancedSearch'
 
 import { useDiscovery } from '../builder/useDiscovery'
 
@@ -84,7 +85,14 @@ import { VisualQueryBuilder } from './VisualQueryBuilder'
 export interface QueryCardProps {
     viewId: string
     isRunning: boolean
-    /** Run the current draft. Called debounced from row edits. */
+    /** Which draft the runner last dispatched, and how it went. Drives
+     *  the "unrun changes" state. Owned by ``useAdvancedSearch`` so it
+     *  survives this component unmounting (the Advanced drawer) and
+     *  reflects failures rather than intentions. */
+    runState: RunState | null
+    /** Run the current draft. Called debounced from row edits. MUST be
+     *  referentially stable — the auto-run debounce keys its timer on
+     *  it. */
     onRun: (predicate: Predicate, options?: SearchQuery['options']) => void
     /** Open Advanced drawer (for OR/NOT/path authoring). */
     onOpenAdvanced: () => void
@@ -136,7 +144,7 @@ type ViewMode = 'visual' | 'code'
 
 
 export const QueryCard: FC<QueryCardProps> = ({
-    viewId, isRunning, onRun, onOpenAdvanced,
+    viewId, isRunning, runState, onRun, onOpenAdvanced,
 }) => {
     const draftPredicate = useDraftPredicate()
     const seedDraftPredicate = useSearchStore((s) => s.seedDraftPredicate)
@@ -218,16 +226,18 @@ export const QueryCard: FC<QueryCardProps> = ({
     //       hit of round-tripping the backend on every chip add /
     //       row edit while composing a multi-tier filter.
     const [runMode, setRunMode] = useRunMode()
-    // Tracked as state (not a ref) so the dirty/pulse calculation
-    // re-renders correctly after a dispatch.
-    const [lastRunHash, setLastRunHash] = useState<string | null>(null)
 
     const runnable = useMemo(() => buildRunnablePredicate(draftPredicate), [draftPredicate])
-    const hasPendingChanges = runnable !== null && runnable.hash !== lastRunHash
+    // "Has the current draft been dispatched?" — answered by the RUNNER
+    // (useAdvancedSearch), not by this component. QueryCard used to own
+    // this as local state set optimistically at dispatch time, which
+    // broke two ways: a run that aborted or errored left the identical
+    // draft permanently un-rerunnable, and opening the Advanced drawer
+    // unmounts this component, silently resetting it.
+    const hasPendingChanges = runnable !== null && runnable.hash !== runState?.hash
 
     const dispatchRun = useCallback(() => {
         if (!runnable) return
-        setLastRunHash(runnable.hash)
         onRun(runnable.predicate, SEARCH_OPTIONS)
     }, [runnable, onRun])
 
@@ -238,19 +248,22 @@ export const QueryCard: FC<QueryCardProps> = ({
         // undo stack survives — they should be able to undo back to a
         // populated draft even after the canvas has gone dim.
         if (runnable === null) {
-            if (lastRunHash !== null) {
-                clearSearchResults()
-                setLastRunHash(null)
-            }
+            // ``queryHash`` is the "results are published" sentinel —
+            // only clear when there's actually something to drop.
+            if (useSearchStore.getState().queryHash !== null) clearSearchResults()
             return
         }
         // Manual mode: wait for the explicit Run click.
         if (runMode === 'manual') return
-        // Auto mode: debounce and dispatch when the hash actually changed.
+        // Auto mode: debounce and dispatch when the draft differs from
+        // whatever the runner last picked up. A draft that already
+        // failed keeps its hash in runState, so a broken query is
+        // dispatched once, not in a retry loop — the Run button stays
+        // available to force a retry.
         if (!hasPendingChanges) return
         const t = setTimeout(dispatchRun, 250)
         return () => clearTimeout(t)
-    }, [runnable, runMode, hasPendingChanges, lastRunHash, clearSearchResults, dispatchRun])
+    }, [runnable, runMode, hasPendingChanges, clearSearchResults, dispatchRun])
 
     // Top-level conditions drive the header summary + the empty-hero
     // gate. The row mutation handlers themselves now live inside
@@ -1726,15 +1739,19 @@ type RunMode = 'auto' | 'manual'
 
 function useRunMode(): [RunMode, (next: RunMode) => void] {
     const [mode, setMode] = useState<RunMode>(() => {
-        // Manual is the default for safety — users authoring a
-        // multi-tier filter shouldn't pay for a backend round-trip
-        // on every chip add. Auto is opt-in, persisted per browser
-        // for users who explicitly enable it.
+        // Auto is the default: a filter you edit should show you its
+        // results. Manual used to be the default "for safety", but a
+        // business user who tweaks a value and sees nothing happen
+        // concludes the panel is broken, not that they need to find a
+        // Run button — and the 250ms debounce already covers the
+        // round-trip cost that motivated it. Manual stays one click
+        // away for power users composing a multi-tier filter, and is
+        // persisted per browser.
         try {
-            return localStorage.getItem(RUN_MODE_KEY) === 'auto'
-                ? 'auto' : 'manual'
+            return localStorage.getItem(RUN_MODE_KEY) === 'manual'
+                ? 'manual' : 'auto'
         } catch {
-            return 'manual'
+            return 'auto'
         }
     })
     const update = useCallback((next: RunMode) => {
