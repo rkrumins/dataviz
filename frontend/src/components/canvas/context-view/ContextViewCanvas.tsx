@@ -95,7 +95,8 @@ import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom } from './fitZoom'
 import { LineageLens } from './LineageLens'
-import { useLensLineage } from '@/hooks/useLensLineage'
+import { EMPTY_LENS_HISTORY, lensFocalOf, type LensHistory } from './lens/lensHistory'
+import { decodeLensShare } from './lens/shareCodec'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -3069,27 +3070,49 @@ export function ContextViewCanvas({
     aggDetailStatus.truncatedIds.forEach(id => { void loadMoreAggregatedDetail(id) })
   }, [aggDetailStatus.truncatedIds, loadMoreAggregatedDetail])
 
-  // ── Lineage Lens — ego-graph overlay (focal stack; empty = closed) ────
-  const [lensStack, setLensStack] = useState<string[]>([])
-  const openLens = useCallback((nodeId: string) => setLensStack([nodeId]), [])
-  const lensRecenter = useCallback((nodeId: string) => setLensStack(prev => [...prev, nodeId]), [])
-  const lensBack = useCallback(() => setLensStack(prev => prev.slice(0, -1)), [])
-  // Walk-trail jump: truncate the walk back to hop i (spatial Back).
-  const lensJumpTo = useCallback((index: number) => setLensStack(prev => prev.slice(0, index + 1)), [])
-  // Miller-column branch: truncate to hop i, then step into nodeId.
-  const lensWalkTo = useCallback((index: number, nodeId: string) =>
-    setLensStack(prev => [...prev.slice(0, index + 1), nodeId]), [])
-  const lensClose = useCallback(() => setLensStack([]), [])
-  // On-demand lineage for every visited focal node — the lens tells the
-  // truth about the DATA SOURCE, not just what's hydrated on the canvas.
-  // Lens-local (never written to the canvas store), cached per session.
-  const lensLineage = useLensLineage(lensStack, provider, lineageEdgeTypes)
+  // ── Lineage Lens — focus room overlay (walk history; empty = closed).
+  // Browser-style back/forward: moving the cursor never drops entries;
+  // focusing a NEW node truncates the forward side first. All lens data
+  // flows through the lens's own session hook — nothing here fetches.
+  // Shared exploration links (?lens=…): decoded ONCE during the first
+  // render so the lens opens directly on the shared picture; the param
+  // strip happens in the mount effect below. Malformed tokens decode to
+  // null and the canvas opens normally.
+  // One state cell: the walk history plus the share-link gesture seed
+  // (replayed by the lens when the restored focal first renders; every
+  // fresh open clears it).
+  const [lens, setLens] = useState<{ history: LensHistory; seed: ReturnType<typeof decodeLensShare> }>(() => {
+    const raw = new URLSearchParams(window.location.search).get('lens')
+    const seed = raw ? decodeLensShare(raw) : null
+    return {
+      history: seed ? { entries: seed.entries, cursor: seed.cursor } : EMPTY_LENS_HISTORY,
+      seed,
+    }
+  })
+  const openLens = useCallback((nodeId: string) => {
+    setLens({ history: { entries: [nodeId], cursor: 0 }, seed: null })
+  }, [])
+  const lensClose = useCallback(() => {
+    setLens({ history: EMPTY_LENS_HISTORY, seed: null })
+  }, [])
+  const lensHistoryChange = useCallback((next: LensHistory) => {
+    setLens(prev => ({ ...prev, history: next }))
+  }, [])
   useEffect(() => {
     focusLensRef.current = () => {
       const target = selectedNodeId ?? drawerNodeId
-      if (target) setLensStack([target])
+      if (target) setLens({ history: { entries: [target], cursor: 0 }, seed: null })
     }
   }, [selectedNodeId, drawerNodeId])
+  // Finish consuming the share link: strip the param so refreshes and
+  // copied URLs stay clean.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (!params.has('lens')) return
+    params.delete('lens')
+    const qs = params.toString()
+    window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
+  }, [])
 
   // ── Anchor Rail — the selected node's off-screen partners docked as
   // proxy chips in their owning columns. The overlay computes the
@@ -3837,51 +3860,16 @@ export function ContextViewCanvas({
           onFit={handleFitToWidth}
         />
 
-        {/* Lineage Lens — ego-graph overlay (portal to body). */}
+        {/* Lineage Lens — focus room overlay (portal to body). */}
         <LineageLens
-          lensStack={lensStack}
-          supplementalEdges={lensLineage.supplementalEdges}
-          supplementalNodes={lensLineage.supplementalNodes}
-          fetchStatus={lensLineage.status}
-          fetchTruncatedIds={lensLineage.truncatedIds}
-          onRetryFetch={lensLineage.retry}
-          drillEdges={lensLineage.drillEdges}
-          drillStatus={lensLineage.drillStatus}
-          onDrillFetch={lensLineage.fetchDrill}
-          externalPreview={externalPreview && lensStack[lensStack.length - 1] === externalPreview.nodeId ? externalPreview : null}
-          onRecenter={lensRecenter}
-          onBack={lensBack}
-          onJumpTo={lensJumpTo}
-          onWalkTo={lensWalkTo}
-          onShowPathOnCanvas={(ids) => {
-            // Presenting a walk IS a frame action — same chrome, same exit.
-            const focal = ids[ids.length - 1]
-            if (focal) {
-              const { selectedNodeIds, selectNode } = useCanvasStore.getState()
-              if (!(selectedNodeIds.length === 1 && selectedNodeIds[0] === focal)) selectNode(focal)
-              setFramedContext({ nodeId: focal, count: ids.length - 1 })
-            }
-            void locateManyOnCanvas(ids)
-          }}
+          history={lens.history}
+          onHistoryChange={lensHistoryChange}
           onClose={lensClose}
           onRevealOnCanvas={revealAndFocus}
           onOpenDetails={openNodeDrawer}
-          onLocateAll={(ids) => {
-            // "Reveal all on canvas" IS a frame action — land the user in
-            // the same framed-mode chrome as the Frame pill so the state
-            // is named and has an explicit exit. Select the focal node so
-            // the canvas focus matches what the lens was showing (guarded:
-            // selectNode toggles OFF when re-selecting the current
-            // selection).
-            const focal = lensStack[lensStack.length - 1]
-            if (focal) {
-              const { selectedNodeIds, selectNode } = useCanvasStore.getState()
-              if (!(selectedNodeIds.length === 1 && selectedNodeIds[0] === focal)) selectNode(focal)
-              setFramedContext({ nodeId: focal, count: ids.length })
-            }
-            void locateManyOnCanvas(ids)
-          }}
           onTrace={(nodeId) => traceFullLineageWithSmartLevel(nodeId)}
+          externalPreview={externalPreview && lensFocalOf(lens.history) === externalPreview.nodeId ? externalPreview : null}
+          shareSeed={lens.seed}
         />
 
         {/* Blank (hand-built) model guidance — the full-canvas hero on a truly
