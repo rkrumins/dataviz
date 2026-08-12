@@ -1293,6 +1293,16 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         // with a dangling `frameId`: skipped by BOTH layout passes, so
         // they kept `x:0, y:0` and rendered stacked on top of the focal.
         if (pushCard(frame) !== frameId) return
+        // One rollup RECORD ("Finance") became a frame holding three
+        // tables. The band counted the record, so the header read "1
+        // in" above three of them. Report what it resolved TO — as a
+        // surplus, so a capped band's own total stays intact.
+        const recordCount = [...entry.refs.values()].reduce((a, r) => a + r.count, 0)
+        const surplus = Math.max(0, connectedTotal - recordCount)
+        if (surplus > 0) {
+          const t = bandTotals.get(`band:${dir}:${band}`)
+          if (t) t.connections += surplus
+        }
 
         // Connection counts come from the server's pair-filtered edges.
         const countFor = (id: string) => {
@@ -1525,7 +1535,6 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           matchesInside: collapsed ? memberMatches : 0,
         }
         if (pushCard(frame) !== frameId) return
-
         for (const m of rows) {
           const mLabel = labelOf(m.nodeId, m.node)
           const mType = (m.node?.data?.type as string) ?? UNRESOLVED_TYPE
@@ -1611,15 +1620,25 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       // empty dashed box captioned "0 connected", right after the closed
       // card had previewed those very children. An explicit open beats
       // the default layout.
+      // A COARSER partner opens as soon as its answer exists, without
+      // waiting to be clicked: it is a summary of the grain you focused
+      // at, so the resolved entities ARE the picture you asked for.
+      // Derived from having the answer rather than stored, so an
+      // explicit close still wins — `collapsedFrames` is checked
+      // downstream, and a container never fetched simply has no result.
+      const isOpen = (entry: BandEntry, openKey: string) =>
+        !collapsedFrames.has(openKey)
+        && (openContainers.has(openKey)
+          || (entry.rollup && (containerResults?.has(openKey) ?? false)))
       for (const item of shown) {
         if (item.kind !== 'entity') continue
         const openKey = `${dir}:${item.entry.nodeId}`
-        if (openContainers.has(openKey)) placeOpenContainer(item.entry, openKey)
+        if (isOpen(item.entry, openKey)) placeOpenContainer(item.entry, openKey)
       }
       for (const item of shown) {
         if (item.kind === 'entity') {
           const openKey = `${dir}:${item.entry.nodeId}`
-          if (!openContainers.has(openKey)) placeEntity(item.entry)
+          if (!isOpen(item.entry, openKey)) placeEntity(item.entry)
           continue
         }
         placeLocalFrame(item.parentId, item.members, framedParents.get(item.parentId))

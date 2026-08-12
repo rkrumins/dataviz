@@ -133,7 +133,62 @@ const small = (): Fixture => ({
   canContain,
 })
 
+/**
+ * The reported estate: seven levels with `Container` REPEATED, focal on
+ * a table. `Data Domain > Application > Container > Container >
+ * Database > Table > Column` — the shape no type→level map can
+ * describe, which is why opening the Domain used to report "nothing
+ * connects" about lineage that plainly exists.
+ */
+const collaterals = (): Fixture => {
+  const nodes = [
+    node('DOM', 'DATADOMAIN', 'Finance'),
+    node('APP', 'APPLICATION', 'RiskApp'),
+    node('CTR1', 'CONTAINER', 'PROD'),
+    node('CTR2', 'CONTAINER', 'CURATED'),
+    node('DB', 'DATABASE', 'RISK_DB'),
+    node('F', 'dataset', 'collaterals'),
+    node('FT', 'dataset', 'fin_marts'),
+  ]
+  const edges = [
+    contains('k1', 'DOM', 'APP'), contains('k2', 'APP', 'CTR1'),
+    contains('k3', 'CTR1', 'CTR2'), contains('k4', 'CTR2', 'DB'),
+    contains('k5', 'FT', 'F'),
+    // All the focal itself sees is a Data Domain rollup.
+    edge('u', 'DOM', 'F', 'DERIVES_FROM'),
+  ]
+  // ...which resolves, five containment steps down, to real tables.
+  const upstream = ['loan_positions', 'collateral_valuations', 'fx_rates']
+  upstream.forEach((label, i) => {
+    nodes.push(node(`t${i}`, 'dataset', label))
+    edges.push(contains(`kt${i}`, 'DB', `t${i}`))
+  })
+  return {
+    title: 'Seven levels, Container repeated',
+    focal: 'F',
+    nodes,
+    edges,
+    isCoarser: (t?: string) => t !== 'dataset' && t !== 'schemaField',
+    canContain: (t?: string) => t !== 'schemaField',
+    over: {
+      containerResults: new Map([['in:DOM', {
+        nodes: upstream.map((label, i) => node(`t${i}`, 'dataset', label)),
+        edges: upstream.map((_, i) => edge(`r${i}`, `t${i}`, 'F')),
+        passedThrough: [
+          node('APP', 'APPLICATION', 'RiskApp'),
+          node('CTR1', 'CONTAINER', 'PROD'),
+          node('CTR2', 'CONTAINER', 'CURATED'),
+          node('DB', 'DATABASE', 'RISK_DB'),
+        ],
+        truncated: false, empty: false,
+      }]]),
+      containerStatus: new Map([['in:DOM', 'done' as const]]),
+    },
+  }
+}
+
 export const FIXTURES: Record<string, Fixture> = {
+  collaterals: collaterals(),
   columns: columns(),
   deep: deep(),
   wide: wide(),

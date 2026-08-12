@@ -26,8 +26,18 @@ import type { LineageNode, LineageEdge } from '@/store/canvas'
 import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
 import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 
-/** Bound on how many pass-through levels an open may skip in one go. */
-export const FRAME_AUTO_STEPS = 4
+/**
+ * Bound on how many pass-through levels an open may skip in one go.
+ *
+ * Sized to a real estate rather than to a round number: `Data Domain >
+ * Application > Container > Container > Database > Table` is five
+ * steps from the domain to the tables, and a bound of 4 stopped one
+ * short of the grain the user had focused at — so close that the
+ * picture looked broken rather than bounded. Six leaves a step of
+ * headroom, and `truncated` says so when even that runs out, because a
+ * walk that stopped early must never read as an answer.
+ */
+export const FRAME_AUTO_STEPS = 6
 
 export type ContainerDirection = 'in' | 'out'
 
@@ -297,9 +307,16 @@ export function useLensContainer(
 
         if (nodes.length !== 1) break
         // Exactly one child: descend through it, recording the step.
+        // The walk follows the CONNECTED path — a level with one
+        // relevant child costs a click for no information, and a level
+        // with several is a real branch worth stopping at.
         passedThrough.push(nodes[0])
         anchor = nodes[0].id
         if (level !== null) level += 1
+        // Ran out of budget mid-chain. Say so: `truncated` renders as a
+        // floor and keeps the frame's counts honest, rather than
+        // presenting a stopped walk as a finished one.
+        if (step === FRAME_AUTO_STEPS - 1) truncated = true
       }
 
       if (session !== sessionRef.current) return

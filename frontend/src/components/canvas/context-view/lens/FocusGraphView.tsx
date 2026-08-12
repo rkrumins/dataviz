@@ -899,8 +899,18 @@ function FocusFrameNode({ data }: NodeProps) {
           </TailName>
           <p className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate">
             {card.frameBreadcrumb.length > 0 && (
-              <span className="truncate" title={`Opened through ${card.frameBreadcrumb.join(' › ')}`}>
-                {card.frameBreadcrumb.join(' › ')} ·{' '}
+              // The levels walked through to reach these rows — five of
+              // them on a deep estate, which is far more than fits.
+              // Keep the DEEPEST, nearest the content: `RiskApp › PROD
+              // › CURATED › RISK_DB` squeezed down to `Risk…`, naming
+              // the level furthest from what you are looking at and
+              // dropping the one you are standing in.
+              <span
+                className="flex-shrink-0 whitespace-nowrap"
+                title={`Opened through ${card.frameBreadcrumb.join(' › ')}`}
+              >
+                {card.frameBreadcrumb.length > BREADCRUMB_LEVELS && '⋯ › '}
+                {card.frameBreadcrumb.slice(-BREADCRUMB_LEVELS).join(' › ')} ·{' '}
               </span>
             )}
             {card.fetch === 'loading'

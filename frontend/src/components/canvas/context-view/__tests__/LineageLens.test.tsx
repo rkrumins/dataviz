@@ -568,6 +568,37 @@ describe('LineageLens graph mode', () => {
     }
   })
 
+  // The other half of "focus a table, see tables": the builder renders
+  // a coarser partner's answer as soon as it exists, and THIS is what
+  // asks for it. Without the request nothing ever arrives, and the user
+  // is back to a Data Domain card they must click — which is the bug.
+  it('asks what is inside a coarser partner without waiting to be clicked', () => {
+    const prevSchema = useSchemaStore.getState().schema
+    useSchemaStore.setState({
+      schema: {
+        ...(prevSchema ?? {}),
+        containmentEdgeTypes: ['CONTAINS'],
+        entityTypes: [
+          { id: 'DATADOMAIN', hierarchy: { level: 0, canContain: ['DATASET'] } },
+          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
+        ],
+      },
+    } as never)
+    try {
+      useCanvasStore.setState({
+        nodes: [node('tbl', 'DATASET'), node('dom', 'DATADOMAIN')],
+        edges: [edge('e1', 'dom', 'tbl')],
+        visibleEdges: [],
+      } as never)
+      const onOpenContainer = vi.fn()
+      renderLens(['tbl'], {}, { onOpenContainer })
+
+      expect(onOpenContainer).toHaveBeenCalledWith('dom', 'tbl', 'in', 0)
+    } finally {
+      useSchemaStore.setState({ schema: prevSchema } as never)
+    }
+  })
+
   /**
    * The wiring test. The builder knows how to draw a table's connected
    * columns inside it, and `focus-graph.test.ts` proves that; what was

@@ -1236,18 +1236,58 @@ describe('buildFocusGraph — caps, chips, filter', () => {
     // Never opened → nothing to preview, and we do not invent one.
     expect(card(build(base), 'n:Snowflake').previewLabels).toEqual([])
 
-    // Opened once, then closed → the cached answer previews.
+    const answered = {
+      containerResults: new Map([['in:Snowflake', {
+        nodes: [node('kid1'), node('kid2')],
+        edges: [edge('r1', 'kid1', 'F')],
+        passedThrough: [], truncated: false, empty: false,
+      }]]),
+    }
+
+    // The answer arriving is enough — a COARSER partner is a summary of
+    // the grain you focused at, so it resolves without being clicked.
+    const auto = build({ ...base, over: answered })
+    expect(card(auto, 'fr:in:Snowflake').kind).toBe('frame')
+
+    // Explicitly closed → back to a card, previewing from the cache
+    // rather than re-fetching. The close is RECORDED (absence of an
+    // open key now means "never asked"), or the auto-open above would
+    // reinstate the frame the user just dismissed.
     const withCache = build({
       ...base,
+      over: { ...answered, collapsedFrames: new Set(['in:Snowflake']) },
+    })
+    expect(card(withCache, 'n:Snowflake').previewLabels).toEqual(['label-kid1', 'label-kid2'])
+  })
+
+  // THE reported failure, in one assertion. Focusing a table showed a
+  // `Finance Data Domain` card and nothing else; reaching the tables
+  // that actually feed it meant leaving the Lens, expanding on the
+  // canvas, and coming back. A partner COARSER than the focal is a
+  // summary of the grain you focused at — it resolves without a click.
+  it('resolves a coarser partner to the focal\'s grain without being clicked', () => {
+    const g = build({
+      nodes: [node('F', 'dataset'), node('Dom', 'DATADOMAIN')],
+      edges: [edge('e1', 'Dom', 'F')],
+      isCoarser: (t?: string) => t === 'DATADOMAIN',
+      canContain: (t?: string) => t === 'DATADOMAIN',
       over: {
-        containerResults: new Map([['in:Snowflake', {
-          nodes: [node('kid1'), node('kid2')],
-          edges: [edge('r1', 'kid1', 'F')],
-          passedThrough: [], truncated: false, empty: false,
+        // No `openContainers` — nobody clicked anything.
+        containerResults: new Map([['in:Dom', {
+          nodes: [node('tbl_a', 'dataset'), node('tbl_b', 'dataset')],
+          edges: [edge('r1', 'tbl_a', 'F'), edge('r2', 'tbl_b', 'F')],
+          passedThrough: [node('app'), node('db')],
+          truncated: false, empty: false,
         }]]),
       },
     })
-    expect(card(withCache, 'n:Snowflake').previewLabels).toEqual(['label-kid1', 'label-kid2'])
+    // The Domain is a frame, and the TABLES are what you see.
+    expect(card(g, 'fr:in:Dom').kind).toBe('frame')
+    expect(g.cards.filter(c => c.frameId === 'fr:in:Dom').map(c => c.nodeId))
+      .toEqual(['tbl_a', 'tbl_b'])
+    // Levels walked through on the way are named, never hidden.
+    expect(card(g, 'fr:in:Dom').frameBreadcrumb).toEqual(['label-app', 'label-db'])
+    expect(g.cards.some(c => c.id === 'n:Dom')).toBe(false)
   })
 
   // REGRESSION: opening a container asks two questions at once — "what

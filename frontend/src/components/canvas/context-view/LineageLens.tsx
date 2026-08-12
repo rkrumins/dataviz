@@ -592,13 +592,23 @@ export function LineageLens({
     setGraphState(prev => {
       const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
       const next = new Set(base.openContainers)
-      wasOpen = next.has(openKey)
-      if (wasOpen) next.delete(openKey)
-      else next.add(openKey)
+      // A coarser partner opens as soon as its answer arrives, so the
+      // absence of a key no longer means "closed" — it means "never
+      // asked". Closing has to be RECORDED, or the auto-open would
+      // reinstate the frame the user just dismissed.
+      const closed = new Set(base.collapsedFrames)
+      wasOpen = next.has(openKey) && !closed.has(openKey)
+      if (wasOpen) {
+        next.delete(openKey)
+        closed.add(openKey)
+      } else {
+        next.add(openKey)
+        closed.delete(openKey)
+      }
       // A new frame starts in whichever mode the header default says.
       const all = new Set(base.frameShowAll)
       if (!wasOpen && lensFrameChildren === 'all') all.add(openKey)
-      return { ...base, openContainers: next, frameShowAll: all }
+      return { ...base, openContainers: next, frameShowAll: all, collapsedFrames: closed }
     })
     if (!wasOpen) {
       onOpenContainer?.(containerNodeId, partner, dir, level)
@@ -904,6 +914,25 @@ export function LineageLens({
       // satisfies all of its conditions, which is exactly the kind of
       // thing a green suite covering both halves separately misses.
       if (c.frameLocal) continue
+      if (containerStatus?.has(c.expandKey) || containerResults?.has(c.expandKey)) continue
+      const partner = c.partnerIds[0] ?? nodeId
+      if (!partner) continue
+      onOpenContainer(c.nodeId, partner, c.expandKey.startsWith('in:') ? 'in' : 'out',
+        entityLevels.get(c.type) ?? null)
+    }
+    // Focus a table, SEE TABLES. A partner coarser than the focal is a
+    // summary of the thing you actually asked about — a Data Domain
+    // card standing for the tables that feed `collaterals`. Making the
+    // user click it, five times, to reach the grain they focused at is
+    // not a picture of their lineage, it is a filing cabinet.
+    //
+    // Fetch only. Whether the answer RENDERS as a frame is derived in
+    // the builder from having one, so this cannot fight an explicit
+    // close, and the "one fetch per key per session" contract holds.
+    // Each partner's walk is independent, so they run concurrently.
+    for (const c of focusGraph.cards) {
+      if (c.kind !== 'entity' || !c.rollup || !c.canOpenChildren) continue
+      if (!c.nodeId || !c.expandKey) continue
       if (containerStatus?.has(c.expandKey) || containerResults?.has(c.expandKey)) continue
       const partner = c.partnerIds[0] ?? nodeId
       if (!partner) continue
