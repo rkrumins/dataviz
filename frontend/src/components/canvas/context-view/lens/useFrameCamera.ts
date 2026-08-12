@@ -1,6 +1,18 @@
 import { useEffect, useRef } from 'react'
 import type { FocusCard } from './focus-graph'
 
+/**
+ * How far `fitView` may zoom IN.
+ *
+ * It used to be 1, meaning a graph smaller than the viewport was drawn
+ * at 1:1 and left floating in a large field of dots — three cards adrift
+ * in an ocean, with 11px type. A focused answer is usually SMALL (that
+ * is the point of focusing), so the common case looked broken. Let a
+ * small picture fill its frame; 1.5 keeps the 11–12px card type at a
+ * comfortable 16–18px without turning two cards into billboards.
+ */
+export const FIT_MAX_ZOOM = 1.5
+
 /** The only part of the React Flow instance the camera needs. */
 export type CameraTarget = {
   fitView: (opts: {
@@ -58,7 +70,7 @@ export function useFrameCamera(
     const t = window.setTimeout(() => {
       framedRef.current = { focal: focalId, ids }
       if (newFocal) {
-        void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: 1 })
+        void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })
         return
       }
       const anchors = new Set(arrived.flatMap(c => c.partnerIds))
@@ -70,7 +82,7 @@ export function useFrameCamera(
         nodes: frame.map(id => ({ id })),
         padding: 0.25,
         duration: reducedMotion ? 0 : 320,
-        maxZoom: 1,
+        maxZoom: FIT_MAX_ZOOM,
       })
     }, 30)
     return () => window.clearTimeout(t)

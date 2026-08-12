@@ -64,7 +64,9 @@ const EMPTY_PAGE_MAP: ReadonlyMap<string, number> = new Map()
 interface LensGraphState {
   nodeId: string | null
   selection: string | null
-  expandedGroups: ReadonlySet<string>
+  /** Frames the user CLOSED. A frame opens showing its rows, because a
+   *  column's provenance is the question the Lens exists to answer. */
+  collapsedFrames: ReadonlySet<string>
   expandedFrontier: ReadonlySet<string>
   /** Coarse containers opened into their focal-relevant contents. */
   openContainers: ReadonlySet<string>
@@ -80,7 +82,7 @@ interface LensGraphState {
 }
 const EMPTY_QUERY_MAP: ReadonlyMap<string, string> = new Map()
 const freshGraphState = (nodeId: string | null): LensGraphState => ({
-  nodeId, selection: null, expandedGroups: EMPTY_TYPE_SET, expandedFrontier: EMPTY_TYPE_SET,
+  nodeId, selection: null, collapsedFrames: EMPTY_TYPE_SET, expandedFrontier: EMPTY_TYPE_SET,
   openContainers: EMPTY_TYPE_SET, frameShowAll: EMPTY_TYPE_SET,
   openContains: EMPTY_TYPE_SET,
   frameQueries: EMPTY_QUERY_MAP, framePages: EMPTY_PAGE_MAP,
@@ -180,7 +182,7 @@ export interface LineageLensProps {
    *  the graph with when this focal first renders. */
   graphSeed?: {
     nodeId: string
-    expandedGroups: string[]
+    collapsedFrames?: string[]
     expandedFrontier: string[]
     openContainers?: string[]
     frameAll?: string[]
@@ -534,7 +536,7 @@ export function LineageLens({
       ? {
           nodeId: id,
           selection: null,
-          expandedGroups: new Set(graphSeed.expandedGroups),
+          collapsedFrames: new Set(graphSeed.collapsedFrames ?? []),
           expandedFrontier: new Set(graphSeed.expandedFrontier),
           openContainers: new Set(graphSeed.openContainers ?? []),
           frameShowAll: new Set(graphSeed.frameAll ?? []),
@@ -549,13 +551,13 @@ export function LineageLens({
   const setGraphSelection = useCallback((selection: string | null) => {
     setGraphState(prev => ({ ...(prev.nodeId === nodeId ? prev : seededFresh(nodeId)), selection }))
   }, [nodeId, seededFresh])
-  const toggleGraphGroup = useCallback((key: string) => {
+  const toggleGraphFrame = useCallback((key: string) => {
     setGraphState(prev => {
       const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
-      const next = new Set(base.expandedGroups)
+      const next = new Set(base.collapsedFrames)
       if (next.has(key)) next.delete(key)
       else next.add(key)
-      return { ...base, expandedGroups: next }
+      return { ...base, collapsedFrames: next }
     })
   }, [nodeId, seededFresh])
   const toggleGraphFrontier = useCallback((key: string, frontierNodeId: string) => {
@@ -849,7 +851,7 @@ export function LineageLens({
       resolveParent,
       isCoarser: isCoarserThan,
       canContain: canContainAnything,
-      expandedGroups: graphCur.expandedGroups,
+      collapsedFrames: graphCur.collapsedFrames,
       expandedFrontier: graphCur.expandedFrontier,
       openContainers: graphCur.openContainers,
       containerResults,
@@ -870,7 +872,7 @@ export function LineageLens({
   }, [
     lensOpen, lensViewMode, nodeId, incomingRecords, outgoingRecords,
     edgesByEndpoint, nodeMap, containmentEdgeTypes, focalChildren,
-    resolveParent, isCoarserThan, canContainAnything, graphCur.expandedGroups,
+    resolveParent, isCoarserThan, canContainAnything, graphCur.collapsedFrames,
     graphCur.expandedFrontier, graphCur.openContainers, graphCur.frameQueries,
     graphCur.framePages, graphCur.bandPages, graphCur.frameShowAll, childrenStatusOf,
     graphCur.openContains, containsKidsById, containsStatusById,
@@ -932,7 +934,7 @@ export function LineageLens({
       entries,
       cursor,
       mode: lensViewMode,
-      groups: [...graphCur.expandedGroups],
+      closed: [...graphCur.collapsedFrames],
       frontier: [...graphCur.expandedFrontier],
       containers: [...graphCur.openContainers],
       frameAll: [...graphCur.frameShowAll],
@@ -995,6 +997,20 @@ export function LineageLens({
   for (const r of incomingRecords) if (isCoarserThan(r.neighborNode?.data?.type as string | undefined, focalType)) focalRollupTotal++
   for (const r of outgoingRecords) if (isCoarserThan(r.neighborNode?.data?.type as string | undefined, focalType)) focalRollupTotal++
   const focalDirectTotal = incomingRecords.length + outgoingRecords.length - focalRollupTotal
+  // The header must count what is ON THE BOARD. AUTO grain folds a
+  // connection reported again at container / platform / dataset level
+  // into the finest one, so "9 connections" sat above three cards with
+  // nothing to reconcile them. Count the survivors and name the fold —
+  // and name the grains, because the Grain control is how you get them
+  // back, which turns a confusing number into a next move.
+  const headerFolded = focusGraph?.foldedAway ?? 0
+  const headerConnections = focalDirectTotal + focalRollupTotal - headerFolded
+  const headerCountTitle = headerFolded > 0
+    ? `The data source reported ${headerConnections} connection${headerConnections === 1 ? '' : 's'} again at ${
+        (focusGraph?.foldedGrains ?? []).join(', ')} level — the same lineage, one grain coarser. Grain: AUTO keeps the finest; pick a grain to see them.`
+    : focalRollupTotal > 0
+      ? `${focalDirectTotal} concrete and ${focalRollupTotal} rolled-up — a rolled-up connection stands for finer ones beneath it`
+      : undefined
 
   const q = query.trim().toLowerCase()
   const filterFn = (r: NeighborRecord) =>
@@ -1056,10 +1072,8 @@ export function LineageLens({
                     connections" beside a focal card reading "17 in · 15
                     out" (= 32) could not be reconciled by a reader: the
                     two counted different sets and neither said so. */}
-                <span title={focalRollupTotal > 0
-                  ? `${focalDirectTotal} concrete and ${focalRollupTotal} rolled-up — a rolled-up connection stands for finer ones beneath it`
-                  : undefined}>
-                  {`${focalDirectTotal + focalRollupTotal} connection${focalDirectTotal + focalRollupTotal === 1 ? '' : 's'}${focalRollupTotal > 0 ? ` · ${focalRollupTotal} rolled-up` : ''}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
+                <span title={headerCountTitle}>
+                  {`${headerConnections} connection${headerConnections === 1 ? '' : 's'}${headerFolded > 0 ? ` · ${headerFolded} coarser cop${headerFolded === 1 ? 'y' : 'ies'} folded in` : ''}${focalRollupTotal > 0 && headerFolded === 0 ? ` · ${focalRollupTotal} rolled-up` : ''}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
                 </span>
                 {focalFetch === 'loading' && (
                   <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
@@ -1503,7 +1517,7 @@ export function LineageLens({
                 edgeTypeInfo={edgeTypeInfo}
                 onSelect={setGraphSelection}
                 onFocus={onRecenter}
-                onToggleGroup={toggleGraphGroup}
+                onToggleFrame={toggleGraphFrame}
                 onOpenContainer={toggleContainer}
                 onExpandFrontier={toggleGraphFrontier}
                 onToggleContains={toggleContains}

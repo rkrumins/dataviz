@@ -1,7 +1,7 @@
 import { StrictMode } from 'react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, act } from '@testing-library/react'
-import { useFrameCamera, type CameraTarget } from '../useFrameCamera'
+import { FIT_MAX_ZOOM, useFrameCamera, type CameraTarget } from '../useFrameCamera'
 import type { FocusCard } from '../focus-graph'
 
 const card = (id: string, partnerIds: string[] = []): FocusCard =>
@@ -33,6 +33,10 @@ describe('useFrameCamera', () => {
     expect(fitView).toHaveBeenCalledTimes(1)
     // No `nodes` — a new focal fits everything.
     expect(fitView.mock.calls[0][0].nodes).toBeUndefined()
+    // And it may zoom IN. At maxZoom 1 a focused answer — which is
+    // small by design — rendered at 1:1 adrift in a field of dots.
+    expect(fitView.mock.calls[0][0].maxZoom).toBe(FIT_MAX_ZOOM)
+    expect(FIT_MAX_ZOOM).toBeGreaterThan(1)
   })
 
   /**

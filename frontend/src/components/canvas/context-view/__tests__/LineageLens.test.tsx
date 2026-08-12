@@ -590,7 +590,7 @@ describe('LineageLens graph mode', () => {
       const onOpenContainer = vi.fn()
       renderLens(['ds'], { onRecenter }, {
         onOpenContainer,
-        graphSeed: { nodeId: 'ds', expandedGroups: [], expandedFrontier: [], openContainers: ['in:plat'] },
+        graphSeed: { nodeId: 'ds', collapsedFrames: [], expandedFrontier: [], openContainers: ['in:plat'] },
         containerResults: new Map([['in:plat', {
           nodes: [node('kid1', 'DATASET'), node('kid2', 'DATASET')],
           edges: [edge('r1', 'kid1', 'ds'), edge('r2', 'kid2', 'ds')],
@@ -747,7 +747,7 @@ describe('LineageLens graph mode', () => {
       } as never)
       renderLens(['ds'], {}, {
         onOpenContainer: vi.fn(),
-        graphSeed: { nodeId: 'ds', expandedGroups: [], expandedFrontier: [], openContainers: ['in:plat'] },
+        graphSeed: { nodeId: 'ds', collapsedFrames: [], expandedFrontier: [], openContainers: ['in:plat'] },
         containerResults: new Map([['in:plat', {
           nodes: [node('urn:li:dataset:(sf,warehouse.public.deep_kid,PROD)', 'DATASET')],
           edges: [edge('r1', 'urn:li:dataset:(sf,warehouse.public.deep_kid,PROD)', 'ds')],
@@ -789,7 +789,7 @@ describe('LineageLens graph mode', () => {
       const onOpenContainer = vi.fn()
       renderLens(['ds'], {}, {
         onOpenContainer,
-        graphSeed: { nodeId: 'ds', expandedGroups: [], expandedFrontier: [], openContainers: ['in:plat'] },
+        graphSeed: { nodeId: 'ds', collapsedFrames: [], expandedFrontier: [], openContainers: ['in:plat'] },
       })
       expect(onOpenContainer).toHaveBeenCalledWith('plat', 'ds', 'in', 2)
     } finally {
@@ -821,7 +821,7 @@ describe('LineageLens graph mode', () => {
       } as never)
       return renderLens(['ds'], {}, {
         onOpenContainer: vi.fn(),
-        graphSeed: { nodeId: 'ds', expandedGroups: [], expandedFrontier: [], openContainers: ['in:plat'] },
+        graphSeed: { nodeId: 'ds', collapsedFrames: [], expandedFrontier: [], openContainers: ['in:plat'] },
         containerResults: new Map([['in:plat', {
           nodes: [node('kid1', 'DATASET')],
           edges: [edge('r1', 'kid1', 'ds')],
@@ -869,7 +869,7 @@ describe('LineageLens graph mode', () => {
       openFrame({
         onLoadAllChildren,
         graphSeed: {
-          nodeId: 'ds', expandedGroups: [], expandedFrontier: [],
+          nodeId: 'ds', collapsedFrames: [], expandedFrontier: [],
           openContainers: ['in:plat'], frameAll: ['in:plat'],
         },
         frameAllResults: new Map([['in:plat', { children: cols, hasMore: false, total: 428 }]]),
@@ -907,7 +907,7 @@ describe('LineageLens graph mode', () => {
       openFrame({
         onLoadAllChildren,
         graphSeed: {
-          nodeId: 'ds', expandedGroups: [], expandedFrontier: [],
+          nodeId: 'ds', collapsedFrames: [], expandedFrontier: [],
           openContainers: ['in:plat'], frameAll: ['in:plat'],
         },
         frameAllResults: new Map([['in:plat', { children: cols, hasMore: true, total: null }]]),
@@ -934,7 +934,7 @@ describe('LineageLens graph mode', () => {
         openFrame({
           onLoadAllChildren,
           graphSeed: {
-            nodeId: 'ds', expandedGroups: [], expandedFrontier: [],
+            nodeId: 'ds', collapsedFrames: [], expandedFrontier: [],
             openContainers: ['in:plat'], frameAll: ['in:plat'],
           },
           frameAllResults: new Map([['in:plat', { children: cols, hasMore: false, total: 60, query: '' }]]),
@@ -970,7 +970,7 @@ describe('LineageLens graph mode', () => {
       openFrame({
         onLoadAllChildren,
         graphSeed: {
-          nodeId: 'ds', expandedGroups: [], expandedFrontier: [],
+          nodeId: 'ds', collapsedFrames: [], expandedFrontier: [],
           openContainers: ['in:plat'], frameAll: ['in:plat'],
         },
         frameAllResults: new Map([['in:plat', { children: cols, hasMore: true, total: null, query: 'order' }]]),
@@ -997,7 +997,7 @@ describe('LineageLens graph mode', () => {
       } as never)
       const onLoadAllChildren = vi.fn()
       const seed = (focal: string) => ({
-        nodeId: focal, expandedGroups: [], expandedFrontier: [],
+        nodeId: focal, collapsedFrames: [], expandedFrontier: [],
         openContainers: ['in:plat'], frameAll: ['in:plat'],
       })
       const props = (focal: string) => ({
@@ -1075,7 +1075,7 @@ describe('LineageLens graph mode', () => {
       } as never)
       renderLens(['ds'], {}, {
         onOpenContainer: vi.fn(),
-        graphSeed: { nodeId: 'ds', expandedGroups: [], expandedFrontier: [], openContainers: ['in:plat'] },
+        graphSeed: { nodeId: 'ds', collapsedFrames: [], expandedFrontier: [], openContainers: ['in:plat'] },
         containerResults: new Map([['in:plat', {
           nodes: [node('kid1', 'DATASET')],
           edges: [edge('r1', 'kid1', 'ds')],

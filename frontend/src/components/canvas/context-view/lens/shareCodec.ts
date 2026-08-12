@@ -3,7 +3,7 @@
  *
  * A walked path is a finding; this lets an analyst hand a colleague the
  * exact picture (focus history + cursor, body mode, and the current
- * focal's group/frontier expansions) as a link instead of a narration.
+ * focal's frame/frontier state) as a link instead of a narration.
  * Versioned JSON → UTF-8 → base64url. Decoding is defensive: anything
  * malformed — bad base64, bad JSON, wrong version, wrong shapes —
  * returns null and the app simply opens normally (a share link must
@@ -16,8 +16,13 @@ export interface LensShareState {
   entries: string[]
   cursor: number
   mode: 'graph' | 'list'
-  /** Current focal's expanded group keys (`${dir}:${parentUrn}`). */
-  groups: string[]
+  /** Current focal's COLLAPSED frames (`${dir}:${parentUrn}`). Frames
+   *  open by default, so this is the exception list. Absent in links
+   *  written while frames were groups that opened closed — those carried
+   *  a `groups` list meaning the opposite, so it is deliberately not
+   *  read: an old link opens everything at today's default rather than
+   *  restoring inverted. */
+  closed: string[]
   /** Current focal's expanded frontier keys (`${dir}:${urn}`). */
   frontier: string[]
   /** Current focal's opened containers (`${dir}:${urn}`). Absent in
@@ -53,7 +58,6 @@ export function decodeLensShare(raw: string): LensShareState | null {
     if (!Array.isArray(s.entries) || !s.entries.every(e => typeof e === 'string') || s.entries.length === 0) return null
     if (typeof s.cursor !== 'number' || s.cursor < 0 || s.cursor >= s.entries.length) return null
     if (s.mode !== 'graph' && s.mode !== 'list') return null
-    if (!Array.isArray(s.groups) || !s.groups.every(e => typeof e === 'string')) return null
     if (!Array.isArray(s.frontier) || !s.frontier.every(e => typeof e === 'string')) return null
     // Optional so links written before these existed still open.
     const containers = s.containers === undefined ? [] : s.containers
@@ -62,6 +66,8 @@ export function decodeLensShare(raw: string): LensShareState | null {
     if (!Array.isArray(frameAll) || !frameAll.every(e => typeof e === 'string')) return null
     const contains = s.contains === undefined ? [] : s.contains
     if (!Array.isArray(contains) || !contains.every(e => typeof e === 'string')) return null
+    const closed = s.closed === undefined ? [] : s.closed
+    if (!Array.isArray(closed) || !closed.every(e => typeof e === 'string')) return null
     const pairs = (raw: unknown, valueOk: (v: unknown) => boolean) => {
       if (raw === undefined) return []
       if (!Array.isArray(raw)) return null
@@ -77,7 +83,7 @@ export function decodeLensShare(raw: string): LensShareState | null {
       entries: s.entries as string[],
       cursor: s.cursor,
       mode: s.mode,
-      groups: s.groups as string[],
+      closed: closed as string[],
       frontier: s.frontier as string[],
       containers: containers as string[],
       frameAll: frameAll as string[],

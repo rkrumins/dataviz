@@ -3111,7 +3111,7 @@ export function ContextViewCanvas({
   // when the restored focal first renders (fresh opens clear it).
   const [lensShareSeed, setLensShareSeed] = useState<{
     nodeId: string
-    expandedGroups: string[]
+    collapsedFrames: string[]
     expandedFrontier: string[]
     openContainers: string[]
     frameAll: string[]
@@ -3122,7 +3122,7 @@ export function ContextViewCanvas({
     initialLensShare
       ? {
           nodeId: initialLensShare.entries[initialLensShare.cursor],
-          expandedGroups: initialLensShare.groups,
+          collapsedFrames: initialLensShare.closed,
           expandedFrontier: initialLensShare.frontier,
           openContainers: initialLensShare.containers,
           frameAll: initialLensShare.frameAll,

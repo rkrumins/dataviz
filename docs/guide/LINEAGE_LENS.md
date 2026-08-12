@@ -35,16 +35,24 @@ canvas does. Each connected entity appears **once per direction**, however many
 relationships reach it: when a rolled-up summary and a direct relationship both
 describe the same connection, they read as one card, with the extra
 relationship named on it rather than given a second card of its own. Neighbors
-that belong to the same parent — say, six fields of one dataset — arrive
-**rolled up into a single parent card** with a count, so a busy entity reads as
-"which datasets touch me" first. Coarser partners — a
-container, a platform — arrive the same way, as one muted card standing for
-everything inside them. Closed cards **name a few of the things they hold**,
-so you can often tell what's in there without opening it, and the focal's own
+that belong to the same parent — say, six fields of one dataset — are drawn
+**inside a frame named for that dataset**, one row each, with their own counts
+and their own wires. A column is never a peer of its own table: where it comes
+from is the box it sits in, not a caption you have to squint at. Wide tables
+page a **fixed window** through the frame ("page 3 of 12") rather than growing
+it, so a 500-column source sits on the board like any other card. Coarser
+partners — a container, a platform — arrive as one muted card standing for
+everything inside them, which you can open into a frame the same way. Closed
+frames **name a few of the things they hold**, so you can often tell what's in
+there without opening one, and the focal's own
 fields start tucked behind a single "contains N" card rather than fanning
 across the middle of the picture. Open that and each field carries its own
 chevron, so the focal's structure unfolds as deep as it goes without leaving
-the entity you focused. The focal card shows a quick tally — how many
+the entity you focused. Above the frames, the focal names **where it lives** —
+`Snowflake › OrderApp › fact_orders` — as a breadcrumb you can click to move up
+a level. Deep hierarchies stay readable because the levels above the cards are
+*text*, never nested boxes: the picture is two levels deep however many levels
+the estate has. The focal card shows a quick tally — how many
 connections come *in* and how many go *out* — and, once measured, its
 **reach**: how many distinct entities it touches transitively upstream and
 downstream ("Reaches 12 upstream · 47 downstream"), the change-impact answer

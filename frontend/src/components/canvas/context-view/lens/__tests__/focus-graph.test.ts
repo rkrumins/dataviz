@@ -19,10 +19,8 @@ import {
   CARD_W,
   BAND_GAP,
   FOCAL_H,
-  GROUP_HEADER_H,
   FRAME_CHILD_CAP,
   FRAME_ALL_CAP,
-  GROUP_MEMBER_CAP,
   ANCESTRY_CAP,
   framePager,
   CARD_H,
@@ -91,7 +89,7 @@ function build(opts: {
     resolveParent,
     isCoarser: opts.isCoarser ?? (() => false),
     canContain: opts.canContain ?? (() => false),
-    expandedGroups: new Set(),
+    collapsedFrames: new Set(),
     expandedFrontier: new Set(),
     openContainers: new Set(),
     entityLevels: new Map([['CONTAINER', 2], ['DATAPLATFORM', 1], ['dataset', 3], ['schemaField', 4]]),
@@ -110,7 +108,7 @@ const card = (g: ReturnType<typeof build>, id: string) => {
 }
 
 describe('buildFocusGraph — grouping and rollups', () => {
-  it('collapses ≥2 same-parent neighbors into one group card with a bundled edge', () => {
+  it('draws ≥2 same-parent neighbors as ROWS inside one frame, each with its own edge', () => {
     const g = build({
       nodes: [node('F'), node('f1', 'schemaField'), node('f2', 'schemaField'), node('PD'), node('s1', 'schemaField'), node('PS')],
       edges: [
@@ -118,21 +116,44 @@ describe('buildFocusGraph — grouping and rollups', () => {
         contains('c1', 'PD', 'f1'), contains('c2', 'PD', 'f2'), contains('c3', 'PS', 's1'),
       ],
     })
-    const group = card(g, 'g:in:PD')
-    expect(group.kind).toBe('group')
-    expect(group.count).toBe(2)        // members
-    expect(group.sumCount).toBe(2)     // Σ connections
-    expect(group.expanded).toBe(false)
-    // Members hidden while collapsed; the singleton stays standalone
-    // with its parent as context (grouping one child adds a click for
-    // nothing).
-    expect(g.cards.find(c => c.id === 'n:f1')).toBeUndefined()
+    const frame = card(g, 'fr:in:PD')
+    expect(frame.kind).toBe('frame')
+    expect(frame.frameLocal).toBe(true)
+    expect(frame.count).toBe(2)        // members
+    expect(frame.sumCount).toBe(2)     // Σ connections
+    // OPEN by default: a column's provenance is the question, so the
+    // rows are on screen without a click.
+    expect(frame.childrenOpen).toBe(true)
+    expect(card(g, 'n:f1').frameId).toBe('fr:in:PD')
+    expect(card(g, 'n:f2').frameId).toBe('fr:in:PD')
+    // The singleton stays standalone with its parent as context —
+    // framing one child adds a box for nothing.
     const single = card(g, 'n:s1')
+    expect(single.frameId).toBeNull()
     expect(single.parentId).toBe('PS')
     expect(single.parentLabel).toBe('label-PS')
-    // One bundled edge group → focal; one edge singleton → focal.
-    expect(g.edges.find(e => e.id === 'fe:g:in:PD->f')?.count).toBe(2)
+    // Rows carry their OWN edges; no bundled frame edge while they show.
+    expect(g.edges.find(e => e.id === 'fe:n:f1->f')).toBeTruthy()
+    expect(g.edges.find(e => e.id === 'fe:n:f2->f')).toBeTruthy()
+    expect(g.edges.find(e => e.id === 'fe:fr:in:PD->f')).toBeUndefined()
     expect(g.edges.find(e => e.id === 'fe:n:s1->f')).toBeTruthy()
+  })
+
+  it('collapsing a frame bundles its rows back into one edge and hides them', () => {
+    const g = build({
+      nodes: [node('F'), node('f1', 'schemaField'), node('f2', 'schemaField'), node('PD')],
+      edges: [
+        edge('e1', 'f1', 'F'), edge('e2', 'f2', 'F'),
+        contains('c1', 'PD', 'f1'), contains('c2', 'PD', 'f2'),
+      ],
+      over: { collapsedFrames: new Set(['in:PD']) },
+    })
+    const frame = card(g, 'fr:in:PD')
+    expect(frame.childrenOpen).toBe(false)
+    expect(g.cards.find(c => c.id === 'n:f1')).toBeUndefined()
+    // Still says what it holds, from data already in hand.
+    expect(frame.previewLabels).toEqual(['label-f1', 'label-f2'])
+    expect(g.edges.find(e => e.id === 'fe:fr:in:PD->f')?.count).toBe(2)
   })
 
   it('demotes a coarser-grain partner to a standalone rollup card — never grouped', () => {
@@ -704,7 +725,10 @@ describe('buildFocusGraph — one card per entity', () => {
     expect(forPD).toHaveLength(1)
     // Its children hang off that one card rather than a second one.
     expect(g.cards.some(c => c.id === 'g:in:PD')).toBe(false)
-    expect(card(g, 'n:PD')).toBeTruthy()
+    expect(g.cards.some(c => c.id === 'n:PD')).toBe(false)
+    const frame = card(g, 'fr:in:PD')
+    expect(frame.kind).toBe('frame')
+    expect(frame.nodeId).toBe('PD')
   })
 
   it('still groups children under a parent that is NOT itself a neighbour', () => {
@@ -715,7 +739,7 @@ describe('buildFocusGraph — one card per entity', () => {
         contains('c1', 'PD', 'f1'), contains('c2', 'PD', 'f2'),
       ],
     })
-    expect(card(g, 'g:in:PD').kind).toBe('group')
+    expect(card(g, 'fr:in:PD').kind).toBe('frame')
     expect(g.cards.some(c => c.id === 'n:PD')).toBe(false)
   })
 
@@ -928,7 +952,7 @@ describe('buildFocusGraph — a frame showing every child', () => {
     expect(card(g, 'n:Z').frontier).toBe(false)
   })
 
-  it('expands a group into a slim header plus exactly the lineage-participating members', () => {
+  it('a frame holds exactly the lineage-participating children, never the rest of the table', () => {
     const g = build({
       nodes: [node('F'), node('f1', 'schemaField'), node('f2', 'schemaField'), node('PD')],
       edges: [
@@ -938,17 +962,14 @@ describe('buildFocusGraph — a frame showing every child', () => {
         // not appear when the group expands.
         contains('c3', 'PD', 'f3'),
       ],
-      over: { expandedGroups: new Set(['in:PD']) },
     })
-    const header = card(g, 'g:in:PD')
-    expect(header.expanded).toBe(true)
-    expect(header.h).toBe(GROUP_HEADER_H)
-    expect(card(g, 'n:f1')).toBeTruthy()
-    expect(card(g, 'n:f2')).toBeTruthy()
+    expect(card(g, 'fr:in:PD').childrenOpen).toBe(true)
+    expect(card(g, 'n:f1').frameId).toBe('fr:in:PD')
+    expect(card(g, 'n:f2').frameId).toBe('fr:in:PD')
     expect(g.cards.find(c => c.id === 'n:f3')).toBeUndefined()
-    // Members carry their own edges; the bundled group edge is gone.
+    // Rows carry their own edges; no bundled frame edge.
     expect(g.edges.find(e => e.id === 'fe:n:f1->f')).toBeTruthy()
-    expect(g.edges.find(e => e.id === 'fe:g:in:PD->f')).toBeUndefined()
+    expect(g.edges.find(e => e.id === 'fe:fr:in:PD->f')).toBeUndefined()
   })
 })
 
@@ -1072,7 +1093,7 @@ describe('buildFocusGraph — caps, chips, filter', () => {
     expect(g.hiddenByChips).toBe(1)
   })
 
-  it('the text filter DIMS misses and counts matches inside collapsed groups — never removes', () => {
+  it('the text filter DIMS misses and counts matches inside a collapsed frame — never removes', () => {
     const g = build({
       nodes: [node('F'), node('alpha'), node('beta'), node('m-alpha', 'schemaField'), node('m-beta', 'schemaField'), node('PD')],
       edges: [
@@ -1080,13 +1101,13 @@ describe('buildFocusGraph — caps, chips, filter', () => {
         edge('e3', 'm-alpha', 'F'), edge('e4', 'm-beta', 'F'),
         contains('c1', 'PD', 'm-alpha'), contains('c2', 'PD', 'm-beta'),
       ],
-      over: { query: 'alpha' },
+      over: { query: 'alpha', collapsedFrames: new Set(['in:PD']) },
     })
     expect(card(g, 'n:alpha').dimmed).toBe(false)
     expect(card(g, 'n:beta').dimmed).toBe(true)          // dimmed, present
-    const group = card(g, 'g:in:PD')
-    expect(group.dimmed).toBe(false)                      // holds a match
-    expect(group.matchesInside).toBe(1)                   // m-alpha
+    const frame = card(g, 'fr:in:PD')
+    expect(frame.dimmed).toBe(false)                      // holds a match
+    expect(frame.matchesInside).toBe(1)                   // m-alpha
   })
 
   it('caps the contains stack with an overflow card honoring childCount', () => {
@@ -1112,15 +1133,16 @@ describe('buildFocusGraph — caps, chips, filter', () => {
     expect(card(opened, 'more:contains').overflowCount).toBe(4)  // childCount wins
   })
 
-  it('a group card previews a few of its members before you open it', () => {
+  it('a collapsed frame previews a few of its rows before you open it', () => {
     const g = build({
       nodes: [node('F'), node('f1', 'schemaField'), node('f2', 'schemaField'), node('PD')],
       edges: [
         edge('e1', 'f1', 'F'), edge('e2', 'f2', 'F'),
         contains('c1', 'PD', 'f1'), contains('c2', 'PD', 'f2'),
       ],
+      over: { collapsedFrames: new Set(['in:PD']) },
     })
-    expect(card(g, 'g:in:PD').previewLabels).toEqual(['label-f1', 'label-f2'])
+    expect(card(g, 'fr:in:PD').previewLabels).toEqual(['label-f1', 'label-f2'])
   })
 
   it('a closed container previews from a previous open, never a fresh fetch', () => {
@@ -1174,10 +1196,22 @@ describe('buildFocusGraph — grain', () => {
     expect(kept.alsoAtGrains).toEqual(['dataset', 'CONTAINER', 'DATAPLATFORM'])
   })
 
-  it('leaves them alone when folding is off', () => {
+  // REGRESSION: the fold rewrote the board without telling the HEADER,
+  // so a focal reading "9 connections · 6 rolled-up" sat above three
+  // cards and nothing on screen reconciled the two — six connections
+  // appeared to have gone missing.
+  it('reports how much it folded, and at which grains, so the header can reconcile', () => {
+    const g = build({ ...restated, over: { foldCoarserRestatements: true } })
+    expect(g.foldedAway).toBe(3)
+    expect(g.foldedGrains).toEqual(['CONTAINER', 'DATAPLATFORM', 'dataset'])
+  })
+
+  it('leaves them alone when folding is off, and reports no fold', () => {
     const g = build({ ...restated, over: { foldCoarserRestatements: false } })
     expect(g.cards.filter(c => c.band === -1)).toHaveLength(4)
     expect(card(g, 'n:up').alsoAtGrains).toEqual([])
+    expect(g.foldedAway).toBe(0)
+    expect(g.foldedGrains).toEqual([])
   })
 
   it('never folds a coarser partner that is NOT an ancestor of a finer one', () => {
@@ -1223,6 +1257,11 @@ describe('buildFocusGraph — provenance', () => {
       ],
     })
     expect(card(g, 'n:col').ancestry).toEqual(['label-Snowflake', 'label-GOLD', 'label-fact_orders'])
+    // Root-first, and the urns line up index for index — the focal's
+    // breadcrumb makes every crumb a place you can go, and a chain
+    // whose ids were ordered differently from its labels would send
+    // you somewhere other than the level you clicked.
+    expect(card(g, 'n:col').ancestryIds).toEqual(['Snowflake', 'GOLD', 'fact_orders'])
     // The immediate parent still resolves as before.
     expect(card(g, 'n:col').parentId).toBe('fact_orders')
   })
@@ -1329,36 +1368,29 @@ describe('buildFocusGraph — honesty', () => {
   // REGRESSION: the band cap counts a group as ONE item, so its members
   // were emitted outside the budget — one click on a wide table's group
   // header put hundreds of cards in a single band.
-  it('caps expanded group members and says what it capped', () => {
-    const members = Array.from({ length: GROUP_MEMBER_CAP + 6 }, (_, i) => node(`m${String(i).padStart(2, '0')}`, 'schemaField'))
-    const g = build({
+  it('moves a fixed WINDOW through a wide frame instead of growing it', () => {
+    const members = Array.from({ length: FRAME_CHILD_CAP + 6 }, (_, i) => node(`m${String(i).padStart(2, '0')}`, 'schemaField'))
+    const fixture = {
       nodes: [node('F'), node('P'), ...members],
       edges: [
         ...members.map((m, i) => edge(`e${i}`, m.id, 'F')),
         ...members.map((m, i) => contains(`c${i}`, 'P', m.id)),
       ],
-      over: { expandedGroups: new Set(['in:P']) },
-    })
-    const shown = g.cards.filter(c => c.kind === 'entity' && c.parentId === 'P')
-    expect(shown).toHaveLength(GROUP_MEMBER_CAP)
-    const more = card(g, 'more:g:in:P')
-    expect(more.overflowCount).toBe(6)
-    expect(more.expandKey).toBe('in:P:members')   // routes to the band pager, which reads it
+    }
+    const g = build(fixture)
+    // One page on screen, and the frame reports the whole roster —
+    // the old "+N more inside" raised the cap instead, so five clicks
+    // on a wide table left a 2,000px box.
+    expect(g.cards.filter(c => c.frameId === 'fr:in:P')).toHaveLength(FRAME_CHILD_CAP)
+    expect(card(g, 'fr:in:P').frameTotal).toBe(members.length)
+    expect(g.cards.find(c => c.id === 'more:g:in:P')).toBeUndefined()
 
-    // And paging it reveals the rest rather than promising forever.
-    const paged = build({
-      nodes: [node('F'), node('P'), ...members],
-      edges: [
-        ...members.map((m, i) => edge(`e${i}`, m.id, 'F')),
-        ...members.map((m, i) => contains(`c${i}`, 'P', m.id)),
-      ],
-      over: {
-        expandedGroups: new Set(['in:P']),
-        bandPages: new Map([['in:P:members', 1]]),
-      },
-    })
-    expect(paged.cards.filter(c => c.kind === 'entity' && c.parentId === 'P')).toHaveLength(members.length)
-    expect(paged.cards.find(c => c.id === 'more:g:in:P')).toBeUndefined()
+    // Page 2 holds the SAME window size, on the remaining rows.
+    const paged = build({ ...fixture, over: { framePages: new Map([['in:P', 1]]) } })
+    expect(paged.cards.filter(c => c.frameId === 'fr:in:P')).toHaveLength(6)
+    expect(card(paged, 'fr:in:P').framePage).toBe(1)
+    // And page 1's rows are gone, not stacked underneath.
+    expect(paged.cards.find(c => c.id === 'n:m00')).toBeUndefined()
   })
 })
 

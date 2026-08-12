@@ -46,11 +46,6 @@ export const edgeLabelFor = (norm: string, info?: EdgeTypeInfoMap): string =>
  *  platform and container partners went — `rollups` is the last segment
  *  of the band, so they stack at the bottom. */
 export const GRAPH_BAND_CAP = 12
-/** Members revealed when a parent group is expanded, before its own
- *  "+N more" card. Groups sit INSIDE the band cap as one item, so
- *  without this an expanded group of a wide table's columns added
- *  hundreds of cards to one band in a single click. */
-export const GROUP_MEMBER_CAP = 12
 /** How far up the containment chain a card's provenance ribbon walks. */
 export const ANCESTRY_CAP = 6
 /** Focal containment children shown before the overflow card. */
@@ -105,7 +100,6 @@ export const CARD_W = 240
 export const FRAME_CONTENT_W = CARD_W + 50
 export const FOCAL_H = 120
 export const CARD_H = 64
-export const GROUP_HEADER_H = 40
 export const CONTAINS_H = 36
 export const OVERFLOW_H = 36
 /** A frame child with no lineage to the focal: present, scannable, but
@@ -113,7 +107,7 @@ export const OVERFLOW_H = 36
 export const CHILD_ROW_H = 36
 export const BAND_GAP = 130
 export const CARD_GAP = 10
-/** Indent for cards nested under a header (group members, constituents). */
+/** Indent for the focal's contains-stack rows. */
 export const NEST_INDENT = 16
 /** Vertical gap between the focal card and its contains stack. */
 export const CONTAINS_STACK_GAP = 18
@@ -159,7 +153,7 @@ export function framePager(card: FocusCard) {
 
 export type FocusDirection = 'in' | 'out'
 
-export type FocusCardKind = 'focal' | 'entity' | 'group' | 'contains' | 'overflow' | 'frame'
+export type FocusCardKind = 'focal' | 'entity' | 'contains' | 'overflow' | 'frame'
 
 /**
  * What a card's ONE expand affordance does. Every expandable card
@@ -179,7 +173,7 @@ export type FocusCardKind = 'focal' | 'entity' | 'group' | 'contains' | 'overflo
  *           wall: the alternative was a chevron that fetched and then
  *           rendered nothing.
  */
-export type FocusExpandKind = 'group' | 'open' | 'hop' | 'more' | 'retry' | 'focus' | null
+export type FocusExpandKind = 'open' | 'hop' | 'more' | 'retry' | 'focus' | null
 
 export interface FocusCard {
   /** Stable across rebuilds so shared cards glide between focal swaps:
@@ -238,11 +232,17 @@ export interface FocusCard {
   frameTotal: number
   /** Frame cards only — more children exist on the server than loaded. */
   frameHasMore: boolean
+  /** Frame cards only — built from the band's OWN records rather than a
+   *  server open, so its roster is complete, its filter is local, and
+   *  its chevron toggles `collapsedFrames` instead of firing a fetch. */
+  frameLocal: boolean
   /** The containment chain ABOVE this entity, root-first, as labels —
    *  `['Snowflake', 'GOLD', 'fact_orders']`. One truncated parent could
    *  not tell `int_clean_orders_t1` from `int_clean_orders_t2`, which is
    *  precisely the "where does this column come from" complaint. */
   ancestry: string[]
+  /** The same chain as urns, so each crumb is a place you can go. */
+  ancestryIds: string[]
   /** Coarser grains this card also arrived as, folded into it — the
    *  same connection restated at its ancestors' levels. Named so the
    *  card can say what it now stands for instead of silently dropping
@@ -371,7 +371,14 @@ export interface FocusGraphInput {
    * answer restated, not four answers. On, the finest card survives and
    * says which grains it also stands for. */
   foldCoarserRestatements?: boolean
-  expandedGroups: ReadonlySet<string>
+  /** Frames the user has COLLAPSED, keyed `${dir}:${parentUrn}`.
+   *
+   *  Inverse of the old `expandedGroups`, and the inversion is the
+   *  point: a column's provenance is the reason the Lens exists, so a
+   *  table that has connected columns opens showing them. Closed-by-
+   *  default made "where does this field come from" a thing you had to
+   *  already suspect before you could ask it. */
+  collapsedFrames: ReadonlySet<string>
   expandedFrontier: ReadonlySet<string>
   /** Containers the user has opened, keyed `${dir}:${urn}`. */
   openContainers: ReadonlySet<string>
@@ -425,6 +432,14 @@ export interface FocusGraph {
   hiddenByChipsOut: number
   /** Per band key `${dir}:${band}`: cards shown vs total available. */
   bandTotals: Map<string, { shown: number; total: number }>
+  /** Records the AUTO grain fold removed as coarser restatements of a
+   *  connection already on the board, and the entity types they came
+   *  in as. Without this the header counted RECORDS ("9 connections")
+   *  while the board drew the folded set (3 cards) and nothing on
+   *  screen reconciled the two — the picture read as if six things had
+   *  silently gone missing. */
+  foldedAway: number
+  foldedGrains: string[]
 }
 
 /** Display label for a node — the same fallback chain the list body
@@ -468,7 +483,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     focalId, incomingRecords, outgoingRecords, edgesByEndpoint, nodeMap,
     containmentEdgeTypes, containsChildren, containsTotal, containsLoading, resolveParent,
     containsChildrenOf, openContains = EMPTY_SET, containsStatusOf,
-    isCoarser, canContain, foldCoarserRestatements = false, expandedGroups, expandedFrontier, openContainers,
+    isCoarser, canContain, foldCoarserRestatements = false, collapsedFrames, expandedFrontier, openContainers,
     containerResults, containerStatus, frameShowAll, frameAllResults,
     frameAllStatus, frameQueries, framePages, entityLevels,
     bandPages, query, hiddenTypes, degreeHints, fetchStatus,
@@ -483,6 +498,8 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
   const bandTotals = new Map<string, { shown: number; total: number }>()
   let hiddenByChipsIn = 0
   let hiddenByChipsOut = 0
+  let foldedAway = 0
+  const foldedGrains = new Set<string>()
 
   /** The ONE way an edge reaches the output. Every id passes through
    *  `edgeById`, so a collision is impossible rather than merely
@@ -591,9 +608,9 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     count: 1, edgeTypeNorm: '', sumCount: 0,
     rollup: false, unresolved: false,
     aggregated: false,
-    frameId: null, depth: 0, ancestry: EMPTY_STRINGS, alsoAtGrains: EMPTY_STRINGS, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
+    frameId: null, depth: 0, ancestry: EMPTY_STRINGS, ancestryIds: EMPTY_STRINGS, alsoAtGrains: EMPTY_STRINGS, frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
     connected: true, frameShowingAll: false, frameConnectedCount: 0,
-    frameLoaded: 0, frameTotal: -1, frameHasMore: false, alreadyShown: false,
+    frameLoaded: 0, frameTotal: -1, frameHasMore: false, frameLocal: false, alreadyShown: false,
     framePage: 0, framePageSize: FRAME_ALL_CAP,
     partnerIds: EMPTY_STRINGS, partnerLabel: null,
     canOpenChildren: false, childrenOpen: false,
@@ -623,6 +640,11 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
     dimmed: !matches(focalLabel),
   }
   focal.parentLabel = focal.parentId ? labelOf(focal.parentId, nodeMap.get(focal.parentId)) : null
+  // The focal states the WHOLE chain: six levels is the stated case and
+  // one parent label cannot express it. Levels above the grain are a
+  // breadcrumb, never geometry.
+  focal.ancestry = ancestryOf(focalId)
+  focal.ancestryIds = ancestryIdsOf(focalId)
   focal.ancestry = ancestryOf(focalId)
   pushCard(focal)
 
@@ -666,7 +688,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         label: cLabel,
         type: cType,
         unresolved: !cNode,
-        ancestry: ancestryOf(cid),
+        ancestry: ancestryOf(cid), ancestryIds: ancestryIdsOf(cid),
         // Offered from the ontology, like every other contents control.
         canOpenChildren: canGoDeeper && !atLimit,
         childrenOpen: open,
@@ -906,7 +928,9 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             if (!coarser) continue
             entryMap.delete(anc)
             present.delete(anc)
+            foldedAway += coarser.count
             const t = (coarser.node?.data?.type as string) ?? UNRESOLVED_TYPE
+            foldedGrains.add(t)
             const list = foldedInto.get(e.nodeId) ?? []
             if (!list.includes(t)) list.push(t)
             foldedInto.set(e.nodeId, list)
@@ -920,12 +944,18 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       for (const e of entries) {
         if (e.rollup) { rollups.push(e); continue }
         const p = resolveParent(e.nodeId)
-        // A parent that is ITSELF a neighbour already has (or will get)
-        // its own card — grouping under it too would draw the same
-        // entity twice, which is exactly what a rollup edge to the
-        // container plus raw edges to its children used to produce.
-        const parentHasOwnCard = p != null && (entryMap.has(p) || placed.has(p))
-        if (p && p !== focalId && !parentHasOwnCard && !refs.some(r => r.nodeId === p)) {
+        // A parent that is itself a neighbour used to BAR its children
+        // from grouping — otherwise the parent got two cards, one as a
+        // rollup and one as a group header. That guard is gone because
+        // the group header is now a frame, which IS the parent's card:
+        // it holds the children and absorbs the parent's own entry
+        // below, so the duplication it prevented cannot arise. What the
+        // guard did produce was the ordinary shape of column lineage —
+        // a table and eight of its columns all neighbours of the focal —
+        // rendering as one table card plus eight LOOSE column cards,
+        // each captioned with a truncated copy of the parent it should
+        // have been drawn inside.
+        if (p && p !== focalId && !placed.has(p) && !refs.some(r => r.nodeId === p)) {
           const g = groups.get(p)
           if (g) g.push(e)
           else groups.set(p, [e])
@@ -933,11 +963,40 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           standalone.push(e)
         }
       }
+      // One child is not a group: a lone column reads better as itself
+      // (with its provenance ribbon) than as a frame wrapping one row.
+      // A parent that is ALSO a neighbour is the exception — the frame
+      // is where its own card goes, so it is worth building for one.
       for (const [p, members] of [...groups.entries()]) {
-        if (members.length < 2) {
+        if (members.length < 2 && !entryMap.has(p)) {
           standalone.push(...members)
           groups.delete(p)
         }
+      }
+      // TWO LEVELS OF GEOMETRY, never three. A parent that holds a frame
+      // of its own is not also drawn as a row inside its own parent's
+      // frame — that is the nesting the 6-level ontology would run away
+      // with (46px of header and 20px of padding per level, before any
+      // content). Levels above the frame are the breadcrumb ribbon;
+      // levels below the rows are a count and a re-grain.
+      for (const [p, members] of groups) {
+        const promoted = members.filter(m => groups.has(m.nodeId))
+        if (promoted.length === 0) continue
+        groups.set(p, members.filter(m => !groups.has(m.nodeId)))
+        standalone.push(...promoted)
+      }
+      for (const [p, members] of [...groups.entries()]) {
+        if (members.length === 0) groups.delete(p)
+      }
+      // The parent's own entry becomes the frame rather than a sibling
+      // of it, so its connection is drawn once, on the frame.
+      const framedParents = new Map<string, BandEntry>()
+      for (const p of groups.keys()) {
+        const own = entryMap.get(p)
+        if (own) framedParents.set(p, own)
+      }
+      for (const i of [...standalone.keys()].reverse()) {
+        if (framedParents.has(standalone[i].nodeId)) standalone.splice(i, 1)
       }
 
       // Deterministic order: groups by member count desc, then entities
@@ -954,10 +1013,10 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
       rollups.sort(byCountLabel)
 
       type BandItem =
-        | { kind: 'group'; parentId: string; members: BandEntry[] }
+        | { kind: 'frame'; parentId: string; members: BandEntry[] }
         | { kind: 'entity'; entry: BandEntry }
       const items: BandItem[] = [
-        ...groupList.map(([parentId, members]) => ({ kind: 'group' as const, parentId, members })),
+        ...groupList.map(([parentId, members]) => ({ kind: 'frame' as const, parentId, members })),
         ...standalone.map(entry => ({ kind: 'entity' as const, entry })),
         ...rollups.map(entry => ({ kind: 'entity' as const, entry })),
       ]
@@ -1013,7 +1072,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           type,
           parentId,
           parentLabel: parentId ? labelOf(parentId, nodeMap.get(parentId)) : null,
-          ancestry: ancestryOf(entry.nodeId),
+          ancestry: ancestryOf(entry.nodeId), ancestryIds: ancestryIdsOf(entry.nodeId),
           alsoAtGrains: foldedInto.get(entry.nodeId) ?? EMPTY_STRINGS,
           count: entry.count,
           edgeTypeNorm: entry.edgeTypeNorm,
@@ -1134,7 +1193,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           unresolved: !entry.node,
           partnerIds: [...entry.refs.keys()],
           partnerLabel: partnerLabelOf([...entry.refs.keys()]),
-          ancestry: ancestryOf(entry.nodeId),
+          ancestry: ancestryOf(entry.nodeId), ancestryIds: ancestryIdsOf(entry.nodeId),
           expandKey: openKey,
           expandKind: 'open',
           canOpenChildren: true,
@@ -1225,7 +1284,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
             type: cType,
             parentId: entry.nodeId,
             parentLabel: label,
-            ancestry: ancestryOf(child.id),
+            ancestry: ancestryOf(child.id), ancestryIds: ancestryIdsOf(child.id),
             partnerIds: [...entry.refs.keys()],
             partnerLabel: partnerLabelOf([...entry.refs.keys()]),
             connected,
@@ -1279,6 +1338,162 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         if (frame.frontierExpanded && !isOutermost) nextRefs.push({ nodeId: entry.nodeId, type })
       }
 
+      /**
+       * A frame built from what is ALREADY IN HAND — the band's own
+       * entries, bucketed by parent — rather than from a server open.
+       *
+       * This is what a "group card" used to be, and the difference is
+       * the whole of Phase 1. A group card was a single card captioned
+       * with the parent's name that you had to know to click; its
+       * members then spilled out beside it as full-size sibling cards,
+       * indented, so a column and its table were peers in the same
+       * band. Provenance was an 80px caption, which is why
+       * `int_clean_orders_t1` and `int_clean_orders_t2` both read
+       * `int_clean_order…` and nothing on screen could tell you which
+       * table a field came from.
+       *
+       * A frame says it structurally: the rows are INSIDE the named
+       * table. It also inherits, for free, everything the opened-
+       * container frame already had — breadcrumb, fixed-window pager,
+       * find, per-row counts and per-row edges — in place of the
+       * group's unbounded `+N more` and one bundled type-erased wire.
+       *
+       * `ownEntry` is the parent's own band entry when the parent is a
+       * neighbour in its own right. Its connection is drawn on the
+       * frame, so the parent gets one card, not one beside its own
+       * children.
+       */
+      const placeLocalFrame = (parentId: string, members: BandEntry[], ownEntry?: BandEntry) => {
+        const key = `${dir}:${parentId}`
+        const frameId = `fr:${dir}:${parentId}`
+        const pNode = nodeMap.get(parentId)
+        const pLabel = labelOf(parentId, pNode)
+        const collapsed = collapsedFrames.has(key)
+        const fq = (frameQueries?.get(key) ?? '').trim().toLowerCase()
+        const pageSize = FRAME_CHILD_CAP
+        const lastPage = Math.max(0, Math.ceil(members.length / pageSize) - 1)
+        const framePage = Math.min(Math.max(0, framePages?.get(key) ?? 0), lastPage)
+        const rows = collapsed
+          ? []
+          : members.slice(framePage * pageSize, framePage * pageSize + pageSize)
+        const memberMatches = members.reduce(
+          (acc, m) => acc + (matches(labelOf(m.nodeId, m.node)) ? 1 : 0), 0)
+        const frame: FocusCard = {
+          ...baseCard(),
+          id: frameId,
+          kind: 'frame',
+          nodeId: parentId,
+          band: sign * band,
+          label: pLabel,
+          description: (pNode?.data?.description as string | undefined) ?? null,
+          type: (pNode?.data?.type as string) ?? UNRESOLVED_TYPE,
+          ancestry: ancestryOf(parentId), ancestryIds: ancestryIdsOf(parentId),
+          alsoAtGrains: foldedInto.get(parentId) ?? EMPTY_STRINGS,
+          count: members.length,
+          sumCount: members.reduce((acc, m) => acc + m.count, 0),
+          rollup: ownEntry?.rollup ?? false,
+          unresolved: !pNode,
+          partnerIds: [...new Set(members.flatMap(m => [...m.refs.keys()]))],
+          partnerLabel: partnerLabelOf([...new Set(members.flatMap(m => [...m.refs.keys()]))]),
+          previewLabels: collapsed ? members.slice(0, 3).map(m => labelOf(m.nodeId, m.node)) : EMPTY_STRINGS,
+          expandKey: key,
+          expandKind: 'open',
+          canOpenChildren: true,
+          childrenOpen: !collapsed,
+          expanded: !collapsed,
+          // A local frame's roster is complete by construction — these
+          // are the band's own records, not a page of a server answer.
+          frameLoaded: members.length,
+          frameTotal: members.length,
+          frameConnectedCount: members.length,
+          frameHasMore: false,
+          frameShowingAll: false,
+          frameLocal: true,
+          framePage,
+          framePageSize: pageSize,
+          // The parent's OWN hop, when it has one. Independent of the
+          // rows, exactly as on an opened frame.
+          frontier: !isOutermost && (degreeHints?.get(parentId)?.[dir] ?? -1) !== 0,
+          frontierExpanded: expandedFrontier.has(key),
+          degreeHint: degreeHints?.get(parentId) ?? null,
+          dimmed: q !== '' && memberMatches === 0 && !matches(pLabel),
+          matchesInside: collapsed ? memberMatches : 0,
+        }
+        if (pushCard(frame) !== frameId) return
+
+        for (const m of rows) {
+          const mLabel = labelOf(m.nodeId, m.node)
+          const mType = (m.node?.data?.type as string) ?? UNRESOLVED_TYPE
+          const mCard: FocusCard = {
+            ...baseCard(),
+            id: `n:${m.nodeId}`,
+            kind: 'entity',
+            nodeId: m.nodeId,
+            band: sign * band,
+            h: CHILD_ROW_H,
+            label: mLabel,
+            description: (m.node?.data?.description as string | undefined) ?? null,
+            type: mType,
+            parentId,
+            parentLabel: pLabel,
+            ancestry: ancestryOf(m.nodeId), ancestryIds: ancestryIdsOf(m.nodeId),
+            alsoAtGrains: foldedInto.get(m.nodeId) ?? EMPTY_STRINGS,
+            count: m.count,
+            edgeTypeNorm: m.edgeTypeNorm,
+            unresolved: !m.node,
+            aggregated: m.agg.aggregated,
+            partnerIds: [...m.refs.keys()],
+            partnerLabel: partnerLabelOf([...m.refs.keys()]),
+            connected: true,
+            frameId,
+            // A row is the second and last level of geometry. What is
+            // inside IT is reached by re-centering — the chevron is a
+            // door, not another box drawn inside this one.
+            expandKey: `${dir}:${m.nodeId}`,
+            expandKind: (!isOutermost && (degreeHints?.get(m.nodeId)?.[dir] ?? -1) !== 0) ? 'hop' : null,
+            canOpenChildren: canContain(mType) && entityLevels?.get(mType) !== undefined,
+            childrenOpen: false,
+            frontier: !isOutermost && (degreeHints?.get(m.nodeId)?.[dir] ?? -1) !== 0,
+            frontierExpanded: expandedFrontier.has(`${dir}:${m.nodeId}`),
+            degreeHint: degreeHints?.get(m.nodeId) ?? null,
+            fetch: fetchStatus?.get(m.nodeId) === 'loading' ? 'loading'
+              : fetchStatus?.get(m.nodeId) === 'error' ? 'error' : null,
+            dimmed: !matches(mLabel) || (fq !== '' && !mLabel.toLowerCase().includes(fq)),
+          }
+          if (pushCard(mCard) !== mCard.id) continue
+          for (const [refId, stat] of m.refs) {
+            const refCard = placed.get(refId)
+            if (refCard) addFlowEdge(dir, refCard, mCard.id, stat.count, stat.edgeTypeNorm, stat.aggregated, mCard.dimmed)
+          }
+          if (mCard.frontierExpanded && !isOutermost) nextRefs.push({ nodeId: m.nodeId, type: mType })
+        }
+
+        // Collapsed, or paged past — the frame carries the connection
+        // itself so the picture still reads, bundled and honest about
+        // being a bundle. Rows on screen carry their own instead, so a
+        // reader counting wires never double-counts.
+        if (rows.length === 0) {
+          const refSums = new Map<string, number>()
+          for (const m of members) {
+            for (const [refId, stat] of m.refs) refSums.set(refId, (refSums.get(refId) ?? 0) + stat.count)
+          }
+          for (const [refId, count] of refSums) {
+            const refCard = placed.get(refId)
+            if (refCard) addFlowEdge(dir, refCard, frameId, count, '', false, frame.dimmed)
+          }
+        }
+        // The parent's own connection, when it has one of its own.
+        if (ownEntry) {
+          for (const [refId, stat] of ownEntry.refs) {
+            const refCard = placed.get(refId)
+            if (refCard) addFlowEdge(dir, refCard, frameId, stat.count, stat.edgeTypeNorm, stat.aggregated, frame.dimmed)
+          }
+        }
+        if (frame.frontierExpanded && !isOutermost) {
+          nextRefs.push({ nodeId: parentId, type: frame.type })
+        }
+      }
+
       // OPENED containers claim their contents before anything else in
       // the band draws a plain card. `shown` is ordered [groups,
       // standalone, rollups] and a container is always a rollup, so its
@@ -1299,78 +1514,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           if (!openContainers.has(openKey)) placeEntity(item.entry)
           continue
         }
-        // Parent group — collapsed: ONE card standing for its members
-        // (exactly the members with real lineage records, nothing
-        // else); expanded: a slim header + each member as a full card.
-        const groupKey = `${dir}:${item.parentId}`
-        const expanded = expandedGroups.has(groupKey)
-        const pNode = nodeMap.get(item.parentId)
-        const pLabel = labelOf(item.parentId, pNode)
-        const sum = item.members.reduce((acc, m) => acc + m.count, 0)
-        const memberMatches = item.members.reduce(
-          (acc, m) => acc + (matches(labelOf(m.nodeId, m.node)) ? 1 : 0), 0)
-        const gCard: FocusCard = {
-          ...baseCard(),
-          id: `g:${dir}:${item.parentId}`,
-          kind: 'group',
-          nodeId: item.parentId,
-          band: sign * band,
-          h: expanded ? GROUP_HEADER_H : CARD_H,
-          label: pLabel,
-          type: (pNode?.data?.type as string) ?? 'entity',
-          count: item.members.length,
-          sumCount: sum,
-          previewLabels: item.members.slice(0, 3).map(m => labelOf(m.nodeId, m.node)),
-          unresolved: !pNode,
-          expandKey: groupKey,
-          expandKind: 'group',
-          expanded,
-          dimmed: q !== '' && memberMatches === 0 && !matches(pLabel),
-          matchesInside: expanded ? 0 : memberMatches,
-        }
-        // The group card STANDS FOR its parent entity, so it goes
-        // through the same gate as any other card: a later band (or the
-        // other direction) that meets the same parent draws an edge to
-        // this card instead of minting a second one for it.
-        pushCard(gCard)
-        if (!expanded) {
-          // Bundled edges: one per reference node the members touch.
-          const refSums = new Map<string, number>()
-          for (const m of item.members) {
-            for (const [refId, stat] of m.refs) {
-              refSums.set(refId, (refSums.get(refId) ?? 0) + stat.count)
-            }
-          }
-          for (const [refId, count] of refSums) {
-            const refCard = placed.get(refId)
-            if (refCard) addFlowEdge(dir, refCard, gCard.id, count, '', false, gCard.dimmed)
-          }
-        } else {
-          // The band cap counts a GROUP as one item, so its members were
-          // emitted outside that budget entirely: one click on a header
-          // for a 400-column table put 400 cards in a single band — the
-          // only unbounded-in-one-gesture term left, and the input to the
-          // O(band²) group-member scan in layout. Same honesty contract
-          // the bands use: cap, then say what was capped.
-          const memberCap = GROUP_MEMBER_CAP * (1 + (bandPages.get(`${groupKey}:members`) ?? 0))
-          for (const m of item.members.slice(0, memberCap)) placeEntity(m)
-          if (item.members.length > memberCap) {
-            pushCard({
-              ...baseCard(),
-              id: `more:g:${dir}:${item.parentId}`,
-              kind: 'overflow',
-              nodeId: null,
-              band: sign * band,
-              h: OVERFLOW_H,
-              label: `+${(item.members.length - memberCap).toLocaleString()} more in ${pLabel}`,
-              type: 'entity',
-              parentId: item.parentId,
-              expandKey: `${groupKey}:members`,
-              expandKind: 'more',
-              overflowCount: item.members.length - memberCap,
-            })
-          }
-        }
+        placeLocalFrame(item.parentId, item.members, framedParents.get(item.parentId))
       }
 
       if (items.length > cap) {
@@ -1398,16 +1542,21 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
 
   layoutBands(cards)
 
-  return { cards, edges, hiddenByChips: hiddenByChipsIn + hiddenByChipsOut, hiddenByChipsIn, hiddenByChipsOut, bandTotals }
+  return {
+    cards, edges,
+    hiddenByChips: hiddenByChipsIn + hiddenByChipsOut, hiddenByChipsIn, hiddenByChipsOut,
+    bandTotals,
+    foldedAway, foldedGrains: [...foldedGrains].sort(),
+  }
 }
 
 /**
  * Deterministic hop-band layout, baked into the cards in place:
  * x from the band index; y by stacking each band's cards (in insertion
  * order — the builder already sorted them) centered on the focal's
- * midline (y = 0). Group members indent by NEST_INDENT. The focal band
- * centers the FOCAL card itself on the midline and hangs the contains
- * stack below it.
+ * midline (y = 0). The focal band centers the FOCAL card itself on the
+ * midline and hangs the contains stack below it, indented by
+ * NEST_INDENT per level.
  *
  * A container FRAME is one stacking unit: its own height covers its
  * children, so the children are pulled out of the band's stacking pass
@@ -1442,8 +1591,13 @@ function layoutBands(cards: FocusCard[]) {
     const kids = childrenByFrame.get(c.id) ?? []
     const inner = kids.reduce((acc, k) => acc + k.h, 0) + CARD_GAP * Math.max(0, kids.length - 1)
     c.w = CARD_W + FRAME_PAD * 2
-    c.h = FRAME_HEADER_H + FRAME_PAD + Math.max(inner, kids.length === 0 ? CARD_H : 0) + FRAME_PAD
-      + (framePager(c).paged ? FRAME_FOOTER_H : 0)
+    // A COLLAPSED frame is its header and nothing else. Reserving a
+    // body row is for a frame that is open and has none yet — loading,
+    // empty, failed — which all need somewhere to say so.
+    c.h = kids.length === 0 && !c.childrenOpen
+      ? FRAME_HEADER_H
+      : FRAME_HEADER_H + FRAME_PAD + Math.max(inner, kids.length === 0 ? CARD_H : 0) + FRAME_PAD
+        + (framePager(c).paged ? FRAME_FOOTER_H : 0)
   }
   // Children FILL their frame, and a nested frame is wider still (it
   // carries its own padding), so each host widens to hold what it holds.
@@ -1474,11 +1628,10 @@ function layoutBands(cards: FocusCard[]) {
       }
       continue
     }
-    const nested = (c: FocusCard) => c.kind === 'entity' && isGroupMember(c, list)
     const total = list.reduce((acc, c) => acc + c.h, 0) + CARD_GAP * Math.max(0, list.length - 1)
     let y = -total / 2
     for (const c of list) {
-      c.x = x + (nested(c) ? NEST_INDENT : 0)
+      c.x = x
       c.y = y
       y += c.h + CARD_GAP
     }
@@ -1498,9 +1651,3 @@ function layoutBands(cards: FocusCard[]) {
   }
 }
 
-/** A member entity rendered under its expanded group header shares the
- *  band with that header; detect it for the nested indent. */
-function isGroupMember(c: FocusCard, bandList: FocusCard[]): boolean {
-  if (!c.parentId) return false
-  return bandList.some(o => o.kind === 'group' && o.expanded && o.nodeId === c.parentId)
-}

@@ -73,7 +73,7 @@ import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { CARD_W, BAND_GAP, FRAME_FOOTER_H, framePager, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph } from './focus-graph'
-import { useFrameCamera } from './useFrameCamera'
+import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 
 /** Direction tints — the house semantics: upstream = sky, downstream
  *  = amber (matches the list columns and the canvas). */
@@ -100,13 +100,19 @@ const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
 
 interface CardCtx {
   edgeTypeInfo?: EdgeTypeInfoMap
+  /** Frame id → the one relationship type all its rows share, when
+   *  they do. Eight columns each reading `● DERIVES FROM` is eight
+   *  identical lines that say nothing and squeeze out the name beside
+   *  them; the frame states it once instead. A row whose type DIFFERS
+   *  from its neighbours still prints it — that is information. */
+  uniformInFrame: ReadonlyMap<string, string>
   /** type id → {color, icon}, resolved ONCE for the whole graph. Cards
    *  used to each subscribe to the schema store and linear-scan the
    *  entity-type list, so every card paid for every schema touch. */
   visualFor: (typeId: string) => { color: string; Icon: LucideIcons.LucideIcon }
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
-  onToggleGroup: (expandKey: string) => void
+  onToggleFrame: (expandKey: string) => void
   /** Open / close a coarse container into the entities inside it that
    *  connect to `partnerId` — the card's own partner in the picture,
    *  which is the focal only at the first hop. */
@@ -152,7 +158,7 @@ interface FocusGraphViewProps {
   edgeTypeInfo?: EdgeTypeInfoMap
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
-  onToggleGroup: (expandKey: string) => void
+  onToggleFrame: (expandKey: string) => void
   onOpenContainer: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
   onExpandFrontier: (expandKey: string, nodeId: string) => void
   onToggleContains: (nodeId: string) => void
@@ -180,7 +186,7 @@ function sameCard(a: FocusCard, b: FocusCard): boolean {
   const keys = Object.keys(a) as Array<keyof FocusCard>
   if (keys.length !== Object.keys(b).length) return false
   for (const k of keys) {
-    if (k === 'frameBreadcrumb' || k === 'previewLabels' || k === 'partnerIds' || k === 'ancestry' || k === 'alsoAtGrains') {
+    if (k === 'frameBreadcrumb' || k === 'previewLabels' || k === 'partnerIds' || k === 'ancestry' || k === 'ancestryIds' || k === 'alsoAtGrains') {
       const x = a[k], y = b[k]
       if (x.length !== y.length || x.some((v, i) => v !== y[i])) return false
       continue
@@ -219,37 +225,111 @@ function PortHandles({ focal }: { focal?: boolean }) {
 }
 
 /**
- * Where this entity lives — the containment chain, not one truncated
- * parent.
+ * Where this entity lives — its OWNER, readably, and the rest on hover.
  *
  * `int_clean_orders_t1` and `int_clean_orders_t2` both rendered as
  * `int_clean_order…` in an 80px end-truncated label, so a column's owner
- * was genuinely unreadable. Two fixes: show the chain, and truncate the
- * MIDDLE so the distinguishing suffix survives — names in a warehouse
- * differ at the end far more often than at the start.
+ * was genuinely unreadable. The first attempt showed the whole chain
+ * middle-truncated and made it worse: on a 240px card the grandparent
+ * took a fixed slice at the front and squeezed the owner — the only
+ * part that answers the question — down to `TRA…`.
+ *
+ * So: one name, the owner, and clip the FRONT rather than the back,
+ * because warehouse names differ at the end (`…_orders_t1` vs
+ * `…_orders_t2`) far more often than at the start. Levels above it are
+ * a depth mark and the title; they are context, not the answer.
  */
-function middleTruncate(s: string, max: number): string {
-  if (s.length <= max) return s
-  const head = Math.ceil((max - 1) / 2)
-  return `${s.slice(0, head)}…${s.slice(s.length - (max - 1 - head))}`
+/** How many containment levels the focal states before eliding. Three
+ *  fits a 240px card at 9.5px; the rest is one ⋯ and the tooltip. */
+const BREADCRUMB_LEVELS = 3
+
+/** A name clipped at the FRONT. `int_clean_orders_t1` and
+ *  `int_clean_orders_t2` both end-truncate to `int_clean_orders…`,
+ *  which is the whole "I can't tell where this column came from"
+ *  complaint; `…clean_orders_t1` answers it in the same width. */
+function TailName({ children, className, title }: { children: string; className?: string; title?: string }) {
+  return (
+    <span dir="rtl" className={cn('truncate min-w-0 text-left', className)} title={title ?? children}>
+      <bdi>{children}</bdi>
+    </span>
+  )
+}
+
+/**
+ * Where the FOCAL lives — the whole chain, each level clickable.
+ *
+ * `Sales › Snowflake › OrderApp › PROD › fact_orders` is the six-level
+ * case stated plainly. This is the plan's "levels above the grain are a
+ * breadcrumb, not geometry": nesting six frames costs ~400px of chrome
+ * before any content, one line of text costs 12px, and the text is the
+ * more useful of the two because every step is a place you can go.
+ *
+ * Deepest levels first in priority: the tail is what identifies the
+ * entity, so the chain elides from the LEFT when it will not fit.
+ */
+function FocalBreadcrumb({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
+  const chain = card.ancestry.length > 0 ? card.ancestry : card.parentLabel ? [card.parentLabel] : []
+  if (chain.length === 0) return null
+  // Decide what fits HERE, not in CSS. Two attempts at leaning on flex
+  // overflow produced a chain in reverse and a chain of `…flake ›
+  // …EDIATE_T1`; a rule you can state in one line beats a layout you
+  // have to screenshot to understand. The deepest levels identify the
+  // entity, so those are the ones kept.
+  const shown = chain.slice(-BREADCRUMB_LEVELS)
+  const elided = chain.length - shown.length
+  const idOf = (i: number) => card.ancestryIds[chain.length - shown.length + i] ?? card.parentId ?? ''
+  return (
+    <p
+      className="flex items-center gap-1 min-w-0 text-[9.5px] text-ink-muted"
+      title={`in ${chain.join(' › ')}`}
+    >
+      <LucideIcons.CornerLeftUp className="w-2.5 h-2.5 flex-shrink-0" />
+      {elided > 0 && (
+        <>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.ancestryIds[0] ?? '') }}
+            title={`${elided} level${elided === 1 ? '' : 's'} above: ${chain.slice(0, elided).join(' › ')}`}
+            className="flex-shrink-0 text-ink-muted/50 hover:text-accent-lineage transition-colors"
+          >
+            ⋯
+          </button>
+          <span className="flex-shrink-0 text-ink-muted/40" aria-hidden>›</span>
+        </>
+      )}
+      {shown.map((level, i) => (
+        <span key={`${level}-${i}`} className="flex items-center gap-1 min-w-0">
+          {i > 0 && <span className="flex-shrink-0 text-ink-muted/40" aria-hidden>›</span>}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); ctx.onFocus(idOf(i)) }}
+            className={cn(
+              'truncate hover:text-accent-lineage transition-colors',
+              i === shown.length - 1 ? 'text-ink-muted' : 'text-ink-muted/60',
+            )}
+          >
+            {level}
+          </button>
+        </span>
+      ))}
+    </p>
+  )
 }
 
 function ProvenanceRibbon({ card }: { card: FocusCard }) {
+  // Inside a frame the header already names the owner, right above this
+  // row. Repeating it on every row is the noise the frame was for.
+  if (card.frameId) return null
   if (card.ancestry.length === 0 && !card.parentLabel) return null
-  // The chain can be six deep; the card is 240px. Show the owner in
-  // full-ish and let the tail of the chain give it context.
   const chain = card.ancestry.length > 0 ? card.ancestry : [card.parentLabel!]
   const owner = chain[chain.length - 1]
-  const above = chain.slice(0, -1)
   return (
     <span className="flex items-center gap-1 min-w-0" title={`in ${chain.join(' › ')}`}>
       <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/50" />
-      {above.length > 0 && (
-        <span className="flex-shrink-0 text-ink-muted/45">
-          {above.length > 1 ? '…› ' : ''}{middleTruncate(above[above.length - 1], 10)} ›
-        </span>
+      {chain.length > 1 && (
+        <span className="flex-shrink-0 text-ink-muted/40">{'· '.repeat(0)}⋯›</span>
       )}
-      <span className="truncate max-w-[132px] text-ink-muted">{middleTruncate(owner, 22)}</span>
+      <TailName className="text-ink-muted" title={`in ${chain.join(' › ')}`}>{owner}</TailName>
     </span>
   )
 }
@@ -324,6 +404,7 @@ function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
       onClick={(e) => {
         e.stopPropagation()
         if (pureContainment) ctx.onToggleContains(card.nodeId!)
+        else if (card.frameLocal) ctx.onToggleFrame(card.expandKey!)
         else ctx.onOpenContainer(card.expandKey!, card.nodeId!, card.type, card.partnerIds[0] ?? null)
       }}
     >
@@ -342,7 +423,12 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   if (!card.nodeId || !card.expandKey || (!card.frontier && !card.frontierExpanded)) return null
   const outLeft = card.band < 0
   const hint = card.degreeHint ? (outLeft ? card.degreeHint.in : card.degreeHint.out) : null
-  const pos = outLeft ? 'right-full mr-1.5' : 'left-full ml-1.5'
+  // A row inside a frame keeps its pill INSIDE the frame's border —
+  // hung outside it floated in the gutter, visually detached from both
+  // the row it belongs to and the box it sat beside.
+  const pos = card.frameId
+    ? (outLeft ? 'left-1 -translate-x-1/2' : 'right-1 translate-x-1/2')
+    : (outLeft ? 'right-full mr-1.5' : 'left-full ml-1.5')
   if (card.fetch === 'loading') {
     return (
       <span className={cn('absolute top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded-full bg-canvas-elevated border border-accent-lineage/40', pos)}>
@@ -431,7 +517,6 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       else if (card.expandKey) ctx.onShowMore(card.expandKey)
       return
     }
-    if (card.kind === 'group') { if (card.expandKey) ctx.onToggleGroup(card.expandKey); return }
     ctx.onSelect(card.nodeId)
   }
   const keyActivate = (e: React.KeyboardEvent) => {
@@ -515,15 +600,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
           {card.label}
         </p>
         {card.parentId && (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.parentId!) }}
-            title={`Focus ${card.parentLabel}`}
-            className="flex items-center gap-1 max-w-full text-[9.5px] text-ink-muted hover:text-accent-lineage transition-colors"
-          >
-            <LucideIcons.CornerLeftUp className="w-2.5 h-2.5 flex-shrink-0" />
-            <span className="truncate">in {card.parentLabel}</span>
-          </button>
+          <FocalBreadcrumb card={card} ctx={ctx} />
         )}
         {focalStats && (
           <div className="flex items-center gap-2.5 mt-1 pt-1 border-t border-black/[0.07] dark:border-white/[0.08] text-[10.5px] font-medium tabular-nums">
@@ -557,101 +634,6 @@ function FocusGraphCard({ data, selected }: NodeProps) {
             </span>
           </p>
         )}
-      </div>
-    )
-  }
-
-  // ── Group: collapsed rollup card / expanded slim header ──
-  if (card.kind === 'group') {
-    if (card.expanded) {
-      return (
-        <div
-          style={{ width: card.w, height: card.h }}
-          className={cn(
-            'group relative flex items-center gap-1.5 rounded-lg px-2 bg-black/[0.03] dark:bg-white/[0.04] border border-black/[0.07] dark:border-white/[0.08]',
-            card.dimmed && 'opacity-30',
-          )}
-        >
-          <PortHandles />
-          <button
-            type="button"
-            onClick={activate}
-            title="Collapse group"
-            className="flex-1 min-w-0 flex items-center gap-1.5 text-left focus-visible:outline-none"
-          >
-            <LucideIcons.ChevronDown className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted" />
-            <LucideIcons.FolderTree className="w-3 h-3 flex-shrink-0 text-ink-muted/70" />
-            <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: accent }} />
-            <span className="min-w-0 truncate text-[11px] font-semibold text-ink">{card.label}</span>
-            <span className="flex-shrink-0 text-[9.5px] tabular-nums text-ink-muted">{card.count}</span>
-          </button>
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
-            title={`Focus ${card.label}`}
-            className="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-          >
-            <LucideIcons.Focus className="w-3 h-3" />
-          </button>
-        </div>
-      )
-    }
-    return (
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={activate}
-        onKeyDown={keyActivate}
-        onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
-        title={`${card.label} — ${card.count} connected entities · click to expand`}
-        style={{ width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent }}
-        className={cn(
-          'group relative flex items-center gap-2 rounded-lg border border-black/[0.07] dark:border-white/[0.08] bg-black/[0.02] dark:bg-white/[0.03] px-2.5 cursor-pointer transition-colors hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-          card.dimmed && 'opacity-30',
-        )}
-      >
-        <PortHandles />
-        <div
-          className="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0"
-          style={{ backgroundColor: `${accent}1f` }}
-        >
-          <LucideIcons.FolderTree className="w-3.5 h-3.5" style={{ color: accent }} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="flex items-center gap-1.5 text-[12px] font-semibold text-ink leading-snug">
-            <span className="truncate">{card.label}</span>
-          </p>
-          <p className="flex items-center gap-1.5 text-[9.5px] text-ink-muted/80 leading-snug">
-            <span className="px-1 rounded bg-black/[0.05] dark:bg-white/[0.07] font-semibold tabular-nums">
-              {card.count} connected
-            </span>
-            {card.sumCount > card.count && (
-              <span className="tabular-nums">×{card.sumCount.toLocaleString()}</span>
-            )}
-            {card.matchesInside > 0 && (
-              <span className="px-1 rounded bg-accent-lineage/15 text-accent-lineage font-semibold tabular-nums">
-                {card.matchesInside} match{card.matchesInside === 1 ? '' : 'es'}
-              </span>
-            )}
-          </p>
-          {card.previewLabels.length > 0 && (
-            <p className="truncate text-[9px] text-ink-muted/60 leading-snug" title={card.previewLabels.join(', ')}>
-              {card.previewLabels.join(', ')}
-              {card.count > card.previewLabels.length && ` +${card.count - card.previewLabels.length}`}
-            </p>
-          )}
-        </div>
-        <LucideIcons.ChevronRight className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted/40 group-hover:hidden" />
-        <span className="hidden group-hover:flex flex-shrink-0 items-center">
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
-            title={`Focus ${card.label}`}
-            className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-          >
-            <LucideIcons.Focus className="w-3 h-3" />
-          </button>
-        </span>
       </div>
     )
   }
@@ -770,7 +752,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
               <span className="text-ink-muted/40">·</span>
             </>
           )}
-          {card.edgeTypeNorm && (
+          {card.edgeTypeNorm && !(card.frameId && ctx.uniformInFrame.get(card.frameId) === card.edgeTypeNorm) && (
             <>
               <span
                 className="w-1 h-1 rounded-full flex-shrink-0"
@@ -857,9 +839,19 @@ function FocusFrameNode({ data }: NodeProps) {
   // In "everything inside" the search runs on the SERVER, so the counts
   // describe the matches, not the container — say which.
   const searching = card.frameShowingAll && q.trim().length > 0
+  // Collapsed, name a few of what is inside — often enough to answer
+  // the question without opening it, and it is data already in hand.
+  const preview = card.previewLabels.length > 0
+    ? ` · ${card.previewLabels.join(', ')}${card.count > card.previewLabels.length
+        ? ` +${(card.count - card.previewLabels.length).toLocaleString()}` : ''}`
+    : ''
+  // Every row shares one relationship type → the frame says it once
+  // instead of the rows each repeating it.
+  const sharedType = ctx.uniformInFrame.get(card.id)
+  const via = sharedType ? ` · ${edgeLabelFor(sharedType, ctx.edgeTypeInfo)}` : ''
   const inside = card.frameShowingAll
     ? `${card.frameConnectedCount.toLocaleString()} connected${to} · ${range ?? `${card.frameLoaded.toLocaleString()} of ${total} shown`}${searching ? ` matching "${q.trim()}"` : ''}`
-    : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected${to || ' inside'}${range ? ` · ${range}` : ''}`
+    : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected${to || ' inside'}${via}${card.childrenOpen ? (range ? ` · ${range}` : '') : preview}`
   return (
     <div
       style={{ width: card.w, height: card.h, borderColor: `${accent}55` }}
@@ -871,17 +863,25 @@ function FocusFrameNode({ data }: NodeProps) {
       <div className="pointer-events-auto absolute inset-x-0 top-0 h-[46px] px-2.5 flex items-center gap-1.5">
         <button
           type="button"
-          onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onOpenContainer(card.expandKey!, card.nodeId, card.type, card.partnerIds[0] ?? null) }}
-          title={`Close ${card.label}`}
+          onClick={(e) => {
+            e.stopPropagation()
+            if (card.frameLocal) ctx.onToggleFrame(card.expandKey!)
+            else if (card.nodeId) ctx.onOpenContainer(card.expandKey!, card.nodeId, card.type, card.partnerIds[0] ?? null)
+          }}
+          aria-expanded={card.childrenOpen}
+          aria-label={card.childrenOpen ? `Collapse ${card.label}` : `Expand ${card.label}`}
+          title={card.childrenOpen ? `Collapse ${card.label}` : `Expand ${card.label}`}
           className="nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
         >
-          <LucideIcons.ChevronDown className="w-3.5 h-3.5" />
+          {card.childrenOpen
+            ? <LucideIcons.ChevronDown className="w-3.5 h-3.5" />
+            : <LucideIcons.ChevronRight className="w-3.5 h-3.5" />}
         </button>
         <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5 flex-shrink-0" />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[11.5px] font-semibold text-ink leading-tight" title={card.label}>
+          <TailName className="block text-[11.5px] font-semibold text-ink leading-tight">
             {card.label}
-          </p>
+          </TailName>
           <p className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate">
             {card.frameBreadcrumb.length > 0 && (
               <span className="truncate" title={`Opened through ${card.frameBreadcrumb.join(' › ')}`}>
@@ -898,7 +898,7 @@ function FocusFrameNode({ data }: NodeProps) {
         {/* Connected ⇄ All. The default answers "what in here touches my
             entity"; All answers "what else is in here", with lineage
             still drawn wherever it exists. */}
-        {ctx.onToggleFrameAll && (
+        {ctx.onToggleFrameAll && !card.frameLocal && (
           <div
             role="group"
             aria-label={`What to show inside ${card.label}`}
@@ -931,8 +931,10 @@ function FocusFrameNode({ data }: NodeProps) {
             ))}
           </div>
         )}
-        {/* Find one by name without reading everything. */}
-        {Math.max(card.count, card.frameLoaded) > 4 && (
+        {/* Find one by name without reading everything — offered only
+            when there IS more than one screenful, because reserving the
+            room truncated the frame's own name on every frame. */}
+        {(pager.paged || card.frameShowingAll) && (
           <input
             value={q}
             onChange={(e) => ctx.onFrameQuery(card.expandKey ?? '', e.target.value)}
@@ -1020,7 +1022,7 @@ function FocusFrameNode({ data }: NodeProps) {
           through it, so a 500-column table sits on the board like any
           other card. Next past the fetched set asks the server for one
           more page and holds this one until it lands. */}
-      {pager.paged && (
+      {pager.paged && card.childrenOpen && (
         <div
           className="pointer-events-auto absolute inset-x-0 bottom-0 flex items-center justify-center gap-2 px-2.5"
           style={{ height: FRAME_FOOTER_H }}
@@ -1231,7 +1233,7 @@ function GraphControls({ reducedMotion, exportName, onResetLayout }: {
         <button
           type="button"
           title="Fit the lineage in view"
-          onClick={() => void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: 1 })}
+          onClick={() => void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })}
           className={btn}
         >
           <LucideIcons.Maximize2 className="w-3.5 h-3.5" />
@@ -1245,7 +1247,7 @@ function GraphControls({ reducedMotion, exportName, onResetLayout }: {
             onClick={() => {
               onResetLayout()
               window.setTimeout(
-                () => void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: 1 }),
+                () => void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM }),
                 reducedMotion ? 0 : 60,
               )
             }}
@@ -1286,7 +1288,7 @@ export function FocusGraphView({
   edgeTypeInfo,
   onSelect,
   onFocus,
-  onToggleGroup,
+  onToggleFrame,
   onOpenContainer,
   onExpandFrontier,
   onToggleContains,
@@ -1325,12 +1327,26 @@ export function FocusGraphView({
     }
   }, [schema])
 
+  // Per frame: the one relationship type its rows share, if they do.
+  const uniformInFrame = useMemo(() => {
+    const seen = new Map<string, string | null>()
+    for (const c of graph.cards) {
+      if (!c.frameId || !c.edgeTypeNorm) continue
+      const prev = seen.get(c.frameId)
+      if (prev === undefined) seen.set(c.frameId, c.edgeTypeNorm)
+      else if (prev !== c.edgeTypeNorm) seen.set(c.frameId, null)
+    }
+    const out = new Map<string, string>()
+    for (const [k, v] of seen) if (v) out.set(k, v)
+    return out
+  }, [graph.cards])
   const ctx = useMemo<CardCtx>(() => ({
     edgeTypeInfo,
+    uniformInFrame,
     visualFor,
     onSelect,
     onFocus,
-    onToggleGroup,
+    onToggleFrame,
     onOpenContainer,
     onExpandFrontier,
     onToggleContains,
@@ -1345,7 +1361,7 @@ export function FocusGraphView({
     onRetryFetch,
     onRevealOnCanvas,
     onOpenDetails,
-  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleGroup, onOpenContainer, onExpandFrontier, onToggleContains, onRetryContains, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
+  }), [edgeTypeInfo, uniformInFrame, visualFor, onSelect, onFocus, onToggleFrame, onOpenContainer, onExpandFrontier, onToggleContains, onRetryContains, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out
@@ -1532,9 +1548,9 @@ export function FocusGraphView({
           edgeTypes={EDGE_TYPES}
           onInit={setRf}
           fitView
-          fitViewOptions={{ padding: 0.15, maxZoom: 1 }}
+          fitViewOptions={{ padding: 0.15, maxZoom: FIT_MAX_ZOOM }}
           minZoom={0.25}
-          maxZoom={1.4}
+          maxZoom={2}
           panOnDrag
           zoomOnScroll
           zoomOnDoubleClick={false}
