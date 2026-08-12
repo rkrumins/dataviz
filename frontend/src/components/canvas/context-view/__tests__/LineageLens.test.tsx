@@ -666,10 +666,13 @@ describe('LineageLens graph mode', () => {
   })
 
   // The Grain control is DEAD; this is what replaced it. One question
-  // in plain words — Grouped (default) or Flat — because the old
+  // in plain words — Detail (default) or Summary — because the old
   // type-name chips could not even express a choice on a self-nesting
-  // estate: Node ⊃ Node ⊃ Node is one type at three depths.
-  it('draws GROUPED by default and flattens on one click — self-nesting estate', () => {
+  // estate: Node ⊃ Node ⊃ Node is one type at three depths. Detail is
+  // the default because the default must SHOW THE RECORDS: Summary as
+  // default absorbed real loaded neighbours into their ancestor, which
+  // read as the user's lineage being replaced by random values.
+  it('opens in DETAIL — the records themselves; SUMMARY is one click, not the default', () => {
     const prevSchema = useSchemaStore.getState().schema
     useSchemaStore.setState({
       schema: {
@@ -693,16 +696,15 @@ describe('LineageLens graph mode', () => {
       } as never)
       renderLens(['F'])
 
-      // Grouped is simply how it opens — nothing to configure.
-      expect(screen.getByRole('button', { name: 'Grouped' }).getAttribute('aria-pressed')).toBe('true')
-      // One card for the whole chain, at its outermost container.
+      // Detail is simply how it opens — the finest record survives the
+      // restatement fold, and nothing real hides behind an ancestor.
+      expect(screen.getByRole('button', { name: 'Detail' }).getAttribute('aria-pressed')).toBe('true')
+      expect(screen.getAllByText('label-leaf').length).toBeGreaterThan(0)
+
+      // Summary: the whole chain as one card at its outermost container.
+      fireEvent.click(screen.getByRole('button', { name: 'Summary' }))
       expect(screen.getAllByText('label-outer').length).toBeGreaterThan(0)
       expect(screen.queryByText('label-leaf')).toBeNull()
-
-      // Flat: every connected entity as its own card — the deepest
-      // survives the restatement fold instead.
-      fireEvent.click(screen.getByRole('button', { name: 'Flat' }))
-      expect(screen.getAllByText('label-leaf').length).toBeGreaterThan(0)
     } finally {
       useSchemaStore.setState({ schema: prevSchema } as never)
     }

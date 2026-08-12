@@ -1240,13 +1240,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         // connected entity missing from it is still shown (appended):
         // the pair-filtered open can resolve a grain deeper than direct
         // children, and dropping a real connection would be a lie.
-        // Connected found NOTHING but the children are loaded → show
-        // them. A container the user opened must never render as a
-        // blank box: "nothing here connects" is an answer, and the
-        // roster beneath it is how they keep going without leaving.
-        const fellBackToRoster = !showAll && inside.length === 0
-          && (all?.children.length ?? 0) > 0
-        const roster = showAll || fellBackToRoster
+        const roster = showAll
           ? (() => {
               const seen = new Set<string>()
               const list: LineageNode[] = []
@@ -1268,7 +1262,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
         // is clamped to what has loaded, so paging past the fetched set
         // holds the last real page (and shows the frame's loading state)
         // instead of rendering an empty window.
-        const pageSize = showAll || fellBackToRoster ? FRAME_ALL_CAP : FRAME_CHILD_CAP
+        const pageSize = showAll ? FRAME_ALL_CAP : FRAME_CHILD_CAP
         const lastLoadedPage = Math.max(0, Math.ceil(roster.length / pageSize) - 1)
         const framePage = Math.min(Math.max(0, framePages?.get(openKey) ?? 0), lastLoadedPage)
         const shownInside = roster.slice(framePage * pageSize, framePage * pageSize + pageSize)
@@ -1312,7 +1306,7 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
           frameBreadcrumb: (res?.passedThrough ?? []).map(n => labelOf(n.id, n)),
           frameTruncated: res?.truncated ?? false,
           frameEmpty: res?.empty ?? false,
-          frameShowingAll: showAll || fellBackToRoster,
+          frameShowingAll: showAll,
           frameConnectedCount: connectedTotal,
           frameLoaded: roster.length,
           // Known only once the last page lands, or from the container's

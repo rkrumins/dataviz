@@ -80,8 +80,10 @@ describe('useFrameCamera', () => {
     )
     flush()
     expect(fitView).toHaveBeenCalledTimes(2)
-    // The card that arrived, and the card it attached to — not the focal.
-    expect(fitView.mock.calls[1][0].nodes).toEqual([{ id: 'n:new' }, { id: 'n:x' }])
+    // The card that arrived, the card it attached to — and ALWAYS the
+    // focal. An async answer panning the viewport to itself is how
+    // "the actual focus node has disappeared" happened.
+    expect(fitView.mock.calls[1][0].nodes).toEqual([{ id: 'n:new' }, { id: 'n:x' }, { id: 'f' }])
   })
 
   it('holds still while a frame churns its rows', () => {

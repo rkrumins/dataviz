@@ -1290,14 +1290,14 @@ describe('buildFocusGraph — caps, chips, filter', () => {
     expect(g.cards.some(c => c.id === 'n:Dom')).toBe(false)
   })
 
-  // REGRESSION: opening a container asks two questions at once — "what
-  // is in here" and "which of it reaches my focal" — and the frame
-  // rendered NOTHING unless the second succeeded. So a Data Domain
-  // whose lineage query came back empty was a dead end: the only way on
-  // was to leave the Lens, expand on the canvas, and come back. The
-  // first question is cheap and always answerable; it must never be
-  // held hostage by the second.
-  it('falls back to the child roster when nothing inside connects', () => {
+  // An empty lineage answer is an ANSWER. The frame says "nothing here
+  // connects" and stops — it must never substitute the container's
+  // arbitrary children for the lineage it failed to find. That ambush
+  // shipped briefly as a "helpful" fallback, and inside a lineage view
+  // it read as random values replacing the user's real upstream. The
+  // roster stays one deliberate click away, on the frame's own
+  // Connected ⇄ All toggle.
+  it('an empty open shows NOTHING inside — the roster only on explicit All', () => {
     const base = {
       nodes: [node('F'), node('Dom', 'DATADOMAIN')],
       edges: [edge('e1', 'Dom', 'F')],
@@ -1310,27 +1310,22 @@ describe('buildFocusGraph — caps, chips, filter', () => {
         nodes: [], edges: [], passedThrough: [], truncated: false, empty: true,
       }]]),
       containerStatus: new Map([['in:Dom', 'done' as const]]),
+      // Children are LOADED — the ambush would have shown them.
+      frameAllResults: new Map([['in:Dom', {
+        children: [node('app1'), node('app2')], hasMore: false, total: 2,
+      }]]),
     }
 
-    // Nothing loaded yet — the frame is honestly empty, not pretending.
-    const bare = build({ ...base, over })
-    expect(bare.cards.filter(c => c.frameId === 'fr:in:Dom')).toHaveLength(0)
+    // Not asked for → honestly empty, whatever happens to be cached.
+    const honest = build({ ...base, over })
+    expect(honest.cards.filter(c => c.frameId === 'fr:in:Dom')).toHaveLength(0)
+    expect(card(honest, 'fr:in:Dom').frameEmpty).toBe(true)
+    expect(card(honest, 'fr:in:Dom').frameShowingAll).toBe(false)
 
-    // Children arrive → they render, and the frame SAYS it is showing
-    // the roster so "0 connected" never sits above a list of things.
-    const withKids = build({
-      ...base,
-      over: {
-        ...over,
-        frameAllResults: new Map([['in:Dom', {
-          children: [node('app1'), node('app2')], hasMore: false, total: 2,
-        }]]),
-      },
-    })
-    const rows = withKids.cards.filter(c => c.frameId === 'fr:in:Dom')
+    // The user flips to All → the roster shows, claiming nothing.
+    const all = build({ ...base, over: { ...over, frameShowAll: new Set(['in:Dom']) } })
+    const rows = all.cards.filter(c => c.frameId === 'fr:in:Dom')
     expect(rows.map(c => c.nodeId)).toEqual(['app1', 'app2'])
-    expect(card(withKids, 'fr:in:Dom').frameShowingAll).toBe(true)
-    // And they claim nothing they cannot back up.
     expect(rows.every(c => !c.connected && c.count === 0)).toBe(true)
   })
 })

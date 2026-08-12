@@ -815,24 +815,33 @@ export function LineageLens({
     }
   }, [nodeId, graphCur.frameShowAll, onLoadAllChildren, containerResults])
 
-  /** GROUPED | FLAT — the only view question the graph body asks, in
-   * plain words. The old control ("Grain: AUTO | SCHEMAFIELD |
-   * CONTAINER | …") asked a business user to pick an ontology level by
-   * its type name — vocabulary they never had, and on a self-nesting
-   * estate (Node ⊃ Node ⊃ Node) one type name covers three depths, so
-   * the control could not even EXPRESS the choice. It is gone.
+  /** DETAIL | SUMMARY — the only view question the graph body asks.
    *
-   * Grouped (default): each connection appears once, at its outermost
-   * container, drawn as a frame that resolves into the detail — depth
-   * reads as structure. Flat: every connected entity as its own card.
-   * The type chips beside it still hide types; that is filtering, a
-   * different question, and it never needed to be fused with this one. */
-  const [lensView, setLensView] = useState<{ nodeId: string | null; view: 'grouped' | 'flat' }>(
-    () => ({ nodeId: null, view: 'grouped' }),
+   * Detail (default) is the lineage view, plainly: the focal in the
+   * middle, its direct upstream and downstream as the data reports
+   * them, expandable a hop at a time. A connection reported again at
+   * coarser levels folds into its finest card (drawing both would be
+   * duplication), and children still group inside their parent's frame
+   * — but nothing REAL is ever hidden behind an ancestor.
+   *
+   * Summary folds the other way — each connection once, at its
+   * outermost container. Useful for a crowded board; catastrophic as a
+   * default, which is how it shipped for one commit: with concrete
+   * tables already loaded, the summary fold absorbed the user's REAL
+   * neighbours into a Domain card, and the board appeared to replace
+   * their lineage with random values. The default must show the
+   * records.
+   *
+   * (The old control — "Grain: AUTO | SCHEMAFIELD | …" — asked for an
+   * ontology level by type name, which a self-nesting estate cannot
+   * even express. The type chips beside this survive: hiding a type is
+   * filtering, a different question.) */
+  const [lensView, setLensView] = useState<{ nodeId: string | null; view: 'detail' | 'summary' }>(
+    () => ({ nodeId: null, view: 'detail' }),
   )
-  const graphView = lensView.nodeId === nodeId ? lensView.view : 'grouped'
+  const graphView = lensView.nodeId === nodeId ? lensView.view : 'detail'
   const setGraphView = useCallback(
-    (view: 'grouped' | 'flat') => setLensView({ nodeId, view }),
+    (view: 'detail' | 'summary') => setLensView({ nodeId, view }),
     [nodeId],
   )
 
@@ -871,7 +880,7 @@ export function LineageLens({
       bandPages: graphCur.bandPages,
       query,
       hiddenTypes,
-      grainFold: graphView === 'grouped' ? 'topmost' : 'finest',
+      grainFold: graphView === 'summary' ? 'topmost' : 'finest',
       degreeHints,
       fetchStatus,
     })
@@ -941,31 +950,12 @@ export function LineageLens({
     }
   }, [focusGraph, nodeId, onOpenContainer, entityLevels, containerStatus, containerResults])
 
-  /**
-   * An open that finds no lineage falls back to WHAT IS INSIDE.
-   *
-   * Opening a container asks two questions at once — "what is in here"
-   * and "which of it reaches my focal" — and the frame used to render
-   * nothing unless the second succeeded. So a Domain whose lineage
-   * query came back empty became a dead end: the only way on was to
-   * leave the Lens, expand on the canvas, and come back. The first
-   * question is cheap, always answerable, and already implemented; it
-   * should never be held hostage by the second.
-   *
-   * This effect only FETCHES. Whether to render the roster is derived
-   * in the builder from "connected is empty and children are loaded",
-   * not stored — so it cannot fight the user's own Connected|All
-   * choice, and Connected stays the default everywhere it has an
-   * answer to give.
-   */
-  useEffect(() => {
-    if (!containerResults || !onLoadAllChildren) return
-    for (const [key, res] of containerResults) {
-      if (!res.empty || containerStatus?.get(key) !== 'done') continue
-      if (frameAllResults?.has(key) || frameAllStatus?.has(key)) continue
-      onLoadAllChildren(key, '')
-    }
-  }, [containerResults, containerStatus, frameAllResults, frameAllStatus, onLoadAllChildren])
+  // An open that finds no lineage says so and STOPS. It used to flip
+  // itself to "everything inside" — helpful for browsing, but inside a
+  // LINEAGE view it presented a container's arbitrary children as if
+  // they were the focal's lineage: the reported "random values". The
+  // Connected ⇄ All toggle on the frame still offers the roster as a
+  // deliberate act; nothing offers it as an ambush.
 
   // Type chips for graph mode — one row across both directions (the
   // list columns render their own per-column rows).
@@ -1528,16 +1518,17 @@ export function LineageLens({
                 is exactly where the tallest bands start. */}
             {(graphTypeChips.length > 0 || focusGraph.hiddenByChips > 0) && (
               <div className="flex-shrink-0 flex flex-wrap items-center gap-x-2 gap-y-1 px-3 pt-2 pb-1">
-                {/* GROUPED | FLAT — one question, plain words. See the
-                    lensView state for why the old Grain control died. */}
+                {/* DETAIL | SUMMARY — one question, plain words. See
+                    the lensView state for why the old Grain control
+                    died and why Detail is the default. */}
                 <div
                   role="group"
                   aria-label="How to draw the connections"
                   className="flex items-center gap-0.5 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.03]"
                 >
                   {([
-                    ['grouped', 'Grouped', 'Each connection once, at its outermost container — open the frame for the detail'],
-                    ['flat', 'Flat', 'Every connected entity as its own card'],
+                    ['detail', 'Detail', 'The lineage as the data reports it — every connected entity, expandable a hop at a time'],
+                    ['summary', 'Summary', 'Each connection once, at its outermost container'],
                   ] as const).map(([value, label, hint]) => (
                     <button
                       key={value}

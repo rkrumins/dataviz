@@ -70,7 +70,7 @@ function buildGraph(fixture: (typeof FIXTURES)[string]) {
     bandPages: new Map(),
     query: '',
     hiddenTypes: new Set(),
-    grainFold: 'topmost',
+    grainFold: 'finest',
     ...over,
   }
   // Mirror what LineageLens passes: the focal describes the BOARD, not

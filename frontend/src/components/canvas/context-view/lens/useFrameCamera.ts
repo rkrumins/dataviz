@@ -83,6 +83,13 @@ export function useFrameCamera(
       const frame = [
         ...arrived.map(c => c.id),
         ...cards.filter(c => c.nodeId && anchors.has(c.nodeId)).map(c => c.id),
+        // THE one unbreakable rule: the focal is in every frame this
+        // camera ever eases to. Answers arriving asynchronously — an
+        // auto-resolved container, a slow expansion — used to pan the
+        // viewport to themselves, and the entity the user focused left
+        // the screen: "the actual focus node has disappeared". The
+        // focal is the question; no answer is allowed to displace it.
+        'f',
       ]
       void rf.fitView({
         nodes: frame.map(id => ({ id })),
