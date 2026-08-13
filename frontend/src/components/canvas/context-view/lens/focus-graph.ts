@@ -191,6 +191,28 @@ export type FocusCardKind = 'focal' | 'entity' | 'contains' | 'overflow' | 'fram
  */
 export type FocusExpandKind = 'open' | 'hop' | 'more' | 'retry' | 'focus' | null
 
+/**
+ * The ⊕ on a walk card, in exactly one of three states — set by
+ * `focus-layout.ts`, never by this builder.
+ *
+ *   reveal — neighbours ALREADY in the walk model that this page has not
+ *            shown yet. Costs nothing to click, and the count is exact.
+ *   extend — the server says more exists BEYOND the model. `count` is the
+ *            exact remainder when it reported a total, and null when it
+ *            genuinely does not know — never a fabricated number.
+ *   page   — the server handed back a cursor for a partial adjacency;
+ *            `cursor` is carried verbatim and never interpreted.
+ *
+ * `key` is `${'in'|'out'}:${urn}` naming the node the click acts on.
+ */
+export interface FocusPill {
+  kind: 'reveal' | 'extend' | 'page'
+  count: number | null
+  key: string
+  cursor?: string
+  status?: 'loading' | 'error'
+}
+
 export interface FocusCard {
   /** Stable across rebuilds so shared cards glide between focal swaps:
    *  'f' | n:urn | g:dir:parentUrn | c:urn | fr:dir:urn | more:dir:band */
@@ -333,6 +355,23 @@ export interface FocusCard {
    *  still closed so you can often skip opening it. Only ever from
    *  data already in hand — never a speculative fetch. */
   previewLabels: string[]
+
+  // ── Walk-model fields (focus-layout.ts only) ──────────────────────
+  // Optional by construction: THIS builder never sets any of them, and
+  // the view renders the walk branches only where `walk` is present, so
+  // the two builders can both be on the board during the rebuild.
+
+  /** Built by `buildFocusLayout` from the walk model. The view's
+   *  discriminator for every branch below. */
+  walk?: true
+  /** The ⊕ on this card's upstream side, or null when drained. */
+  pillUp?: FocusPill | null
+  /** The ⊕ on this card's downstream side, or null when drained. */
+  pillDown?: FocusPill | null
+  /** What is inside, at the two grains that matter: how many of its
+   *  contents are ON THIS LINEAGE, and how many it holds in total (null
+   *  when the count is genuinely unknown — a floor is not a total). */
+  contents?: { onLineage: number; total: number | null } | null
 }
 
 export interface FocusEdge {
@@ -346,6 +385,10 @@ export interface FocusEdge {
   /** Dashed focal→child containment tether (not a flow edge). */
   containment: boolean
   dimmed: boolean
+  /** Walk model only (focus-layout.ts): this hop runs BACKWARDS in the
+   *  picture's own hop numbering, so it closes a loop. Drawn with a
+   *  cycle badge rather than silently overlapping a forward wire. */
+  cycleBack?: boolean
 }
 
 export interface FocusGraphInput {
@@ -1748,7 +1791,12 @@ export function buildFocusGraph(input: FocusGraphInput): FocusGraph {
  * and positioned inside the frame afterwards. That keeps the band maths
  * (and its determinism) exactly as it was.
  */
-function layoutBands(cards: FocusCard[]) {
+/** Stack and size a built card list in place: frames deepest-first (an
+ *  outer frame's height sums its children's), then bands, then each
+ *  frame's rows inside it. Exported for `focus-layout.ts` — the walk
+ *  builder produces the same card shapes and must lay them out the same
+ *  way, and two copies of this would drift. */
+export function layoutBands(cards: FocusCard[]) {
   // Size every frame to its children first, so the band can stack it as
   // a single unit.
   const childrenByFrame = new Map<string, FocusCard[]>()
