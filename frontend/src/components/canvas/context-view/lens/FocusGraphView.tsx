@@ -73,7 +73,7 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, FRAME_FOOTER_H, framePager, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph } from './focus-graph'
+import { CARD_W, BAND_GAP, FRAME_FOOTER_H, framePager, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill } from './focus-graph'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 
 /** Direction tints — the house semantics: upstream = sky, downstream
@@ -134,6 +134,17 @@ interface CardCtx {
   onRetryFetch?: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
+  // ── Walk model (cards built by focus-layout.ts) ──────────────────
+  // All optional: a caller still on the old builder passes none of
+  // them, and no card it produces can reach the branches that use them.
+  /** Show the next page of neighbours ALREADY in the walk model —
+   *  a re-projection, never a fetch. Keyed `${'in'|'out'}:${urn}`. */
+  onRevealMore?: (key: string) => void
+  /** Fetch one further hop from this card, in this direction. */
+  onExtend?: (key: string, nodeId: string, dir: 'in' | 'out') => void
+  /** Page a partially-loaded adjacency further, with the server's own
+   *  cursor carried back verbatim. */
+  onPage?: (nodeId: string, dir: 'in' | 'out', cursor: string) => void
 }
 
 interface FocusGraphViewProps {
@@ -168,14 +179,17 @@ interface FocusGraphViewProps {
   onRetryFetch?: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
+  onRevealMore?: (key: string) => void
+  onExtend?: (key: string, nodeId: string, dir: 'in' | 'out') => void
+  onPage?: (nodeId: string, dir: 'in' | 'out', cursor: string) => void
 }
 
 const iconByName = (name: string): LucideIcons.LucideIcon =>
   (LucideIcons as unknown as Record<string, LucideIcons.LucideIcon>)[name] ?? LucideIcons.Box
 
-/** Flat equality over a built card. Every field is a primitive or a
- *  frozen string array, so this is exact and cheap enough to run per
- *  card per rebuild. */
+/** Flat equality over a built card. Every field is a primitive, a frozen
+ *  string array, or one of the walk builder's small records, so this is
+ *  exact and cheap enough to run per card per rebuild. */
 function sameCard(a: FocusCard, b: FocusCard): boolean {
   if (a === b) return true
   const keys = Object.keys(a) as Array<keyof FocusCard>
@@ -184,6 +198,23 @@ function sameCard(a: FocusCard, b: FocusCard): boolean {
     if (k === 'frameBreadcrumb' || k === 'previewLabels' || k === 'partnerIds' || k === 'ancestry' || k === 'ancestryIds' || k === 'alsoAtGrains') {
       const x = a[k], y = b[k]
       if (x.length !== y.length || x.some((v, i) => v !== y[i])) return false
+      continue
+    }
+    // The walk builder returns fresh records every rebuild, so these
+    // have to be compared by VALUE — by reference they would never
+    // match and the memo boundary this function exists for would be
+    // gone the moment the lens moved onto the walk model.
+    if (k === 'pillUp' || k === 'pillDown') {
+      const x = a[k] ?? null, y = b[k] ?? null
+      if (x === null || y === null) { if (x !== y) return false; continue }
+      if (x.kind !== y.kind || x.count !== y.count || x.key !== y.key
+        || x.cursor !== y.cursor || x.status !== y.status) return false
+      continue
+    }
+    if (k === 'contents') {
+      const x = a[k] ?? null, y = b[k] ?? null
+      if (x === null || y === null) { if (x !== y) return false; continue }
+      if (x.onLineage !== y.onLineage || x.total !== y.total) return false
       continue
     }
     if (a[k] !== b[k]) return false
@@ -412,7 +443,11 @@ function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
         : `Show what's inside ${card.label}`}
       onClick={(e) => {
         e.stopPropagation()
-        if (pureContainment) ctx.onToggleContains(card.nodeId!)
+        // On the walk model, "what's inside" is always a re-projection
+        // over the model already in hand — expanding can never reach
+        // outside the lineage, so it never fetches.
+        if (card.walk) ctx.onToggleFrame(card.expandKey!)
+        else if (pureContainment) ctx.onToggleContains(card.nodeId!)
         else if (card.frameLocal) ctx.onToggleFrame(card.expandKey!)
         else ctx.onOpenContainer(card.expandKey!, card.nodeId!, card.type, card.partnerIds[0] ?? null)
       }}
@@ -506,6 +541,143 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   )
 }
 
+/** The node a pill's click acts on. The key is `${dir}:${urn}`, and a
+ *  PAGE names the node the server's cursor belongs to, which is not
+ *  always the card the pill hangs off (a collapsed table's pill pages
+ *  the column underneath it). */
+const pillTarget = (key: string): string => key.slice(key.indexOf(':') + 1)
+
+/**
+ * The walk model's ⊕, in one of three states — and the state is the
+ * whole point, because they cost different things and promise different
+ * things:
+ *
+ *   reveal — show more of what is ALREADY downloaded. Instant, exact.
+ *   page   — ask the server for the rest of THIS node's connections,
+ *            with its own cursor.
+ *   extend — walk one hop further out from here.
+ *
+ * A drained direction gets no pill at all rather than a control that
+ * would do nothing; `WalkPills` stamps the end of the walk instead.
+ */
+function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; dir: 'in' | 'out'; ctx: CardCtx }) {
+  const upstream = dir === 'in'
+  // Upstream hangs off the left edge, downstream off the right: the pill
+  // points the way the data flows, so a card carrying both is readable.
+  const pos = card.frameId
+    ? (upstream ? 'left-1 -translate-x-1/2' : 'right-1 translate-x-1/2')
+    : (upstream ? 'right-full mr-1.5' : 'left-full ml-1.5')
+  const base = 'nodrag pointer-events-auto absolute top-1/2 -translate-y-1/2 flex items-center justify-center gap-0.5 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors'
+  const side = upstream ? 'upstream' : 'downstream'
+  const act = () => {
+    if (pill.kind === 'reveal') ctx.onRevealMore?.(pill.key)
+    else if (pill.kind === 'page' && pill.cursor) ctx.onPage?.(pillTarget(pill.key), dir, pill.cursor)
+    else ctx.onExtend?.(pill.key, pillTarget(pill.key), dir)
+  }
+
+  if (pill.status === 'loading') {
+    return (
+      <span className={cn(base, 'w-5 bg-canvas-elevated border-accent-lineage/40', pos)}>
+        <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage" aria-label={`Fetching ${side} lineage`} />
+      </span>
+    )
+  }
+  if (pill.status === 'error') {
+    // Same key, same click: retry is the action that failed, not a
+    // different one, so it cannot drift out of step with it.
+    return (
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); act() }}
+        title={`Couldn't fetch what's ${side} of ${card.label} — click to try again`}
+        aria-label={`Retry fetching ${side} of ${card.label}`}
+        className={cn(base, 'w-5 bg-canvas-elevated border-amber-500/60 text-amber-600 dark:text-amber-400 hover:bg-amber-500/10', pos)}
+      >
+        <LucideIcons.AlertTriangle className="w-3 h-3" />
+      </button>
+    )
+  }
+
+  const n = pill.count
+  const title = pill.kind === 'reveal'
+    ? `Show ${n?.toLocaleString()} more ${side} — already loaded, nothing to fetch`
+    : pill.kind === 'page'
+      ? `Load the rest of what is ${side} of ${card.label}${n != null ? ` (${n.toLocaleString()} more)` : ''}`
+      : `Walk one hop further ${side} of ${card.label}${n != null ? ` (${n.toLocaleString()} more)` : ''}`
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); act() }}
+      title={title}
+      aria-label={title}
+      className={cn(
+        base,
+        n != null ? 'px-1.5' : 'w-5',
+        // Free (already in hand) reads as the lens's own accent; a
+        // fetch is quieter, because it costs a round trip.
+        pill.kind === 'reveal'
+          ? 'bg-accent-lineage/12 border-accent-lineage/45 text-accent-lineage hover:bg-accent-lineage/25'
+          : 'bg-canvas-elevated border-black/15 dark:border-white/20 text-ink-muted hover:text-accent-lineage hover:border-accent-lineage/50',
+        pos,
+      )}
+    >
+      {upstream && <LucideIcons.Plus className="w-2.5 h-2.5" />}
+      {/* A count only ever renders when the model actually knows one. */}
+      {n != null && n.toLocaleString()}
+      {!upstream && <LucideIcons.Plus className="w-2.5 h-2.5" />}
+    </button>
+  )
+}
+
+/** Both sides of a walk card, or — when neither side has anything left
+ *  to offer — the mark that the walk genuinely ends here. */
+function WalkPills({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
+  if (!card.walk) return null
+  if (!card.pillUp && !card.pillDown) {
+    if (!card.deadEnd) return null
+    const upstream = card.band < 0
+    return (
+      <span
+        title={`No further ${upstream ? 'upstream' : 'downstream'} lineage in the data source — the walk ends here`}
+        aria-label={`End of ${upstream ? 'upstream' : 'downstream'} lineage`}
+        className={cn(
+          'pointer-events-none absolute top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded-full bg-canvas-elevated border border-black/10 dark:border-white/15 text-ink-muted/50',
+          card.frameId
+            ? (upstream ? 'left-1 -translate-x-1/2' : 'right-1 translate-x-1/2')
+            : (upstream ? 'right-full mr-1.5' : 'left-full ml-1.5'),
+        )}
+      >
+        <LucideIcons.CircleSlash className="w-3 h-3" />
+      </span>
+    )
+  }
+  return (
+    <>
+      {card.pillUp && <WalkPill card={card} pill={card.pillUp} dir="in" ctx={ctx} />}
+      {card.pillDown && <WalkPill card={card} pill={card.pillDown} dir="out" ctx={ctx} />}
+    </>
+  )
+}
+
+/** What is inside, at the only two grains that matter: how much of it is
+ *  on this lineage, and how much there is altogether. "3 on this lineage
+ *  · of 12" is the sentence that makes a collapsed container safe to
+ *  leave collapsed. The total is omitted rather than guessed. */
+function ContentsCount({ card }: { card: FocusCard }) {
+  if (!card.contents) return null
+  const { onLineage, total } = card.contents
+  return (
+    <span
+      className="flex-shrink-0 tabular-nums"
+      title={total != null
+        ? `${onLineage.toLocaleString()} of the ${total.toLocaleString()} things inside ${card.label} carry lineage here`
+        : `${onLineage.toLocaleString()} things inside ${card.label} carry lineage here`}
+    >
+      {onLineage.toLocaleString()} on this lineage{total != null ? ` · of ${total.toLocaleString()}` : ''}
+    </span>
+  )
+}
+
 function FocusGraphCard({ data, selected }: NodeProps) {
   const { card, ctx, focalStats } = data as unknown as {
     card: FocusCard
@@ -593,6 +765,9 @@ function FocusGraphCard({ data, selected }: NodeProps) {
         )}
       >
         <PortHandles focal />
+        {/* The focus is where a walk starts, so both of its ⊕ live here
+            — upstream on the left edge, downstream on the right. */}
+        <WalkPills card={card} ctx={ctx} />
         <div className="flex items-center gap-1.5">
           <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5" />
           <p className="text-[9.5px] font-bold uppercase tracking-[0.12em] truncate" style={{ color: accent }}>
@@ -800,6 +975,12 @@ function FocusGraphCard({ data, selected }: NodeProps) {
               ×{card.count.toLocaleString()}
             </span>
           )}
+          {card.contents && (
+            <>
+              <span className="text-ink-muted/40">·</span>
+              <ContentsCount card={card} />
+            </>
+          )}
           {card.unresolved && <span className="italic flex-shrink-0">· not on canvas</span>}
         </p>
         {/* Name a few of the things a closed container stands for, so
@@ -812,6 +993,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       </div>
       <CardActions card={card} ctx={ctx} />
       <FrontierPill card={card} ctx={ctx} />
+      <WalkPills card={card} ctx={ctx} />
     </div>
   )
 }
@@ -875,6 +1057,9 @@ function FocusFrameNode({ data }: NodeProps) {
       className="relative rounded-xl border-2 border-dashed bg-black/[0.02] dark:bg-white/[0.03] pointer-events-none"
     >
       <PortHandles />
+      {/* An open container keeps its own lineage question: looking
+          inside something must never end the walk. */}
+      <WalkPills card={card} ctx={ctx} />
       {/* Header — the only interactive part; the body is click-through
           so the child cards above stay reachable. */}
       <div className="pointer-events-auto absolute inset-x-0 top-0 h-[46px] px-2.5 flex items-center gap-1.5">
@@ -917,15 +1102,24 @@ function FocusFrameNode({ data }: NodeProps) {
             )}
             {card.fetch === 'loading'
               ? 'Looking inside…'
-              : card.frameEmpty && !card.frameShowingAll
-                ? card.frameTruncated ? `cut short before finding anything connected${to}` : `nothing connected${to || ' inside'}`
-                : inside}
+              : card.walk && card.contents
+                // The walk knows both numbers exactly: what is in here on
+                // this lineage, and what is in here altogether.
+                ? <ContentsCount card={card} />
+                : card.frameEmpty && !card.frameShowingAll
+                  ? card.frameTruncated ? `cut short before finding anything connected${to}` : `nothing connected${to || ' inside'}`
+                  : inside}
           </p>
         </div>
         {/* Connected ⇄ All. The default answers "what in here touches my
             entity"; All answers "what else is in here", with lineage
             still drawn wherever it exists. */}
-        {ctx.onToggleFrameAll && !card.frameLocal && (
+        {/* A walk frame is `frameLocal` (collapsing it is a
+            re-projection, never a fetch) but its roster is NOT complete:
+            the model knows what carries lineage, and only the children
+            endpoint knows what else is in there. So it keeps the
+            toggle. */}
+        {ctx.onToggleFrameAll && (!card.frameLocal || card.walk) && (
           <div
             role="group"
             aria-label={`What to show inside ${card.label}`}
@@ -1143,6 +1337,7 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     containment: boolean
     dimmed: boolean
     tint: string
+    cycleBack?: boolean
   }
   // Hover emphasis is derived here from context: the edges ARRAY stays
   // identity-stable, so sweeping the pointer never rebuilds it (nor
@@ -1171,13 +1366,28 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
           transition: 'opacity 120ms, stroke-width 120ms',
         }}
       />
-      {d.count > 1 && !d.dimmed && (
+      {(d.count > 1 || d.cycleBack) && !d.dimmed && (
         <EdgeLabelRenderer>
           <div
             style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`, opacity: hoverActive && !emphasized ? 0.3 : 1 }}
-            className="absolute pointer-events-none px-1 py-px rounded-full bg-canvas-elevated border border-black/10 dark:border-white/10 text-[8.5px] font-semibold tabular-nums text-ink-muted shadow-sm"
+            className={cn(
+              'absolute pointer-events-none px-1 py-px rounded-full bg-canvas-elevated border border-black/10 dark:border-white/10 text-[8.5px] font-semibold tabular-nums text-ink-muted shadow-sm',
+              // Only a cycle badge needs to sit beside a count; a bare
+              // count keeps exactly the box it has always had.
+              d.cycleBack && 'flex items-center gap-0.5',
+            )}
           >
-            ×{d.count.toLocaleString()}
+            {/* This hop runs back towards the focus rather than away
+                from it: the lineage loops. Said out loud, because two
+                wires between the same pair otherwise read as a
+                duplicate rather than a cycle. */}
+            {d.cycleBack && (
+              <LucideIcons.RefreshCcw
+                className="w-2 h-2 text-amber-600 dark:text-amber-400"
+                aria-label="This connection loops back"
+              />
+            )}
+            {d.count > 1 && `×${d.count.toLocaleString()}`}
           </div>
         </EdgeLabelRenderer>
       )}
@@ -1330,6 +1540,9 @@ export function FocusGraphView({
   onRetryFetch,
   onRevealOnCanvas,
   onOpenDetails,
+  onRevealMore,
+  onExtend,
+  onPage,
 }: FocusGraphViewProps) {
   // Type visuals resolved ONCE per schema for the whole graph. Cards
   // used to each subscribe to the schema store and linear-scan the
@@ -1374,7 +1587,10 @@ export function FocusGraphView({
     onRetryFetch,
     onRevealOnCanvas,
     onOpenDetails,
-  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleFrame, onOpenContainer, onExpandFrontier, onToggleContains, onRetryContains, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails])
+    onRevealMore,
+    onExtend,
+    onPage,
+  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleFrame, onOpenContainer, onExpandFrontier, onToggleContains, onRetryContains, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails, onRevealMore, onExtend, onPage])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out
@@ -1535,7 +1751,7 @@ export function FocusGraphView({
         markerEnd: e.containment
           ? undefined
           : { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
-        data: { count: e.count, aggregated: e.aggregated, containment: e.containment, dimmed: e.dimmed, tint },
+        data: { count: e.count, aggregated: e.aggregated, containment: e.containment, dimmed: e.dimmed, tint, cycleBack: e.cycleBack },
       }
     })
   }, [graph.cards, graph.edges])
