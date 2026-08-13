@@ -347,7 +347,11 @@ async def test_trace_closure_after_cursor_bad_format_422(graph_client):
 
 async def test_trace_closure_provider_not_implemented_returns_501(test_client: AsyncClient):
     """A provider that doesn't support trace_closure maps to 501, not a
-    500 — the endpoint's compute path wraps NotImplementedError."""
+    500, on the scope-is-None / direct-compute path — this mock engine
+    carries no workspace scope, same as `graph_client`, so `_cache_scope`
+    returns None and `GraphCache.get_or_compute` is never called. See
+    test_trace_closure_provider_not_implemented_returns_501_through_cache_wrapper
+    below for the same proof through the real cache wrapper."""
     from backend.app.main import app
     from backend.app.api.v1.endpoints.graph import get_context_engine
 
@@ -368,6 +372,100 @@ async def test_trace_closure_provider_not_implemented_returns_501(test_client: A
 
     assert resp.status_code == 501
     assert resp.json()["detail"]["code"] == "trace_closure_unsupported"
+
+
+# `graph_client`'s mock engine has no workspace/data-source scope, so every
+# test above hits `_cache_scope`'s None branch and never reaches
+# `GraphCache.get_or_compute` — the two tests below give the engine a real
+# scope (same technique as the `top_level_client` fixture) and swap in a
+# real `GraphCache` backed by a minimal mocked redis client (same technique
+# as test_graph_cache.py's `_make_redis()`, not the trivial passthrough
+# `_PassthroughGraphCache` uses) so the response has genuinely round-tripped
+# through `GraphCache.get_or_compute` — generation read, cache-miss lookup,
+# `result.model_dump_json()`, `cache_redis.set()` — the thing that actually
+# exercises `model_cls=TraceClosureResult` as a new subclass usage and the
+# try/except's placement around the real (not bypassed) call.
+
+def _make_scoped_engine_and_cache(provider):
+    from backend.app.services.graph_cache import GraphCache
+
+    engine = ContextEngine(provider=provider)
+    engine._workspace_id = "ws1"
+    engine._data_source_id = "ds1"
+
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)  # unconditional cache miss
+    redis.set = AsyncMock(return_value=True)
+    return engine, GraphCache(redis), redis
+
+
+async def test_trace_closure_returns_scoped_lineage_through_cache_wrapper(test_client: AsyncClient, monkeypatch):
+    """Success path through the real GraphCache.get_or_compute: the
+    frontier (and its totalCount/nextCursor) and seedTruncated must
+    survive the serialize/cache-write round trip, not just a direct
+    compute() call."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    mock_engine, real_cache, redis = _make_scoped_engine_and_cache(_StubProvider())
+    urn = _get_sample_urn(mock_engine)
+
+    async def _override():
+        return mock_engine
+
+    app.dependency_overrides[graph_module.get_context_engine] = _override
+    monkeypatch.setattr(graph_module, "get_graph_cache", lambda: real_cache)
+    try:
+        resp = await test_client.post(
+            "/api/v1/test-ws/graph/trace/closure",
+            json={"urn": urn},
+        )
+    finally:
+        app.dependency_overrides.pop(graph_module.get_context_engine, None)
+
+    assert resp.status_code == 200, resp.text
+    # Proof this ran through get_or_compute, not the scope-is-None bypass:
+    # the generation/cache-lookup GET and the primary+LKG cache SET both fired.
+    assert redis.get.await_count >= 1
+    assert redis.set.await_count >= 1
+    body = resp.json()
+    assert body["frontierUp"][0]["totalCount"] == 7
+    assert body["frontierUp"][0]["nextCursor"] == "e:42"
+    assert body["seedTruncated"] is False
+
+
+async def test_trace_closure_provider_not_implemented_returns_501_through_cache_wrapper(test_client: AsyncClient, monkeypatch):
+    """Same scope-resolving setup as the success case above, but with the
+    NotImplementedError-raising provider: proves the endpoint's
+    try/except wraps the REAL get_or_compute call (whose own exception
+    handling re-raises through a singleflight future) rather than only
+    the scope-is-None direct-compute shortcut the sibling 501 test above
+    exercises."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    mock_engine, real_cache, redis = _make_scoped_engine_and_cache(_NotImplementedClosureProvider())
+    urn = _get_sample_urn(mock_engine)
+
+    async def _override():
+        return mock_engine
+
+    app.dependency_overrides[graph_module.get_context_engine] = _override
+    monkeypatch.setattr(graph_module, "get_graph_cache", lambda: real_cache)
+    try:
+        resp = await test_client.post(
+            "/api/v1/test-ws/graph/trace/closure",
+            json={"urn": urn},
+        )
+    finally:
+        app.dependency_overrides.pop(graph_module.get_context_engine, None)
+
+    assert resp.status_code == 501
+    assert resp.json()["detail"]["code"] == "trace_closure_unsupported"
+    # Reached (and raised inside) the real cache flow, not the bypass: the
+    # generation/cache-lookup GET fired; no result ever reached the SET side.
+    assert redis.get.await_count >= 1
+    assert redis.set.await_count == 0
 
 
 # ── GET /nodes/{urn} ──────────────────────────────────────────────────

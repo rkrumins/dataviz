@@ -900,7 +900,9 @@ async def trace_closure(
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
 
     if request.seed_urns is not None or request.exclude_urns is not None:
-        # seedUrns/excludeUrns are semantically sets; sorting stabilizes the cache key.
+        # seedUrns/excludeUrns are semantically sets; sorting stabilizes the cache
+        # key. The provider receives these same sorted lists (not just the cache
+        # key) — harmless, since its own walk treats them as sets too.
         request = request.model_copy(update={
             "seed_urns": sorted(request.seed_urns) if request.seed_urns is not None else None,
             "exclude_urns": sorted(request.exclude_urns) if request.exclude_urns is not None else None,
