@@ -10,16 +10,18 @@ click, and the picture is laid out for you.
 
 Here you'll learn to:
 
-- **Open the Lens** from a dense node, the Anchor Rail, or a curated View.
-- **Read its layout** — sources on the left, consumers on the right, the focused
-  entity in the middle.
-- **Walk a chain** of connections without ever touching the canvas, with
-  Back/Forward to retrace every step.
-- **Expand the picture** one hop at a time, exactly like dedicated lineage
-  tools.
+- **Open the Lens** on any entity — a keystroke or a right-click, a dense
+  node's own chip, the Anchor Rail, or a curated View.
+- **Read its layout** — sources on the left, consumers on the right, the
+  focused entity in the middle.
+- **Walk a chain** of connections one hop at a time, straight from the data
+  source, with Back/Forward to retrace every step.
 - **Rearrange it** by dragging cards around, with every connection following.
-- **Open a container** into just the entities inside it that touch your focus
-  — or into everything it holds, with the connected ones marked.
+- **Open a container** into just the entities inside it that touch your focus,
+  at any depth — or into everything it holds, with the connected ones marked.
+- **Set how far a new focus reaches**, look at just the cause or just the
+  impact, and see how any card connects back to what you're looking at.
+- **Share exactly what you found**, or export it as data.
 - **See lineage beyond a View's boundary** and preview what sits outside it.
 
 ## What the Lens shows
@@ -31,42 +33,51 @@ left and its **data consumers** (downstream) to the right, connected by
 direction-tinted edges.
 
 Data flows **left to right** throughout, so the layout reads the same way the
-canvas does. Each connected entity appears **once per direction**, however many
-relationships reach it: when a rolled-up summary and a direct relationship both
-describe the same connection, they read as one card, with the extra
-relationship named on it rather than given a second card of its own. Neighbors
-that belong to the same parent — say, six fields of one dataset — are drawn
-**inside a frame named for that dataset**, one row each, with their own counts
-and their own wires. A column is never a peer of its own table: where it comes
-from is the box it sits in, not a caption you have to squint at. Wide tables
-page a **fixed window** through the frame ("page 3 of 12") rather than growing
-it, so a 500-column source sits on the board like any other card. Coarser
-partners connected **directly to your focal** — a domain, a platform — resolve
-on their own: the Lens walks down through the levels between you and them and
-shows the entities at **your grain** inside a frame, with the walked path as
-its breadcrumb (`⋯ › PROD › CURATED › RISK_DB`). Focus a table and the picture
-is tables, however many containment levels the estate stacks above them.
-Coarser cards further out stay summarized until you open them. Closed
-frames **name a few of the things they hold**, so you can often tell what's in
-there without opening one, and the focal's own
-fields start tucked behind a single "contains N" card rather than fanning
-across the middle of the picture. Open that and each field carries its own
-chevron, so the focal's structure unfolds as deep as it goes without leaving
-the entity you focused. Above the frames, the focal names **where it lives** —
-`Snowflake › OrderApp › fact_orders` — as a breadcrumb you can click to move up
-a level. Deep hierarchies stay readable because the levels above the cards are
-*text*, never nested boxes: the picture is two levels deep however many levels
-the estate has. The focal card shows a quick tally — how many
-connections come *in* and how many go *out* — and, once measured, its
-**reach**: how many distinct entities it touches transitively upstream and
-downstream ("Reaches 12 upstream · 47 downstream"), the change-impact answer
-Focus mode usually gets opened for. A capped measurement shows as a floor
-("47+") — the Lens never invents a number. Numbers here always match the
-canvas, because the Lens reads the same connections you see on screen.
+canvas does. Each connected entity appears **once**, however many
+relationships reach it — when more than one hop connects it to your focus, the
+card and the wire between them say so ("×3") rather than drawing it twice.
+Neighbors that belong to the same parent — say, six fields of one dataset —
+are drawn **inside a frame named for that dataset**, one row each, with their
+own counts and their own wires. A column is never a peer of its own table:
+where it comes from is the box it sits in, not a caption you have to squint
+at. Wide tables page a **fixed window** through the frame ("page 3 of 12")
+rather than growing it, so a 500-column source sits on the board like any
+other card. Coarser partners connected **directly to your focal** — a domain,
+a platform — resolve on their own: the Lens walks down through the levels
+between you and them and shows the entities at **your grain** inside a frame,
+with the walked path as its breadcrumb (`⋯ › PROD › CURATED › RISK_DB`). Focus
+a table and the picture is tables, however many containment levels the estate
+stacks above them. Coarser cards further out stay summarized until you open
+them. A closed card says **how much is inside** — how many of its contents sit
+on this lineage and how many it holds altogether — so you can often tell
+whether it's worth opening without opening it.
+
+The focal's own structure is part of the picture from the moment you focus —
+open it further, one chevron at a time, and it keeps unfolding: table →
+column → field → sub-field, exactly as deep as the estate actually goes. There
+is no cap on nesting; a self-nesting hierarchy nests in the Lens exactly as
+many times as it does in the data source. Above the frames, the focal names
+**where it lives** — `Snowflake › OrderApp › fact_orders` — as a breadcrumb
+you can click to move up a level; those levels are always *text*, never
+another nested box, so a deep hierarchy stays readable instead of turning into
+boxes inside boxes inside boxes. The focal card shows a quick tally — how many
+connections come *in* and how many go *out* — and its **reach so far**: how
+many distinct entities the walk has reached, transitively, upstream and
+downstream ("Reach: 12 upstream · 47 downstream"). This isn't a separate
+measurement; it's exactly what the walk has found up to this point, so it
+grows as you click ⊕ to reach further. While the data source has more than the
+walk has reached yet, the number shows as a floor ("47+") — the Lens never
+invents a number. **Every number here is the data source's own truth, fetched
+live the moment you focus** — whether or not the canvas happens to have that
+entity loaded. The Lens never answers a lineage question by reading the
+canvas; it asks the data source directly, one hop at a time, and shows exactly
+what came back.
 
 Prefer scanning to exploring? The **Graph | List** toggle in the header swaps
 the body for the classic three-column list (sources | focal | consumers,
-grouped by parent with type chips). The Lens remembers your choice.
+grouped by parent with type chips). Both bodies count connections the same
+way off the same walk, so the two never disagree. The Lens remembers your
+choice.
 
 ```mermaid
 flowchart LR
@@ -88,6 +99,8 @@ flowchart LR
 
 There are a few natural ways in:
 
+- **Select any entity and press F** — or right-click it and choose **Focus
+  Connections**. This works everywhere, any time, on any entity.
 - When an entity has a **large connection fan**, the canvas shows only its
   strongest links to stay legible, and a chip appears reading *"Strongest N of
   M"* with an **Open lens** button. That's your cue that there's more to see.
@@ -108,37 +121,54 @@ The Lens is built for exploring, not just reading:
   identity, its own in/out counts, and actions. Nothing jumps: focusing is
   always a deliberate second gesture.
 - **Double-click a card** (or use **Focus here** in the strip) to re-center
-  the Lens on that entity. Its own sources and consumers lay out around it,
-  and the step is recorded in your **path**.
+  the Lens on that entity. The Lens fetches that entity's own neighbours from
+  the data source — instantly, if you've already visited it earlier in this
+  session — and the step is recorded in your **path**.
 - **Back and Forward** — buttons in the header, or the **←/→** keys — retrace
   your walk in either direction, exactly like browser history: stepping back
   never loses where you'd been, and the hops ahead of you stay visible
   (dimmed) in the **Path** trail. Click any chip in the trail to jump straight
   there. Focusing somewhere new after stepping back starts a fresh forward
   path from that point.
-- **Expand a hop** with the **⊕ pill** on a card's outer edge to fetch and
-  reveal *that* entity's next hop of lineage — growing the graph outward from
-  your focus point, one deliberate step at a time. When the total is known,
-  the pill shows it (**+12**); the Lens never invents a number.
+- **Walk one hop further** with the **⊕ pill** on a card's outer edge. The
+  Lens starts by fetching just your focus and its immediate neighbours —
+  one hop each way by default, or however many you've set (below) — directly
+  from the data source. Click ⊕ and the Lens shows more of that entity's
+  lineage: instantly, if an earlier hop already brought back more than fit on
+  the board, or with a quick fetch for *that one entity's* next hop once
+  there's nothing left in hand. Either way it adds exactly what comes back,
+  never more, and never a guess. When the data source has told the Lens
+  precisely how many more connections are waiting, the pill says so
+  (**+12**); when it hasn't, the pill still offers the click with no number
+  attached — there may be more, the Lens simply hasn't asked yet. A hub with
+  more connections than fit in one response hands back a bookmark, and the
+  same ⊕ keeps pulling from where it left off, unnoticed, until the hub is
+  drained. A **⊘** where a pill would be is a genuine dead end: the data
+  source has confirmed there is nothing further that way, and the Lens only
+  ever says that once the walk has actually finished asking — never as a
+  guess.
+- A small **loop icon** on a wire means that hop curls back *toward* your
+  focus rather than away from it — the lineage genuinely cycles, and the Lens
+  says so rather than letting two wires between the same pair read as a plain
+  duplicate.
 - **Open any card into what's inside it** with the **chevron** on its body —
   a column of a table, the tables of a platform, the fields of a column. This
   is a different question from the ⊕ pill next to it, and the two never
   interfere: a card can offer both, and looking inside something never ends
-  the walk through it. The chevron appears whenever the *ontology* says that
-  type can hold something, so it is offered consistently rather than only
-  where a count happened to be loaded — an open that finds nothing says so,
-  which is a real answer.
+  the walk through it. Opening costs no fetch at all — it's a re-projection of
+  lineage the Lens already holds — so it's instant, and it nests as deep as
+  the estate actually goes.
 
   The card unfolds into a frame holding **only the entities inside it that
   connect to the card it hangs off**. At the first hop that's the entity you
   focused; further out it's the card's own partner, and the frame's header
   names it ("4 connected to `STG_ORDERS`") so you always know which question
   was answered. Those children are ordinary cards with chevrons of their own,
-  so frames nest: table → column → field, without ever re-centering. A
-  platform that merely passes lineage through a single container is walked
-  through for you, with the levels it skipped shown in the frame's header.
-  Frames say how many they hold and state plainly when nothing inside
-  connects rather than leaving you guessing.
+  so frames nest — table → column → field, without ever re-centering, and
+  without limit. A platform that merely passes lineage through a single
+  container is walked through for you, with the levels it skipped shown in
+  the frame's header. Frames say how many they hold and state plainly when
+  nothing inside connects rather than leaving you guessing.
 - **Show everything inside**, not just the connected part, with the small
   toggle in a frame's header (**⛓ Connected** | **▤ All**). "All" lists every
   column, table or dataset the container holds, in the source system's own
@@ -158,6 +188,19 @@ The Lens is built for exploring, not just reading:
   searches the *whole* container in the data source, not just the page on
   screen, so a column on page 7 is one keystroke away. A new search starts
   the list again at page 1, and the counts say what they're scoped to.
+- **Choose how far a new focus reaches** with the depth control in the header
+  (**1 / 2 / 3** hops each way). This only governs what happens the *next*
+  time you focus somewhere new — an entity already on the board keeps
+  whatever depth it was fetched at, so turning the dial up never re-fetches
+  what you're already looking at.
+- **Look at just one side of the story** with the direction control —
+  **Both**, **Root cause** (upstream only), or **Impact** (downstream only).
+  This only changes what's drawn: the Lens still holds both directions
+  underneath, so flipping back is instant and every count stays exactly what
+  it was.
+- **See how a card connects back to your focus** by hovering or selecting it
+  — every wire on some shortest path back to the focus lights up and the rest
+  of the picture dims. When two routes are equally short, both light up.
 - **Drag a card anywhere** to arrange the picture the way you read it. Every
   connection follows the card it belongs to — moving things changes only where
   they sit, never what connects to what. An opened container moves as one
@@ -166,17 +209,24 @@ The Lens is built for exploring, not just reading:
   resetting; **Tidy up** in the corner controls puts everything back where the
   Lens placed it.
 - **Filter connections** with the search box in the header — matching cards
-  stay bright while the rest dim (a collapsed parent card tells you how many
-  matches it's holding), so a match can never silently vanish.
+  stay bright while the rest dim, so you can spot what matters in a crowded
+  picture at a glance. The filter searches what's currently on the board; open
+  a container first if what you're after might be tucked inside it.
 - Cards offer two quiet actions on hover alongside Focus: **Reveal on canvas**
   (scrolls the real entity into view) and **Open details** (opens its details
   panel). The path itself is a deliverable too — **Copy path** and **Show on
   canvas** live at the end of the trail.
 - **Share the exploration** with the link button in the header: it copies a
   URL that reopens this exact picture — the walked path, the focused entity,
-  everything you expanded, and which frames you left showing all their
-  children — for a colleague. And the **image button** in the corner controls
-  downloads the graph as a PNG for a deck or a doc.
+  every hop you've revealed or expanded, which containers you opened and how
+  you left them (Connected or All, and which page or search each one was on),
+  plus your depth and direction settings — for a colleague. An older link
+  someone sends you still opens on the right entity and the right walked
+  path; it just won't carry the newer extras a link copied today does. The
+  **image button** in the corner controls downloads the graph as a PNG for a
+  deck or a doc, and the two **export** buttons beside it download the same
+  picture as **JSON** or **CSV** — exactly the entities and connections on
+  screen right now, as data for a script or a spreadsheet.
 
 All of this follows you as you explore: double-click a card to focus it and
 the same opening, expanding and filtering apply to that entity's own
