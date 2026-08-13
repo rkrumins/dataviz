@@ -94,7 +94,7 @@ import { LayerColumn } from './LayerColumn'
 import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom } from './fitZoom'
-import { LineageLens } from './LineageLens'
+import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
   EMPTY_LENS_HISTORY,
   lensFocalOf,
@@ -3113,8 +3113,24 @@ export function ContextViewCanvas({
   // stepping Back is instant. Lens-local: never written to the canvas
   // store.
   const lensFocal = lensFocalOf(lensHistory)
-  const lensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
+  const userLensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
+  // A share v2 link's `depth` overrides the pref for exactly the
+  // RESTORED focal's initial fetch: useLensWalk's own cache guard
+  // (`startedRef`) means this can only ever matter for that ONE fetch —
+  // once it has fired (or for any other focal), the user's own
+  // preference is what's in effect, so this never becomes a silent,
+  // permanent override for the rest of the session.
+  const lensInitialDepth = initialLensShare && initialLensShare.v === 2 && lensFocal === initialLensShare.entries[initialLensShare.cursor]
+    ? initialLensShare.depth
+    : userLensInitialDepth
   const lensWalk = useLensWalk(lensFocal, provider, lensInitialDepth)
+  // The rest of a restored exploration — applied once, inside the lens,
+  // to the same focal the depth override above targets.
+  const lensWalkSeed = useMemo<LensWalkSeed | null>(() => {
+    if (!initialLensShare || initialLensShare.v !== 2) return null
+    const { entries, cursor, direction, revealed, opened, collapsed, frameAll, framePages, frameQueries } = initialLensShare
+    return { nodeId: entries[cursor], direction, revealed, opened, collapsed, frameAll, framePages, frameQueries }
+  }, [initialLensShare])
   // "What is really inside this entity" — membership, which the lineage
   // walk structurally cannot answer (it only ever knows the
   // participants). A separate, separately-paged fetch for that reason.
@@ -3903,6 +3919,7 @@ export function ContextViewCanvas({
           history={lensHistory}
           walk={lensWalkEntry}
           walkApi={lensWalkApi}
+          walkSeed={lensWalkSeed}
           childrenAll={lensChildren.allResults}
           childrenAllStatus={lensChildren.allStatus}
           onLoadChildrenOf={loadLensChildrenOf}

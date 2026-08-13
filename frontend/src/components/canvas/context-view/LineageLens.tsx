@@ -46,6 +46,7 @@ import {
 import {
   buildFocusLayout,
   initialLensViewState,
+  type LensDirectionFilter,
   type LensFetchStatus,
   type LensRoster,
   type LensViewState,
@@ -191,6 +192,28 @@ export interface LensWalkApi {
   retry: (focusUrn: string) => void
 }
 
+/**
+ * A restored exploration, applied ONCE to the focal it names — decoded
+ * from a share v2 token (see shareCodec.ts). `revealed`/`opened`/
+ * `collapsed`/`frameAll`/`framePages`/`frameQueries` are exactly a
+ * `LensViewState`'s own fields; a revealed key whose card never lands in
+ * the fetched model simply no-ops under the population fixpoint — the
+ * same safety `buildFocusLayout` already gives a stale key, so a seed
+ * can never reach outside the walk it is applied to. Frontier EXTENDS
+ * are deliberately not encoded (they cost a round trip); the restored
+ * board just shows their honest pills instead of replaying the fetch. */
+export interface LensWalkSeed {
+  /** Applied once this exact focal's walk entry reaches 'done'. */
+  nodeId: string
+  direction: LensDirectionFilter
+  revealed: Array<[string, number]>
+  opened: string[]
+  collapsed: string[]
+  frameAll: string[]
+  framePages: Array<[string, number]>
+  frameQueries: Array<[string, string]>
+}
+
 export interface LineageLensProps {
   /** Focus history; entries[cursor] is the current focal. Empty = closed. */
   history: LensHistory
@@ -200,6 +223,9 @@ export interface LineageLensProps {
   /** Growing that model: one further hop, one further page, or again
    *  after a failure. */
   walkApi: LensWalkApi
+  /** A shared exploration to restore, once. Applied to the focal it
+   *  names the moment that focal's walk lands (see LensWalkSeed). */
+  walkSeed?: LensWalkSeed | null
   /** "What is really inside this entity" per urn — membership, which
    *  lineage cannot answer (useLensChildren). */
   childrenAll?: ReadonlyMap<string, LensRoster>
@@ -240,6 +266,7 @@ export function LineageLens({
   history,
   walk,
   walkApi,
+  walkSeed = null,
   childrenAll = EMPTY_ROSTERS,
   childrenAllStatus = EMPTY_ROSTER_STATUS,
   onLoadAllChildren,
@@ -309,13 +336,9 @@ export function LineageLens({
   const initialView = useMemo(() => initialLensViewState(sg), [sg])
   const [viewState, setViewState] = useState<{ nodeId: string | null; view: LensViewState } | null>(null)
   // Discarded on re-center, exactly like the filter and chip state: a
-  // new focal is a new question, not a continuation of this one.
-  //
-  // Restoring a SHARED exploration lands here in the next task, which
-  // re-encodes this state as share v2. The v1 fields (collapsed /
-  // frontier / containers / contains / framePages / frameQueries)
-  // describe a state model that no longer exists, so nothing consumes
-  // them: a v1 link still restores the walked path and the body mode.
+  // new focal is a new question, not a continuation of this one — EXCEPT
+  // for a one-time seed restored from a share link (below), which is the
+  // sanctioned way a focal's starting view can be anything but default.
   const view = viewState?.nodeId === nodeId ? viewState.view : initialView
   const editView = useCallback((edit: (base: LensViewState) => LensViewState) => {
     setViewState(prev => ({
@@ -336,11 +359,47 @@ export function LineageLens({
     return { nodeId, types: next }
   })
 
+  // Direction preset — VIEW-SIDE filter (the fetch always stays 'both';
+  // see focus-layout.ts's `directionFilter`). Per-focal like the other
+  // lens-local state above, so re-centering starts at "Both" again.
+  const [directionState, setDirectionState] = useState<{ nodeId: string | null; dir: LensDirectionFilter }>({ nodeId: null, dir: 'both' })
+  const directionFilter = directionState.nodeId === nodeId ? directionState.dir : 'both'
+  const setDirectionFilter = (dir: LensDirectionFilter) => setDirectionState({ nodeId, dir })
+
   const lensViewMode = usePreferencesStore((s) => s.lensViewMode)
   const setLensViewMode = usePreferencesStore((s) => s.setLensViewMode)
   const lensFrameChildren = usePreferencesStore((s) => s.lensFrameChildren)
   const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
+  const lensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
+  const setLensInitialDepth = usePreferencesStore((s) => s.setLensInitialDepth)
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
+
+  // Restore a shared exploration — ONCE, the moment the seed's own focal
+  // is the one on screen AND its walk has actually landed (a revealed key
+  // means nothing until the model it points into exists). Guarded by a
+  // ref rather than folded into the nodeId-keyed state above: THAT state
+  // is keyed to "whichever focal is current" and rebuilding it on every
+  // walk-status tick would fight the user's own edits the instant they
+  // made one before the walk settled.
+  const seedAppliedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!walkSeed || walkSeed.nodeId !== nodeId || walkStatus !== 'done') return
+    if (seedAppliedRef.current === nodeId) return
+    seedAppliedRef.current = nodeId
+    setViewState({
+      nodeId,
+      view: {
+        selection: null,
+        revealed: new Map(walkSeed.revealed),
+        expandedContainment: new Set(walkSeed.opened),
+        collapsedContainment: new Set(walkSeed.collapsed),
+        frameShowAll: new Set(walkSeed.frameAll),
+        frameQueries: new Map(walkSeed.frameQueries),
+        framePages: new Map(walkSeed.framePages),
+      },
+    })
+    setDirectionState({ nodeId, dir: walkSeed.direction })
+  }, [walkSeed, nodeId, walkStatus])
 
   const layout = useMemo(() => buildFocusLayout({
     sg,
@@ -351,7 +410,8 @@ export function LineageLens({
     childrenAll,
     childrenAllStatus,
     walkStatus,
-  }), [sg, view, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus])
+    directionFilter,
+  }), [sg, view, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter])
 
   const neighbors = useMemo(() => walkNeighborRecords(sg), [sg])
   const inConnections = neighbors.incoming.reduce((n, r) => n + r.weight, 0)
@@ -602,22 +662,24 @@ export function LineageLens({
     }
   }, [view.selection, sg])
 
-  // ── Share this exploration — the walked path as a link a colleague
-  // can open. The EXPLORATION half is re-encoded in the next task; a
-  // link written today restores the path and the body mode.
+  // ── Share this exploration — the walked path AND the current focal's
+  // exploration (revealed/opened/searched, the direction preset, the
+  // depth control) as a link a colleague can open exactly where you left
+  // it. Encoded on demand, from whatever is on screen right now.
   const [shareCopied, setShareCopied] = useState(false)
   const copyShareLink = () => {
     const token = encodeLensShare({
       entries,
       cursor,
       mode: lensViewMode,
-      closed: [],
-      frontier: [],
-      containers: [],
-      frameAll: [],
-      contains: [],
-      framePages: [],
-      frameQueries: [],
+      direction: directionFilter,
+      depth: lensInitialDepth,
+      revealed: [...view.revealed],
+      opened: [...view.expandedContainment],
+      collapsed: [...view.collapsedContainment],
+      frameAll: [...view.frameShowAll],
+      framePages: [...view.framePages],
+      frameQueries: [...view.frameQueries],
     })
     const url = new URL(window.location.href)
     url.searchParams.set('lens', token)
@@ -854,6 +916,35 @@ export function LineageLens({
                   {shareCopied ? <LucideIcons.Check className="w-4 h-4" /> : <LucideIcons.Link2 className="w-4 h-4" />}
                 </button>
               </InfoTooltip>
+              {/* Initial depth — how many hops each direction a NEWLY
+                  focused entity fetches. Never refetches the current
+                  focal: a card already in hand keeps the depth it was
+                  fetched at (useLensWalk's own cache contract), so this
+                  control only ever changes what happens NEXT. */}
+              <div
+                data-tour="lens-depth"
+                role="group"
+                aria-label="Hops to fetch when you focus a new entity"
+                className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+              >
+                {([1, 2, 3] as const).map((d) => (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => setLensInitialDepth(d)}
+                    title={`Fetch ${d} hop${d === 1 ? '' : 's'} each way for entities you focus next — this entity keeps the depth it was already fetched at`}
+                    aria-pressed={lensInitialDepth === d}
+                    className={cn(
+                      'flex items-center justify-center w-6 h-6 rounded-md text-[10.5px] font-semibold tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                      lensInitialDepth === d
+                        ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                        : 'text-ink-muted hover:text-ink',
+                    )}
+                  >
+                    {d}
+                  </button>
+                ))}
+              </div>
               {/* What a container opens into, by default. Each frame can
                   still be flipped on its own; this sets the starting
                   point for the next one you open (persisted). */}
@@ -879,6 +970,45 @@ export function LineageLens({
                       className={cn(
                         'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                         lensFrameChildren === mode
+                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                          : 'text-ink-muted hover:text-ink',
+                      )}
+                    >
+                      <Icon className="w-3 h-3" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Direction preset — a VIEW-side filter: the fetch always
+                  stays 'both' at the chosen depth (cache-friendly,
+                  instant toggling, counts stay true), and only what
+                  DRAWS changes. Plain-language labels for business
+                  readers, with the technical direction as the tooltip. */}
+              {lensViewMode === 'graph' && (
+                <div
+                  data-tour="lens-direction"
+                  role="group"
+                  aria-label="Which direction to show"
+                  className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  {([
+                    { dir: 'both', Icon: LucideIcons.ArrowLeftRight, label: 'Both',
+                      title: 'Show upstream and downstream' },
+                    { dir: 'in', Icon: LucideIcons.ArrowDownLeft, label: 'Root cause',
+                      title: 'Show only what feeds this entity — upstream' },
+                    { dir: 'out', Icon: LucideIcons.ArrowUpRight, label: 'Impact',
+                      title: 'Show only what this entity feeds — downstream' },
+                  ] as const).map(({ dir, Icon, label, title }) => (
+                    <button
+                      key={dir}
+                      type="button"
+                      onClick={() => setDirectionFilter(dir)}
+                      title={title}
+                      aria-pressed={directionFilter === dir}
+                      className={cn(
+                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                        directionFilter === dir
                           ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
                           : 'text-ink-muted hover:text-ink',
                       )}
@@ -1160,6 +1290,7 @@ export function LineageLens({
                 focalFetch={walkStatus === 'unsupported' ? undefined : walkStatus}
                 focalReach={reach}
                 exportName={focalLabel}
+                directionFilter={directionFilter}
                 selectedId={view.selection}
                 reducedMotion={reducedMotion}
                 edgeTypeInfo={edgeTypeInfo}

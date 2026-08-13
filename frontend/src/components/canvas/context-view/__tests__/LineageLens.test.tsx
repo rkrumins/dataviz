@@ -16,11 +16,12 @@
 import type { ComponentProps } from 'react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, within, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest'
-import { LineageLens } from '../LineageLens'
+import { LineageLens, type LensWalkSeed } from '../LineageLens'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
+import { decodeLensShare } from '../lens/shareCodec'
 import type { WalkEntry } from '@/hooks/useLensWalk'
 import {
   toLensClosure,
@@ -249,6 +250,33 @@ describe('the business journey — a table\'s lineage through a seven-level esta
     )
     expect(screen.queryByText(/Walking the lineage from the data source/)).toBeNull()
     expect(onBoard('its_source')).toBe(true)
+  })
+
+  it('a mid-walk share restores the same picture — revealed, opened, preset, depth 2 — with no fetch beyond the initial', () => {
+    // What a colleague's link actually carries: they opened Sales's
+    // branch (which stays collapsed by default — see the "opens a
+    // branchy domain" test above) and filtered to Root cause only.
+    const walkSeed: LensWalkSeed = {
+      nodeId: 'F',
+      direction: 'in',
+      revealed: [['in:F', 1], ['out:F', 1]],
+      opened: ['FT', 'F', 'DOM', 'APP', 'CTR1', 'CTR2', 'DB', 'SALES'],
+      collapsed: [],
+      frameAll: [],
+      framePages: [],
+      frameQueries: [],
+    }
+    const { api } = renderLens(['F'], doneWalk(collateralsEstate()), { walkSeed })
+
+    // Opened by the seed, with no click.
+    expect(onBoard('orders_raw')).toBe(true)
+    expect(onBoard('refunds_raw')).toBe(true)
+    // Root cause only: the downstream card the preset hides.
+    expect(onBoard('risk_exposure_daily')).toBe(false)
+    // A seed is a re-projection over the model already fetched — never a
+    // round trip, however much it opens.
+    expect(api.extend).not.toHaveBeenCalled()
+    expect(api.page).not.toHaveBeenCalled()
   })
 })
 
@@ -574,6 +602,61 @@ describe('the shell around the picture', () => {
     expect(() => fireEvent.click(download)).not.toThrow()
   })
 
+  it('offers the walk as JSON and CSV downloads, beside the image export', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    renderLens(['b'], simple())
+    expect(() => fireEvent.click(screen.getByLabelText('Export lineage data as JSON'))).not.toThrow()
+    expect(() => fireEvent.click(screen.getByLabelText('Export lineage data as CSV'))).not.toThrow()
+  })
+
+  it('the initial-depth control is a preference, and touches no walk call', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 })
+    const { api } = renderLens(['b'], simple())
+    fireEvent.click(screen.getByTitle(/Fetch 2 hops each way/))
+    expect(usePreferencesStore.getState().lensInitialDepth).toBe(2)
+    // Changing it never touches the CURRENT focal's walk — only what a
+    // future focus fetches.
+    expect(api.extend).not.toHaveBeenCalled()
+    expect(api.retry).not.toHaveBeenCalled()
+    usePreferencesStore.setState({ lensInitialDepth: 1 })
+  })
+
+  it('the direction preset filters the board view-side, with no fetch, and toggles back cleanly', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    const { api } = renderLens(['b'], simple())
+    expect(onBoard('label-a')).toBe(true)
+    expect(onBoard('label-c')).toBe(true)
+
+    fireEvent.click(screen.getByTitle('Show only what feeds this entity — upstream'))
+    expect(onBoard('label-a')).toBe(true)
+    expect(onBoard('label-c')).toBe(false)
+    expect(api.extend).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByTitle('Show upstream and downstream'))
+    expect(onBoard('label-a')).toBe(true)
+    expect(onBoard('label-c')).toBe(true)
+  })
+
+  it('the share link encodes the exploration on screen as v2', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 2 })
+    const writeText = vi.fn()
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    renderLens(['F'], doneWalk(collateralsEstate()))
+    fireEvent.click(screen.getByTitle('Show only what feeds this entity — upstream'))
+    fireEvent.click(screen.getByLabelText('Copy exploration link'))
+
+    expect(writeText).toHaveBeenCalledTimes(1)
+    const url = new URL(writeText.mock.calls[0][0] as string)
+    const decoded = decodeLensShare(url.searchParams.get('lens') ?? '')
+    expect(decoded?.v).toBe(2)
+    if (decoded?.v !== 2) throw new Error('expected a v2 token')
+    expect(decoded.entries).toEqual(['F'])
+    expect(decoded.mode).toBe('graph')
+    expect(decoded.depth).toBe(2)
+    expect(decoded.direction).toBe('in')
+    usePreferencesStore.setState({ lensInitialDepth: 1 })
+  })
+
   it('every card is movable, and a frame carries its children rather than shedding them', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['F'], doneWalk(walkModel('F', {
@@ -604,6 +687,79 @@ describe('the shell around the picture', () => {
     fireEvent.click(screen.getByText('Reveal all on canvas'))
     expect(onClose).toHaveBeenCalled()
     expect(onLocateAll).toHaveBeenCalledWith(['a', 'c'])
+  })
+})
+
+// ── PATH-TO-FOCUS HIGHLIGHT ──────────────────────────────────────────
+
+describe('hovering or selecting a card highlights its path to the focus', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
+  afterEach(() => cleanup())
+
+  const simple = () => doneWalk(walkModel('b', {
+    nodes: [wnode('a', 'dataset', 'label-a'), wnode('b', 'dataset', 'label-b'), wnode('c', 'dataset', 'label-c')],
+    lineageEdges: [hop('a', 'b'), hop('b', 'c')],
+    upstreamUrns: new Set(['a']),
+    downstreamUrns: new Set(['c']),
+  }))
+  // The card's OWN root (role="button") carries the dimmed opacity class;
+  // `.react-flow__node` is React Flow's wrapper one level further out.
+  // A SELECTED card's label is also echoed in the detail strip below the
+  // board, so disambiguate by picking the match that lives on the board.
+  const nodeFor = (label: string) => {
+    const onCanvas = screen.getAllByText(label).find(el => el.closest('.react-flow__node'))!
+    return onCanvas.closest('[role="button"]')!
+  }
+
+  it('selecting a card dims everything not on its path to the focus', () => {
+    renderLens(['b'], simple())
+    fireEvent.click(screen.getByText('label-a'))
+    // 'a' is one direct hop from the focus 'b' — 'c' is not on that path.
+    expect(nodeFor('label-c').className).toContain('opacity-30')
+    expect(nodeFor('label-a').className).not.toContain('opacity-30')
+  })
+
+  it('deselecting (pane click) clears the highlight — nothing stays dimmed', () => {
+    renderLens(['b'], simple())
+    fireEvent.click(screen.getByText('label-a'))
+    expect(nodeFor('label-c').className).toContain('opacity-30')
+    fireEvent.click(document.querySelector('.react-flow__pane')!)
+    expect(nodeFor('label-c').className).not.toContain('opacity-30')
+  })
+
+  it('hovering (past the 150ms intent delay) also highlights the path, and clears on mouse leave', () => {
+    vi.useFakeTimers()
+    try {
+      renderLens(['b'], simple())
+      fireEvent.mouseEnter(nodeFor('label-a'))
+      act(() => { vi.advanceTimersByTime(149) })
+      expect(nodeFor('label-c').className).not.toContain('opacity-30')
+      act(() => { vi.advanceTimersByTime(1) })
+      expect(nodeFor('label-c').className).toContain('opacity-30')
+      fireEvent.mouseLeave(nodeFor('label-a'))
+      expect(nodeFor('label-c').className).not.toContain('opacity-30')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a diamond highlights both branches', () => {
+    // H is two hops from the focus, so it needs A's and B's own pages
+    // revealed too — a seed is the simplest way to land it on the board
+    // without a click standing in for the thing under test.
+    const walkSeed: LensWalkSeed = {
+      nodeId: 'F', direction: 'both',
+      revealed: [['in:F', 1], ['out:F', 1], ['in:A', 1], ['in:B', 1]],
+      opened: [], collapsed: [], frameAll: [], framePages: [], frameQueries: [],
+    }
+    renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [wnode('H', 'dataset', 'hub'), wnode('A', 'dataset', 'branch_a'), wnode('B', 'dataset', 'branch_b'), wnode('F', 'dataset', 'the_focus')],
+      lineageEdges: [hop('H', 'A'), hop('A', 'F'), hop('H', 'B'), hop('B', 'F')],
+      upstreamUrns: new Set(['H', 'A', 'B']),
+    })), { walkSeed })
+    fireEvent.click(screen.getByText('hub'))
+    expect(nodeFor('branch_a').className).not.toContain('opacity-30')
+    expect(nodeFor('branch_b').className).not.toContain('opacity-30')
   })
 })
 

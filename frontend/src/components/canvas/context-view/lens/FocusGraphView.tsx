@@ -43,7 +43,7 @@
  * The viewport re-frames on FOCAL change only: expanding grows the
  * picture in place instead of yanking it away from what you opened.
  */
-import { createContext, memo, useCallback, useContext, useMemo, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -73,7 +73,7 @@ import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { CARD_W, BAND_GAP, FRAME_FOOTER_H, framePager, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
-import { REVEAL_PAGE } from './focus-layout'
+import { REVEAL_PAGE, pathToFocus, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 
 /** Direction tints — the house semantics: upstream = sky, downstream
@@ -94,6 +94,17 @@ const TINT_DOWN = '#f59e0b'
  */
 const HoverContext = createContext<string | null>(null)
 const ReachContext = createContext<LensReach | null>(null)
+/**
+ * Path-to-focus highlight — every card/edge id on SOME path between the
+ * hovered-with-intent (or selected) card and the focus (see
+ * `pathToFocus` in focus-layout.ts). `null` = no active highlight,
+ * meaning nothing dims — the SAME "no path: don't touch the picture"
+ * contract `pathToFocus` itself returns for an unreachable card.
+ * Context, not card/edge data: hovering must re-render the affected
+ * cards/edges alone, never rebuild the arrays (see the PERF CONTRACT
+ * above) — the same reason HoverContext/ReachContext exist.
+ */
+const PathHighlightContext = createContext<{ cardIds: ReadonlySet<string>; edgeKeys: ReadonlySet<string> } | null>(null)
 
 /** Shared empty overlay — a fresh Map would churn the nodes memo. */
 const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
@@ -149,8 +160,12 @@ interface FocusGraphViewProps {
   focalFetch?: 'loading' | 'done' | 'error'
   /** How far the walk has reached; null while it is still walking. */
   focalReach?: LensReach | null
-  /** Filename stem for the PNG export. */
+  /** Filename stem for the PNG/data export. */
   exportName?: string
+  /** The header's direction preset — an empty band it CAUSED must say
+   *  so, never "no lineage in the data source" (that is the filter's
+   *  doing, not a fact about the source). Defaults to 'both'. */
+  directionFilter?: LensDirectionFilter
   selectedId: string | null
   reducedMotion: boolean
   edgeTypeInfo?: EdgeTypeInfoMap
@@ -572,6 +587,10 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   // Reach arrives via context so a growing walk re-renders ONLY this
   // card — it used to invalidate every node in the graph.
   const focalReach = useContext(ReachContext)
+  // Same reasoning for the path-to-focus highlight: a hover must re-
+  // render only the cards whose dim state actually changed.
+  const pathHighlight = useContext(PathHighlightContext)
+  const pathDimmed = pathHighlight != null && !pathHighlight.cardIds.has(card.id)
   const accent = card.type === 'not loaded' ? '#94a3b8' : ctx.visualFor(card.type).color
 
   const activate = () => ctx.onSelect(card.nodeId)
@@ -597,7 +616,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
         className={cn(
           'group relative rounded-xl border-2 px-3.5 py-2.5 bg-canvas-elevated cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
           selected && 'ring-2 ring-accent-lineage ring-offset-1 ring-offset-canvas-elevated',
-          card.dimmed && 'opacity-30',
+          (card.dimmed || pathDimmed) && 'opacity-30',
         )}
       >
         <PortHandles />
@@ -672,7 +691,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
         className={cn(
           'group relative flex items-center gap-1.5 rounded-lg border border-dashed border-black/[0.08] dark:border-white/[0.09] bg-transparent px-2.5 cursor-pointer transition-colors hover:border-accent-lineage/40 hover:bg-black/[0.02] dark:hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
           selected && 'ring-2 ring-accent-lineage',
-          card.dimmed ? 'opacity-20' : 'opacity-60 hover:opacity-100',
+          card.dimmed || pathDimmed ? 'opacity-20' : 'opacity-60 hover:opacity-100',
         )}
       >
         <PortHandles />
@@ -698,7 +717,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       className={cn(
         'group relative flex items-center gap-2 rounded-lg border border-black/[0.07] dark:border-white/[0.08] px-2.5 cursor-pointer transition-colors bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
         selected && 'ring-2 ring-accent-lineage',
-        card.dimmed && 'opacity-30',
+        (card.dimmed || pathDimmed) && 'opacity-30',
       )}
     >
       <PortHandles />
@@ -775,6 +794,8 @@ function FocusGraphCard({ data, selected }: NodeProps) {
  */
 function FocusFrameNode({ data }: NodeProps) {
   const { card, ctx } = data as unknown as { card: FocusCard; ctx: CardCtx }
+  const pathHighlight = useContext(PathHighlightContext)
+  const pathDimmed = pathHighlight != null && !pathHighlight.cardIds.has(card.id)
   const accent = ctx.visualFor(card.type).color
   // The thing you asked about, when it happens to hold things. It reads
   // as the anchor — solid border, the accent glow the focal card has —
@@ -817,6 +838,7 @@ function FocusFrameNode({ data }: NodeProps) {
         isFocus
           ? 'bg-black/[0.03] dark:bg-white/[0.04]'
           : 'border-dashed bg-black/[0.02] dark:bg-white/[0.03]',
+        pathDimmed && 'opacity-30',
       )}
     >
       <PortHandles />
@@ -1043,6 +1065,7 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     dimmed: boolean
     tint: string
     cycleBack?: boolean
+    reducedMotion?: boolean
   }
   // Hover emphasis is derived here from context: the edges ARRAY stays
   // identity-stable, so sweeping the pointer never rebuilds it (nor
@@ -1050,10 +1073,13 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   const hoveredId = useContext(HoverContext)
   const hoverActive = hoveredId != null
   const emphasized = hoverActive && (source === hoveredId || target === hoveredId)
+  // Path-to-focus highlight — same context-routing reason as above.
+  const pathHighlight = useContext(PathHighlightContext)
+  const pathDimmed = pathHighlight != null && !pathHighlight.edgeKeys.has(id)
   const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
   // Hovering a card lights up ITS connections and quiets the rest —
   // the read-your-neighborhood gesture.
-  const opacity = d.dimmed ? 0.12
+  const opacity = d.dimmed || pathDimmed ? 0.12
     : emphasized ? 1
       : hoverActive ? 0.2
         : d.containment ? 0.45 : 0.7
@@ -1068,7 +1094,7 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
           strokeWidth: emphasized ? (d.aggregated ? 3 : 2.5) : d.aggregated ? 2 : 1.5,
           strokeDasharray: d.containment ? '4 4' : undefined,
           opacity,
-          transition: 'opacity 120ms, stroke-width 120ms',
+          transition: d.reducedMotion ? undefined : 'opacity 120ms, stroke-width 120ms',
         }}
       />
       {(d.count > 1 || d.cycleBack) && !d.dimmed && (
@@ -1104,11 +1130,25 @@ const EDGE_TYPES = { focusEdge: FocusGraphEdgeComp }
 
 // ── Controls ─────────────────────────────────────────────────────────
 
+/** Hand the browser a Blob to save, then release the object URL. No
+ *  server call — the data is already sitting in `graph`. */
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 /** House-styled zoom cluster (React Flow's default chrome doesn't
  *  match the lens). Must render inside <ReactFlow> for useReactFlow. */
-function GraphControls({ reducedMotion, exportName, onResetLayout }: {
+function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayout }: {
   reducedMotion: boolean
   exportName?: string
+  /** The VISIBLE picture and who it's about — source for the data export. */
+  graph: FocusGraph
+  focalUrn: string
   /** Present only once something has been dragged. */
   onResetLayout?: () => void
 }) {
@@ -1116,6 +1156,16 @@ function GraphControls({ reducedMotion, exportName, onResetLayout }: {
   const [exporting, setExporting] = useState(false)
   const dur = reducedMotion ? 0 : 200
   const btn = 'w-7 h-7 flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
+  const fileStem = `lineage-${(exportName ?? 'focus').replace(/[^\p{L}\p{N}_-]+/gu, '-')}`
+
+  const exportJson = () => {
+    const payload = buildWalkExport(graph, focalUrn)
+    downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), `${fileStem}.json`)
+  }
+  const exportCsv = () => {
+    const payload = buildWalkExport(graph, focalUrn)
+    downloadBlob(new Blob([walkExportToCsv(payload)], { type: 'text/csv' }), `${fileStem}.csv`)
+  }
 
   // PNG export: re-project the whole graph into a fixed frame and
   // rasterize the viewport pane (the standard React Flow recipe).
@@ -1209,6 +1259,27 @@ function GraphControls({ reducedMotion, exportName, onResetLayout }: {
             ? <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
             : <LucideIcons.ImageDown className="w-3.5 h-3.5" />}
         </button>
+        {/* Data export — the same VISIBLE picture as portable data, no
+            server call. Two entries rather than a menu: one click,
+            one file, same as the PNG button beside them. */}
+        <button
+          type="button"
+          title="Export this lineage as JSON (for scripts and other tools)"
+          aria-label="Export lineage data as JSON"
+          onClick={exportJson}
+          className={btn}
+        >
+          <LucideIcons.FileJson className="w-3.5 h-3.5" />
+        </button>
+        <button
+          type="button"
+          title="Export this lineage as CSV (for spreadsheets)"
+          aria-label="Export lineage data as CSV"
+          onClick={exportCsv}
+          className={btn}
+        >
+          <LucideIcons.FileSpreadsheet className="w-3.5 h-3.5" />
+        </button>
       </div>
     </Panel>
   )
@@ -1224,6 +1295,7 @@ export function FocusGraphView({
   focalFetch,
   focalReach,
   exportName,
+  directionFilter = 'both',
   selectedId,
   reducedMotion,
   edgeTypeInfo,
@@ -1364,9 +1436,14 @@ export function FocusGraphView({
           id: 'blw:in', type: 'bandLabel', position: { x: -(CARD_W + BAND_GAP), y: -10 },
           draggable: false, selectable: false, focusable: false,
           data: {
-            whisper: graph.hiddenByChipsIn > 0
-              ? `${graph.hiddenByChipsIn.toLocaleString()} upstream hidden by the type chips`
-              : 'No upstream sources in the data source',
+            // Priority: the user's OWN direction filter, then the type
+            // chips, then a genuine claim about the data source — never
+            // the wrong one of the three.
+            whisper: directionFilter === 'out'
+              ? 'Upstream hidden — showing Impact only'
+              : graph.hiddenByChipsIn > 0
+                ? `${graph.hiddenByChipsIn.toLocaleString()} upstream hidden by the type chips`
+                : 'No upstream sources in the data source',
           },
         })
       }
@@ -1375,15 +1452,17 @@ export function FocusGraphView({
           id: 'blw:out', type: 'bandLabel', position: { x: CARD_W + BAND_GAP, y: -10 },
           draggable: false, selectable: false, focusable: false,
           data: {
-            whisper: graph.hiddenByChipsOut > 0
-              ? `${graph.hiddenByChipsOut.toLocaleString()} downstream hidden by the type chips`
-              : 'No downstream consumers in the data source',
+            whisper: directionFilter === 'in'
+              ? 'Downstream hidden — showing Root cause only'
+              : graph.hiddenByChipsOut > 0
+                ? `${graph.hiddenByChipsOut.toLocaleString()} downstream hidden by the type chips`
+                : 'No downstream consumers in the data source',
           },
         })
       }
     }
     return nodes
-  }, [graph.cards, graph.bandTotals, graph.hiddenByChipsIn, graph.hiddenByChipsOut, ctx, focalIn, focalOut, focalFetch])
+  }, [graph.cards, graph.bandTotals, graph.hiddenByChipsIn, graph.hiddenByChipsOut, ctx, focalIn, focalOut, focalFetch, directionFilter])
 
   /**
    * Cards the user has dragged, by card id. The builder keeps producing
@@ -1439,15 +1518,43 @@ export function FocusGraphView({
         // Business users shouldn't infer direction from layout
         // convention alone — every hop carries an explicit arrowhead.
         markerEnd: { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
-        data: { count: e.count, dimmed: e.dimmed, tint, cycleBack: e.cycleBack },
+        data: { count: e.count, dimmed: e.dimmed, tint, cycleBack: e.cycleBack, reducedMotion },
       }
     })
-  }, [graph.cards, graph.edges])
+  }, [graph.cards, graph.edges, reducedMotion])
 
   const reachValue = useMemo(
     () => focalReach ?? null,
     [focalReach],
   )
+
+  // ── Path-to-focus highlight ──────────────────────────────────────
+  //
+  // Trigger is hover-WITH-INTENT (150ms, so a sweeping pointer doesn't
+  // strobe the board) OR selection — hover wins while it is active, so
+  // the two can never fight over what is drawn; releasing the hover
+  // falls back to whatever is selected, never to nothing.
+  const [pathHoverId, setPathHoverId] = useState<string | null>(null)
+  const pathHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (pathHoverTimer.current) clearTimeout(pathHoverTimer.current) }, [])
+
+  const focalCardId = useMemo(
+    () => graph.cards.find(c => c.nodeId === focalId)?.id ?? null,
+    [graph.cards, focalId],
+  )
+  const selectedCardId = useMemo(
+    () => (selectedId ? graph.cards.find(c => c.nodeId === selectedId)?.id ?? null : null),
+    [graph.cards, selectedId],
+  )
+  const pathSourceId = pathHoverId ?? selectedCardId
+  const pathHighlightValue = useMemo(() => {
+    if (!pathSourceId || !focalCardId) return null
+    const found = pathToFocus(graph.edges, pathSourceId, focalCardId)
+    // Empty means "no path" (a roster extra, or the focus itself) —
+    // the contract both here and in pathToFocus is that this dims
+    // nothing rather than dimming the whole board for no reason.
+    return found.cardIds.size > 0 ? found : null
+  }, [pathSourceId, focalCardId, graph.edges])
 
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
   useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion)
@@ -1464,6 +1571,7 @@ export function FocusGraphView({
     >
       <ReachContext.Provider value={reachValue}>
       <HoverContext.Provider value={hoveredId}>
+      <PathHighlightContext.Provider value={pathHighlightValue}>
       <ReactFlowProvider>
         <ReactFlow
           nodes={nodes}
@@ -1490,8 +1598,17 @@ export function FocusGraphView({
           edgesFocusable={false}
           onNodeDragStop={commitDrag}
           onPaneClick={() => onSelect(null)}
-          onNodeMouseEnter={(_, n) => { if (n.type === 'focusCard') setHoveredId(n.id) }}
-          onNodeMouseLeave={() => setHoveredId(null)}
+          onNodeMouseEnter={(_, n) => {
+            if (n.type === 'focusCard') setHoveredId(n.id)
+            if (n.type !== 'focusCard' && n.type !== 'focusFrame') return
+            if (pathHoverTimer.current) clearTimeout(pathHoverTimer.current)
+            pathHoverTimer.current = setTimeout(() => setPathHoverId(n.id), 150)
+          }}
+          onNodeMouseLeave={() => {
+            setHoveredId(null)
+            if (pathHoverTimer.current) { clearTimeout(pathHoverTimer.current); pathHoverTimer.current = null }
+            setPathHoverId(null)
+          }}
           proOptions={{ hideAttribution: true }}
           style={{ background: 'transparent' }}
         >
@@ -1499,10 +1616,13 @@ export function FocusGraphView({
           <GraphControls
             reducedMotion={reducedMotion}
             exportName={exportName}
+            graph={graph}
+            focalUrn={focalId}
             onResetLayout={moved.size > 0 ? resetLayout : undefined}
           />
         </ReactFlow>
       </ReactFlowProvider>
+      </PathHighlightContext.Provider>
       </HoverContext.Provider>
       </ReachContext.Provider>
     </div>
