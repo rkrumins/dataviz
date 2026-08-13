@@ -2,7 +2,7 @@ import { StrictMode } from 'react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, act } from '@testing-library/react'
 import { FIT_MAX_ZOOM, useFrameCamera, type CameraTarget } from '../useFrameCamera'
-import type { FocusCard } from '../focus-graph'
+import type { FocusCard } from '../focus-cards'
 
 const card = (id: string, partnerIds: string[] = []): FocusCard =>
   ({ id, nodeId: id === 'f' ? 'focal-urn' : `urn:${id}`, partnerIds }) as unknown as FocusCard

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import type { FocusCard } from './focus-graph'
+import type { FocusCard } from './focus-cards'
 
 /**
  * How far `fitView` may zoom IN.

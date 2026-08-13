@@ -21,7 +21,7 @@ import {
     type LensViewState,
     type FocusLayoutInput,
 } from '../focus-layout'
-import { FRAME_CHILD_CAP, type FocusCard } from '../focus-graph'
+import { FRAME_CHILD_CAP, type FocusCard } from '../focus-cards'
 
 // ── fixtures ─────────────────────────────────────────────────────────
 

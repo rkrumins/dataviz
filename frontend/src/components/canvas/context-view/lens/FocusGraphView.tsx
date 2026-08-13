@@ -73,7 +73,7 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, FRAME_FOOTER_H, framePager, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill } from './focus-graph'
+import { CARD_W, BAND_GAP, FRAME_FOOTER_H, framePager, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill } from './focus-cards'
 import { REVEAL_PAGE } from './focus-layout'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 
@@ -102,6 +102,11 @@ const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
 
 interface CardCtx {
   edgeTypeInfo?: EdgeTypeInfoMap
+  /** The entity the whole picture is about. A focus that HOLDS things
+   *  is emitted as a frame rather than a focal card — correct, since it
+   *  has rows — and without this it was the only card on the board with
+   *  no sign it was the one you asked about. */
+  focalId: string
   /** type id → {color, icon}, resolved ONCE for the whole graph. Cards
    *  used to each subscribe to the schema store and linear-scan the
    *  entity-type list, so every card paid for every schema touch. */
@@ -1023,6 +1028,10 @@ function FocusGraphCard({ data, selected }: NodeProps) {
 function FocusFrameNode({ data }: NodeProps) {
   const { card, ctx } = data as unknown as { card: FocusCard; ctx: CardCtx }
   const accent = ctx.visualFor(card.type).color
+  // The thing you asked about, when it happens to hold things. It reads
+  // as the anchor — solid border, the accent glow the focal card has —
+  // rather than as one more container that drifted into the picture.
+  const isFocus = card.nodeId != null && card.nodeId === ctx.focalId
   const q = ctx.frameQueryFor?.(card.expandKey ?? '') ?? ''
   // A total is a claim: state it only when the last page has landed (or
   // the container reported its own count). Otherwise say "at least".
@@ -1060,8 +1069,18 @@ function FocusFrameNode({ data }: NodeProps) {
     : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected${to || ' inside'}${via}${card.childrenOpen ? (range ? ` · ${range}` : '') : preview}`
   return (
     <div
-      style={{ width: card.w, height: card.h, borderColor: `${accent}55` }}
-      className="relative rounded-xl border-2 border-dashed bg-black/[0.02] dark:bg-white/[0.03] pointer-events-none"
+      style={{
+        width: card.w,
+        height: card.h,
+        borderColor: isFocus ? accent : `${accent}55`,
+        ...(isFocus ? { boxShadow: `0 10px 34px ${accent}33` } : {}),
+      }}
+      className={cn(
+        'relative rounded-xl border-2 pointer-events-none',
+        isFocus
+          ? 'bg-black/[0.03] dark:bg-white/[0.04]'
+          : 'border-dashed bg-black/[0.02] dark:bg-white/[0.03]',
+      )}
     >
       <PortHandles />
       {/* An open container keeps its own lineage question: looking
@@ -1576,6 +1595,7 @@ export function FocusGraphView({
 
   const ctx = useMemo<CardCtx>(() => ({
     edgeTypeInfo,
+    focalId,
     visualFor,
     onSelect,
     onFocus,
@@ -1597,7 +1617,7 @@ export function FocusGraphView({
     onRevealMore,
     onExtend,
     onPage,
-  }), [edgeTypeInfo, visualFor, onSelect, onFocus, onToggleFrame, onOpenContainer, onExpandFrontier, onToggleContains, onRetryContains, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails, onRevealMore, onExtend, onPage])
+  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onOpenContainer, onExpandFrontier, onToggleContains, onRetryContains, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails, onRevealMore, onExtend, onPage])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out

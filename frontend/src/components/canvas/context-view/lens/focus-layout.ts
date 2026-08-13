@@ -63,7 +63,7 @@ import {
     type FocusEdge,
     type FocusGraph,
     type FocusPill,
-} from './focus-graph'
+} from './focus-cards'
 
 /** Upstream ('in') and downstream ('out') — the lens's own words, and the
  *  same two the old builder uses. The walk HOOK speaks 'up'/'down';
