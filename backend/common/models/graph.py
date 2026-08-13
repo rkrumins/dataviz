@@ -166,6 +166,30 @@ class TraceRequest(BaseModel):
         populate_by_name = True
 
 
+class TraceClosureRequest(BaseModel):
+    """Focus-lineage-closure request: walk a bounded upstream/downstream
+    closure around a single node. Deliberately a NEW model, not an
+    extension of TraceRequest — it must not accept the re-anchoring-era
+    skeleton/expand concepts (level, includeInheritedLineage,
+    includeAncestorChain).
+    """
+    urn: str                                   # focus (initial) or the card being extended (walk)
+    direction: str = "both"                    # upstream | downstream | both
+    upstream_depth: int = Field(1, alias="upstreamDepth", ge=0, le=25)
+    downstream_depth: int = Field(1, alias="downstreamDepth", ge=0, le=25)
+    lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
+    max_nodes: Optional[int] = Field(None, alias="maxNodes", ge=1)          # engine clamps to TRACE_MAX_NODES
+    # Walk continuation: the specific lineage-participating leaves to extend from (e.g. the
+    # visible leaves under a rolled-up container card). Skips the container seed walk;
+    # keeps the walk scoped to the FOCUS's lineage, not the container's whole lineage.
+    seed_urns: Optional[List[str]] = Field(None, alias="seedUrns", max_length=500)
+    exclude_urns: Optional[List[str]] = Field(None, alias="excludeUrns", max_length=2000)
+    after_cursor: Optional[str] = Field(None, alias="afterCursor")          # "e:<edge-id>"; hub paging
+
+    class Config:
+        populate_by_name = True
+
+
 class ExpandRequest(BaseModel):
     source_urn: str = Field(alias="sourceUrn")
     target_urn: str = Field(alias="targetUrn")
@@ -305,6 +329,30 @@ class TraceResult(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+class TraceFrontierNode(BaseModel):
+    """One node at the edge of a closure that was not expanded further —
+    either because depth ran out or the closure is paging a hub. total_count
+    / next_cursor let the client decide whether to show a '+N more'
+    affordance or page the frontier.
+    """
+    urn: str
+    total_count: Optional[int] = Field(None, alias="totalCount")   # full-graph degree that direction; None = unknown
+    next_cursor: Optional[str] = Field(None, alias="nextCursor")   # only on the paging shape
+
+    class Config:
+        populate_by_name = True
+
+
+class TraceClosureResult(TraceResult):
+    """Result of a focus-lineage-closure walk. Adds the frontier (nodes at
+    the closure boundary) on top of TraceResult's nodes/edges/containment/
+    truncation shape.
+    """
+    frontier_up: List[TraceFrontierNode] = Field(default_factory=list, alias="frontierUp")
+    frontier_down: List[TraceFrontierNode] = Field(default_factory=list, alias="frontierDown")
+    seed_truncated: bool = Field(False, alias="seedTruncated")     # container seed walk hit the cap
 
 
 class TraceResultV2(TraceResult):
