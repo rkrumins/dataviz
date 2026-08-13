@@ -8,7 +8,7 @@
  */
 import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { LensFrontierEntry } from '@/components/canvas/context-view/lens/lens-subgraph'
-import type { LensRoster, LensViewState } from '@/components/canvas/context-view/lens/focus-layout'
+import type { LensDirectionFilter, LensRoster, LensViewState } from '@/components/canvas/context-view/lens/focus-layout'
 
 const wnode = (
   urn: string,
@@ -62,6 +62,11 @@ export interface WalkFixture {
   script?: (base: LensViewState) => LensViewState
   childrenAll?: Map<string, LensRoster>
   extendStatus?: Map<string, 'loading' | 'error'>
+  /** Header direction preset in effect for the shot. Defaults to 'both'. */
+  directionFilter?: LensDirectionFilter
+  /** Pre-selected card, so the shot also shows the path-to-focus
+   *  highlight (hover isn't scriptable in a static screenshot). */
+  selectedId?: string
 }
 
 const scripted = (
@@ -255,6 +260,26 @@ const walkSmall = (): WalkFixture => ({
   }),
 })
 
+/** Root cause only (Impact hidden) plus a selected card, so a screenshot
+ *  proves both header-control features at once: the downstream band is
+ *  gone, and SRC's path to the focus is lit while nothing else is. */
+const walkDirectionAndHighlight = (): WalkFixture => ({
+  title: 'Root cause only, with a path-to-focus highlight on the selected source',
+  model: walkModel('F', {
+    nodes: [
+      wnode('SRC', 'dataset', 'raw_orders'),
+      wnode('F', 'dataset', 'stg_orders'),
+      wnode('DOWN', 'dataset', 'mart_revenue'),
+    ],
+    containmentEdges: [],
+    lineageEdges: [hop('SRC', 'F'), hop('F', 'DOWN')],
+    upstreamUrns: new Set(['SRC']),
+    downstreamUrns: new Set(['DOWN']),
+  }),
+  directionFilter: 'in',
+  selectedId: 'SRC',
+})
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkCollaterals: walkCollaterals(),
   walkDiamond: walkDiamond(),
@@ -262,4 +287,5 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkFrontier: walkFrontier(),
   walkDeep: walkDeep(),
   walkSmall: walkSmall(),
+  walkDirectionAndHighlight: walkDirectionAndHighlight(),
 }

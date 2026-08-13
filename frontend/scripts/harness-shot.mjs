@@ -20,8 +20,9 @@ const FIXTURES = process.argv.slice(2).length
   ? process.argv.slice(2)
   // Every walk shape by default: whether a deep estate genuinely NESTS,
   // whether a diamond stays one card, whether every ⊕ state is legible
-  // side by side. None of those can be checked any other way.
-  : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall']
+  // side by side, whether the direction preset + path highlight actually
+  // draw. None of those can be checked any other way.
+  : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall', 'walkDirectionAndHighlight']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH

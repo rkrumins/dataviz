@@ -42,10 +42,13 @@ function buildWalk(fixture: WalkFixture) {
     childrenAll: fixture.childrenAll ?? new Map(),
     childrenAllStatus: new Map(),
     walkStatus: 'done',
+    directionFilter: fixture.directionFilter,
   })
   return {
     graph,
     focalId: sg.focusUrn,
+    directionFilter: fixture.directionFilter,
+    selectedId: fixture.selectedId ?? null,
     stats: {
       in: graph.bandTotals.get('band:in:1')?.connections ?? 0,
       out: graph.bandTotals.get('band:out:1')?.connections ?? 0,
@@ -79,7 +82,8 @@ export function Harness() {
           focalStats={built.stats}
           focalFetch="done"
           focalReach={built.reach}
-          selectedId={null}
+          directionFilter={built.directionFilter}
+          selectedId={built.selectedId}
           reducedMotion
           onSelect={noop}
           onFocus={noop}
