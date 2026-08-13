@@ -17,7 +17,7 @@ import type { ComponentProps } from 'react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest'
 import { LineageLens } from '../LineageLens'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
@@ -85,7 +85,6 @@ const makeApi = () => ({
   extend: vi.fn(),
   page: vi.fn(),
   retry: vi.fn(),
-  retryExtend: vi.fn(),
 })
 
 type Api = ReturnType<typeof makeApi>
@@ -661,6 +660,79 @@ describe('what is really inside a container', () => {
     expect(screen.getByText('internal_notes')).toBeTruthy()
     // It lives in there, but it must never read as a connection.
     expect(screen.getByText('no lineage')).toBeTruthy()
+  })
+
+  /**
+   * A wide table, its roster half-loaded: one server page of a hundred
+   * children in hand, and more waiting. Ten render windows of ten fit
+   * inside what is already loaded.
+   */
+  const wideTable = () => doneWalk(walkModel('F', {
+    nodes: [
+      wnode('F', 'dataset', 'stg_orders'),
+      wnode('T', 'dataset', 'raw_orders', { childCount: 400 }),
+      wnode('c1', 'schemaField', 'order_id'),
+    ],
+    containmentEdges: [holds('T', 'c1')],
+    lineageEdges: [hop('c1', 'F')],
+    upstreamUrns: new Set(['c1']),
+  }))
+
+  const hundredLoaded = new Map([['T', {
+    children: Array.from({ length: 100 }, (_, i) => ({
+      id: `col_${i}`,
+      data: { label: `col_${i}`, type: 'schemaField' },
+    })),
+    hasMore: true,
+    total: null,
+  }]]) as never
+
+  type LoadRoster = Mock<(urn: string, searchQuery?: string) => void>
+
+  /** Flip the frame to "everything inside" and hand it the loaded page,
+   *  which is the state a page turn actually happens in. */
+  const openWideTable = (onLoadAllChildren: LoadRoster) => {
+    const { rerender, api } = renderLens(['F'], wideTable(), { onLoadAllChildren })
+    fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={wideTable()}
+        walkApi={api}
+        childrenAll={hundredLoaded}
+        childrenAllStatus={new Map([['T', 'done' as const]])}
+        onLoadAllChildren={onLoadAllChildren}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    // The flip itself asks for the roster; the turns are what this test
+    // is about.
+    onLoadAllChildren.mockClear()
+  }
+
+  it('turns pages inside the loaded set without asking the server', () => {
+    const onLoadAllChildren: LoadRoster = vi.fn()
+    openWideTable(onLoadAllChildren)
+    const next = screen.getByLabelText('Next page of raw_orders')
+    // Nine turns, all of them inside the hundred children already in
+    // hand. One server page backs ten render windows — asking on every
+    // Next spent nine round trips re-fetching what the frame held.
+    for (let i = 0; i < 9; i++) fireEvent.click(next)
+    expect(screen.getByText(/page 10 of/)).toBeTruthy()
+    expect(onLoadAllChildren).not.toHaveBeenCalled()
+  })
+
+  it('asks exactly once when a turn runs past what is loaded', () => {
+    const onLoadAllChildren: LoadRoster = vi.fn()
+    openWideTable(onLoadAllChildren)
+    const next = screen.getByLabelText('Next page of raw_orders')
+    for (let i = 0; i < 10; i++) fireEvent.click(next)
+    // The tenth turn is the first window the loaded page cannot cover.
+    expect(onLoadAllChildren).toHaveBeenCalledTimes(1)
+    expect(onLoadAllChildren).toHaveBeenCalledWith('T', '')
   })
 
   it('asks a focal that HOLDS things for its own roster, once', () => {

@@ -56,7 +56,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useTourStore } from '@/features/tour/tourStore'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { lensFocalOf, type LensHistory } from './lens/lensHistory'
-import { labelOf, edgeLabelFor, type EdgeTypeInfoMap, type LensReach } from './lens/focus-cards'
+import { labelOf, edgeLabelFor, FRAME_ALL_CAP, type EdgeTypeInfoMap, type LensReach } from './lens/focus-cards'
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
 
@@ -493,7 +493,13 @@ export function LineageLens({
     })
     if (!showingAll) return
     const loaded = childrenAll.get(urn)
-    if (!loaded || loaded.hasMore) onLoadAllChildren?.(urn, q)
+    // One SERVER page backs several render pages — a hundred children is
+    // ten windows of ten — so a page turn inside what is already loaded
+    // must not ask for anything. Without this, nine of every ten Next
+    // clicks spent a round trip re-fetching a list the frame was already
+    // holding.
+    const wanted = (Math.max(0, page) + 1) * FRAME_ALL_CAP
+    if (!loaded || (loaded.hasMore && loaded.children.length < wanted)) onLoadAllChildren?.(urn, q)
   }, [editView, childrenAll, onLoadAllChildren])
 
   const retryFrameAll = useCallback(

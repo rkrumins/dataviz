@@ -111,19 +111,9 @@ interface CardCtx {
   visualFor: (typeId: string) => { color: string; Icon: LucideIcons.LucideIcon }
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
+  /** Open / close what a card holds. Free: a re-projection over the
+   *  walk model, never a fetch. */
   onToggleFrame: (expandKey: string) => void
-  /** Open / close a coarse container into the entities inside it that
-   *  connect to `partnerId` — the card's own partner in the picture,
-   *  which is the focal only at the first hop. */
-  onOpenContainer?: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
-  onExpandFrontier?: (expandKey: string, nodeId: string) => void
-  /** Open / close a contains-stack row into what IT holds. Pure
-   *  containment — no partner, no lineage question. */
-  onToggleContains?: (nodeId: string) => void
-  /** Re-ask for a contains row's children after a failed fetch, without
-   *  toggling the row shut. */
-  onRetryContains?: (nodeId: string) => void
-  onShowMore?: (bandKey: string) => void
   /** Move a frame's fixed page window to `page` (0-based), fetching the
    *  next server page when the window runs past what has loaded. */
   onSetFramePage: (openKey: string, page: number) => void
@@ -134,13 +124,12 @@ interface CardCtx {
   onToggleFrameAll?: (openKey: string) => void
   /** Re-kick a failed "everything inside" fetch. */
   onRetryFrameAll?: (openKey: string) => void
-  onRetryOpen?: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
-  onRetryFetch?: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
-  // ── Walk model (cards built by focus-layout.ts) ──────────────────
-  // All optional: a caller still on the old builder passes none of
-  // them, and no card it produces can reach the branches that use them.
+  // ── Growing the walk ─────────────────────────────────────────────
+  // Optional so a caller can render a picture it does not intend to be
+  // grown (the visual harness does exactly that); the ⊕ renders only
+  // where the layout put one.
   /** Show the next page of neighbours ALREADY in the walk model —
    *  a re-projection, never a fetch. Keyed `${'in'|'out'}:${urn}`. */
   onRevealMore?: (key: string) => void
@@ -168,18 +157,11 @@ interface FocusGraphViewProps {
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
   onToggleFrame: (expandKey: string) => void
-  onOpenContainer?: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
-  onExpandFrontier?: (expandKey: string, nodeId: string) => void
-  onToggleContains?: (nodeId: string) => void
-  onRetryContains?: (nodeId: string) => void
-  onShowMore?: (bandKey: string) => void
   onSetFramePage: (openKey: string, page: number) => void
   onFrameQuery: (openKey: string, q: string) => void
   frameQueryFor?: (openKey: string) => string
   onToggleFrameAll?: (openKey: string) => void
   onRetryFrameAll?: (openKey: string) => void
-  onRetryOpen?: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
-  onRetryFetch?: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
   onRevealMore?: (key: string) => void
@@ -1248,18 +1230,11 @@ export function FocusGraphView({
   onSelect,
   onFocus,
   onToggleFrame,
-  onOpenContainer,
-  onExpandFrontier,
-  onToggleContains,
-  onRetryContains,
-  onShowMore,
   onSetFramePage,
   onFrameQuery,
   frameQueryFor,
   onToggleFrameAll,
   onRetryFrameAll,
-  onRetryOpen,
-  onRetryFetch,
   onRevealOnCanvas,
   onOpenDetails,
   onRevealMore,
@@ -1296,24 +1271,17 @@ export function FocusGraphView({
     onSelect,
     onFocus,
     onToggleFrame,
-    onOpenContainer,
-    onExpandFrontier,
-    onToggleContains,
-    onRetryContains,
-    onShowMore,
     onSetFramePage,
     onFrameQuery,
     frameQueryFor,
     onToggleFrameAll,
     onRetryFrameAll,
-    onRetryOpen,
-    onRetryFetch,
     onRevealOnCanvas,
     onOpenDetails,
     onRevealMore,
     onExtend,
     onPage,
-  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onOpenContainer, onExpandFrontier, onToggleContains, onRetryContains, onShowMore, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRetryOpen, onRetryFetch, onRevealOnCanvas, onOpenDetails, onRevealMore, onExtend, onPage])
+  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRevealMore, onExtend, onPage])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out
