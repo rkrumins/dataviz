@@ -4282,18 +4282,30 @@ class FalkorDBProvider(GraphDataProvider):
             for u in missing_urns:
                 result[u] = computed.get(u, [])
 
-            # Batch-store all computed chains in one pipeline
-            store_pipe = self._redis.pipeline(transaction=False)
-            for u in missing_urns:
-                store_pipe.execute_command(
-                    "HSET", cache_key, u, json.dumps(result.get(u, [])),
-                )
-            # TTL so the ancestors hash stays evictable (see _cache_urn_label).
-            store_pipe.expire(cache_key, self._ancestor_cache_ttl())
-            try:
-                await store_pipe.execute()
-            except Exception as e:
-                logger.debug(f"Failed to batch-store ancestor chains: {e}")
+            # Batch-store all computed chains in one pipeline.
+            #
+            # The cache is an OPTIMIZATION, never a hard dependency. There is no
+            # cache client when CACHE_REDIS_URL is unset OR when the dedicated
+            # cache Redis is simply DOWN (``build_cache_client`` returns None by
+            # construction — it never co-locates the cache on FalkorDB). Guard
+            # the write: this line used to raise AttributeError on a None client
+            # and, because the raise escaped the whole method, it THREW AWAY the
+            # chains that had just been computed successfully above. Callers saw
+            # `truncated: ancestors_failed` and a trace with NO containment tree
+            # — i.e. a cache outage silently broke the graph read path, the exact
+            # inverse of the decoupling's intent.
+            if self._redis is not None:
+                store_pipe = self._redis.pipeline(transaction=False)
+                for u in missing_urns:
+                    store_pipe.execute_command(
+                        "HSET", cache_key, u, json.dumps(result.get(u, [])),
+                    )
+                # TTL so the ancestors hash stays evictable (see _cache_urn_label).
+                store_pipe.expire(cache_key, self._ancestor_cache_ttl())
+                try:
+                    await store_pipe.execute()
+                except Exception as e:
+                    logger.debug(f"Failed to batch-store ancestor chains: {e}")
 
         return result
 
