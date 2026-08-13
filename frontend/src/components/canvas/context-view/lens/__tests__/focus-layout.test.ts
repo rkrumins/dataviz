@@ -18,11 +18,14 @@ import {
     initialLensViewState,
     revealKey,
     walkStatusKey,
+    pathToFocus,
+    buildWalkExport,
+    walkExportToCsv,
     REVEAL_PAGE,
     type LensViewState,
     type FocusLayoutInput,
 } from '../focus-layout'
-import { FRAME_CHILD_CAP, type FocusCard } from '../focus-cards'
+import { FRAME_CHILD_CAP, type FocusCard, type FocusEdge } from '../focus-cards'
 
 // ── fixtures ─────────────────────────────────────────────────────────
 
@@ -733,5 +736,188 @@ describe('focus-layout — determinism', () => {
         expect(cardFor(g, 'D1')!.band).toBe(1)
         expect(cardFor(g, 'U2')!.x).toBeLessThan(cardFor(g, 'U1')!.x)
         expect(cardFor(g, 'D1')!.x).toBeGreaterThan(cardFor(g, 'F')!.x)
+    })
+})
+
+// ── direction preset (view-side filter) ─────────────────────────────
+
+describe('focus-layout — direction filter (view-side; presentation, not data)', () => {
+    const bothSides = () => subgraph({
+        focus: 'F',
+        nodes: [wnode('F'), wnode('U'), wnode('D')],
+        contains: [],
+        hops: [['U', 'F'], ['F', 'D']],
+    })
+
+    it('both (default): every side\'s cards and edges are present', () => {
+        const sg = bothSides()
+        const g = layout(sg, initialLensViewState(sg), { directionFilter: 'both' })
+        expect(cardFor(g, 'U')).toBeDefined()
+        expect(cardFor(g, 'D')).toBeDefined()
+        expect(g.edges).toHaveLength(2)
+    })
+
+    it('Root cause (upstream-only) suppresses the downstream card, pill and edge', () => {
+        const sg = bothSides()
+        const g = layout(sg, initialLensViewState(sg), { directionFilter: 'in' })
+        expect(cardFor(g, 'U')).toBeDefined()          // unfiltered side intact
+        expect(cardFor(g, 'D')).toBeUndefined()        // filtered side: no card
+        expect(cardFor(g, 'F')!.pillDown).toBeNull()   // filtered side: no pill
+        expect(g.edges).toHaveLength(1)
+        expect(g.edges[0].target).toBe(cardFor(g, 'F')!.id)
+    })
+
+    it('Impact (downstream-only) suppresses the upstream card, pill and edge', () => {
+        const sg = bothSides()
+        const g = layout(sg, initialLensViewState(sg), { directionFilter: 'out' })
+        expect(cardFor(g, 'D')).toBeDefined()
+        expect(cardFor(g, 'U')).toBeUndefined()
+        expect(cardFor(g, 'F')!.pillUp).toBeNull()
+        expect(g.edges).toHaveLength(1)
+        expect(g.edges[0].source).toBe(cardFor(g, 'F')!.id)
+    })
+
+    it('never claims a dead end on a side the filter merely hid — that would misdescribe the data source', () => {
+        // F has more downstream waiting (a frontier), but nothing from
+        // that side is in the model yet — so there is no drawn wire to
+        // fall back on, and a naive pill-only check would read as "the
+        // walk ends here" the moment the pill is hidden by the filter.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F'), wnode('U')],
+            contains: [],
+            hops: [['U', 'F']],
+            frontierDown: [{ urn: 'F', totalCount: 5, nextCursor: null }],
+        })
+        const both = layout(sg, initialLensViewState(sg), { directionFilter: 'both' })
+        expect(cardFor(both, 'F')!.pillDown).toMatchObject({ kind: 'extend', count: 5 })
+        expect(cardFor(both, 'F')!.deadEnd).toBe(false)
+
+        const rootCauseOnly = layout(sg, initialLensViewState(sg), { directionFilter: 'in' })
+        expect(cardFor(rootCauseOnly, 'F')!.pillDown).toBeNull()
+        expect(cardFor(rootCauseOnly, 'F')!.deadEnd).toBe(false)
+    })
+
+    it('population is unchanged — counts stay true regardless of the filter', () => {
+        const sg = bothSides()
+        const both = layout(sg, initialLensViewState(sg), { directionFilter: 'both' })
+        const filtered = layout(sg, initialLensViewState(sg), { directionFilter: 'in' })
+        // The focus's own weight (raw hops touching its subtree) counts
+        // BOTH sides even while only one renders — the filter is a view
+        // over the walk, not a smaller walk.
+        expect(cardFor(filtered, 'F')!.count).toBe(cardFor(both, 'F')!.count)
+    })
+
+    it('toggling back to both restores the picture identically', () => {
+        const sg = bothSides()
+        const original = layout(sg, initialLensViewState(sg), { directionFilter: 'both' })
+        layout(sg, initialLensViewState(sg), { directionFilter: 'in' })   // toggle away
+        const restored = layout(sg, initialLensViewState(sg), { directionFilter: 'both' })   // toggle back
+        expect(JSON.stringify(restored.cards)).toEqual(JSON.stringify(original.cards))
+        expect(JSON.stringify(restored.edges)).toEqual(JSON.stringify(original.edges))
+    })
+
+    it('defaults to both when omitted', () => {
+        const sg = bothSides()
+        const g = layout(sg)   // no directionFilter passed at all
+        expect(cardFor(g, 'U')).toBeDefined()
+        expect(cardFor(g, 'D')).toBeDefined()
+    })
+})
+
+// ── path-to-focus highlight ──────────────────────────────────────────
+
+describe('focus-layout — pathToFocus (client-side hover/selection highlight)', () => {
+    const edge = (id: string, source: string, target: string): FocusEdge =>
+        ({ id, source, target, count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false })
+
+    it('a diamond: both branches to the focus highlight', () => {
+        // H reaches focus F via two EQUAL-length paths: H-A-F and H-B-F.
+        const edges = [edge('e1', 'H', 'A'), edge('e2', 'A', 'F'), edge('e3', 'H', 'B'), edge('e4', 'B', 'F')]
+        const { cardIds, edgeKeys } = pathToFocus(edges, 'H', 'F')
+        expect(cardIds).toEqual(new Set(['H', 'A', 'B', 'F']))
+        expect(edgeKeys).toEqual(new Set(['e1', 'e2', 'e3', 'e4']))
+    })
+
+    it('a single path (no diamond) highlights exactly its own hops, not a longer detour', () => {
+        const edges = [edge('e1', 'A', 'B'), edge('e2', 'B', 'F'), edge('e3', 'A', 'F')]
+        const { cardIds, edgeKeys } = pathToFocus(edges, 'A', 'F')
+        expect(cardIds).toEqual(new Set(['A', 'F']))
+        expect(edgeKeys).toEqual(new Set(['e3']))
+    })
+
+    it('no path: nothing dims — the shape a roster extra (no projected edge at all) is in', () => {
+        const edges = [edge('e1', 'A', 'F')]
+        const { cardIds, edgeKeys } = pathToFocus(edges, 'X', 'F')
+        expect(cardIds.size).toBe(0)
+        expect(edgeKeys.size).toBe(0)
+    })
+
+    it('is undirected: a hop drawn TOWARD the hovered card still counts', () => {
+        const edges = [edge('e1', 'F', 'A')]   // F -> A, but we hover A looking for a path to F
+        const { cardIds, edgeKeys } = pathToFocus(edges, 'A', 'F')
+        expect(cardIds).toEqual(new Set(['A', 'F']))
+        expect(edgeKeys).toEqual(new Set(['e1']))
+    })
+
+    it('hovering the focus itself finds nothing to highlight', () => {
+        const edges = [edge('e1', 'A', 'F')]
+        const { cardIds, edgeKeys } = pathToFocus(edges, 'F', 'F')
+        expect(cardIds.size).toBe(0)
+        expect(edgeKeys.size).toBe(0)
+    })
+
+    it('is cycle-safe: a loop among the projected edges terminates and still finds the path', () => {
+        // A cycle A-B-C-A, with the only route to the focus running through A.
+        const edges = [edge('e1', 'A', 'B'), edge('e2', 'B', 'C'), edge('e3', 'C', 'A'), edge('e4', 'A', 'F')]
+        const { cardIds, edgeKeys } = pathToFocus(edges, 'B', 'F')
+        expect(cardIds).toEqual(new Set(['B', 'A', 'F']))
+        expect(edgeKeys).toEqual(new Set(['e1', 'e4']))
+    })
+})
+
+// ── walk export (JSON/CSV) ───────────────────────────────────────────
+
+describe('focus-layout — walk export, pure and server-free', () => {
+    it('serializes the visible picture to JSON: nodes with parent+depth, edges resolved to urns', () => {
+        const sg = collateralEstate()
+        const g = layout(sg)
+        const payload = buildWalkExport(g, sg.focusUrn, () => '2026-08-13T00:00:00.000Z')
+        expect(payload.focus).toBe('F')
+        expect(payload.generatedAt).toBe('2026-08-13T00:00:00.000Z')
+        const dom = payload.nodes.find(n => n.urn === 'DOM')!
+        expect(dom).toMatchObject({ name: 'Finance', type: 'DATADOMAIN', parentUrn: null, depth: 0 })
+        // DB sits four containment levels down (DOM > APP > CTR1 > CTR2 > DB).
+        const db = payload.nodes.find(n => n.urn === 'DB')!
+        expect(db).toMatchObject({ parentUrn: 'CTR2', depth: 4 })
+        // Edges are addressed by URN, not the layout's internal card ids —
+        // and the three raw hops into DB bundle into one weighted edge.
+        expect(payload.edges).toContainEqual({ sourceUrn: 'DB', targetUrn: 'F', type: 'DERIVES_FROM', weight: 3 })
+    })
+
+    it('reflects only what is VISIBLE — a collapsed branch drops out of the export too', () => {
+        const sg = collateralEstate()
+        const collapsed = layout(sg, { ...initialLensViewState(sg), collapsedContainment: new Set(['CTR1']) })
+        const payload = buildWalkExport(collapsed, sg.focusUrn)
+        expect(payload.nodes.some(n => n.urn === 'DB')).toBe(false)
+        expect(payload.nodes.some(n => n.urn === 'CTR1')).toBe(true)
+    })
+
+    it('CSV is one file: a nodes table then an edges table, properly quoted', () => {
+        const sg = collateralEstate()
+        const payload = buildWalkExport(layout(sg), sg.focusUrn, () => '2026-08-13T00:00:00.000Z')
+        const csv = walkExportToCsv(payload)
+        const lines = csv.split('\n')
+        expect(lines[0]).toBe('urn,name,type,parentUrn,depth')
+        const blankAt = lines.indexOf('')
+        expect(blankAt).toBeGreaterThan(0)
+        expect(lines[blankAt + 1]).toBe('sourceUrn,targetUrn,type,weight')
+        // A name that itself contains a comma is quoted, not corrupted.
+        const withComma = { ...payload, nodes: [{ urn: 'x', name: 'Revenue, Q1', type: 't', parentUrn: null, depth: 0 }] }
+        expect(walkExportToCsv(withComma)).toContain('"Revenue, Q1"')
+        // A urn with no containment parent renders as an EMPTY field, not
+        // the literal string "null".
+        expect(lines.some(l => l.startsWith('"DOM"') || l.startsWith('DOM'))).toBe(true)
+        expect(csv).not.toContain('null')
     })
 })

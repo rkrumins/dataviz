@@ -125,6 +125,13 @@ export interface LensRoster {
 
 export type LensFetchStatus = 'loading' | 'done' | 'error' | 'unsupported'
 
+/** The header's direction preset. VIEW-SIDE only: the fetch always asks
+ *  for 'both' directions (cache-friendly, instant toggling), and the
+ *  walk's population is never touched — a preset just decides what
+ *  `buildFocusLayout` DRAWS. 'in' = "Root cause" (upstream only), 'out'
+ *  = "Impact" (downstream only). */
+export type LensDirectionFilter = 'both' | LensDir
+
 export interface FocusLayoutInput {
     sg: LensSubgraph<LensWalkNode>
     view: LensViewState
@@ -138,6 +145,11 @@ export interface FocusLayoutInput {
     /** The walk model's own fetch state. A dead end is never claimed
      *  while this is anything but 'done'. */
     walkStatus: LensFetchStatus
+    /** Suppress one side's bands/pills/edges. Presentation only — the
+     *  population this is computed FROM never shrinks, so every count and
+     *  pill remainder stays true when the user toggles back. Defaults to
+     *  'both' (nothing suppressed). */
+    directionFilter?: LensDirectionFilter
 }
 
 /**
@@ -175,6 +187,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const {
         sg, view, query, hiddenTypes, extendStatus,
         childrenAll, childrenAllStatus, walkStatus,
+        directionFilter = 'both',
     } = input
     const model = sg.nodes
 
@@ -634,20 +647,29 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const isFocus = urn === sg.focusUrn
         const askUp = isFocus || up != null
         const askDown = isFocus || down != null
-        const pillUp = askUp ? pillFor(urn, 'in') : null
-        const pillDown = askDown ? pillFor(urn, 'out') : null
+        // A direction the preset hides never shows a pill for it — this
+        // is the ONE place a card's own ⊕ (not just its band of cards)
+        // has to respect the filter, since the focal itself sits at
+        // band 0 and is never skipped by the roots loop below.
+        const upVisible = directionFilter !== 'out'
+        const downVisible = directionFilter !== 'in'
+        const pillUp = askUp && upVisible ? pillFor(urn, 'in') : null
+        const pillDown = askDown && downVisible ? pillFor(urn, 'out') : null
         // The end of a walk is worth stating exactly where the picture
         // does NOT already state it: on the OUTWARD side of a card that
         // has no wire there. A frame never claims it — its rows carry the
         // lineage, and the frame saying "ends here" over an open estate
         // full of live connections is simply false. And "nothing further
         // exists" is a claim about the DATA SOURCE, so it waits for the
-        // walk to actually report done.
+        // walk to actually report done — and never fires on a side the
+        // user's OWN direction filter hid, or hiding a live frontier
+        // would misreport it as the walk having ended.
         const outwardDir: LensDir = band < 0 ? 'in' : 'out'
+        const outwardVisible = outwardDir === 'in' ? upVisible : downVisible
         const asked = outwardDir === 'in' ? askUp : askDown
         const pill = outwardDir === 'in' ? pillUp : pillDown
         const drawn = outwardDir === 'in' ? drawnIn.has(urn) : drawnOut.has(urn)
-        const deadEnd = walkStatus === 'done' && !isFrame && asked && pill === null && !drawn
+        const deadEnd = walkStatus === 'done' && !isFrame && asked && outwardVisible && pill === null && !drawn
         return { pillUp, pillDown, deadEnd }
     }
 
@@ -783,7 +805,14 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // at the top of its band.
     const roots = rankCards(visibleOrder.filter(u => (nodeOf(u)?.parent ?? null) === null))
     for (const root of [...roots].sort((a, b) => signedHop(a) - signedHop(b))) {
-        emit(root, null, 0, signedHop(root))
+        const band = signedHop(root)
+        // The whole band a direction filter hides — never emitted, so its
+        // cards, pills AND edges (an edge needs both endpoints' card ids)
+        // are all absent at once. Band 0 (the focus's own subtree) is
+        // never a "side" and is never skipped.
+        if (directionFilter === 'in' && band > 0) continue
+        if (directionFilter === 'out' && band < 0) continue
+        emit(root, null, 0, band)
     }
 
     // A frame states its rows' one shared relationship, and that decides
@@ -884,4 +913,157 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         hiddenByChipsOut,
         bandTotals,
     }
+}
+
+// ── path-to-focus highlight ─────────────────────────────────────────
+
+/**
+ * Every card and edge on SOME shortest path between `fromId` and
+ * `focalId`, computed over the PROJECTED edges (`FocusGraph.edges`) —
+ * both orientations, so a wire drawn the other way still counts. Pure
+ * and client-side: hovering or selecting a card asks nothing of the
+ * server, because the answer is already sitting in the picture.
+ *
+ * "Some" rather than "the" on purpose — a diamond (two branches of equal
+ * length rejoining before the focus) highlights BOTH branches, not one
+ * arbitrarily chosen. Cycle-safe: BFS distance is computed once, and the
+ * backtrack only ever walks strictly toward the focus, so a loop in the
+ * projected edges cannot make it retrace its steps.
+ *
+ * `fromId === focalId` (hovering the focus itself) and a `fromId` with
+ * no route to the focus at all (a roster extra — a card shown only in
+ * "everything inside" mode, off the lineage) both return empty sets: the
+ * caller's contract is that an empty result means "nothing dims".
+ */
+export function pathToFocus(
+    edges: ReadonlyArray<FocusEdge>,
+    fromId: string,
+    focalId: string,
+): { edgeKeys: Set<string>; cardIds: Set<string> } {
+    if (fromId === focalId) return { edgeKeys: new Set(), cardIds: new Set() }
+
+    const adjacency = new Map<string, Array<{ to: string; edgeId: string }>>()
+    const link = (a: string, b: string, edgeId: string) => {
+        const list = adjacency.get(a)
+        if (list) list.push({ to: b, edgeId })
+        else adjacency.set(a, [{ to: b, edgeId }])
+    }
+    for (const e of edges) {
+        link(e.source, e.target, e.id)
+        link(e.target, e.source, e.id)
+    }
+
+    // BFS distance FROM THE FOCUS, so every node's distance is measured
+    // the same way regardless of which card is hovered.
+    const dist = new Map<string, number>([[focalId, 0]])
+    const queue = [focalId]
+    for (let i = 0; i < queue.length; i++) {
+        const u = queue[i]
+        const du = dist.get(u)!
+        for (const { to } of adjacency.get(u) ?? []) {
+            if (dist.has(to)) continue
+            dist.set(to, du + 1)
+            queue.push(to)
+        }
+    }
+    if (!dist.has(fromId)) return { edgeKeys: new Set(), cardIds: new Set() }
+
+    // Backtrack: every edge whose far end is exactly one step closer to
+    // the focus than its near end sits on SOME shortest path — multiple
+    // qualifying edges at one node is exactly the diamond case.
+    const cardIds = new Set<string>([fromId])
+    const edgeKeys = new Set<string>()
+    const seen = new Set<string>([fromId])
+    const stack = [fromId]
+    while (stack.length > 0) {
+        const u = stack.pop()!
+        const du = dist.get(u)!
+        if (du === 0) continue   // reached the focus
+        for (const { to, edgeId } of adjacency.get(u) ?? []) {
+            if (dist.get(to) !== du - 1) continue
+            edgeKeys.add(edgeId)
+            cardIds.add(to)
+            if (!seen.has(to)) { seen.add(to); stack.push(to) }
+        }
+    }
+    return { edgeKeys, cardIds }
+}
+
+// ── walk export (JSON/CSV) ───────────────────────────────────────────
+
+export interface WalkExportNode {
+    urn: string
+    name: string
+    type: string
+    /** Containment parent, null for a top-level card. */
+    parentUrn: string | null
+    /** Nesting level, 0 for a top-level card — same as `FocusCard.depth`. */
+    depth: number
+}
+
+export interface WalkExportEdge {
+    sourceUrn: string
+    targetUrn: string
+    /** '' when the bundle carries more than one relationship type. */
+    type: string
+    weight: number
+}
+
+export interface WalkExportPayload {
+    focus: string
+    generatedAt: string
+    nodes: WalkExportNode[]
+    edges: WalkExportEdge[]
+}
+
+/**
+ * The VISIBLE picture (cards + projected bundles, including nesting
+ * parent) as portable data. Addressed by urn throughout — never the
+ * layout's own card ids — so the export means the same thing outside the
+ * lens as it does inside it. No server call: this is a re-projection of
+ * `graph`, exactly what is already on screen.
+ */
+export function buildWalkExport(
+    graph: FocusGraph,
+    focusUrn: string,
+    now: () => string = () => new Date().toISOString(),
+): WalkExportPayload {
+    const cardById = new Map(graph.cards.map(c => [c.id, c]))
+    const nodes: WalkExportNode[] = graph.cards
+        .filter(c => c.nodeId !== null)
+        .map(c => ({ urn: c.nodeId!, name: c.label, type: c.type, parentUrn: c.parentId, depth: c.depth }))
+    const edges: WalkExportEdge[] = graph.edges.map(e => ({
+        sourceUrn: cardById.get(e.source)?.nodeId ?? e.source,
+        targetUrn: cardById.get(e.target)?.nodeId ?? e.target,
+        type: e.edgeTypeNorm,
+        weight: e.count,
+    }))
+    return { focus: focusUrn, generatedAt: now(), nodes, edges }
+}
+
+/** Quote a CSV field only when it needs it (comma, quote or newline),
+ *  doubling any interior quotes. `null` renders as an empty field, never
+ *  the literal string "null". */
+function csvField(v: string | number | null): string {
+    const s = v === null ? '' : String(v)
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+
+/**
+ * One CSV file for the whole export: a nodes table, a blank line, then
+ * an edges table — the simplest single-download shape (two files would
+ * mean two save-as prompts for one export click; one combined table
+ * would mean a stub row per node re-explaining the edge columns). The
+ * column headers alone say which table is which.
+ */
+export function walkExportToCsv(payload: WalkExportPayload): string {
+    const nodeRows = [
+        'urn,name,type,parentUrn,depth',
+        ...payload.nodes.map(n => [n.urn, n.name, n.type, n.parentUrn, n.depth].map(csvField).join(',')),
+    ]
+    const edgeRows = [
+        'sourceUrn,targetUrn,type,weight',
+        ...payload.edges.map(e => [e.sourceUrn, e.targetUrn, e.type, e.weight].map(csvField).join(',')),
+    ]
+    return [...nodeRows, '', ...edgeRows].join('\n')
 }
