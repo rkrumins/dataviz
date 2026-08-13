@@ -137,18 +137,20 @@ class _TraceFake:
                 if s in params["sUrns"] and t in params["tUrns"] and et in params["ltypes"]:
                     rows.append([s, t, et, f"raw-{s}-{t}", {}])
             return _Result(rows)
-        if "WHERE id(r) > $after" in cypher:
+        if "WHERE id(r) >= $after" in cypher:
             # _page_raw_lineage_single: cursor page over ONE node's
             # adjacency. `self.adjacency[(urn, direction)]` is an ordered
             # [(other_urn, edge_type)] list — the list index IS the fake's
             # `id(r)`, so slicing by `after`/`limit` mirrors a real
-            # `WHERE id(r) > $after ... ORDER BY id(r) LIMIT $limit`.
+            # `WHERE id(r) >= $after ... ORDER BY id(r) LIMIT $limit`. The
+            # cursor is INCLUSIVE: it names the next id to consider, so
+            # `after=0` is from the start and edge id 0 is reachable.
             urn = params["urn"]
             after = params["after"]
             limit = params["limit"]
             incoming = "<-[r" in cypher
             edges = self.adjacency.get((urn, "incoming" if incoming else "outgoing"), [])
-            page = [(eid, other, et) for eid, (other, et) in enumerate(edges) if eid > after][:limit]
+            page = [(eid, other, et) for eid, (other, et) in enumerate(edges) if eid >= after][:limit]
             rows = []
             for eid, other, et in page:
                 if incoming:
@@ -162,13 +164,12 @@ class _TraceFake:
             # is in the frontier; outgoing (downstream) whose SOURCE is.
             # ``otherUrn`` is the far (newly discovered) endpoint. Row
             # shape: [sourceUrn, targetUrn, edgeId, edgeType, otherUrn,
-            # otherLabel]. `exclude`, when present, drops rows whose far
-            # endpoint is excluded — simulating the real `NOT o.urn IN
-            # $exclude` WHERE clause. The lineage list INDEX is the edge's
+            # otherLabel]. There is NO exclude filter here — the hop returns
+            # every incident row and the caller drops the NODE in Python
+            # while keeping its EDGE. The lineage list INDEX is the edge's
             # `id(r)` (same convention as the paging branch), so two parallel
             # edges on one (source, target) pair stay distinct rows.
             frontier = set(params.get("frontier", []))
-            exclude = set(params.get("exclude") or [])
             incoming = "<-[r" in cypher
             rows = []
             for eid, (s, t, et) in enumerate(self.lineage):
@@ -177,8 +178,6 @@ class _TraceFake:
                 elif not incoming and s in frontier:
                     other = t
                 else:
-                    continue
-                if other in exclude:
                     continue
                 rows.append([s, t, f"raw-{eid}", et, other, None])
             # `LIMIT $limit` is part of the query, not an afterthought the
@@ -557,14 +556,16 @@ def test_an_anchor_that_matches_nothing_falls_back_to_itself():
 # that no string-matching fake could.
 
 
-def test_expand_raw_lineage_set_exclude_filters_far_endpoints():
-    """`exclude` adds a parameterized `NOT o.urn IN $exclude` clause and
-    drops excluded far-endpoints from the hop; without it the clause is
-    absent and nothing is filtered."""
+def test_expand_raw_lineage_set_never_filters_far_endpoints_in_the_db():
+    """The hop returns EVERY incident row. It used to accept an `exclude`
+    that became a `NOT o.urn IN $exclude` clause, applied on hop 1 only —
+    which threw away the row for any edge whose far end the client already
+    held, and with it the edge. Dropping the node is the caller's job,
+    downstream of recording the edge; the query has no business knowing."""
     fake = _TraceFake()
     fake.lineage = [
         ("hub", "keep1", "FLOWS"),
-        ("hub", "drop1", "FLOWS"),
+        ("hub", "known", "FLOWS"),
         ("hub", "keep2", "FLOWS"),
     ]
     p = _make_provider(fake)
@@ -581,18 +582,9 @@ def test_expand_raw_lineage_set_exclude_filters_far_endpoints():
     out = _run(p._expand_raw_lineage_set(
         frontier=["hub"], frontier_labels={"hub": "Hub"},
         direction="outgoing", ltypes=["FLOWS"], limit=50, timeout_secs=2.0,
-        exclude=["drop1"],
     ))
-    assert {r["otherUrn"] for r in out} == {"keep1", "keep2"}
-    assert any("NOT o.urn IN $exclude" in c for c in seen)
-
-    seen.clear()
-    out2 = _run(p._expand_raw_lineage_set(
-        frontier=["hub"], frontier_labels={"hub": "Hub"},
-        direction="outgoing", ltypes=["FLOWS"], limit=50, timeout_secs=2.0,
-    ))
-    assert {r["otherUrn"] for r in out2} == {"keep1", "drop1", "keep2"}
-    assert all("NOT o.urn IN $exclude" not in c for c in seen)
+    assert {r["otherUrn"] for r in out} == {"keep1", "known", "keep2"}
+    assert all("$exclude" not in c for c in seen)
 
 
 def test_collect_lineage_seed_exclude_keeps_focus_row():
@@ -641,33 +633,38 @@ def test_collect_lineage_seed_seed_capped_reflects_limit_hit():
 
 def test_page_raw_lineage_single_pages_disjoint_by_edge_id():
     """7 outgoing edges off one anchor, limit 3: three calls page 3/3/1
-    disjoint rows in edge-id order, the last call's last_edge_id resumes
-    the next page correctly, and paging past the end returns ([], None)."""
+    disjoint rows in edge-id order and paging past the end returns
+    ([], None).
+
+    `after_id` is INCLUSIVE — the NEXT id to consider, not the last one seen —
+    so a caller resumes at `last + 1`, and `0`/`None` both mean from the start
+    WITHOUT skipping edge id 0. The exclusive form could not express "from the
+    start" in the `^e:\\d+$` wire grammar at all: `e:0` silently swallowed the
+    first edge."""
     fake = _TraceFake()
     fake.adjacency[("hub", "outgoing")] = [(f"t{i}", "FLOWS") for i in range(7)]
     p = _make_provider(fake)
 
-    page1, last1 = _run(p._page_raw_lineage_single(
-        "hub", "Hub", "outgoing", ["FLOWS"], None, 3, 2.0,
-    ))
+    def _page(after):
+        return _run(p._page_raw_lineage_single(
+            "hub", "Hub", "outgoing", ["FLOWS"], after, 3, 2.0,
+        ))
+
+    page1, last1 = _page(None)
     assert [r["otherUrn"] for r in page1] == ["t0", "t1", "t2"]
     assert last1 == 2
+    # Explicit 0 is the same request, and does not eat t0.
+    assert [r["otherUrn"] for r in _page(0)[0]] == ["t0", "t1", "t2"]
 
-    page2, last2 = _run(p._page_raw_lineage_single(
-        "hub", "Hub", "outgoing", ["FLOWS"], last1, 3, 2.0,
-    ))
+    page2, last2 = _page(last1 + 1)
     assert [r["otherUrn"] for r in page2] == ["t3", "t4", "t5"]
     assert last2 == 5
 
-    page3, last3 = _run(p._page_raw_lineage_single(
-        "hub", "Hub", "outgoing", ["FLOWS"], last2, 3, 2.0,
-    ))
+    page3, last3 = _page(last2 + 1)
     assert [r["otherUrn"] for r in page3] == ["t6"]
     assert last3 == 6
 
-    page4, last4 = _run(p._page_raw_lineage_single(
-        "hub", "Hub", "outgoing", ["FLOWS"], last3, 3, 2.0,
-    ))
+    page4, last4 = _page(last3 + 1)
     assert page4 == []
     assert last4 is None
 
@@ -705,7 +702,7 @@ def test_page_raw_lineage_single_unlabeled_anchor_falls_back():
     orig = fake.ro_query
 
     async def spy(cypher, params=None, timeout=None, **kwargs):
-        if "WHERE id(r) > $after" in cypher:
+        if "WHERE id(r) >= $after" in cypher:
             seen["cypher"] = cypher
         return await orig(cypher, params=params, timeout=timeout, **kwargs)
 
@@ -907,10 +904,10 @@ def test_trace_closure_seed_urns_skip_the_container_seed_walk():
 
 
 def test_trace_closure_exclude_urns_keep_the_seam_edge_not_the_node():
-    """`exclude_urns` = what the client already holds. Hop 1 filters them in
-    the QUERY (cheaper than shipping and dropping), but a hop-2 edge INTO an
-    excluded node is a SEAM — the stitch between this step and the graph the
-    client already has — so the edge ships while the node does not."""
+    """`exclude_urns` = what the client already holds: never re-shipped as a
+    NODE, but every EDGE into one still ships — that is the seam that stitches
+    this step onto the graph the client has. Uniform at EVERY hop, including
+    the first, and no query ever learns the exclude set."""
     fake = _TraceFake()
     fake.lineage = [("f", "a", "FLOWS"), ("f", "x", "FLOWS"), ("a", "x", "FLOWS")]
     p = _make_provider(fake, hydrate=True)
@@ -931,20 +928,57 @@ def test_trace_closure_exclude_urns_keep_the_seam_edge_not_the_node():
         exclude_urns=["x"],
     ))
 
-    assert "NOT o.urn IN $exclude" in seen[0]          # hop 1 filters in the DB
-    assert "NOT o.urn IN $exclude" not in seen[1]      # hop 2 must not
+    assert all("$exclude" not in c for c in seen)      # no hop filters in the DB
     shipped = {n.urn for n in result.nodes}
     assert shipped == {"f", "a"}
     got_edges = {(e.source_urn, e.target_urn) for e in result.edges}
-    assert ("a", "x") in got_edges                     # the seam survives
-    assert ("f", "x") not in got_edges                 # hop 1 never fetched it
+    assert ("a", "x") in got_edges                     # the hop-2 seam
+    assert ("f", "x") in got_edges                     # and the hop-1 seam
+
+
+def test_trace_closure_keeps_the_diamond_edge_between_two_held_nodes():
+    """THE diamond. f→a, f→x and a→x: one depth-1 click hands the client a and
+    x but never a→x, because that edge is two hops from f. Continuing from a
+    with both f and x excluded is the only way the client can ever learn it —
+    and a DB-side exclusion on hop 1 filtered exactly that row away, losing the
+    edge for good while a one-shot depth-2 closure showed it plainly. The union
+    of the two shallow steps must equal the deep closure."""
+    fake = _TraceFake()
+    fake.lineage = [("f", "a", "FLOWS"), ("f", "x", "FLOWS"), ("a", "x", "FLOWS")]
+    p = _make_provider(fake, hydrate=True)
+
+    def _closure(**kw):
+        return _run(p.trace_closure(
+            "f", lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+            max_nodes=100, timeout_ms=5000, **kw,
+        ))
+
+    first = _closure(upstream_depth=0, downstream_depth=1)
+    assert {(e.source_urn, e.target_urn) for e in first.edges} == {("f", "a"), ("f", "x")}
+
+    second = _closure(
+        upstream_depth=0, downstream_depth=1,
+        seed_urns=["a"], exclude_urns=["f", "x"],
+    )
+    # The whole point: the edge arrives, x does not come back with it.
+    assert {(e.source_urn, e.target_urn) for e in second.edges} == {("a", "x")}
+    assert "x" not in {n.urn for n in second.nodes}
+
+    deep = _closure(upstream_depth=0, downstream_depth=2)
+    assert (
+        {e.id for e in first.edges} | {e.id for e in second.edges}
+        == {e.id for e in deep.edges}
+    )
 
 
 def test_trace_closure_cursor_pages_one_hub_to_exhaustion():
     """The hub fallback: `after_cursor` pages ONE node's adjacency in ONE
-    direction instead of walking. Three pages of 3/3/1 over the 7 edges after
-    the cursor — disjoint, complete, and the anchor stays a frontier entry with
-    the next cursor until the page comes back short."""
+    direction instead of walking. A cursor names the NEXT id to consider, so
+    "e:0" opens the hub from the start and edge id 0 is reachable — under the
+    old exclusive `id(r) > $after` it was unreachable by any cursor the wire
+    grammar (`^e:\\d+$`) could express. Pages of 3/3/2 over all 8 edges —
+    disjoint, complete, and the anchor keeps its cursor until a page comes
+    back short."""
     fake = _TraceFake()
     fake.adjacency[("hub", "outgoing")] = [(f"t{i}", "FLOWS") for i in range(8)]
     fake.degrees = {"hub": {"in": 0, "out": 8}}
@@ -957,24 +991,22 @@ def test_trace_closure_cursor_pages_one_hub_to_exhaustion():
             max_nodes=3, timeout_ms=5000, after_cursor=cursor,
         ))
 
-    # The first cursor comes from the hop that discovered the hub — edge id 0
-    # was already delivered there, so paging resumes strictly after it.
     page1 = _page("e:0")
     assert [f.urn for f in page1.frontier_down] == ["hub"]
     assert page1.frontier_down[0].next_cursor == "e:3"
     assert page1.frontier_down[0].total_count == 8
-    assert page1.downstream_urns == {"t1", "t2", "t3"}
+    assert page1.downstream_urns == {"t0", "t1", "t2"}   # t0 rides on edge id 0
 
     page2 = _page(page1.frontier_down[0].next_cursor)
     assert page2.frontier_down[0].next_cursor == "e:6"
-    assert page2.downstream_urns == {"t4", "t5", "t6"}
+    assert page2.downstream_urns == {"t3", "t4", "t5"}
 
     page3 = _page(page2.frontier_down[0].next_cursor)
-    assert page3.downstream_urns == {"t7"}
+    assert page3.downstream_urns == {"t6", "t7"}
     assert page3.frontier_down == []        # short page = the hub is drained
 
     seen = [e.id for e in page1.edges] + [e.id for e in page2.edges] + [e.id for e in page3.edges]
-    assert len(seen) == len(set(seen)) == 7
+    assert len(seen) == len(set(seen)) == 8
 
     # Paging keeps the walk's exclusion discipline: a node the client already
     # holds keeps its EDGE (the seam) but is not re-shipped and is not filed
@@ -983,9 +1015,9 @@ def test_trace_closure_cursor_pages_one_hub_to_exhaustion():
         "hub", upstream_depth=0, downstream_depth=1,
         lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
         max_nodes=3, timeout_ms=5000, after_cursor="e:0",
-        exclude_urns=["t2"],
+        exclude_urns=["t1"],
     ))
-    assert excluded_page.downstream_urns == {"t1", "t3"}
+    assert excluded_page.downstream_urns == {"t0", "t2"}
     assert len(excluded_page.edges) == 3
 
 
@@ -1216,6 +1248,10 @@ def test_trace_closure_a_hop_that_hits_its_own_limit_still_reports_truncated():
     assert result.truncated is True
     assert result.truncation_reason == "max_nodes"
     assert [(f.urn, f.total_count) for f in result.frontier_down] == [("hub", 12)]
+    # A node the BUDGET cut off can be resumed, so it says how: page it from
+    # the start. Half its adjacency was left unread and only the cursor path
+    # can finish it — a re-root would just re-run the same truncated hop.
+    assert result.frontier_down[0].next_cursor == "e:0"
 
 
 def test_trace_closure_asymmetric_depth_keeps_the_shallow_side_frontier():
@@ -1241,6 +1277,10 @@ def test_trace_closure_asymmetric_depth_keeps_the_shallow_side_frontier():
 
     assert result.downstream_urns == {"c2", "c3"}
     assert [(f.urn, f.total_count) for f in result.frontier_up] == [("c0", 1)]
+    # Nothing about c0 was left half-read — it ran out of DEPTH, not budget —
+    # so it gets no cursor. Its affordance is a re-root via seedUrns, and a
+    # cursor here would promise a continuation that does not exist.
+    assert result.frontier_up[0].next_cursor is None
     # Downstream reached the end of the graph before the end of its depth.
     assert result.frontier_down == []
 

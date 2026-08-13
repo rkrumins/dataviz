@@ -869,17 +869,25 @@ async def trace_closure(
     finest grain regardless of aggregation regime — containment is used
     only to nest results, never as a lineage hop. ``excludeUrns`` names
     nodes the client already holds: never re-shipped in ``nodes``, but a
-    seam edge into one still is. ``afterCursor`` pages a single node's
-    adjacency in a single direction instead of walking further.
+    seam edge into one still is — at EVERY hop, so an edge between two
+    nodes the client already holds is never lost. ``afterCursor`` pages a
+    single node's adjacency in a single direction instead of walking further.
 
-    Two honesty corners of the wire contract clients must read correctly:
+    Three honesty corners of the wire contract clients must read correctly:
       * ``truncated: true`` with EMPTY ``frontierUp``/``frontierDown`` is
         reachable — the walk was cut, but everything reachable-and-unfinished
         proved fully shown by the degree probe. Read it as "nothing more to
         expand here despite the cut", not as a contradiction.
       * A frontier entry's ``totalCount`` is the full-graph degree in that
-        direction — a cue, not a ledger. After hop-1 exclusion filtering it
-        can overstate what is actually still reachable.
+        direction — a cue, not a ledger. It counts edges the response may
+        already be showing, so it can overstate what is still to come.
+      * A cursor names the NEXT edge id to consider, so ``e:0`` means from
+        the start and is a legal opening cursor. A frontier entry carries
+        ``nextCursor`` only when it can be RESUMED: entries cut by the node
+        budget or the deadline carry ``e:0`` (page them from the start; your
+        merge dedupes the overlap with what you already hold), a full page
+        carries one past its last row, and a depth-exhausted entry carries
+        none at all — re-root that one with ``seedUrns`` instead.
 
     Same bulkheads and never-504 contract as ``/trace/v2``. Unlike the
     legacy trace routes, this endpoint IS enrolled in fair-share: a

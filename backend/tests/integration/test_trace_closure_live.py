@@ -13,9 +13,10 @@ catches that class of bug, so every Cypher the closure emits gets exercised
 here against a real one: the two seed probes, the per-hop expand, the cursor
 page, the degree probe, the ancestor hydration, the containment fetch.
 
-Each estate gets its OWN throwaway ``gvt_lens_live_*`` graph, DELETED in the
-fixture's finally — this runs against the SHARED dev FalkorDB, where a leaked
-graph outlives the run.
+Each estate gets its OWN throwaway ``gvt_lens_live_*`` graph, uniquely named
+per run and DELETED in the fixture's finally — this runs against the SHARED
+dev FalkorDB, where a leaked graph outlives the run and a reused name lets two
+runs wipe each other.
 
 Run:
     docker run --rm --network synodic-dev_default --entrypoint sh \
@@ -24,6 +25,7 @@ Run:
       -c "python -m pytest backend/tests/integration/test_trace_closure_live.py -q"
 """
 import os
+import uuid
 
 import pytest
 
@@ -44,10 +46,12 @@ async def estate():
     ancestor hydration cannot classify containment), seed, hand the provider
     back. The teardown DELETES every graph it built.
 
-    The provider's Redis namespace is flushed first: URN labels and ancestor
-    chains cache under ``host:port:graph_name``, so a previous run of the same
-    test would otherwise grade an edited estate against a stale containment
-    tree — a live gate that reads its answer out of a cache is not a gate.
+    Every graph name carries a per-run random suffix. That keeps two runs on
+    the shared dev FalkorDB from wiping each other's estates mid-assertion,
+    and it makes each run's Redis namespace fresh too — URN labels and
+    ancestor chains cache under ``host:port:graph_name``, so a fixed name
+    would let a previous run's containment tree answer this run's questions.
+    A live gate that reads its answer out of a cache is not a gate.
     """
     built = []
 
@@ -55,7 +59,7 @@ async def estate():
         p = FalkorDBProvider(
             host=os.getenv("FALKORDB_HOST", "falkordb"),
             port=int(os.getenv("FALKORDB_PORT", "6379")),
-            graph_name=name,
+            graph_name=f"gvt_lens_live_{name}_{uuid.uuid4().hex[:8]}",
         )
         try:
             await p._ensure_connected()
@@ -63,13 +67,6 @@ async def estate():
             pytest.skip(f"FalkorDB unreachable: {exc}")
         built.append(p)
         p.set_containment_edge_types(ctypes)
-        if p._redis is not None:
-            try:
-                async for key in p._redis.scan_iter(match=f"{p.physical_graph_id()}:*"):
-                    await p._redis.delete(key)
-            except Exception:
-                pass
-        await p._query("MATCH (n) DETACH DELETE n")
         await p._query(seed_cypher)
         return p
 
@@ -79,8 +76,14 @@ async def estate():
         for p in built:
             try:
                 await p._graph.delete()
-            except Exception:
-                pass
+            except Exception as exc:  # pragma: no cover - cleanup best effort
+                # Say which graph leaked. A silent pass here leaves a stranger
+                # to find an orphan on the shared dev instance with no idea
+                # where it came from.
+                print(
+                    f"WARNING: leaked test graph {p._graph_name!r} "
+                    f"on {p._host}:{p._port} — delete it by hand ({exc})"
+                )
 
 
 def _hops(result):
@@ -127,7 +130,7 @@ CREATE
 
 @pytest.fixture()
 async def provider(estate):
-    return await estate("gvt_lens_live_focus", FOCUS_SEED)
+    return await estate("focus", FOCUS_SEED)
 
 
 async def test_leaf_focus_is_scoped_to_the_column_not_the_table(provider):
@@ -241,7 +244,7 @@ async def test_mid_container_focus_walks_a_recursive_containment_spine(estate):
     descendant Doc that actually carries lineage, not to every leaf under it —
     and the closure then walks lineage from there, across into the other
     branch. Both branches come back with their whole multi-level spine."""
-    p = await estate("gvt_lens_live_recursive", RECURSIVE_SEED)
+    p = await estate("recursive", RECURSIVE_SEED)
 
     r = await p.trace_closure(
         urn="fa", upstream_depth=25, downstream_depth=25,
@@ -296,7 +299,7 @@ async def test_the_walk_sequence_covers_what_one_deep_closure_would(estate):
     what came back at the edges. Staged, because the point is the SEQUENCE —
     two shallow steps have to add up to the deep closure they replace, or the
     server-driven walk quietly loses lineage the one-shot trace showed."""
-    p = await estate("gvt_lens_live_walk", WALK_SEED)
+    p = await estate("walk", WALK_SEED)
 
     # ── (a) the click: one hop each way from a mid-chain leaf ──────────
     first = await p.trace_closure(
@@ -330,10 +333,13 @@ async def test_the_walk_sequence_covers_what_one_deep_closure_would(estate):
         seed_urns=seeds, exclude_urns=sorted(set(_urns(first)) - set(seeds)),
     )
 
-    # ONLY the next hop. The two edges the client already holds do not come
-    # back — at hop 1 the exclude set is a DB-side NOT filter — and neither
-    # does any lineage node it already had.
-    assert _hops(second) == [("c", "d", "FLOWS_TO"), ("z", "a", "FLOWS_TO")]
+    # Only the next hop's NODES. The edges into b come back too — an edge
+    # touching an excluded node is a seam, and the exclude set never filters
+    # edges at any hop; b itself is not re-shipped.
+    assert _hops(second) == [
+        ("a", "b", "FLOWS_TO"), ("b", "c", "FLOWS_TO"),
+        ("c", "d", "FLOWS_TO"), ("z", "a", "FLOWS_TO"),
+    ]
     assert sorted(second.upstream_urns) == ["z"]
     assert sorted(second.downstream_urns) == ["d"]
     # What DOES come back beside the new pair: the anchors this step was told
@@ -356,6 +362,57 @@ async def test_the_walk_sequence_covers_what_one_deep_closure_would(estate):
         {e.id for e in first.edges} | {e.id for e in second.edges}
         == {e.id for e in direct.edges}
     ), "the walk lost an edge the one-shot depth-2 closure shows"
+
+
+# ── Estate: a diamond ─────────────────────────────────────────────────
+#
+#     kf⊃f  kg⊃g  kh⊃h
+#     f -> g, f -> h, g -> h
+
+DIAMOND_SEED = """
+CREATE
+ (kf:Box {urn:'kf', displayName:'box-f'}),
+ (kg:Box {urn:'kg', displayName:'box-g'}),
+ (kh:Box {urn:'kh', displayName:'box-h'}),
+ (f:Doc {urn:'f', displayName:'f'}),
+ (g:Doc {urn:'g', displayName:'g'}),
+ (h:Doc {urn:'h', displayName:'h'}),
+ (kf)-[:CONTAINS]->(f), (kg)-[:CONTAINS]->(g), (kh)-[:CONTAINS]->(h),
+ (f)-[:FLOWS_TO]->(g), (f)-[:FLOWS_TO]->(h), (g)-[:FLOWS_TO]->(h)
+"""
+
+
+async def test_the_walk_never_loses_the_diamond_edge_between_two_held_nodes(estate):
+    """THE diamond, live. One depth-1 click at f hands the client g and h but
+    never g→h, which is two hops away. Continuing from g — with f and h both
+    excluded, because the client holds them — is the only way it can ever
+    learn that edge. A DB-side exclusion on hop 1 filtered exactly that row
+    away and lost the edge for good, while a one-shot depth-2 closure showed
+    it plainly. The union of the two shallow steps must equal the deep one."""
+    p = await estate("diamond", DIAMOND_SEED)
+
+    async def _closure(**kw):
+        return await p.trace_closure(
+            urn="f", lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+            max_nodes=1000, timeout_ms=15000, **kw,
+        )
+
+    first = await _closure(upstream_depth=0, downstream_depth=1)
+    assert _hops(first) == [("f", "g", "FLOWS_TO"), ("f", "h", "FLOWS_TO")]
+
+    second = await _closure(
+        upstream_depth=0, downstream_depth=1,
+        seed_urns=["g"], exclude_urns=["f", "h"],
+    )
+    # The edge arrives; h does not come back with it.
+    assert ("g", "h", "FLOWS_TO") in _hops(second)
+    assert "h" not in _urns(second)
+
+    deep = await _closure(upstream_depth=0, downstream_depth=2)
+    assert (
+        {e.id for e in first.edges} | {e.id for e in second.edges}
+        == {e.id for e in deep.edges}
+    ), "the walk lost the diamond's closing edge"
 
 
 # ── Estate: a three-node cycle ────────────────────────────────────────
@@ -382,7 +439,7 @@ async def test_a_later_hop_keeps_the_seam_edge_into_an_excluded_node(estate):
     exclude set is a DB-side filter at hop 1 only, precisely so deeper hops can
     still report the seam; this walks two hops around a cycle back onto the
     excluded node and requires the edge without the node."""
-    p = await estate("gvt_lens_live_seam", SEAM_SEED)
+    p = await estate("seam", SEAM_SEED)
 
     r = await p.trace_closure(
         urn="n", upstream_depth=0, downstream_depth=2,
@@ -401,9 +458,11 @@ async def test_a_later_hop_keeps_the_seam_edge_into_an_excluded_node(estate):
 
 # ── Estate: one hub with twelve downstream partners ───────────────────
 #
-# Containment is created FIRST so it takes the low relationship ids: the
-# cursor grammar is ``e:<id(r)>`` resumed with ``id(r) > $after`` and has no
-# from-the-start value, so a client opens a hub at ``e:0``.
+# LINEAGE is created FIRST, so ``id(r) == 0`` is genuinely one of the hub's
+# lineage edges. That is the case a client opening a hub at ``e:0`` has to
+# survive, and under the old exclusive ``id(r) > $after`` it could not: no
+# cursor the wire grammar (``^e:\d+$``) can express reached edge id 0, so
+# that partner was invisible to paging forever.
 
 HUB_PARTNERS = [f"p{i:02d}" for i in range(12)]
 
@@ -412,18 +471,28 @@ HUB_SEED = "CREATE " + ", ".join([
     "(kp:Box {urn:'kp', displayName:'partner-box'})",
     "(hub:Doc {urn:'hub', displayName:'hub'})",
     *[f"({u}:Doc {{urn:'{u}', displayName:'partner-{u}'}})" for u in HUB_PARTNERS],
+    *[f"(hub)-[:FLOWS_TO]->({u})" for u in HUB_PARTNERS],
     "(kh)-[:CONTAINS]->(hub)",
     *[f"(kp)-[:CONTAINS]->({u})" for u in HUB_PARTNERS],
-    *[f"(hub)-[:FLOWS_TO]->({u})" for u in HUB_PARTNERS],
 ])
 
 
 async def test_hub_truncates_then_pages_its_whole_adjacency(estate):
     """A hub with more lineage than the budget carries. The first call says so
     honestly — the hub in the frontier with its FULL degree, not the shown
-    count — and the cursor then drains the rest in pages that never overlap
-    and never lose a partner. The last page withdraws the offer."""
-    p = await estate("gvt_lens_live_hub", HUB_SEED)
+    count, and a cursor saying where to resume — and paging then drains the
+    rest without overlapping or losing a partner. The last page withdraws the
+    offer."""
+    p = await estate("hub", HUB_SEED)
+
+    # Prove the estate really does put a lineage edge at id 0, so the paging
+    # assertions below are testing reachability rather than an arrangement
+    # that quietly avoids the problem.
+    res = await p._ro_query(
+        "MATCH (h:Doc {urn:'hub'})-[r:FLOWS_TO]->(o) WHERE id(r) = 0 RETURN o.urn"
+    )
+    assert res.result_set, "estate no longer puts a lineage edge at id 0"
+    first_partner = res.result_set[0][0]
 
     initial = await p.trace_closure(
         urn="hub", upstream_depth=0, downstream_depth=1,
@@ -431,16 +500,19 @@ async def test_hub_truncates_then_pages_its_whole_adjacency(estate):
         max_nodes=5, timeout_ms=15000,
     )
 
-    # max_nodes reserves half for the seed, so the hop carries 4 of the 12.
+    # The seed takes the hub, leaving max_nodes-1 for the hop, whose own LIMIT
+    # stops it at 4 rows and marks the whole ring cut.
     assert initial.truncated and initial.truncation_reason == "max_nodes"
     assert len(initial.edges) == 4
     assert {e.target_urn for e in initial.edges} <= set(HUB_PARTNERS)
     # The hub is the only thing worth offering: its partners are fully shown.
     assert [(f.urn, f.total_count) for f in initial.frontier_down] == [("hub", 12)]
-    # A cut is not a page — the initial call hands back no cursor.
-    assert initial.frontier_down[0].next_cursor is None
+    # A node the BUDGET cut off can be resumed, and says how: page it from the
+    # start. Only the cursor path can finish a hub — a re-root would re-run
+    # the same truncated hop — so this entry has to carry a cursor.
+    assert initial.frontier_down[0].next_cursor == "e:0"
 
-    pages, cursor = [], "e:0"
+    pages, cursor = [], initial.frontier_down[0].next_cursor
     while cursor is not None:
         page = await p.trace_closure(
             urn="hub", upstream_depth=0, downstream_depth=1,
@@ -458,10 +530,66 @@ async def test_hub_truncates_then_pages_its_whole_adjacency(estate):
         for right in partners[i + 1:]:
             assert not left & right, f"pages overlap on {left & right}"
     assert set().union(*partners) == set(HUB_PARTNERS)
+    # The edge-id-0 partner is in the FIRST page, not lost off the front of it.
+    assert first_partner in partners[0]
     # Drained: the hub is not offered again, so the client stops on its own.
     assert not any(f.urn == "hub" for f in pages[-1].frontier_down)
     # Every page is one hub's adjacency — the hub itself is never re-walked.
     assert all(pg.upstream_urns == set() for pg in pages)
+
+
+# ── Estate: a container with more lineage-bearing leaves than fit ─────
+#
+#     K ⊃ g0..g6   (SEVEN docs, every one of them lineage-bearing)
+#     g0->s0, g1->s1, g2->s2      (downstream partners)
+#     u3->g3, u4->g4, u5->g5, u6->g6   (upstream partners)
+#
+# Partners are :Sink so the Docs in a response can be counted exactly.
+
+CAPPED_SEED = "CREATE " + ", ".join([
+    "(K:Box {urn:'K', displayName:'the-container'})",
+    *[f"(g{i}:Doc {{urn:'g{i}', displayName:'doc-{i}'}})" for i in range(7)],
+    *[f"(s{i}:Sink {{urn:'s{i}', displayName:'sink-{i}'}})" for i in range(3)],
+    *[f"(u{i}:Sink {{urn:'u{i}', displayName:'src-{i}'}})" for i in range(3, 7)],
+    *[f"(K)-[:CONTAINS]->(g{i})" for i in range(7)],
+    *[f"(g{i})-[:FLOWS_TO]->(s{i})" for i in range(3)],
+    *[f"(u{i})-[:FLOWS_TO]->(g{i})" for i in range(3, 7)],
+])
+
+
+async def test_a_capped_container_seed_still_walks_and_says_it_is_partial(estate):
+    """The half-seed path, live. ``max_nodes`` reserves half its budget for the
+    seed, so a container with more lineage-bearing leaves than that gets only
+    some of them — and the response has to say so while STILL walking. Setting
+    the flag as a truncation mid-method would have failed the loop's
+    ``not truncation_reason`` guard and shipped a board of nodes with no edges
+    on it, which is the one thing a lineage view must never be.
+
+    This is also a live instance of the endpoint's second honesty corner:
+    ``truncated: true`` with an EMPTY frontier. The walk was cut at the seed,
+    but every boundary node it did reach proved fully shown by the degree
+    probe, so there is genuinely nothing to offer expanding."""
+    p = await estate("capped", CAPPED_SEED)
+
+    r = await p.trace_closure(
+        urn="K", upstream_depth=0, downstream_depth=1,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=12, timeout_ms=15000,   # seed cap = 12 // 2 = 6, of 7 leaves
+    )
+
+    assert r.seed_truncated is True
+    # Folded in at the RETURN, not mid-walk — the response is partial and says
+    # so, and the walk still happened.
+    assert r.truncated is True
+    assert r.truncation_reason == "max_nodes"
+
+    docs = {n.urn for n in r.nodes if n.urn.startswith("g")}
+    assert len(docs) == 6, f"the seed cap did not bite: {sorted(docs)}"
+    assert r.edges, "a capped seed must still walk"
+    for e in r.edges:
+        assert e.edge_type == "FLOWS_TO"
+        assert e.source_urn in docs and e.target_urn.startswith("s")
+    assert r.frontier_up == [] and r.frontier_down == []
 
 
 # ── Estate: two distinct edges on one (source, target) pair ───────────
@@ -481,7 +609,7 @@ async def test_parallel_edges_both_survive_the_walk(estate):
     """Two DISTINCT relationships on the same (source, target) pair are two
     real relationships. Anything that dedupes by pair rather than by edge id
     silently merges them and the canvas loses one."""
-    p = await estate("gvt_lens_live_parallel", PARALLEL_SEED)
+    p = await estate("parallel", PARALLEL_SEED)
 
     r = await p.trace_closure(
         urn="x", upstream_depth=1, downstream_depth=1,
@@ -506,7 +634,7 @@ async def test_closure_survives_a_cache_outage(estate):
     no containment tree) and the URN labels (dropping every reader onto the
     unlabeled full-scan path the cache exists to avoid). Proven live, because
     both failures are invisible to a fake that never had a client to lose."""
-    p = await estate("gvt_lens_live_outage", FOCUS_SEED)
+    p = await estate("outage", FOCUS_SEED)
     p._redis = None
 
     r = await p.trace_closure(

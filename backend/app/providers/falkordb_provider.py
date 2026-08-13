@@ -7131,9 +7131,10 @@ class FalkorDBProvider(GraphDataProvider):
                          re-shipped in ``nodes``, but an EDGE into one still
                          is — that seam edge is what stitches this step onto
                          the graph the client already has.
-        ``after_cursor`` page ONE node's adjacency in ONE direction
-                         (``e:<edge id>``) instead of walking: the fallback for
-                         a hub with more lineage than a hop can carry.
+        ``after_cursor`` page ONE node's adjacency in ONE direction instead of
+                         walking: the fallback for a hub with more lineage than
+                         a hop can carry. ``e:<edge id>`` names the NEXT id to
+                         consider, so ``e:0`` is from the start.
 
         ``frontierUp``/``frontierDown`` name the boundary nodes the walk did NOT
         finish — depth ran out, the ``max_nodes`` budget cut them off, or a page
@@ -7141,7 +7142,10 @@ class FalkorDBProvider(GraphDataProvider):
         it is known, so the canvas can offer "+N more" instead of presenting a
         bounded closure as the whole truth. A boundary node whose adjacency is
         already fully on screen is NOT frontier: it is an honest dead end, and
-        saying otherwise puts a chip on a node with nothing behind it.
+        saying otherwise puts a chip on a node with nothing behind it. An entry
+        carries ``nextCursor`` when it can be RESUMED: the budget/deadline cut
+        set pages from ``e:0``, a full page resumes past its last row, and a
+        depth-exhausted entry gets none (re-root it with ``seed_urns``).
         """
         await self._ensure_connected()
         deadline = time.monotonic() + (timeout_ms / 1000.0)
@@ -7228,7 +7232,9 @@ class FalkorDBProvider(GraphDataProvider):
                 paged_anchor = urn
                 (cut_up if up else cut_down)[urn] = None
                 if last_edge_id is not None:
-                    paged_cursor = f"e:{last_edge_id}"
+                    # A cursor names the NEXT id to consider, so resume one
+                    # past the last row shipped.
+                    paged_cursor = f"e:{last_edge_id + 1}"
         else:
             # ---- seed: the nodes the hops start from -----------------------
             if seed_urns:
@@ -7287,19 +7293,28 @@ class FalkorDBProvider(GraphDataProvider):
                 # Ask for only what still fits under max_nodes: rows past the
                 # budget get dropped below anyway, and their edges with them.
                 hop_limit = max(1, max_nodes - len(discovered))
-                # Hop 1 ONLY: the client's known set is worth a DB-side NOT
-                # filter. Deeper hops rely on `visited` instead, because a row
-                # INTO an excluded node is a SEAM edge the client does not have
-                # yet — filtering it in the query would lose it for good.
-                hop_exclude = list(excluded) if (hop == 1 and excluded) else None
-
+                # The excluded set NEVER filters the query, at any hop. It is
+                # already pre-populated into `visited`, and rows are recorded
+                # edge-FIRST/visited-second below, so an excluded node costs a
+                # row and yields only its EDGE — the seam that stitches this
+                # step onto the graph the client already holds.
+                #
+                # This used to be a DB-side `NOT o.urn IN $exclude` on hop 1,
+                # on the reasoning that a hop-1 seam is always an edge the
+                # client walked in on. It is not: on a DIAMOND (b→c, b→x,
+                # x→c) the client holds b, c and x after one hop but has
+                # never seen x→c, and a continuation seeded at c had that row
+                # filtered away in the DB — lost for good, while a one-shot
+                # depth-2 closure showed it plainly. Uniform semantics cost
+                # hop-1 LIMIT budget on rows into already-known nodes; that
+                # is the price of never losing an edge between two held nodes.
                 directions: List[str] = []
                 coros = []
                 if up_frontier and hop <= upstream_depth:
                     directions.append("up")
                     coros.append(self._expand_raw_lineage_set(
                         list(up_frontier), up_labels, "incoming", ltypes,
-                        hop_limit, hop_timeout, exclude=hop_exclude,
+                        hop_limit, hop_timeout,
                     ))
                 elif up_frontier:
                     # Ran out of DEPTH, not of graph (asymmetric depths) — this
@@ -7310,7 +7325,7 @@ class FalkorDBProvider(GraphDataProvider):
                     directions.append("down")
                     coros.append(self._expand_raw_lineage_set(
                         list(down_frontier), down_labels, "outgoing", ltypes,
-                        hop_limit, hop_timeout, exclude=hop_exclude,
+                        hop_limit, hop_timeout,
                     ))
                 elif down_frontier:
                     depth_down.update(dict.fromkeys(down_frontier))
@@ -7407,7 +7422,8 @@ class FalkorDBProvider(GraphDataProvider):
                 shown_in[edge.target_urn] += 1
 
             def _frontier(
-                candidates: List[str], probed: Set[str], key: str, shown: Dict[str, int],
+                candidates: List[str], probed: Set[str], key: str,
+                shown: Dict[str, int], cut: Dict[str, None],
             ) -> List[TraceFrontierNode]:
                 out: List[TraceFrontierNode] = []
                 for u in candidates:
@@ -7416,17 +7432,28 @@ class FalkorDBProvider(GraphDataProvider):
                         out.append(TraceFrontierNode(
                             urn=u, totalCount=total, nextCursor=paged_cursor,
                         ))
-                    elif total is None:
+                        continue
+                    # A node the BUDGET or the DEADLINE cut off has a sound
+                    # resume: page it from the start ("e:0" — a cursor names
+                    # the next id to consider) and let the client's merge
+                    # dedupe whatever it already holds. A node that merely ran
+                    # out of DEPTH does not: nothing about it was left
+                    # half-read, its affordance is a re-root via seedUrns, and
+                    # a cursor there would promise a continuation that isn't.
+                    cursor = "e:0" if u in cut else None
+                    if total is None:
                         # Unprobed, probe failed, or the degree bucket failed —
                         # absence is UNKNOWN, never zero.
-                        out.append(TraceFrontierNode(urn=u))
+                        out.append(TraceFrontierNode(urn=u, nextCursor=cursor))
                     elif total > shown.get(u, 0):
-                        out.append(TraceFrontierNode(urn=u, totalCount=total))
+                        out.append(TraceFrontierNode(
+                            urn=u, totalCount=total, nextCursor=cursor,
+                        ))
                     # else: everything this node has is already on screen.
                 return out
 
-            frontier_up = _frontier(candidates_up, set(probe_up), "in", shown_in)
-            frontier_down = _frontier(candidates_down, set(probe_down), "out", shown_out)
+            frontier_up = _frontier(candidates_up, set(probe_up), "in", shown_in, cut_up)
+            frontier_down = _frontier(candidates_down, set(probe_down), "out", shown_out, cut_down)
 
         # Hydrate participant nodes, then their containment ancestor chains, so
         # the canvas can nest the closure. Guarded: on failure surface a
@@ -8157,7 +8184,6 @@ class FalkorDBProvider(GraphDataProvider):
         ltypes: List[str],
         limit: int,
         timeout_secs: float,
-        exclude: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """One BFS hop over RAW lineage edges — the regime-independent core of
         ``trace_closure``.
@@ -8181,10 +8207,10 @@ class FalkorDBProvider(GraphDataProvider):
         ``(:Label).urn`` index (there is no label-less URN index; an unlabeled
         bucket pays one scan, still correct).
 
-        ``exclude``, when non-empty, adds a parameterized ``NOT o.urn IN
-        $exclude`` to every bucket's WHERE — the closure's already-visited
-        set, kept out of the DB round-trip's own results rather than
-        filtered in Python after the fact.
+        There is deliberately NO exclude filter. The caller's already-known
+        set is applied in Python AFTER the row is recorded, so an edge into a
+        known node still ships while the node itself does not — see the note
+        at the call site in ``trace_closure`` for the diamond this protects.
         """
         if not frontier or limit <= 0 or not ltypes:
             return []
@@ -8208,9 +8234,6 @@ class FalkorDBProvider(GraphDataProvider):
             label_clause = f":{sl}" if sl else ""
             where_clause = "WHERE f.urn IN $frontier "
             params: Dict[str, Any] = {"frontier": urns, "limit": limit}
-            if exclude:
-                where_clause += "AND NOT o.urn IN $exclude "
-                params["exclude"] = exclude
             cypher = (
                 f"MATCH (f{label_clause}){arrow.format(rel=rel_alt)}(o) "
                 + where_clause
@@ -8374,9 +8397,12 @@ class FalkorDBProvider(GraphDataProvider):
         whose full hop would blow the BFS budget, paired with
         ``_expand_raw_lineage_set``'s batched hop.
 
-        Stable-ordered by ``id(r)`` and resumed via ``after_id`` (the
-        previous page's returned ``last_edge_id``; pass ``-1`` or ``None``
-        for the first page — both normalize to "from the start"). Row
+        Stable-ordered by ``id(r)``. ``after_id`` is INCLUSIVE — "the next
+        edge id to consider", not "the last one you saw" — so ``0`` means
+        from the start and the caller's next cursor is ``last_edge_id + 1``.
+        The exclusive form could not express "from the start" at all: the
+        wire grammar is ``^e:\\d+$``, so the only available start was
+        ``e:0``, which silently skipped the edge with ``id(r) == 0``. Row
         dicts use the SAME keys as ``_expand_raw_lineage_set`` rows so
         callers can share processing code between the batched and
         single-node paths.
@@ -8389,7 +8415,7 @@ class FalkorDBProvider(GraphDataProvider):
         if not ltypes or limit <= 0:
             return [], None
 
-        after = -1 if after_id is None else after_id
+        after = 0 if after_id is None else after_id
         sl = _sanitize_label(label) if label else ""
         label_clause = f":{sl}" if sl else ""
         rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
@@ -8403,7 +8429,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         cypher = (
             f"MATCH (f{label_clause} {{urn: $urn}}){arrow}(o) "
-            "WHERE id(r) > $after "
+            "WHERE id(r) >= $after "
             f"RETURN id(r) AS edgeId, {source_expr} AS sourceUrn, {target_expr} AS targetUrn, "
             "type(r) AS edgeType, o.urn AS otherUrn, labels(o)[0] AS otherLabel "
             "ORDER BY id(r) "
