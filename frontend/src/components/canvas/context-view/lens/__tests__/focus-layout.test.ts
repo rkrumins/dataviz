@@ -295,6 +295,51 @@ describe('focus-layout — reveal paging', () => {
         expect(cardFor(revealed, 'c1')!.pillUp).toBeNull()
     })
 
+    it('spends a page only on what it introduces — a shared neighbour is free', () => {
+        // A and B both feed the focus and SHARE twelve upstream sources;
+        // B has one more of its own, ranked last. Reveal A first and its
+        // twelve fill the whole ranking prefix of B's page — so slicing
+        // the raw ranking spent B's entire page on cards already drawn and
+        // B's "+1" did nothing, forever.
+        const nodes = [wnode('F'), wnode('A', 'dataset', 'a_table'), wnode('B', 'dataset', 'b_table')]
+        const hops: Array<[string, string]> = [['A', 'F'], ['B', 'F']]
+        for (let i = 0; i < 12; i++) {
+            const s = `s${String(i).padStart(2, '0')}`
+            nodes.push(wnode(s, 'dataset', `shared_${String(i).padStart(2, '0')}`))
+            hops.push([s, 'A'])
+            // Two hops into B, so every shared source outranks the extra.
+            hops.push([s, 'B'], [s, 'B'])
+        }
+        nodes.push(wnode('X', 'dataset', 'only_b_has_me'))
+        hops.push(['X', 'B'])
+        const sg = subgraph({ focus: 'F', nodes, contains: [], hops })
+
+        const afterA = withReveal(initialLensViewState(sg), 'in:A', 1)
+        const g1 = layout(sg, afterA)
+        expect(cardFor(g1, 's00')).toBeDefined()
+        expect(cardFor(g1, 'X')).toBeUndefined()
+        expect(cardFor(g1, 'B')!.pillUp).toMatchObject({ kind: 'reveal', count: 1, key: 'in:B' })
+
+        // Clicking B's ⊕ must actually deliver the one it promised.
+        const g2 = layout(sg, withReveal(afterA, 'in:B', 1))
+        expect(cardFor(g2, 'X')).toBeDefined()
+        expect(cardFor(g2, 'B')!.pillUp).toBeNull()
+        // ...and it stays a walk, not a dump: the shared twelve were free,
+        // but a page is still a page.
+        expect(g2.cards.filter(c => c.nodeId?.startsWith('s')).length).toBe(12)
+    })
+
+    it('a page delivers a page, and the badge is the remainder', () => {
+        const sg = fanIn(new Array(20).fill(1))
+        const one = layout(sg)
+        expect(urns(one).filter(u => u !== 'F')).toHaveLength(REVEAL_PAGE)
+        expect(cardFor(one, 'F')!.pillUp).toMatchObject({ count: 20 - REVEAL_PAGE })
+        // One more page: exactly the remainder arrives, and the ⊕ retires.
+        const two = layout(sg, withReveal(initialLensViewState(sg), 'in:F', 2))
+        expect(urns(two).filter(u => u !== 'F')).toHaveLength(20)
+        expect(cardFor(two, 'F')!.pillUp).toBeNull()
+    })
+
     it('caps the reveal with an exact remaining count — never a silent truncation', () => {
         const sg = fanIn(new Array(20).fill(1))
         const g = layout(sg)
@@ -436,6 +481,57 @@ describe('focus-layout — the ⊕ pill tells one of three truths', () => {
         const open = layout(sg, { ...base, expandedContainment: new Set([...base.expandedContainment, 'T']) })
         expect(cardFor(open, 'T')!.pillUp).toBeNull()
         expect(cardFor(open, 'c0')!.pillUp).toMatchObject({ kind: 'extend', count: 4 })
+    })
+
+    it('the extend round-trip: the key the consumer passes back is the key the spinner lands on', () => {
+        // T is a collapsed branch; the frontier really belongs to the two
+        // columns hidden inside it. The contract is CARD-anchored: the
+        // consumer calls extend(T, 'up', seedLeaves-from-T's-subtree), and
+        // useLensWalk keys its in-flight map by that same T.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F'), wnode('T', 'dataset', 'src_table'), wnode('c0'), wnode('c1')],
+            contains: [['T', 'c0'], ['T', 'c1']],
+            hops: [['c0', 'F'], ['c1', 'F']],
+            frontierUp: [
+                { urn: 'c0', totalCount: 4, nextCursor: null },
+                { urn: 'c1', totalCount: 3, nextCursor: null },
+            ],
+        })
+        const idle = layout(sg)
+        const pill = cardFor(idle, 'T')!.pillUp!
+        expect(pill.kind).toBe('extend')
+        expect(pill.key).toBe('in:T')
+        expect(pill.status).toBeUndefined()
+
+        // Replay the consumer convention: split the key, hand the urn to
+        // the hook, and the hook reports progress under the same urn.
+        const [dir, target] = [pill.key.slice(0, pill.key.indexOf(':')), pill.key.slice(pill.key.indexOf(':') + 1)]
+        expect(target).toBe('T')
+        const inflight = layout(sg, initialLensViewState(sg), {
+            extendStatus: new Map([[walkStatusKey(dir as 'in' | 'out', target), 'loading']]),
+        })
+        expect(cardFor(inflight, 'T')!.pillUp!.status).toBe('loading')
+    })
+
+    it('the page round-trip is NODE-anchored — a cursor names its own node', () => {
+        // Same shape, but the server handed back a cursor for c0. A cursor
+        // only means anything on the node it was issued for, so the key
+        // names c0 and the spinner comes back on c0 — while the pill still
+        // hangs off the card standing for it.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F'), wnode('T', 'dataset', 'src_table'), wnode('c0'), wnode('c1')],
+            contains: [['T', 'c0'], ['T', 'c1']],
+            hops: [['c0', 'F'], ['c1', 'F']],
+            frontierUp: [{ urn: 'c0', totalCount: 90, nextCursor: 'cur-1' }],
+        })
+        const pill = cardFor(layout(sg), 'T')!.pillUp!
+        expect(pill).toMatchObject({ kind: 'page', key: 'in:c0', cursor: 'cur-1' })
+        const inflight = layout(sg, initialLensViewState(sg), {
+            extendStatus: new Map([[walkStatusKey('in', 'c0'), 'loading']]),
+        })
+        expect(cardFor(inflight, 'T')!.pillUp!.status).toBe('loading')
     })
 
     it('a container carries the frontier of everything inside it', () => {

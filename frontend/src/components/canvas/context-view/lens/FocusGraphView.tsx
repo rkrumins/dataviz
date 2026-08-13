@@ -74,6 +74,7 @@ import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { CARD_W, BAND_GAP, FRAME_FOOTER_H, framePager, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill } from './focus-graph'
+import { REVEAL_PAGE } from './focus-layout'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 
 /** Direction tints — the house semantics: upstream = sky, downstream
@@ -599,8 +600,12 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
   }
 
   const n = pill.count
+  // The badge is the REMAINDER; one click delivers a page of it. Saying
+  // "show 18 more" over a control that shows twelve is a promise the
+  // click cannot keep, so name both numbers when they differ.
+  const thisClick = n != null ? Math.min(n, REVEAL_PAGE) : null
   const title = pill.kind === 'reveal'
-    ? `Show ${n?.toLocaleString()} more ${side} — already loaded, nothing to fetch`
+    ? `Show ${thisClick?.toLocaleString()} more ${side}${n != null && n > REVEAL_PAGE ? ` (${n.toLocaleString()} waiting)` : ''} — already loaded, nothing to fetch`
     : pill.kind === 'page'
       ? `Load the rest of what is ${side} of ${card.label}${n != null ? ` (${n.toLocaleString()} more)` : ''}`
       : `Walk one hop further ${side} of ${card.label}${n != null ? ` (${n.toLocaleString()} more)` : ''}`

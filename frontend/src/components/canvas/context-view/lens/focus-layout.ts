@@ -246,9 +246,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     for (const urn of subtreeOf(sg.focusUrn)) admit(urn)
 
     // The ranking baseline. Frozen BEFORE any reveal is applied: a group's
-    // rank must not depend on which pages happen to be open, or paging
-    // would re-order the cards already on the board (and, worse, keep
-    // finding "new" top-ranked groups forever).
+    // RANK must not depend on which pages happen to be open, or paging
+    // would re-order the cards already on the board.
+    //
+    // Freezing the rank is only half of it. The other half is how a page
+    // is SPENT — see the admission loop below, which charges a page only
+    // for groups it actually introduces. Rank is frozen; budget is not.
     const seed = new Set(population)
 
     const groupCache = new Map<string, RevealGroup[]>()
@@ -300,25 +303,60 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
     const revealedKeys = [...view.revealed.keys()].sort()
     const admittedGroups: RevealGroup[] = []
-    /** Fixpoint. A key only becomes live once its own card is in the
-     *  picture (revealing under a card revealed by another key), so this
-     *  iterates; because the ranking is frozen, it converges in at most
-     *  one pass per key and the result is the same deterministic union
-     *  whatever order the keys are in. */
+    const processed = new Set<string>()
+    /**
+     * Admission. A key only becomes live once its own card is in the
+     * picture (you can reveal under a card another key revealed), so this
+     * iterates until no further key comes alive — at most one pass per key.
+     *
+     * A PAGE IS CHARGED ONLY FOR WHAT IT INTRODUCES. Two cards can rank
+     * the same neighbour: twelve sources feeding both `A` and `B` are
+     * twelve groups under each. Slicing the raw ranking spent B's whole
+     * page on twelve groups A had already put on the board, so B's ⊕ —
+     * correctly reading "1 more", its thirteenth, lower-ranked source —
+     * did nothing at all when clicked, forever. Skipping an already-shown
+     * group for FREE makes a page always worth a page, and makes the
+     * remainder a pill reports genuinely reachable.
+     *
+     * Two shapes were rejected getting here, both worse than the bug:
+     *  • filtering the ranking by population and THEN slicing re-filters
+     *    on every pass, so pass 2 no longer sees what pass 1 admitted and
+     *    spends a fresh twelve — one click drains the entire ranking and
+     *    the cap is gone;
+     *  • counting the pill against the slice window hides every group
+     *    below it: no number, so no pill, so no way to ever reach them.
+     *    Silent truncation is the one thing this builder must not do.
+     *
+     * The trade: because a shared group is paid for by whichever key
+     * reaches it first, the final picture depends on the ORDER keys are
+     * processed in. That order is the sorted key list, so a given view
+     * state always renders identically (and a share link replays exactly)
+     * — deterministic, but no longer order-INDEPENDENT, which the
+     * previous version of this loop claimed. It stays monotone in the
+     * thing that matters: opening a page, or opening another card's page,
+     * only ever ADDS. Nothing already on the board can vanish.
+     */
     for (let pass = 0; pass < revealedKeys.length + 1; pass++) {
-        let changed = false
+        let progressed = false
         for (const key of revealedKeys) {
+            if (processed.has(key)) continue
             const parsed = splitKey(key)
             const pages = view.revealed.get(key) ?? 0
             if (!parsed || pages <= 0 || !population.has(parsed.urn)) continue
-            for (const group of rankedGroups(parsed.dir, parsed.urn).slice(0, pages * REVEAL_PAGE)) {
-                let fresh = false
-                for (const member of group.members) if (admit(member)) fresh = true
-                if (fresh) changed = true
+            processed.add(key)
+            progressed = true
+            let budget = pages * REVEAL_PAGE
+            for (const group of rankedGroups(parsed.dir, parsed.urn)) {
+                if (budget <= 0) break
+                const fresh = group.members.filter(m => !population.has(m))
+                // Already on the board — this key owes nothing for it.
+                if (fresh.length === 0) continue
+                budget -= 1
+                for (const member of fresh) admit(member)
                 if (!admittedGroups.some(g => g.root === group.root)) admittedGroups.push(group)
             }
         }
-        if (!changed) break
+        if (!progressed) break
     }
 
     // ── the column a card sits in: its signed hop distance ───────────
@@ -486,21 +524,43 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
     // ── pills ────────────────────────────────────────────────────────
 
-    /** The one ⊕ this card offers in this direction, or null when the
-     *  walk here is drained. Three states, in priority order:
+    /**
+     * The one ⊕ this card offers in this direction, or null when the walk
+     * here is drained. Three states, in priority order:
      *
-     *    reveal — neighbours ALREADY IN THE MODEL that this page hasn't
-     *             shown yet. Free: no fetch, exact count.
-     *    page   — the server handed back a cursor for a partial
-     *             adjacency; carry it verbatim.
-     *    extend — the server says more exists beyond the model. Exact
-     *             remainder when it reported a total, a countless
-     *             chevron when it did not (never a fabricated number). */
+     *   reveal — neighbours ALREADY IN THE MODEL that this page hasn't
+     *            shown yet. Free: no fetch, exact count.
+     *   page   — the server handed back a cursor for a partial adjacency;
+     *            carry it verbatim.
+     *   extend — the server says more exists beyond the model. Exact
+     *            remainder when it reported a total, a countless chevron
+     *            when it did not (never a fabricated number).
+     *
+     * THE ANCHORING CONTRACT, one rule for all three kinds:
+     *
+     *   `key` is `${dir}:${urn}` where `urn` is the node the consumer
+     *   passes as the FIRST ARGUMENT to the matching walk-hook call, and
+     *   `status` for that pill comes back on that same urn (via
+     *   `walkStatusKey`, which is the only in/out ↔ up/down translation).
+     *
+     * The urn differs by kind, and it has to. `extend` is CARD-anchored:
+     * the consumer calls `extend(cardUrn, dir, seedLeaves)` with the
+     * leaves gathered from the card's own subtree, and `useLensWalk` keys
+     * its in-flight map by that same cardUrn — so a collapsed table whose
+     * frontier really belongs to two hidden columns is extended as the
+     * TABLE, seeded by those columns, and its spinner arrives at the
+     * table. `page` is NODE-anchored, because a cursor is meaningless
+     * anywhere but on the node the server issued it for; the key names
+     * that node, and `page(thatUrn, dir, cursor)` is what the consumer
+     * calls. Both obey the one rule: split the key, pass the urn.
+     */
     const pillFor = (urn: string, dir: LensDir): FocusPill | null => {
         const owned = ownedBy(urn)
-        // What this direction could still show from data already in hand.
-        // A group another card's reveal happened to admit is not offered
-        // again — the count is what clicking would actually add.
+        // What this direction could still show from data already in hand:
+        // the REMAINDER, not one page of it. A group another card's reveal
+        // already put on the board is not offered again, and — because the
+        // admission loop charges a page only for what it introduces — every
+        // group counted here is one a click can actually reach.
         const remainingGroups = groupsFrom(dir, owned, subtreeOf(urn), `own:${dir}:${urn}`)
             .filter(g => g.members.some(m => !population.has(m)))
         if (remainingGroups.length > 0) {
