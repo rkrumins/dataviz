@@ -416,13 +416,15 @@ describe('reach — how far the walk got, and whether that is all of it', () => 
     frontierUp: withFrontier ? [frontier('u1', 9)] : [],
   })
 
-  it('counts what the data source named, and admits an open frontier', () => {
+  it('counts what the data source named, and marks them as floors while a frontier is open', () => {
     usePreferencesStore.setState({ lensViewMode: 'list' })
     renderLens(['F'], doneWalk(reachModel(true)))
-    expect(screen.getByText(/Reach: 2 upstream · 1 downstream · more beyond this view/)).toBeTruthy()
+    // Upstream has an open frontier; downstream is drained, and must
+    // NOT be marked as a floor just because the other side is.
+    expect(screen.getByText(/Reach: 2\+ upstream · 1 downstream/)).toBeTruthy()
   })
 
-  it('drops the qualifier once nothing is left to walk', () => {
+  it('drops the floor mark once nothing is left to walk', () => {
     usePreferencesStore.setState({ lensViewMode: 'list' })
     renderLens(['F'], doneWalk(reachModel(false)))
     expect(screen.getByText(/Reach: 2 upstream · 1 downstream$/)).toBeTruthy()

@@ -236,9 +236,8 @@ export function useLensLineage(
    * resolve descendants. It therefore only finds constituents when the
    * aggregate's own endpoints are the concrete ones. Resolving a
    * table→table rollup into its column pairs needs `expandAggregated`,
-   * which is what `useLensContainer` already calls — see the Phase 2
-   * drill work. Until then this returns what it can and the row reports
-   * the remainder honestly rather than inventing it.
+   * which nothing calls any more. Until then this returns what it can
+   * and the row reports the remainder honestly rather than inventing it.
    */
   const fetchDrill = useCallback((edge: LineageEdge) => {
     if (!provider || drillStartedRef.current.has(edge.id)) return

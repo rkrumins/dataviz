@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import type { FocusCard } from './focus-cards'
+import type { FocusCard, FocusEdge } from './focus-cards'
 
 /**
  * How far `fitView` may zoom IN.
@@ -37,7 +37,8 @@ export type CameraTarget = {
  * is why it was pinned in the first place. So ease to exactly the cards
  * that ARRIVED plus the cards they attached to — the thing you clicked
  * stays in frame and the answer comes to you. The anchors come free
- * from `partnerIds`, which every card already carries.
+ * from the EDGES on the board — the cards an arrival actually wired
+ * itself to.
  *
  * The one invariant worth naming, because breaking it cost a whole
  * feature: **the bookkeeping is stamped only once the move has actually
@@ -53,6 +54,7 @@ export function useFrameCamera(
   rf: CameraTarget | null,
   focalId: string,
   cards: FocusCard[],
+  edges: FocusEdge[],
   reducedMotion: boolean,
 ) {
   const framedRef = useRef<{ focal: string; ids: Set<string> } | null>(null)
@@ -79,10 +81,18 @@ export function useFrameCamera(
         void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })
         return
       }
-      const anchors = new Set(arrived.flatMap(c => c.partnerIds))
+      // What each arrival wired itself to — the other end of every
+      // edge touching it, which is the same question `partnerIds` used
+      // to answer off the card and is now simply on the board.
+      const arrivedIds = new Set(arrived.map(c => c.id))
+      const anchors = new Set<string>()
+      for (const e of edges) {
+        if (arrivedIds.has(e.source) && !arrivedIds.has(e.target)) anchors.add(e.target)
+        if (arrivedIds.has(e.target) && !arrivedIds.has(e.source)) anchors.add(e.source)
+      }
       const frame = [
         ...arrived.map(c => c.id),
-        ...cards.filter(c => c.nodeId && anchors.has(c.nodeId)).map(c => c.id),
+        ...cards.filter(c => anchors.has(c.id)).map(c => c.id),
         // THE one unbreakable rule: the focal is in every frame this
         // camera ever eases to. Answers arriving asynchronously — an
         // auto-resolved container, a slow expansion — used to pan the

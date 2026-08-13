@@ -18,10 +18,10 @@ const PORT = 5199
 const OUT = '.harness'
 const FIXTURES = process.argv.slice(2).length
   ? process.argv.slice(2)
-  // The walk shapes are in the default set because they are the two
-  // that cannot be checked any other way: whether the estate genuinely
-  // NESTS, and whether every ⊕ state is legible side by side.
-  : ['columns', 'deep', 'wide', 'small', 'walkCollaterals', 'walkFrontier']
+  // Every walk shape by default: whether a deep estate genuinely NESTS,
+  // whether a diamond stays one card, whether every ⊕ state is legible
+  // side by side. None of those can be checked any other way.
+  : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH

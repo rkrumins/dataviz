@@ -1,11 +1,8 @@
 /**
- * focus-layout — the Lineage Lens's layout engine for the WALK MODEL.
+ * focus-layout — the Lineage Lens's layout engine.
  *
  * Pure: `(walk subgraph + view state) → FocusGraph`. No React, no fetch,
- * no store. It emits the SAME `FocusGraph` contract `FocusGraphView`
- * already renders, so the walk path and the old neighbor-record path can
- * both be on the board while the rebuild lands (the new capabilities ride
- * on OPTIONAL card/edge fields the old builder never sets).
+ * no store. The one place a lens picture is built.
  *
  * The five stages, in order, each a pure function of the one before:
  *
@@ -28,14 +25,14 @@
  *  4. CARDS — one card per entity, frames nesting to N levels, and the ⊕
  *     pill in exactly one of three states (reveal what's in hand / extend
  *     the walk / page a partial adjacency) or absent when drained.
- *  5. GEOMETRY — signed hop distance is the column; `layoutBands` (shared
- *     with the old builder) stacks and sizes, deepest frame first.
+ *  5. GEOMETRY — signed hop distance is the column; `layoutBands`
+ *     stacks and sizes, deepest frame first.
  *
- * HONESTY RULES, carried over verbatim from the old builder because they
- * are contracts of the lens rather than of an implementation: the text
- * filter DIMS and never removes; the type chips remove but report what
- * they removed; a cap states its exact remainder; a dead end is a claim
- * about the data source and is only ever made once the walk says 'done'.
+ * HONESTY RULES, contracts of the lens rather than of an implementation:
+ * the text filter DIMS and never removes; the type chips remove but
+ * report what they removed; a cap states its exact remainder; a dead end
+ * is a claim about the data source and is only ever made once the walk
+ * says 'done'.
  */
 import type { LineageNode } from '@/store/canvas'
 import {
@@ -65,17 +62,17 @@ import {
     type FocusPill,
 } from './focus-cards'
 
-/** Upstream ('in') and downstream ('out') — the lens's own words, and the
- *  same two the old builder uses. The walk HOOK speaks 'up'/'down';
- *  `walkStatusKey` is the one place that translates. */
+/** Upstream ('in') and downstream ('out') — the lens's own words. The
+ *  walk HOOK speaks 'up'/'down'; `walkStatusKey` is the one place that
+ *  translates. */
 export type LensDir = 'in' | 'out'
 
 /** New top-level cards one ⊕ click reveals.
  *
  *  Counted in GROUPS, not entities: a group is one root-most container,
  *  so twelve groups is twelve cards however many leaves nest inside them.
- *  Sized like the old band cap — a card is ~74px, so twelve fill a ~950px
- *  lens body. */
+ *  Sized to the viewport — a card is ~74px, so twelve fill a ~950px lens
+ *  body. */
 export const REVEAL_PAGE = 12
 
 /** The layout's own key for "this card, this direction". One namespace
@@ -615,28 +612,17 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         x: 0, y: 0, w: CARD_W, h: CARD_H,
         description: null,
         parentId: null, parentLabel: null,
-        count: 1, edgeTypeNorm: '', sumCount: 0,
-        rollup: false, unresolved: false, aggregated: false,
+        count: 1, edgeTypeNorm: '',
         frameId: null, depth: 0,
-        ancestry: EMPTY_STRINGS, ancestryIds: EMPTY_STRINGS, alsoAtGrains: EMPTY_STRINGS,
-        frameBreadcrumb: EMPTY_STRINGS, frameTruncated: false, frameEmpty: false,
+        ancestry: EMPTY_STRINGS, ancestryIds: EMPTY_STRINGS,
+        frameTruncated: false, frameEmpty: false,
         connected: true, frameShowingAll: false, frameConnectedCount: 0,
         frameLoaded: 0, frameTotal: -1, frameHasMore: false,
-        // The walk model IS the roster for what connects: collapsing a
-        // frame is a re-projection over data in hand, never a fetch.
-        frameLocal: true,
-        frameSharedEdgeType: '', alreadyShown: false,
+        frameSharedEdgeType: '',
         framePage: 0, framePageSize: FRAME_CHILD_CAP,
-        partnerIds: EMPTY_STRINGS, partnerLabel: null,
         canOpenChildren: false, childrenOpen: false,
-        expandKey: null, expanded: false,
-        expandKind: null, frontier: false, frontierExpanded: false, deadEnd: false,
-        degreeHint: null, fetch: null,
-        dimmed: false, matchesInside: 0,
-        overflowCount: 0, previewLabels: EMPTY_STRINGS,
-        // The strangler discriminator: the view renders the walk branches
-        // ONLY on cards carrying this, so the old path is untouched.
-        walk: true,
+        expandKey: null, expanded: false, deadEnd: false,
+        fetch: null, dimmed: false,
         pillUp: null, pillDown: null, contents: null,
     })
 
@@ -823,7 +809,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // fit in 64px. Squashing it there spilled its own text out
         // through the bottom of the container holding it.
         if (card.kind === 'frame' || card.kind === 'focal') continue
-        card.h = rowHeight(host.frameSharedEdgeType, card.edgeTypeNorm, EMPTY_STRINGS)
+        card.h = rowHeight(host.frameSharedEdgeType, card.edgeTypeNorm)
     }
 
     // ── edges ────────────────────────────────────────────────────────
@@ -851,8 +837,6 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             target,
             count: bundle.weight,
             edgeTypeNorm: (bundle.edgeTypeNorm || '').toUpperCase(),
-            aggregated: false,
-            containment: false,
             // A wire between two misses is background; one touching a
             // match stays lit, or the filter would hide the answer's own
             // connections.
@@ -899,9 +883,5 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         hiddenByChipsIn,
         hiddenByChipsOut,
         bandTotals,
-        // The walk model nests instead of restating one connection at
-        // four grains, so there is nothing to fold away.
-        foldedAway: 0,
-        foldedGrains: EMPTY_STRINGS,
     }
 }

@@ -676,12 +676,15 @@ export function LineageLens({
    * the server has NAMED as upstream / downstream of the focus, which
    * is the number every other surface here is derived from.
    */
+  // A cap applies to the whole fetch, so it makes BOTH sides floors; a
+  // frontier only makes its own side one.
+  const capped = (model?.truncated ?? false) || (model?.seedTruncated ?? false)
   const reach: LensReach | null = model && walkStatus === 'done'
     ? {
         up: model.upstreamUrns.size,
         down: model.downstreamUrns.size,
-        more: model.frontierUp.length > 0 || model.frontierDown.length > 0
-          || model.truncated || model.seedTruncated,
+        moreUp: capped || model.frontierUp.length > 0,
+        moreDown: capped || model.frontierDown.length > 0,
       }
     : null
 
@@ -1530,14 +1533,14 @@ function ReachLine({ reach, loading }: { reach: LensReach | null; loading: boole
   return (
     <p
       className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted tabular-nums"
-      title={reach.more
-        ? 'Entities this walk has reached so far. More exists beyond this view — use ⊕ on a card to walk further.'
+      title={reach.moreUp || reach.moreDown
+        ? 'Entities this walk has reached so far. A + marks a floor rather than a total — more exists that way. Use ⊕ on a card to walk further.'
         : 'Every entity connected to this one, upstream and downstream, as far as the data source goes.'}
     >
       <LucideIcons.Radar className="w-3 h-3 text-accent-lineage/70" />
       <span>
-        Reach: {reach.up.toLocaleString()} upstream · {reach.down.toLocaleString()} downstream
-        {reach.more ? ' · more beyond this view' : ''}
+        Reach: {reach.up.toLocaleString()}{reach.moreUp ? '+' : ''} upstream
+        {' · '}{reach.down.toLocaleString()}{reach.moreDown ? '+' : ''} downstream
       </span>
     </p>
   )

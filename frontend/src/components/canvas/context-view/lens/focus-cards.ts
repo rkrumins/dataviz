@@ -63,8 +63,6 @@ export const CARD_W = 240
 export const FRAME_CONTENT_W = CARD_W + 50
 export const FOCAL_H = 120
 export const CARD_H = 64
-export const CONTAINS_H = 36
-export const OVERFLOW_H = 36
 /** A frame row with nothing to say beneath its name — its relationship
  *  is stated once on the frame, and it stands for no coarser grain.
  *  Sized to the name alone rather than to a subtitle that will not
@@ -74,13 +72,10 @@ export const CHILD_ROW_H = 36
 /** How tall a row inside a frame must be.
  *
  *  A row prints a subtitle only when it has something the frame has not
- *  already said: a relationship its siblings do not share, or a coarser
- *  grain it stands for. Otherwise the name is the whole row. Both frame
- *  kinds ask this, so a column inside its table is one height however
- *  the frame was built. */
-export function rowHeight(sharedEdgeType: string, ownEdgeType: string, alsoAtGrains: readonly string[]): number {
-  const saysSomethingNew = (ownEdgeType !== '' && ownEdgeType !== sharedEdgeType) || alsoAtGrains.length > 0
-  return saysSomethingNew ? CARD_H : CHILD_ROW_H
+ *  already said: a relationship its siblings do not share. Otherwise the
+ *  name is the whole row. */
+export function rowHeight(sharedEdgeType: string, ownEdgeType: string): number {
+  return ownEdgeType !== '' && ownEdgeType !== sharedEdgeType ? CARD_H : CHILD_ROW_H
 }
 export const BAND_GAP = 130
 export const CARD_GAP = 10
@@ -128,26 +123,10 @@ export function framePager(card: FocusCard) {
   }
 }
 
-export type FocusDirection = 'in' | 'out'
-
-export type FocusCardKind = 'focal' | 'entity' | 'contains' | 'overflow' | 'frame'
+export type FocusCardKind = 'focal' | 'entity' | 'frame'
 
 /**
- * What a card's ONE expand affordance does. Every expandable card
- * offers the same gesture — "show me what's inside / what's next" —
- * and this says which meaning applies:
- *   open  → open a COARSER partner (a container, a platform) into the
- *           entities inside it that carry lineage to the focal
- *   hop   → fetch and reveal this entity's own next hop
- *   more  → page in the rest of a capped band or frame
- *   retry → the fetch behind this row failed; ask again
- *   focus → the stack ends here; re-center the lens on this entity so
- *           its own contents become the new top level
- */
-export type FocusExpandKind = 'open' | 'hop' | 'more' | 'retry' | 'focus' | null
-
-/**
- * The ⊕ on a walk card, in exactly one of three states — and the state
+ * The ⊕ on a card, in exactly one of three states — and the state
  * is the whole point, because they cost different things and promise
  * different things:
  *
@@ -181,17 +160,21 @@ export interface FocusPill {
 export interface LensReach {
   up: number
   down: number
-  /** A frontier is still open somewhere, or a fetch was capped — so
-   *  these two numbers are floors, not totals, and say so. */
-  more: boolean
+  /** A frontier is still open on THIS side (or a fetch was capped), so
+   *  the count beside it is a floor rather than a total. Per-direction
+   *  on purpose: one flag for both stamped "0+ downstream" on a focal
+   *  whose downstream the data source had plainly reported as empty,
+   *  right beside the whisper saying so. */
+  moreUp: boolean
+  moreDown: boolean
 }
 
 export interface FocusCard {
   /** Stable across rebuilds so shared cards glide between focal swaps:
-   *  'f' | n:urn | g:dir:parentUrn | c:urn | fr:dir:urn | more:dir:band */
+   *  'f' | n:urn | fr:urn */
   id: string
   kind: FocusCardKind
-  /** Backing entity urn; null only for overflow cards. */
+  /** Backing entity urn. */
   nodeId: string | null
   band: number
   x: number
@@ -201,36 +184,27 @@ export interface FocusCard {
   label: string
   /** Entity description when known — hover context for business users. */
   description: string | null
-  /** Entity type id; 'entity' fallback, 'not loaded' when unresolved. */
+  /** Entity type id; 'not loaded' when the walk could not resolve one. */
   type: string
   parentId: string | null
   parentLabel: string | null
-  /** Entity: bundled connection count (≥1). Group: member count. */
+  /** Raw hops this card's subtree carries to the rest of the picture. */
   count: number
-  /** Entity: normalized type of the connecting edge ('' elsewhere). */
+  /** The one relationship type this card's hops share, '' when they
+   *  differ or it carries none. */
   edgeTypeNorm: string
-  /** Group: Σ member connection counts. 0 elsewhere. */
-  sumCount: number
-  /** Coarser-grain summary of finer flows (dashed, badged, demoted). */
-  rollup: boolean
-  /** Entity not resolvable from store or fetches ("not on canvas"). */
-  unresolved: boolean
-  aggregated: boolean
-  /** Frame this card is nested inside (`fr:${dir}:${urn}`), else null. */
+  /** Frame this card is nested inside (`fr:${urn}`), else null. */
   frameId: string | null
   /** Nesting level, 0 for a top-level card. Drives the indent; the tree
    *  itself is derived, never stored. */
   depth: number
-  /** Frame cards only — the pass-through levels the open walked
-   *  through, so a skipped level is shown rather than hidden. */
-  frameBreadcrumb: string[]
   /** Frame cards only — server capped the expansion (counts are floors). */
   frameTruncated: boolean
   /** Frame cards only — opened, and nothing inside connects to the focal. */
   frameEmpty: boolean
-  /** Frame CHILD only: does this carry lineage to the focal? False for a
-   *  child that merely lives inside the container, shown in "all" mode
-   *  so the picture is the whole table rather than an edited version. */
+  /** Frame CHILD only: is this on the lineage? False for a child that
+   *  merely lives inside the container, shown in "all" mode so the
+   *  picture is the whole table rather than an edited version. */
   connected: boolean
   /** Frame cards only — showing every child, not just connected ones. */
   frameShowingAll: boolean
@@ -243,10 +217,6 @@ export interface FocusCard {
   frameTotal: number
   /** Frame cards only — more children exist on the server than loaded. */
   frameHasMore: boolean
-  /** Frame cards only — built from records already in hand rather than a
-   *  server open, so its roster is complete, its filter is local, and
-   *  its chevron toggles a local set instead of firing a fetch. */
-  frameLocal: boolean
   /** Frame cards only — the one relationship type ALL its rows carry,
    *  or '' when they differ.
    *
@@ -264,12 +234,6 @@ export interface FocusCard {
   ancestry: string[]
   /** The same chain as urns, so each crumb is a place you can go. */
   ancestryIds: string[]
-  /** Coarser grains this card also arrived as, folded into it — the
-   *  same connection restated at its ancestors' levels. */
-  alsoAtGrains: string[]
-  /** This card's expansion completed and reached only entities that
-   *  were already drawn — it contributed edges, not cards. */
-  alreadyShown: boolean
   /** Frame cards only — which page of children is on screen (0-based),
    *  already clamped to what has actually loaded. Paging shows ONE page
    *  at a time so a 500-column table and a 5-column one occupy the same
@@ -278,16 +242,10 @@ export interface FocusCard {
   framePage: number
   /** Frame cards only — children per page. */
   framePageSize: number
-  /** The entities THIS card is connected to in the picture — its
-   *  previous-band partners (the focal, at band 1). */
-  partnerIds: string[]
-  /** Human name of the partner an open would ask about — NULL when that
-   *  partner is the focal itself. */
-  partnerLabel: string | null
   /** This entity can hold things, so it offers to open its contents.
-   *  Independent of `expandKind`: "what is inside this" and "what
-   *  connects to this next" are different questions and get different
-   *  controls, rather than one pill whose meaning depends on grain. */
+   *  Independent of the ⊕: "what is inside this" and "what connects to
+   *  this next" are different questions and get different controls,
+   *  rather than one pill whose meaning depends on grain. */
   canOpenChildren: boolean
   /** Its contents are currently open (it renders as a frame). */
   childrenOpen: boolean
@@ -295,44 +253,20 @@ export interface FocusCard {
   expandKey: string | null
   /** Frame cards: its rows are on screen. Mirrors `childrenOpen`. */
   expanded: boolean
-  /** What this card's expand affordance means (null = not expandable). */
-  expandKind: FocusExpandKind
-  /** Card shows an outward expand pill (an 'open' or 'hop' card). */
-  frontier: boolean
-  /** True when this card is already expanded open. */
-  frontierExpanded: boolean
-  /** Expanded, fetch completed, and NOTHING further exists — the walk
-   *  genuinely ends here (a data-source claim, never a guess). */
+  /** The walk reached this card and NOTHING further exists beyond it —
+   *  a claim about the data source, made only once the walk says so. */
   deadEnd: boolean
-  degreeHint: { in: number; out: number } | null
   fetch: 'loading' | 'error' | null
   /** Text-filter miss — rendered dimmed, never removed. */
   dimmed: boolean
-  /** Collapsed group only: members matching the text filter. */
-  matchesInside: number
-  /** Overflow card only: how many more cards the band holds. */
-  overflowCount: number
-  /** Up to 3 names of what this card stands for, shown while it is
-   *  still closed so you can often skip opening it. Only ever from
-   *  data already in hand — never a speculative fetch. */
-  previewLabels: string[]
-
-  // ── Walk-model fields (focus-layout.ts only) ──────────────────────
-  // Optional by construction: the OLD builder never sets any of them,
-  // and the view renders the walk branches only where `walk` is
-  // present, so both builders can be on the board during the rebuild.
-
-  /** Built by `buildFocusLayout` from the walk model. The view's
-   *  discriminator for every branch below. */
-  walk?: true
   /** The ⊕ on this card's upstream side, or null when drained. */
-  pillUp?: FocusPill | null
+  pillUp: FocusPill | null
   /** The ⊕ on this card's downstream side, or null when drained. */
-  pillDown?: FocusPill | null
+  pillDown: FocusPill | null
   /** What is inside, at the two grains that matter: how many of its
    *  contents are ON THIS LINEAGE, and how many it holds in total (null
    *  when the count is genuinely unknown — a floor is not a total). */
-  contents?: { onLineage: number; total: number | null } | null
+  contents: { onLineage: number; total: number | null } | null
 }
 
 export interface FocusEdge {
@@ -342,14 +276,11 @@ export interface FocusEdge {
   target: string
   count: number
   edgeTypeNorm: string
-  aggregated: boolean
-  /** Dashed focal→child containment tether (not a flow edge). */
-  containment: boolean
   dimmed: boolean
-  /** Walk model only (focus-layout.ts): this hop runs BACKWARDS in the
-   *  picture's own hop numbering, so it closes a loop. Drawn with a
-   *  cycle badge rather than silently overlapping a forward wire. */
-  cycleBack?: boolean
+  /** This hop runs BACKWARDS in the picture's own hop numbering, so it
+   *  closes a loop. Drawn with a cycle badge rather than silently
+   *  overlapping a forward wire. */
+  cycleBack: boolean
 }
 
 export interface FocusGraph {
@@ -373,11 +304,6 @@ export interface FocusGraph {
      *  nothing on screen reconciling them. */
     connections: number
   }>
-  /** Records a grain fold removed as coarser restatements of a
-   *  connection already on the board, and the entity types they came
-   *  in as. */
-  foldedAway: number
-  foldedGrains: string[]
 }
 
 /** Display label for a node — the fallback chain every lens surface

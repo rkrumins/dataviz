@@ -2,17 +2,17 @@
  * FocusGraphView — the Lens's interactive Graph mode renderer.
  *
  * A self-contained React Flow instance (own provider — never shares
- * viewport state with GraphCanvas) that renders the pure focus-graph
- * build as rich entity cards in hop bands. All semantics live in
- * focus-graph.ts; this file is presentation and gestures only:
+ * viewport state with GraphCanvas) that renders the pure layout build as
+ * rich entity cards in hop bands. All semantics live in
+ * focus-layout.ts; this file is presentation and gestures only:
  *   single click  = select (detail strip)     double click = focus
- *   frame chevron = show/hide its rows         pane click   = deselect
+ *   ▸ chevron     = show/hide what is inside   pane click   = deselect
  *   hover a card  = light up its connections
  *   drag a card   = rearrange it; a frame carries its children
  *   breadcrumb    = re-center a level above this one
- *   ⊕ pill        = open this card — a coarse container reveals what
- *                   is inside it that connects to the focal; anything
- *                   else reveals its own next hop
+ *   ⊕ pill        = grow the walk from this card — reveal what is
+ *                   already loaded, page a partial adjacency, or fetch
+ *                   one hop further out
  *
  * Positions come pre-baked from the builder, so React Flow does no
  * layout of its own — card ids are stable across rebuilds and a CSS
@@ -199,15 +199,14 @@ function sameCard(a: FocusCard, b: FocusCard): boolean {
   const keys = Object.keys(a) as Array<keyof FocusCard>
   if (keys.length !== Object.keys(b).length) return false
   for (const k of keys) {
-    if (k === 'frameBreadcrumb' || k === 'previewLabels' || k === 'partnerIds' || k === 'ancestry' || k === 'ancestryIds' || k === 'alsoAtGrains') {
+    if (k === 'ancestry' || k === 'ancestryIds') {
       const x = a[k], y = b[k]
       if (x.length !== y.length || x.some((v, i) => v !== y[i])) return false
       continue
     }
-    // The walk builder returns fresh records every rebuild, so these
-    // have to be compared by VALUE — by reference they would never
-    // match and the memo boundary this function exists for would be
-    // gone the moment the lens moved onto the walk model.
+    // The builder returns fresh records every rebuild, so these have to
+    // be compared by VALUE — by reference they would never match and
+    // the memo boundary this function exists for would be gone.
     if (k === 'pillUp' || k === 'pillDown') {
       const x = a[k] ?? null, y = b[k] ?? null
       if (x === null || y === null) { if (x !== y) return false; continue }
@@ -419,20 +418,17 @@ function CardActions({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
 
 /** "What's inside this?" — the containment gesture, on the card body.
  *
- *  Deliberately a different control in a different place from the
- *  FrontierPill, which answers the other question ("what connects to
- *  this next?"). They used to share one ⊕ whose meaning flipped with
- *  the card's grain, so an ordinary neighbour's columns were simply
- *  unreachable. A card may now offer both, and each means one thing.
+ *  Distinct from the ⊕, which answers the other question ("what connects
+ *  to this next?"). They used to share one control whose meaning flipped
+ *  with the card's grain, so an ordinary neighbour's columns were simply
+ *  unreachable. A card may offer both, and each means one thing.
  *
- *  Offered from the ontology — whether the TYPE can contain anything —
- *  not from `childCount`, which most read paths strip. An open that
- *  comes back empty says so; a hidden control cannot. */
+ *  Always free: "what's inside" is a re-projection over the walk model
+ *  already in hand, and the model's children are scoped to lineage
+ *  participants — so expanding can never fetch, and can never reach
+ *  outside the lineage. */
 function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   if (!card.canOpenChildren || !card.nodeId || !card.expandKey) return null
-  // `kids:` is pure containment (the focal's own stack, at any depth);
-  // everything else asks what inside it connects to a partner.
-  const pureContainment = card.expandKey.startsWith('kids:')
   const Icon = card.fetch === 'loading' ? LucideIcons.Loader2
     : card.childrenOpen ? LucideIcons.ChevronDown : LucideIcons.ChevronRight
   return (
@@ -445,102 +441,9 @@ function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
       title={card.childrenOpen
         ? `Hide what's inside ${card.label}`
         : `Show what's inside ${card.label}`}
-      onClick={(e) => {
-        e.stopPropagation()
-        // On the walk model, "what's inside" is always a re-projection
-        // over the model already in hand — expanding can never reach
-        // outside the lineage, so it never fetches.
-        if (card.walk) ctx.onToggleFrame(card.expandKey!)
-        else if (pureContainment) ctx.onToggleContains?.(card.nodeId!)
-        else if (card.frameLocal) ctx.onToggleFrame(card.expandKey!)
-        else ctx.onOpenContainer?.(card.expandKey!, card.nodeId!, card.type, card.partnerIds[0] ?? null)
-      }}
+      onClick={(e) => { e.stopPropagation(); ctx.onToggleFrame(card.expandKey!) }}
     >
       <Icon className={cn('w-3 h-3', card.fetch === 'loading' && 'animate-spin')} />
-    </button>
-  )
-}
-
-/** The one expand pill on a card's outward side. What it opens depends
- *  on the card: a rolled-up connection resolves into the constituent
- *  entities that actually carry lineage to the focal ('drill'), while a
- *  plain entity fetches its own next hop ('hop'). Never invents a
- *  number — the count renders only when the backend reported a real
- *  degree — and a completed-empty hop becomes an end-of-lineage mark. */
-function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
-  if (!card.nodeId || !card.expandKey || (!card.frontier && !card.frontierExpanded)) return null
-  const outLeft = card.band < 0
-  const hint = card.degreeHint ? (outLeft ? card.degreeHint.in : card.degreeHint.out) : null
-  // A row inside a frame keeps its pill INSIDE the frame's border —
-  // hung outside it floated in the gutter, visually detached from both
-  // the row it belongs to and the box it sat beside.
-  const pos = card.frameId
-    ? (outLeft ? 'left-1 -translate-x-1/2' : 'right-1 translate-x-1/2')
-    : (outLeft ? 'right-full mr-1.5' : 'left-full ml-1.5')
-  if (card.fetch === 'loading') {
-    return (
-      <span className={cn('absolute top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded-full bg-canvas-elevated border border-accent-lineage/40', pos)}>
-        <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage" aria-label="Fetching lineage from the data source" />
-      </span>
-    )
-  }
-  if (card.fetch === 'error') {
-    return (
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); ctx.onRetryFetch?.(card.nodeId!) }}
-        title="Couldn't fetch this entity's lineage — click to retry"
-        className={cn('absolute top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded-full bg-canvas-elevated border border-amber-500/60 text-amber-600 dark:text-amber-400 hover:bg-amber-500/10', pos)}
-      >
-        <LucideIcons.AlertTriangle className="w-3 h-3" />
-      </button>
-    )
-  }
-  if (card.deadEnd) {
-    return (
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier?.(card.expandKey!, card.nodeId!) }}
-        title={`No further ${outLeft ? 'upstream' : 'downstream'} lineage in the data source — the walk ends here (click to collapse)`}
-        className={cn('absolute top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded-full bg-canvas-elevated border border-black/10 dark:border-white/15 text-ink-muted/50 hover:text-ink-muted', pos)}
-      >
-        <LucideIcons.CircleSlash className="w-3 h-3" />
-      </button>
-    )
-  }
-  const expanded = card.frontierExpanded
-  return (
-    <button
-      type="button"
-      onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier?.(card.expandKey!, card.nodeId!) }}
-      title={expanded
-        // An expansion that reached only cards already on the board adds
-        // edges and nothing else. Saying so is the difference between
-        // "this control is broken" and "you already had the answer".
-        ? card.alreadyShown
-          ? `Everything ${outLeft ? 'upstream of' : 'downstream of'} ${card.label} is already on the board — expanding drew the connections to it (click to collapse)`
-          : `Collapse ${outLeft ? 'upstream of' : 'downstream of'} ${card.label}`
-        : `Expand the next hop ${outLeft ? 'upstream' : 'downstream'} of ${card.label}${hint != null ? ` (${hint.toLocaleString()} known)` : ''}`}
-      aria-label={expanded
-        ? `Collapse ${outLeft ? 'upstream of' : 'downstream of'} ${card.label}`
-        : `Expand the next hop ${outLeft ? 'upstream' : 'downstream'} of ${card.label}`}
-      aria-expanded={expanded}
-      className={cn(
-        'absolute top-1/2 -translate-y-1/2 flex items-center justify-center gap-0.5 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors',
-        hint != null && !expanded ? 'px-1.5' : 'w-5',
-        expanded
-          ? 'bg-accent-lineage/15 border-accent-lineage/50 text-accent-lineage hover:bg-accent-lineage/25'
-          : 'bg-canvas-elevated border-black/15 dark:border-white/20 text-ink-muted hover:text-accent-lineage hover:border-accent-lineage/50',
-        pos,
-      )}
-    >
-      {(() => {
-        if (expanded && card.alreadyShown) return <LucideIcons.Link2 className="w-3 h-3" />
-        if (expanded) return <LucideIcons.Minus className="w-3 h-3" />
-        // A hop only knows a degree when the backend reported one.
-        if (hint == null) return <LucideIcons.Plus className="w-3 h-3" />
-        return <>{outLeft && <LucideIcons.Plus className="w-2.5 h-2.5" />}{hint.toLocaleString()}{!outLeft && <LucideIcons.Plus className="w-2.5 h-2.5" />}</>
-      })()}
     </button>
   )
 }
@@ -552,7 +455,7 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
 const pillTarget = (key: string): string => key.slice(key.indexOf(':') + 1)
 
 /**
- * The walk model's ⊕, in one of three states — and the state is the
+ * The ⊕, in one of three states — and the state is the
  * whole point, because they cost different things and promise different
  * things:
  *
@@ -639,10 +542,9 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
   )
 }
 
-/** Both sides of a walk card, or — when neither side has anything left
- *  to offer — the mark that the walk genuinely ends here. */
+/** Both sides of a card, or — when neither side has anything left to
+ *  offer — the mark that the walk genuinely ends here. */
 function WalkPills({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
-  if (!card.walk) return null
   if (!card.pillUp && !card.pillDown) {
     if (!card.deadEnd) return null
     const upstream = card.band < 0
@@ -699,58 +601,9 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   const focalReach = useContext(ReachContext)
   const accent = card.type === 'not loaded' ? '#94a3b8' : ctx.visualFor(card.type).color
 
-  const activate = () => {
-    if (card.kind === 'overflow') {
-      // A 'focus' overflow is the door at the end of the contains stack:
-      // it re-centers rather than paging a column that cannot page.
-      if (card.expandKind === 'focus' && card.parentId) ctx.onFocus(card.parentId)
-      else if (card.expandKind === 'retry' && card.parentId) ctx.onRetryContains?.(card.parentId)
-      else if (card.expandKey) ctx.onShowMore?.(card.expandKey)
-      return
-    }
-    ctx.onSelect(card.nodeId)
-  }
+  const activate = () => ctx.onSelect(card.nodeId)
   const keyActivate = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); activate() }
-  }
-
-  // ── Overflow: the honest "+N more" card ──
-  if (card.kind === 'overflow') {
-    const toFocus = card.expandKind === 'focus'
-    const toRetry = card.expandKind === 'retry'
-    // A card with nothing to do is a STATEMENT, not a button — an
-    // "Nothing inside X" row that looked clickable and did nothing was
-    // the thing this whole pass is removing.
-    const inert = !toFocus && !toRetry && !card.expandKey
-    const Icon = toFocus ? LucideIcons.Focus
-      : toRetry ? LucideIcons.RotateCw
-      : LucideIcons.ChevronDown
-    if (inert) {
-      return (
-        <p
-          style={{ width: card.w, height: card.h }}
-          className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-muted/25 text-[11px] italic text-ink-muted/70"
-        >
-          {card.label}
-        </p>
-      )
-    }
-    return (
-      <button
-        type="button"
-        onClick={activate}
-        title={toFocus
-          ? `Focus ${card.label.replace(/ — focus it$/, '')} — its contents become the top level`
-          : toRetry
-            ? 'Ask the data source again'
-            : `Show more (${card.overflowCount.toLocaleString()} not shown)`}
-        style={{ width: card.w, height: card.h }}
-        className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-muted/35 text-[11px] font-medium text-ink-muted hover:text-ink hover:border-ink-muted/60 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-      >
-        <Icon className="w-3.5 h-3.5" />
-        {card.label}
-      </button>
-    )
   }
 
   // ── Focal: the anchor card — bigger, gradient, in/out tally ──
@@ -815,54 +668,17 @@ function FocusGraphCard({ data, selected }: NodeProps) {
         {focalReach && (
           <p
             className="flex items-center gap-1 mt-0.5 text-[9px] text-ink-muted tabular-nums truncate"
-            title={focalReach.more
-              ? 'Entities this walk has reached so far. More exists beyond this view — use ⊕ on a card to walk further.'
+            title={focalReach.moreUp || focalReach.moreDown
+              ? 'Entities this walk has reached so far. A + marks a floor rather than a total — more exists that way. Use ⊕ on a card to walk further.'
               : 'Every entity connected to this one, upstream and downstream, as far as the data source goes.'}
           >
             <LucideIcons.Radar className="w-2.5 h-2.5 flex-shrink-0 text-accent-lineage/70" />
             <span className="truncate">
-              Reach: {focalReach.up.toLocaleString()} upstream · {focalReach.down.toLocaleString()} downstream
-              {focalReach.more ? ' · more beyond this view' : ''}
+              Reach: {focalReach.up.toLocaleString()}{focalReach.moreUp ? '+' : ''} upstream
+              {' · '}{focalReach.down.toLocaleString()}{focalReach.moreDown ? '+' : ''} downstream
             </span>
           </p>
         )}
-      </div>
-    )
-  }
-
-  // ── Contains: compact child row under the focal ──
-  if (card.kind === 'contains') {
-    return (
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={activate}
-        onKeyDown={keyActivate}
-        onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
-        title={`${card.label}${card.description ? ` — ${card.description}` : ''} — contained by the focal entity · double-click to focus`}
-        style={{ width: card.w, height: card.h }}
-        className={cn(
-          'group relative flex items-center gap-1.5 rounded-lg border border-black/[0.06] dark:border-white/[0.07] bg-black/[0.015] dark:bg-white/[0.02] px-2.5 cursor-pointer transition-colors hover:border-accent-lineage/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-          selected && 'ring-2 ring-accent-lineage',
-          card.dimmed && 'opacity-30',
-        )}
-      >
-        <PortHandles />
-        <ContentsChevron card={card} ctx={ctx} />
-        {card.expandKind === 'focus' && card.nodeId && (
-          <button
-            type="button"
-            title={`${card.label} holds more — focus it to make its contents the top level`}
-            onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.nodeId!) }}
-            className="nodrag flex-shrink-0 -ml-1 w-4 h-full flex items-center justify-center text-ink-muted/50 hover:text-accent-lineage focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded"
-          >
-            <LucideIcons.Focus className="w-3 h-3" />
-          </button>
-        )}
-        <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
-        <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: accent }} />
-        <span className="min-w-0 truncate text-[11px] text-ink">{card.label}</span>
-        <CardActions card={card} ctx={ctx} />
       </div>
     )
   }
@@ -907,10 +723,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       title={`${card.label}${card.description ? ` — ${card.description}` : ''} · click to inspect, double-click to focus`}
       style={{ width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent }}
       className={cn(
-        'group relative flex items-center gap-2 rounded-lg border px-2.5 cursor-pointer transition-colors bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-      card.rollup
-          ? 'border-dashed border-black/[0.12] dark:border-white/[0.14] opacity-75 hover:opacity-100'
-          : 'border-black/[0.07] dark:border-white/[0.08]',
+        'group relative flex items-center gap-2 rounded-lg border border-black/[0.07] dark:border-white/[0.08] px-2.5 cursor-pointer transition-colors bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
         selected && 'ring-2 ring-accent-lineage',
         card.dimmed && 'opacity-30',
       )}
@@ -928,14 +741,6 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       <div className="flex-1 min-w-0">
         <p className="flex items-center gap-1.5 min-w-0 text-[12px] font-medium text-ink leading-snug">
           <span className="truncate">{card.label}</span>
-          {card.rollup && (
-            <span
-              className="flex-shrink-0 flex items-center"
-              title="Stands for finer flows beneath it — not an additional connection"
-            >
-              <LucideIcons.Layers className="w-2.5 h-2.5 text-ink-muted/50" />
-            </span>
-          )}
         </p>
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug min-w-0">
           {(card.ancestry.length > 0 || card.parentLabel) && (
@@ -958,23 +763,6 @@ function FocusGraphCard({ data, selected }: NodeProps) {
               </span>
             </>
           )}
-          {card.alsoAtGrains.length > 0 && (
-            <>
-              {/* This card absorbed the same connection restated at
-                  OTHER levels of the containment tree — coarser ones in
-                  Flat view, finer ones in Grouped. Say so, whichever
-                  direction: cards vanishing while the header still
-                  counts them would be silent loss. */}
-              <span
-                className="flex-shrink-0 flex items-center gap-0.5 px-1 rounded bg-black/[0.04] dark:bg-white/[0.06] text-[8.5px] uppercase tracking-wide text-ink-muted/70"
-                title={`Absorbed ${card.alsoAtGrains.length} restatement${card.alsoAtGrains.length === 1 ? '' : 's'} of the same connection (${[...new Set(card.alsoAtGrains)].join(', ')}) from elsewhere in the containment tree`}
-              >
-                <LucideIcons.Layers2 className="w-2.5 h-2.5" />
-                +{card.alsoAtGrains.length}
-              </span>
-              <span className="text-ink-muted/40">·</span>
-            </>
-          )}
           {card.count > 1 && (
             <span
               className="tabular-nums font-semibold text-ink-muted flex-shrink-0"
@@ -989,18 +777,9 @@ function FocusGraphCard({ data, selected }: NodeProps) {
               <ContentsCount card={card} />
             </>
           )}
-          {card.unresolved && <span className="italic flex-shrink-0">· not on canvas</span>}
         </p>
-        {/* Name a few of the things a closed container stands for, so
-            you can often skip opening it. Cached data only. */}
-        {card.previewLabels.length > 0 && (
-          <p className="truncate text-[9px] text-ink-muted/60 leading-snug" title={card.previewLabels.join(', ')}>
-            {card.previewLabels.join(', ')}
-          </p>
-        )}
       </div>
       <CardActions card={card} ctx={ctx} />
-      <FrontierPill card={card} ctx={ctx} />
       <WalkPills card={card} ctx={ctx} />
     </div>
   )
@@ -1033,23 +812,12 @@ function FocusFrameNode({ data }: NodeProps) {
   // the container reported its own count). Otherwise say "at least".
   const pager = framePager(card)
   const total = pager.exact ? pager.rows.toLocaleString() : `${pager.rows.toLocaleString()}+`
-  // Name what the open actually matched against. At the first hop that
-  // is the focused entity and the plain wording reads better; further
-  // out it is the card's own partner, and saying "this entity" there
-  // would claim something the server was never asked.
-  const to = card.partnerLabel ? ` to ${card.partnerLabel}` : ''
   // Say which rows are on screen, not just how many exist — "showing
   // 21–40 of 428" is the sentence a 428-column table needs.
   const range = pager.paged ? `showing ${pager.from.toLocaleString()}–${pager.to.toLocaleString()} of ${total}` : null
   // In "everything inside" the search runs on the SERVER, so the counts
   // describe the matches, not the container — say which.
   const searching = card.frameShowingAll && q.trim().length > 0
-  // Collapsed, name a few of what is inside — often enough to answer
-  // the question without opening it, and it is data already in hand.
-  const preview = card.previewLabels.length > 0
-    ? ` · ${card.previewLabels.join(', ')}${card.count > card.previewLabels.length
-        ? ` +${(card.count - card.previewLabels.length).toLocaleString()}` : ''}`
-    : ''
   // Every row shares one relationship type → the frame says it once
   // instead of the rows each repeating it.
   const via = card.frameSharedEdgeType
@@ -1060,9 +828,9 @@ function FocusFrameNode({ data }: NodeProps) {
   const fellBack = card.frameShowingAll && card.frameEmpty && card.frameConnectedCount === 0
   const inside = card.frameShowingAll
     ? fellBack
-      ? `${card.frameTruncated ? 'the search was cut short' : `nothing here connects${to}`} · showing everything inside${range ? ` · ${range}` : ''}`
-      : `${card.frameConnectedCount.toLocaleString()} connected${to} · ${range ?? `${card.frameLoaded.toLocaleString()} of ${total} shown`}${searching ? ` matching "${q.trim()}"` : ''}`
-    : `${card.count.toLocaleString()}${card.frameTruncated ? '+' : ''} connected${to || ' inside'}${via}${card.childrenOpen ? (range ? ` · ${range}` : '') : preview}`
+      ? `nothing here is on this lineage · showing everything inside${range ? ` · ${range}` : ''}`
+      : `${card.frameConnectedCount.toLocaleString()} on this lineage · ${range ?? `${card.frameLoaded.toLocaleString()} of ${total} shown`}${searching ? ` matching "${q.trim()}"` : ''}`
+    : `${card.count.toLocaleString()} connected inside${via}${range ? ` · ${range}` : ''}`
   return (
     <div
       style={{
@@ -1087,11 +855,7 @@ function FocusFrameNode({ data }: NodeProps) {
       <div className="pointer-events-auto absolute inset-x-0 top-0 h-[46px] px-2.5 flex items-center gap-1.5">
         <button
           type="button"
-          onClick={(e) => {
-            e.stopPropagation()
-            if (card.frameLocal) ctx.onToggleFrame(card.expandKey!)
-            else if (card.nodeId) ctx.onOpenContainer?.(card.expandKey!, card.nodeId, card.type, card.partnerIds[0] ?? null)
-          }}
+          onClick={(e) => { e.stopPropagation(); ctx.onToggleFrame(card.expandKey!) }}
           aria-expanded={card.childrenOpen}
           aria-label={card.childrenOpen ? `Collapse ${card.label}` : `Expand ${card.label}`}
           title={card.childrenOpen ? `Collapse ${card.label}` : `Expand ${card.label}`}
@@ -1107,48 +871,29 @@ function FocusFrameNode({ data }: NodeProps) {
             {card.label}
           </TailName>
           <p className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate">
-            {card.frameBreadcrumb.length > 0 && (
-              // The levels walked through to reach these rows — five of
-              // them on a deep estate, which is far more than fits.
-              // Keep the DEEPEST, nearest the content: `RiskApp › PROD
-              // › CURATED › RISK_DB` squeezed down to `Risk…`, naming
-              // the level furthest from what you are looking at and
-              // dropping the one you are standing in.
-              <span
-                className="flex-shrink-0 whitespace-nowrap"
-                title={`Opened through ${card.frameBreadcrumb.join(' › ')}`}
-              >
-                {card.frameBreadcrumb.length > BREADCRUMB_LEVELS && '⋯ › '}
-                {card.frameBreadcrumb.slice(-BREADCRUMB_LEVELS).join(' › ')} ·{' '}
-              </span>
-            )}
             {card.fetch === 'loading'
               ? 'Looking inside…'
-              : card.walk && card.contents
-                // The walk knows both numbers exactly: what is in here on
-                // this lineage, and what is in here altogether.
+              : card.contents
+                // Both numbers, exactly: what is in here on this
+                // lineage, and what is in here altogether.
                 ? <ContentsCount card={card} />
-                : card.frameEmpty && !card.frameShowingAll
-                  ? card.frameTruncated ? `cut short before finding anything connected${to}` : `nothing connected${to || ' inside'}`
-                  : inside}
+                : inside}
           </p>
         </div>
-        {/* Connected ⇄ All. The default answers "what in here touches my
-            entity"; All answers "what else is in here", with lineage
-            still drawn wherever it exists. */}
-        {/* A walk frame is `frameLocal` (collapsing it is a
-            re-projection, never a fetch) but its roster is NOT complete:
-            the model knows what carries lineage, and only the children
-            endpoint knows what else is in there. So it keeps the
-            toggle. */}
-        {ctx.onToggleFrameAll && (!card.frameLocal || card.walk) && (
+        {/* Connected ⇄ All. The default answers "what in here is on this
+            lineage"; All answers "what else is in here", with lineage
+            still marked wherever it exists.
+            The walk model IS the roster for what connects — but only the
+            children endpoint knows what ELSE is in there, so this is the
+            one control on a frame that can cost a fetch. */}
+        {ctx.onToggleFrameAll && (
           <div
             role="group"
             aria-label={`What to show inside ${card.label}`}
             className="nodrag flex-shrink-0 flex items-center rounded-md border border-black/10 dark:border-white/10 p-0.5"
           >
             {([
-              { all: false, Icon: LucideIcons.Link2, label: `Only what connects to ${card.partnerLabel ?? 'this entity'}` },
+              { all: false, Icon: LucideIcons.Link2, label: 'Only what is on this lineage' },
               { all: true, Icon: LucideIcons.Rows3, label: 'Everything inside, lineage marked' },
             ] as const).map(({ all, Icon, label }) => (
               <button
@@ -1190,31 +935,6 @@ function FocusFrameNode({ data }: NodeProps) {
             className="nodrag flex-shrink-0 w-16 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
           />
         )}
-        {/* The lineage hop, kept in the header rather than as a
-            FrontierPill: the frame's `fetch` tracks the LOOK-INSIDE
-            request, so the pill's loading state would report the wrong
-            fetch. Looking inside something must never end the walk. */}
-        {(card.frontier || card.frontierExpanded) && card.nodeId && (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier?.(card.expandKey!, card.nodeId!) }}
-            aria-expanded={card.frontierExpanded}
-            aria-label={card.frontierExpanded
-              ? `Collapse ${card.band < 0 ? 'upstream of' : 'downstream of'} ${card.label}`
-              : `Expand the next hop ${card.band < 0 ? 'upstream' : 'downstream'} of ${card.label}`}
-            title={card.frontierExpanded
-              ? `Collapse ${card.band < 0 ? 'upstream of' : 'downstream of'} ${card.label}`
-              : `Expand the next hop ${card.band < 0 ? 'upstream' : 'downstream'} of ${card.label}`}
-            className={cn(
-              'nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center hover:bg-black/[0.06] dark:hover:bg-white/[0.08]',
-              card.frontierExpanded ? 'text-accent-lineage' : 'text-ink-muted hover:text-accent-lineage',
-            )}
-          >
-            {card.frontierExpanded
-              ? <LucideIcons.Minus className="w-3 h-3" />
-              : <LucideIcons.Plus className="w-3 h-3" />}
-          </button>
-        )}
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
@@ -1238,12 +958,7 @@ function FocusFrameNode({ data }: NodeProps) {
           <span className="truncate">Couldn&apos;t look inside.</span>
           <button
             type="button"
-            onClick={(e) => {
-              e.stopPropagation()
-              // Two fetches back this frame; re-kick whichever failed.
-              if (card.frameShowingAll) ctx.onRetryFrameAll?.(card.expandKey ?? '')
-              else if (card.nodeId) ctx.onRetryOpen?.(card.expandKey!, card.nodeId, card.type, card.partnerIds[0] ?? null)
-            }}
+            onClick={(e) => { e.stopPropagation(); ctx.onRetryFrameAll?.(card.expandKey ?? '') }}
             className="font-semibold hover:underline"
           >
             Retry
@@ -1252,12 +967,7 @@ function FocusFrameNode({ data }: NodeProps) {
       )}
       {card.frameEmpty && card.frameLoaded === 0 && card.fetch === null && (
         <p className="absolute inset-x-2.5 top-[52px] text-[10px] text-ink-muted/70 italic leading-snug">
-          {/* A truncated expansion is NOT a verified negative — the
-              server stopped early, and `empty` and `truncated` are set
-              together when it does. */}
-          {card.frameTruncated
-            ? `The search inside ${card.label} was cut short before finding anything that connects to ${card.partnerLabel ?? 'this entity'}.`
-            : `Nothing inside ${card.label} connects to ${card.partnerLabel ?? 'this entity'}.`}
+          Nothing inside {card.label} is on this lineage.
           {ctx.onToggleFrameAll && ' Show everything inside to see what it holds.'}
         </p>
       )}
@@ -1757,23 +1467,20 @@ export function FocusGraphView({
   const edges = useMemo((): Edge[] => {
     const bandById = new Map(graph.cards.map(c => [c.id, c.band]))
     return graph.edges.map((e) => {
-      const tint = e.containment
-        ? TINT_CONTAIN
-        : Math.max(bandById.get(e.source) ?? 0, bandById.get(e.target) ?? 0) <= 0
-          ? TINT_UP
-          : TINT_DOWN
+      // Containment is never drawn as a wire — it NESTS. Every edge on
+      // the board is a lineage hop, tinted by the side it lands on.
+      const tint = Math.max(bandById.get(e.source) ?? 0, bandById.get(e.target) ?? 0) <= 0
+        ? TINT_UP
+        : TINT_DOWN
       return {
         id: e.id,
         source: e.source,
         target: e.target,
-        sourceHandle: e.containment ? 'contains' : undefined,
         type: 'focusEdge',
         // Business users shouldn't infer direction from layout
-        // convention alone — flow edges carry an explicit arrowhead.
-        markerEnd: e.containment
-          ? undefined
-          : { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
-        data: { count: e.count, aggregated: e.aggregated, containment: e.containment, dimmed: e.dimmed, tint, cycleBack: e.cycleBack },
+        // convention alone — every hop carries an explicit arrowhead.
+        markerEnd: { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
+        data: { count: e.count, dimmed: e.dimmed, tint, cycleBack: e.cycleBack },
       }
     })
   }, [graph.cards, graph.edges])
@@ -1784,7 +1491,7 @@ export function FocusGraphView({
   )
 
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
-  useFrameCamera(rf, focalId, graph.cards, reducedMotion)
+  useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion)
 
   return (
     <div

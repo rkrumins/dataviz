@@ -1,7 +1,8 @@
 /**
  * focus-layout — the walk-model layout engine.
  *
- * Several names here are SALVAGED from focus-graph.test.ts on purpose:
+ * Several names here are SALVAGED from the retired focus-graph.test.ts
+ * on purpose:
  * the old builder's honesty rules (one card per entity, a filter that
  * dims rather than removes, caps that say what they capped, dead ends
  * that are a data-source claim) are contracts of the LENS, not of one

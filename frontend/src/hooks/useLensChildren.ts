@@ -1,13 +1,12 @@
 /**
  * useLensChildren — "show me everything inside this entity", server-paged.
  *
- * Extracted from useLensContainer's `getChildrenWithEdges` half: the SAME
- * roster/paging/Find machinery, minus the pairwise open-against-a-focal
- * concept (results/status/openContainer/expandAggregated/passedThrough
- * stay behind in useLensContainer.ts, untouched, until THE SWAP task
- * retires that file). Keyed directly by the entity's own urn — there is no
- * more openKey/anchor indirection to resolve, because there is no more
- * pass-through walk to land somewhere else first.
+ * Keyed directly by the entity's own urn: there is no openKey/anchor
+ * indirection to resolve, because there is no pass-through walk to land
+ * somewhere else first. (This is the surviving half of the retired
+ * useLensContainer — its roster/paging/Find machinery; the pairwise
+ * open-against-a-focal concept died with the walk model, which knows
+ * the participants without asking.)
  *
  * Deliberately a separate fetch from the walk model: the server has no way
  * to ask "children of X, flagged by whether they're on the lineage walk",
@@ -75,7 +74,7 @@ export function useLensChildren(
     const sessionRef = useRef(0)
     // `loadAllChildren` needs the page count already in state; it only
     // ever runs from an event handler, so a committed mirror is current by
-    // the time it reads (same pattern as useLensContainer's stateRef).
+    // the time it reads.
     const stateRef = useRef(state)
     useEffect(() => { stateRef.current = state }, [state])
 

@@ -120,7 +120,7 @@ export function useLensWalk(
     // extend/page need the LATEST model synchronously (to compute
     // excludeUrns, and to merge into) without retriggering on every
     // keystroke-adjacent render; committed mirror, current by the time a
-    // callback reads it (same pattern as useLensContainer's stateRef).
+    // callback reads it.
     const stateRef = useRef(state)
     useEffect(() => { stateRef.current = state }, [state])
 

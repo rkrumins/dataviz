@@ -2,13 +2,21 @@ import { StrictMode } from 'react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, act } from '@testing-library/react'
 import { FIT_MAX_ZOOM, useFrameCamera, type CameraTarget } from '../useFrameCamera'
-import type { FocusCard } from '../focus-cards'
+import type { FocusCard, FocusEdge } from '../focus-cards'
 
-const card = (id: string, partnerIds: string[] = []): FocusCard =>
-  ({ id, nodeId: id === 'f' ? 'focal-urn' : `urn:${id}`, partnerIds }) as unknown as FocusCard
+const card = (id: string): FocusCard =>
+  ({ id, nodeId: id === 'f' ? 'focal-urn' : `urn:${id}` }) as unknown as FocusCard
 
-function Harness({ rf, focalId, cards }: { rf: CameraTarget; focalId: string; cards: FocusCard[] }) {
-  useFrameCamera(rf, focalId, cards, true)
+const wire = (source: string, target: string): FocusEdge =>
+  ({ id: `e:${source}>${target}`, source, target }) as unknown as FocusEdge
+
+function Harness({ rf, focalId, cards, edges = [] }: {
+  rf: CameraTarget
+  focalId: string
+  cards: FocusCard[]
+  edges?: FocusEdge[]
+}) {
+  useFrameCamera(rf, focalId, cards, edges, true)
   return null
 }
 
@@ -75,7 +83,8 @@ describe('useFrameCamera', () => {
       <Harness
         rf={rf}
         focalId="a"
-        cards={[card('f'), card('n:x'), card('n:new', ['urn:n:x'])]}
+        cards={[card('f'), card('n:x'), card('n:new')]}
+        edges={[wire('n:new', 'n:x')]}
       />,
     )
     flush()

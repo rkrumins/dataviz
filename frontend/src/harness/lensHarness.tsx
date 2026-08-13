@@ -1,14 +1,14 @@
 /**
  * Visual harness for the Lens graph body.
  *
- * Renders the REAL `FocusGraphView` against a hand-built fixture and
+ * Renders the REAL `FocusGraphView` against a hand-built walk model and
  * nothing else — no API, no canvas, no providers. It exists because the
  * unit tests all passed over a frame that grew to 1,030px, two controls
  * that did nothing, and a provenance ribbon that truncated itself into
  * `TRA…`. None of those are assertable without looking.
  *
  *   npx vite --config vite.config.ts --port 5199
- *   open http://localhost:5199/lens-harness.html?fixture=columns
+ *   open http://localhost:5199/lens-harness.html?fixture=walkCollaterals
  *
  * `npm run harness:shot` drives Chromium over every fixture and writes
  * PNGs to .harness/.
@@ -18,82 +18,16 @@ import { createRoot } from 'react-dom/client'
 import { ReactFlowProvider } from '@xyflow/react'
 import '../styles/globals.css'
 import { FocusGraphView } from '../components/canvas/context-view/lens/FocusGraphView'
-import { buildFocusGraph, type FocusGraphInput } from '../components/canvas/context-view/lens/focus-graph'
 import { buildLensSubgraph } from '../components/canvas/context-view/lens/lens-subgraph'
 import { buildFocusLayout, initialLensViewState } from '../components/canvas/context-view/lens/focus-layout'
-import { deriveNeighborRecords } from '@/lib/lineage-neighbors'
-import type { LineageEdge } from '@/store/canvas'
-import { FIXTURES, WALK_FIXTURES, type WalkFixture } from './lensFixtures'
-
-const CONTAINMENT = ['CONTAINS']
-
-function buildGraph(fixture: (typeof FIXTURES)[string]) {
-  const { focal, nodes, edges, isCoarser, canContain, over } = fixture
-  const nodeMap = new Map(nodes.map(n => [n.id, n]))
-  const edgesByEndpoint = new Map<string, LineageEdge[]>()
-  for (const e of edges) {
-    for (const k of e.source === e.target ? [e.source] : [e.source, e.target]) {
-      const list = edgesByEndpoint.get(k)
-      if (list) list.push(e)
-      else edgesByEndpoint.set(k, [e])
-    }
-  }
-  const { incomingRecords, outgoingRecords } = deriveNeighborRecords(
-    focal, edgesByEndpoint.get(focal) ?? [], nodeMap, CONTAINMENT,
-  )
-  const resolveParent = (id: string): string | null => {
-    for (const e of edgesByEndpoint.get(id) ?? []) {
-      if (e.target === id && e.source !== id && (e.data?.edgeType as string)?.toUpperCase() === 'CONTAINS') return e.source
-    }
-    return null
-  }
-  const containsChildren: string[] = []
-  for (const e of edgesByEndpoint.get(focal) ?? []) {
-    if (e.source === focal && (e.data?.edgeType as string)?.toUpperCase() === 'CONTAINS') containsChildren.push(e.target)
-  }
-  const input: FocusGraphInput = {
-    focalId: focal,
-    incomingRecords,
-    outgoingRecords,
-    edgesByEndpoint,
-    nodeMap,
-    containmentEdgeTypes: CONTAINMENT,
-    containsChildren,
-    resolveParent,
-    isCoarser: isCoarser ?? (() => false),
-    canContain: canContain ?? (() => false),
-    collapsedFrames: new Set(),
-    expandedFrontier: new Set(),
-    openContainers: new Set(),
-    entityLevels: new Map([
-      ['DATADOMAIN', 0], ['DATAPLATFORM', 1], ['CONTAINER', 2],
-      ['dataset', 3], ['schemaField', 4],
-    ]),
-    bandPages: new Map(),
-    query: '',
-    hiddenTypes: new Set(),
-    grainFold: 'finest',
-    ...over,
-  }
-  // Mirror what LineageLens passes: the focal describes the BOARD, not
-  // the record count, or the harness would show a discrepancy the app
-  // does not have (and hide one it does).
-  const graph = buildFocusGraph(input)
-  return {
-    graph,
-    stats: {
-      in: graph.bandTotals.get('band:in:1')?.connections ?? incomingRecords.length,
-      out: graph.bandTotals.get('band:out:1')?.connections ?? outgoingRecords.length,
-    },
-  }
-}
+import { WALK_FIXTURES, type WalkFixture } from './lensFixtures'
 
 /**
- * The walk path, end to end through the REAL modules: a merged walk
- * model → `buildLensSubgraph` → `initialLensViewState` (+ the fixture's
- * scripted clicks) → `buildFocusLayout` → the same view. Nothing is
- * mocked but the callbacks, so a screenshot is evidence about the code
- * that ships rather than about the harness.
+ * End to end through the REAL modules: a merged walk model →
+ * `buildLensSubgraph` → `initialLensViewState` (+ the fixture's scripted
+ * clicks) → `buildFocusLayout` → the same view the app renders. Nothing
+ * is mocked but the callbacks, so a screenshot is evidence about the
+ * code that ships rather than about the harness.
  */
 function buildWalk(fixture: WalkFixture) {
   const sg = buildLensSubgraph(fixture.model)
@@ -116,21 +50,26 @@ function buildWalk(fixture: WalkFixture) {
       in: graph.bandTotals.get('band:in:1')?.connections ?? 0,
       out: graph.bandTotals.get('band:out:1')?.connections ?? 0,
     },
+    reach: {
+      up: fixture.model.upstreamUrns.size,
+      down: fixture.model.downstreamUrns.size,
+      moreUp: fixture.model.frontierUp.length > 0,
+      moreDown: fixture.model.frontierDown.length > 0,
+    },
   }
 }
 
 const noop = () => {}
 
 export function Harness() {
-  const name = new URLSearchParams(window.location.search).get('fixture') ?? 'columns'
-  const walk = WALK_FIXTURES[name]
-  const fixture = FIXTURES[name]
-  if (!walk && !fixture) {
+  const name = new URLSearchParams(window.location.search).get('fixture') ?? 'walkCollaterals'
+  const fixture = WALK_FIXTURES[name]
+  if (!fixture) {
     return <p style={{ font: '14px system-ui', padding: 24 }}>
-      Unknown fixture &quot;{name}&quot;. Try: {[...Object.keys(FIXTURES), ...Object.keys(WALK_FIXTURES)].join(', ')}
+      Unknown fixture &quot;{name}&quot;. Try: {Object.keys(WALK_FIXTURES).join(', ')}
     </p>
   }
-  const built = walk ? buildWalk(walk) : { ...buildGraph(fixture), focalId: fixture.focal }
+  const built = buildWalk(fixture)
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'var(--surface, #fff)' }}>
       <ReactFlowProvider>
@@ -139,16 +78,12 @@ export function Harness() {
           focalId={built.focalId}
           focalStats={built.stats}
           focalFetch="done"
+          focalReach={built.reach}
           selectedId={null}
           reducedMotion
           onSelect={noop}
           onFocus={noop}
           onToggleFrame={noop}
-          onOpenContainer={noop}
-          onExpandFrontier={noop}
-          onToggleContains={noop}
-          onRetryContains={noop}
-          onShowMore={noop}
           onSetFramePage={noop}
           onFrameQuery={noop}
           onToggleFrameAll={noop}

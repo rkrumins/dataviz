@@ -1,7 +1,7 @@
 /**
  * useLensChildren — the roster/paging/Find half extracted from the old
- * useLensContainer (`getChildrenWithEdges`), minus the pairwise
- * open-against-a-focal machinery (that stays behind in useLensContainer.ts
+ * the retired useLensContainer (`getChildrenWithEdges`), minus the
+ * pairwise open-against-a-focal machinery (which died with the walk
  * until THE SWAP task retires it). Same contract as the source: server-side
  * paging and search, "drained" means no more round trips, a failed page is
  * re-kickable by just calling again, session clears when the lens closes.
