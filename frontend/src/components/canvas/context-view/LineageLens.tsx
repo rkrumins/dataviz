@@ -1,98 +1,212 @@
 /**
- * LineageLens — ego-graph overlay for "click a node, see its immediate
- * links" regardless of canvas scale or scroll position.
+ * LineageLens — "click an entity, see its lineage", at any canvas scale.
  *
- * The focal entity sits centered; upstream neighbors (data sources) list
- * on the LEFT, downstream (data consumers) on the RIGHT, grouped by
- * entity type with counts. Data flow reads left → right throughout:
- * every connector arrow points toward the consumer side. Re-centering
- * on a neighbor is a WALK recorded in a browser-style focus history
- * (Back/Forward buttons, ←/→ keys, clickable Path trail — moving the
- * cursor never drops a hop); the SAME body renders at every depth, so
- * a walk never flips the layout. Per-row actions reveal the neighbor
- * on the canvas or open its details; the footer escalates to full
- * Trace.
+ * The focal entity sits centered; upstream (data sources) on the LEFT,
+ * downstream (consumers) on the RIGHT. Data flow reads left → right
+ * throughout. Re-centering on a neighbour is a WALK recorded in a
+ * browser-style focus history (Back/Forward, ←/→ keys, clickable Path
+ * trail — moving the cursor never drops a hop); the SAME body renders at
+ * every depth, so a walk never flips the layout.
  *
- * Data comes from the canvas store (visibleEdges with raw-edges
- * fallback, via the shared deriveNeighborRecords helper) MERGED with
- * on-demand fetched lineage for every visited focal node (see
- * useLensLineage): the lens tells the truth about the DATA SOURCE, not
- * just about what happens to be hydrated on the canvas. Fetched edges
- * that the store already represents — same id, same endpoint pair, or
- * rolled up into an aggregate touching the same endpoint — are deduped
- * so counts stay truthful at one granularity.
+ * EVERY NUMBER ON THE BOARD IS SERVER TRUTH. The lens reads ONE thing:
+ * the accumulated walk model for the current focal (`useLensWalk`), a
+ * client-side union of one-hop closure responses. It does not read the
+ * canvas store at all — what happens to be hydrated on the canvas is a
+ * fact about the canvas, and the lens is asked about the DATA SOURCE.
+ * The pipeline is four pure steps:
+ *
+ *   walk model → buildLensSubgraph → buildFocusLayout → FocusGraphView
+ *
+ * with a per-focal `LensViewState` (what the user has opened, revealed,
+ * searched) as the only other input. Because the layout is a pure
+ * re-projection over the model, expanding a container is free and can
+ * never reach outside the lineage: the model's children are already
+ * scoped to walk participants. The only things that cost a round trip
+ * are ⊕ extend / page (one further hop) and "everything inside" (the
+ * roster of what a container holds, which lineage cannot answer).
  *
  * Styling is dual-theme (black/* light + white/* dark overlay pairs) on
  * a SOLID elevated surface — translucent glass over a busy canvas read
- * as washed-out, especially in light mode. Panel height adapts to
- * content so small neighborhoods don't get a cavernous empty grid.
- * Lens-local ESC handling runs in the capture phase so canvas keyboard
- * shortcuts don't fire underneath.
+ * as washed-out, especially in light mode. Lens-local ESC handling runs
+ * in the capture phase so canvas keyboard shortcuts don't fire
+ * underneath.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
-import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
-import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType, useEntityTypeHierarchyMap, useEntityTypeLevels, useRelationshipTypes } from '@/store/schema'
+import { useRelationshipTypes } from '@/store/schema'
 import { relationshipLabel } from '@/lib/relationshipLabel'
+import type { WalkEntry, LensWalkDir } from '@/hooks/useLensWalk'
+import { emptyWalkModel, type LensWalkNode } from './lens/closure-adapter'
 import {
-  deriveNeighborRecords,
-  mergeSupplementalEdges,
-  buildCanContainClosure,
-  isCoarserGrain,
-  type NeighborRecord,
-} from '@/lib/lineage-neighbors'
-import { EDGE_FETCH_LIMIT } from '@/hooks/useLensLineage'
-import { IMPACT_DEPTH, type LensImpact } from '@/hooks/useLensImpact'
-import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
+  buildLensSubgraph,
+  type LensSubgraph,
+} from './lens/lens-subgraph'
+import {
+  buildFocusLayout,
+  initialLensViewState,
+  type LensFetchStatus,
+  type LensRoster,
+  type LensViewState,
+} from './lens/focus-layout'
+import { generateColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { usePreferencesStore } from '@/store/preferences'
 import { useTourStore } from '@/features/tour/tourStore'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { lensFocalOf, type LensHistory } from './lens/lensHistory'
-import { buildFocusGraph, labelOf, edgeLabelFor, FRAME_ALL_CAP, CONTAINS_CAP, type EdgeTypeInfoMap } from './lens/focus-graph'
+import { labelOf, edgeLabelFor, type EdgeTypeInfoMap, type LensReach } from './lens/focus-cards'
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
 
-const ROWS_CAP = 200
+/** Leaves one ⊕ extend ships to the server. A hub can stand for
+ *  thousands of participants; the request has to stay a request. */
+const SEED_CAP = 500
 const EMPTY_TYPE_SET: ReadonlySet<string> = new Set()
-const EMPTY_PAGE_MAP: ReadonlyMap<string, number> = new Map()
+const EMPTY_EXTEND_STATUS: ReadonlyMap<string, 'loading' | 'error'> = new Map()
+const EMPTY_ROSTERS: ReadonlyMap<string, LensRoster> = new Map()
+const EMPTY_ROSTER_STATUS: ReadonlyMap<string, LensFetchStatus> = new Map()
 
-/** Graph-mode interaction state, keyed to the focal node (fresh on
- *  every re-center, like the filter and chip state). */
-interface LensGraphState {
-  nodeId: string | null
-  selection: string | null
-  /** Frames the user CLOSED. A frame opens showing its rows, because a
-   *  column's provenance is the question the Lens exists to answer. */
-  collapsedFrames: ReadonlySet<string>
-  expandedFrontier: ReadonlySet<string>
-  /** Coarse containers opened into their focal-relevant contents. */
-  openContainers: ReadonlySet<string>
-  /** Contains-stack rows opened, by urn. One flat set — nesting depth
-   *  emerges from the walk, exactly as it does on the canvas. */
-  openContains: ReadonlySet<string>
-  /** Frames switched to "everything inside", keyed like openContainers. */
-  frameShowAll: ReadonlySet<string>
-  /** Per-frame filter text and paging, keyed like openContainers. */
-  frameQueries: ReadonlyMap<string, string>
-  framePages: ReadonlyMap<string, number>
-  bandPages: ReadonlyMap<string, number>
+/** One hop-1 neighbour of the focus, as the walk model reports it —
+ *  the same edges the graph body draws, counted the same way, so the
+ *  two bodies cannot disagree about what is connected. */
+interface WalkNeighbor {
+  urn: string
+  label: string
+  type: string
+  /** Raw hops between this entity and the focus side. */
+  weight: number
+  /** The one relationship type these hops share, '' when they differ. */
+  edgeTypeNorm: string
+  parentUrn: string | null
+  parentLabel: string | null
 }
-const EMPTY_QUERY_MAP: ReadonlyMap<string, string> = new Map()
-const freshGraphState = (nodeId: string | null): LensGraphState => ({
-  nodeId, selection: null, collapsedFrames: EMPTY_TYPE_SET, expandedFrontier: EMPTY_TYPE_SET,
-  openContainers: EMPTY_TYPE_SET, frameShowAll: EMPTY_TYPE_SET,
-  openContains: EMPTY_TYPE_SET,
-  frameQueries: EMPTY_QUERY_MAP, framePages: EMPTY_PAGE_MAP,
-  bandPages: EMPTY_PAGE_MAP,
-})
 
+/**
+ * The focus's direct neighbours, straight off the walk model.
+ *
+ * "Hop 1" is structural: a lineage edge with one endpoint on the FOCUS
+ * SIDE (the focus plus everything contained in it — a container has no
+ * edges of its own, only its descendants do) and the other outside it.
+ * That is exactly the rule `buildLensSubgraph` uses to number hops, so
+ * the list body and the graph body are two renderings of one fact.
+ */
+function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>): {
+  incoming: WalkNeighbor[]
+  outgoing: WalkNeighbor[]
+} {
+  const focusSide = new Set<string>()
+  const stack = [sg.focusUrn]
+  while (stack.length > 0) {
+    const urn = stack.pop()!
+    if (focusSide.has(urn) || !sg.nodes.has(urn)) continue
+    focusSide.add(urn)
+    for (const child of sg.nodes.get(urn)!.children) stack.push(child)
+  }
+
+  const build = (dir: 'in' | 'out'): WalkNeighbor[] => {
+    const byUrn = new Map<string, { weight: number; types: Set<string> }>()
+    for (const hop of sg.lineageEdges) {
+      const near = dir === 'in' ? hop.targetUrn : hop.sourceUrn
+      const far = dir === 'in' ? hop.sourceUrn : hop.targetUrn
+      if (!focusSide.has(near) || focusSide.has(far)) continue
+      const entry = byUrn.get(far) ?? { weight: 0, types: new Set<string>() }
+      entry.weight += 1
+      entry.types.add((hop.edgeType ?? '').toUpperCase())
+      byUrn.set(far, entry)
+    }
+    const labelFor = (urn: string) => labelOf(urn, sg.nodes.get(urn)?.node)
+    return [...byUrn.entries()]
+      .map(([urn, { weight, types }]) => {
+        const node = sg.nodes.get(urn)
+        const parentUrn = node?.parent ?? null
+        return {
+          urn,
+          label: labelFor(urn),
+          type: (node?.node?.data?.type as string) ?? node?.node?.entityType ?? 'not loaded',
+          weight,
+          edgeTypeNorm: types.size === 1 ? [...types][0] : '',
+          parentUrn,
+          parentLabel: parentUrn ? labelFor(parentUrn) : null,
+        }
+      })
+      .sort((a, b) => b.weight - a.weight || a.label.localeCompare(b.label) || a.urn.localeCompare(b.urn))
+  }
+
+  return { incoming: build('in'), outgoing: build('out') }
+}
+
+/**
+ * The leaves an ⊕ extend is seeded from: the lineage-participating
+ * members of the card's own subtree, in this direction.
+ *
+ * A card stands for everything inside it, so extending a collapsed
+ * table means "walk one hop further from the columns underneath it" —
+ * the server needs those columns by name. Ranked by how much lineage
+ * each already carries so a capped request spends its budget on the
+ * busiest participants.
+ *
+ * A member with NO loaded edges in this direction but a frontier entry
+ * from the server counts too: that is precisely a node whose lineage
+ * has not been fetched yet, and dropping it would seed the request with
+ * everything except the reason it exists.
+ */
+function seedLeavesFor(
+  sg: LensSubgraph<LensWalkNode>,
+  cardUrn: string,
+  dir: 'in' | 'out',
+): string[] {
+  const members: Array<{ urn: string; degree: number }> = []
+  const stack = [cardUrn]
+  const seen = new Set<string>()
+  while (stack.length > 0) {
+    const urn = stack.pop()!
+    if (seen.has(urn)) continue
+    seen.add(urn)
+    const node = sg.nodes.get(urn)
+    if (!node) continue
+    const degree = dir === 'in' ? node.degreeUp : node.degreeDown
+    const frontier = dir === 'in' ? node.frontierUp : node.frontierDown
+    if (degree > 0 || frontier != null) members.push({ urn, degree })
+    for (const child of node.children) stack.push(child)
+  }
+  return members
+    .sort((a, b) => b.degree - a.degree || a.urn.localeCompare(b.urn))
+    .slice(0, SEED_CAP)
+    .map(m => m.urn)
+}
+
+const toWalkDir = (dir: 'in' | 'out'): LensWalkDir => (dir === 'in' ? 'up' : 'down')
+
+/** Every walk affordance the lens hands to the hook. Grouped because
+ *  they are one capability — "grow this focal's model" — and a caller
+ *  holding three of the four would be holding a broken one. */
+export interface LensWalkApi {
+  extend: (cardUrn: string, dir: LensWalkDir, seedLeaves: string[]) => void
+  page: (cardUrn: string, dir: LensWalkDir, cursor: string) => void
+  retry: (focusUrn: string) => void
+  retryExtend: (cardUrn: string, dir: LensWalkDir, seedLeaves: string[]) => void
+}
 
 export interface LineageLensProps {
   /** Focus history; entries[cursor] is the current focal. Empty = closed. */
   history: LensHistory
+  /** The accumulated walk for the CURRENT focal, or null before the
+   *  hook has touched it. Every number the lens shows comes from here. */
+  walk: WalkEntry | null
+  /** Growing that model: one further hop, one further page, or again
+   *  after a failure. */
+  walkApi: LensWalkApi
+  /** "What is really inside this entity" per urn — membership, which
+   *  lineage cannot answer (useLensChildren). */
+  childrenAll?: ReadonlyMap<string, LensRoster>
+  childrenAllStatus?: ReadonlyMap<string, LensFetchStatus>
+  /** Fetch (or page further into, or search within) a container's full
+   *  child list. `searchQuery` goes to the server, so Find reaches rows
+   *  that have not been paged to yet. */
+  onLoadAllChildren?: (urn: string, searchQuery?: string) => void
+  onLoadChildrenOf?: (urn: string) => void
   onRecenter: (nodeId: string) => void
   /** Step the focus history back one hop (non-destructive). */
   onBack: () => void
@@ -118,82 +232,16 @@ export interface LineageLensProps {
     loading: boolean
     records: Array<{ urn: string; label: string; direction: 'in' | 'out'; edgeType: string }>
   } | null
-  /** On-demand fetched lineage for visited focal nodes (useLensLineage).
-   *  Lens-local only — never part of the canvas store. */
-  supplementalEdges?: LineageEdge[]
-  supplementalNodes?: Map<string, LineageNode>
-  /** Per-focal fetch status; absent id = no fetch attempted. */
-  fetchStatus?: Map<string, 'loading' | 'done' | 'error'>
-  /** Focal nodes whose fetch hit the per-direction edge cap. */
-  fetchTruncatedIds?: Set<string>
-  onRetryFetch?: (nodeId: string) => void
-  /** Underlying edges fetched per drilled aggregate (aggregate edge id). */
-  drillEdges?: Map<string, LineageEdge[]>
-  drillStatus?: Map<string, 'loading' | 'done' | 'error'>
-  /** Fetch an aggregated row's underlying connections on drill. */
-  onDrillFetch?: (edge: LineageEdge) => void
-  /** Fetch a node's 1-hop lineage if not already fetched — powers the
-   *  graph mode's frontier (⊕) hop expansion. */
-  onEnsureFetched?: (nodeId: string) => void
-  /** Known total lineage degrees (in/out) per node — used for honest
-   *  "+N" frontier pills. Absent node = UNKNOWN, never zero. */
-  degreeHints?: Map<string, { in: number; out: number }>
-  /** Server answers for opened containers (useLensContainer), keyed
-   *  `${dir}:${urn}` — what's inside that connects to the focal. */
-  containerResults?: Map<string, {
-    nodes: LineageNode[]
-    edges: LineageEdge[]
-    passedThrough: LineageNode[]
-    truncated: boolean
-    empty: boolean
-  }>
-  containerStatus?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
-  /** Every child of an opened container, keyed the same way — the
-   *  "show all" answer, which the server cannot flag by connectivity. */
-  frameAllResults?: Map<string, {
-    children: LineageNode[]
-    hasMore: boolean
-    total: number | null
-    /** The search this page set answers; absent for the full list. */
-    query?: string
-  }>
-  frameAllStatus?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
-  /** Fetch (or page further into) an opened container's full child list. */
-  /** Fetch (or page further into) every child of an opened frame.
-   *  `searchQuery` goes to the server, so Find reaches rows that have
-   *  not been paged to yet. */
-  onLoadAllChildren?: (openKey: string, searchQuery?: string) => void
-  /** Children the lens fetched for an entity in its own right, keyed by
-   *  entity id — the focal's contents, and any contained child's. */
-  childrenOf?: Map<string, { children: LineageNode[]; hasMore: boolean; total: number | null }>
-  childrenStatusOf?: Map<string, 'loading' | 'done' | 'error' | 'unsupported'>
-  /** Ask for an entity's children without leaving the lens. */
-  onLoadChildrenOf?: (nodeId: string) => void
-  /** Ask the server what's inside a container that connects to
-   *  `partnerUrn` — the card's partner in the picture, which is the
-   *  focal only at the first hop. */
-  onOpenContainer?: (containerUrn: string, partnerUrn: string, dir: 'in' | 'out', containerLevel: number | null) => void
-  onRetryOpenContainer?: (containerUrn: string, partnerUrn: string, dir: 'in' | 'out', containerLevel: number | null) => void
-  /** Transitive reach per visited focal (useLensImpact). Absent =
-   *  unknown or unsupported — nothing is shown, never a fake zero. */
-  impact?: Map<string, LensImpact>
-  impactStatus?: Map<string, 'loading' | 'done' | 'error'>
-  /** Exploration restored from a share link: expansion state to seed
-   *  the graph with when this focal first renders. */
-  graphSeed?: {
-    nodeId: string
-    collapsedFrames?: string[]
-    expandedFrontier: string[]
-    openContainers?: string[]
-    frameAll?: string[]
-    contains?: string[]
-    framePages?: Array<[string, number]>
-    frameQueries?: Array<[string, string]>
-  } | null
 }
 
 export function LineageLens({
   history,
+  walk,
+  walkApi,
+  childrenAll = EMPTY_ROSTERS,
+  childrenAllStatus = EMPTY_ROSTER_STATUS,
+  onLoadAllChildren,
+  onLoadChildrenOf,
   onRecenter,
   onBack,
   onForward,
@@ -205,39 +253,11 @@ export function LineageLens({
   onLocateAll,
   onTrace,
   externalPreview,
-  supplementalEdges,
-  supplementalNodes,
-  fetchStatus,
-  fetchTruncatedIds,
-  onRetryFetch,
-  drillEdges,
-  drillStatus,
-  onDrillFetch,
-  onEnsureFetched,
-  degreeHints,
-  containerResults,
-  containerStatus,
-  frameAllResults,
-  frameAllStatus,
-  onLoadAllChildren,
-  childrenOf,
-  childrenStatusOf,
-  onLoadChildrenOf,
-  onOpenContainer,
-  onRetryOpenContainer,
-  impact,
-  impactStatus,
-  graphSeed,
 }: LineageLensProps) {
   const { entries, cursor } = history
   const nodeId = lensFocalOf(history)
   const canBack = cursor > 0
   const canForward = cursor < entries.length - 1
-
-  const rawEdges = useCanvasStore((s) => s.edges)
-  const visibleEdges = useCanvasStore((s) => s.visibleEdges)
-  const nodes = useCanvasStore((s) => s.nodes)
-  const containmentEdgeTypes = useContainmentEdgeTypes()
 
   // Query is keyed to the focal node — re-centering starts with a fresh
   // filter without needing a reset effect.
@@ -271,191 +291,39 @@ export function LineageLens({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [nodeId, onClose, canBack, canForward, onBack, onForward])
 
-  // Open gate for every canvas-scale memo below: this component is
-  // always mounted, and a closed lens must cost nothing when the
-  // (potentially very large) node/edge sets churn.
-  const lensOpen = entries.length > 0
+  const walkStatus: LensFetchStatus = walk?.status ?? 'loading'
+  const model = walk?.model ?? null
 
-  const nodeMap = useMemo(() => {
-    const m = new Map<string, LineageNode>()
-    if (!lensOpen) return m
-    // Lowest precedence first; store nodes win (they carry full canvas
-    // data). Container answers are folded in because otherwise the
-    // entities the server just named for an opened frame stay unknown
-    // to the rest of the lens — rendering as a URN tail ("a random id"),
-    // typed "not loaded", and blank when focused.
-    if (containerResults) for (const r of containerResults.values()) {
-      for (const n of r.nodes) m.set(n.id, n)
-      for (const n of r.passedThrough) m.set(n.id, n)
-    }
-    if (frameAllResults) for (const r of frameAllResults.values()) {
-      for (const n of r.children) m.set(n.id, n)
-    }
-    if (childrenOf) for (const r of childrenOf.values()) {
-      for (const n of r.children) m.set(n.id, n)
-    }
-    if (supplementalNodes) for (const [id, n] of supplementalNodes) m.set(id, n)
-    for (const n of nodes) m.set(n.id, n)
-    return m
-  }, [nodes, supplementalNodes, containerResults, frameAllResults, childrenOf, lensOpen])
+  // ── The pipeline: model → subgraph → view state → layout ──────────
 
-  // Store edges (canvas truth) merged with on-demand fetched edges
-  // (data-source truth). A fetched edge is redundant — and skipped —
-  // when the store already represents that connection: identical id,
-  // identical (source, target, edgeType) pair, or rolled up into an
-  // aggregate that shares an endpoint with it (the aggregate row shows
-  // it at coarser granularity, and the drill below resolves it). An
-  // aggregate between two OTHER nodes does NOT cover it — that's
-  // exactly the invisible-lineage case this merge exists to fix.
-  const edges = useMemo(() => {
-    const base = visibleEdges.length > 0 ? visibleEdges : rawEdges
-    if (!supplementalEdges || supplementalEdges.length === 0) return base
-    return mergeSupplementalEdges(base, supplementalEdges)
-  }, [visibleEdges, rawEdges, supplementalEdges])
-
-  // Endpoint index — one O(E) pass per edge-set change so everything
-  // downstream (hop columns, trail metadata, the classic body) works in
-  // O(degree of the node), not O(all edges) per hop. At canvas scale
-  // (100k+ edges, multi-hop walks) the naive full-array scan per hop is
-  // the difference between instant and seconds. The open gate is a
-  // boolean, so opening builds once and walking doesn't rebuild.
-  const edgesByEndpoint = useMemo(() => {
-    const m = new Map<string, LineageEdge[]>()
-    if (!lensOpen) return m
-    const add = (k: string, e: LineageEdge) => {
-      const list = m.get(k)
-      if (list) list.push(e)
-      else m.set(k, [e])
-    }
-    for (const e of edges) {
-      add(e.source, e)
-      if (e.target !== e.source) add(e.target, e)
-    }
-    return m
-  }, [edges, lensOpen])
-
-  // Hop metadata — direction + edge type for each trail transition,
-  // derived from loaded edges. Lets the trail read as a sentence
-  // ("acct_num FEEDS System A") instead of a bare list. Trail length is
-  // small; recomputed only when the walk or edge set changes. null =
-  // connecting edge not loaded (fall back to a neutral separator).
-  const hopMeta = useMemo(() => {
-    const meta: Array<{ downstream: boolean; edgeType: string } | null> = []
-    for (let i = 1; i < entries.length; i++) {
-      const prev = entries[i - 1]
-      const curr = entries[i]
-      let found: { downstream: boolean; edgeType: string } | null = null
-      for (const e of edgesByEndpoint.get(curr) ?? []) {
-        if (e.source === prev && e.target === curr) {
-          found = { downstream: true, edgeType: (e.data?.edgeType as string) || '' }
-          break
-        }
-        if (e.source === curr && e.target === prev) {
-          found = { downstream: false, edgeType: (e.data?.edgeType as string) || '' }
-          break
-        }
-      }
-      meta.push(found)
-    }
-    return meta
-  }, [entries, edgesByEndpoint])
-
-  // Deep walks middle-truncate so the cursor's neighborhood (the part
-  // people care about) stays visible; the gap chips expand the full trail.
-  const [showFullTrail, setShowFullTrail] = useState(false)
-  const TRAIL_CAP = 6
-  const collapseTrail = entries.length > TRAIL_CAP && !showFullTrail
-
-  // Containment children of the focal — a container's relationships
-  // often live at CHILD level, so focusing one would dead-end on flow
-  // edges alone. Children (containment edges are parent → child) render
-  // as a walkable "Contains" group; O(degree) via the endpoint index.
-  const focalChildren = useMemo(() => {
-    if (!nodeId) return []
-    const children: string[] = []
-    const seen = new Set<string>()
-    for (const e of edgesByEndpoint.get(nodeId) ?? []) {
-      if (!isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) continue
-      if (e.source === nodeId && e.target !== nodeId && !seen.has(e.target)) {
-        seen.add(e.target)
-        children.push(e.target)
-      }
-    }
-    // Children the lens FETCHED itself. Without this the stack could
-    // only ever show children that happened to be loaded on the canvas
-    // already — so an entity would say "contains 128" and show none of
-    // them until you left Focus mode, expanded it on the canvas, and
-    // came back.
-    for (const n of childrenOf?.get(nodeId)?.children ?? []) {
-      if (seen.has(n.id)) continue
-      seen.add(n.id)
-      children.push(n.id)
-    }
-    return children
-  }, [nodeId, edgesByEndpoint, containmentEdgeTypes, childrenOf])
-
-  /** Loaded children per urn, for the contains stack's deeper levels.
-   *  Only entities the user actually opened are fetched, so this stays
-   *  as small as the stack the user built. */
-  const containsKidsById = useMemo(() => {
-    const m = new Map<string, string[]>()
-    for (const [urn, page] of childrenOf ?? []) m.set(urn, page.children.map(n => n.id))
-    return m
-  }, [childrenOf])
-  /** Fetch state per urn, so a row that came back EMPTY and one that
-   *  FAILED are distinguishable from one still loading. All three used
-   *  to render as an open chevron with nothing under it. */
-  const containsStatusById = useMemo(
-    () => childrenStatusOf ?? new Map<string, 'loading' | 'done' | 'error' | 'unsupported'>(),
-    [childrenStatusOf],
+  const sg = useMemo(
+    () => buildLensSubgraph(model ?? emptyWalkModel(nodeId ?? '')),
+    [model, nodeId],
   )
 
-  // ── Grain machinery — data-driven from the schema's entity-type
-  // hierarchy. closure(T) = every type T can transitively contain; a
-  // partner is a COARSER-grain rollup relative to a base node when the
-  // partner's type can contain the base's type (e.g. CONTAINER and
-  // DATAPLATFORM vs a DATASET focal). Case-insensitive like the other
-  // schema helpers. Tiny input (schema type list), computed once.
-  // Ontology wording for edge types — display name + description when
-  // the schema defines them. Shared by both bodies so the lens never
-  // shows a raw FLOWS_TO token to a business user.
-  const relationshipTypes = useRelationshipTypes()
-  const edgeTypeInfo = useMemo<EdgeTypeInfoMap>(() => {
-    const m: EdgeTypeInfoMap = new Map()
-    for (const rt of relationshipTypes) {
-      m.set(rt.id.toUpperCase(), { label: rt.name || relationshipLabel(rt.id), description: rt.description })
-    }
-    return m
-  }, [relationshipTypes])
-
-  const hierarchyMap = useEntityTypeHierarchyMap()
-  const entityLevels = useEntityTypeLevels()
-  const canContainClosure = useMemo(() => buildCanContainClosure(hierarchyMap), [hierarchyMap])
-  /** Can this type hold anything at all? Straight from the ontology —
-   *  NOT from childCount, which is absent often enough that gating on
-   *  it hid the "open its contents" control exactly where it mattered. */
-  const canContainAnything = useCallback(
-    (type: string | undefined) => (type ? (hierarchyMap[type]?.canContain.length ?? 0) > 0 : false),
-    [hierarchyMap],
-  )
-  const isCoarserThan = useCallback(
-    (partnerType: string | undefined, baseType: string): boolean =>
-      isCoarserGrain(canContainClosure, partnerType, baseType),
-    [canContainClosure],
-  )
-
-  // Containment parent of a node, when known — fetched or loaded
-  // containment edge pointing at it, else the canvas's own assignment.
-  const resolveParent = useCallback((id: string): string | null => {
-    for (const e of edgesByEndpoint.get(id) ?? []) {
-      if (e.target === id && e.source !== id
-        && isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) return e.source
-    }
-    return (nodeMap.get(id)?.data?.parentId as string | undefined) ?? null
-  }, [edgesByEndpoint, containmentEdgeTypes, nodeMap])
+  // Where a walk starts: the focus's containment spine already open and
+  // one page of neighbours each way. Recomputed only when the model
+  // changes, so it is a stable identity for the layout memo below.
+  const initialView = useMemo(() => initialLensViewState(sg), [sg])
+  const [viewState, setViewState] = useState<{ nodeId: string | null; view: LensViewState } | null>(null)
+  // Discarded on re-center, exactly like the filter and chip state: a
+  // new focal is a new question, not a continuation of this one.
+  //
+  // Restoring a SHARED exploration lands here in the next task, which
+  // re-encodes this state as share v2. The v1 fields (collapsed /
+  // frontier / containers / contains / framePages / frameQueries)
+  // describe a state model that no longer exists, so nothing consumes
+  // them: a v1 link still restores the walked path and the body mode.
+  const view = viewState?.nodeId === nodeId ? viewState.view : initialView
+  const editView = useCallback((edit: (base: LensViewState) => LensViewState) => {
+    setViewState(prev => ({
+      nodeId,
+      view: edit(prev?.nodeId === nodeId ? prev.view : initialView),
+    }))
+  }, [nodeId, initialView])
 
   // Type-filter chips — lens-local, keyed to the focal (like the text
-  // filter) so re-centering starts clean. Shared across both columns.
+  // filter) so re-centering starts clean.
   const [hiddenTypesState, setHiddenTypesState] = useState<{ nodeId: string | null; types: ReadonlySet<string> }>({ nodeId: null, types: EMPTY_TYPE_SET })
   const hiddenTypes = hiddenTypesState.nodeId === nodeId ? hiddenTypesState.types : EMPTY_TYPE_SET
   const toggleHiddenType = (t: string) => setHiddenTypesState(prev => {
@@ -466,552 +334,282 @@ export function LineageLens({
     return { nodeId, types: next }
   })
 
-  // Parent-group collapse — per-group TOGGLES against a per-column
-  // default (3+ parent groups → start collapsed: dataset-level overview
-  // first), stored as XOR so the default can vary without migrating
-  // state. Keyed to the focal like the other lens-local state.
-  const [collapseState, setCollapseState] = useState<{ nodeId: string | null; keys: ReadonlySet<string> }>({ nodeId: null, keys: EMPTY_TYPE_SET })
-  const collapseToggles = collapseState.nodeId === nodeId ? collapseState.keys : EMPTY_TYPE_SET
-  const toggleCollapse = (k: string) => setCollapseState(prev => {
-    const base = prev.nodeId === nodeId ? prev.keys : EMPTY_TYPE_SET
-    const next = new Set(base)
-    if (next.has(k)) next.delete(k)
-    else next.add(k)
-    return { nodeId, keys: next }
-  })
-
-  // ── Containment drill — refine an aggregated row to its constituent
-  // endpoints, resolved LOCALLY from the raw edges the aggregate rolls
-  // up (`data.sourceEdges`). Honest by construction: constituents that
-  // aren't loaded are reported as "+M more", never invented.
-  const rawEdgeById = useMemo(() => {
-    const m = new Map<string, LineageEdge>()
-    for (const e of rawEdges) m.set(e.id, e)
-    // Fetched edges resolve drill constituents the canvas never loaded.
-    if (supplementalEdges) for (const e of supplementalEdges) { if (!m.has(e.id)) m.set(e.id, e) }
-    return m
-  }, [rawEdges, supplementalEdges])
-  const [drilledRows, setDrilledRows] = useState<Set<string>>(() => new Set())
-  const toggleDrill = useCallback((key: string) => setDrilledRows(prev => {
-    const next = new Set(prev)
-    if (next.has(key)) next.delete(key)
-    else next.add(key)
-    return next
-  }), [])
-  // Opening a drill with incomplete local coverage fetches the
-  // underlying edges on demand (idempotent per aggregate). Shared by
-  // the graph cards and the classic-mode rows. Memoized — it rides
-  // into every graph card's context, which must stay identity-stable.
-  const toggleDrillWithFetch = useCallback((key: string, edge: LineageEdge) => {
-    // No local-resolution shortcut: `sourceEdges` is never populated at
-    // runtime — nothing in the backend materializes a constituent-id
-    // list, and nothing client-side writes one outside test fixtures —
-    // so the branch that counted already-loaded constituents was dead
-    // and only made this look cheaper than it is.
-    if (!drilledRows.has(key) && onDrillFetch && !drillEdges?.has(edge.id)) onDrillFetch(edge)
-    toggleDrill(key)
-  }, [drilledRows, onDrillFetch, drillEdges, toggleDrill])
-
-  const { incomingRecords, outgoingRecords } = useMemo(
-    () => (nodeId
-      ? deriveNeighborRecords(nodeId, edgesByEndpoint.get(nodeId) ?? [], nodeMap, containmentEdgeTypes)
-      : { incomingRecords: [], outgoingRecords: [] }),
-    [nodeId, edgesByEndpoint, nodeMap, containmentEdgeTypes],
-  )
-
-  // ── Graph mode — body preference + per-focal interaction state ─────
-  // (selection, expanded groups, expanded frontier hops, band pages),
-  // keyed to the focal like the other lens-local state so re-centering
-  // starts clean without reset effects.
   const lensViewMode = usePreferencesStore((s) => s.lensViewMode)
   const setLensViewMode = usePreferencesStore((s) => s.setLensViewMode)
   const lensFrameChildren = usePreferencesStore((s) => s.lensFrameChildren)
   const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
-  const [graphState, setGraphState] = useState<LensGraphState>(() => freshGraphState(null))
-  // A share-link seed pre-expands the restored focal's groups/frontier
-  // the first time it renders; any later re-center falls back to fresh.
-  const seededFresh = useCallback((id: string | null): LensGraphState => (
-    graphSeed && id != null && graphSeed.nodeId === id
-      ? {
-          nodeId: id,
-          selection: null,
-          collapsedFrames: new Set(graphSeed.collapsedFrames ?? []),
-          expandedFrontier: new Set(graphSeed.expandedFrontier),
-          openContainers: new Set(graphSeed.openContainers ?? []),
-          frameShowAll: new Set(graphSeed.frameAll ?? []),
-          openContains: new Set(graphSeed.contains ?? []),
-          frameQueries: new Map(graphSeed.frameQueries ?? []),
-          framePages: new Map(graphSeed.framePages ?? []),
-          bandPages: EMPTY_PAGE_MAP,
-        }
-      : freshGraphState(id)
-  ), [graphSeed])
-  const graphCur = graphState.nodeId === nodeId ? graphState : seededFresh(nodeId)
-  const setGraphSelection = useCallback((selection: string | null) => {
-    setGraphState(prev => ({ ...(prev.nodeId === nodeId ? prev : seededFresh(nodeId)), selection }))
-  }, [nodeId, seededFresh])
-  const toggleGraphFrame = useCallback((key: string) => {
-    setGraphState(prev => {
-      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
-      const next = new Set(base.collapsedFrames)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return { ...base, collapsedFrames: next }
+
+  const layout = useMemo(() => buildFocusLayout({
+    sg,
+    view,
+    query,
+    hiddenTypes,
+    extendStatus: walk?.extendStatus ?? EMPTY_EXTEND_STATUS,
+    childrenAll,
+    childrenAllStatus,
+    walkStatus,
+  }), [sg, view, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus])
+
+  const neighbors = useMemo(() => walkNeighborRecords(sg), [sg])
+  const inConnections = neighbors.incoming.reduce((n, r) => n + r.weight, 0)
+  const outConnections = neighbors.outgoing.reduce((n, r) => n + r.weight, 0)
+
+  // ── Growing the walk ───────────────────────────────────────────────
+
+  /** Instant: a page of neighbours already in the model. No fetch. */
+  const revealMore = useCallback((key: string) => {
+    editView(base => {
+      const revealed = new Map(base.revealed)
+      revealed.set(key, (revealed.get(key) ?? 0) + 1)
+      return { ...base, revealed }
     })
-  }, [nodeId, seededFresh])
-  const toggleGraphFrontier = useCallback((key: string, frontierNodeId: string) => {
-    let wasExpanded = false
-    setGraphState(prev => {
-      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
-      const next = new Set(base.expandedFrontier)
-      wasExpanded = next.has(key)
-      if (wasExpanded) next.delete(key)
-      else next.add(key)
-      return { ...base, expandedFrontier: next }
-    })
-    // Expanding walks INTO unexplored lineage — fetch that node's true
-    // 1-hop neighborhood (idempotent; no-op when already fetched).
-    if (!wasExpanded) onEnsureFetched?.(frontierNodeId)
-  }, [nodeId, seededFresh, onEnsureFetched])
-  /** Toggle a coarse container open. Opening asks the server what's
-   *  inside it that connects to the focal (idempotent per key); closing
-   *  only drops the key — the answer stays cached for re-opening. */
-  const toggleContainer = useCallback((openKey: string, containerNodeId: string, entityType: string, partnerId: string | null) => {
-    // An UNDECLARED level is not a reason to refuse. A type that appears
-    // at two containment depths — a Container inside a Container — has
-    // no single `hierarchy.level`, so requiring one made whole branches
-    // of a real ontology silently unopenable. `null` says "no honest
-    // level to send" and the server drills structurally instead.
-    const level = entityLevels.get(entityType) ?? null
-    // No partner means the card connects to the focal (band 1).
-    const partner = partnerId ?? nodeId
-    if (!partner) return
-    const dir: 'in' | 'out' = openKey.startsWith('in:') ? 'in' : 'out'
-    let wasOpen = false
-    setGraphState(prev => {
-      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
-      const next = new Set(base.openContainers)
-      // A coarser partner opens as soon as its answer arrives, so the
-      // absence of a key no longer means "closed" — it means "never
-      // asked". Closing has to be RECORDED, or the auto-open would
-      // reinstate the frame the user just dismissed.
-      const closed = new Set(base.collapsedFrames)
-      wasOpen = next.has(openKey) && !closed.has(openKey)
-      if (wasOpen) {
-        next.delete(openKey)
-        closed.add(openKey)
-      } else {
-        next.add(openKey)
-        closed.delete(openKey)
-      }
-      // A new frame starts in whichever mode the header default says.
-      const all = new Set(base.frameShowAll)
-      if (!wasOpen && lensFrameChildren === 'all') all.add(openKey)
-      return { ...base, openContainers: next, frameShowAll: all, collapsedFrames: closed }
-    })
-    if (!wasOpen) {
-      onOpenContainer?.(containerNodeId, partner, dir, level)
-      // Opening straight into "everything inside" has to ASK for
-      // everything inside; without this the frame claimed to show every
-      // child while rendering only the connected ones. The fetch is a
-      // no-op until the open resolves and supplies the anchor, and the
-      // effect below re-runs it once that lands.
-      if (lensFrameChildren === 'all') onLoadAllChildren?.(openKey)
+  }, [editView])
+
+  /** One further hop from this card, seeded by what is underneath it. */
+  const extendWalk = useCallback((_key: string, urn: string, dir: 'in' | 'out') => {
+    walkApi.extend(urn, toWalkDir(dir), seedLeavesFor(sg, urn, dir))
+  }, [walkApi, sg])
+
+  /** The rest of THIS node's adjacency, with the server's own cursor. */
+  const pageWalk = useCallback((urn: string, dir: 'in' | 'out', cursor: string) => {
+    walkApi.page(urn, toWalkDir(dir), cursor)
+  }, [walkApi])
+
+  /** Which cards the LAYOUT opened by itself, so a click on one can
+   *  close it. Read from the built cards rather than re-deriving the
+   *  pass-through-spine rule, which would be a second copy of it. */
+  const autoOpen = useMemo(() => {
+    const open = new Set<string>()
+    for (const card of layout.cards) {
+      if (card.kind === 'frame' && card.nodeId) open.add(card.nodeId)
     }
-  }, [nodeId, seededFresh, entityLevels, onOpenContainer, onLoadAllChildren, lensFrameChildren])
+    return open
+  }, [layout])
 
-  /** Ask again for a row whose children fetch failed — WITHOUT toggling
-   *  the row shut, which is what a plain re-click would do. */
-  const retryContains = useCallback((urn: string) => { onLoadChildrenOf?.(urn) }, [onLoadChildrenOf])
-
-  /** Open / close one contains row, fetching its children the first
-   *  time. Collapsing keeps the answer cached for re-opening. */
-  const toggleContains = useCallback((urn: string) => {
+  /** Open / close what a card holds. Pure re-projection over the model
+   *  — the children are already scoped to walk participants, so this can
+   *  never reach outside the lineage and never fetches. */
+  const toggleContents = useCallback((urn: string) => {
     let opening = false
-    setGraphState(prev => {
-      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
-      const next = new Set(base.openContains)
-      opening = !next.has(urn)
-      if (opening) next.add(urn)
-      else next.delete(urn)
-      return { ...base, openContains: next }
+    editView(base => {
+      const expanded = new Set(base.expandedContainment)
+      const collapsed = new Set(base.collapsedContainment)
+      // The layout auto-opens pass-through spines, so "is it open" is
+      // not "is it in the set" — an open the user shuts has to be
+      // RECORDED, or the spine would reinstate it on the next build.
+      const isOpen = !collapsed.has(urn) && (expanded.has(urn) || autoOpen.has(urn))
+      opening = !isOpen
+      if (isOpen) {
+        expanded.delete(urn)
+        collapsed.add(urn)
+      } else {
+        expanded.add(urn)
+        collapsed.delete(urn)
+      }
+      // A newly opened frame starts in whichever mode the header says.
+      const showAll = new Set(base.frameShowAll)
+      if (opening && lensFrameChildren === 'all') showAll.add(urn)
+      return { ...base, expandedContainment: expanded, collapsedContainment: collapsed, frameShowAll: showAll }
     })
-    if (opening) onLoadChildrenOf?.(urn)
-  }, [nodeId, seededFresh, onLoadChildrenOf])
+    if (opening && lensFrameChildren === 'all') onLoadAllChildren?.(urn)
+  }, [editView, autoOpen, lensFrameChildren, onLoadAllChildren])
 
   /** Flip one frame between "only what connects" and "everything
-   *  inside". Turning it on fetches that container's child list; turning
-   *  it off keeps the answer cached for flipping back. */
-  const toggleFrameAll = useCallback((openKey: string) => {
+   *  inside". Turning it on fetches the roster; turning it off keeps
+   *  the answer cached for flipping back. */
+  const toggleFrameAll = useCallback((urn: string) => {
     let turningOn = false
-    setGraphState(prev => {
-      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
+    editView(base => {
       const next = new Set(base.frameShowAll)
-      turningOn = !next.has(openKey)
-      if (turningOn) next.add(openKey)
-      else next.delete(openKey)
+      turningOn = !next.has(urn)
+      if (turningOn) next.add(urn)
+      else next.delete(urn)
       return { ...base, frameShowAll: next }
     })
-    if (turningOn) onLoadAllChildren?.(openKey)
-  }, [nodeId, seededFresh, onLoadAllChildren])
+    if (turningOn) onLoadAllChildren?.(urn)
+  }, [editView, onLoadAllChildren])
 
-  const retryContainer = useCallback((openKey: string, containerNodeId: string, entityType: string, partnerId: string | null) => {
-    const level = entityLevels.get(entityType) ?? null
-    const partner = partnerId ?? nodeId
-    if (!partner) return
-    onRetryOpenContainer?.(containerNodeId, partner, openKey.startsWith('in:') ? 'in' : 'out', level)
-  }, [nodeId, entityLevels, onRetryOpenContainer])
-
-  const setFrameQuery = useCallback((openKey: string, q: string) => {
-    setGraphState(prev => {
-      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
-      const next = new Map(base.frameQueries)
-      if (q) next.set(openKey, q)
-      else next.delete(openKey)
+  const setFrameQuery = useCallback((urn: string, q: string) => {
+    editView(base => {
+      const queries = new Map(base.frameQueries)
+      if (q) queries.set(urn, q)
+      else queries.delete(urn)
       // A new search is a new list — start it at the top rather than
       // leaving the window parked on a page the matches may not reach.
       const pages = new Map(base.framePages)
-      pages.delete(openKey)
-      return { ...base, frameQueries: next, framePages: pages }
+      pages.delete(urn)
+      return { ...base, frameQueries: queries, framePages: pages }
     })
-  }, [nodeId, seededFresh])
+  }, [editView])
+
+  const frameQueryFor = useCallback(
+    (urn: string) => view.frameQueries.get(urn) ?? '',
+    [view.frameQueries],
+  )
 
   /**
    * Find, debounced into the server.
    *
-   * The in-frame box used to filter the loaded page in the browser, so
-   * on a 500-column table you could not find a column you had not paged
-   * to — the one thing a Find box is for. `getChildrenWithEdges` matches
-   * displayName/urn server-side; this sends the query there, and the
-   * hook resets that frame's pages because a different query is a
-   * different list. Connected mode is unaffected: its set is small,
-   * fully loaded, and already the answer you opened for.
+   * `getChildrenWithEdges` matches displayName/urn server-side, so Find
+   * reaches a column on page 7 of a wide table without paging to it.
+   * Connected mode needs none of this: its set is the model already in
+   * hand, and the layout filters it locally.
    */
-  const frameQueriesNow = graphCur.frameQueries
-  const frameShowAllNow = graphCur.frameShowAll
+  const frameQueriesNow = view.frameQueries
+  const frameShowAllNow = view.frameShowAll
   useEffect(() => {
     if (!onLoadAllChildren || frameShowAllNow.size === 0) return
     const t = setTimeout(() => {
-      for (const key of frameShowAllNow) {
-        const want = (frameQueriesNow.get(key) ?? '').trim()
-        const have = frameAllResults?.get(key)
+      for (const urn of frameShowAllNow) {
+        const want = (frameQueriesNow.get(urn) ?? '').trim()
+        const have = childrenAll.get(urn)
         // Only when the question CHANGED — otherwise this would race the
         // frame's own first-page fetch and quietly page past it.
         if (!have || (have.query ?? '') === want) continue
-        onLoadAllChildren(key, want)
+        onLoadAllChildren(urn, want)
       }
     }, 300)
     return () => clearTimeout(t)
-  }, [frameQueriesNow, frameShowAllNow, frameAllResults, onLoadAllChildren])
+  }, [frameQueriesNow, frameShowAllNow, childrenAll, onLoadAllChildren])
 
   /** Move a frame's fixed window to an absolute page. Fetching is
-   *  decoupled from the window: one 100-child server page backs five
-   *  20-row render pages, so we only ask for more when the requested
-   *  window actually runs past what is loaded. */
-  const setFramePage = useCallback((openKey: string, page: number) => {
+   *  decoupled from the window: one server page backs several render
+   *  pages, so we only ask when the window runs past what is loaded. */
+  const setFramePage = useCallback((urn: string, page: number) => {
     let showingAll = false
-    let query = ''
-    setGraphState(prev => {
-      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
-      showingAll = base.frameShowAll.has(openKey)
-      // The page we turn to belongs to whatever list is on screen. Asking
-      // without the query made the hook see a DIFFERENT question, refetch
-      // page 1 unfiltered, replace the matches — and the debounce then
-      // re-ran the search 300ms later. One Next click cost two round
-      // trips, a flash of unrelated rows, and the window snapped home.
-      query = base.frameQueries.get(openKey) ?? ''
-      const next = new Map(base.framePages)
-      next.set(openKey, Math.max(0, page))
-      return { ...base, framePages: next }
+    let q = ''
+    editView(base => {
+      showingAll = base.frameShowAll.has(urn)
+      // The page we turn to belongs to whatever list is on screen.
+      // Asking without the query made the hook see a DIFFERENT question
+      // and refetch page 1 unfiltered.
+      q = base.frameQueries.get(urn) ?? ''
+      const pages = new Map(base.framePages)
+      pages.set(urn, Math.max(0, page))
+      return { ...base, framePages: pages }
     })
     if (!showingAll) return
-    const loaded = frameAllResults?.get(openKey)
-    const wanted = (Math.max(0, page) + 1) * FRAME_ALL_CAP
-    // The hook is idempotent and no-ops once the list is drained; this
-    // just keeps a page turn inside the fetched set from asking at all.
-    if (!loaded || (loaded.hasMore && loaded.children.length < wanted)) onLoadAllChildren?.(openKey, query)
-  }, [nodeId, seededFresh, onLoadAllChildren, frameAllResults])
+    const loaded = childrenAll.get(urn)
+    if (!loaded || loaded.hasMore) onLoadAllChildren?.(urn, q)
+  }, [editView, childrenAll, onLoadAllChildren])
 
-  /** Re-kick a failed "everything inside" fetch — under whatever search
-   *  is active, for the same reason a page turn must. */
-  const retryFrameAll = useCallback((openKey: string) => {
-    onLoadAllChildren?.(openKey, graphCur.frameQueries.get(openKey) ?? '')
-  }, [onLoadAllChildren, graphCur.frameQueries])
-
-  /** Stable per-frame query getter. An inline arrow here re-created the
-   *  card context on every render, which re-rendered every card in the
-   *  graph — see the PERF CONTRACT in FocusGraphView. */
-  const frameQueryFor = useCallback(
-    (openKey: string) => graphCur.frameQueries.get(openKey) ?? '',
-    [graphCur.frameQueries],
+  const retryFrameAll = useCallback(
+    (urn: string) => onLoadAllChildren?.(urn, view.frameQueries.get(urn) ?? ''),
+    [onLoadAllChildren, view.frameQueries],
   )
 
-  const bumpBandPage = useCallback((bandKey: string) => {
-    let page = 0
-    setGraphState(prev => {
-      const base = prev.nodeId === nodeId ? prev : seededFresh(nodeId)
-      const next = new Map(base.bandPages)
-      page = (next.get(bandKey) ?? 0) + 1
-      next.set(bandKey, page)
-      return { ...base, bandPages: next }
-    })
-    // The contains stack pages a FETCHED list, not just a render cap.
-    // Raising the cap past what has loaded used to show the same rows
-    // again while the label still promised "+328 more contained".
-    if (bandKey === 'contains' && nodeId) {
-      const loaded = childrenOf?.get(nodeId)
-      if (!loaded || (loaded.hasMore && loaded.children.length < CONTAINS_CAP * (page + 1))) {
-        onLoadChildrenOf?.(nodeId)
+  const retryWalk = useCallback(() => { if (nodeId) walkApi.retry(nodeId) }, [nodeId, walkApi])
+
+  const setSelection = useCallback((selection: string | null) => {
+    editView(base => ({ ...base, selection }))
+  }, [editView])
+
+  // ── Wording ────────────────────────────────────────────────────────
+
+  const relationshipTypes = useRelationshipTypes()
+  const edgeTypeInfo = useMemo<EdgeTypeInfoMap>(() => {
+    const m: EdgeTypeInfoMap = new Map()
+    for (const rt of relationshipTypes) {
+      m.set(rt.id.toUpperCase(), { label: rt.name || relationshipLabel(rt.id), description: rt.description })
+    }
+    return m
+  }, [relationshipTypes])
+
+  // Deep walks middle-truncate so the cursor's neighborhood (the part
+  // people care about) stays visible; the gap chips expand the full trail.
+  const [showFullTrail, setShowFullTrail] = useState(false)
+  const TRAIL_CAP = 6
+  const collapseTrail = entries.length > TRAIL_CAP && !showFullTrail
+
+  const labelFor = useCallback(
+    (urn: string) => labelOf(urn, sg.nodes.get(urn)?.node),
+    [sg],
+  )
+  const parentOf = useCallback(
+    (urn: string) => sg.nodes.get(urn)?.parent ?? null,
+    [sg],
+  )
+
+  // Hop metadata for the trail — direction + relationship for each
+  // transition, so the path reads as a sentence rather than a list.
+  // Only the hops the CURRENT focal's model can vouch for get one; the
+  // rest fall back to a neutral separator, because a walk's earlier
+  // hops live in other focals' models and guessing them would be
+  // inventing lineage.
+  const hopMeta = useMemo(() => {
+    const meta: Array<{ downstream: boolean; edgeType: string } | null> = []
+    for (let i = 1; i < entries.length; i++) {
+      const prev = entries[i - 1]
+      const curr = entries[i]
+      let found: { downstream: boolean; edgeType: string } | null = null
+      for (const e of sg.lineageEdges) {
+        if (e.sourceUrn === prev && e.targetUrn === curr) {
+          found = { downstream: true, edgeType: (e.edgeType ?? '') }
+          break
+        }
+        if (e.sourceUrn === curr && e.targetUrn === prev) {
+          found = { downstream: false, edgeType: (e.edgeType ?? '') }
+          break
+        }
       }
+      meta.push(found)
     }
-  }, [nodeId, seededFresh, childrenOf, onLoadChildrenOf])
-  // Restored frontier expansions need their nodes' lineage fetched —
-  // the same idempotent kick a live ⊕ click performs.
-  useEffect(() => {
-    if (!graphSeed || graphSeed.nodeId !== nodeId || !onEnsureFetched) return
-    for (const k of graphSeed.expandedFrontier) onEnsureFetched(k.replace(/^(in|out):/, ''))
-  }, [graphSeed, nodeId, onEnsureFetched])
-  // A frame in "everything inside" mode needs its FIRST page of
-  // children once its open has resolved (the open supplies the anchor).
-  //
-  // Exactly once per frame. This used to re-run on every render — its
-  // deps include a handler that is a fresh closure each time — and each
-  // run fetched the next page, which re-rendered, which fetched again.
-  // A restored link on a wide table paged itself to the end with no
-  // user action. Paging past the first page is a deliberate gesture
-  // now: the frame's "Load more" control.
-  // The focal's own contents, asked for once. This used to be gated on
-  // `childCount > 0` — but every lineage and trace read path strips
-  // childCount server-side (`include_child_count=False`; absent entirely
-  // in trace v2), and that is how a focal normally arrives on the canvas.
-  // So the gate read "no children" for the common case and the focal's
-  // contents never loaded. The ontology is the reliable authority on
-  // whether a type contains anything at all; ask it instead.
-  const focalKidsAskedRef = useRef<string | null>(null)
-  useEffect(() => {
-    if (!nodeId || !onLoadChildrenOf) return
-    if (focalKidsAskedRef.current === nodeId) return
-    if (!canContainAnything(nodeMap.get(nodeId)?.data?.type as string | undefined)) return
-    focalKidsAskedRef.current = nodeId
-    onLoadChildrenOf(nodeId)
-  }, [nodeId, nodeMap, onLoadChildrenOf, canContainAnything])
+    return meta
+  }, [entries, sg])
 
-  // Keyed by FOCAL as well as frame: the fetch caches are per focal, so
-  // a bare `${dir}:${urn}` key meant re-centering to a second focal and
-  // opening the same container there was treated as already-asked. That
-  // frame then showed only its connected children, with no loading
-  // state, while its own toggle read "Everything inside".
-  const firstPageAskedRef = useRef<Set<string>>(new Set())
-  useEffect(() => {
-    if (!nodeId) { firstPageAskedRef.current.clear(); return }
-    if (!onLoadAllChildren) return
-    for (const k of graphCur.frameShowAll) {
-      const asked = `${nodeId}\u0000${k}`
-      if (firstPageAskedRef.current.has(asked)) continue
-      if (!containerResults?.has(k)) continue
-      firstPageAskedRef.current.add(asked)
-      onLoadAllChildren(k)
+  // Type chips — every type the chips could actually remove. Never the
+  // focus or the containers above it: chipping the focus's own type
+  // would delete the thing you are looking at.
+  const typeChips = useMemo(() => {
+    const kept = new Set<string>([sg.focusUrn])
+    let cursorUrn = sg.nodes.get(sg.focusUrn)?.parent ?? null
+    while (cursorUrn && !kept.has(cursorUrn)) {
+      kept.add(cursorUrn)
+      cursorUrn = sg.nodes.get(cursorUrn)?.parent ?? null
     }
-  }, [nodeId, graphCur.frameShowAll, onLoadAllChildren, containerResults])
-
-  /** DETAIL | SUMMARY — the only view question the graph body asks.
-   *
-   * Detail (default) is the lineage view, plainly: the focal in the
-   * middle, its direct upstream and downstream as the data reports
-   * them, expandable a hop at a time. A connection reported again at
-   * coarser levels folds into its finest card (drawing both would be
-   * duplication), and children still group inside their parent's frame
-   * — but nothing REAL is ever hidden behind an ancestor.
-   *
-   * Summary folds the other way — each connection once, at its
-   * outermost container. Useful for a crowded board; catastrophic as a
-   * default, which is how it shipped for one commit: with concrete
-   * tables already loaded, the summary fold absorbed the user's REAL
-   * neighbours into a Domain card, and the board appeared to replace
-   * their lineage with random values. The default must show the
-   * records.
-   *
-   * (The old control — "Grain: AUTO | SCHEMAFIELD | …" — asked for an
-   * ontology level by type name, which a self-nesting estate cannot
-   * even express. The type chips beside this survive: hiding a type is
-   * filtering, a different question.) */
-  const [lensView, setLensView] = useState<{ nodeId: string | null; view: 'detail' | 'summary' }>(
-    () => ({ nodeId: null, view: 'detail' }),
-  )
-  const graphView = lensView.nodeId === nodeId ? lensView.view : 'detail'
-  const setGraphView = useCallback(
-    (view: 'detail' | 'summary') => setLensView({ nodeId, view }),
-    [nodeId],
-  )
-
-  // The pure graph build — every semantic decision (grouping, rollups,
-  // drills, frontier hops, caps, filter dimming, layout) lives in
-  // focus-graph.ts where it's unit-tested without React Flow.
-  const focusGraph = useMemo(() => {
-    if (!lensOpen || lensViewMode !== 'graph' || !nodeId) return null
-    return buildFocusGraph({
-      focalId: nodeId,
-      incomingRecords,
-      outgoingRecords,
-      edgesByEndpoint,
-      nodeMap,
-      containmentEdgeTypes,
-      containsChildren: focalChildren,
-      containsTotal: (nodeMap.get(nodeId)?.data?.childCount as number | undefined) ?? 0,
-      containsLoading: childrenStatusOf?.get(nodeId) === 'loading',
-      containsChildrenOf: containsKidsById,
-      openContains: graphCur.openContains,
-      containsStatusOf: containsStatusById,
-      resolveParent,
-      isCoarser: isCoarserThan,
-      canContain: canContainAnything,
-      collapsedFrames: graphCur.collapsedFrames,
-      expandedFrontier: graphCur.expandedFrontier,
-      openContainers: graphCur.openContainers,
-      containerResults,
-      containerStatus,
-      frameShowAll: graphCur.frameShowAll,
-      frameAllResults,
-      frameAllStatus,
-      frameQueries: graphCur.frameQueries,
-      framePages: graphCur.framePages,
-      entityLevels,
-      bandPages: graphCur.bandPages,
-      query,
-      hiddenTypes,
-      grainFold: graphView === 'summary' ? 'topmost' : 'finest',
-      degreeHints,
-      fetchStatus,
-    })
-  }, [
-    lensOpen, lensViewMode, nodeId, incomingRecords, outgoingRecords,
-    edgesByEndpoint, nodeMap, containmentEdgeTypes, focalChildren,
-    resolveParent, isCoarserThan, canContainAnything, graphCur.collapsedFrames,
-    graphCur.expandedFrontier, graphCur.openContainers, graphCur.frameQueries,
-    graphCur.framePages, graphCur.bandPages, graphCur.frameShowAll, childrenStatusOf,
-    graphCur.openContains, containsKidsById, containsStatusById,
-    containerResults, containerStatus, frameAllResults, frameAllStatus,
-    entityLevels, query, graphView, hiddenTypes, degreeHints, fetchStatus,
-  ])
-
-  // Any frame on the board with no answer and no fetch in flight gets
-  // asked. Driven off the BUILT graph rather than the share seed, so it
-  // covers a restored link (which otherwise reopened frames that stayed
-  // empty forever) and knows each frame's real partner — a container
-  // two hops out has no lineage with the focal, so asking about the
-  // focal there would be answered correctly, and uselessly, with
-  // "nothing". Idempotent: the hook fetches once per key per session,
-  // and the status it sets immediately closes this condition.
-  useEffect(() => {
-    if (!focusGraph || !onOpenContainer) return
-    for (const c of focusGraph.cards) {
-      if (c.kind !== 'frame' || !c.nodeId || !c.expandKey) continue
-      // A LOCAL frame is built from records already in hand — the band's
-      // own entries bucketed by parent. It never reads
-      // `containerResults`, so asking the server would spend a
-      // `/trace/expand` per table on the board, per re-center, and
-      // discard every answer. This seam predates local frames and
-      // satisfies all of its conditions, which is exactly the kind of
-      // thing a green suite covering both halves separately misses.
-      if (c.frameLocal) continue
-      if (containerStatus?.has(c.expandKey) || containerResults?.has(c.expandKey)) continue
-      const partner = c.partnerIds[0] ?? nodeId
-      if (!partner) continue
-      onOpenContainer(c.nodeId, partner, c.expandKey.startsWith('in:') ? 'in' : 'out',
-        entityLevels.get(c.type) ?? null)
-    }
-    // Focus a table, SEE TABLES. A partner coarser than the focal is a
-    // summary of the thing you actually asked about — a Data Domain
-    // card standing for the tables that feed `collaterals`. Making the
-    // user click it, five times, to reach the grain they focused at is
-    // not a picture of their lineage, it is a filing cabinet.
-    //
-    // BAND ±1 ONLY — the focal's own partners. The first cut resolved
-    // every rollup anywhere on the board, so one ⊕ hop spawned a frame
-    // (and a multi-step server walk) for each coarse card the new band
-    // brought with it: frames erupting three bands out about questions
-    // nobody had asked, the camera chasing every asynchronous arrival.
-    // Deeper rollups keep their chevron; they open when asked.
-    //
-    // Fetch only. Whether the answer RENDERS as a frame is derived in
-    // the builder from having one, so this cannot fight an explicit
-    // close, and the "one fetch per key per session" contract holds.
-    // Each partner's walk is independent, so they run concurrently.
-    for (const c of focusGraph.cards) {
-      if (c.kind !== 'entity' || !c.rollup || !c.canOpenChildren) continue
-      if (Math.abs(c.band) !== 1) continue
-      if (!c.nodeId || !c.expandKey) continue
-      if (containerStatus?.has(c.expandKey) || containerResults?.has(c.expandKey)) continue
-      const partner = c.partnerIds[0] ?? nodeId
-      if (!partner) continue
-      onOpenContainer(c.nodeId, partner, c.expandKey.startsWith('in:') ? 'in' : 'out',
-        entityLevels.get(c.type) ?? null)
-    }
-  }, [focusGraph, nodeId, onOpenContainer, entityLevels, containerStatus, containerResults])
-
-  // An AUTO-resolved frame that finds no lineage says so and STOPS —
-  // substituting arbitrary children for lineage nobody asked about is
-  // the "random values" ambush, removed once already. A USER-OPENED
-  // frame is different: the click asked "show me what is inside", and
-  // when the lineage question errors or comes back empty, the
-  // container's contents ARE the best available answer — the same
-  // children the canvas shows. The builder derives that fallback; this
-  // effect only fetches the roster it will need. Fetch-only, once per
-  // key, no state writes.
-  useEffect(() => {
-    if (!onLoadAllChildren) return
-    for (const key of graphCur.openContainers) {
-      const status = containerStatus?.get(key)
-      const failed = status === 'error'
-        || (status === 'done' && (containerResults?.get(key)?.empty ?? false))
-      if (!failed) continue
-      if (frameAllResults?.has(key) || frameAllStatus?.has(key)) continue
-      onLoadAllChildren(key, '')
-    }
-  }, [graphCur.openContainers, containerResults, containerStatus, frameAllResults, frameAllStatus, onLoadAllChildren])
-
-  // Type chips for graph mode — one row across both directions (the
-  // list columns render their own per-column rows).
-  const graphTypeChips = useMemo(() => {
-    if (lensViewMode !== 'graph' || !lensOpen) return []
     const counts = new Map<string, number>()
-    for (const r of [...incomingRecords, ...outgoingRecords]) {
-      const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
+    for (const [urn, node] of sg.nodes) {
+      if (kept.has(urn)) continue
+      const t = (node.node?.data?.type as string) ?? node.node?.entityType ?? 'not loaded'
       counts.set(t, (counts.get(t) ?? 0) + 1)
     }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1])
-  }, [lensViewMode, lensOpen, incomingRecords, outgoingRecords])
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  }, [sg])
 
-  // Detail-strip data for the selected card — the selected node's own
-  // in/out tallies, derived the same way as everything else.
+  // Detail strip for the selected card — its own tallies, from the same
+  // model everything else reads.
   const selectedInfo = useMemo(() => {
-    const sel = graphCur.selection
-    if (!sel || lensViewMode !== 'graph') return null
-    const recs = deriveNeighborRecords(sel, edgesByEndpoint.get(sel) ?? [], nodeMap, containmentEdgeTypes)
+    const sel = view.selection
+    const node = sel ? sg.nodes.get(sel) : undefined
+    if (!sel || !node) return null
     return {
       id: sel,
-      node: nodeMap.get(sel),
-      inCount: recs.incomingRecords.length,
-      outCount: recs.outgoingRecords.length,
+      label: labelOf(sel, node.node),
+      type: (node.node?.data?.type as string) ?? node.node?.entityType ?? 'not loaded',
+      description: (node.node?.data?.description as string | undefined) ?? null,
+      parentLabel: node.parent ? labelOf(node.parent, sg.nodes.get(node.parent)?.node) : null,
+      inCount: node.degreeUp,
+      outCount: node.degreeDown,
     }
-  }, [graphCur.selection, lensViewMode, edgesByEndpoint, nodeMap, containmentEdgeTypes])
+  }, [view.selection, sg])
 
-  // ── Share this exploration — encode history + current expansions
-  // into a link a colleague can open to the exact same picture.
+  // ── Share this exploration — the walked path as a link a colleague
+  // can open. The EXPLORATION half is re-encoded in the next task; a
+  // link written today restores the path and the body mode.
   const [shareCopied, setShareCopied] = useState(false)
   const copyShareLink = () => {
     const token = encodeLensShare({
       entries,
       cursor,
       mode: lensViewMode,
-      closed: [...graphCur.collapsedFrames],
-      frontier: [...graphCur.expandedFrontier],
-      containers: [...graphCur.openContainers],
-      frameAll: [...graphCur.frameShowAll],
-      contains: [...graphCur.openContains],
-      framePages: [...graphCur.framePages],
-      frameQueries: [...graphCur.frameQueries],
+      closed: [],
+      frontier: [],
+      containers: [],
+      frameAll: [],
+      contains: [],
+      framePages: [],
+      frameQueries: [],
     })
     const url = new URL(window.location.href)
     url.searchParams.set('lens', token)
@@ -1023,6 +621,7 @@ export function LineageLens({
   // ── Guided tour — offered ONCE, the first time the graph body opens
   // (rich gestures shouldn't be discovered by accident); replayable
   // from Help on any view afterwards.
+  const lensOpen = entries.length > 0
   const tourStart = useTourStore((s) => s.start)
   const tourActive = useTourStore((s) => s.activeTourId)
   const hasCompletedTour = useTourStore((s) => s.hasCompleted)
@@ -1040,52 +639,55 @@ export function LineageLens({
     return () => window.clearTimeout(t)
   }, [lensOpen, lensViewMode, tourActive, hasCompletedTour, tourStart])
 
+  // The focal's own contents, asked for once — the roster half, which
+  // lineage cannot answer. Every read path strips childCount, so a
+  // gate on it would hide the affordance exactly where it matters.
+  const focalKidsAskedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!nodeId || !onLoadChildrenOf) return
+    if (focalKidsAskedRef.current === nodeId) return
+    if (walkStatus !== 'done') return
+    focalKidsAskedRef.current = nodeId
+    onLoadChildrenOf(nodeId)
+  }, [nodeId, onLoadChildrenOf, walkStatus])
+
   if (!nodeId) return null
 
-  const focalNode = nodeMap.get(nodeId)
+  const focalNode = sg.nodes.get(nodeId)?.node
   const focalLabel = labelOf(nodeId, focalNode)
-  const focalType = (focalNode?.data?.type as string) ?? 'entity'
+  const focalType = (focalNode?.data?.type as string) ?? focalNode?.entityType ?? 'entity'
   const focalColor = generateColorFromType(focalType)
-  const focalFetch = fetchStatus?.get(nodeId)
-  const focalImpact = impact?.get(nodeId) ?? null
-  const focalImpactLoading = impactStatus?.get(nodeId) === 'loading'
+  const focalParentId = parentOf(nodeId)
+  const focalParentLabel = focalParentId ? labelFor(focalParentId) : null
+  // Header display suppresses the parent when the PREVIOUS hop already
+  // is the parent (saying it twice reads as noise).
+  const focalParentInHeader = focalParentId && focalParentId !== entries[cursor - 1]
+    ? focalParentLabel
+    : null
+  const focalChildren = sg.nodes.get(nodeId)?.children ?? []
   const focalChildTotal = Math.max(
     focalChildren.length,
     (focalNode?.data?.childCount as number | undefined) ?? 0,
   )
-  // Containment parent of the focal — breadcrumb context ("ticket_key
-  // in fact_support"). Header display suppresses it when the PREVIOUS
-  // hop already is the parent (saying it twice reads as noise).
-  const focalParentId = resolveParent(nodeId)
-  const focalParentLabel = focalParentId ? labelOf(focalParentId, nodeMap.get(focalParentId)) : null
-  const focalParentInHeader = focalParentId && focalParentId !== entries[cursor - 1]
-    ? focalParentLabel
+
+  /**
+   * How far the walk has actually reached, and whether that is the
+   * whole story. Not a measurement of its own: these are the entities
+   * the server has NAMED as upstream / downstream of the focus, which
+   * is the number every other surface here is derived from.
+   */
+  const reach: LensReach | null = model && walkStatus === 'done'
+    ? {
+        up: model.upstreamUrns.size,
+        down: model.downstreamUrns.size,
+        more: model.frontierUp.length > 0 || model.frontierDown.length > 0
+          || model.truncated || model.seedTruncated,
+      }
     : null
 
-  // Headline counts split by grain so units never mix: direct (finer/
-  // peer) connections vs coarser rolled-up summaries of those flows.
-  let focalRollupTotal = 0
-  for (const r of incomingRecords) if (isCoarserThan(r.neighborNode?.data?.type as string | undefined, focalType)) focalRollupTotal++
-  for (const r of outgoingRecords) if (isCoarserThan(r.neighborNode?.data?.type as string | undefined, focalType)) focalRollupTotal++
-  const focalDirectTotal = incomingRecords.length + outgoingRecords.length - focalRollupTotal
-  // The header must count what is ON THE BOARD. AUTO grain folds a
-  // connection reported again at container / platform / dataset level
-  // into the finest one, so "9 connections" sat above three cards with
-  // nothing to reconcile them. Count the survivors and name the fold —
-  // and name the grains, because the Grain control is how you get them
-  // back, which turns a confusing number into a next move.
-  const headerFolded = focusGraph?.foldedAway ?? 0
-  const headerConnections = focalDirectTotal + focalRollupTotal - headerFolded
-  const headerCountTitle = headerFolded > 0
-    ? `The data source reported the same lineage again at ${
-        (focusGraph?.foldedGrains ?? []).join(', ')} level — ${headerFolded} restatement${headerFolded === 1 ? '' : 's'} folded into the card${headerFolded === 1 ? '' : 's'} shown. Grouped shows each connection at its outermost container; Flat shows every entity as its own card.`
-    : focalRollupTotal > 0
-      ? `${focalDirectTotal} concrete and ${focalRollupTotal} rolled-up — a rolled-up connection stands for finer ones beneath it`
-      : undefined
-
+  const headerConnections = inConnections + outConnections
   const q = query.trim().toLowerCase()
-  const filterFn = (r: NeighborRecord) =>
-    q === '' || labelOf(r.neighborId, r.neighborNode).toLowerCase().includes(q)
+  const filterFn = (r: WalkNeighbor) => q === '' || r.label.toLowerCase().includes(q)
 
   return createPortal(
     <AnimatePresence>
@@ -1113,7 +715,7 @@ export function LineageLens({
             // Graph exploration is a "focus room" — near-fullscreen with
             // a RESOLVED height (React Flow needs one). The list keeps
             // its adaptive height so small neighborhoods don't get a
-            // cavernous empty grid (why the original sizing adapted).
+            // cavernous empty grid.
             lensViewMode === 'graph'
               ? { width: 'min(1800px, 96vw)', height: 'min(1100px, 94vh)' }
               : { width: 'min(1000px, 92vw)', maxHeight: 'min(72vh, 780px)', minHeight: 380 }
@@ -1139,14 +741,12 @@ export function LineageLens({
                 )}
               </div>
               <p className="flex items-center gap-1.5 text-[10.5px] text-ink-muted leading-tight">
-                {/* The total, not the total-minus-rollups. "28 direct
-                    connections" beside a focal card reading "17 in · 15
-                    out" (= 32) could not be reconciled by a reader: the
-                    two counted different sets and neither said so. */}
-                <span title={headerCountTitle}>
-                  {`${headerConnections} connection${headerConnections === 1 ? '' : 's'}${headerFolded > 0 ? ` · ${headerFolded} coarser cop${headerFolded === 1 ? 'y' : 'ies'} folded in` : ''}${focalRollupTotal > 0 && headerFolded === 0 ? ` · ${focalRollupTotal} rolled-up` : ''}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
+                {/* Counted off the same model the board draws — there is
+                    no second set of numbers to reconcile it against. */}
+                <span>
+                  {`${headerConnections} connection${headerConnections === 1 ? '' : 's'}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
                 </span>
-                {focalFetch === 'loading' && (
+                {walkStatus === 'loading' && (
                   <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
                 )}
               </p>
@@ -1193,8 +793,8 @@ export function LineageLens({
                       <ul className="space-y-0.5 text-ink-muted">
                         <li><span className="font-medium text-ink">Click</span> a card — inspect it</li>
                         <li><span className="font-medium text-ink">Double-click</span> — focus there</li>
-                        <li><span className="font-medium text-ink">⊕</span> on a card's outer edge — reveal its next hop</li>
-                        <li><span className="font-medium text-ink">×N</span> — show the underlying connections</li>
+                        <li><span className="font-medium text-ink">⊕</span> on a card&apos;s outer edge — reveal or fetch its next hop</li>
+                        <li><span className="font-medium text-ink">▸</span> beside a name — what is inside it</li>
                         <li><span className="font-medium text-ink">← / →</span> — step back / forward</li>
                         <li><span className="font-medium text-ink">Drag a card</span> — move it; connections follow</li>
                         <li><span className="font-medium text-ink">Drag · scroll</span> the background — pan and zoom</li>
@@ -1217,9 +817,9 @@ export function LineageLens({
                   <LucideIcons.HelpCircle className="w-4 h-4" />
                 </button>
               </InfoTooltip>
-              {/* Share this exploration — the walked path and current
-                  expansions as a link (the URL param restores it). */}
-              <InfoTooltip side="bottom" content={shareCopied ? 'Link copied' : 'Copy a link to this exact exploration'}>
+              {/* Share this exploration — the walked path as a link (the
+                  URL param restores it). */}
+              <InfoTooltip side="bottom" content={shareCopied ? 'Link copied' : 'Copy a link to this exploration'}>
                 <button
                   type="button"
                   data-tour="lens-share"
@@ -1247,7 +847,7 @@ export function LineageLens({
                 >
                   {([
                     { mode: 'connected', Icon: LucideIcons.Link2, label: 'Connected',
-                      title: 'Opened containers show only what connects to the focused entity' },
+                      title: 'Opened containers show only what is on this lineage' },
                     { mode: 'all', Icon: LucideIcons.Rows3, label: 'All',
                       title: 'Opened containers show everything inside, with lineage marked where it exists' },
                   ] as const).map(({ mode, Icon, label, title }) => (
@@ -1370,7 +970,7 @@ export function LineageLens({
                         <button
                           type="button"
                           onClick={() => setShowFullTrail(true)}
-                          title={`Show ${hidden.length} hidden hop${hidden.length === 1 ? '' : 's'}: ${hidden.map(id => labelOf(id, nodeMap.get(id))).join(' → ')}`}
+                          title={`Show ${hidden.length} hidden hop${hidden.length === 1 ? '' : 's'}: ${hidden.map(labelFor).join(' → ')}`}
                           className="px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-dashed border-ink-muted/30 transition-colors"
                         >
                           … {hidden.length} hop{hidden.length === 1 ? '' : 's'}
@@ -1381,17 +981,19 @@ export function LineageLens({
                   const id = entries[i]
                   const isCurrent = i === cursor
                   const isForward = i > cursor
-                  const label = labelOf(id, nodeMap.get(id))
-                  const chipColor = generateColorFromType((nodeMap.get(id)?.data?.type as string) ?? 'entity')
+                  const label = labelFor(id)
+                  const chipColor = generateColorFromType(
+                    (sg.nodes.get(id)?.node?.data?.type as string) ?? 'entity',
+                  )
                   const meta = i > 0 ? hopMeta[i - 1] : null
                   // Direction arrows only between ADJACENT hops — after a
                   // gap chip the transition shown isn't the real one.
                   const adjacent = pos > 0 && visible[pos - 1] === i - 1
                   // Parent context — "ticket_key · fact_support" — except
                   // when the previous hop already IS the parent.
-                  const chipParent = resolveParent(id)
+                  const chipParent = parentOf(id)
                   const chipParentLabel = chipParent && chipParent !== entries[i - 1]
-                    ? labelOf(chipParent, nodeMap.get(chipParent))
+                    ? labelFor(chipParent)
                     : null
                   return (
                     <div key={`${id}-${i}`} className="flex items-center gap-1 flex-shrink-0">
@@ -1402,12 +1004,9 @@ export function LineageLens({
                             title={`${meta.edgeType ? edgeLabelFor(meta.edgeType.toUpperCase(), edgeTypeInfo) : 'Connection'} — walked ${meta.downstream ? 'downstream' : 'upstream'}`}
                           >
                             {/* Amber is DOWNSTREAM everywhere else in the
-                                lens — TINT_DOWN, the band arrows, the
-                                focal's "out" tally, the Data Consumers
-                                column. The trail had it on the upstream
-                                hop, so a reader who had learned the
-                                colour reconstructed their own walk
-                                backwards. Sky upstream, amber down. */}
+                                lens — the band arrows, the focal's "out"
+                                tally, the Data Consumers column. Sky
+                                upstream, amber down. */}
                             {meta.downstream
                               ? <LucideIcons.MoveRight className={cn('w-3.5 h-3.5 text-amber-500/80', isForward && 'opacity-50')} />
                               : <LucideIcons.MoveLeft className={cn('w-3.5 h-3.5 text-sky-500/80', isForward && 'opacity-50')} />}
@@ -1464,11 +1063,10 @@ export function LineageLens({
                     // dropped when the previous hop already is the parent.
                     void navigator.clipboard?.writeText(
                       entries.slice(0, cursor + 1).map((id, idx, path) => {
-                        const p = resolveParent(id)
-                        const qualified = p && p !== path[idx - 1]
-                        return qualified
-                          ? `${labelOf(p, nodeMap.get(p))}.${labelOf(id, nodeMap.get(id))}`
-                          : labelOf(id, nodeMap.get(id))
+                        const p = parentOf(id)
+                        return p && p !== path[idx - 1]
+                          ? `${labelFor(p)}.${labelFor(id)}`
+                          : labelFor(id)
                       }).join(' → '),
                     )
                   }}
@@ -1482,166 +1080,112 @@ export function LineageLens({
             </div>
           )}
 
-          {/* ── Fetch narration — the lens fetches each visited node's
-              lineage from the data source on demand; a failed or capped
-              fetch is SAID, never silently rendered as "no connections". ── */}
-          {focalFetch === 'error' && (
+          {/* ── Walk narration — a failed or capped walk is SAID, never
+              silently rendered as "no connections". ── */}
+          {walkStatus === 'error' && (
             <div className="flex items-center gap-2 px-4 py-1.5 border-b border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
               <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
-              <span>Couldn&apos;t fetch this entity&apos;s lineage from the data source — showing only what&apos;s already loaded on the canvas.</span>
-              {onRetryFetch && (
-                <button
-                  type="button"
-                  onClick={() => onRetryFetch(nodeId)}
-                  className="ml-auto flex-shrink-0 font-semibold hover:underline"
-                >
-                  Retry
-                </button>
-              )}
+              <span>
+                Couldn&apos;t fetch this entity&apos;s lineage from the data source
+                {walk?.error ? ` — ${walk.error}` : '.'}
+              </span>
+              <button
+                type="button"
+                onClick={retryWalk}
+                className="ml-auto flex-shrink-0 font-semibold hover:underline"
+              >
+                Retry
+              </button>
             </div>
           )}
-          {focalFetch === 'done' && fetchTruncatedIds?.has(nodeId) && (
+          {walkStatus === 'done' && (model?.truncated || model?.seedTruncated) && (
             <div className="flex items-center gap-2 px-4 py-1.5 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] text-[10.5px] text-ink-muted">
               <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
-              <span>Large neighborhood — showing the first {EDGE_FETCH_LIMIT} connections per direction from the data source. Use the filter to narrow.</span>
-            </div>
-          )}
-          {/* Frontier fetches can hit the same cap — say so rather than
-              letting an expanded hop read as complete. */}
-          {lensViewMode === 'graph' && fetchTruncatedIds
-            && [...graphCur.expandedFrontier].some(k => fetchTruncatedIds.has(k.replace(/^(in|out):/, ''))) && (
-            <div className="flex items-center gap-2 px-4 py-1.5 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] text-[10.5px] text-ink-muted">
-              <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
-              <span>Some expanded entities have very large neighborhoods — showing the first {EDGE_FETCH_LIMIT} connections per direction for each.</span>
+              <span>
+                Large neighbourhood — the data source stopped early
+                {model?.truncationReason ? ` (${model.truncationReason})` : ''}, so these counts are floors.
+                Use ⊕ to walk further, or the filter to narrow.
+              </span>
             </div>
           )}
 
           {/* ── Body — the SAME layout at every depth: re-centering
               swaps the focal in place instead of flipping to a
-              different presentation (the old Miller-columns walk body
-              was the #1 reported confusion). Two bodies, one contract:
-              the interactive hop-band GRAPH (default) or the classic
-              three-column LIST, switched from the header toggle. ── */}
-          {lensViewMode === 'graph' && focusGraph ? (
+              different presentation. Two bodies, one model: the
+              interactive hop-band GRAPH (default) or the classic
+              two-column LIST, switched from the header toggle. ── */}
+          {lensViewMode === 'graph' ? (
           <div className="flex-1 min-h-0 flex flex-col">
-            {/* Grain chips — same explicit, reversible filter contract as
-                the list columns, one row for the whole graph, and hidden
-                counts stay visible (never silent loss). In their OWN row
-                rather than floating over the canvas: as an overlay they
-                sat on top of the first card of the upstream band, which
-                is exactly where the tallest bands start. */}
-            {(graphTypeChips.length > 0 || focusGraph.hiddenByChips > 0) && (
+            {/* Type chips — an explicit, reversible filter, and hidden
+                counts stay visible (never silent loss). */}
+            {(typeChips.length > 1 || layout.hiddenByChips > 0) && (
               <div className="flex-shrink-0 flex flex-wrap items-center gap-x-2 gap-y-1 px-3 pt-2 pb-1">
-                {/* DETAIL | SUMMARY — one question, plain words. See
-                    the lensView state for why the old Grain control
-                    died and why Detail is the default. */}
-                <div
-                  role="group"
-                  aria-label="How to draw the connections"
-                  className="flex items-center gap-0.5 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.03]"
-                >
-                  {([
-                    ['detail', 'Detail', 'The lineage as the data reports it — every connected entity, expandable a hop at a time'],
-                    ['summary', 'Summary', 'Each connection once, at its outermost container'],
-                  ] as const).map(([value, label, hint]) => (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={() => setGraphView(value)}
-                      aria-pressed={graphView === value}
-                      title={hint}
-                      className={cn(
-                        'px-2 py-0.5 rounded-md text-[9.5px] font-semibold tracking-wide transition-colors',
-                        graphView === value
-                          ? 'bg-accent-lineage/15 text-accent-lineage'
-                          : 'text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]',
-                      )}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                {graphTypeChips.length > 1 && (
-                  <TypeChips chips={graphTypeChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} />
+                {typeChips.length > 1 && (
+                  <TypeChips chips={typeChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} />
                 )}
-                {focusGraph.hiddenByChips > 0 && (
+                {layout.hiddenByChips > 0 && (
                   <span className="px-1.5 py-0.5 rounded-md bg-black/[0.04] dark:bg-white/[0.06] text-[9.5px] text-ink-muted">
-                    {focusGraph.hiddenByChips} hidden by the type chips
+                    {layout.hiddenByChips} hidden by the type chips
                   </span>
                 )}
               </div>
             )}
             <div data-tour="lens-graph" className="relative flex-1 min-h-0">
               <FocusGraphView
-                graph={focusGraph}
+                graph={layout}
                 focalId={nodeId}
-                // What the BOARD holds, not how many records arrived.
-                // The bands now report connections rather than cards, so
-                // a focal still tallying raw records would restate the
-                // very mismatch that fixed — "11 in" above a band header
-                // reading "8 connections", both true, neither reconciled.
-                // Records are still reachable: the header's own count
-                // names the fold, and the chips report what they hide.
-                focalStats={{
-                  in: focusGraph?.bandTotals.get('band:in:1')?.connections ?? incomingRecords.length,
-                  out: focusGraph?.bandTotals.get('band:out:1')?.connections ?? outgoingRecords.length,
-                }}
-                focalFetch={focalFetch}
-                focalImpact={focalImpact}
-                focalImpactLoading={focalImpactLoading}
+                focalStats={{ in: inConnections, out: outConnections }}
+                // 'unsupported' deliberately passes NOTHING: the
+                // empty-direction whispers are a claim about what the
+                // data source SAID, and it was never asked.
+                focalFetch={walkStatus === 'unsupported' ? undefined : walkStatus}
+                focalReach={reach}
                 exportName={focalLabel}
-                selectedId={graphCur.selection}
+                selectedId={view.selection}
                 reducedMotion={reducedMotion}
                 edgeTypeInfo={edgeTypeInfo}
-                onSelect={setGraphSelection}
+                onSelect={setSelection}
                 onFocus={onRecenter}
-                onToggleFrame={toggleGraphFrame}
-                onOpenContainer={toggleContainer}
-                onExpandFrontier={toggleGraphFrontier}
-                onToggleContains={toggleContains}
-                onRetryContains={retryContains}
-                onShowMore={bumpBandPage}
+                onToggleFrame={toggleContents}
                 onSetFramePage={setFramePage}
                 onFrameQuery={setFrameQuery}
                 frameQueryFor={frameQueryFor}
                 onToggleFrameAll={toggleFrameAll}
                 onRetryFrameAll={retryFrameAll}
-                onRetryOpen={retryContainer}
-                onRetryFetch={onRetryFetch}
                 onRevealOnCanvas={onRevealOnCanvas}
                 onOpenDetails={onOpenDetails}
+                // The affordances only exist once the focal's own model
+                // is in hand — `useLensWalk` ignores an extend before
+                // that by design, so offering one would be a dead click.
+                onRevealMore={walkStatus === 'done' ? revealMore : undefined}
+                onExtend={walkStatus === 'done' ? extendWalk : undefined}
+                onPage={walkStatus === 'done' ? pageWalk : undefined}
               />
-              {/* Empty/loading state — a lone focal card floating in
-                  space explains nothing. In-flight fetches narrate;
-                  a store-only empty view says what it is (the DONE +
-                  empty case is claimed per-direction by the whispers
-                  inside the graph itself). */}
-              {incomingRecords.length === 0 && outgoingRecords.length === 0 && focalChildren.length === 0
-                && (focalFetch === 'loading' || focalFetch === undefined) && (
+              {/* Status surfaces — a lone focal card floating in space
+                  explains nothing. */}
+              {walkStatus === 'loading' && (
                 <div className="absolute inset-x-0 bottom-8 z-10 flex justify-center pointer-events-none">
-                  {focalFetch === 'loading' ? (
-                    <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-canvas-elevated/95 border border-black/[0.07] dark:border-white/[0.08] shadow-sm text-[11px] text-ink-muted">
-                      <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
-                      Fetching lineage from the data source…
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-canvas-elevated/95 border border-black/[0.07] dark:border-white/[0.08] shadow-sm text-[11px] text-ink-muted">
-                      <LucideIcons.CircleSlash className="w-3.5 h-3.5 text-ink-muted/50" />
-                      No lineage connections loaded on this canvas
-                    </div>
-                  )}
+                  <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-canvas-elevated/95 border border-black/[0.07] dark:border-white/[0.08] shadow-sm text-[11px] text-ink-muted">
+                    <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
+                    Walking the lineage from the data source…
+                  </div>
+                </div>
+              )}
+              {walkStatus === 'unsupported' && (
+                <div className="absolute inset-x-0 bottom-8 z-10 flex justify-center pointer-events-none">
+                  <div className="flex items-center gap-2 max-w-[520px] px-3.5 py-2 rounded-lg bg-canvas-elevated/95 border border-black/[0.07] dark:border-white/[0.08] shadow-sm text-[11px] text-ink-muted">
+                    <LucideIcons.CircleSlash className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted/50" />
+                    This data source can&apos;t walk lineage — Focus mode needs a provider that
+                    answers lineage queries.
+                  </div>
                 </div>
               )}
             </div>
             {/* ── Detail strip — single click inspects; focusing stays a
-                deliberate second gesture (the old click-to-flip was the
-                top confusion report). ── */}
+                deliberate second gesture. ── */}
             <AnimatePresence>
               {selectedInfo && (() => {
-                const selLabel = labelOf(selectedInfo.id, selectedInfo.node)
-                const selType = (selectedInfo.node?.data?.type as string) ?? 'entity'
-                const selColor = generateColorFromType(selType)
-                const selParent = resolveParent(selectedInfo.id)
+                const selColor = generateColorFromType(selectedInfo.type)
                 return (
                   <motion.div
                     key={selectedInfo.id}
@@ -1659,22 +1203,19 @@ export function LineageLens({
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="flex items-center gap-1.5 min-w-0 text-[12.5px] font-semibold text-ink leading-tight">
-                        <span className="truncate">{selLabel}</span>
+                        <span className="truncate">{selectedInfo.label}</span>
                         <span
                           className="flex-shrink-0 px-1.5 py-px rounded text-[8.5px] font-bold uppercase tracking-wide"
                           style={{ backgroundColor: `${selColor}1f`, color: selColor }}
                         >
-                          {selType}
+                          {selectedInfo.type}
                         </span>
-                        {!selectedInfo.node && (
-                          <span className="flex-shrink-0 text-[9.5px] italic text-ink-muted/70">not on canvas</span>
-                        )}
                       </p>
                       <p className="flex items-center gap-2 text-[10px] text-ink-muted leading-tight tabular-nums">
-                        {selParent && (
+                        {selectedInfo.parentLabel && (
                           <span className="flex items-center gap-1 min-w-0">
                             <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/60" />
-                            <span className="truncate max-w-[180px]">{labelOf(selParent, nodeMap.get(selParent))}</span>
+                            <span className="truncate max-w-[180px]">{selectedInfo.parentLabel}</span>
                           </span>
                         )}
                         <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
@@ -1685,9 +1226,9 @@ export function LineageLens({
                           <LucideIcons.ArrowUpRight className="w-3 h-3" />
                           {selectedInfo.outCount} out
                         </span>
-                        {(selectedInfo.node?.data?.description as string | undefined) && (
+                        {selectedInfo.description && (
                           <span className="min-w-0 truncate max-w-[420px] italic text-ink-muted/70">
-                            {selectedInfo.node?.data?.description as string}
+                            {selectedInfo.description}
                           </span>
                         )}
                       </p>
@@ -1733,7 +1274,7 @@ export function LineageLens({
                       )}
                       <button
                         type="button"
-                        onClick={() => setGraphSelection(null)}
+                        onClick={() => setSelection(null)}
                         aria-label="Clear selection"
                         className="w-6 h-6 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                       >
@@ -1754,25 +1295,14 @@ export function LineageLens({
             <NeighborColumn
               title="Data Sources"
               subtitle="Upstream"
-              records={incomingRecords.filter(filterFn)}
-              totalCount={incomingRecords.length}
+              rows={neighbors.incoming.filter(filterFn)}
+              totalConnections={inConnections}
               direction="incoming"
-              fetchState={focalFetch}
-              nodeMap={nodeMap}
-              edgeTypeInfo={edgeTypeInfo}
-              resolveParent={resolveParent}
-              isCoarser={(t) => isCoarserThan(t, focalType)}
+              walkStatus={walkStatus}
               hiddenTypes={hiddenTypes}
               onToggleType={toggleHiddenType}
-              collapseToggles={collapseToggles}
-              onToggleCollapse={toggleCollapse}
               searching={q !== ''}
-              rawEdgeById={rawEdgeById}
-              drilledRows={drilledRows}
-              onToggleDrill={toggleDrillWithFetch}
-              drillEdges={drillEdges}
-              drillStatus={drillStatus}
-              onDrillFetch={onDrillFetch}
+              edgeTypeInfo={edgeTypeInfo}
               onRecenter={onRecenter}
               onRevealOnCanvas={onRevealOnCanvas}
               onOpenDetails={onOpenDetails}
@@ -1781,7 +1311,7 @@ export function LineageLens({
             {/* Focal card */}
             <div className="flex flex-col items-center justify-center px-5 py-6">
               <div className="flex items-center">
-                <FlowRail color={focalColor} active={incomingRecords.length > 0} />
+                <FlowRail color={focalColor} active={inConnections > 0} />
                 <div
                   className="w-60 rounded-xl border-2 px-4 py-3.5 bg-canvas-elevated"
                   style={{
@@ -1813,69 +1343,53 @@ export function LineageLens({
                   <div className="flex items-center gap-3 mt-2.5 pt-2 border-t border-black/[0.07] dark:border-white/[0.08] text-[11px] font-medium tabular-nums">
                     <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
                       <LucideIcons.ArrowDownLeft className="w-3.5 h-3.5" />
-                      {incomingRecords.length} in
+                      {inConnections} in
                     </span>
                     <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
                       <LucideIcons.ArrowUpRight className="w-3.5 h-3.5" />
-                      {outgoingRecords.length} out
+                      {outConnections} out
                     </span>
                   </div>
-                  {/* Transitive reach — the question Focus mode is opened
-                      to answer. Truncated measurements show as floors
-                      ("47+"), absent capability shows nothing. */}
-                  {focalImpactLoading && (
-                    <p className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted/70">
-                      <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/60" />
-                      Measuring reach…
-                    </p>
-                  )}
-                  {focalImpact && (
-                    <p
-                      className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted tabular-nums"
-                      title={`Distinct entities connected within ${IMPACT_DEPTH} hops, measured at this entity's OWN grain — so it counts different things from the connections listed beside it, which are at whatever grain they arrived at${focalImpact.truncated ? '. Measurement capped, true totals may be higher' : ''}`}
-                    >
-                      <LucideIcons.Radar className="w-3 h-3 text-accent-lineage/70" />
-                      <span>
-                        Reach at this grain: {focalImpact.up.toLocaleString()}{focalImpact.truncated ? '+' : ''} upstream
-                        {' · '}{focalImpact.down.toLocaleString()}{focalImpact.truncated ? '+' : ''} downstream
-                      </span>
-                    </p>
-                  )}
+                  <ReachLine reach={reach} loading={walkStatus === 'loading'} />
                 </div>
-                <FlowRail color={focalColor} active={outgoingRecords.length > 0} />
+                <FlowRail color={focalColor} active={outConnections > 0} />
               </div>
 
-              {/* Contained entities — the descent that keeps exploration
-                  alive when a container's relationships live at child
-                  level. Clicking steps the walk INTO the child. */}
+              {/* Contained entities that are ON this lineage — the
+                  descent that keeps exploration alive when a container's
+                  relationships live at child level. */}
               {focalChildren.length > 0 && (
                 <div className="w-60 mt-4 min-h-0">
                   <div className="flex items-center gap-1.5 mb-1">
                     <LucideIcons.FolderTree className="w-3 h-3 text-ink-muted/60" />
                     <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/70">Contains</span>
-                    <span className="text-[9.5px] tabular-nums text-ink-muted/60">{focalChildTotal}</span>
+                    <span className="text-[9.5px] tabular-nums text-ink-muted/60">
+                      {focalChildren.length} on this lineage{focalChildTotal > focalChildren.length ? ` · of ${focalChildTotal}` : ''}
+                    </span>
                   </div>
                   <div className="max-h-36 overflow-y-auto custom-scrollbar flex flex-col">
                     {focalChildren.slice(0, 50).map(cid => {
-                      const cColor = generateColorFromType((nodeMap.get(cid)?.data?.type as string) ?? 'entity')
+                      const cColor = generateColorFromType(
+                        (sg.nodes.get(cid)?.node?.data?.type as string) ?? 'entity',
+                      )
                       return (
                         <button
                           key={`focal-child-${cid}`}
                           type="button"
                           onClick={() => onRecenter(cid)}
-                          title={`Step into ${labelOf(cid, nodeMap.get(cid))} — walk its lineage`}
+                          title={`Step into ${labelFor(cid)} — walk its lineage`}
                           className="w-full min-w-0 flex items-center gap-1.5 px-2 py-1.5 rounded-md text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] transition-colors"
                         >
                           <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
                           <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: cColor }} />
-                          <span className="truncate">{labelOf(cid, nodeMap.get(cid))}</span>
+                          <span className="truncate">{labelFor(cid)}</span>
                           <LucideIcons.ChevronRight className="ml-auto w-3 h-3 flex-shrink-0 text-ink-muted/30" />
                         </button>
                       )
                     })}
-                    {focalChildTotal > Math.min(focalChildren.length, 50) && (
+                    {focalChildren.length > 50 && (
                       <p className="px-2 py-0.5 text-[10px] text-ink-muted/60">
-                        +{(focalChildTotal - Math.min(focalChildren.length, 50)).toLocaleString()} more contained
+                        +{(focalChildren.length - 50).toLocaleString()} more on this lineage
                       </p>
                     )}
                   </div>
@@ -1886,25 +1400,14 @@ export function LineageLens({
             <NeighborColumn
               title="Data Consumers"
               subtitle="Downstream"
-              records={outgoingRecords.filter(filterFn)}
-              totalCount={outgoingRecords.length}
+              rows={neighbors.outgoing.filter(filterFn)}
+              totalConnections={outConnections}
               direction="outgoing"
-              fetchState={focalFetch}
-              nodeMap={nodeMap}
-              edgeTypeInfo={edgeTypeInfo}
-              resolveParent={resolveParent}
-              isCoarser={(t) => isCoarserThan(t, focalType)}
+              walkStatus={walkStatus}
               hiddenTypes={hiddenTypes}
               onToggleType={toggleHiddenType}
-              collapseToggles={collapseToggles}
-              onToggleCollapse={toggleCollapse}
               searching={q !== ''}
-              rawEdgeById={rawEdgeById}
-              drilledRows={drilledRows}
-              onToggleDrill={toggleDrillWithFetch}
-              drillEdges={drillEdges}
-              drillStatus={drillStatus}
-              onDrillFetch={onDrillFetch}
+              edgeTypeInfo={edgeTypeInfo}
               onRecenter={onRecenter}
               onRevealOnCanvas={onRevealOnCanvas}
               onOpenDetails={onOpenDetails}
@@ -1968,9 +1471,7 @@ export function LineageLens({
           <div className="flex items-center gap-2 px-4 py-2.5 border-t border-black/[0.08] dark:border-white/[0.08]">
             <p className="text-[10.5px] text-ink-muted/80">
               {lensViewMode === 'graph'
-                // Expansion was missing from this list entirely — the one
-                // gesture people go looking for.
-                ? 'Click a card to inspect · ＋ to expand a hop · ▸ to open what is inside · Double-click to focus · Esc to close'
+                ? 'Click a card to inspect · ⊕ to walk a hop · ▸ to open what is inside · Double-click to focus · Esc to close'
                 : 'Click a connection to re-center · Esc to close'}
             </p>
             <div className="ml-auto flex items-center gap-2">
@@ -1978,7 +1479,7 @@ export function LineageLens({
                 <button
                   type="button"
                   onClick={() => {
-                    const ids = [...new Set([...incomingRecords, ...outgoingRecords].map(r => r.neighborId))]
+                    const ids = [...new Set([...neighbors.incoming, ...neighbors.outgoing].map(r => r.urn))]
                     onClose()
                     void onLocateAll(ids)
                   }}
@@ -2007,6 +1508,41 @@ export function LineageLens({
   )
 }
 
+/**
+ * How far the walk has reached, on the focal card.
+ *
+ * Two counts and one qualifier — and the qualifier is the honest half:
+ * a walk that still has an open frontier has seen SOME of the lineage,
+ * so the numbers are floors and say so. The old strip measured a
+ * bounded transitive trace of its own, which counted different things
+ * from everything beside it and could not be reconciled with them.
+ */
+function ReachLine({ reach, loading }: { reach: LensReach | null; loading: boolean }) {
+  if (loading) {
+    return (
+      <p className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted/70">
+        <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/60" />
+        Walking the lineage…
+      </p>
+    )
+  }
+  if (!reach) return null
+  return (
+    <p
+      className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted tabular-nums"
+      title={reach.more
+        ? 'Entities this walk has reached so far. More exists beyond this view — use ⊕ on a card to walk further.'
+        : 'Every entity connected to this one, upstream and downstream, as far as the data source goes.'}
+    >
+      <LucideIcons.Radar className="w-3 h-3 text-accent-lineage/70" />
+      <span>
+        Reach: {reach.up.toLocaleString()} upstream · {reach.down.toLocaleString()} downstream
+        {reach.more ? ' · more beyond this view' : ''}
+      </span>
+    </p>
+  )
+}
+
 /** Short horizontal flow rail flanking the focal card — reads as the
  *  edge entering / leaving the focal entity. */
 function FlowRail({ color, active }: { color: string; active: boolean }) {
@@ -2019,11 +1555,10 @@ function FlowRail({ color, active }: { color: string; active: boolean }) {
   )
 }
 
-/** Entity-type filter chips — shared by the classic columns and the
- *  walk frontier. An OFF chip goes ghost (dashed border, dimmed, EyeOff)
- *  but keeps its count: filtering is an explicit, visible, reversible
- *  choice — never a strikethrough that reads as broken, never silent
- *  loss. */
+/** Entity-type filter chips. An OFF chip goes ghost (dashed border,
+ *  dimmed, EyeOff) but keeps its count: filtering is an explicit,
+ *  visible, reversible choice — never a strikethrough that reads as
+ *  broken, never silent loss. */
 function TypeChips({
   chips,
   hiddenTypes,
@@ -2046,8 +1581,8 @@ function TypeChips({
             type="button"
             onClick={() => onToggle(t)}
             title={off
-              ? `${t} hidden — click to show these ${n} connection${n === 1 ? '' : 's'} again`
-              : `Click to hide ${t} connections (${n})`}
+              ? `${t} hidden — click to show these ${n} entit${n === 1 ? 'y' : 'ies'} again`
+              : `Click to hide ${t} entities (${n})`}
             className={cn(
               'flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[9px] font-semibold uppercase tracking-wide transition-all',
               off
@@ -2066,140 +1601,71 @@ function TypeChips({
   )
 }
 
-/** Drill payload for an aggregated (×N) row — computed by the column,
- *  rendered by the row. Same refine semantics as the walk columns. */
-interface NeighborRowDrill {
-  drilled: boolean
-  onToggle: () => void
-  /** Locally loaded ∪ on-demand fetched underlying edges, deduped. */
-  constituents: LineageEdge[]
-  missing: number
-  state?: 'loading' | 'done' | 'error'
-  onRetry?: () => void
-}
-
-/** One neighbor row — shared by parent groups, type groups, and the
- *  rollup tier so the interaction contract stays identical everywhere. */
+/** One neighbour row — the same entity the graph body draws as a card,
+ *  with the same weight on it. */
 function NeighborRow({
   r,
   isIn,
-  accentColor,
-  rollup,
-  drill,
-  nodeMap,
   edgeTypeInfo,
   onRecenter,
   onRevealOnCanvas,
   onOpenDetails,
 }: {
-  r: NeighborRecord
+  r: WalkNeighbor
   isIn: boolean
-  accentColor: string
-  /** Coarser-grain summary row — muted, badged, never counted as more data. */
-  rollup?: boolean
-  /** Present when the row is a drillable aggregate. */
-  drill?: NeighborRowDrill
-  nodeMap: Map<string, LineageNode>
   edgeTypeInfo?: EdgeTypeInfoMap
   onRecenter: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
 }) {
-  const edgeColor = generateEdgeColorFromType(r.edgeTypeNorm)
-  // From the RECORD: a folded rollup carries its weight on
-  // `bundledCount`, and the concrete edge that survived the fold has no
-  // count of its own — reading the edge would silently drop the ×N.
-  const bundleCount = r.bundledCount > 1 ? r.bundledCount : undefined
-  const unloaded = !r.neighborNode
+  const accentColor = r.type === 'not loaded' ? '#94a3b8' : generateColorFromType(r.type)
   return (
-    <div className="min-w-0">
     <div
       role="button"
       tabIndex={0}
       className={cn(
         // content-visibility skips layout+paint for offscreen rows —
-        // lightweight virtualization; columns can hold 200 cards.
+        // lightweight virtualization; columns can hold hundreds of rows.
         // transition-colors (not -all): animating every property makes
         // hover sweeps during scroll recompute layout per row.
         'group relative flex items-center gap-2 rounded-lg border px-2.5 py-2 cursor-pointer transition-colors [content-visibility:auto] [contain-intrinsic-size:auto_58px] border-black/[0.07] dark:border-white/[0.08] hover:border-accent-lineage/50 hover:shadow-sm bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] min-w-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-        rollup && 'opacity-75 hover:opacity-100',
       )}
       style={{ borderLeftWidth: 3, borderLeftColor: accentColor }}
-      onClick={() => onRecenter(r.neighborId)}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRecenter(r.neighborId) } }}
-      title={`Re-center on ${labelOf(r.neighborId, r.neighborNode)}`}
+      onClick={() => onRecenter(r.urn)}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRecenter(r.urn) } }}
+      title={`Re-center on ${r.label}`}
     >
       <div className="flex-1 min-w-0">
         <p className="flex items-center gap-1.5 min-w-0 text-[12px] font-medium text-ink leading-snug">
-          <span className="truncate">{labelOf(r.neighborId, r.neighborNode)}</span>
-          {rollup && (
-            <span
-              className="flex-shrink-0 flex items-center gap-0.5 px-1 py-px rounded bg-black/[0.05] dark:bg-white/[0.07] text-[8.5px] font-semibold uppercase tracking-wide text-ink-muted/70"
-              title="A coarser-grain summary of finer flows — not an additional connection"
-            >
-              <LucideIcons.Layers className="w-2.5 h-2.5" />
-              rollup
-            </span>
-          )}
+          <span className="truncate">{r.label}</span>
         </p>
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug">
-          <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ backgroundColor: edgeColor }} />
           <span
             className="truncate uppercase tracking-wide"
             title={edgeTypeInfo?.get(r.edgeTypeNorm)?.description}
           >
-            {edgeLabelFor(r.edgeTypeNorm, edgeTypeInfo)}
+            {r.edgeTypeNorm ? edgeLabelFor(r.edgeTypeNorm, edgeTypeInfo) : 'several relationships'}
           </span>
-          {/* Relationships folded into this one connection — the row is
-              per connection, so the extra types are named rather than
-              given a duplicate row of their own. */}
-          {r.alsoTypes.map(t => (
-            <span
-              key={t}
-              className="flex-shrink-0 px-1 rounded bg-black/[0.04] dark:bg-white/[0.06] uppercase tracking-wide text-ink-muted/60"
-              title={`Also connected by ${edgeLabelFor(t, edgeTypeInfo)} — shown as one connection, not two`}
-            >
-              +{edgeLabelFor(t, edgeTypeInfo)}
+          {r.weight > 1 && (
+            <span className="tabular-nums font-semibold text-ink-muted" title={`${r.weight} connections`}>
+              ×{r.weight.toLocaleString()}
             </span>
-          ))}
-          {drill ? (
-            // The ×N badge IS the drill toggle — same refine gesture as
-            // the walk columns (stopPropagation: card click re-centers).
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); drill.onToggle() }}
-              title={drill.drilled
-                ? 'Collapse back to the rolled-up connection'
-                : `Refine — see the ${(bundleCount ?? 0).toLocaleString()} underlying connection${bundleCount === 1 ? '' : 's'} this rolls up`}
-              className="flex items-center gap-0.5 tabular-nums font-semibold text-ink-muted hover:text-accent-lineage transition-colors"
-            >
-              ×{(bundleCount ?? 0).toLocaleString()}
-              <LucideIcons.ChevronDown className={cn('w-2.5 h-2.5 transition-transform', !drill.drilled && '-rotate-90')} />
-            </button>
-          ) : (
-            bundleCount != null && bundleCount > 1 && (
-              <span className="tabular-nums font-semibold text-ink-muted">×{bundleCount.toLocaleString()}</span>
-            )
           )}
-          {unloaded && <span className="italic">· not on canvas</span>}
         </p>
       </div>
       {/* Flow direction cue: data always travels left → right. Hover
           actions ALWAYS dock on the right (docking them left covered
           the label/chevron); only the right-side chevron (incoming
-          rows) swaps out for them — the left chevron keeps its place. */}
+          rows) swaps out for them. */}
       <LucideIcons.ChevronRight
-        className={cn('w-3.5 h-3.5 flex-shrink-0', isIn ? 'order-last group-hover:hidden' : 'order-first')}
-        style={{ color: `${edgeColor}99` }}
+        className={cn('w-3.5 h-3.5 flex-shrink-0 text-ink-muted/50', isIn ? 'order-last group-hover:hidden' : 'order-first')}
       />
-      <span className={cn(
-        'hidden group-hover:flex flex-shrink-0 order-last items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5',
-      )}>
+      <span className="hidden group-hover:flex flex-shrink-0 order-last items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5">
         {onRevealOnCanvas && (
           <InfoTooltip side="top" content="Reveal on canvas">
             <button
               type="button"
-              onClick={(e) => { e.stopPropagation(); void onRevealOnCanvas(r.neighborId) }}
+              onClick={(e) => { e.stopPropagation(); void onRevealOnCanvas(r.urn) }}
               className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
             >
               <LucideIcons.Crosshair className="w-3 h-3" />
@@ -2210,7 +1676,7 @@ function NeighborRow({
           <InfoTooltip side="top" content="Open details">
             <button
               type="button"
-              onClick={(e) => { e.stopPropagation(); onOpenDetails(r.neighborId) }}
+              onClick={(e) => { e.stopPropagation(); onOpenDetails(r.urn) }}
               className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
             >
               <LucideIcons.PanelRight className="w-3 h-3" />
@@ -2219,203 +1685,73 @@ function NeighborRow({
         )}
       </span>
     </div>
-    {/* Refined constituents — the aggregate's real endpoints, local ∪
-        fetched, mirroring the walk-column drill exactly. */}
-    {drill?.drilled && (
-      <div className="ml-4 mt-0.5 pl-2 border-l border-dashed border-black/[0.10] dark:border-white/[0.12] pb-1">
-        {drill.constituents.map(e => {
-          const otherId = isIn ? e.source : e.target
-          const oColor = generateColorFromType((nodeMap.get(otherId)?.data?.type as string) ?? 'entity')
-          return (
-            <div
-              key={e.id}
-              className="flex items-center gap-1.5 px-2 py-1 min-w-0 text-[10.5px] text-ink/90"
-              title={`${labelOf(e.source, nodeMap.get(e.source))} → ${labelOf(e.target, nodeMap.get(e.target))}${(e.data?.edgeType as string) ? ` (${e.data?.edgeType as string})` : ''}`}
-            >
-              <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ backgroundColor: oColor }} />
-              <span className="truncate">{labelOf(otherId, nodeMap.get(otherId))}</span>
-            </div>
-          )
-        })}
-        {drill.state === 'loading' && (
-          <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-ink-muted/70">
-            <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" />
-            Fetching underlying connections…
-          </div>
-        )}
-        {drill.state === 'error' && (
-          <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-400">
-            <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
-            <span>Couldn&apos;t fetch the underlying connections.</span>
-            {drill.onRetry && (
-              <button type="button" onClick={drill.onRetry} className="font-semibold hover:underline">
-                Retry
-              </button>
-            )}
-          </div>
-        )}
-        {drill.constituents.length === 0 && drill.state !== 'loading' && drill.state !== 'error' && (
-          <p className="px-2 py-1 text-[10px] text-ink-muted/70 italic leading-snug">
-            {drill.state === 'done'
-              ? 'No underlying connections found between these entities.'
-              : 'Constituent connections aren’t loaded — drill this edge on the canvas to fetch them.'}
-          </p>
-        )}
-        {drill.missing > 0 && drill.constituents.length > 0 && drill.state !== 'loading' && (
-          <p className="px-2 py-0.5 text-[10px] text-ink-muted/60">
-            +{drill.missing.toLocaleString()} more (showing the first {drill.constituents.length})
-          </p>
-        )}
-      </div>
-    )}
-    </div>
   )
 }
 
+/**
+ * One direction's neighbours as a scannable column.
+ *
+ * Grouped by their containment PARENT when the walk knows one — the
+ * column then reads "which datasets feed me, via which fields", which
+ * is the structural story the graph body tells by nesting.
+ */
 function NeighborColumn({
   title,
   subtitle,
-  records,
-  totalCount,
+  rows,
+  totalConnections,
   direction,
-  fetchState,
-  nodeMap,
-  edgeTypeInfo,
-  resolveParent,
-  isCoarser,
+  walkStatus,
   hiddenTypes,
   onToggleType,
-  collapseToggles,
-  onToggleCollapse,
   searching,
-  rawEdgeById,
-  drilledRows,
-  onToggleDrill,
-  drillEdges,
-  drillStatus,
-  onDrillFetch,
+  edgeTypeInfo,
   onRecenter,
   onRevealOnCanvas,
   onOpenDetails,
 }: {
   title: string
   subtitle: string
-  records: NeighborRecord[]
-  totalCount: number
+  rows: WalkNeighbor[]
+  totalConnections: number
   direction: 'incoming' | 'outgoing'
-  /** On-demand fetch status for the focal node — keeps an in-flight
-   *  fetch from reading as "no connections". */
-  fetchState?: 'loading' | 'done' | 'error'
-  nodeMap: Map<string, LineageNode>
-  edgeTypeInfo?: EdgeTypeInfoMap
-  /** Containment parent of a node, when known (fetched or loaded). */
-  resolveParent: (id: string) => string | null
-  /** True when the given entity type is a COARSER grain than the focal
-   *  (its type can transitively contain the focal's type) — those rows
-   *  are summaries of finer flows, demoted to the rollup tier. */
-  isCoarser: (type: string | undefined) => boolean
+  walkStatus: LensFetchStatus
   hiddenTypes: ReadonlySet<string>
   onToggleType: (type: string) => void
-  /** Per-group collapse toggles (XOR against the column default). */
-  collapseToggles: ReadonlySet<string>
-  onToggleCollapse: (key: string) => void
-  /** Text filter active — auto-expand every group so matches can't
-   *  hide inside a collapsed one (that would be silent loss). */
+  /** Text filter active — every group expands so matches can't hide
+   *  inside a collapsed one (that would be silent loss). */
   searching: boolean
-  /** Drill machinery — same refine semantics as the walk columns. */
-  rawEdgeById: Map<string, LineageEdge>
-  drilledRows: Set<string>
-  onToggleDrill: (key: string, edge: LineageEdge) => void
-  drillEdges?: Map<string, LineageEdge[]>
-  drillStatus?: Map<string, 'loading' | 'done' | 'error'>
-  onDrillFetch?: (edge: LineageEdge) => void
+  edgeTypeInfo?: EdgeTypeInfoMap
   onRecenter: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
 }) {
-  // Three-way organization, replacing the flat by-type grouping:
-  //  1. finer/peer rows grouped by their PARENT dataset when known —
-  //     the column reads "which datasets feed me, via which fields";
-  //  2. rows with no known parent grouped by entity type (as before);
-  //  3. coarser-grain rows demoted to a labeled Rollups tier — visible
-  //     (never silently dropped) but muted and explained, because they
-  //     summarize the finer flows above rather than add connections.
-  const { typeChips, groups, rollups, hiddenCount } = useMemo(() => {
+  const { typeChips, groups, hiddenCount } = useMemo(() => {
     const typeCounts = new Map<string, number>()
-    for (const r of records) {
-      const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
-      typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1)
-    }
+    for (const r of rows) typeCounts.set(r.type, (typeCounts.get(r.type) ?? 0) + 1)
     const typeChips = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])
     let hiddenCount = 0
-    const shown: NeighborRecord[] = []
-    for (const r of records) {
-      const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
-      if (hiddenTypes.has(t)) { hiddenCount++; continue }
-      if (shown.length < ROWS_CAP) shown.push(r)
+    const shown: WalkNeighbor[] = []
+    for (const r of rows) {
+      if (hiddenTypes.has(r.type)) { hiddenCount++; continue }
+      shown.push(r)
     }
-    const rollups: NeighborRecord[] = []
-    const finer: NeighborRecord[] = []
+    const groupMap = new Map<string, { key: string; label: string; rows: WalkNeighbor[] }>()
     for (const r of shown) {
-      if (isCoarser(r.neighborNode?.data?.type as string | undefined)) rollups.push(r)
-      else finer.push(r)
-    }
-    const groupMap = new Map<string, { kind: 'parent' | 'type'; key: string; rows: NeighborRecord[] }>()
-    for (const r of finer) {
-      const parent = resolveParent(r.neighborId)
-      const mapKey = parent ? `p:${parent}` : `t:${(r.neighborNode?.data?.type as string) ?? 'not loaded'}`
+      const mapKey = r.parentUrn ? `p:${r.parentUrn}` : `t:${r.type}`
       let g = groupMap.get(mapKey)
       if (!g) {
-        g = {
-          kind: parent ? 'parent' : 'type',
-          key: parent ?? ((r.neighborNode?.data?.type as string) ?? 'not loaded'),
-          rows: [],
-        }
+        g = { key: r.parentUrn ?? r.type, label: r.parentLabel ?? r.type, rows: [] }
         groupMap.set(mapKey, g)
       }
       g.rows.push(r)
     }
     const groups = [...groupMap.values()].sort((a, b) => b.rows.length - a.rows.length)
-    return { typeChips, groups, rollups, hiddenCount }
-  }, [records, hiddenTypes, isCoarser, resolveParent])
+    return { typeChips, groups, hiddenCount }
+  }, [rows, hiddenTypes])
 
   const isIn = direction === 'incoming'
-  const allFilteredOff = records.length > 0 && groups.length === 0 && rollups.length === 0
-
-  // Drill payload for an aggregated row — local raw edges ∪ on-demand
-  // fetched, mirroring the walk-column computation exactly.
-  const buildDrill = (r: NeighborRecord): NeighborRowDrill | undefined => {
-    // The ROLLUP edge is what the server can expand into constituents;
-    // after the fold it is no longer `r.edge`, so drilling must follow
-    // it or the refine gesture disappears from every folded row.
-    const drillEdge = r.rollupEdge ?? r.edge
-    const aggData = drillEdge.data as { isAggregated?: boolean; sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
-    const canDrill = !!aggData?.isAggregated
-      && ((aggData.sourceEdges?.length ?? 0) > 0 || (aggData.sourceEdgeCount ?? 0) > 1)
-    if (!canDrill) return undefined
-    const key = `c:${direction}:${drillEdge.id}`
-    const drilled = drilledRows.has(key)
-    let constituents: LineageEdge[] = []
-    let missing = 0
-    if (drilled) {
-      const local = (aggData.sourceEdges ?? [])
-        .map(eid => rawEdgeById.get(eid))
-        .filter((e): e is LineageEdge => !!e)
-      const seenConstituent = new Set(local.map(e => e.id))
-      const fetched = (drillEdges?.get(drillEdge.id) ?? []).filter(e => !seenConstituent.has(e.id))
-      const all = [...local, ...fetched]
-      constituents = all.slice(0, 50)
-      missing = Math.max(0, Math.max(aggData.sourceEdgeCount ?? 0, all.length) - constituents.length)
-    }
-    return {
-      drilled,
-      onToggle: () => onToggleDrill(key, drillEdge),
-      constituents,
-      missing,
-      state: drilled ? drillStatus?.get(drillEdge.id) : undefined,
-      onRetry: onDrillFetch ? () => onDrillFetch(drillEdge) : undefined,
-    }
-  }
+  const allFilteredOff = rows.length > 0 && groups.length === 0
 
   return (
     <div className={cn(
@@ -2438,183 +1774,137 @@ function NeighborColumn({
             ? 'bg-sky-500/10 text-sky-600 dark:text-sky-400'
             : 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
         )}>
-          {totalCount}
+          {totalConnections}
         </span>
       </div>
-      {/* Grain/type chips — one per entity type present, click to
-          toggle. An off chip stays visible with its count (explicit
-          user choice, not silent loss). */}
       {typeChips.length > 1 && (
         <TypeChips chips={typeChips} hiddenTypes={hiddenTypes} onToggle={onToggleType} className="px-3 pb-1.5 flex-shrink-0" />
       )}
       <div className="flex-1 overflow-y-auto custom-scrollbar px-2.5 pb-3">
         {allFilteredOff && (
           <p className="px-2 py-6 text-center text-[11px] text-ink-muted/70 leading-snug">
-            All {totalCount} connection{totalCount === 1 ? '' : 's'} hidden by the type chips above.
+            All {rows.length} hidden by the type chips above.
           </p>
         )}
-        {records.length === 0 && (
-          totalCount === 0 && fetchState === 'loading' ? (
+        {rows.length === 0 && (
+          walkStatus === 'loading' ? (
             <div className="flex flex-col items-center gap-2 px-2 py-10 text-center">
               <LucideIcons.Loader2 className="w-5 h-5 animate-spin text-accent-lineage/60" />
               <p className="text-[11px] text-ink-muted/70 leading-snug">
-                Fetching {isIn ? 'upstream sources' : 'downstream consumers'} from the data source…
+                Walking {isIn ? 'upstream sources' : 'downstream consumers'} from the data source…
               </p>
             </div>
           ) : (
             <div className="flex flex-col items-center gap-2 px-2 py-10 text-center">
               <LucideIcons.CircleSlash className="w-5 h-5 text-ink-muted/40" />
               <p className="text-[11px] text-ink-muted/70 leading-snug">
-                {totalCount === 0
-                  // Post-fetch this is a data-source claim, not a canvas one.
-                  ? fetchState === 'done'
+                {searching
+                  ? 'No matches for this filter'
+                  : walkStatus === 'done'
+                    // Post-walk this is a claim about the DATA SOURCE.
                     ? `No ${isIn ? 'upstream sources' : 'downstream consumers'} in the data source`
-                    : `No ${isIn ? 'upstream sources' : 'downstream consumers'} on this canvas`
-                  : 'No matches for this filter'}
+                    : walkStatus === 'unsupported'
+                      ? 'This data source can’t walk lineage'
+                      : `Couldn’t reach the data source for ${isIn ? 'upstream sources' : 'downstream consumers'}`}
               </p>
             </div>
           )
         )}
-        {groups.map((g, _gi, allGroups) => {
-          if (g.kind === 'parent') {
-            const parentLabel = labelOf(g.key, nodeMap.get(g.key))
-            const parentColor = generateColorFromType((nodeMap.get(g.key)?.data?.type as string) ?? 'entity')
-            // 3+ parent groups → start collapsed (dataset-level overview
-            // first); toggles XOR the default. Searching expands all.
-            const defaultCollapsed = allGroups.filter(gr => gr.kind === 'parent').length >= 3
-            const collapseKey = `${direction}:p:${g.key}`
-            const collapsed = !searching && (defaultCollapsed !== collapseToggles.has(collapseKey))
-            return (
-              <div key={`p-${g.key}`} className="mb-2.5">
-                {/* Parent-dataset header — the structural story ("which
-                    datasets feed me, via which fields"). The WHOLE row
-                    toggles collapse (a 20px chevron alone was unusable);
-                    navigation lives on the dedicated re-center button. */}
-                <div className="flex items-center gap-1 mb-1 min-w-0">
-                  <button
-                    type="button"
-                    onClick={() => onToggleCollapse(collapseKey)}
-                    title={collapsed ? `Expand ${g.rows.length} connection${g.rows.length === 1 ? '' : 's'}` : 'Collapse group'}
-                    className="flex-1 min-w-0 flex items-center gap-2 px-2 py-2 rounded-lg text-left bg-black/[0.03] dark:bg-white/[0.04] hover:bg-black/[0.06] dark:hover:bg-white/[0.07] transition-colors"
-                  >
-                    <LucideIcons.ChevronDown className={cn('w-4 h-4 flex-shrink-0 text-ink-muted transition-transform', collapsed && '-rotate-90')} />
-                    <LucideIcons.FolderTree className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted/70" />
-                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: parentColor }} />
-                    <span className="min-w-0 truncate text-[12px] font-semibold text-ink">{parentLabel}</span>
-                    <span className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07] text-[10px] font-semibold tabular-nums text-ink-muted">
-                      {g.rows.length}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onRecenter(g.key)}
-                    title={`Re-center on ${parentLabel}`}
-                    className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors"
-                  >
-                    <LucideIcons.Crosshair className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                {!collapsed && (
-                  <div className="flex flex-col gap-1">
-                    {g.rows.map((r, i) => (
-                      <NeighborRow
-                        key={`${r.edge.id}-${i}`}
-                        r={r}
-                        isIn={isIn}
-                        accentColor={r.neighborNode ? generateColorFromType((r.neighborNode.data?.type as string) ?? 'entity') : '#94a3b8'}
-                        drill={buildDrill(r)}
-                        nodeMap={nodeMap}
-                        edgeTypeInfo={edgeTypeInfo}
-                        onRecenter={onRecenter}
-                        onRevealOnCanvas={onRevealOnCanvas}
-                        onOpenDetails={onOpenDetails}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            )
-          }
-          const unloaded = g.key === 'not loaded'
-          const typeColor = unloaded ? '#94a3b8' : generateColorFromType(g.key)
-          return (
-            <div key={`t-${g.key}`} className="mb-2.5">
-              <div
-                className="flex items-center gap-1.5 px-1.5 py-1"
-                title={unloaded
-                  ? 'Referenced by lineage, but the entity details couldn’t be resolved from the data source.'
-                  : undefined}
-              >
-                {unloaded
-                  ? <LucideIcons.HelpCircle className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
-                  : <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: typeColor }} />}
-                <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/80">
-                  {unloaded ? 'Unresolved' : g.key}
-                </span>
-                <span className="text-[9.5px] tabular-nums text-ink-muted/60">{g.rows.length}</span>
-              </div>
-              <div className="flex flex-col gap-1">
-                {g.rows.map((r, i) => (
-                  <NeighborRow
-                    key={`${r.edge.id}-${i}`}
-                    r={r}
-                    isIn={isIn}
-                    accentColor={typeColor}
-                    drill={buildDrill(r)}
-                    nodeMap={nodeMap}
-                    edgeTypeInfo={edgeTypeInfo}
-                    onRecenter={onRecenter}
-                    onRevealOnCanvas={onRevealOnCanvas}
-                    onOpenDetails={onOpenDetails}
-                  />
-                ))}
-              </div>
-            </div>
-          )
-        })}
-        {/* Rollup tier — coarser-grain summaries (containers, platforms)
-            of the flows above. Visible and labeled, never silently
-            dropped — but demoted so they can't read as extra data. */}
-        {rollups.length > 0 && (
-          <div className="mt-1 pt-1.5 border-t border-dashed border-black/[0.08] dark:border-white/[0.10]">
-            <div
-              className="flex items-center gap-1.5 px-1.5 py-1"
-              title="Coarser-grain summaries (containers, platforms) of the flows above — not additional connections"
-            >
-              <LucideIcons.Layers className="w-3 h-3 text-ink-muted/50" />
-              <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/60">Rollups</span>
-              <span className="text-[9.5px] tabular-nums text-ink-muted/50">{rollups.length}</span>
-            </div>
-            <div className="flex flex-col gap-1">
-              {rollups.map((r, i) => (
-                <NeighborRow
-                  key={`${r.edge.id}-${i}`}
-                  r={r}
-                  isIn={isIn}
-                  accentColor={r.neighborNode ? generateColorFromType((r.neighborNode.data?.type as string) ?? 'entity') : '#94a3b8'}
-                  rollup
-                  drill={buildDrill(r)}
-                  nodeMap={nodeMap}
-                  edgeTypeInfo={edgeTypeInfo}
-                  onRecenter={onRecenter}
-                  onRevealOnCanvas={onRevealOnCanvas}
-                  onOpenDetails={onOpenDetails}
-                />
-              ))}
-            </div>
-          </div>
-        )}
+        {groups.map(g => (
+          <NeighborGroup
+            key={g.key}
+            group={g}
+            isIn={isIn}
+            direction={direction}
+            searching={searching}
+            groupCount={groups.length}
+            edgeTypeInfo={edgeTypeInfo}
+            onRecenter={onRecenter}
+            onRevealOnCanvas={onRevealOnCanvas}
+            onOpenDetails={onOpenDetails}
+          />
+        ))}
         {hiddenCount > 0 && !allFilteredOff && (
           <p className="px-2 py-1.5 text-[10px] text-ink-muted/60">
-            {hiddenCount} connection{hiddenCount === 1 ? '' : 's'} hidden by the type chips
-          </p>
-        )}
-        {records.length > ROWS_CAP && (
-          <p className="px-2 py-1.5 text-[10px] text-ink-muted/70">
-            +{records.length - ROWS_CAP} more — use the filter to narrow
+            {hiddenCount} hidden by the type chips
           </p>
         )}
       </div>
+    </div>
+  )
+}
+
+/** One parent group — collapsible, because 3+ of them means the useful
+ *  first read is "which datasets feed me", not every field at once. */
+function NeighborGroup({
+  group,
+  isIn,
+  direction,
+  searching,
+  groupCount,
+  edgeTypeInfo,
+  onRecenter,
+  onRevealOnCanvas,
+  onOpenDetails,
+}: {
+  group: { key: string; label: string; rows: WalkNeighbor[] }
+  isIn: boolean
+  direction: 'incoming' | 'outgoing'
+  searching: boolean
+  groupCount: number
+  edgeTypeInfo?: EdgeTypeInfoMap
+  onRecenter: (nodeId: string) => void
+  onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
+  onOpenDetails?: (nodeId: string) => void
+}) {
+  // 3+ groups → start collapsed (dataset-level overview first); the
+  // toggle XORs that default so it never needs migrating. Searching
+  // expands everything.
+  const [toggled, setToggled] = useState(false)
+  const collapsed = !searching && (groupCount >= 3) !== toggled
+  const parentColor = generateColorFromType(group.rows[0]?.type ?? 'entity')
+  return (
+    <div className="mb-2.5">
+      <div className="flex items-center gap-1 mb-1 min-w-0">
+        <button
+          type="button"
+          onClick={() => setToggled(t => !t)}
+          aria-expanded={!collapsed}
+          title={collapsed ? `Expand ${group.rows.length} connection${group.rows.length === 1 ? '' : 's'}` : 'Collapse group'}
+          className="flex-1 min-w-0 flex items-center gap-2 px-2 py-2 rounded-lg text-left bg-black/[0.03] dark:bg-white/[0.04] hover:bg-black/[0.06] dark:hover:bg-white/[0.07] transition-colors"
+        >
+          <LucideIcons.ChevronDown className={cn('w-4 h-4 flex-shrink-0 text-ink-muted transition-transform', collapsed && '-rotate-90')} />
+          <LucideIcons.FolderTree className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted/70" />
+          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: parentColor }} />
+          <span className="min-w-0 truncate text-[12px] font-semibold text-ink">{group.label}</span>
+          <span className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07] text-[10px] font-semibold tabular-nums text-ink-muted">
+            {group.rows.length}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => onRecenter(group.key)}
+          title={`Re-center on ${group.label}`}
+          className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors"
+        >
+          <LucideIcons.Crosshair className="w-3.5 h-3.5" />
+        </button>
+      </div>
+      {!collapsed && (
+        <div className="flex flex-col gap-1">
+          {group.rows.map(r => (
+            <NeighborRow
+              key={`${direction}-${r.urn}`}
+              r={r}
+              isIn={isIn}
+              edgeTypeInfo={edgeTypeInfo}
+              onRecenter={onRecenter}
+              onRevealOnCanvas={onRevealOnCanvas}
+              onOpenDetails={onOpenDetails}
+            />
+          ))}
+        </div>
+      )}
     </div>
   )
 }

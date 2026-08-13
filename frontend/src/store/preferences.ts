@@ -184,6 +184,17 @@ interface PreferencesState {
   lensFrameChildren: 'connected' | 'all'
   setLensFrameChildren: (mode: 'connected' | 'all') => void
 
+  /** How many hops each direction the Lens fetches when it opens on a
+   *  NEW entity. One is the answer to "what feeds this", which is what
+   *  people open the lens for; deeper is a deliberate choice, because
+   *  every extra hop is a bigger query against the data source.
+   *
+   *  Applies to focals the current lens session has NOT walked yet — a
+   *  focal already in hand keeps the depth it was fetched at rather
+   *  than silently refetching a picture the user is looking at. */
+  lensInitialDepth: number
+  setLensInitialDepth: (depth: number) => void
+
   // Icon picker — recently used Lucide icon names (most recent first).
   recentIcons: string[]
   addRecentIcon: (name: string) => void
@@ -356,6 +367,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       setLensViewMode: (lensViewMode) => set({ lensViewMode }),
       lensFrameChildren: 'connected',
       setLensFrameChildren: (lensFrameChildren) => set({ lensFrameChildren }),
+      lensInitialDepth: 1,
+      setLensInitialDepth: (lensInitialDepth) => set({ lensInitialDepth }),
 
       // Icon picker recents
       recentIcons: [],

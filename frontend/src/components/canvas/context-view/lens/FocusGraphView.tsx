@@ -28,8 +28,8 @@
  * frequent interaction may rebuild the node or edge arrays:
  *   • hover   → HoverContext; the edges array keeps its identity and
  *               only the SVG paths re-render.
- *   • impact  → ImpactContext; a resolving measurement re-renders the
- *               focal card alone, not all N nodes.
+ *   • reach   → ReachContext; a growing walk re-renders the focal
+ *               card alone, not all N nodes.
  *   • select  → React Flow's own `selected` flag, node identity kept
  *               for every unaffected card.
  *   • rebuild → cards memo on card CONTENT, not on the freshly-built
@@ -68,12 +68,11 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import * as LucideIcons from 'lucide-react'
-import { IMPACT_DEPTH, type LensImpact } from '@/hooks/useLensImpact'
 import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, FRAME_FOOTER_H, framePager, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill } from './focus-cards'
+import { CARD_W, BAND_GAP, FRAME_FOOTER_H, framePager, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
 import { REVEAL_PAGE } from './focus-layout'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 
@@ -87,15 +86,15 @@ const TINT_CONTAIN = '#94a3b8'
  * Live interaction values delivered by CONTEXT rather than through node
  * data — the difference between a snappy graph and a sluggish one.
  *
- * Hover emphasis and the focal's impact line both change often and
+ * Hover emphasis and the focal's reach line both change often and
  * matter to a tiny slice of the graph, but folding them into node/edge
  * data made every change rebuild the whole nodes or edges array, which
  * React Flow then reconciled element by element. Routed through
- * context, a hover re-renders only the edge paths, and an impact result
+ * context, a hover re-renders only the edge paths, and a growing walk
  * re-renders only the focal card. The arrays keep their identity.
  */
 const HoverContext = createContext<string | null>(null)
-const ImpactContext = createContext<{ impact?: LensImpact | null; loading?: boolean }>({})
+const ReachContext = createContext<LensReach | null>(null)
 
 /** Shared empty overlay — a fresh Map would churn the nodes memo. */
 const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
@@ -117,15 +116,15 @@ interface CardCtx {
   /** Open / close a coarse container into the entities inside it that
    *  connect to `partnerId` — the card's own partner in the picture,
    *  which is the focal only at the first hop. */
-  onOpenContainer: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
-  onExpandFrontier: (expandKey: string, nodeId: string) => void
+  onOpenContainer?: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
+  onExpandFrontier?: (expandKey: string, nodeId: string) => void
   /** Open / close a contains-stack row into what IT holds. Pure
    *  containment — no partner, no lineage question. */
-  onToggleContains: (nodeId: string) => void
+  onToggleContains?: (nodeId: string) => void
   /** Re-ask for a contains row's children after a failed fetch, without
    *  toggling the row shut. */
-  onRetryContains: (nodeId: string) => void
-  onShowMore: (bandKey: string) => void
+  onRetryContains?: (nodeId: string) => void
+  onShowMore?: (bandKey: string) => void
   /** Move a frame's fixed page window to `page` (0-based), fetching the
    *  next server page when the window runs past what has loaded. */
   onSetFramePage: (openKey: string, page: number) => void
@@ -160,9 +159,8 @@ interface FocusGraphViewProps {
   focalStats: { in: number; out: number }
   /** Focal fetch state — drives the empty-direction whispers. */
   focalFetch?: 'loading' | 'done' | 'error'
-  /** Transitive reach of the focal (useLensImpact); null = unknown. */
-  focalImpact?: LensImpact | null
-  focalImpactLoading?: boolean
+  /** How far the walk has reached; null while it is still walking. */
+  focalReach?: LensReach | null
   /** Filename stem for the PNG export. */
   exportName?: string
   selectedId: string | null
@@ -171,11 +169,11 @@ interface FocusGraphViewProps {
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
   onToggleFrame: (expandKey: string) => void
-  onOpenContainer: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
-  onExpandFrontier: (expandKey: string, nodeId: string) => void
-  onToggleContains: (nodeId: string) => void
-  onRetryContains: (nodeId: string) => void
-  onShowMore: (bandKey: string) => void
+  onOpenContainer?: (openKey: string, nodeId: string, entityType: string, partnerId: string | null) => void
+  onExpandFrontier?: (expandKey: string, nodeId: string) => void
+  onToggleContains?: (nodeId: string) => void
+  onRetryContains?: (nodeId: string) => void
+  onShowMore?: (bandKey: string) => void
   onSetFramePage: (openKey: string, page: number) => void
   onFrameQuery: (openKey: string, q: string) => void
   frameQueryFor?: (openKey: string) => string
@@ -453,9 +451,9 @@ function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
         // over the model already in hand — expanding can never reach
         // outside the lineage, so it never fetches.
         if (card.walk) ctx.onToggleFrame(card.expandKey!)
-        else if (pureContainment) ctx.onToggleContains(card.nodeId!)
+        else if (pureContainment) ctx.onToggleContains?.(card.nodeId!)
         else if (card.frameLocal) ctx.onToggleFrame(card.expandKey!)
-        else ctx.onOpenContainer(card.expandKey!, card.nodeId!, card.type, card.partnerIds[0] ?? null)
+        else ctx.onOpenContainer?.(card.expandKey!, card.nodeId!, card.type, card.partnerIds[0] ?? null)
       }}
     >
       <Icon className={cn('w-3 h-3', card.fetch === 'loading' && 'animate-spin')} />
@@ -502,7 +500,7 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
     return (
       <button
         type="button"
-        onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier(card.expandKey!, card.nodeId!) }}
+        onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier?.(card.expandKey!, card.nodeId!) }}
         title={`No further ${outLeft ? 'upstream' : 'downstream'} lineage in the data source — the walk ends here (click to collapse)`}
         className={cn('absolute top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded-full bg-canvas-elevated border border-black/10 dark:border-white/15 text-ink-muted/50 hover:text-ink-muted', pos)}
       >
@@ -514,7 +512,7 @@ function FrontierPill({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   return (
     <button
       type="button"
-      onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier(card.expandKey!, card.nodeId!) }}
+      onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier?.(card.expandKey!, card.nodeId!) }}
       title={expanded
         // An expansion that reached only cards already on the board adds
         // edges and nothing else. Saying so is the difference between
@@ -696,9 +694,9 @@ function FocusGraphCard({ data, selected }: NodeProps) {
     ctx: CardCtx
     focalStats?: { in: number; out: number }
   }
-  // Impact arrives via context so a resolving measurement re-renders
-  // ONLY this card — it used to invalidate every node in the graph.
-  const { impact: focalImpact, loading: focalImpactLoading } = useContext(ImpactContext)
+  // Reach arrives via context so a growing walk re-renders ONLY this
+  // card — it used to invalidate every node in the graph.
+  const focalReach = useContext(ReachContext)
   const accent = card.type === 'not loaded' ? '#94a3b8' : ctx.visualFor(card.type).color
 
   const activate = () => {
@@ -706,8 +704,8 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       // A 'focus' overflow is the door at the end of the contains stack:
       // it re-centers rather than paging a column that cannot page.
       if (card.expandKind === 'focus' && card.parentId) ctx.onFocus(card.parentId)
-      else if (card.expandKind === 'retry' && card.parentId) ctx.onRetryContains(card.parentId)
-      else if (card.expandKey) ctx.onShowMore(card.expandKey)
+      else if (card.expandKind === 'retry' && card.parentId) ctx.onRetryContains?.(card.parentId)
+      else if (card.expandKey) ctx.onShowMore?.(card.expandKey)
       return
     }
     ctx.onSelect(card.nodeId)
@@ -810,23 +808,21 @@ function FocusGraphCard({ data, selected }: NodeProps) {
             </span>
           </div>
         )}
-        {/* Transitive reach — the question Focus mode gets opened to
-            answer. Truncated = floors ("47+"); unknown = nothing. */}
-        {focalImpactLoading && (
-          <p className="flex items-center gap-1 mt-0.5 text-[9px] text-ink-muted/70">
-            <LucideIcons.Loader2 className="w-2.5 h-2.5 animate-spin text-accent-lineage/60" />
-            Measuring reach…
-          </p>
-        )}
-        {focalImpact && (
+        {/* How far the walk has reached — the question Focus mode gets
+            opened to answer, counted off the model the board draws
+            rather than measured separately. An open frontier makes
+            these floors, and says so. */}
+        {focalReach && (
           <p
             className="flex items-center gap-1 mt-0.5 text-[9px] text-ink-muted tabular-nums truncate"
-            title={`Distinct entities connected within ${IMPACT_DEPTH} hops, measured at this entity's OWN grain — so it counts different things from the connections listed beside it, which are at whatever grain they arrived at${focalImpact.truncated ? '. Measurement capped, true totals may be higher' : ''}`}
+            title={focalReach.more
+              ? 'Entities this walk has reached so far. More exists beyond this view — use ⊕ on a card to walk further.'
+              : 'Every entity connected to this one, upstream and downstream, as far as the data source goes.'}
           >
             <LucideIcons.Radar className="w-2.5 h-2.5 flex-shrink-0 text-accent-lineage/70" />
             <span className="truncate">
-              Reach at this grain: {focalImpact.up.toLocaleString()}{focalImpact.truncated ? '+' : ''} upstream
-              {' · '}{focalImpact.down.toLocaleString()}{focalImpact.truncated ? '+' : ''} downstream
+              Reach: {focalReach.up.toLocaleString()} upstream · {focalReach.down.toLocaleString()} downstream
+              {focalReach.more ? ' · more beyond this view' : ''}
             </span>
           </p>
         )}
@@ -1094,7 +1090,7 @@ function FocusFrameNode({ data }: NodeProps) {
           onClick={(e) => {
             e.stopPropagation()
             if (card.frameLocal) ctx.onToggleFrame(card.expandKey!)
-            else if (card.nodeId) ctx.onOpenContainer(card.expandKey!, card.nodeId, card.type, card.partnerIds[0] ?? null)
+            else if (card.nodeId) ctx.onOpenContainer?.(card.expandKey!, card.nodeId, card.type, card.partnerIds[0] ?? null)
           }}
           aria-expanded={card.childrenOpen}
           aria-label={card.childrenOpen ? `Collapse ${card.label}` : `Expand ${card.label}`}
@@ -1201,7 +1197,7 @@ function FocusFrameNode({ data }: NodeProps) {
         {(card.frontier || card.frontierExpanded) && card.nodeId && (
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier(card.expandKey!, card.nodeId!) }}
+            onClick={(e) => { e.stopPropagation(); ctx.onExpandFrontier?.(card.expandKey!, card.nodeId!) }}
             aria-expanded={card.frontierExpanded}
             aria-label={card.frontierExpanded
               ? `Collapse ${card.band < 0 ? 'upstream of' : 'downstream of'} ${card.label}`
@@ -1543,8 +1539,7 @@ export function FocusGraphView({
   focalId,
   focalStats,
   focalFetch,
-  focalImpact,
-  focalImpactLoading,
+  focalReach,
   exportName,
   selectedId,
   reducedMotion,
@@ -1783,9 +1778,9 @@ export function FocusGraphView({
     })
   }, [graph.cards, graph.edges])
 
-  const impactValue = useMemo(
-    () => ({ impact: focalImpact, loading: focalImpactLoading }),
-    [focalImpact, focalImpactLoading],
+  const reachValue = useMemo(
+    () => focalReach ?? null,
+    [focalReach],
   )
 
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
@@ -1801,7 +1796,7 @@ export function FocusGraphView({
         !reducedMotion && '[&_.react-flow__node]:transition-transform [&_.react-flow__node]:duration-300 [&_.react-flow__node.dragging]:transition-none',
       )}
     >
-      <ImpactContext.Provider value={impactValue}>
+      <ReachContext.Provider value={reachValue}>
       <HoverContext.Provider value={hoveredId}>
       <ReactFlowProvider>
         <ReactFlow
@@ -1843,7 +1838,7 @@ export function FocusGraphView({
         </ReactFlow>
       </ReactFlowProvider>
       </HoverContext.Provider>
-      </ImpactContext.Provider>
+      </ReachContext.Provider>
     </div>
   )
 }

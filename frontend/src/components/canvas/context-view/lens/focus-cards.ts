@@ -169,6 +169,23 @@ export interface FocusPill {
   status?: 'loading' | 'error'
 }
 
+/**
+ * How far a walk has reached, for the focal card's reach line.
+ *
+ * Not a measurement of its own — these are the entities the data source
+ * has NAMED as upstream / downstream of the focus, which is the same
+ * model every other number on the board comes from. The old strip ran a
+ * bounded transitive trace instead, so it counted different things from
+ * everything beside it and no reader could reconcile the two.
+ */
+export interface LensReach {
+  up: number
+  down: number
+  /** A frontier is still open somewhere, or a fetch was capped — so
+   *  these two numbers are floors, not totals, and say so. */
+  more: boolean
+}
+
 export interface FocusCard {
   /** Stable across rebuilds so shared cards glide between focal swaps:
    *  'f' | n:urn | g:dir:parentUrn | c:urn | fr:dir:urn | more:dir:band */

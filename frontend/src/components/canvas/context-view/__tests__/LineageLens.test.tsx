@@ -1,1368 +1,753 @@
 /**
- * LineageLens — ego-graph overlay behavior.
+ * LineageLens — the lens on the WALK MODEL.
  *
- * Data parity with the drawer's LineageNeighbors section is guaranteed by
- * the shared deriveNeighborRecords helper (tested directly below); the
- * component tests cover the lens contract: grouping, re-center stack,
- * and ESC/close handling.
+ * Every test here hands the component the same thing production does: a
+ * `WalkEntry` (the accumulated union of one-hop closure responses) and
+ * the four calls that grow it. There is no canvas store, no store-derived
+ * neighbour records, no second source of numbers — which is the point of
+ * the rebuild, and what these tests exist to hold.
+ *
+ * The fixtures are hand-authored merged walk models. One test loads the
+ * SHARED wire fixture (`trace_closure_walk_fixture.json`, which the
+ * backend's own contract test validates) through the real adapter, so a
+ * drift between the wire and this component fails a suite rather than a
+ * demo.
  */
 import type { ComponentProps } from 'react'
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { LineageLens } from '../LineageLens'
-import { deriveNeighborRecords } from '@/lib/lineage-neighbors'
-import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
-import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
-import { FRAME_ALL_CAP, GRAPH_BAND_CAP } from '../lens/focus-graph'
+import { useSchemaStore } from '@/store/schema'
+import type { WalkEntry } from '@/hooks/useLensWalk'
+import {
+  toLensClosure,
+  mergeClosures,
+  type LensWalkModel,
+  type LensWalkNode,
+} from '../lens/closure-adapter'
+import type { LensFrontierEntry } from '../lens/lens-subgraph'
+import type { GraphNode, GraphEdge, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
 
-const node = (id: string, type = 'dataset'): LineageNode => ({
-  id,
-  type: 'custom',
+// ── Walk-model fixture kit ───────────────────────────────────────────
+// The same shapes `mergeClosures` produces, written by hand so a test
+// can state the picture it is about in ten lines.
+
+const wnode = (
+  urn: string,
+  type = 'dataset',
+  label = urn,
+  extra: Record<string, unknown> = {},
+): LensWalkNode => ({
+  id: urn,
+  type: 'generic',
   position: { x: 0, y: 0 },
-  data: { label: `label-${id}`, type, urn: id },
-} as unknown as LineageNode)
+  data: { urn, label, type, ...extra },
+  urn,
+  displayName: label,
+  entityType: type,
+}) as unknown as LensWalkNode
 
-const edge = (id: string, source: string, target: string): LineageEdge => ({
-  id, source, target, data: { edgeType: 'FLOWS_TO' },
-} as unknown as LineageEdge)
+/** A lineage hop. Direction is verbatim: source flows INTO target. */
+const hop = (source: string, target: string, edgeType = 'DERIVES_FROM') =>
+  ({ id: `h:${source}>${target}`, sourceUrn: source, targetUrn: target, edgeType })
 
-describe('deriveNeighborRecords (shared with LineageNeighbors)', () => {
-  it('splits incoming/outgoing and resolves neighbor nodes', () => {
-    const nodes = [node('a'), node('b'), node('c')]
-    const nodeMap = new Map(nodes.map(n => [n.id, n]))
-    const { incomingRecords, outgoingRecords } = deriveNeighborRecords(
-      'b',
-      [edge('e1', 'a', 'b'), edge('e2', 'b', 'c'), edge('e3', 'b', 'ghost')],
-      nodeMap,
-      [],
-    )
-    expect(incomingRecords.map(r => r.neighborId)).toEqual(['a'])
-    expect(outgoingRecords.map(r => r.neighborId)).toEqual(['c', 'ghost'])
-    expect(outgoingRecords[1].neighborNode).toBeUndefined() // unloaded neighbor kept
-  })
+/** parent → child containment. Never a hop; only ever nesting. */
+const holds = (parent: string, child: string) => ({ sourceUrn: parent, targetUrn: child })
+
+const frontier = (urn: string, totalCount: number | null, nextCursor: string | null = null): LensFrontierEntry =>
+  ({ urn, totalCount, nextCursor })
+
+function walkModel(focusUrn: string, parts: Partial<Omit<LensWalkModel, 'focusUrn'>>): LensWalkModel {
+  return {
+    focusUrn,
+    nodes: [],
+    lineageEdges: [],
+    containmentEdges: [],
+    upstreamUrns: new Set(),
+    downstreamUrns: new Set(),
+    frontierUp: [],
+    frontierDown: [],
+    truncated: false,
+    truncationReason: null,
+    seedTruncated: false,
+    ...parts,
+  }
+}
+
+const doneWalk = (model: LensWalkModel, extendStatus?: Map<string, 'loading' | 'error'>): WalkEntry => ({
+  model, status: 'done', error: null, extendStatus: extendStatus ?? new Map(),
 })
 
-const renderLens = (
-  stack: string[],
-  handlers: Partial<Record<'onRecenter' | 'onBack' | 'onForward' | 'onClose', () => void>> = {},
+const makeApi = () => ({
+  extend: vi.fn(),
+  page: vi.fn(),
+  retry: vi.fn(),
+  retryExtend: vi.fn(),
+})
+
+type Api = ReturnType<typeof makeApi>
+
+function renderLens(
+  entries: string[],
+  walk: WalkEntry | null,
   extra: Partial<ComponentProps<typeof LineageLens>> = {},
-) =>
-  render(
+  api: Api = makeApi(),
+) {
+  const utils = render(
     <LineageLens
-      history={{ entries: stack, cursor: stack.length - 1 }}
-      onRecenter={handlers.onRecenter ?? vi.fn()}
-      onBack={handlers.onBack ?? vi.fn()}
-      onForward={handlers.onForward ?? vi.fn()}
-      onClose={handlers.onClose ?? vi.fn()}
+      history={{ entries, cursor: extra.history?.cursor ?? entries.length - 1 }}
+      walk={walk}
+      walkApi={api}
+      onRecenter={vi.fn()}
+      onBack={vi.fn()}
+      onForward={vi.fn()}
+      onClose={vi.fn()}
       {...extra}
     />,
   )
+  return { ...utils, api }
+}
 
-describe('LineageLens', () => {
-  beforeEach(() => {
-    // Pin the LIST body — these suites assert the column layout; the
-    // graph body has its own suite below.
-    usePreferencesStore.setState({ lensViewMode: 'list' })
-    useCanvasStore.setState({
-      nodes: [node('a'), node('b'), node('c')],
-      edges: [edge('e1', 'a', 'b'), edge('e2', 'b', 'c')],
-      visibleEdges: [],
-    } as never)
-  })
+/** The chevron beside a card's name — "what is inside this". */
+const contentsChevron = (label: string) => screen.getByLabelText(`Show what's inside ${label}`)
+
+/** Cards on the board, by their rendered name. */
+const onBoard = (label: string) => screen.queryAllByText(label).length > 0
+
+// ── THE BUSINESS JOURNEY ─────────────────────────────────────────────
+
+/**
+ * The reported estate, as the walk returns it: a seven-level spine with
+ * CONTAINER repeated, and the answer five containment steps below the
+ * only thing the focus can see.
+ *
+ *   Finance ⊃ RiskApp ⊃ PROD ⊃ CURATED ⊃ RISK_DB ⊃ loan_positions
+ *   Sales   ⊃ {orders_raw, refunds_raw}          (a branchy domain)
+ *   fin_marts ⊃ collaterals (the focus) → risk_exposure_daily
+ *
+ * This is the shape that used to render as one "Finance" card opening
+ * onto nothing.
+ */
+const collateralsEstate = () => walkModel('F', {
+  nodes: [
+    wnode('DOM', 'DATADOMAIN', 'Finance', { childCount: 4 }),
+    wnode('APP', 'APPLICATION', 'RiskApp', { childCount: 2 }),
+    wnode('CTR1', 'CONTAINER', 'PROD', { childCount: 3 }),
+    wnode('CTR2', 'CONTAINER', 'CURATED', { childCount: 6 }),
+    wnode('DB', 'DATABASE', 'RISK_DB', { childCount: 12 }),
+    wnode('t0', 'dataset', 'loan_positions'),
+    wnode('SALES', 'DATADOMAIN', 'Sales', { childCount: 40 }),
+    wnode('s1', 'dataset', 'orders_raw'),
+    wnode('s2', 'dataset', 'refunds_raw'),
+    wnode('FT', 'dataset', 'fin_marts', { childCount: 9 }),
+    wnode('F', 'dataset', 'collaterals', { description: 'Collateral positions, daily' }),
+    wnode('OUT', 'dataset', 'risk_exposure_daily'),
+  ],
+  containmentEdges: [
+    holds('DOM', 'APP'), holds('APP', 'CTR1'), holds('CTR1', 'CTR2'), holds('CTR2', 'DB'),
+    holds('DB', 't0'),
+    holds('SALES', 's1'), holds('SALES', 's2'),
+    holds('FT', 'F'),
+  ],
+  lineageEdges: [hop('t0', 'F'), hop('s1', 'F'), hop('s2', 'F'), hop('F', 'OUT')],
+  upstreamUrns: new Set(['t0', 's1', 's2']),
+  downstreamUrns: new Set(['OUT']),
+  // The data source says loan_positions has six more producers it has
+  // not shipped yet — the one honest reason to offer an ⊕ extend.
+  frontierUp: [frontier('t0', 6)],
+})
+
+describe('the business journey — a table\'s lineage through a seven-level estate', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' }))
   afterEach(() => cleanup())
 
-  it('renders nothing when the stack is empty', () => {
-    renderLens([])
+  it('shows the upstream TABLE immediately, nested under its whole spine', () => {
+    renderLens(['F'], doneWalk(collateralsEstate()))
+
+    // Every level of the spine is on the board — the walk resolved a
+    // structure the old builder collapsed into one card.
+    for (const level of ['Finance', 'RiskApp', 'PROD', 'CURATED', 'RISK_DB']) {
+      expect(onBoard(level)).toBe(true)
+    }
+    // And the ANSWER — the actual upstream table — is visible without a
+    // single click, because every level above it is a pass-through.
+    expect(onBoard('loan_positions')).toBe(true)
+    // The focus itself, nested in its own table.
+    expect(screen.getAllByText('collaterals').length).toBeGreaterThan(0)
+    expect(onBoard('risk_exposure_daily')).toBe(true)
+  })
+
+  it('states honest counts for what a container holds, at both grains', () => {
+    renderLens(['F'], doneWalk(collateralsEstate()))
+    // RISK_DB holds twelve things; exactly one of them is on this
+    // lineage. Both numbers, or the card is either a lie or a mystery.
+    expect(screen.getByText(/1 on this lineage · of 12/)).toBeTruthy()
+    // A branchy domain the walk did NOT open states the same way.
+    expect(screen.getByText(/2 on this lineage · of 40/)).toBeTruthy()
+  })
+
+  it('opens a branchy domain\'s lineage children in ONE click, with no fetch', () => {
+    const { api } = renderLens(['F'], doneWalk(collateralsEstate()))
+    // Sales BRANCHES, so the walk stopped there rather than guessing
+    // which of its children was the answer.
+    expect(onBoard('orders_raw')).toBe(false)
+
+    fireEvent.click(contentsChevron('Sales'))
+
+    expect(onBoard('orders_raw')).toBe(true)
+    expect(onBoard('refunds_raw')).toBe(true)
+    // The model already held them — expanding is a re-projection, and
+    // it must never cost a round trip.
+    expect(api.extend).not.toHaveBeenCalled()
+    expect(api.page).not.toHaveBeenCalled()
+  })
+
+  it('the ⊕ extend asks the server from the card\'s own leaves', () => {
+    const { api } = renderLens(['F'], doneWalk(collateralsEstate()))
+    // "6 more upstream of loan_positions" — the remainder the data
+    // source reported, minus what is already in hand.
+    fireEvent.click(screen.getByTitle(/Walk one hop further upstream of loan_positions \(6 more\)/))
+    expect(api.extend).toHaveBeenCalledWith('t0', 'up', ['t0'])
+  })
+
+  it('double-clicking a card re-centers the walk there', () => {
+    const onRecenter = vi.fn()
+    renderLens(['F'], doneWalk(collateralsEstate()), { onRecenter })
+    fireEvent.doubleClick(screen.getByText('loan_positions'))
+    expect(onRecenter).toHaveBeenCalledWith('t0')
+  })
+
+  it('stepping Back to an already-walked focal is instant — no loading state', () => {
+    const onBack = vi.fn()
+    const { rerender, api } = renderLens(
+      ['prev', 'F'],
+      doneWalk(collateralsEstate()),
+      { onBack },
+    )
+    fireEvent.click(screen.getByText('Back'))
+    expect(onBack).toHaveBeenCalled()
+
+    // The parent moves the cursor; the previous focal's model is still
+    // in the hook's session cache, so it arrives already 'done'.
+    const previous = doneWalk(walkModel('prev', {
+      nodes: [wnode('prev', 'dataset', 'previous_focus'), wnode('up', 'dataset', 'its_source')],
+      lineageEdges: [hop('up', 'prev')],
+      upstreamUrns: new Set(['up']),
+    }))
+    rerender(
+      <LineageLens
+        history={{ entries: ['prev', 'F'], cursor: 0 }}
+        walk={previous}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={onBack}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(screen.queryByText(/Walking the lineage from the data source/)).toBeNull()
+    expect(onBoard('its_source')).toBe(true)
+  })
+})
+
+// ── PILL HONESTY ─────────────────────────────────────────────────────
+
+/** Every ⊕ state on one board: a reveal that costs nothing, a page with
+ *  the server's own cursor, an exact extend, a countless one, one in
+ *  flight, one that failed, and a direction that genuinely ended. */
+const pillCatalogue = () => {
+  const nodes = [
+    wnode('F', 'dataset', 'orders_enriched'),
+    wnode('EXACT', 'dataset', 'has_48_more'),
+    wnode('UNKNOWN', 'dataset', 'count_unknown'),
+    wnode('PAGED', 'dataset', 'partially_loaded'),
+    wnode('ENDED', 'dataset', 'end_of_lineage'),
+    wnode('BUSY', 'dataset', 'fetching_now'),
+    wnode('FAILED', 'dataset', 'fetch_failed'),
+    wnode('DOWN', 'dataset', 'one_consumer'),
+  ]
+  const lineageEdges = [
+    hop('EXACT', 'F'), hop('UNKNOWN', 'F'), hop('PAGED', 'F'),
+    hop('ENDED', 'F'), hop('BUSY', 'F'), hop('FAILED', 'F'), hop('F', 'DOWN'),
+  ]
+  return walkModel('F', {
+    nodes,
+    lineageEdges,
+    upstreamUrns: new Set(['EXACT', 'UNKNOWN', 'PAGED', 'ENDED', 'BUSY', 'FAILED']),
+    downstreamUrns: new Set(['DOWN']),
+    frontierUp: [
+      frontier('EXACT', 48),
+      frontier('UNKNOWN', null),
+      frontier('PAGED', 96, 'eyJvZmZzZXQiOjMwfQ=='),
+      frontier('BUSY', 12),
+      frontier('FAILED', 9),
+      // ENDED gets NO entry at all — that is what a dead end is.
+    ],
+  })
+}
+
+/** Fourteen upstream groups against a REVEAL_PAGE of twelve, so the
+ *  focus's own ⊕ has a remainder to offer from data already in hand. */
+const crowdedFanIn = () => {
+  const nodes = [wnode('F', 'dataset', 'dim_customer')]
+  const lineageEdges = []
+  for (let i = 0; i < 14; i++) {
+    const urn = `s${String(i).padStart(2, '0')}`
+    nodes.push(wnode(urn, 'dataset', `source_${String(i).padStart(2, '0')}`))
+    lineageEdges.push(hop(urn, 'F'))
+  }
+  return walkModel('F', { nodes, lineageEdges, upstreamUrns: new Set(nodes.slice(1).map(n => n.urn)) })
+}
+
+describe('the ⊕ tells the truth about what it costs', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
+  afterEach(() => cleanup())
+
+  it('a reveal is instant: more cards, no request', () => {
+    const { api } = renderLens(['F'], doneWalk(crowdedFanIn()))
+    // Twelve of fourteen fit on the first page.
+    expect(onBoard('source_12')).toBe(false)
+    fireEvent.click(screen.getByTitle(/Show 2 more upstream — already loaded, nothing to fetch/))
+    expect(onBoard('source_12')).toBe(true)
+    expect(onBoard('source_13')).toBe(true)
+    expect(api.extend).not.toHaveBeenCalled()
+    expect(api.page).not.toHaveBeenCalled()
+  })
+
+  it('a page carries the server\'s own cursor back verbatim', () => {
+    const { api } = renderLens(['F'], doneWalk(pillCatalogue()))
+    fireEvent.click(screen.getByTitle(/Load the rest of what is upstream of partially_loaded/))
+    expect(api.page).toHaveBeenCalledWith('PAGED', 'up', 'eyJvZmZzZXQiOjMwfQ==')
+    expect(api.extend).not.toHaveBeenCalled()
+  })
+
+  it('an exact remainder is stated; an unknown one is never invented', () => {
+    renderLens(['F'], doneWalk(pillCatalogue()))
+    const exact = screen.getByTitle(/Walk one hop further upstream of has_48_more \(48 more\)/)
+    expect(exact.textContent).toContain('48')
+    // The server did not report a total. A countless chevron, not a
+    // fabricated number.
+    const countless = screen.getByTitle('Walk one hop further upstream of count_unknown')
+    expect(countless.textContent?.trim()).toBe('')
+  })
+
+  it('an in-flight extend spins on its own pill; a failed one offers the same click again', () => {
+    const { api } = renderLens(['F'], doneWalk(
+      pillCatalogue(),
+      new Map([['up:BUSY', 'loading'], ['up:FAILED', 'error']]),
+    ))
+    expect(screen.getByLabelText('Fetching upstream lineage')).toBeTruthy()
+
+    const retry = screen.getByLabelText('Retry fetching upstream of fetch_failed')
+    fireEvent.click(retry)
+    // Retry IS the action that failed — same key, same call — so the
+    // two can never drift out of step.
+    expect(api.extend).toHaveBeenCalledWith('FAILED', 'up', ['FAILED'])
+  })
+
+  it('a genuinely drained direction is marked as ended, not left blank', () => {
+    renderLens(['F'], doneWalk(pillCatalogue()))
+    expect(screen.getAllByLabelText('End of upstream lineage').length).toBeGreaterThan(0)
+  })
+
+  it('offers no ⊕ at all until the focal\'s own model has landed', () => {
+    // `useLensWalk` holds an EMPTY model until the first response, and
+    // ignores an extend before the focal is 'done' — so there is
+    // nothing to hang a pill on, and no dead click to make.
+    renderLens(['F'], { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map() })
+    expect(screen.queryByTitle(/Walk one hop further/)).toBeNull()
+    expect(screen.queryByTitle(/Show .* more upstream/)).toBeNull()
+  })
+})
+
+// ── STATUS SURFACES ──────────────────────────────────────────────────
+
+describe('what the lens says while it cannot answer', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
+  afterEach(() => cleanup())
+
+  it('narrates the walk instead of claiming "no connections"', () => {
+    renderLens(['F'], { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map() })
+    expect(screen.getByText(/Walking the lineage from the data source/)).toBeTruthy()
+  })
+
+  it('surfaces a failure with its reason, and a Retry that re-kicks the walk', () => {
+    const { api } = renderLens(['F'], {
+      model: walkModel('F', {}), status: 'error', error: 'provider unreachable', extendStatus: new Map(),
+    })
+    expect(screen.getByText(/provider unreachable/)).toBeTruthy()
+    fireEvent.click(screen.getByText('Retry'))
+    expect(api.retry).toHaveBeenCalledWith('F')
+  })
+
+  it('says plainly when the data source cannot walk lineage at all', () => {
+    renderLens(['F'], { model: walkModel('F', {}), status: 'unsupported', error: null, extendStatus: new Map() })
+    expect(screen.getByText(/can't walk lineage/)).toBeTruthy()
+    // NOT the empty-direction whisper: that is a claim about what the
+    // data source said, and it was never asked.
+    expect(screen.queryByText(/No upstream sources in the data source/)).toBeNull()
+  })
+
+  it('says when the data source stopped early, so the counts read as floors', () => {
+    const model = walkModel('F', {
+      nodes: [wnode('F'), wnode('u')],
+      lineageEdges: [hop('u', 'F')],
+      truncated: true,
+      truncationReason: 'node budget reached',
+    })
+    renderLens(['F'], doneWalk(model))
+    expect(screen.getByText(/stopped early \(node budget reached\)/)).toBeTruthy()
+  })
+})
+
+// ── REACH ────────────────────────────────────────────────────────────
+
+describe('reach — how far the walk got, and whether that is all of it', () => {
+  afterEach(() => cleanup())
+
+  const reachModel = (withFrontier: boolean) => walkModel('F', {
+    nodes: [wnode('F'), wnode('u1'), wnode('u2'), wnode('d1')],
+    lineageEdges: [hop('u1', 'F'), hop('u2', 'F'), hop('F', 'd1')],
+    upstreamUrns: new Set(['u1', 'u2']),
+    downstreamUrns: new Set(['d1']),
+    frontierUp: withFrontier ? [frontier('u1', 9)] : [],
+  })
+
+  it('counts what the data source named, and admits an open frontier', () => {
+    usePreferencesStore.setState({ lensViewMode: 'list' })
+    renderLens(['F'], doneWalk(reachModel(true)))
+    expect(screen.getByText(/Reach: 2 upstream · 1 downstream · more beyond this view/)).toBeTruthy()
+  })
+
+  it('drops the qualifier once nothing is left to walk', () => {
+    usePreferencesStore.setState({ lensViewMode: 'list' })
+    renderLens(['F'], doneWalk(reachModel(false)))
+    expect(screen.getByText(/Reach: 2 upstream · 1 downstream$/)).toBeTruthy()
+  })
+
+  it('claims no reach at all while the walk is still running', () => {
+    usePreferencesStore.setState({ lensViewMode: 'list' })
+    renderLens(['F'], { model: reachModel(true), status: 'loading', error: null, extendStatus: new Map() })
+    expect(screen.queryByText(/Reach:/)).toBeNull()
+    expect(screen.getByText(/Walking the lineage…/)).toBeTruthy()
+  })
+})
+
+// ── ONE MODEL, TWO BODIES ────────────────────────────────────────────
+
+describe('the list body and the graph body are two renderings of one model', () => {
+  afterEach(() => cleanup())
+
+  const model = () => walkModel('F', {
+    nodes: [
+      wnode('F', 'dataset', 'stg_orders'),
+      wnode('T', 'dataset', 'raw_orders'),
+      wnode('c1', 'schemaField', 'order_id'),
+      wnode('c2', 'schemaField', 'customer_id'),
+      wnode('OUT', 'dataset', 'fct_orders'),
+    ],
+    containmentEdges: [holds('T', 'c1'), holds('T', 'c2')],
+    lineageEdges: [hop('c1', 'F'), hop('c2', 'F'), hop('F', 'OUT')],
+    upstreamUrns: new Set(['c1', 'c2']),
+    downstreamUrns: new Set(['OUT']),
+  })
+
+  it('agrees about the counts whichever body is on screen', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    const { unmount } = renderLens(['F'], doneWalk(model()))
+    // The focal card, in the graph.
+    expect(screen.getByText('2 in')).toBeTruthy()
+    expect(screen.getByText('1 out')).toBeTruthy()
+    unmount()
+
+    usePreferencesStore.setState({ lensViewMode: 'list' })
+    renderLens(['F'], doneWalk(model()))
+    const sourcesHeader = screen.getByText('Data Sources').closest('div')!
+    expect(within(sourcesHeader).getByText('2')).toBeTruthy()
+    // The same two columns, named — grouped under the table that holds
+    // them, which is the structural story the graph tells by nesting.
+    expect(screen.getByText('order_id')).toBeTruthy()
+    expect(screen.getByText('customer_id')).toBeTruthy()
+    expect(screen.getByText('raw_orders')).toBeTruthy()
+  })
+
+  it('re-centers from a list row', () => {
+    usePreferencesStore.setState({ lensViewMode: 'list' })
+    const onRecenter = vi.fn()
+    renderLens(['F'], doneWalk(model()), { onRecenter })
+    fireEvent.click(screen.getByText('fct_orders'))
+    expect(onRecenter).toHaveBeenCalledWith('OUT')
+  })
+
+  it('a type chip hides entities and keeps saying how many', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [wnode('F'), wnode('v', 'view', 'reporting_view'), wnode('d', 'dataset', 'fct_orders')],
+      lineageEdges: [hop('v', 'F'), hop('F', 'd')],
+      upstreamUrns: new Set(['v']),
+      downstreamUrns: new Set(['d']),
+    })))
+    expect(onBoard('reporting_view')).toBe(true)
+    fireEvent.click(screen.getByTitle('Click to hide view entities (1)'))
+    expect(onBoard('reporting_view')).toBe(false)
+    // Removed, and SAID — a chip never loses anything silently.
+    expect(screen.getByText('1 hidden by the type chips')).toBeTruthy()
+  })
+})
+
+// ── THE SHELL ────────────────────────────────────────────────────────
+
+describe('the shell around the picture', () => {
+  afterEach(() => cleanup())
+
+  const simple = () => doneWalk(walkModel('b', {
+    nodes: [wnode('a', 'dataset', 'label-a'), wnode('b', 'dataset', 'label-b'), wnode('c', 'dataset', 'label-c')],
+    lineageEdges: [hop('a', 'b'), hop('b', 'c')],
+    upstreamUrns: new Set(['a']),
+    downstreamUrns: new Set(['c']),
+  }))
+
+  it('renders nothing when the history is empty', () => {
+    renderLens([], null)
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
-  it('centers the focal node with its upstream and downstream neighbors', () => {
-    renderLens(['b'])
-    expect(screen.getByRole('dialog')).toBeTruthy()
-    expect(screen.getAllByText('label-b').length).toBeGreaterThan(0)
-    expect(screen.getByText('label-a')).toBeTruthy()   // upstream
-    expect(screen.getByText('label-c')).toBeTruthy()   // downstream
-  })
-
-  it('clicking a neighbor re-centers', () => {
-    const onRecenter = vi.fn()
-    renderLens(['b'], { onRecenter })
-    fireEvent.click(screen.getByText('label-c'))
-    expect(onRecenter).toHaveBeenCalledWith('c')
-  })
-
-  it('shows Back only with stack depth > 1 and pops on click', () => {
-    const onBack = vi.fn()
-    renderLens(['a', 'b'], { onBack })
-    fireEvent.click(screen.getByText('Back'))
-    expect(onBack).toHaveBeenCalled()
+  it('is a labelled dialog naming what it is about', () => {
+    usePreferencesStore.setState({ lensViewMode: 'list' })
+    renderLens(['b'], simple())
+    expect(screen.getByRole('dialog', { name: 'Connections of label-b' })).toBeTruthy()
   })
 
   it('Escape closes the lens', () => {
     const onClose = vi.fn()
-    renderLens(['b'], { onClose })
+    renderLens(['b'], simple(), { onClose })
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(onClose).toHaveBeenCalled()
   })
-})
-
-describe('LineageLens on-demand fetch merge', () => {
-  beforeEach(() => {
-    usePreferencesStore.setState({ lensViewMode: 'list' })
-  })
-  afterEach(() => cleanup())
-
-  it('surfaces fetched edges and partner names the canvas never loaded', () => {
-    useCanvasStore.setState({ nodes: [node('a')], edges: [], visibleEdges: [] } as never)
-    renderLens(['a'], {}, {
-      supplementalEdges: [edge('s1', 'a', 'x')],
-      supplementalNodes: new Map([['x', node('x')]]),
-    })
-    expect(screen.getByText('label-x')).toBeTruthy()
-  })
-
-  it('dedupes a fetched edge the store already has as a (source, target, type) pair', () => {
-    useCanvasStore.setState({
-      nodes: [node('b'), node('c')],
-      edges: [edge('e2', 'b', 'c')],
-      visibleEdges: [],
-    } as never)
-    renderLens(['b'], {}, { supplementalEdges: [edge('other-id', 'b', 'c')] })
-    expect(screen.getAllByText('label-c')).toHaveLength(1)
-  })
-
-  it('skips a fetched edge rolled into an aggregate that touches it, keeps one that is not', () => {
-    const agg: LineageEdge = {
-      id: 'agg1', source: 'a', target: 'P',
-      data: { edgeType: 'FLOWS_TO', isAggregated: true, sourceEdgeCount: 2, sourceEdges: ['r1', 'r2'] },
-    } as unknown as LineageEdge
-    const aggElsewhere: LineageEdge = {
-      id: 'agg2', source: 'P', target: 'Q',
-      data: { edgeType: 'FLOWS_TO', isAggregated: true, sourceEdgeCount: 1, sourceEdges: ['r3'] },
-    } as unknown as LineageEdge
-    useCanvasStore.setState({
-      nodes: [node('a'), node('P'), node('Q')],
-      edges: [],
-      visibleEdges: [agg, aggElsewhere],
-    } as never)
-    renderLens(['a'], {}, {
-      // r1 is covered by agg1 (shares endpoint a) → hidden behind the
-      // aggregate row; r3 belongs to an aggregate between OTHER nodes
-      // → must surface, that's the invisible-lineage case.
-      supplementalEdges: [edge('r1', 'a', 'c1'), edge('r3', 'a', 'c2')],
-      supplementalNodes: new Map([['c1', node('c1')], ['c2', node('c2')]]),
-    })
-    expect(screen.queryByText('label-c1')).toBeNull()
-    expect(screen.getByText('label-P')).toBeTruthy()
-    expect(screen.getByText('label-c2')).toBeTruthy()
-  })
-
-  it('classic-mode ×N badge drills an aggregate into its constituents', () => {
-    const agg: LineageEdge = {
-      id: 'agg1', source: 'a', target: 'P',
-      data: { edgeType: 'FLOWS_TO', isAggregated: true, sourceEdgeCount: 2, sourceEdges: ['r1', 'r2'] },
-    } as unknown as LineageEdge
-    useCanvasStore.setState({
-      nodes: [node('a'), node('P'), node('c1')],
-      edges: [edge('r1', 'a', 'c1')],
-      visibleEdges: [agg],
-    } as never)
-    renderLens(['a'])
-    // Constituents hidden until drilled.
-    expect(screen.queryByText('label-c1')).toBeNull()
-    fireEvent.click(screen.getByTitle(/Refine — see the 2 underlying connections/))
-    expect(screen.getByText('label-c1')).toBeTruthy()
-    // The unloaded remainder is reported, never invented.
-    expect(screen.getByText(/\+1 more \(showing the first 1\)/)).toBeTruthy()
-  })
-
-  it('narrates an in-flight fetch instead of claiming "no connections"', () => {
-    useCanvasStore.setState({ nodes: [node('a')], edges: [], visibleEdges: [] } as never)
-    renderLens(['a'], {}, { fetchStatus: new Map([['a', 'loading' as const]]) })
-    expect(screen.getByText(/Fetching upstream sources from the data source/)).toBeTruthy()
-    expect(screen.getByText(/Fetching downstream consumers from the data source/)).toBeTruthy()
-  })
-
-  it('claims data-source truth (not canvas truth) once the fetch completed empty', () => {
-    useCanvasStore.setState({ nodes: [node('a')], edges: [], visibleEdges: [] } as never)
-    renderLens(['a'], {}, { fetchStatus: new Map([['a', 'done' as const]]) })
-    expect(screen.getByText('No upstream sources in the data source')).toBeTruthy()
-    expect(screen.getByText('No downstream consumers in the data source')).toBeTruthy()
-  })
-
-  it('surfaces a failed fetch with a Retry that re-kicks it', () => {
-    useCanvasStore.setState({ nodes: [node('a')], edges: [], visibleEdges: [] } as never)
-    const onRetryFetch = vi.fn()
-    renderLens(['a'], {}, { fetchStatus: new Map([['a', 'error' as const]]), onRetryFetch })
-    fireEvent.click(screen.getByText('Retry'))
-    expect(onRetryFetch).toHaveBeenCalledWith('a')
-  })
-
-  it('groups field partners under their parent dataset and demotes coarser rollups', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [
-          { id: 'CONTAINER', hierarchy: { canContain: ['DATASET'] } },
-          { id: 'DATASET', hierarchy: { canContain: ['SCHEMAFIELD'] } },
-          { id: 'SCHEMAFIELD', hierarchy: { canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({ nodes: [node('ds', 'DATASET')], edges: [], visibleEdges: [] } as never)
-      const onRecenter = vi.fn()
-      renderLens(['ds'], { onRecenter }, {
-        supplementalEdges: [
-          edge('f1', 'fieldA', 'ds'),
-          { id: 'c1', source: 'parentDs', target: 'fieldA', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
-          edge('f2', 'plat', 'ds'),
-        ],
-        supplementalNodes: new Map([
-          ['fieldA', node('fieldA', 'SCHEMAFIELD')],
-          ['parentDs', node('parentDs', 'DATASET')],
-          ['plat', node('plat', 'CONTAINER')],
-        ]),
-        fetchStatus: new Map([['ds', 'done' as const]]),
-      })
-      // Field grouped under its parent dataset (structural story).
-      expect(screen.getByText('label-parentDs')).toBeTruthy()
-      expect(screen.getByText('label-fieldA')).toBeTruthy()
-      // Coarser CONTAINER partner demoted to the labeled Rollups tier.
-      expect(screen.getByText('Rollups')).toBeTruthy()
-      expect(screen.getByText('label-plat')).toBeTruthy()
-      expect(screen.getByText('rollup')).toBeTruthy()
-      // The headline total reconciles with the focal card's in/out
-      // tally: 2 connections, of which 1 is a rollup. "1 direct
-      // connection · 1 rolled-up" beside a card reading 2 could not be
-      // reconciled by a reader.
-      expect(screen.getByText(/2 connections · 1 rolled-up/)).toBeTruthy()
-      // The header row toggles collapse; navigation lives on the
-      // dedicated re-center button beside it.
-      fireEvent.click(screen.getByTitle('Re-center on label-parentDs'))
-      expect(onRecenter).toHaveBeenCalledWith('parentDs')
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  it('type chips toggle a grain off without silent loss (count stays visible)', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        entityTypes: [
-          { id: 'CONTAINER', hierarchy: { canContain: ['DATASET'] } },
-          { id: 'DATASET', hierarchy: { canContain: ['SCHEMAFIELD'] } },
-          { id: 'SCHEMAFIELD', hierarchy: { canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({ nodes: [node('ds', 'DATASET')], edges: [], visibleEdges: [] } as never)
-      renderLens(['ds'], {}, {
-        supplementalEdges: [edge('f1', 'fieldA', 'ds'), edge('f2', 'plat', 'ds')],
-        supplementalNodes: new Map([
-          ['fieldA', node('fieldA', 'SCHEMAFIELD')],
-          ['plat', node('plat', 'CONTAINER')],
-        ]),
-      })
-      expect(screen.getByText('label-plat')).toBeTruthy()
-      // Toggle the CONTAINER chip off — rows hide, the count note appears.
-      fireEvent.click(screen.getByText('CONTAINER'))
-      expect(screen.queryByText('label-plat')).toBeNull()
-      expect(screen.getByText(/1 connection hidden by the type chips/)).toBeTruthy()
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  it('collapses parent groups by default at 3+ groups; chevron expands', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: { ...(prevSchema ?? {}), containmentEdgeTypes: ['CONTAINS'] },
-    } as never)
-    try {
-      useCanvasStore.setState({ nodes: [node('ds')], edges: [], visibleEdges: [] } as never)
-      renderLens(['ds'], {}, {
-        supplementalEdges: [
-          edge('f1', 'kid1', 'ds'),
-          edge('f2', 'kid2', 'ds'),
-          edge('f3', 'kid3', 'ds'),
-          { id: 'c1', source: 'p1', target: 'kid1', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
-          { id: 'c2', source: 'p2', target: 'kid2', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
-          { id: 'c3', source: 'p3', target: 'kid3', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
-        ],
-        supplementalNodes: new Map([
-          ['kid1', node('kid1')], ['kid2', node('kid2')], ['kid3', node('kid3')],
-          ['p1', node('p1')], ['p2', node('p2')], ['p3', node('p3')],
-        ]),
-      })
-      // Three parent groups → collapsed by default: headers with counts
-      // visible, member rows hidden.
-      expect(screen.getByText('label-p1')).toBeTruthy()
-      expect(screen.queryByText('label-kid1')).toBeNull()
-      // Chevron expands the group (header click would re-center instead).
-      fireEvent.click(screen.getAllByTitle('Expand 1 connection')[0])
-      expect(screen.getByText('label-kid1')).toBeTruthy()
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  it('renders the SAME body at depth > 1: partners grouped under their parent, re-center on its button', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: { ...(prevSchema ?? {}), containmentEdgeTypes: ['CONTAINS'] },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('a'), node('b')],
-        edges: [edge('e1', 'a', 'b')],
-        visibleEdges: [],
-      } as never)
-      const onRecenter = vi.fn()
-      renderLens(['a', 'b'], { onRecenter }, {
-        onJumpTo: vi.fn(),
-        supplementalEdges: [
-          edge('f1', 'b', 'kid1'),
-          edge('f2', 'b', 'kid2'),
-          { id: 'c1', source: 'pd', target: 'kid1', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
-          { id: 'c2', source: 'pd', target: 'kid2', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
-        ],
-        supplementalNodes: new Map([
-          ['kid1', node('kid1')],
-          ['kid2', node('kid2')],
-          ['pd', node('pd')],
-        ]),
-      })
-      // Depth 2 renders the standard columns — no layout flip: partners
-      // grouped under their parent dataset, exactly like depth 1.
-      expect(screen.getByText('label-pd')).toBeTruthy()
-      expect(screen.getByText('label-kid1')).toBeTruthy()
-      // The header row toggles collapse; navigation lives on the
-      // dedicated re-center button beside it.
-      fireEvent.click(screen.getByTitle('Re-center on label-pd'))
-      expect(onRecenter).toHaveBeenCalledWith('pd')
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  it('path trail and headers carry the focal node\'s parent context', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: { ...(prevSchema ?? {}), containmentEdgeTypes: ['CONTAINS'] },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('a'), node('kid')],
-        edges: [edge('e1', 'a', 'kid')],
-        visibleEdges: [],
-      } as never)
-      renderLens(['a', 'kid'], {}, {
-        onJumpTo: vi.fn(),
-        supplementalEdges: [
-          // P contains kid; P is NOT the previous hop, so the breadcrumb
-          // must surface it (that's the expanded-parent context the bare
-          // trail was losing).
-          { id: 'c1', source: 'P', target: 'kid', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
-        ],
-        supplementalNodes: new Map([['P', node('P')]]),
-      })
-      expect(screen.getAllByText(/label-P/).length).toBeGreaterThanOrEqual(1)
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  it('Forward appears when the cursor is mid-path and steps forward without dropping hops', () => {
-    useCanvasStore.setState({
-      nodes: [node('a'), node('b'), node('c')],
-      edges: [edge('e1', 'a', 'b'), edge('e2', 'b', 'c')],
-      visibleEdges: [],
-    } as never)
-    const onForward = vi.fn()
-    renderLens(['a'], { onForward }, {
-      history: { entries: ['a', 'b', 'c'], cursor: 1 },
-      onJumpTo: vi.fn(),
-    })
-    fireEvent.click(screen.getByText('Forward'))
-    expect(onForward).toHaveBeenCalled()
-  })
 
   it('ArrowRight steps forward; ignored while typing in the filter input', () => {
-    useCanvasStore.setState({
-      nodes: [node('a'), node('b'), node('c')],
-      edges: [edge('e1', 'a', 'b'), edge('e2', 'b', 'c')],
-      visibleEdges: [],
-    } as never)
     const onForward = vi.fn()
-    renderLens(['a'], { onForward }, {
-      history: { entries: ['a', 'b', 'c'], cursor: 1 },
-      onJumpTo: vi.fn(),
-    })
-    fireEvent.keyDown(screen.getByPlaceholderText('Filter connections…'), { key: 'ArrowRight' })
-    expect(onForward).not.toHaveBeenCalled()
+    renderLens(['a', 'b'], simple(), { history: { entries: ['a', 'b'], cursor: 0 }, onForward })
     fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(onForward).toHaveBeenCalledTimes(1)
+
+    const input = screen.getByPlaceholderText('Filter connections…')
+    fireEvent.keyDown(input, { key: 'ArrowRight' })
     expect(onForward).toHaveBeenCalledTimes(1)
   })
 
-  it('a forward trail chip stays visible and jumps the cursor there non-destructively', () => {
-    useCanvasStore.setState({
-      nodes: [node('a'), node('b'), node('c')],
-      edges: [edge('e1', 'a', 'b'), edge('e2', 'b', 'c')],
-      visibleEdges: [],
-    } as never)
+  it('restores a shared path: every hop a chip, the cursor where the link left it', () => {
     const onJumpTo = vi.fn()
-    renderLens(['a'], {}, {
-      history: { entries: ['a', 'b', 'c'], cursor: 1 },
-      onJumpTo,
-    })
-    // 'c' is AHEAD of the cursor — the old destructive stack would have
-    // dropped it; the history keeps it visible and clickable.
-    fireEvent.click(screen.getByTitle('Jump to label-c'))
+    renderLens(['a', 'b', 'c'], simple(), { history: { entries: ['a', 'b', 'c'], cursor: 1 }, onJumpTo })
+    expect(screen.getByText('Path')).toBeTruthy()
+    // The forward side of the history stays visible and clickable —
+    // browser history, not a destructive stack.
+    fireEvent.click(screen.getByTitle(/Jump to label-c/))
     expect(onJumpTo).toHaveBeenCalledWith(2)
   })
 
-  it('renders a walkable Contains group for a container focal (containment ≠ flow)', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: { ...(prevSchema ?? {}), containmentEdgeTypes: ['CONTAINS'] },
-    } as never)
-    try {
-      useCanvasStore.setState({ nodes: [node('root')], edges: [], visibleEdges: [] } as never)
-      const onRecenter = vi.fn()
-      renderLens(['root'], { onRecenter }, {
-        supplementalEdges: [
-          { id: 'c1', source: 'root', target: 'kid', data: { edgeType: 'CONTAINS' } } as unknown as LineageEdge,
-        ],
-        supplementalNodes: new Map([['kid', node('kid')]]),
-        fetchStatus: new Map([['root', 'done' as const]]),
-      })
-      expect(screen.getByText('Contains')).toBeTruthy()
-      // Containment must NOT count as a flow connection.
-      expect(screen.getByText(/0 connections · contains 1/)).toBeTruthy()
-      fireEvent.click(screen.getByText('label-kid'))
-      expect(onRecenter).toHaveBeenCalledWith('kid')
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
+  it('the body toggle switches to the list and persists the preference', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    renderLens(['b'], simple())
+    expect(screen.queryByText('Upstream')).toBeNull()
+    fireEvent.click(screen.getByTitle('List — scan all connections as columns'))
+    expect(screen.getByText('Upstream')).toBeTruthy()
+    expect(usePreferencesStore.getState().lensViewMode).toBe('list')
   })
-})
 
-describe('LineageLens graph mode', () => {
-  beforeEach(() => {
-    // Both are persisted preferences — pin them, or one test's header
-    // click decides the next test's starting state.
+  it('the container default is a preference, persisted like the body mode', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' })
-    useCanvasStore.setState({
-      nodes: [node('a'), node('b'), node('c')],
-      edges: [edge('e1', 'a', 'b'), edge('e2', 'b', 'c')],
-      visibleEdges: [],
-    } as never)
-  })
-  afterEach(() => cleanup())
-
-  it('renders upstream and downstream as cards; double-click focuses', () => {
-    const onRecenter = vi.fn()
-    renderLens(['b'], { onRecenter })
-    // Focal + one card per neighbor (React Flow smoke — logic depth
-    // lives in the pure focus-graph tests).
-    expect(screen.getAllByText('label-b').length).toBeGreaterThan(0)
-    expect(screen.getByText('label-a')).toBeTruthy()
-    expect(screen.getByText('label-c')).toBeTruthy()
-    // Edge types read as words, not tokens (FLOWS_TO → "Flows to").
-    expect(screen.getAllByText('Flows to').length).toBeGreaterThan(0)
-    fireEvent.doubleClick(screen.getByText('label-c'))
-    expect(onRecenter).toHaveBeenCalledWith('c')
-  })
-
-  it('single click selects into the detail strip; Focus here re-centers', () => {
-    const onRecenter = vi.fn()
-    renderLens(['b'], { onRecenter })
-    fireEvent.click(screen.getByText('label-c'))
-    const focusBtn = screen.getByText('Focus here')
-    expect(focusBtn).toBeTruthy()
-    fireEvent.click(focusBtn)
-    expect(onRecenter).toHaveBeenCalledWith('c')
-  })
-
-  it('a coarse partner offers a chevron that asks what is inside it', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [
-          { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
-          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
-        edges: [edge('e1', 'plat', 'ds')],
-        visibleEdges: [],
-      } as never)
-      const onOpenContainer = vi.fn()
-      renderLens(['ds'], {}, { onOpenContainer })
-
-      // The coarse partner is not a dead end — it offers its contents,
-      // on a control separate from the lineage hop.
-      fireEvent.click(screen.getByTitle("Show what's inside label-plat"))
-      // Opening asks the server for the next grain down (container level
-      // 2 → 3), about the partner the card is connected to — the focal
-      // itself at the first hop.
-      expect(onOpenContainer).toHaveBeenCalledWith('plat', 'ds', 'in', 2)
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  // REGRESSION: "what's inside this" was only ever offered to a COARSER
-  // partner, so an ordinary dataset upstream of your dataset had one ⊕
-  // that did a lineage hop — its columns were simply unreachable, and
-  // you had to re-center the whole lens to see them.
-  it('a SAME-GRAIN neighbour offers its contents too, alongside its lineage hop', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [
-          { id: 'DATASET', hierarchy: { level: 3, canContain: ['FIELD'] } },
-          { id: 'FIELD', hierarchy: { level: 4, canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('ds', 'DATASET'), node('up', 'DATASET')],
-        edges: [edge('e1', 'up', 'ds')],
-        visibleEdges: [],
-      } as never)
-      const onOpenContainer = vi.fn()
-      const onEnsureFetched = vi.fn()
-      renderLens(['ds'], {}, { onOpenContainer, onEnsureFetched })
-
-      // Two controls, two questions — and using one leaves the other be.
-      fireEvent.click(screen.getByTitle("Show what's inside label-up"))
-      expect(onOpenContainer).toHaveBeenCalledWith('up', 'ds', 'in', 3)
-      expect(onEnsureFetched).not.toHaveBeenCalled()
-
-      // The frame keeps its hop control — looking inside must not end
-      // the walk. (The lens re-asserts an unresolved open on re-render,
-      // so compare across the click rather than counting from zero.)
-      const opensBefore = onOpenContainer.mock.calls.length
-      fireEvent.click(screen.getByTitle(/Expand the next hop upstream of label-up/))
-      expect(onEnsureFetched).toHaveBeenCalledWith('up')
-      expect(onOpenContainer.mock.calls.filter(c => c[0] !== 'up')).toHaveLength(0)
-      expect(onOpenContainer.mock.calls.length).toBeGreaterThanOrEqual(opensBefore)
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  // The other half of "focus a table, see tables": the builder renders
-  // a coarser partner's answer as soon as it exists, and THIS is what
-  // asks for it. Without the request nothing ever arrives, and the user
-  // is back to a Data Domain card they must click — which is the bug.
-  it('asks what is inside a coarser partner without waiting to be clicked', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [
-          { id: 'DATADOMAIN', hierarchy: { level: 0, canContain: ['DATASET'] } },
-          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('tbl', 'DATASET'), node('dom', 'DATADOMAIN')],
-        edges: [edge('e1', 'dom', 'tbl')],
-        visibleEdges: [],
-      } as never)
-      const onOpenContainer = vi.fn()
-      renderLens(['tbl'], {}, { onOpenContainer })
-
-      expect(onOpenContainer).toHaveBeenCalledWith('dom', 'tbl', 'in', 0)
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  /**
-   * The wiring test. The builder knows how to draw a table's connected
-   * columns inside it, and `focus-graph.test.ts` proves that; what was
-   * never covered is the layer BETWEEN — that the frame the builder
-   * emits from records already in hand does not get mistaken for one
-   * that needs fetching, and that its chevron reaches the state the
-   * builder reads.
-   *
-   * REGRESSION: it was. `LineageLens`'s default-framing effect fires a
-   * container expansion for every frame with no result, and a locally
-   * built frame satisfies all of its conditions — so every table on the
-   * board cost one `/trace/expand` per re-center whose answer was then
-   * discarded. Both halves passed their own tests.
-   */
-  it('draws a neighbour table\'s columns inside it, with no fetch, and collapses on the chevron', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [
-          { id: 'DATASET', hierarchy: { level: 3, canContain: ['FIELD'] } },
-          { id: 'FIELD', hierarchy: { level: 4, canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [
-          node('focal', 'FIELD'), node('src', 'DATASET'),
-          node('c1', 'FIELD'), node('c2', 'FIELD'),
-        ],
-        edges: [
-          edge('k1', 'src', 'c1'), edge('k2', 'src', 'c2'),
-          edge('u1', 'c1', 'focal'), edge('u2', 'c2', 'focal'),
-        ].map((e, i) => (i < 2 ? { ...e, data: { edgeType: 'CONTAINS' } } : e)) as never,
-        visibleEdges: [],
-      } as never)
-      const onOpenContainer = vi.fn()
-      renderLens(['focal'], {}, { onOpenContainer })
-
-      // The table is a frame; its two connected columns are rows inside
-      // it, not loose cards beside it.
-      expect(screen.getByText('label-src')).toBeInTheDocument()
-      expect(screen.getByText('label-c1')).toBeInTheDocument()
-      expect(screen.getByText('label-c2')).toBeInTheDocument()
-
-      // And nothing was asked of the server. The records were already in
-      // hand — that is what makes this frame local.
-      expect(onOpenContainer).not.toHaveBeenCalled()
-
-      // The chevron closes it: rows go, the frame stays, still no fetch.
-      fireEvent.click(screen.getByTitle('Collapse label-src'))
-      expect(screen.queryByText('label-c1')).not.toBeInTheDocument()
-      expect(screen.getByText('label-src')).toBeInTheDocument()
-      expect(onOpenContainer).not.toHaveBeenCalled()
-
-      // And re-opens it.
-      fireEvent.click(screen.getByTitle('Expand label-src'))
-      expect(screen.getByText('label-c1')).toBeInTheDocument()
-      expect(onOpenContainer).not.toHaveBeenCalled()
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  // The Grain control is DEAD; this is what replaced it. One question
-  // in plain words — Detail (default) or Summary — because the old
-  // type-name chips could not even express a choice on a self-nesting
-  // estate: Node ⊃ Node ⊃ Node is one type at three depths. Detail is
-  // the default because the default must SHOW THE RECORDS: Summary as
-  // default absorbed real loaded neighbours into their ancestor, which
-  // read as the user's lineage being replaced by random values.
-  it('opens in DETAIL — the records themselves; SUMMARY is one click, not the default', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [{ id: 'Node', hierarchy: { canContain: ['Node'] } }],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('F', 'Node'), node('outer', 'Node'), node('mid', 'Node'), node('leaf', 'Node')],
-        edges: (() => {
-          const contains = (id: string, a: string, b: string) =>
-            ({ ...edge(id, a, b), data: { edgeType: 'CONTAINS' } })
-          return [
-            edge('e1', 'outer', 'F'), edge('e2', 'mid', 'F'), edge('e3', 'leaf', 'F'),
-            contains('k1', 'outer', 'mid'), contains('k2', 'mid', 'leaf'),
-          ]
-        })() as never,
-        visibleEdges: [],
-      } as never)
-      renderLens(['F'])
-
-      // Detail is simply how it opens — the finest record survives the
-      // restatement fold, and nothing real hides behind an ancestor.
-      expect(screen.getByRole('button', { name: 'Detail' }).getAttribute('aria-pressed')).toBe('true')
-      expect(screen.getAllByText('label-leaf').length).toBeGreaterThan(0)
-
-      // Summary: the whole chain as one card at its outermost container.
-      fireEvent.click(screen.getByRole('button', { name: 'Summary' }))
-      expect(screen.getAllByText('label-outer').length).toBeGreaterThan(0)
-      expect(screen.queryByText('label-leaf')).toBeNull()
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  /**
-   * THE BUSINESS JOURNEY, end to end at the component level: select a
-   * node, see the real upstream at your grain with no clicks, walk to
-   * one of those upstream entities, walk back, and keep going. This is
-   * the sentence the user reported as impossible — every gesture in it
-   * is pinned here, through the real component, builder and renderer.
-   */
-  it('walks the tree: focus → upstream tables appear → walk to one → back → onward', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [
-          // The reported estate shape: a domain far above the tables,
-          // with the repeated middle levels carrying NO declared levels.
-          { id: 'DATADOMAIN', hierarchy: { level: 0, canContain: ['CONTAINER'] } },
-          { id: 'CONTAINER', hierarchy: { canContain: ['CONTAINER', 'DATASET'] } },
-          { id: 'DATASET', hierarchy: { level: 5, canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('collaterals', 'DATASET'), node('finance', 'DATADOMAIN')],
-        edges: [edge('u1', 'finance', 'collaterals')],
-        visibleEdges: [],
-      } as never)
-      const onRecenter = vi.fn()
-      const onBack = vi.fn()
-      // The container answer as the (fixed) wire now delivers it — the
-      // walk resolved the domain down to the tables, naming each level
-      // it stepped through. NO graphSeed, NO openContainers: nothing
-      // was clicked.
-      renderLens(['collaterals'], { onRecenter, onBack }, {
-        containerResults: new Map([['in:finance', {
-          nodes: [node('loan_positions', 'DATASET'), node('fx_rates', 'DATASET')],
-          edges: [edge('r1', 'loan_positions', 'collaterals'), edge('r2', 'fx_rates', 'collaterals')],
-          passedThrough: [node('riskapp', 'CONTAINER'), node('risk_db', 'CONTAINER')],
-          truncated: false,
-          empty: false,
-        }]]),
-        containerStatus: new Map([['in:finance', 'done' as const]]),
-      })
-
-      // 1. Selecting the node was enough: the upstream is TABLES, inside
-      //    a frame named for the domain, walked path on show. (getAll —
-      //    a name can legitimately appear in a row and in a caption.)
-      const row = screen.getAllByText('label-loan_positions')[0]
-      expect(row).toBeTruthy()
-      expect(screen.getAllByText('label-fx_rates').length).toBeGreaterThan(0)
-      expect(screen.getByText(/label-riskapp › label-risk_db/)).toBeTruthy()
-
-      // 2. Each table is a real card: click inspects...
-      fireEvent.click(row)
-      // (detail strip appears — the row is selected, nothing jumped)
-
-      // 3. ...double-click WALKS to it.
-      fireEvent.doubleClick(row)
-      expect(onRecenter).toHaveBeenCalledWith('loan_positions')
-
-      // 4. And from a walked-to node, Back retraces the step.
-      cleanup()
-      useCanvasStore.setState({
-        nodes: [node('collaterals', 'DATASET'), node('loan_positions', 'DATASET')],
-        edges: [edge('r1', 'loan_positions', 'collaterals')],
-        visibleEdges: [],
-      } as never)
-      renderLens(['collaterals', 'loan_positions'], { onBack })
-      fireEvent.click(screen.getByText('Back'))
-      expect(onBack).toHaveBeenCalled()
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  it('fetches the contents for a user-opened frame whose lineage answer failed', () => {
-    // The wiring for the fall-through: the builder derives the display,
-    // and THIS asks for the roster it needs. Without the ask, nothing
-    // ever arrives and the chevron stays a dead end.
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [
-          { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
-          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
-        edges: [edge('e1', 'plat', 'ds')],
-        visibleEdges: [],
-      } as never)
-      const onLoadAllChildren = vi.fn()
-      renderLens(['ds'], {}, {
-        onLoadAllChildren,
-        graphSeed: { nodeId: 'ds', collapsedFrames: [], expandedFrontier: [], openContainers: ['in:plat'] },
-        containerStatus: new Map([['in:plat', 'error' as const]]),
-      })
-      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat', '')
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  it('renders an opened container as a frame holding its connected children', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [
-          { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
-          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
-        edges: [edge('e1', 'plat', 'ds')],
-        visibleEdges: [],
-      } as never)
-      const onRecenter = vi.fn()
-      const onOpenContainer = vi.fn()
-      renderLens(['ds'], { onRecenter }, {
-        onOpenContainer,
-        graphSeed: { nodeId: 'ds', collapsedFrames: [], expandedFrontier: [], openContainers: ['in:plat'] },
-        containerResults: new Map([['in:plat', {
-          nodes: [node('kid1', 'DATASET'), node('kid2', 'DATASET')],
-          edges: [edge('r1', 'kid1', 'ds'), edge('r2', 'kid2', 'ds')],
-          passedThrough: [],
-          truncated: false,
-          empty: false,
-        }]]),
-        containerStatus: new Map([['in:plat', 'done' as const]]),
-      })
-
-      // Only the children that connect show, and they are real cards you
-      // can keep exploring from.
-      expect(screen.getByText('label-kid1')).toBeTruthy()
-      expect(screen.getByText('label-kid2')).toBeTruthy()
-      expect(screen.getByText(/2 connected inside/)).toBeTruthy()
-      fireEvent.doubleClick(screen.getByText('label-kid1'))
-      expect(onRecenter).toHaveBeenCalledWith('kid1')
-      // The answer is already in hand, so nothing is re-asked.
-      expect(onOpenContainer).not.toHaveBeenCalled()
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  // REGRESSION: band overflow keys used to be `${dir}:${band}` (e.g.
-  // "in:1"), which collides with the `${dir}:${urn}` space frames use.
-  // The prefix-based dispatch routed band paging into frame paging, so
-  // the band's "+N more" was a dead control.
-  it('the band overflow card actually reveals more of the band', () => {
-    const extra = 5
-    const many = Array.from({ length: GRAPH_BAND_CAP + extra }, (_, i) => node(`src${i}`))
-    useCanvasStore.setState({
-      nodes: [node('ds'), ...many],
-      edges: many.map((n, i) => edge(`e${i}`, n.id, 'ds')),
-      visibleEdges: [],
-    } as never)
-    renderLens(['ds'])
-
-    // One viewport's worth fits; the rest sit behind one overflow card.
-    expect(screen.getByText(`+${extra} more`)).toBeTruthy()
-    expect(screen.getAllByText(/^label-src\d+$/)).toHaveLength(GRAPH_BAND_CAP)
-
-    fireEvent.click(screen.getByText(`+${extra} more`))
-    expect(screen.getAllByText(/^label-src\d+$/)).toHaveLength(many.length)
-    expect(screen.queryByText(`+${extra} more`)).toBeNull()
-  })
-
-  // REGRESSION: the contains stack was derived ONLY from containment
-  // edges already on the canvas, while its total came from childCount.
-  // So the lens would say "contains 128" and show none of them: you had
-  // to leave Focus mode, expand the node on the canvas, and come back.
-  // And the ASK is driven by the ontology, not by childCount: every
-  // lineage and trace read path strips childCount server-side, so a
-  // focal that arrived by a trace claims zero children it in fact has.
-  it('asks for the focal\'s children, and shows them, without visiting the canvas', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [
-          { id: 'dataset', hierarchy: { level: 3, canContain: ['schemaField'] } },
-          { id: 'schemaField', hierarchy: { level: 4, canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('ds')],            // no childCount at all
-        edges: [],                      // no containment edges loaded either
-        visibleEdges: [],
-      } as never)
-      const onLoadChildrenOf = vi.fn()
-      const { rerender } = render(
-        <LineageLens
-          history={{ entries: ['ds'], cursor: 0 }}
-          onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
-          onLoadChildrenOf={onLoadChildrenOf}
-        />,
-      )
-      // It asks, because a dataset is a type that holds columns.
-      expect(onLoadChildrenOf).toHaveBeenCalledWith('ds')
-
-      // And once the answer lands, they are on screen — no canvas trip.
-      rerender(
-        <LineageLens
-          history={{ entries: ['ds'], cursor: 0 }}
-          onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
-          onLoadChildrenOf={onLoadChildrenOf}
-          childrenOf={new Map([['ds', {
-            children: [node('col_a'), node('col_b'), node('col_c')],
-            hasMore: false,
-            total: 3,
-          }]])}
-          childrenStatusOf={new Map([['ds', 'done' as const]])}
-        />,
-      )
-      // The stack starts collapsed, but it now names a real, openable
-      // total rather than a count with nothing behind it.
-      fireEvent.click(screen.getByText('contains 3'))
-      // Named, not rendered as a urn tail — fetched children reach the
-      // lens's node map like any other resolved entity.
-      expect(screen.getByText('label-col_a')).toBeTruthy()
-      expect(screen.getByText('label-col_b')).toBeTruthy()
-      expect(screen.getByText('label-col_c')).toBeTruthy()
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  it('does not ask for children of a type that can hold nothing', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        entityTypes: [{ id: 'schemaField', hierarchy: { level: 4, canContain: [] } }],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('col', 'schemaField')], edges: [], visibleEdges: [],
-      } as never)
-      const onLoadChildrenOf = vi.fn()
-      renderLens(['col'], {}, { onLoadChildrenOf })
-      expect(onLoadChildrenOf).not.toHaveBeenCalled()
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  // REGRESSION: container answers were passed straight into the graph
-  // builder and nowhere else, so entities the server had just NAMED for
-  // an opened frame were unknown to the rest of the lens — they rendered
-  // as a urn tail ("a random id"), typed "not loaded", flagged not on
-  // canvas, and blank when focused.
-  it('resolves names the canvas store never had from the container answer', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [
-          { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
-          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      // The canvas knows nothing about `deep-kid`.
-      useCanvasStore.setState({
-        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
-        edges: [edge('e1', 'plat', 'ds')],
-        visibleEdges: [],
-      } as never)
-      renderLens(['ds'], {}, {
-        onOpenContainer: vi.fn(),
-        graphSeed: { nodeId: 'ds', collapsedFrames: [], expandedFrontier: [], openContainers: ['in:plat'] },
-        containerResults: new Map([['in:plat', {
-          nodes: [node('urn:li:dataset:(sf,warehouse.public.deep_kid,PROD)', 'DATASET')],
-          edges: [edge('r1', 'urn:li:dataset:(sf,warehouse.public.deep_kid,PROD)', 'ds')],
-          passedThrough: [], truncated: false, empty: false,
-        }]]),
-        containerStatus: new Map([['in:plat', 'done' as const]]),
-      })
-      // Its real label — not "PROD", the urn tail the unresolved
-      // fallback produces and which reads as a random id.
-      expect(screen.getByText('label-urn:li:dataset:(sf,warehouse.public.deep_kid,PROD)')).toBeTruthy()
-      expect(screen.queryByText('PROD')).toBeNull()
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  // REGRESSION: a restored exploration put its open containers into
-  // state but never re-asked the server, so a shared link reopened
-  // frames that stayed empty forever. The kick is driven off the built
-  // graph now, so it also names each frame's real partner.
-  it('asks the server for a restored open that has no answer yet', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [
-          { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
-          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
-        edges: [edge('e1', 'plat', 'ds')],
-        visibleEdges: [],
-      } as never)
-      const onOpenContainer = vi.fn()
-      renderLens(['ds'], {}, {
-        onOpenContainer,
-        graphSeed: { nodeId: 'ds', collapsedFrames: [], expandedFrontier: [], openContainers: ['in:plat'] },
-      })
-      expect(onOpenContainer).toHaveBeenCalledWith('plat', 'ds', 'in', 2)
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  describe('showing everything inside an opened frame', () => {
-    const withSchema = (fn: () => void) => {
-      const prevSchema = useSchemaStore.getState().schema
-      useSchemaStore.setState({
-        schema: {
-          ...(prevSchema ?? {}),
-          containmentEdgeTypes: ['CONTAINS'],
-          entityTypes: [
-            { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
-            { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
-          ],
-        },
-      } as never)
-      try { fn() } finally { useSchemaStore.setState({ schema: prevSchema } as never) }
-    }
-
-    const openFrame = (extra: Partial<ComponentProps<typeof LineageLens>> = {}) => {
-      useCanvasStore.setState({
-        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
-        edges: [edge('e1', 'plat', 'ds')],
-        visibleEdges: [],
-      } as never)
-      return renderLens(['ds'], {}, {
-        onOpenContainer: vi.fn(),
-        graphSeed: { nodeId: 'ds', collapsedFrames: [], expandedFrontier: [], openContainers: ['in:plat'] },
-        containerResults: new Map([['in:plat', {
-          nodes: [node('kid1', 'DATASET')],
-          edges: [edge('r1', 'kid1', 'ds')],
-          passedThrough: [], truncated: false, empty: false,
-        }]]),
-        containerStatus: new Map([['in:plat', 'done' as const]]),
-        ...extra,
-      })
-    }
-
-    it('flips one frame to everything inside and fetches its children', () => withSchema(() => {
-      const onLoadAllChildren = vi.fn()
-      openFrame({ onLoadAllChildren })
-
-      fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
-      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat')
-      // Flipping one frame is not a preference change.
-      expect(usePreferencesStore.getState().lensFrameChildren).toBe('connected')
-    }))
-
-    it('shows unconnected children as present but claiming nothing', () => withSchema(() => {
-      openFrame({
-        onLoadAllChildren: vi.fn(),
-        frameAllResults: new Map([['in:plat', {
-          children: [node('kid1', 'DATASET'), node('spare', 'DATASET')],
-          hasMore: false,
-          total: 2,
-        }]]),
-        frameAllStatus: new Map([['in:plat', 'done' as const]]),
-      })
-      fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
-
-      expect(screen.getByText('label-kid1')).toBeTruthy()
-      expect(screen.getByText('label-spare')).toBeTruthy()
-      expect(screen.getByText('no lineage')).toBeTruthy()
-      expect(screen.getByText(/1 connected · 2 of 2 shown/)).toBeTruthy()
-    }))
-
-    // A 428-column table used to grow the frame by a page per click
-    // ("+N more inside" raised a cap), so five clicks left a ~2,000px
-    // frame and 100 live cards. One window, moved.
-    it('pages a wide table one fixed window at a time, and says which rows', () => withSchema(() => {
-      const cols = Array.from({ length: 428 }, (_, i) => node(`col${String(i).padStart(3, '0')}`, 'DATASET'))
-      const onLoadAllChildren = vi.fn()
-      openFrame({
-        onLoadAllChildren,
-        graphSeed: {
-          nodeId: 'ds', collapsedFrames: [], expandedFrontier: [],
-          openContainers: ['in:plat'], frameAll: ['in:plat'],
-        },
-        frameAllResults: new Map([['in:plat', { children: cols, hasMore: false, total: 428 }]]),
-        frameAllStatus: new Map([['in:plat', 'done' as const]]),
-      })
-
-      const atMount = onLoadAllChildren.mock.calls.length
-      const rows = cols.length + 1        // + the connected child the open found
-      const pages = Math.ceil(rows / FRAME_ALL_CAP)
-      // 429, not 428: the one child the pair-filtered open found is
-      // appended to the server's child list, and the pager counts the
-      // rows it can actually reach rather than stranding it.
-      expect(screen.getByText(new RegExp(`showing 1–${FRAME_ALL_CAP} of ${rows}`))).toBeTruthy()
-      expect(screen.getByText(`page 1 of ${pages}`)).toBeTruthy()
-      expect(screen.getByText('label-col000')).toBeTruthy()
-      expect(screen.queryByText(`label-col${String(FRAME_ALL_CAP).padStart(3, '0')}`)).toBeNull()
-      // Nothing to go back to yet.
-      expect(screen.getByTitle('Previous page').hasAttribute('disabled')).toBe(true)
-
-      fireEvent.click(screen.getByTitle('Next page'))
-      expect(screen.getByText(new RegExp(`showing ${FRAME_ALL_CAP + 1}–${FRAME_ALL_CAP * 2} of ${rows}`))).toBeTruthy()
-      expect(screen.getByText(`page 2 of ${pages}`)).toBeTruthy()
-      // The window MOVED — page 1's rows are gone, not stacked above.
-      expect(screen.getByText(`label-col${String(FRAME_ALL_CAP).padStart(3, '0')}`)).toBeTruthy()
-      expect(screen.queryByText('label-col000')).toBeNull()
-      // Everything is already loaded, so turning a page asks for nothing
-      // beyond the frame's own first-page kick at mount.
-      expect(onLoadAllChildren).toHaveBeenCalledTimes(atMount)
-    }))
-
-    it('asks the server for one more page only when the window runs past what is loaded', () => withSchema(() => {
-      // Exactly one window's worth fetched, with more on the server.
-      const cols = Array.from({ length: FRAME_ALL_CAP }, (_, i) => node(`col${String(i).padStart(3, '0')}`, 'DATASET'))
-      const onLoadAllChildren = vi.fn()
-      openFrame({
-        onLoadAllChildren,
-        graphSeed: {
-          nodeId: 'ds', collapsedFrames: [], expandedFrontier: [],
-          openContainers: ['in:plat'], frameAll: ['in:plat'],
-        },
-        frameAllResults: new Map([['in:plat', { children: cols, hasMore: true, total: null }]]),
-        frameAllStatus: new Map([['in:plat', 'done' as const]]),
-      })
-      // Total unknown while the server still has more — the page count
-      // is a floor, never a guess.
-      expect(screen.getByText(/^page 1 of \d+\+$/)).toBeTruthy()
-      const atMount = onLoadAllChildren.mock.calls.length
-
-      // Page 2 runs past the fetched set: exactly one fetch.
-      fireEvent.click(screen.getByTitle('Next page'))
-      expect(onLoadAllChildren).toHaveBeenCalledTimes(atMount + 1)
-      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat', '')
-    }))
-
-    // REGRESSION: Find dimmed the loaded page client-side, so a column
-    // on page 7 of a 428-column table could not be found at all.
-    it('sends Find to the server and restarts the window at page 1', () => withSchema(() => {
-      vi.useFakeTimers()
-      try {
-        const cols = Array.from({ length: 60 }, (_, i) => node(`col${String(i).padStart(3, '0')}`, 'DATASET'))
-        const onLoadAllChildren = vi.fn()
-        openFrame({
-          onLoadAllChildren,
-          graphSeed: {
-            nodeId: 'ds', collapsedFrames: [], expandedFrontier: [],
-            openContainers: ['in:plat'], frameAll: ['in:plat'],
-          },
-          frameAllResults: new Map([['in:plat', { children: cols, hasMore: false, total: 60, query: '' }]]),
-          frameAllStatus: new Map([['in:plat', 'done' as const]]),
-        })
-        fireEvent.click(screen.getByTitle('Next page'))
-        expect(screen.getByText(/^page 2 of /)).toBeTruthy()
-        onLoadAllChildren.mockClear()
-
-        fireEvent.change(screen.getByPlaceholderText('Find…'), { target: { value: 'order' } })
-        // A new list starts at the top, immediately — no waiting on the
-        // debounce to stop showing a page the matches may not reach.
-        expect(screen.getByText(/^page 1 of/)).toBeTruthy()
-        expect(onLoadAllChildren).not.toHaveBeenCalled()   // still debouncing
-
-        act(() => { vi.advanceTimersByTime(300) })
-        expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat', 'order')
-      } finally {
-        vi.useRealTimers()
-      }
-    }))
-
-    // REGRESSION: a page turn called onLoadAllChildren(openKey) with no
-    // query while a search was active. The hook saw a different question,
-    // refetched page 1 unfiltered and replaced the matches; the debounce
-    // then re-ran the search 300ms later. One click, two round trips, a
-    // flash of unrelated rows, and the window snapped back to page 1.
-    it('keeps an active search when you turn the page or retry', () => withSchema(() => {
-      // One window of matches loaded with more on the server, so page 2
-      // runs past them and the turn DOES ask the server.
-      const cols = Array.from({ length: FRAME_ALL_CAP }, (_, i) => node(`col${String(i).padStart(3, '0')}`, 'DATASET'))
-      const onLoadAllChildren = vi.fn()
-      openFrame({
-        onLoadAllChildren,
-        graphSeed: {
-          nodeId: 'ds', collapsedFrames: [], expandedFrontier: [],
-          openContainers: ['in:plat'], frameAll: ['in:plat'],
-        },
-        frameAllResults: new Map([['in:plat', { children: cols, hasMore: true, total: null, query: 'order' }]]),
-        frameAllStatus: new Map([['in:plat', 'done' as const]]),
-      })
-      fireEvent.change(screen.getByPlaceholderText('Find…'), { target: { value: 'order' } })
-      onLoadAllChildren.mockClear()
-
-      fireEvent.click(screen.getByTitle('Next page'))
-      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat', 'order')
-      // Never the unfiltered list — that replaced the matches and cost a
-      // second round trip when the debounce noticed.
-      expect(onLoadAllChildren.mock.calls.every(c => c[1] === 'order')).toBe(true)
-    }))
-
-    // REGRESSION: firstPageAskedRef was keyed `${dir}:${urn}` with no
-    // focal and cleared only when nodeId went null — which re-centering
-    // never does. The second focal's frame never got its first page.
-    it('still fetches a frame\'s first page after re-centering', () => withSchema(() => {
-      useCanvasStore.setState({
-        nodes: [node('ds', 'DATASET'), node('other', 'DATASET'), node('plat', 'CONTAINER')],
-        edges: [edge('e1', 'plat', 'ds'), edge('e2', 'plat', 'other')],
-        visibleEdges: [],
-      } as never)
-      const onLoadAllChildren = vi.fn()
-      const seed = (focal: string) => ({
-        nodeId: focal, collapsedFrames: [], expandedFrontier: [],
-        openContainers: ['in:plat'], frameAll: ['in:plat'],
-      })
-      const props = (focal: string) => ({
-        history: { entries: [focal], cursor: 0 },
-        onRecenter: vi.fn(), onBack: vi.fn(), onForward: vi.fn(), onClose: vi.fn(),
-        onOpenContainer: vi.fn(),
-        onLoadAllChildren,
-        graphSeed: seed(focal),
-        containerResults: new Map([['in:plat', {
-          nodes: [node('kid1', 'DATASET')], edges: [edge('r1', 'kid1', focal)],
-          passedThrough: [], truncated: false, empty: false,
-        }]]),
-        containerStatus: new Map([['in:plat', 'done' as const]]),
-      })
-      const { rerender } = render(<LineageLens {...props('ds')} />)
-      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat')
-      onLoadAllChildren.mockClear()
-
-      // Same container, different focal — a different question, and the
-      // caches are per focal, so it must be asked again.
-      rerender(<LineageLens {...props('other')} />)
-      expect(onLoadAllChildren).toHaveBeenCalledWith('in:plat')
-    }))
-
-    it('opens new frames in whichever mode the header default names', () => withSchema(() => {
-      usePreferencesStore.setState({ lensFrameChildren: 'all' })
-      const onLoadAllChildren = vi.fn()
-      // No seed here — the frame is opened by clicking, as a user would.
-      useCanvasStore.setState({
-        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
-        edges: [edge('e1', 'plat', 'ds')],
-        visibleEdges: [],
-      } as never)
-      renderLens(['ds'], {}, { onOpenContainer: vi.fn(), onLoadAllChildren })
-
-      fireEvent.click(screen.getByTitle("Show what's inside label-plat"))
-      // The frame comes up already in "everything inside".
-      expect(screen.getByLabelText('Everything inside, lineage marked').getAttribute('aria-pressed')).toBe('true')
-      usePreferencesStore.setState({ lensFrameChildren: 'connected' })
-    }))
-  })
-
-  it('cards can be dragged to rearrange the picture', () => {
-    useCanvasStore.setState({
-      nodes: [node('ds'), node('src')],
-      edges: [edge('e1', 'src', 'ds')],
-      visibleEdges: [],
-    } as never)
-    renderLens(['ds'])
-    // Every card is movable; the lineage is anchored to card ids, so
-    // nothing about the connections depends on where they sit.
-    // (The Lens portals to body, so query the document, not container.)
-    const cards = document.querySelectorAll('.react-flow__node-focusCard')
-    expect(cards.length).toBeGreaterThan(0)
-    for (const c of cards) expect(c.className).toContain('draggable')
-  })
-
-  it('a frame moves as one piece — its children are not dragged out of it', () => {
-    const prevSchema = useSchemaStore.getState().schema
-    useSchemaStore.setState({
-      schema: {
-        ...(prevSchema ?? {}),
-        containmentEdgeTypes: ['CONTAINS'],
-        entityTypes: [
-          { id: 'CONTAINER', hierarchy: { level: 2, canContain: ['DATASET'] } },
-          { id: 'DATASET', hierarchy: { level: 3, canContain: [] } },
-        ],
-      },
-    } as never)
-    try {
-      useCanvasStore.setState({
-        nodes: [node('ds', 'DATASET'), node('plat', 'CONTAINER')],
-        edges: [edge('e1', 'plat', 'ds')],
-        visibleEdges: [],
-      } as never)
-      renderLens(['ds'], {}, {
-        onOpenContainer: vi.fn(),
-        graphSeed: { nodeId: 'ds', collapsedFrames: [], expandedFrontier: [], openContainers: ['in:plat'] },
-        containerResults: new Map([['in:plat', {
-          nodes: [node('kid1', 'DATASET')],
-          edges: [edge('r1', 'kid1', 'ds')],
-          passedThrough: [], truncated: false, empty: false,
-        }]]),
-        containerStatus: new Map([['in:plat', 'done' as const]]),
-      })
-
-      // The frame itself is movable...
-      const frame = document.querySelector('.react-flow__node-focusFrame')
-      expect(frame?.className).toContain('draggable')
-      // ...and carries its children, which are therefore not draggable
-      // on their own — a table never sheds a column.
-      const child = screen.getByText('label-kid1').closest('.react-flow__node')
-      expect(child).toBeTruthy()
-      expect(child!.className).not.toContain('draggable')
-    } finally {
-      useSchemaStore.setState({ schema: prevSchema } as never)
-    }
-  })
-
-  it('the header default is a preference, persisted like the body mode', () => {
-    renderLens(['b'])
-    expect(usePreferencesStore.getState().lensFrameChildren).toBe('connected')
+    renderLens(['b'], simple())
     fireEvent.click(screen.getByTitle(/Opened containers show everything inside/))
     expect(usePreferencesStore.getState().lensFrameChildren).toBe('all')
     usePreferencesStore.setState({ lensFrameChildren: 'connected' })
   })
 
-  it('the header toggle switches to the list body and persists the preference', () => {
-    renderLens(['b'])
-    // The graph shows band headers ("Data Sources") too — the LIST
-    // body is identified by its column subtitles.
-    expect(screen.queryByText('Upstream')).toBeNull()
-    fireEvent.click(screen.getByTitle('List — scan all connections as columns'))
-    expect(screen.getByText('Upstream')).toBeTruthy()
-    expect(usePreferencesStore.getState().lensViewMode).toBe('list')
+  it('offers the picture as an image without throwing', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    renderLens(['b'], simple())
+    const download = screen.getByTitle('Download this lineage as an image (for decks and docs)')
+    expect(() => fireEvent.click(download)).not.toThrow()
+  })
+
+  it('every card is movable, and a frame carries its children rather than shedding them', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [
+        wnode('F', 'dataset', 'stg_orders'),
+        wnode('T', 'dataset', 'raw_orders', { childCount: 2 }),
+        wnode('c1', 'schemaField', 'order_id'),
+      ],
+      containmentEdges: [holds('T', 'c1')],
+      lineageEdges: [hop('c1', 'F')],
+      upstreamUrns: new Set(['c1']),
+    })))
+
+    const frame = document.querySelector('.react-flow__node-focusFrame')
+    expect(frame?.className).toContain('draggable')
+    // The column rides along as a child node, so dragging the table
+    // moves the whole thing — a table never sheds a column.
+    const child = screen.getByText('order_id').closest('.react-flow__node')
+    expect(child).toBeTruthy()
+    expect(child!.className).not.toContain('draggable')
+  })
+
+  it('reveals every neighbour on the canvas by urn, and closes on the way', () => {
+    usePreferencesStore.setState({ lensViewMode: 'list' })
+    const onLocateAll = vi.fn()
+    const onClose = vi.fn()
+    renderLens(['b'], simple(), { onLocateAll, onClose })
+    fireEvent.click(screen.getByText('Reveal all on canvas'))
+    expect(onClose).toHaveBeenCalled()
+    expect(onLocateAll).toHaveBeenCalledWith(['a', 'c'])
+  })
+})
+
+// ── EVERYTHING INSIDE ────────────────────────────────────────────────
+
+describe('what is really inside a container', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' }))
+  afterEach(() => cleanup())
+
+  const tableWithColumns = () => doneWalk(walkModel('F', {
+    nodes: [
+      wnode('F', 'dataset', 'stg_orders'),
+      wnode('T', 'dataset', 'raw_orders', { childCount: 4 }),
+      wnode('c1', 'schemaField', 'order_id'),
+    ],
+    containmentEdges: [holds('T', 'c1')],
+    lineageEdges: [hop('c1', 'F')],
+    upstreamUrns: new Set(['c1']),
+  }))
+
+  it('flips a frame to everything inside, and asks the server for the roster', () => {
+    const onLoadAllChildren = vi.fn()
+    renderLens(['F'], tableWithColumns(), { onLoadAllChildren })
+    fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
+    expect(onLoadAllChildren).toHaveBeenCalledWith('T')
+  })
+
+  it('shows an unconnected child as present, and claiming nothing', () => {
+    const onLoadAllChildren = vi.fn()
+    const { rerender, api } = renderLens(['F'], tableWithColumns(), { onLoadAllChildren })
+    fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
+
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={tableWithColumns()}
+        walkApi={api}
+        childrenAll={new Map([['T', {
+          children: [
+            { id: 'c1', data: { label: 'order_id', type: 'schemaField' } },
+            { id: 'c9', data: { label: 'internal_notes', type: 'schemaField' } },
+          ],
+          hasMore: false,
+          total: 2,
+        }]]) as never}
+        childrenAllStatus={new Map([['T', 'done' as const]])}
+        onLoadAllChildren={onLoadAllChildren}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('internal_notes')).toBeTruthy()
+    // It lives in there, but it must never read as a connection.
+    expect(screen.getByText('no lineage')).toBeTruthy()
+  })
+
+  it('asks the focal for its own contents once the walk has landed', () => {
+    const onLoadChildrenOf = vi.fn()
+    renderLens(['F'], tableWithColumns(), { onLoadChildrenOf })
+    expect(onLoadChildrenOf).toHaveBeenCalledWith('F')
+    expect(onLoadChildrenOf).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not ask before the walk has landed — there is nothing to be inside yet', () => {
+    const onLoadChildrenOf = vi.fn()
+    renderLens(
+      ['F'],
+      { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map() },
+      { onLoadChildrenOf },
+    )
+    expect(onLoadChildrenOf).not.toHaveBeenCalled()
+  })
+})
+
+// ── THE WIRE, END TO END ─────────────────────────────────────────────
+
+/** Mirrors what `normalizeTraceV2` does on the real provider before the
+ *  adapter ever sees a response: Set-ify the direction urns. */
+interface RawClosureDoc {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  containmentEdges: GraphEdge[]
+  upstreamUrns: string[]
+  downstreamUrns: string[]
+  [k: string]: unknown
+}
+const toResponse = (doc: RawClosureDoc) => ({
+  ...doc,
+  upstreamUrns: new Set(doc.upstreamUrns),
+  downstreamUrns: new Set(doc.downstreamUrns),
+}) as unknown as TraceV2Result & LensClosureExtras
+
+describe('the real wire shape reaches the board', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
+  afterEach(() => cleanup())
+
+  it('renders a merged two-response walk built from the shared backend fixture', () => {
+    const raw = JSON.parse(readFileSync(
+      resolve(__dirname, '../../../../../../backend/tests/fixtures/trace_closure_walk_fixture.json'),
+      'utf-8',
+    )) as { initial: RawClosureDoc; extension: RawClosureDoc }
+    const focus = 'urn:li:table:t_orders'
+
+    // Exactly what `useLensWalk` holds after an open plus one ⊕ extend.
+    const merged = mergeClosures(
+      toLensClosure(toResponse(raw.initial), focus),
+      toResponse(raw.extension),
+      { rootUrn: 'urn:li:table:t_raw', direction: 'up' },
+    )
+    renderLens([focus], doneWalk(merged))
+
+    // The focus, an estate only the INITIAL response named, and one
+    // only the EXTENSION named, all on one board — proof the board
+    // draws the union rather than the last response.
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    const board = screen.getByRole('dialog').textContent ?? ''
+    expect(board).toContain('Orders')       // the focus
+    expect(board).toContain('Ingest App')   // initial only
+    expect(board).toContain('Vendor')       // extension only
+  })
+})
+
+// ── SCHEMA WORDING ───────────────────────────────────────────────────
+
+describe('relationship wording comes from the ontology', () => {
+  afterEach(() => {
+    cleanup()
+    useSchemaStore.setState({ schema: null } as never)
+  })
+
+  it('prints the schema\'s own display name for a relationship, not the raw id', () => {
+    useSchemaStore.setState({
+      schema: {
+        entityTypes: [],
+        relationshipTypes: [{ id: 'DERIVES_FROM', name: 'Derives from', description: 'Computed from' }],
+      },
+    } as never)
+    usePreferencesStore.setState({ lensViewMode: 'list' })
+    renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [wnode('F'), wnode('u', 'dataset', 'upstream_table')],
+      lineageEdges: [hop('u', 'F')],
+      upstreamUrns: new Set(['u']),
+    })))
+    expect(screen.getByText('Derives from')).toBeTruthy()
   })
 })

@@ -105,17 +105,8 @@ import {
   type LensHistory,
 } from './lens/lensHistory'
 import { decodeLensShare } from './lens/shareCodec'
-import { useLensLineage } from '@/hooks/useLensLineage'
-import { useLensImpact } from '@/hooks/useLensImpact'
-import {
-  useLensContainer,
-  childrenKeyOf,
-  type ContainerAllResult,
-  type LensContainerStatus,
-} from '@/hooks/useLensContainer'
-
-/** `childrenKeyOf('')` — the prefix its keys carry. */
-const CHILDREN_KEY_PREFIX = childrenKeyOf('')
+import { useLensWalk } from '@/hooks/useLensWalk'
+import { useLensChildren } from '@/hooks/useLensChildren'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -3107,33 +3098,7 @@ export function ContextViewCanvas({
       ? { entries: initialLensShare.entries, cursor: initialLensShare.cursor }
       : EMPTY_LENS_HISTORY
   ))
-  // Expansion state restored from a share link, consumed by the lens
-  // when the restored focal first renders (fresh opens clear it).
-  const [lensShareSeed, setLensShareSeed] = useState<{
-    nodeId: string
-    collapsedFrames: string[]
-    expandedFrontier: string[]
-    openContainers: string[]
-    frameAll: string[]
-    contains: string[]
-    framePages: Array<[string, number]>
-    frameQueries: Array<[string, string]>
-  } | null>(() => (
-    initialLensShare
-      ? {
-          nodeId: initialLensShare.entries[initialLensShare.cursor],
-          collapsedFrames: initialLensShare.closed,
-          expandedFrontier: initialLensShare.frontier,
-          openContainers: initialLensShare.containers,
-          frameAll: initialLensShare.frameAll,
-          contains: initialLensShare.contains,
-          framePages: initialLensShare.framePages,
-          frameQueries: initialLensShare.frameQueries,
-        }
-      : null
-  ))
   const openLens = useCallback((nodeId: string) => {
-    setLensShareSeed(null)
     setLensHistory({ entries: [nodeId], cursor: 0 })
   }, [])
   const lensRecenter = useCallback((nodeId: string) => setLensHistory(h => lensPush(h, nodeId)), [])
@@ -3141,71 +3106,39 @@ export function ContextViewCanvas({
   const lensForward = useCallback(() => setLensHistory(lensForwardStep), [])
   // Path-trail jump: move the cursor to hop i without dropping the trail.
   const lensJumpTo = useCallback((index: number) => setLensHistory(h => lensJump(h, index)), [])
-  const lensClose = useCallback(() => {
-    setLensShareSeed(null)
-    setLensHistory(EMPTY_LENS_HISTORY)
-  }, [])
-  // On-demand lineage for every visited focal node — the lens tells the
-  // truth about the DATA SOURCE, not just what's hydrated on the canvas.
-  // Lens-local (never written to the canvas store), cached per session.
-  const lensLineage = useLensLineage(lensHistory.entries, provider, lineageEdgeTypes)
-  // Transitive reach of the current focal — one bounded trace per
-  // visited focal per session (lens-local, same invariants).
-  const lensImpact = useLensImpact(lensFocalOf(lensHistory), provider)
-  // "What's inside this container that connects to my focus" — the
-  // descendant-pair expansion, held lens-locally like everything else.
-  const lensContainer = useLensContainer(lensFocalOf(lensHistory), provider, lineageEdgeTypes)
-  // The hook caches "children of X" under a `kids:` key alongside the
-  // container answers; the lens thinks in entity ids, so re-key here.
-  const lensChildren = useMemo(() => {
-    const results = new Map<string, ContainerAllResult>()
-    const status = new Map<string, LensContainerStatus>()
-    for (const [k, v] of lensContainer.allResults) {
-      if (k.startsWith(CHILDREN_KEY_PREFIX)) results.set(k.slice(CHILDREN_KEY_PREFIX.length), v)
-    }
-    for (const [k, v] of lensContainer.allStatus) {
-      if (k.startsWith(CHILDREN_KEY_PREFIX)) status.set(k.slice(CHILDREN_KEY_PREFIX.length), v)
-    }
-    return { results, status }
-  }, [lensContainer.allResults, lensContainer.allStatus])
-  // PERF: the hook returns a fresh object literal every render while the
-  // methods inside it are stable useCallbacks. Depending on the OBJECT
-  // made each handler below new on every render, which changed the Lens's
-  // card context identity — and both card memo comparators start with
-  // `a.ctx === b.ctx &&`, so the 48-field content comparison was never
+  const lensClose = useCallback(() => setLensHistory(EMPTY_LENS_HISTORY), [])
+  // The lens reads ONE thing: the accumulated walk model for whichever
+  // focal it is on. Server-lazy — one closure fetch on open, then a
+  // further hop per ⊕ — cached per focal for the whole lens session, so
+  // stepping Back is instant. Lens-local: never written to the canvas
+  // store.
+  const lensFocal = lensFocalOf(lensHistory)
+  const lensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
+  const lensWalk = useLensWalk(lensFocal, provider, lensInitialDepth)
+  // "What is really inside this entity" — membership, which the lineage
+  // walk structurally cannot answer (it only ever knows the
+  // participants). A separate, separately-paged fetch for that reason.
+  const lensChildren = useLensChildren(lensFocal, provider)
+  // PERF: both hooks return a fresh object literal every render while
+  // the methods inside are stable useCallbacks. Depending on the OBJECT
+  // made each handler below new on every render, which changed the
+  // Lens's card context identity — and both card memo comparators start
+  // with `a.ctx === b.ctx &&`, so the content comparison was never
   // reached and every card re-rendered on every canvas tick. It also
   // churned the deps of the in-frame search debounce, which could keep
   // the 300ms timer resetting forever. Depend on the methods.
-  const {
-    loadChildrenOf: lensLoadChildrenOf,
-    loadAllChildren: lensLoadAllChildren,
-    openContainer: lensOpenContainerFetch,
-    retry: lensRetryContainerFetch,
-  } = lensContainer
-  const loadLensChildrenOf = useCallback((entityId: string) => {
-    const focal = lensFocalOf(lensHistory)
-    if (focal) lensLoadChildrenOf(entityId, focal)
-  }, [lensLoadChildrenOf, lensHistory])
-  const loadLensAllChildren = useCallback((openKey: string, searchQuery?: string) => {
-    const focal = lensFocalOf(lensHistory)
-    if (focal) lensLoadAllChildren(openKey, focal, searchQuery)
-  }, [lensLoadAllChildren, lensHistory])
-  const openLensContainer = useCallback((urn: string, partner: string, dir: 'in' | 'out', level: number | null) => {
-    // The focal buckets the cache; the PARTNER is the question.
-    const focal = lensFocalOf(lensHistory)
-    if (focal) lensOpenContainerFetch(urn, focal, partner, dir, level)
-  }, [lensOpenContainerFetch, lensHistory])
-  const retryLensContainer = useCallback((urn: string, partner: string, dir: 'in' | 'out', level: number | null) => {
-    const focal = lensFocalOf(lensHistory)
-    if (focal) lensRetryContainerFetch(urn, focal, partner, dir, level)
-  }, [lensRetryContainerFetch, lensHistory])
+  const { extend: lensExtend, page: lensPage, retry: lensRetryWalk, retryExtend: lensRetryExtend } = lensWalk
+  const lensWalkApi = useMemo(
+    () => ({ extend: lensExtend, page: lensPage, retry: lensRetryWalk, retryExtend: lensRetryExtend }),
+    [lensExtend, lensPage, lensRetryWalk, lensRetryExtend],
+  )
+  const { walkFor: lensWalkFor } = lensWalk
+  const lensWalkEntry = lensFocal ? lensWalkFor(lensFocal) : null
+  const { loadAllChildren: loadLensAllChildren, loadChildrenOf: loadLensChildrenOf } = lensChildren
   useEffect(() => {
     focusLensRef.current = () => {
       const target = selectedNodeId ?? drawerNodeId
-      if (target) {
-        setLensShareSeed(null)
-        setLensHistory({ entries: [target], cursor: 0 })
-      }
+      if (target) setLensHistory({ entries: [target], cursor: 0 })
     }
   }, [selectedNodeId, drawerNodeId])
   // Finish consuming the share link: strip the param (so refreshes and
@@ -3968,29 +3901,12 @@ export function ContextViewCanvas({
         {/* Lineage Lens — ego-graph overlay (portal to body). */}
         <LineageLens
           history={lensHistory}
-          supplementalEdges={lensLineage.supplementalEdges}
-          supplementalNodes={lensLineage.supplementalNodes}
-          fetchStatus={lensLineage.status}
-          fetchTruncatedIds={lensLineage.truncatedIds}
-          onRetryFetch={lensLineage.retry}
-          drillEdges={lensLineage.drillEdges}
-          drillStatus={lensLineage.drillStatus}
-          onDrillFetch={lensLineage.fetchDrill}
-          onEnsureFetched={lensLineage.ensureFetched}
-          degreeHints={externalDegrees}
-          impact={lensImpact.impact}
-          impactStatus={lensImpact.status}
-          containerResults={lensContainer.results}
-          containerStatus={lensContainer.status}
-          frameAllResults={lensContainer.allResults}
-          frameAllStatus={lensContainer.allStatus}
-          childrenOf={lensChildren.results}
-          childrenStatusOf={lensChildren.status}
+          walk={lensWalkEntry}
+          walkApi={lensWalkApi}
+          childrenAll={lensChildren.allResults}
+          childrenAllStatus={lensChildren.allStatus}
           onLoadChildrenOf={loadLensChildrenOf}
           onLoadAllChildren={loadLensAllChildren}
-          onOpenContainer={openLensContainer}
-          onRetryOpenContainer={retryLensContainer}
-          graphSeed={lensShareSeed}
           externalPreview={externalPreview && lensFocalOf(lensHistory) === externalPreview.nodeId ? externalPreview : null}
           onRecenter={lensRecenter}
           onBack={lensBack}
