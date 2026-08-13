@@ -361,7 +361,53 @@ describe('focus-layout — the ⊕ pill tells one of three truths', () => {
         const sg = frontierCase({ urn: 'U', totalCount: 1 })
         const g = layout(sg, drilled(sg))
         expect(cardFor(g, 'U')!.pillUp).toBeNull()
-        expect(cardFor(g, 'U')!.deadEnd).toBe(true)
+        // No stamp either: U2 is drawn upstream of U, so the picture
+        // already says where that side goes. The stamp is for a side
+        // with NOTHING on it — see the drained test above.
+        expect(cardFor(g, 'U')!.deadEnd).toBe(false)
+        expect(cardFor(g, 'U2')!.deadEnd).toBe(true)
+    })
+
+    it('one frontier is offered once, at the grain that can act on it', () => {
+        // Five containment levels above a column with more upstream. Only
+        // the column's own card may carry that ⊕ — an ancestor repeating
+        // it is four controls that cannot be told apart, stacked in the
+        // gutter on top of each other.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [
+                wnode('F'), wnode('L0', 'Node', 'estate'), wnode('L1', 'Node', 'zone'),
+                wnode('L2', 'Node', 'db'), wnode('leaf', 'Node', 'the_table'),
+            ],
+            contains: [['L0', 'L1'], ['L1', 'L2'], ['L2', 'leaf']],
+            hops: [['leaf', 'F']],
+            frontierUp: [{ urn: 'leaf', totalCount: 9, nextCursor: null }],
+        })
+        const g = layout(sg)
+        expect(cardFor(g, 'leaf')!.pillUp).toMatchObject({ kind: 'extend', count: 9 })
+        for (const level of ['L0', 'L1', 'L2']) {
+            expect(cardFor(g, level)!.pillUp).toBeNull()
+            expect(cardFor(g, level)!.deadEnd).toBe(false)
+        }
+    })
+
+    it('a COLLAPSED container still speaks for the frontier it hides', () => {
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F'), wnode('T', 'dataset', 'src'), wnode('c0'), wnode('c1')],
+            contains: [['T', 'c0'], ['T', 'c1']],
+            hops: [['c0', 'F'], ['c1', 'F']],
+            frontierUp: [{ urn: 'c0', totalCount: 4, nextCursor: null }],
+        })
+        // T is the branch, so its columns are hidden inside it — and its
+        // pill has to carry what they cannot say for themselves.
+        const closed = layout(sg)
+        expect(cardFor(closed, 'T')!.pillUp).toMatchObject({ kind: 'extend', count: 4 })
+        // Opened, the column speaks for itself and T falls silent.
+        const base = initialLensViewState(sg)
+        const open = layout(sg, { ...base, expandedContainment: new Set([...base.expandedContainment, 'T']) })
+        expect(cardFor(open, 'T')!.pillUp).toBeNull()
+        expect(cardFor(open, 'c0')!.pillUp).toMatchObject({ kind: 'extend', count: 4 })
     })
 
     it('a container carries the frontier of everything inside it', () => {

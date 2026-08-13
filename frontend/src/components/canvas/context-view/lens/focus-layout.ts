@@ -252,18 +252,16 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const seed = new Set(population)
 
     const groupCache = new Map<string, RevealGroup[]>()
-    /** The groups one direction of one card could still reveal, ranked.
+    /** Groups of not-yet-shown neighbours reachable from `near`, ranked.
      *  Weight is raw hops — the wire the reveal would draw. */
-    const rankedGroups = (dir: LensDir, urn: string): RevealGroup[] => {
-        const key = revealKey(dir, urn)
-        const hit = groupCache.get(key)
+    const groupsFrom = (dir: LensDir, near: ReadonlySet<string>, cacheKey: string): RevealGroup[] => {
+        const hit = groupCache.get(cacheKey)
         if (hit) return hit
-        const sub = subtreeOf(urn)
         const byRoot = new Map<string, { weight: number; members: Set<string> }>()
         for (const hop of sg.lineageEdges) {
-            const near = dir === 'in' ? hop.targetUrn : hop.sourceUrn
+            const from = dir === 'in' ? hop.targetUrn : hop.sourceUrn
             const far = dir === 'in' ? hop.sourceUrn : hop.targetUrn
-            if (!sub.has(near) || sub.has(far) || seed.has(far)) continue
+            if (!near.has(from) || near.has(far) || seed.has(far)) continue
             const root = rootOf(far)
             const group = byRoot.get(root) ?? { weight: 0, members: new Set<string>() }
             group.weight += 1
@@ -276,9 +274,13 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                 b.weight - a.weight
                 || labelFor(a.root).localeCompare(labelFor(b.root))
                 || a.root.localeCompare(b.root))
-        groupCache.set(key, ranked)
+        groupCache.set(cacheKey, ranked)
         return ranked
     }
+    /** What a REVEAL CLICK on this card admits: everything reachable from
+     *  its whole subtree, whatever is currently open. */
+    const rankedGroups = (dir: LensDir, urn: string): RevealGroup[] =>
+        groupsFrom(dir, subtreeOf(urn), `sub:${dir}:${urn}`)
 
     const revealedKeys = [...view.revealed.keys()].sort()
     const admittedGroups: RevealGroup[] = []
@@ -394,6 +396,37 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const visible = new Set(visibleOrder)
     const projected = projectLensEdges(sg, population, visible)
 
+    /**
+     * What each visible card VISUALLY STANDS FOR: itself, plus every
+     * population member whose nearest visible ancestor it is.
+     *
+     * This is the same rule `projectLensEdges` uses to decide where a
+     * hop lands, applied to the ⊕ — and it has to be, or a frontier gets
+     * reported once per containment level above it. Five nested frames
+     * each grew their own copy of one column's "+2", four of which could
+     * not be acted on separately and which piled up on top of each other
+     * in the gutter. A card offers exactly what it stands for.
+     */
+    const standsFor = new Map<string, Set<string>>()
+    for (const urn of visible) standsFor.set(urn, new Set([urn]))
+    for (const urn of population) {
+        if (visible.has(urn)) continue
+        let cursor: string | null = model.get(urn)?.parent ?? null
+        const guard = new Set<string>()
+        while (cursor && !guard.has(cursor)) {
+            if (visible.has(cursor)) { standsFor.get(cursor)!.add(urn); break }
+            guard.add(cursor)
+            cursor = model.get(cursor)?.parent ?? null
+        }
+    }
+    const ownedBy = (urn: string): ReadonlySet<string> => standsFor.get(urn) ?? new Set([urn])
+
+    // Which sides of a card already have a wire on them. A drained
+    // direction that is DRAWN needs no "the walk ends here" mark — the
+    // picture says it. One that is empty does.
+    const drawnIn = new Set(projected.map(e => e.targetUrn))
+    const drawnOut = new Set(projected.map(e => e.sourceUrn))
+
     // ── 4. CARDS ─────────────────────────────────────────────────────
 
     const cards: FocusCard[] = []
@@ -448,10 +481,11 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      *             remainder when it reported a total, a countless
      *             chevron when it did not (never a fabricated number). */
     const pillFor = (urn: string, dir: LensDir): FocusPill | null => {
+        const owned = ownedBy(urn)
         // What this direction could still show from data already in hand.
         // A group another card's reveal happened to admit is not offered
         // again — the count is what clicking would actually add.
-        const remainingGroups = rankedGroups(dir, urn)
+        const remainingGroups = groupsFrom(dir, owned, `own:${dir}:${urn}`)
             .filter(g => g.members.some(m => !population.has(m)))
         if (remainingGroups.length > 0) {
             return {
@@ -462,10 +496,9 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                 status: undefined,
             }
         }
-        // The card speaks for everything inside it, so its pill sums the
-        // frontier of its whole subtree.
-        const entries = [...subtreeOf(urn)]
-            .filter(u => population.has(u))
+        // The card speaks for what it stands for — its own frontier, plus
+        // that of anything collapsed inside it.
+        const entries = [...owned]
             .sort()
             .map(u => ({ urn: u, node: model.get(u)! }))
             .map(({ urn: u, node }) => ({
@@ -534,19 +567,25 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     /** The card's own ⊕ state and whether the walk genuinely ends here.
      *  A direction is only asked about when the card has a presence
      *  there — an upstream card is not asked what is downstream of it. */
-    const walkStateOf = (urn: string) => {
+    const walkStateOf = (urn: string, isFrame: boolean, band: number) => {
         const { up, down } = hopsOf(urn)
         const isFocus = urn === sg.focusUrn
         const askUp = isFocus || up != null
         const askDown = isFocus || down != null
         const pillUp = askUp ? pillFor(urn, 'in') : null
         const pillDown = askDown ? pillFor(urn, 'out') : null
-        // "Nothing further exists" is a claim about the DATA SOURCE, so it
-        // waits for the walk to actually say done.
-        const deadEnd = walkStatus === 'done'
-            && (askUp || askDown)
-            && (!askUp || pillUp === null)
-            && (!askDown || pillDown === null)
+        // The end of a walk is worth stating exactly where the picture
+        // does NOT already state it: on the OUTWARD side of a card that
+        // has no wire there. A frame never claims it — its rows carry the
+        // lineage, and the frame saying "ends here" over an open estate
+        // full of live connections is simply false. And "nothing further
+        // exists" is a claim about the DATA SOURCE, so it waits for the
+        // walk to actually report done.
+        const outwardDir: LensDir = band < 0 ? 'in' : 'out'
+        const asked = outwardDir === 'in' ? askUp : askDown
+        const pill = outwardDir === 'in' ? pillUp : pillDown
+        const drawn = outwardDir === 'in' ? drawnIn.has(urn) : drawnOut.has(urn)
+        const deadEnd = walkStatus === 'done' && !isFrame && asked && pill === null && !drawn
         return { pillUp, pillDown, deadEnd }
     }
 
@@ -587,7 +626,6 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const isFocus = urn === sg.focusUrn
         const label = labelFor(urn)
         const ancestry = ancestorsOf(urn)
-        const { pillUp, pillDown, deadEnd } = walkStateOf(urn)
         const parent = nodeOf(urn)?.parent ?? null
 
         const roster = childrenAll.get(urn)
@@ -598,6 +636,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             : []
         const rows = [...kids, ...rosterExtras]
         const isFrame = rows.length > 0
+        const { pillUp, pillDown, deadEnd } = walkStateOf(urn, isFrame, band)
         const pageSize = showAll ? FRAME_ALL_CAP : FRAME_CHILD_CAP
         const pageCount = Math.max(1, Math.ceil(rows.length / pageSize))
         const page = Math.min(Math.max(0, view.framePages.get(urn) ?? 0), pageCount - 1)
@@ -702,6 +741,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         if (!host) continue
         card.edgeTypeNorm = edgeTypeOf(card.id)
         card.frameSharedEdgeType = host.frameSharedEdgeType
+        // Rows get a row's height — but a FRAME is sized from its own
+        // contents by layoutBands, and the FOCUS card carries the rich
+        // focal chrome (name, provenance, in/out, reach) that does not
+        // fit in 64px. Squashing it there spilled its own text out
+        // through the bottom of the container holding it.
+        if (card.kind === 'frame' || card.kind === 'focal') continue
         card.h = rowHeight(host.frameSharedEdgeType, card.edgeTypeNorm, EMPTY_STRINGS)
     }
 

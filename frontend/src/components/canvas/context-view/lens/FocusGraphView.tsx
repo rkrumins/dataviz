@@ -613,10 +613,12 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
       className={cn(
         base,
         n != null ? 'px-1.5' : 'w-5',
-        // Free (already in hand) reads as the lens's own accent; a
-        // fetch is quieter, because it costs a round trip.
+        // Free (already in hand) reads as the lens's own accent; a fetch
+        // is quieter, because it costs a round trip. Both backgrounds are
+        // OPAQUE: a pill sits exactly where a hub's wires converge, and a
+        // tinted-transparent one had thirteen edges running through it.
         pill.kind === 'reveal'
-          ? 'bg-accent-lineage/12 border-accent-lineage/45 text-accent-lineage hover:bg-accent-lineage/25'
+          ? 'bg-canvas-elevated border-accent-lineage/60 text-accent-lineage hover:border-accent-lineage hover:bg-accent-lineage/10'
           : 'bg-canvas-elevated border-black/15 dark:border-white/20 text-ink-muted hover:text-accent-lineage hover:border-accent-lineage/50',
         pos,
       )}

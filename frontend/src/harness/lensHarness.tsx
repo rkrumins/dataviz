@@ -19,9 +19,11 @@ import { ReactFlowProvider } from '@xyflow/react'
 import '../styles/globals.css'
 import { FocusGraphView } from '../components/canvas/context-view/lens/FocusGraphView'
 import { buildFocusGraph, type FocusGraphInput } from '../components/canvas/context-view/lens/focus-graph'
+import { buildLensSubgraph } from '../components/canvas/context-view/lens/lens-subgraph'
+import { buildFocusLayout, initialLensViewState } from '../components/canvas/context-view/lens/focus-layout'
 import { deriveNeighborRecords } from '@/lib/lineage-neighbors'
 import type { LineageEdge } from '@/store/canvas'
-import { FIXTURES } from './lensFixtures'
+import { FIXTURES, WALK_FIXTURES, type WalkFixture } from './lensFixtures'
 
 const CONTAINMENT = ['CONTAINS']
 
@@ -86,24 +88,56 @@ function buildGraph(fixture: (typeof FIXTURES)[string]) {
   }
 }
 
+/**
+ * The walk path, end to end through the REAL modules: a merged walk
+ * model → `buildLensSubgraph` → `initialLensViewState` (+ the fixture's
+ * scripted clicks) → `buildFocusLayout` → the same view. Nothing is
+ * mocked but the callbacks, so a screenshot is evidence about the code
+ * that ships rather than about the harness.
+ */
+function buildWalk(fixture: WalkFixture) {
+  const sg = buildLensSubgraph(fixture.model)
+  const base = initialLensViewState(sg)
+  const view = fixture.script ? fixture.script(base) : base
+  const graph = buildFocusLayout({
+    sg,
+    view,
+    query: '',
+    hiddenTypes: new Set(),
+    extendStatus: fixture.extendStatus ?? new Map(),
+    childrenAll: fixture.childrenAll ?? new Map(),
+    childrenAllStatus: new Map(),
+    walkStatus: 'done',
+  })
+  return {
+    graph,
+    focalId: sg.focusUrn,
+    stats: {
+      in: graph.bandTotals.get('band:in:1')?.connections ?? 0,
+      out: graph.bandTotals.get('band:out:1')?.connections ?? 0,
+    },
+  }
+}
+
 const noop = () => {}
 
 export function Harness() {
   const name = new URLSearchParams(window.location.search).get('fixture') ?? 'columns'
+  const walk = WALK_FIXTURES[name]
   const fixture = FIXTURES[name]
-  if (!fixture) {
+  if (!walk && !fixture) {
     return <p style={{ font: '14px system-ui', padding: 24 }}>
-      Unknown fixture &quot;{name}&quot;. Try: {Object.keys(FIXTURES).join(', ')}
+      Unknown fixture &quot;{name}&quot;. Try: {[...Object.keys(FIXTURES), ...Object.keys(WALK_FIXTURES)].join(', ')}
     </p>
   }
-  const { graph, stats } = buildGraph(fixture)
+  const built = walk ? buildWalk(walk) : { ...buildGraph(fixture), focalId: fixture.focal }
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'var(--surface, #fff)' }}>
       <ReactFlowProvider>
         <FocusGraphView
-          graph={graph}
-          focalId={fixture.focal}
-          focalStats={stats}
+          graph={built.graph}
+          focalId={built.focalId}
+          focalStats={built.stats}
           focalFetch="done"
           selectedId={null}
           reducedMotion
@@ -117,6 +151,10 @@ export function Harness() {
           onShowMore={noop}
           onSetFramePage={noop}
           onFrameQuery={noop}
+          onToggleFrameAll={noop}
+          onRevealMore={noop}
+          onExtend={noop}
+          onPage={noop}
         />
       </ReactFlowProvider>
     </div>
