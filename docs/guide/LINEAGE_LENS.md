@@ -52,15 +52,30 @@ Everything in the Lens is one of four gestures, available on every card:
   degree has been measured, the pill says how much more there is (**+12**);
   unknown shows no number, never a made-up zero. There is **no hop limit** —
   the picture grows sideways as far as you walk, and the camera follows
-  what arrived.
-- **› (chevron)** — open what the entity contains, one paged level at a
-  time ("page 2 of 4 · 8 of 25"). Children are full cards: each carries its
-  own ⊕ and its own chevron, so structure unfolds as deep as it goes without
-  ever leaving the entity you focused. A second click folds the frame away —
-  the loaded data stays.
+  what arrived. The upstream ⊕ sits on the card's left edge, the downstream
+  ⊕ on its right — the gestures live where their answers land.
+- **› (chevron)** — open what the entity contains. On a **rolled-up
+  partner** it opens *connected only*: exactly the contents the visible
+  lineage reaches, drilled straight from the wires — focus a Domain with a
+  rolled-up connection to another Domain, open it, and you see precisely
+  the applications your side touches; open one of those and you see its
+  datasets, as deep as the estate nests (self-nesting hierarchies
+  included). Levels with a single connected child are **walked
+  automatically** and named in the frame's header ("C › PROD › CURATED").
+  The frame's strip states the honest counts ("2 connected") and toggles to
+  **Show all** — everything inside, with the unconnected members drawn
+  quiet. On anything else the chevron opens plain contents, one paged level
+  at a time ("page 2 of 4 · 8 of 25"), and larger frames carry a **Find**
+  box that narrows the page without pretending the rest doesn't exist
+  ("3 of 14 match"). Children are full cards with their own gestures; a
+  second click folds the frame away — the loaded data stays, and the
+  coarse wire returns.
 - **×N (on a wire)** — a rolled-up connection standing for N concrete ones;
-  click to drill one structural step toward the real edges. Repeat as needed:
-  a drill always terminates at concrete connections.
+  click to drill one structural step toward the real edges. Repeat as
+  needed: a drill always terminates at concrete connections. Only the far
+  side refines — the near side stays whole until you deliberately open it,
+  and the wires snap onto the true endpoints the moment they're on the
+  board.
 - **Click / double-click** — click inspects (a detail strip with identity,
   degrees, description, and actions: **Focus here**, **Reveal on canvas**,
   **Open details**); double-click re-centers the Lens on that entity.
@@ -78,6 +93,11 @@ the **image** button downloads the current picture as a PNG.
 - If an entity has no lineage of its own at its grain but an **ancestor**
   does, the Lens says exactly that and offers to focus the ancestor — it
   never silently swaps in the ancestor's picture.
+- If an entity has no lineage at its own grain because the real connections
+  live on its **children** — a dataset whose columns carry the lineage —
+  the Lens shows the children-grain truth instead of an empty board: its
+  contents open under it, their sources and consumers land one hop out,
+  grouped in their own parents' frames.
 - Wide sets **page at a fixed size** ("‹ 3 of 12 ›"); nothing is silently
   dropped for legibility.
 - Direction always follows the ontology's declared edge orientation — the

@@ -22,6 +22,7 @@ import {
   mergeDegrees,
   mergeDrill,
   mergeExpansion,
+  mergeContainedLineage,
   mergeNodes,
   recordRenderStates,
   resolveToCarded,
@@ -305,6 +306,31 @@ describe('children (containment opens)', () => {
     }
   })
 
+  it('contained lineage places external partners by edge orientation', () => {
+    let s = createLensSession('ds')
+    s = startChildren(s, 'ds')
+    s = mergeChildren(s, 'ds', page(['c1', 'c2'], false, 2, null), OPTS)
+    s = mergeContainedLineage(
+      s,
+      'ds',
+      [
+        edge('src.col', 'c1'),
+        edge('c2', 'sink.col'),
+        edge('c1', 'c2'),
+        edge('stranger', 'elsewhere'),
+      ],
+      OPTS,
+    )
+    // Children stay at the focal's hop; partners land one hop out per
+    // the edge's own orientation; stranger edges are ignored.
+    expect(s.hops.get('c1')).toBe(0)
+    expect(s.hops.get('c2')).toBe(0)
+    expect(s.hops.get('src.col')).toBe(-1)
+    expect(s.hops.get('sink.col')).toBe(1)
+    expect(s.hops.has('stranger')).toBe(false)
+    expect(visibleRecords(s)).toHaveLength(3)
+  })
+
   it('folds lineage edges shipped with a children page', () => {
     let s = createLensSession('f')
     s = mergeChildren(
@@ -440,6 +466,68 @@ describe('refinement render states', () => {
     expect(atApp1.get(top.id)).toBe('refined')
     expect(atApp1.get(mid.id)).toBe('shown')
     expect(atApp1.get(leaf.id)).toBe('folded')
+  })
+
+  it('keeps the chain live when raw truth absorbs the drilled rollup', () => {
+    // The walk's terminal: drilling (a1→X AGG) returns the pair's own
+    // concrete edge; foldEdge absorbs the rollup into the concrete
+    // record and DELETES it. The orphaned drill must still conduct
+    // liveness or the tail folds invisible at the moment of truth.
+    let s = createLensSession('f')
+    s = expandDown(s, 'f', input({ rawEdges: [edge('f', 'C', 'AGGREGATED', { weight: 6 })] }))
+    const top = [...s.records.values()].find(r => r.aggregated)!
+    s = startDrill(s, top.id, 'C')
+    s = mergeDrill(
+      s,
+      top.id,
+      emptyTrace({
+        nodes: [node('X'), node('a1')],
+        containmentEdges: [edge('C', 'X', 'CONTAINS'), edge('f', 'a1', 'CONTAINS')],
+        edges: [edge('a1', 'X', 'AGGREGATED', { weight: 6 })],
+      }),
+      OPTS,
+      'C',
+    )
+    const mid = [...s.records.values()].find(r => r.aggregated && r.target === 'X')!
+    s = startDrill(s, mid.id, 'X')
+    s = mergeDrill(
+      s,
+      mid.id,
+      emptyTrace({ edges: [edge('a1', 'X', 'FLOWS_TO')] }),
+      OPTS,
+      'X',
+    )
+    // The aggregated record is gone — absorbed into the concrete one.
+    expect(s.records.has(mid.id)).toBe(false)
+    const concrete = [...s.records.values()].find(r => !r.aggregated)!
+    const states = recordRenderStates(s)
+    expect(states.get(top.id)).toBe('refined')
+    expect(states.get(concrete.id)).toBe('shown')
+    expect(visibleRecords(s).map(r => r.id)).toEqual([concrete.id])
+    // Folding the expand anchor still folds the whole chain, orphan
+    // included.
+    const folded = recordRenderStates(s, new Set(['C']))
+    expect(folded.get(top.id)).toBe('shown')
+    expect(folded.get(concrete.id)).toBe('folded')
+  })
+
+  it('an orphaned root drill still shows its absorbing concrete record', () => {
+    // Same absorption, but on a first-level record (×N chip drill).
+    let s = createLensSession('f')
+    s = expandDown(s, 'f', input({ rawEdges: [edge('f', 'sys', 'AGGREGATED', { weight: 2 })] }))
+    const rollup = [...s.records.values()].find(r => r.aggregated)!
+    s = startDrill(s, rollup.id, 'sys')
+    s = mergeDrill(
+      s,
+      rollup.id,
+      emptyTrace({ edges: [edge('f', 'sys', 'FLOWS_TO')] }),
+      OPTS,
+      'sys',
+    )
+    expect(s.records.has(rollup.id)).toBe(false)
+    const concrete = [...s.records.values()].find(r => !r.aggregated)!
+    expect(recordRenderStates(s).get(concrete.id)).toBe('shown')
+    expect(visibleRecords(s).map(r => r.id)).toEqual([concrete.id])
   })
 
   it('a record revealed by several drills folds only when no path shows it', () => {

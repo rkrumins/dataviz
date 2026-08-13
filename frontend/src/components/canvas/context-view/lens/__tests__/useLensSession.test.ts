@@ -465,6 +465,54 @@ describe('connected expand', () => {
   })
 })
 
+describe('container fallback (children-grain lineage)', () => {
+  it('falls back to the children page + their raw edges when the focal has nothing', async () => {
+    const { provider, getChildrenWithEdges, getEdges } = makeProvider({
+      edges: q => {
+        // The dataset itself has no edges; its column does.
+        if (q.sourceUrns?.includes('col1')) return [ge('out', 'col1', 'other.col')]
+        if (q.targetUrns?.includes('col1')) return [ge('in', 'src.col', 'col1')]
+        return []
+      },
+      children: () => ({
+        children: [gn('col1')],
+        containmentEdges: [ge('c', 'f', 'col1', 'CONTAINS')],
+        lineageEdges: [],
+        totalChildren: 1,
+        hasMore: false,
+        nextCursor: null,
+      }),
+    })
+    const { result } = renderHook(() => useLensSession('f', provider))
+    await waitFor(() => expect(result.current?.state.children.get('f')?.state).toBe('done'))
+
+    // Children page + BOTH raw directions for the children.
+    expect(getChildrenWithEdges).toHaveBeenCalledTimes(1)
+    const childQueries = getEdges.mock.calls.map(c => c[0])
+    expect(childQueries.some(q => q.sourceUrns?.includes('col1'))).toBe(true)
+    expect(childQueries.some(q => q.targetUrns?.includes('col1'))).toBe(true)
+
+    await waitFor(() => expect(result.current!.state.hops.get('other.col')).toBe(1))
+    expect(result.current!.state.hops.get('col1')).toBe(0)
+    expect(result.current!.state.hops.get('src.col')).toBe(-1)
+    expect(result.current!.state.records.size).toBe(2)
+
+    // The fallback IS the first contents page — a chevron open refires nothing.
+    act(() => result.current!.openChildren('f'))
+    expect(getChildrenWithEdges).toHaveBeenCalledTimes(1)
+  })
+
+  it('never fires when the focal has lineage of its own', async () => {
+    const { provider, getChildrenWithEdges } = makeProvider({
+      edges: q => (q.sourceUrns?.[0] === 'f' ? [ge('out', 'f', 'sink')] : []),
+    })
+    const { result } = renderHook(() => useLensSession('f', provider))
+    await waitFor(() => expect(result.current && doneAt(result.current, expansionKeyOf('down', 'f'))).toBe(true))
+    await waitFor(() => expect(result.current!.state.hops.get('sink')).toBe(1))
+    expect(getChildrenWithEdges).not.toHaveBeenCalled()
+  })
+})
+
 describe('session integrity', () => {
   it('drops results that resolve after the focal changed', async () => {
     let releaseFirst: (edges: GraphEdge[]) => void = () => {}

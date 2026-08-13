@@ -38,6 +38,7 @@ import {
   isAggregatedType,
   mergeAncestors,
   mergeChildren,
+  mergeContainedLineage,
   mergeContainmentEdges,
   mergeDegrees,
   mergeDrill,
@@ -364,6 +365,59 @@ export function useLensSession(
     [provider, rawLineageTypes, containmentOpts, apply],
   )
 
+  /**
+   * The container fallback: when a focal lands with ZERO lineage of its
+   * own — no raw edges at its grain and no rollup cells (unmaterialized
+   * cube, or lineage that only exists between children, the
+   * dataset-of-columns case) — the honest picture is one level down.
+   * Fetch the first children page, then the children's own raw edges
+   * (both directions; the children query itself returns only intra-page
+   * lineage), and land them as contained lineage: children under the
+   * focal's frame, external partners one hop out.
+   */
+  const fetchContainedLineage = useCallback(
+    async (session: number, urn: string) => {
+      if (!provider) return
+      // A superseded session must never CLAIM the dedupe key: under
+      // StrictMode's double-invoked mount effect, the stale chain can
+      // reach this point first, and its claim would starve the live
+      // session whose merges actually land.
+      if (session !== sessionRef.current) return
+      // Shares the chevron's namespace: this IS the first contents page,
+      // so a later chevron folds/loads-more instead of refetching.
+      const key = `kids:${urn}:`
+      if (startedRef.current.has(key)) return
+      startedRef.current.add(key)
+      apply(session, prev => startChildren(prev, urn))
+      try {
+        const res = await provider.getChildrenWithEdges(urn, {
+          limit: LENS_CHILD_PAGE,
+          includeLineageEdges: true,
+          lineageEdgeTypes: rawLineageTypes.length > 0 ? rawLineageTypes : undefined,
+        })
+        apply(session, prev => mergeChildren(prev, urn, res, containmentOpts))
+        const childUrns = res.children.map(c => c.urn).filter(Boolean)
+        if (childUrns.length === 0) return
+        const types = rawLineageTypes.length > 0 ? rawLineageTypes : undefined
+        const [asSource, asTarget, childDegrees] = await Promise.all([
+          provider.getEdges({ sourceUrns: childUrns, edgeTypes: types, limit: LENS_EDGE_LIMIT }),
+          provider.getEdges({ targetUrns: childUrns, edgeTypes: types, limit: LENS_EDGE_LIMIT }),
+          provider.getNodeDegrees
+            ? provider.getNodeDegrees(childUrns, types).catch(() => ({}))
+            : Promise.resolve({}),
+        ])
+        apply(session, prev => mergeDegrees(prev, childDegrees))
+        const edges = [...asSource, ...asTarget]
+        apply(session, prev => mergeContainedLineage(prev, urn, edges, containmentOpts))
+        await hydratePartners(session, urn, edges)
+      } catch {
+        startedRef.current.delete(key)
+        apply(session, prev => failChildren(prev, urn))
+      }
+    },
+    [provider, rawLineageTypes, containmentOpts, apply, hydratePartners],
+  )
+
   const fetchDrill = useCallback(
     async (
       session: number,
@@ -507,6 +561,20 @@ export function useLensSession(
           ...rawDown,
           ...(trace && !trace.isInherited ? trace.edges : []),
         ])
+        // Nothing at the focal's own grain? The lineage may live one
+        // level down (columns of a dataset; unmaterialized rollups) —
+        // fall back to children-grain truth instead of an empty board.
+        const contributed =
+          rawUp.length +
+          rawDown.length +
+          (trace && !trace.isInherited
+            ? trace.edges.filter(
+                e => !isContainmentEdgeType((e.edgeType || '').toUpperCase(), containmentOpts.containmentEdgeTypes),
+              ).length
+            : 0)
+        if (contributed === 0) {
+          await fetchContainedLineage(session, focal)
+        }
         // Transitive reach — the change-impact number the lens gets
         // opened for. One bounded deep trace, measured not guessed;
         // truncation renders the numbers as floors.

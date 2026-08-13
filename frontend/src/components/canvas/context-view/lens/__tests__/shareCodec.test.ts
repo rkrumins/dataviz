@@ -12,6 +12,8 @@ const full = {
   expansions: ['down:urn:b', 'up:urn:b'],
   children: ['urn:b'],
   drills: ['urn:b urn:sys AGGREGATED'],
+  anchors: { 'urn:b urn:sys AGGREGATED': 'urn:sys' },
+  connected: ['urn:sys'],
 }
 
 describe('shareCodec', () => {
@@ -44,7 +46,23 @@ describe('shareCodec', () => {
       expansions: [],
       children: [],
       drills: [],
+      anchors: {},
+      connected: [],
     })
+  })
+
+  it('drops malformed anchor maps instead of trusting them', () => {
+    const json = JSON.stringify({
+      v: 2,
+      entries: ['urn:a'],
+      cursor: 0,
+      anchors: { good: 'urn:x', bad: 42 },
+      connected: ['urn:x', 7],
+    })
+    const token = btoa(json).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    const decoded = decodeLensShare(token)
+    expect(decoded?.anchors).toEqual({})
+    expect(decoded?.connected).toEqual([])
   })
 
   it.each([

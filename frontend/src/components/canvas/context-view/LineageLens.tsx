@@ -95,7 +95,8 @@ export function LineageLens({
     for (const urn of shareSeed.children) session.openChildren(urn)
   }, [shareSeed, session])
   // Drills replay once their record exists (a shared drill needs the
-  // expansion that revealed the record to land first).
+  // expansion that revealed the record to land first — insertion order
+  // walks chains parent-first), anchored on the side the sharer opened.
   const seededDrillsRef = useRef<Set<string>>(new Set())
   useEffect(() => {
     if (!shareSeed || !session) return
@@ -104,7 +105,7 @@ export function LineageLens({
       const record = session.state.records.get(recordId)
       if (record?.rollupEdge) {
         seededDrillsRef.current.add(recordId)
-        session.drillRollup(recordId, record.rollupEdge.targetUrn)
+        session.drillRollup(recordId, shareSeed.anchors[recordId] ?? record.rollupEdge.targetUrn)
       }
     }
   }, [shareSeed, session])
@@ -113,12 +114,23 @@ export function LineageLens({
   const [copied, setCopied] = useState(false)
   const share = useCallback(() => {
     if (!session) return
+    const anchors: Record<string, string> = {}
+    const connected: string[] = []
+    for (const [recordId, drill] of session.state.drills) {
+      if (!drill.anchorUrn) continue
+      anchors[recordId] = drill.anchorUrn
+      if (drill.state === 'done' && drill.recordIds.length > 0 && !connected.includes(drill.anchorUrn)) {
+        connected.push(drill.anchorUrn)
+      }
+    }
     const token = encodeLensShare({
       entries: history.entries,
       cursor: history.cursor,
       expansions: [...session.state.expansions.keys()],
       children: [...session.state.children.keys()],
       drills: [...session.state.drills.keys()],
+      anchors,
+      connected,
     })
     const url = `${window.location.origin}${window.location.pathname}?lens=${token}${window.location.hash}`
     void navigator.clipboard?.writeText(url).then(() => {
@@ -236,6 +248,9 @@ export function LineageLens({
               onFocus={urn => onHistoryChange(lensPush(history, urn))}
               {...(onRevealOnCanvas ? { onRevealOnCanvas: (urn: string) => void onRevealOnCanvas(urn) } : {})}
               {...(onOpenDetails ? { onOpenDetails } : {})}
+              {...(shareSeed && session.state.focal === shareSeed.entries[shareSeed.cursor]
+                ? { initialConnectedFrames: new Set(shareSeed.connected) }
+                : {})}
             />
           ) : (
             <div className="flex h-full items-center justify-center text-xs text-ink-muted">

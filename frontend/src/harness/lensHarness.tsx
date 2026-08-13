@@ -49,12 +49,14 @@ useSchemaStore.setState({
     containmentEdgeTypes: ['CONTAINS'],
     lineageEdgeTypes: ['FLOWS_TO', 'CONSUMES', 'AGGREGATED'],
     entityTypes: [
-      { id: 'domain', name: 'Domain', hierarchy: { canContain: ['dataPlatform', 'system', 'app'], canBeContainedBy: [] } },
+      // domain⊃domain is deliberate: the fixtures exercise self-nesting
+      // ontologies (Node has Node has Node).
+      { id: 'domain', name: 'Domain', hierarchy: { canContain: ['domain', 'dataPlatform', 'system', 'app'], canBeContainedBy: ['domain'] } },
       { id: 'dataPlatform', name: 'Platform', hierarchy: { canContain: ['dataset', 'schema'], canBeContainedBy: ['domain'] } },
       { id: 'system', name: 'System', hierarchy: { canContain: ['dataset'], canBeContainedBy: ['domain'] } },
-      { id: 'app', name: 'Application', hierarchy: { canContain: [], canBeContainedBy: ['domain'] } },
+      { id: 'app', name: 'Application', hierarchy: { canContain: ['dataset'], canBeContainedBy: ['domain'] } },
       { id: 'schema', name: 'Schema', hierarchy: { canContain: ['dataset'], canBeContainedBy: ['dataPlatform'] } },
-      { id: 'dataset', name: 'Dataset', hierarchy: { canContain: ['column'], canBeContainedBy: ['schema', 'dataPlatform', 'system'] } },
+      { id: 'dataset', name: 'Dataset', hierarchy: { canContain: ['column'], canBeContainedBy: ['schema', 'dataPlatform', 'system', 'app'] } },
       { id: 'column', name: 'Column', hierarchy: { canContain: [], canBeContainedBy: ['dataset'] } },
       { id: 'dashboard', name: 'Dashboard', hierarchy: { canContain: [], canBeContainedBy: ['domain'] } },
     ],

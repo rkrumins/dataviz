@@ -178,12 +178,99 @@ async function drive(cdp, fixture) {
     })
     await cdp.shot('e2e-coarse-1-first-paint')
 
-    await step('drilling the ×N wire lands concrete constituents', async () => {
+    await step('drilling the ×N wire refines the opened side only', async () => {
       await click(cdp, `[title*="rolled-up connection standing for 14"]`, '×14 drill chip')
-      await waitFor(cdp, `document.querySelector('${card('ds:raw_events')}')`, 'constituent source')
-      await waitFor(cdp, `document.querySelector('${card('ds:stg_events')}')`, 'constituent target')
+      // The anchor (kafka, farther from the focal) opens into a frame
+      // holding its constituent; the focal side stays whole — its
+      // constituent is recorded but NOT carded, the wire re-anchors on
+      // the focal card itself.
+      await waitFor(cdp, `document.querySelector('${card('ds:raw_events')}')`, 'anchor-side constituent')
+      await waitFor(cdp, `document.querySelector('[data-lens-frame="plat:kafka"]')`, 'kafka frame')
+      if (await cdp.eval(`Boolean(document.querySelector('${card('ds:stg_events')}'))`)) {
+        throw new Error('focal-side constituent was carded — the whole side must stay whole')
+      }
+      await waitFor(cdp, `document.querySelectorAll('.react-flow__edge').length >= 2`, 'wires present')
     })
     await cdp.shot('e2e-coarse-2-drilled')
+  }
+
+  if (fixture === 'columns') {
+    console.log('▸ columns — container fallback: dataset lineage lives on its columns')
+    await step('an empty-at-grain focal paints its children-grain truth', async () => {
+      await waitFor(cdp, `document.querySelector('${card('ds:t2')}')`, 'focal dataset')
+      // The fallback: focal columns under its frame, source columns
+      // grouped in their dataset frame upstream, consumers downstream.
+      await waitFor(cdp, `document.querySelector('${card('col:t2.total_amount')}')`, 'focal column')
+      await waitFor(cdp, `document.querySelector('${card('col:t1.total_amount')}')`, 'source column')
+      await waitFor(cdp, `document.querySelector('${card('col:fact.gross_profit')}')`, 'consumer column')
+      await waitFor(cdp, `document.querySelector('[data-lens-frame="ds:t1"]')`, 'source dataset frame')
+      await waitFor(cdp, `document.querySelectorAll('.react-flow__edge').length >= 6`, '6 wires')
+      // No dishonest whispers, no noise 0/0 tally on the container.
+      if (await cdp.eval(`document.body.textContent.includes('No upstream lineage')`)) {
+        throw new Error('empty-side whisper shown despite children-grain lineage')
+      }
+      if (await cdp.eval(`document.querySelector('${card('ds:t2')}').textContent.includes('0 in')`)) {
+        throw new Error('container shows a 0/0 degree tally')
+      }
+    })
+    await cdp.shot('e2e-columns-1-fallback')
+  }
+
+  if (fixture === 'domains') {
+    console.log('▸ domains — macro→micro connected expand, N deep, auto-walk')
+    await step('first paint: domain focal with two rollup partners', async () => {
+      await waitFor(cdp, `document.querySelector('${card('dom:a')}')`, 'focal domain')
+      await waitFor(cdp, `document.querySelector('${card('dom:b')}')`, 'Domain B rollup')
+      await waitFor(cdp, `document.querySelector('${card('dom:c')}')`, 'Domain C rollup')
+      await waitFor(cdp, `document.querySelectorAll('.react-flow__edge').length >= 2`, '2 wires')
+    })
+    await cdp.shot('e2e-domains-1-first-paint')
+
+    await step('chevron on B opens CONNECTED only — the apps A reaches', async () => {
+      await click(cdp, `${card('dom:b')} [aria-label="Open contents of dom:b"]`, 'B chevron')
+      await waitFor(cdp, `document.querySelector('${card('app:b1')}')`, 'connected app 1')
+      await waitFor(cdp, `document.querySelector('${card('app:b2')}')`, 'connected app 2')
+      await waitFor(cdp, `document.querySelector('[data-lens-frame="dom:b"]')`, 'B frame')
+      await waitFor(cdp, `document.querySelector('[data-lens-strip="dom:b"]')?.textContent.includes('2 connected')`, 'honest connected count')
+      if (await cdp.eval(`Boolean(document.querySelector('${card('app:b3')}'))`)) {
+        throw new Error('unconnected app appeared in connected-only mode')
+      }
+      // The A side stays whole: the true source endpoint is not carded.
+      if (await cdp.eval(`Boolean(document.querySelector('${card('app:a1')}'))`)) {
+        throw new Error('focal-side endpoint carded before the focal was opened')
+      }
+    })
+    await cdp.shot('e2e-domains-2-connected')
+
+    await step('Show all reveals the rest, quiet', async () => {
+      await click(cdp, `[data-lens-strip="dom:b"] button`, 'Show all toggle')
+      await waitFor(cdp, `document.querySelector('${card('app:b3')}[data-lens-quiet]')`, 'quiet unconnected app')
+    })
+    await cdp.shot('e2e-domains-3-show-all')
+
+    await step('chevron on an app nests its datasets three frames deep', async () => {
+      await click(cdp, `${card('app:b1')} [aria-label="Open contents of app:b1"]`, 'app chevron')
+      await waitFor(cdp, `document.querySelector('${card('ds:b1_orders')}')`, 'dataset 1')
+      await waitFor(cdp, `document.querySelector('${card('ds:b1_lines')}')`, 'dataset 2')
+      await waitFor(cdp, `document.querySelector('[data-lens-frame="app:b1"]')`, 'nested app frame')
+    })
+    await cdp.shot('e2e-domains-4-three-deep')
+
+    await step('opening the focal cards its app and wires snap to it', async () => {
+      await click(cdp, `${card('dom:a')} [aria-label="Open contents of dom:a"]`, 'focal chevron')
+      await waitFor(cdp, `document.querySelector('${card('app:a1')}')`, 'A-side endpoint carded')
+    })
+    await cdp.shot('e2e-domains-5-a-side-open')
+
+    await step('chevron on C auto-walks the pass-through tower', async () => {
+      await click(cdp, `${card('dom:c')} [aria-label="Open contents of dom:c"]`, 'C chevron')
+      await waitFor(cdp, `document.querySelector('${card('app:c1')}')`, 'deepest member')
+      await waitFor(cdp, `document.querySelector('[data-lens-strip="dom:c"]')?.textContent.includes('PROD › CURATED')`, 'walked path named')
+      if (await cdp.eval(`Boolean(document.querySelector('${card('dom:c_prod')}') || document.querySelector('${card('dom:c_curated')}'))`)) {
+        throw new Error('pass-through intermediates were carded')
+      }
+    })
+    await cdp.shot('e2e-domains-6-auto-walk')
   }
 }
 
@@ -218,6 +305,8 @@ try {
   const cdp = new Cdp(ws)
   await drive(cdp, 'app')
   await drive(cdp, 'coarse')
+  await drive(cdp, 'domains')
+  await drive(cdp, 'columns')
   ws.close()
 } catch (err) {
   failures++

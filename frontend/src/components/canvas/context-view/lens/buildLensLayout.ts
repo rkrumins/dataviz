@@ -138,6 +138,8 @@ export interface LensFrame {
   walkPath?: string[]
   /** The auto-walk stopped at its step cap, not at a natural end. */
   walkCapped?: boolean
+  /** Members matching the active Find filter (absent = no filter). */
+  matchedMembers?: number
   /** Absolute y of the mode strip row (header-card frames only). */
   stripY?: number
 }
@@ -198,6 +200,9 @@ export interface LensLayoutOptions {
   connectedFrames?: ReadonlySet<string>
   /** Anchors whose auto-walk stopped at the step cap (view state). */
   walkCapped?: ReadonlySet<string>
+  /** Per-frame member filter (Find box): label substring, case-blind.
+   *  Filtering narrows the page window, never the data. */
+  frameFilters?: ReadonlyMap<string, string>
   pageSize?: number
   columnPageSize?: number
 }
@@ -580,10 +585,16 @@ export function buildLensLayout(state: LensSessionState, opts: LensLayoutOptions
     const frameId = lensFrameId(entry.urn)
     const headerIsCard = cardUrns.has(entry.urn)
     const members = orderMembers(entry.urn, entry.members)
+    // The Find box narrows the page window, never the data: totals keep
+    // naming the full membership so a filter can't masquerade as truth.
+    const query = opts.frameFilters?.get(entry.urn)?.trim().toLowerCase()
+    const matched = query
+      ? members.filter(m => labelOf(state.nodes, m.urn).toLowerCase().includes(query))
+      : members
     const page = pages.get(frameId) ?? 0
-    const pageCount = Math.max(1, Math.ceil(members.length / pageSize))
+    const pageCount = Math.max(1, Math.ceil(Math.max(matched.length, 1) / pageSize))
     const boundedPage = Math.min(page, pageCount - 1)
-    const window = members.slice(boundedPage * pageSize, (boundedPage + 1) * pageSize)
+    const window = matched.slice(boundedPage * pageSize, (boundedPage + 1) * pageSize)
 
     // Connected-context meta: the frame was opened by drilling a rollup
     // anchored at it, so the header owes the honest counts, the
@@ -617,6 +628,7 @@ export function buildLensLayout(state: LensSessionState, opts: LensLayoutOptions
       pageCount,
       totalMembers: members.length,
       shownMembers: window.length,
+      ...(query !== undefined && query !== '' ? { matchedMembers: matched.length } : {}),
       ...(contextFrame
         ? {
             mode: opts.connectedFrames?.has(entry.urn) ? ('connected' as const) : ('all' as const),

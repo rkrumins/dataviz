@@ -96,7 +96,8 @@ describe('LensGraphView', () => {
   it('renders the focal, its partner, the breadcrumb and honest whispers', () => {
     const session = api(appSession())
     render(<LensGraphView session={session} onFocus={vi.fn()} />)
-    expect(screen.getByText('Customer Portal')).toBeInTheDocument()
+    // Named on the focal card AND in the identity header block.
+    expect(screen.getAllByText('Customer Portal').length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('Gold Orders')).toBeInTheDocument()
     // Breadcrumb names the focal's ancestor, clickable.
     expect(screen.getByTitle('Focus Retail Domain')).toBeInTheDocument()
@@ -239,6 +240,16 @@ describe('connected expand routing', () => {
     fireEvent.click(screen.getByLabelText('Open contents of domainB'))
     expect(session.calls.connectedExpand).toHaveBeenCalledWith('domainB')
     expect(session.calls.openChildren).not.toHaveBeenCalled()
+  })
+
+  it('the focal always opens plain contents — never consumes partner rollups', () => {
+    const session = api(domainSession())
+    render(<LensGraphView session={session} onFocus={vi.fn()} />)
+    // domainA has a drillable incident rollup (A→B), but expanding the
+    // focal must not drill it anchored at the wrong end.
+    fireEvent.click(screen.getByLabelText('Open contents of domainA'))
+    expect(session.calls.openChildren).toHaveBeenCalledWith('domainA')
+    expect(session.calls.connectedExpand).not.toHaveBeenCalled()
   })
 
   it('falls back to a plain contents open when nothing per-child is mapped', async () => {

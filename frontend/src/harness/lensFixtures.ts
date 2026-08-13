@@ -289,9 +289,185 @@ function drillFixture(): { focal: string; world: HarnessWorld } {
   return { focal: 'ds:orders', world }
 }
 
+/** Focus Domain A with rollups to Domains B and C: the macro→micro
+ *  story. Expanding B shows only the applications A's lineage reaches
+ *  (level-aligned constituents — the true A-side endpoints live under A
+ *  and stay unplaced until A is opened); expanding an application shows
+ *  its datasets, three frames deep. C is a pass-through chain of
+ *  self-nested domains (C ⊃ PROD ⊃ CURATED ⊃ one app) that the
+ *  auto-walk crosses in one gesture, ending in concrete truth. */
+function domainsFixture(): { focal: string; world: HarnessWorld } {
+  const world: HarnessWorld = {
+    nodes: [
+      node('dom:a', 'domain', 'Domain A', 1),
+      node('dom:b', 'domain', 'Domain B', 3),
+      node('dom:c', 'domain', 'Domain C', 1),
+      node('app:a1', 'app', 'Portal', 0),
+      node('app:b1', 'app', 'Orders Service', 2),
+      node('app:b2', 'app', 'Inventory Service', 0),
+      node('app:b3', 'app', 'Legacy Reports', 0),
+      node('ds:b1_orders', 'dataset', 'orders.core'),
+      node('ds:b1_lines', 'dataset', 'orders.lines'),
+      node('dom:c_prod', 'domain', 'PROD', 1),
+      node('dom:c_curated', 'domain', 'CURATED', 1),
+      node('app:c1', 'app', 'Analytics Hub', 0),
+    ],
+    edges: [],
+    containment: [
+      edge('dom:a', 'app:a1', 'CONTAINS'),
+      edge('dom:b', 'app:b1', 'CONTAINS'),
+      edge('dom:b', 'app:b2', 'CONTAINS'),
+      edge('dom:b', 'app:b3', 'CONTAINS'),
+      edge('app:b1', 'ds:b1_orders', 'CONTAINS'),
+      edge('app:b1', 'ds:b1_lines', 'CONTAINS'),
+      edge('dom:c', 'dom:c_prod', 'CONTAINS'),
+      edge('dom:c_prod', 'dom:c_curated', 'CONTAINS'),
+      edge('dom:c_curated', 'app:c1', 'CONTAINS'),
+    ],
+    degrees: {
+      'app:a1': { in: 0, out: 18 },
+      'app:b1': { in: 7, out: 2 },
+      'app:b2': { in: 5, out: 0 },
+      'ds:b1_orders': { in: 4, out: 1 },
+      'app:c1': { in: 6, out: 0 },
+    },
+    traces: {
+      'dom:a': {
+        edges: [
+          edge('dom:a', 'dom:b', 'AGGREGATED', { weight: 12, sourceEdgeTypes: ['CONSUMES', 'FLOWS_TO'] }),
+          edge('dom:a', 'dom:c', 'AGGREGATED', { weight: 6, sourceEdgeTypes: ['FLOWS_TO'] }),
+        ],
+        nodes: [node('dom:b', 'domain', 'Domain B', 3), node('dom:c', 'domain', 'Domain C', 1)],
+        downstreamUrns: new Set(['dom:b', 'dom:c']),
+      },
+    },
+    expands: req => {
+      const anchored = (s: string, t: string, anchor: string) =>
+        req.sourceUrn === s && req.targetUrn === t && req.drillAnchor === anchor
+      // B, one step: the applications A's lineage actually reaches —
+      // level-aligned cells whose A-side endpoint is A's app, not A.
+      if (anchored('dom:a', 'dom:b', 'dom:b')) {
+        return {
+          nodes: [
+            node('app:b1', 'app', 'Orders Service', 2),
+            node('app:b2', 'app', 'Inventory Service', 0),
+            node('app:a1', 'app', 'Portal', 0),
+          ],
+          containmentEdges: [
+            edge('dom:b', 'app:b1', 'CONTAINS'),
+            edge('dom:b', 'app:b2', 'CONTAINS'),
+            edge('dom:a', 'app:a1', 'CONTAINS'),
+          ],
+          edges: [
+            edge('app:a1', 'app:b1', 'AGGREGATED', { weight: 7, sourceEdgeTypes: ['CONSUMES'] }),
+            edge('app:a1', 'app:b2', 'AGGREGATED', { weight: 5, sourceEdgeTypes: ['FLOWS_TO'] }),
+          ],
+        }
+      }
+      // Orders Service, one step deeper: exactly which datasets.
+      if (anchored('app:a1', 'app:b1', 'app:b1')) {
+        return {
+          nodes: [
+            node('ds:b1_orders', 'dataset', 'orders.core'),
+            node('ds:b1_lines', 'dataset', 'orders.lines'),
+          ],
+          containmentEdges: [
+            edge('app:b1', 'ds:b1_orders', 'CONTAINS'),
+            edge('app:b1', 'ds:b1_lines', 'CONTAINS'),
+            edge('dom:a', 'app:a1', 'CONTAINS'),
+          ],
+          edges: [
+            edge('app:a1', 'ds:b1_orders', 'AGGREGATED', { weight: 4, sourceEdgeTypes: ['CONSUMES'] }),
+            edge('app:a1', 'ds:b1_lines', 'AGGREGATED', { weight: 3, sourceEdgeTypes: ['CONSUMES'] }),
+          ],
+        }
+      }
+      // C is a pass-through tower of self-nested domains: each level has
+      // exactly one connected child, so the auto-walk crosses all of it.
+      if (anchored('dom:a', 'dom:c', 'dom:c')) {
+        return {
+          nodes: [node('dom:c_prod', 'domain', 'PROD', 1), node('app:a1', 'app', 'Portal', 0)],
+          containmentEdges: [
+            edge('dom:c', 'dom:c_prod', 'CONTAINS'),
+            edge('dom:a', 'app:a1', 'CONTAINS'),
+          ],
+          edges: [edge('app:a1', 'dom:c_prod', 'AGGREGATED', { weight: 6, sourceEdgeTypes: ['FLOWS_TO'] })],
+        }
+      }
+      if (anchored('app:a1', 'dom:c_prod', 'dom:c_prod')) {
+        return {
+          nodes: [node('dom:c_curated', 'domain', 'CURATED', 1)],
+          containmentEdges: [edge('dom:c_prod', 'dom:c_curated', 'CONTAINS')],
+          edges: [edge('app:a1', 'dom:c_curated', 'AGGREGATED', { weight: 6, sourceEdgeTypes: ['FLOWS_TO'] })],
+        }
+      }
+      if (anchored('app:a1', 'dom:c_curated', 'dom:c_curated')) {
+        return {
+          nodes: [node('app:c1', 'app', 'Analytics Hub', 0)],
+          containmentEdges: [edge('dom:c_curated', 'app:c1', 'CONTAINS')],
+          edges: [edge('app:a1', 'app:c1', 'AGGREGATED', { weight: 6, sourceEdgeTypes: ['FLOWS_TO'] })],
+        }
+      }
+      // The chain's last step: the raw fallback returns concrete truth
+      // between the pair itself — the walk ends on a solid wire.
+      if (anchored('app:a1', 'app:c1', 'app:c1')) {
+        return {
+          nodes: [node('app:c1', 'app', 'Analytics Hub', 0)],
+          containmentEdges: [edge('dom:c_curated', 'app:c1', 'CONTAINS')],
+          edges: [edge('app:a1', 'app:c1', 'FLOWS_TO', { weight: 6 })],
+        }
+      }
+      return null
+    },
+  }
+  return { focal: 'dom:a', world }
+}
+
+/** Focus a dataset whose lineage lives entirely on its COLUMNS — no
+ *  raw edges of its own, no materialized rollups (traces come back
+ *  empty). The container fallback must paint the children-grain truth:
+ *  the focal's columns under its frame, source columns grouped in
+ *  their dataset frame upstream, consumer columns downstream. */
+function columnsFixture(): { focal: string; world: HarnessWorld } {
+  const t1cols = ['total_amount', 'subtotal', 'order_id', 'net_revenue']
+  const world: HarnessWorld = {
+    nodes: [
+      node('ds:t2', 'dataset', 'int_clean_orders_t2', 4),
+      node('sch:int', 'schema', 'INTERMEDIATE_T2'),
+      node('ds:t1', 'dataset', 'int_clean_orders_t1', 4),
+      node('ds:fact', 'dataset', 'fact_orders', 2),
+      ...t1cols.map(c => node(`col:t1.${c}`, 'column', c)),
+      ...t1cols.map(c => node(`col:t2.${c}`, 'column', c)),
+      node('col:fact.total_amount', 'column', 'total_amount'),
+      node('col:fact.gross_profit', 'column', 'gross_profit'),
+    ],
+    edges: [
+      ...t1cols.map(c => edge(`col:t1.${c}`, `col:t2.${c}`, 'FLOWS_TO')),
+      edge('col:t2.total_amount', 'col:fact.total_amount', 'FLOWS_TO'),
+      edge('col:t2.net_revenue', 'col:fact.gross_profit', 'FLOWS_TO'),
+    ],
+    containment: [
+      edge('sch:int', 'ds:t2', 'CONTAINS'),
+      ...t1cols.map(c => edge('ds:t1', `col:t1.${c}`, 'CONTAINS')),
+      ...t1cols.map(c => edge('ds:t2', `col:t2.${c}`, 'CONTAINS')),
+      edge('ds:fact', 'col:fact.total_amount', 'CONTAINS'),
+      edge('ds:fact', 'col:fact.gross_profit', 'CONTAINS'),
+    ],
+    degrees: {
+      'ds:t2': { in: 0, out: 0 },
+      'col:t2.total_amount': { in: 1, out: 1 },
+      'col:t2.net_revenue': { in: 1, out: 1 },
+      'col:t1.total_amount': { in: 3, out: 1 },
+    },
+  }
+  return { focal: 'ds:t2', world }
+}
+
 export const FIXTURES: Record<string, () => { focal: string; world: HarnessWorld }> = {
   app: appFixture,
   coarse: coarseFixture,
   'deep-walk': deepWalkFixture,
   drill: drillFixture,
+  domains: domainsFixture,
+  columns: columnsFixture,
 }

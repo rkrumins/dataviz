@@ -158,7 +158,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/EXPLORING_GRAPH.md"
   },
   "lineage-lens": {
-    "updated": "2026-07-20",
+    "updated": "2026-08-12",
     "path": "docs/guide/LINEAGE_LENS.md"
   },
   "navigating-layers": {

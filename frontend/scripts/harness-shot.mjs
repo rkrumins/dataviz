@@ -16,7 +16,7 @@ import { join } from 'node:path'
 const run = promisify(execFile)
 const PORT = 5199
 const OUT = '.harness'
-const FIXTURES = process.argv.slice(2).length ? process.argv.slice(2) : ['app', 'coarse', 'deep-walk', 'drill']
+const FIXTURES = process.argv.slice(2).length ? process.argv.slice(2) : ['app', 'coarse', 'deep-walk', 'drill', 'domains', 'columns']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH

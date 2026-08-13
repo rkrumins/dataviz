@@ -23,8 +23,14 @@ export interface LensShareState {
   expansions: string[]
   /** Containment opens (urns whose children were opened). */
   children: string[]
-  /** Rollup drills (record ids) to replay once their record exists. */
+  /** Rollup drills (record ids) to replay once their record exists —
+   *  in insertion order, so a walked chain replays parent-first. */
   drills: string[]
+  /** Which side each drill opened (record id → anchor urn). Without it
+   *  a replay could descend the wrong end of the pair. */
+  anchors: Record<string, string>
+  /** Anchor urns whose frames open in connected-only mode. */
+  connected: string[]
 }
 
 export function encodeLensShare(state: Omit<LensShareState, 'v'>): string {
@@ -36,6 +42,12 @@ export function encodeLensShare(state: Omit<LensShareState, 'v'>): string {
 
 const isStringArray = (v: unknown): v is string[] =>
   Array.isArray(v) && v.every(x => typeof x === 'string')
+
+const isStringRecord = (v: unknown): v is Record<string, string> =>
+  typeof v === 'object' &&
+  v !== null &&
+  !Array.isArray(v) &&
+  Object.values(v).every(x => typeof x === 'string')
 
 export function decodeLensShare(raw: string): LensShareState | null {
   if (!raw || typeof raw !== 'string' || raw.length > 16384) return null
@@ -56,6 +68,8 @@ export function decodeLensShare(raw: string): LensShareState | null {
       expansions: isStringArray(p.expansions) ? p.expansions : [],
       children: isStringArray(p.children) ? p.children : [],
       drills: isStringArray(p.drills) ? p.drills : [],
+      anchors: isStringRecord(p.anchors) ? p.anchors : {},
+      connected: isStringArray(p.connected) ? p.connected : [],
     }
   } catch {
     return null

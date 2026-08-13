@@ -26,6 +26,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
+  useUpdateNodeInternals,
   type Edge,
   type EdgeProps,
   type Node,
@@ -98,6 +99,7 @@ interface LensInteractions {
   loadMoreChildren: (urn: string) => void
   drillRecords: (recordIds: string[]) => void
   toggleFrameMode: (urn: string, mode: 'connected' | 'all') => void
+  setFrameFilter: (urn: string, query: string) => void
   select: (urn: string) => void
   focus: (urn: string) => void
   framePage: (frameId: string, delta: number) => void
@@ -230,6 +232,20 @@ function CardNode({ data }: NodeProps<Node<CardNodeData>>) {
       <PillButton pill={card.pills.down} urn={card.urn} io={io} />
     </span>
   )
+  // Entity rows read like the original design: the upstream ⊕ sits on
+  // the LEFT edge (where upstream lives), the chevron + downstream ⊕ on
+  // the right — the gesture geometry mirrors the board's.
+  const upGesture = (
+    <span className="flex shrink-0 items-center">
+      <PillButton pill={card.pills.up} urn={card.urn} io={io} />
+    </span>
+  )
+  const downGestures = (
+    <span className="flex shrink-0 items-center gap-1">
+      <ChevronButton chevron={card.chevron} urn={card.urn} io={io} />
+      <PillButton pill={card.pills.down} urn={card.urn} io={io} />
+    </span>
+  )
   const handles = (
     <>
       {/* Wires attach here: data flows left → right. Invisible — the
@@ -292,7 +308,10 @@ function CardNode({ data }: NodeProps<Node<CardNodeData>>) {
           )}
         </div>
         <div className="mt-1 flex items-center gap-2.5 border-t border-black/[0.07] pt-1 text-[10.5px] font-medium tabular-nums dark:border-white/[0.08]">
-          {card.degrees ? (
+          {/* A 0/0 measurement on a container is noise, not news — its
+              lineage lives on its children and the empty-side whispers
+              already state the honest absence. */}
+          {card.degrees && (card.degrees.in > 0 || card.degrees.out > 0) ? (
             <>
               <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400" title="Measured incoming lineage edges">
                 ↙ {card.degrees.in} in
@@ -337,6 +356,7 @@ function CardNode({ data }: NodeProps<Node<CardNodeData>>) {
       {...(card.connected === false ? { 'data-lens-quiet': true } : {})}
     >
       {handles}
+      {upGesture}
       <div
         className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md"
         style={{ backgroundColor: `${accent}1f`, color: accent }}
@@ -366,7 +386,7 @@ function CardNode({ data }: NodeProps<Node<CardNodeData>>) {
           ) : null}
         </p>
       </div>
-      {gestures}
+      {downGestures}
     </div>
   )
 }
@@ -396,10 +416,24 @@ function BandNode({ data }: NodeProps<Node<BandNodeData>>) {
   )
 }
 
+function FrameFind({ frame, io }: { frame: LensFrame; io: { current: LensInteractions } }) {
+  return (
+    <input
+      type="text"
+      className="nodrag h-[16px] w-[74px] shrink-0 rounded border border-black/10 dark:border-white/10 bg-canvas px-1 text-[9px] text-ink placeholder:text-ink-muted/50 focus:border-accent-lineage focus:outline-none"
+      placeholder="Find…"
+      onClick={e => e.stopPropagation()}
+      onChange={e => io.current.setFrameFilter(frame.urn, e.target.value)}
+      aria-label={`Find inside ${frame.label}`}
+    />
+  )
+}
+
 function FrameNode({ data }: NodeProps<Node<FrameNodeData>>) {
   const { frame, entityType, io } = data
   const { color } = useEntityVisual(entityType || 'entity')
   const paged = frame.pageCount > 1
+  const findable = frame.totalMembers > 4 || frame.matchedMembers !== undefined
   return (
     <div
       className="h-full w-full rounded-xl border-2 border-dashed bg-black/[0.02] dark:bg-white/[0.03]"
@@ -423,8 +457,11 @@ function FrameNode({ data }: NodeProps<Node<FrameNodeData>>) {
           >
             {frame.label}
           </button>
+          {findable ? <FrameFind frame={frame} io={io} /> : null}
           <span className="ml-auto shrink-0 text-[9.5px] text-ink-muted/70">
-            {frame.totalMembers} connected inside
+            {frame.matchedMembers !== undefined
+              ? `${frame.matchedMembers} of ${frame.totalMembers} match`
+              : `${frame.totalMembers} connected inside`}
           </span>
         </div>
       ) : null}
@@ -451,10 +488,13 @@ function FrameNode({ data }: NodeProps<Node<FrameNodeData>>) {
             </span>
           ) : null}
           <span className="shrink-0 tabular-nums">
-            {frame.mode === 'connected'
-              ? `${frame.connectedCount ?? 0} connected`
-              : `${frame.totalMembers} inside · ${frame.connectedCount ?? 0} connected`}
+            {frame.matchedMembers !== undefined
+              ? `${frame.matchedMembers} of ${frame.totalMembers} match`
+              : frame.mode === 'connected'
+                ? `${frame.connectedCount ?? 0} connected`
+                : `${frame.totalMembers} inside · ${frame.connectedCount ?? 0} connected`}
           </span>
+          {findable ? <FrameFind frame={frame} io={io} /> : null}
           <button
             type="button"
             className="nodrag ml-auto shrink-0 rounded-full border border-black/15 dark:border-white/15 px-1.5 py-px text-[9px] text-ink hover:border-accent-lineage hover:text-accent-lineage"
@@ -558,6 +598,81 @@ function LensEdgeComponent(props: EdgeProps<Edge<LensEdgeData>>) {
 
 const nodeTypes = { lensCard: CardNode, lensFrame: FrameNode, lensBand: BandNode }
 const edgeTypes = { lensEdge: LensEdgeComponent }
+
+// ── Header info + footer hints ─────────────────────────────────────────
+
+function TypeChip({ type, count }: { type: string; count: number }) {
+  const { color } = useEntityVisual(type || 'entity')
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full border border-black/10 dark:border-white/10 bg-canvas-elevated/95 px-2 py-0.5 text-[9px] font-medium text-ink-muted shadow-sm">
+      <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: color }} aria-hidden />
+      <span className="uppercase tracking-wide">{type}</span>
+      <span className="tabular-nums text-ink">{count}</span>
+    </span>
+  )
+}
+
+/** The original design's top-left identity block: who is focused, what
+ *  it sits in, how much is on the board, and of what kinds. */
+function InfoPanel({ session, layout }: { session: LensSessionApi; layout: LensLayout }) {
+  const focal = session.state.nodes.get(session.state.focal)
+  const visual = useEntityVisual(focal?.entityType || 'entity')
+  const parent = session.state.parents.get(session.state.focal)
+  const parentLabel = parent ? (session.state.nodes.get(parent)?.displayName ?? parent) : null
+  const connections = layout.edges.reduce((n, e) => n + e.bundledCount, 0)
+  const contains = layout.cards.find(c => c.isFocal)?.chevron.count
+  const typeCounts = new Map<string, number>()
+  for (const c of layout.cards) {
+    const t = c.entityType || 'entity'
+    typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1)
+  }
+  return (
+    <div className="pointer-events-none absolute left-2 top-2 z-10 flex max-w-[46%] flex-col gap-1.5 rounded-lg border border-black/[0.07] dark:border-white/[0.08] bg-canvas-elevated/95 p-2 shadow-sm">
+      <div className="flex items-center gap-2">
+        <span
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md"
+          style={{ backgroundColor: `${visual.color}1f`, color: visual.color }}
+          aria-hidden
+        >
+          <DynamicIcon name={visual.icon} className="h-3.5 w-3.5" />
+        </span>
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-baseline gap-1.5">
+            <span className="truncate text-[13px] font-semibold leading-tight text-ink">
+              {focal?.displayName ?? session.state.focal}
+            </span>
+            {parentLabel ? (
+              <span className="shrink-0 text-[10px] text-ink-muted">in {parentLabel}</span>
+            ) : null}
+          </div>
+          <div className="text-[10px] leading-tight text-ink-muted">
+            {connections} connection{connections === 1 ? '' : 's'}
+            {contains !== undefined ? ` · contains ${contains}` : ''}
+          </div>
+        </div>
+      </div>
+      {typeCounts.size > 0 ? (
+        <div className="flex flex-wrap items-center gap-1">
+          {[...typeCounts.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([t, n]) => (
+              <TypeChip key={t} type={t} count={n} />
+            ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function FooterHints() {
+  return (
+    <div className="pointer-events-none absolute bottom-2 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-full border border-black/5 dark:border-white/5 bg-canvas-elevated/80 px-3 py-1 text-[10px] text-ink-muted/80 shadow-sm">
+      Click a card to inspect · <strong className="font-semibold text-ink-muted">+</strong> to expand a
+      hop · <strong className="font-semibold text-ink-muted">›</strong> to open what's inside ·
+      Double-click to focus · Esc to close
+    </div>
+  )
+}
 
 // ── Banners ────────────────────────────────────────────────────────────
 
@@ -789,6 +904,7 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails,
     () => initialConnectedFrames ?? new Set(),
   )
   const [walkCapped, setWalkCapped] = useState<ReadonlySet<string>>(new Set())
+  const [frameFilters, setFrameFilters] = useState<ReadonlyMap<string, string>>(new Map())
   const [selectedUrn, setSelectedUrn] = useState<string | null>(null)
   const [hoveredUrn, setHoveredUrn] = useState<string | null>(null)
 
@@ -810,8 +926,16 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails,
   )
 
   const layout: LensLayout = useMemo(
-    () => buildLensLayout(session.state, { pages, canHaveChildren, collapsedChildren, connectedFrames, walkCapped }),
-    [session.state, pages, canHaveChildren, collapsedChildren, connectedFrames, walkCapped],
+    () =>
+      buildLensLayout(session.state, {
+        pages,
+        canHaveChildren,
+        collapsedChildren,
+        connectedFrames,
+        walkCapped,
+        frameFilters,
+      }),
+    [session.state, pages, canHaveChildren, collapsedChildren, connectedFrames, walkCapped, frameFilters],
   )
 
   // Interactions live behind a ref so node data stays referentially
@@ -824,6 +948,7 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails,
     loadMoreChildren: () => {},
     drillRecords: () => {},
     toggleFrameMode: () => {},
+    setFrameFilter: () => {},
     select: () => {},
     focus: () => {},
     framePage: () => {},
@@ -862,6 +987,13 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails,
         // lineage partner in its own right stays on the board); rollup
         // partners open CONNECTED (drill what the wires stand for);
         // everything else opens its plain contents.
+        //
+        // The FOCAL always opens plain contents: a record can be
+        // drilled from one side only, so expanding the focal must not
+        // consume its partners' rollups anchored at the wrong end. The
+        // focal side still refines — partner drills return level-
+        // aligned cells carrying the focal-side grain, and opening the
+        // focal's contents snaps the wires onto the true endpoints.
         if (chevron.state === 'loading' || chevron.connectedState === 'loading') return
         if (chevron.connectedState === 'error') {
           void runConnectedExpand(urn)
@@ -875,7 +1007,7 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails,
           toggleFold(urn)
           return
         }
-        if (chevron.connectedCandidates > 0) {
+        if (urn !== session.state.focal && chevron.connectedCandidates > 0) {
           void runConnectedExpand(urn)
           return
         }
@@ -899,6 +1031,14 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails,
         setConnectedFrames(prev => {
           const next = new Set(prev)
           if (mode === 'connected') next.add(urn)
+          else next.delete(urn)
+          return next
+        })
+      },
+      setFrameFilter: (urn: string, query: string) => {
+        setFrameFilters(prev => {
+          const next = new Map(prev)
+          if (query) next.set(urn, query)
           else next.delete(urn)
           return next
         })
@@ -1069,6 +1209,21 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails,
     })
   }, [layout, edgeLabelFor, hoverContext])
 
+  // Handle-bounds re-measurement after every layout change. React Flow
+  // measures handles lazily (rAF/ResizeObserver); when nodes resize or
+  // arrive mid-session that pipeline can stall — headless Chromium
+  // especially — leaving EVERY edge silently unrendered while the cards
+  // paint fine. updateNodeInternals is the documented escape hatch:
+  // force the recompute as soon as the DOM for the new picture exists.
+  const updateNodeInternals = useUpdateNodeInternals()
+  useEffect(() => {
+    if (!flowReady || nodes.length === 0) return
+    // jsdom has no layout engine (and no DOMMatrix): there is nothing
+    // to measure there, and React Flow's re-measure path would throw.
+    if (typeof window.DOMMatrixReadOnly !== 'function') return
+    updateNodeInternals(nodes.map(n => n.id))
+  }, [flowReady, nodes, updateNodeInternals])
+
   useFrameCamera(
     rf,
     lensCardId(session.state.focal),
@@ -1163,7 +1318,9 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails,
       )}
 
       <Banners banners={layout.banners} labelFor={labelFor} onFocus={onFocus} onRetry={retryFromBanner} />
+      {!loading ? <InfoPanel session={session} layout={layout} /> : null}
       {!selectedUrn && !loading ? <CornerControls containerRef={containerRef} /> : null}
+      {!selectedUrn && !loading && pagedColumns.length === 0 ? <FooterHints /> : null}
 
       {pagedColumns.length > 0 ? (
         <div className="pointer-events-auto absolute bottom-2 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3 rounded-full border border-black/10 dark:border-white/10 bg-canvas-elevated/95 px-3 py-1 text-2xs text-ink-muted shadow-sm">
