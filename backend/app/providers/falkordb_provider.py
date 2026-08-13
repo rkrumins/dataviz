@@ -39,6 +39,8 @@ from ..models.graph import (
     ChildrenWithEdgesResult, TopLevelNodesResult,
     TraceResult, TraceFocus,
 )
+# The closure-walk models are not carried by the app-level re-export above.
+from backend.common.models.graph import TraceClosureResult, TraceFrontierNode
 from .base import GraphDataProvider
 from backend.common.interfaces.provider import ProviderConfigurationError
 
@@ -153,6 +155,14 @@ def _sanitize_label(s: str) -> str:
 # continuing would silently skip or repeat rows — so providers reject the
 # mismatch (ValueError → 400 at the endpoint).
 _CURSOR_PREFIX = "k1:"
+
+# How many closure-frontier candidates get a real degree probe. Every boundary
+# node the walk did not finish is a candidate, and they all share ONE
+# `get_node_degrees` wave — so a hub-heavy closure could otherwise turn its
+# "what did I miss?" epilogue into the most expensive part of the request.
+# Past the cap the entries still ship, with totalCount None ("there is more,
+# we don't know how much"), which is what an unprobed frontier honestly is.
+CLOSURE_FRONTIER_PROBE_CAP = int(os.getenv("CLOSURE_FRONTIER_PROBE_CAP", "1000"))
 
 
 class CursorMismatchError(ValueError):
@@ -7054,6 +7064,396 @@ class FalkorDBProvider(GraphDataProvider):
         if fallback_level is not None:
             object.__setattr__(result, "_fallback_level", fallback_level)
         return result
+
+    async def trace_closure(
+        self,
+        urn: str,
+        upstream_depth: int,
+        downstream_depth: int,
+        lineage_edge_types: List[str],
+        containment_edge_types: List[str],
+        max_nodes: int,
+        timeout_ms: int,
+        seed_urns: Optional[List[str]] = None,
+        exclude_urns: Optional[List[str]] = None,
+        after_cursor: Optional[str] = None,
+    ) -> TraceClosureResult:
+        """Focus-scoped, regime-independent lineage closure — ONE step of a walk.
+
+        Walks RAW lineage edges outward from the focus (upstream + downstream)
+        as a bounded per-hop frontier BFS (``_expand_raw_lineage_set``),
+        gathering exactly the leaves that participate in THIS focus's lineage —
+        not its container's. Depends on NO ``:AGGREGATED`` cells, so it is
+        correct at the finest grain even in boundary regime where leaf rollups
+        are never materialised (the "trace disappears at the attribute level"
+        bug). Always hydrates the containment ancestor chain so the canvas can
+        nest the participants — containment is used to PLACE nodes, never as a
+        lineage hop.
+
+        Bounded like ``trace_at_level``: the engine deadline (< the middleware
+        tier) makes it truncate to a 200 with a ``truncationReason`` rather than
+        race a 504; ``max_nodes`` caps the working set. Python is a frontier
+        cursor + a visited set (cycle-safe on any cyclic graph); every
+        set-shaped step is one label-qualified index-seeking Cypher.
+
+        The walk is SERVER-DRIVEN one step at a time — the client keeps the
+        graph it has accumulated and asks for the next step — so three
+        parameters describe where it already is:
+
+        ``seed_urns``    start the hops from these known lineage participants
+                         instead of deriving a seed from the focus. A walk
+                         CONTINUATION: the client is expanding a frontier node,
+                         not re-anchoring on the focus.
+        ``exclude_urns`` nodes the client already holds. They are never
+                         re-shipped in ``nodes``, but an EDGE into one still
+                         is — that seam edge is what stitches this step onto
+                         the graph the client already has.
+        ``after_cursor`` page ONE node's adjacency in ONE direction
+                         (``e:<edge id>``) instead of walking: the fallback for
+                         a hub with more lineage than a hop can carry.
+
+        ``frontierUp``/``frontierDown`` name the boundary nodes the walk did NOT
+        finish — depth ran out, the ``max_nodes`` budget cut them off, or a page
+        came back full — carrying the full-graph degree in that direction when
+        it is known, so the canvas can offer "+N more" instead of presenting a
+        bounded closure as the whole truth. A boundary node whose adjacency is
+        already fully on screen is NOT frontier: it is an honest dead end, and
+        saying otherwise puts a chip on a node with nothing behind it.
+        """
+        await self._ensure_connected()
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+
+        # Normalize + per-graph case-align the declared rel-type sets (the
+        # case-sensitive [:TYPE] / type(r) patterns need the graph's spelling).
+        ltypes = [t.upper() for t in (lineage_edge_types or [])]
+        ctypes = [t.upper() for t in (containment_edge_types or [])]
+        ltypes = self._alias_rel_types(ltypes) if ltypes else ltypes
+        ctypes = self._alias_rel_types(ctypes) if ctypes else ctypes
+
+        try:
+            focus_node = await self.get_node(urn)
+        except Exception:
+            focus_node = None
+        focus_level = self._get_node_level(focus_node.entity_type) if focus_node else None
+        focus_entity_type = str(focus_node.entity_type) if focus_node else "unknown"
+        focus_label = focus_entity_type if focus_node else ""
+
+        edges_by_id: Dict[str, GraphEdge] = {}
+        upstream_urns: Set[str] = set()
+        downstream_urns: Set[str] = set()
+        truncation_reason: Optional[str] = None
+        excluded: Set[str] = set(exclude_urns or [])
+        seed_truncated = False
+
+        # Boundary bookkeeping. dict-as-ordered-set so the frontier a client
+        # sees is stable across identical requests. ``cut_*`` = stopped by the
+        # budget/deadline, ``depth_*`` = stopped by the requested depth.
+        cut_up: Dict[str, None] = {}
+        cut_down: Dict[str, None] = {}
+        depth_up: Dict[str, None] = {}
+        depth_down: Dict[str, None] = {}
+        paged_anchor: Optional[str] = None
+        paged_cursor: Optional[str] = None
+
+        def _record_edge(rec: Dict[str, Any]) -> None:
+            eid = rec["edgeId"]
+            if eid not in edges_by_id:
+                edges_by_id[eid] = GraphEdge(
+                    id=eid,
+                    sourceUrn=rec["sourceUrn"],
+                    targetUrn=rec["targetUrn"],
+                    edgeType=rec["edgeType"],
+                    properties={},
+                )
+
+        if after_cursor is not None:
+            # ---- paging shape: one node, one direction, one page ----------
+            # No seed walk and no BFS: the client is draining a single hub it
+            # already has, so re-walking would re-ship everything around it.
+            try:
+                after_id = int(after_cursor[2:])
+            except (TypeError, ValueError):
+                # The endpoint guarantees ^e:\d+$; if something else arrives,
+                # refuse rather than silently page from the start (which would
+                # re-ship a page the client already holds).
+                raise ValueError("invalid cursor")
+            up = int(upstream_depth) > 0
+            anchor_label = await self._get_cached_label(urn) or focus_label
+            rows, last_edge_id = await self._page_raw_lineage_single(
+                urn, anchor_label, "incoming" if up else "outgoing", ltypes,
+                after_id, max_nodes, max(0.0, deadline - time.monotonic()),
+            )
+            discovered: Set[str] = {urn}
+            for rec in rows:
+                _record_edge(rec)
+                other = rec.get("otherUrn")
+                if not other:
+                    continue
+                (upstream_urns if up else downstream_urns).add(other)
+                if other not in excluded:
+                    discovered.add(other)
+            if len(rows) >= max_nodes:
+                # A FULL page means there is more of this node's adjacency.
+                # Its entry is kept whatever the probe says — here the cursor,
+                # not the count, is the affordance.
+                paged_anchor = urn
+                (cut_up if up else cut_down)[urn] = None
+                if last_edge_id is not None:
+                    paged_cursor = f"e:{last_edge_id}"
+        else:
+            # ---- seed: the nodes the hops start from -----------------------
+            if seed_urns:
+                # A walk CONTINUATION. The caller already knows which nodes
+                # carry the lineage it is expanding from, so the container seed
+                # walk is deliberately skipped: re-deriving a seed from the
+                # focus's containment would cost a round-trip and re-anchor the
+                # walk on a focus the client has already moved past.
+                wanted = [
+                    u for u in dict.fromkeys(seed_urns)
+                    if u == urn or u not in excluded
+                ]
+                labels = await self._resolve_urn_labels_bulk(wanted) if wanted else {}
+                seed = [(u, labels.get(u) or "") for u in wanted]
+                seed_capped = False
+            else:
+                seed_timeout = max(0.6, min(1.5, deadline - time.monotonic()))
+                seed, seed_capped = await self._collect_lineage_seed(
+                    urn, focus_label, ltypes, ctypes, max_nodes, seed_timeout,
+                    exclude=excluded,
+                )
+            seed_truncated = seed_capped
+            if seed_truncated:
+                # The container holds more lineage-bearing descendants than the
+                # cap returned, so the response is partial before a single hop
+                # runs — the global flag has to say so too, not just the
+                # specific one.
+                truncation_reason = truncation_reason or "max_nodes"
+
+            seed_set = {u for u, _ in seed}
+            seed_labels = {u: lbl for u, lbl in seed}
+
+            # Excluded urns are pre-visited: never walked from, never
+            # re-shipped — but an edge INTO one is still recorded below.
+            visited: Set[str] = seed_set | {urn} | excluded
+            discovered = seed_set | {urn}
+
+            up_frontier: Set[str] = set(seed_set) if upstream_depth > 0 else set()
+            down_frontier: Set[str] = set(seed_set) if downstream_depth > 0 else set()
+            up_labels: Dict[str, str] = dict(seed_labels)
+            down_labels: Dict[str, str] = dict(seed_labels)
+
+            max_hops = max(int(upstream_depth), int(downstream_depth))
+            hop = 0
+            while (up_frontier or down_frontier) and hop < max_hops and not truncation_reason:
+                hop += 1
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    truncation_reason = "timeout"
+                    break
+                hop_timeout = max(0.6, min(1.5, remaining / 2))
+                # Ask for only what still fits under max_nodes: rows past the
+                # budget get dropped below anyway, and their edges with them.
+                hop_limit = max(1, max_nodes - len(discovered))
+                # Hop 1 ONLY: the client's known set is worth a DB-side NOT
+                # filter. Deeper hops rely on `visited` instead, because a row
+                # INTO an excluded node is a SEAM edge the client does not have
+                # yet — filtering it in the query would lose it for good.
+                hop_exclude = list(excluded) if (hop == 1 and excluded) else None
+
+                directions: List[str] = []
+                coros = []
+                if up_frontier and hop <= upstream_depth:
+                    directions.append("up")
+                    coros.append(self._expand_raw_lineage_set(
+                        list(up_frontier), up_labels, "incoming", ltypes,
+                        hop_limit, hop_timeout, exclude=hop_exclude,
+                    ))
+                elif up_frontier:
+                    # Ran out of DEPTH, not of graph (asymmetric depths) — this
+                    # ring is the upstream boundary, and the loop is about to
+                    # forget it while the other direction keeps going.
+                    depth_up.update(dict.fromkeys(up_frontier))
+                if down_frontier and hop <= downstream_depth:
+                    directions.append("down")
+                    coros.append(self._expand_raw_lineage_set(
+                        list(down_frontier), down_labels, "outgoing", ltypes,
+                        hop_limit, hop_timeout, exclude=hop_exclude,
+                    ))
+                elif down_frontier:
+                    depth_down.update(dict.fromkeys(down_frontier))
+                if not coros:
+                    break
+
+                results = await asyncio.gather(*coros)
+
+                new_up: Set[str] = set()
+                new_down: Set[str] = set()
+                new_up_labels: Dict[str, str] = {}
+                new_down_labels: Dict[str, str] = {}
+                for direction, recs in zip(directions, results):
+                    if len(recs) >= hop_limit:
+                        # The hop hit its own LIMIT: rows were left on the
+                        # floor and nothing tells us WHICH frontier node they
+                        # belonged to, so the whole ring is a candidate. The
+                        # probe drops the ones that turn out to be fully shown.
+                        truncation_reason = "max_nodes"
+                        ring = up_frontier if direction == "up" else down_frontier
+                        cut = cut_up if direction == "up" else cut_down
+                        cut.update(dict.fromkeys(ring))
+                    for rec in recs:
+                        other = rec.get("otherUrn")
+                        is_new = bool(other) and other not in visited
+                        if is_new and len(discovered) >= max_nodes:
+                            # Budget check BEFORE recording anything: a node we
+                            # cannot ship must not leave its edge behind, or the
+                            # canvas draws an edge into nothing. What has more
+                            # to give is the NEAR endpoint — and unlike the one
+                            # we are dropping, it is on screen, so it is what
+                            # the client can ask about.
+                            truncation_reason = "max_nodes"
+                            near = rec["targetUrn"] if direction == "up" else rec["sourceUrn"]
+                            (cut_up if direction == "up" else cut_down)[near] = None
+                            continue
+                        # Edge FIRST, visited check second: an edge to an
+                        # already-known node is the seam that joins this step to
+                        # what the client already holds.
+                        _record_edge(rec)
+                        if not is_new:
+                            continue
+                        visited.add(other)
+                        discovered.add(other)
+                        lbl = rec.get("otherLabel") or ""
+                        if direction == "up":
+                            new_up.add(other)
+                            upstream_urns.add(other)
+                            new_up_labels[other] = lbl
+                        else:
+                            new_down.add(other)
+                            downstream_urns.add(other)
+                            new_down_labels[other] = lbl
+                up_frontier, down_frontier = new_up, new_down
+                up_labels, down_labels = new_up_labels, new_down_labels
+
+            if truncation_reason in ("max_nodes", "timeout"):
+                # Whatever we were about to expand (timeout) or had just
+                # discovered (max_nodes) never got its hop.
+                cut_up.update(dict.fromkeys(up_frontier))
+                cut_down.update(dict.fromkeys(down_frontier))
+            else:
+                # Depth exhaustion: the ring that was still growing when the
+                # last allowed hop finished. A ring that simply DRAINED is
+                # empty here — a dead end, never a frontier.
+                depth_up.update(dict.fromkeys(up_frontier))
+                depth_down.update(dict.fromkeys(down_frontier))
+
+        # ---- frontier: what the walk did not finish, and how much is left --
+        candidates_up = list(dict.fromkeys([*depth_up, *cut_up]))
+        candidates_down = list(dict.fromkeys([*depth_down, *cut_down]))
+        frontier_up: List[TraceFrontierNode] = []
+        frontier_down: List[TraceFrontierNode] = []
+        if candidates_up or candidates_down:
+            probe_up = candidates_up[:CLOSURE_FRONTIER_PROBE_CAP]
+            probe_down = candidates_down[:CLOSURE_FRONTIER_PROBE_CAP]
+            degrees: Dict[str, Dict[str, int]] = {}
+            if (deadline - time.monotonic()) < 1.5:
+                # Not enough budget for the probe wave. The frontier still
+                # ships — unknown counts, not invented ones.
+                probe_up, probe_down = [], []
+            else:
+                try:
+                    degrees = await self.get_node_degrees(
+                        list(dict.fromkeys([*probe_up, *probe_down])), ltypes,
+                    )
+                except Exception as exc:
+                    logger.warning("trace_closure: frontier probe failed: %s", exc)
+
+            shown_in: Dict[str, int] = defaultdict(int)
+            shown_out: Dict[str, int] = defaultdict(int)
+            for edge in edges_by_id.values():
+                shown_out[edge.source_urn] += 1
+                shown_in[edge.target_urn] += 1
+
+            def _frontier(
+                candidates: List[str], probed: Set[str], key: str, shown: Dict[str, int],
+            ) -> List[TraceFrontierNode]:
+                out: List[TraceFrontierNode] = []
+                for u in candidates:
+                    total = (degrees.get(u) or {}).get(key) if u in probed else None
+                    if u == paged_anchor:
+                        out.append(TraceFrontierNode(
+                            urn=u, totalCount=total, nextCursor=paged_cursor,
+                        ))
+                    elif total is None:
+                        # Unprobed, probe failed, or the degree bucket failed —
+                        # absence is UNKNOWN, never zero.
+                        out.append(TraceFrontierNode(urn=u))
+                    elif total > shown.get(u, 0):
+                        out.append(TraceFrontierNode(urn=u, totalCount=total))
+                    # else: everything this node has is already on screen.
+                return out
+
+            frontier_up = _frontier(candidates_up, set(probe_up), "in", shown_in)
+            frontier_down = _frontier(candidates_down, set(probe_down), "out", shown_out)
+
+        # Hydrate participant nodes, then their containment ancestor chains, so
+        # the canvas can nest the closure. Guarded: on failure surface a
+        # truncated-200 with the reason rather than dropping the lineage.
+        nodes_by_urn: Dict[str, GraphNode] = {}
+        try:
+            hydrated = await self.get_nodes_batch(list(discovered))
+            nodes_by_urn = {n.urn: n for n in hydrated if n}
+        except Exception:
+            truncation_reason = truncation_reason or "nodes_failed"
+
+        containment_edges_list: List[GraphEdge] = []
+        if ctypes and nodes_by_urn:
+            if (deadline - time.monotonic()) < 2.0:
+                truncation_reason = truncation_reason or "ancestors_failed"
+            else:
+                try:
+                    chains = await self._compute_and_store_ancestors_bulk(
+                        list(nodes_by_urn.keys()),
+                    )
+                    seen_anc: Set[str] = set()
+                    ancestor_urns: List[str] = []
+                    for chain in chains.values():
+                        for ancestor in chain or []:
+                            if ancestor and ancestor not in seen_anc:
+                                seen_anc.add(ancestor)
+                                ancestor_urns.append(ancestor)
+                    new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+                    if new_ancestors:
+                        ancestor_nodes = await self.get_nodes_batch(new_ancestors)
+                        for n in ancestor_nodes:
+                            if n:
+                                nodes_by_urn[n.urn] = n
+                    if len(nodes_by_urn) > 1:
+                        containment_edges_list = await self._fetch_containment_edges(
+                            list(nodes_by_urn.keys()), ctypes, chains=chains,
+                        )
+                except Exception:
+                    truncation_reason = truncation_reason or "ancestors_failed"
+
+        return TraceClosureResult(
+            nodes=list(nodes_by_urn.values()),
+            edges=list(edges_by_id.values()),
+            containmentEdges=containment_edges_list,
+            upstreamUrns=upstream_urns,
+            downstreamUrns=downstream_urns,
+            focus=TraceFocus(
+                urn=urn,
+                level=focus_level if focus_level is not None else 0,
+                entityType=focus_entity_type,
+            ),
+            effectiveLevel=focus_level if focus_level is not None else 0,
+            isInherited=False,
+            inheritedFromUrn=None,
+            truncated=(truncation_reason is not None),
+            truncationReason=truncation_reason,
+            frontierUp=frontier_up,
+            frontierDown=frontier_down,
+            seedTruncated=seed_truncated,
+        )
 
     async def expand_aggregated(
         self,

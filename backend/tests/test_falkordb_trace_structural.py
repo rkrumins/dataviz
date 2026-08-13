@@ -17,6 +17,7 @@ type-level pair filter.
 """
 import asyncio
 
+from backend.app.models.graph import GraphNode
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 
 
@@ -45,6 +46,7 @@ class _TraceFake:
         self.agg = {}          # (src, tgt) -> {weight, sd, td, types}
         self.meta = ("cube", 2)
         self.adjacency = {}    # (urn, direction) -> [(other_urn, edge_type)], id(r) == list index
+        self.degrees = {}      # urn -> {"in": n, "out": n}; ABSENT = unknown, never zero
 
     def contain(self, parent, child):
         self.children.setdefault(parent, []).append(child)
@@ -162,12 +164,14 @@ class _TraceFake:
             # shape: [sourceUrn, targetUrn, edgeId, edgeType, otherUrn,
             # otherLabel]. `exclude`, when present, drops rows whose far
             # endpoint is excluded — simulating the real `NOT o.urn IN
-            # $exclude` WHERE clause.
+            # $exclude` WHERE clause. The lineage list INDEX is the edge's
+            # `id(r)` (same convention as the paging branch), so two parallel
+            # edges on one (source, target) pair stay distinct rows.
             frontier = set(params.get("frontier", []))
             exclude = set(params.get("exclude") or [])
             incoming = "<-[r" in cypher
             rows = []
-            for s, t, et in self.lineage:
+            for eid, (s, t, et) in enumerate(self.lineage):
                 if incoming and t in frontier:
                     other = s
                 elif not incoming and s in frontier:
@@ -176,7 +180,7 @@ class _TraceFake:
                     continue
                 if other in exclude:
                     continue
-                rows.append([s, t, f"raw-{s}-{t}", et, other, None])
+                rows.append([s, t, f"raw-{eid}", et, other, None])
             return _Result(rows)
         if "RETURN f.urn AS urn, labels(f)[0] AS label" in cypher:
             # _collect_lineage_seed — TWO separately-valid queries (FalkorDB
@@ -207,7 +211,12 @@ class _TraceFake:
         raise AssertionError(f"unhandled ro_query: {cypher}")
 
 
-def _make_provider(fake, levels=None):
+def _make_provider(fake, levels=None, hydrate=False):
+    """`hydrate=True` gives every discovered urn a stub node, so tests can
+    assert on what the response SHIPS (`result.nodes`) rather than only on
+    its edges. It also stubs the containment hydration that would follow —
+    that seam has its own tests; here it would just answer Cypher this fake
+    knows nothing about."""
     p = FalkorDBProvider(host="x", graph_name="g")
     p._entity_type_levels = levels or {"Roots": 0, "Node": 1}
     p._redis = None
@@ -226,10 +235,33 @@ def _make_provider(fake, levels=None):
     async def _no_ancestors(urns, ctypes):
         return []
 
+    async def _degrees(urns, edge_types=None):
+        # Mirrors get_node_degrees' contract: a urn ABSENT from the result is
+        # unknown, not zero.
+        return {u: dict(fake.degrees[u]) for u in urns if u in fake.degrees}
+
     p._ensure_connected = _noop
     p.get_nodes_batch = _no_nodes
     p.get_node = _no_node
     p._collect_ancestor_urns = _no_ancestors
+    p.get_node_degrees = _degrees
+
+    if hydrate:
+        async def _hydrate(urns):
+            return [
+                GraphNode(urn=u, entityType=_label(u), displayName=u)
+                for u in urns
+            ]
+
+        async def _no_chains(urns):
+            return {}
+
+        async def _no_containment_edges(urns, ctypes, chains=None):
+            return []
+
+        p.get_nodes_batch = _hydrate
+        p._compute_and_store_ancestors_bulk = _no_chains
+        p._fetch_containment_edges = _no_containment_edges
     return p
 
 
@@ -681,3 +713,419 @@ def test_page_raw_lineage_single_unlabeled_anchor_falls_back():
     assert "MATCH (f {urn: $urn})" in seen["cypher"]
     assert "MATCH (f:" not in seen["cypher"]
     assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# trace_closure — the focus-scoped lineage walk.
+#
+# SAME WARNING as the helper tests above: these fakes PATTERN-MATCH Cypher
+# strings. They pin the walk's CONTROL FLOW — seed choice, hop order, budget,
+# frontier, cursor — and cannot validate a single character of Cypher. The
+# live-engine gate is a later task.
+# ---------------------------------------------------------------------------
+
+
+def test_trace_closure_scopes_to_focus_raw_lineage():
+    """trace_closure walks RAW lineage from the focus (upstream + downstream),
+    returning exactly the connected chain — regime-independent (no :AGGREGATED
+    reads, so it works when boundary mode omits leaf cells) and scoped to the
+    focus: a sibling column's UNRELATED lineage never appears."""
+    fake = _TraceFake()
+    fake.lineage = [
+        ("c0", "c1", "FLOWS"),   # upstream of the focus
+        ("c1", "c2", "FLOWS"),   # downstream …
+        ("c2", "c3", "FLOWS"),   # … chain
+        ("c1b", "c9", "FLOWS"),  # a sibling's unrelated lineage — must NOT appear
+    ]
+    p = _make_provider(fake)
+
+    result = _run(p.trace_closure(
+        "c1", upstream_depth=25, downstream_depth=25,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=1000, timeout_ms=5000,
+    ))
+
+    got_edges = {(e.source_urn, e.target_urn) for e in result.edges}
+    assert got_edges == {("c0", "c1"), ("c1", "c2"), ("c2", "c3")}
+    assert result.upstream_urns == {"c0"}
+    assert result.downstream_urns == {"c2", "c3"}
+
+
+def test_trace_closure_seeds_container_focus_from_leaf_descendants():
+    """Tracing a CONTAINER (a Domain with no lineage of its own) seeds from its
+    lineage-bearing leaf descendants via CONTAINMENT (down), then walks
+    LINEAGE from there. The graph shows ONLY the lineage hop la->lb — the
+    containment edges (d1->la, d2->lb) are never rendered as lineage."""
+    fake = _TraceFake()
+    fake.contain("d1", "la")   # domain d1 ⊃ leaf la
+    fake.contain("d2", "lb")   # domain d2 ⊃ leaf lb
+    fake.lineage = [("la", "lb", "FLOWS")]   # d1 itself has NO incident lineage
+    p = _make_provider(fake)
+
+    result = _run(p.trace_closure(
+        "d1", upstream_depth=25, downstream_depth=25,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=1000, timeout_ms=5000,
+    ))
+
+    # Only the lineage hop is a graph edge — containment is NOT a lineage hop.
+    got_edges = {(e.source_urn, e.target_urn) for e in result.edges}
+    assert got_edges == {("la", "lb")}
+    assert "lb" in result.downstream_urns
+
+
+def test_trace_closure_depth_exhaustion_is_the_frontier():
+    """Depth 1/1 on a 5-node chain: the ring the walk STOPPED at (c0 upstream,
+    c2 downstream) is the frontier, each carrying the full-graph degree in its
+    direction so the canvas can offer '+N more'. What lies beyond (c-1, c3) is
+    named by the count, never shipped."""
+    fake = _TraceFake()
+    fake.lineage = [
+        ("c-1", "c0", "FLOWS"),
+        ("c0", "c1", "FLOWS"),
+        ("c1", "c2", "FLOWS"),
+        ("c2", "c3", "FLOWS"),
+    ]
+    fake.degrees = {
+        "c0": {"in": 1, "out": 1},   # one edge in from c-1 — none of it shown
+        "c2": {"in": 1, "out": 1},   # one edge out to c3 — none of it shown
+    }
+    p = _make_provider(fake, hydrate=True)
+
+    result = _run(p.trace_closure(
+        "c1", upstream_depth=1, downstream_depth=1,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=1000, timeout_ms=5000,
+    ))
+
+    assert [(f.urn, f.total_count) for f in result.frontier_up] == [("c0", 1)]
+    assert [(f.urn, f.total_count) for f in result.frontier_down] == [("c2", 1)]
+    shipped = {n.urn for n in result.nodes}
+    assert shipped == {"c1", "c0", "c2"}
+    assert "c-1" not in shipped and "c3" not in shipped
+    assert result.truncated is False
+
+
+def test_trace_closure_a_drained_frontier_is_a_dead_end_not_a_frontier():
+    """Depth 5 on a 2-hop chain: the walk runs out of GRAPH, not of depth.
+    Nothing is left unexpanded, so both frontier lists are empty — a dead end
+    reported as a frontier would put a '+N more' chip on a node with nothing
+    more behind it."""
+    fake = _TraceFake()
+    fake.lineage = [("c0", "c1", "FLOWS"), ("c1", "c2", "FLOWS")]
+    p = _make_provider(fake)
+
+    result = _run(p.trace_closure(
+        "c0", upstream_depth=5, downstream_depth=5,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=1000, timeout_ms=5000,
+    ))
+
+    assert {(e.source_urn, e.target_urn) for e in result.edges} == {
+        ("c0", "c1"), ("c1", "c2"),
+    }
+    assert result.frontier_up == []
+    assert result.frontier_down == []
+    assert result.truncated is False
+    assert result.truncation_reason is None
+
+
+def test_trace_closure_max_nodes_cut_names_the_hub_and_orphans_no_edge():
+    """A hub with 12 downstream children under max_nodes=8: the walk stops
+    mid-fan-out. The children it could not ship are absent from `nodes` AND
+    their edges are absent too (an edge to a node the canvas never receives
+    draws into nothing). The HUB — a node the client HAS — is the frontier
+    entry, with the real out-degree so '+N more' can be honest."""
+    fake = _TraceFake()
+    fake.lineage = [("p", "hub", "FLOWS")] + [
+        ("hub", f"c{i}", "FLOWS") for i in range(12)
+    ]
+    fake.degrees = {
+        "hub": {"in": 1, "out": 12},
+        "p": {"in": 0, "out": 1},
+        **{f"c{i}": {"in": 1, "out": 0} for i in range(12)},
+    }
+    p = _make_provider(fake, hydrate=True)
+
+    result = _run(p.trace_closure(
+        "hub", upstream_depth=1, downstream_depth=1,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=8, timeout_ms=5000,
+    ))
+
+    assert result.truncated is True
+    assert result.truncation_reason == "max_nodes"
+    shipped = {n.urn for n in result.nodes}
+    assert len(shipped) == 8
+    assert not (shipped & {f"c{i}" for i in range(6, 12)})   # the cut children
+    # Orphan-edge invariant: every edge lands on two shipped nodes.
+    for e in result.edges:
+        assert e.source_urn in shipped and e.target_urn in shipped
+    assert [(f.urn, f.total_count) for f in result.frontier_down] == [("hub", 12)]
+    # p's whole in-side is shown (in=0), so upstream is an honest dead end.
+    assert result.frontier_up == []
+
+
+def test_trace_closure_seed_urns_skip_the_container_seed_walk():
+    """`seed_urns` = a walk CONTINUATION: the caller already knows which nodes
+    carry the lineage, so neither seed query fires. The focus is never dropped
+    by `exclude_urns` — a client that lists everything it holds still gets its
+    own focus walked."""
+    fake = _TraceFake()
+    fake.contain("dom", "leaf_a")
+    fake.lineage = [
+        ("leaf_a", "leaf_b", "FLOWS"),
+        ("dom", "d_out", "FLOWS"),
+        ("ghost", "g_out", "FLOWS"),
+    ]
+    p = _make_provider(fake)
+    seen = []
+    orig = fake.ro_query
+
+    async def spy(cypher, params=None, timeout=None, **kwargs):
+        seen.append(cypher)
+        return await orig(cypher, params=params, timeout=timeout, **kwargs)
+
+    p._ro_query = spy
+
+    result = _run(p.trace_closure(
+        "dom", upstream_depth=0, downstream_depth=1,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=100, timeout_ms=5000,
+        seed_urns=["dom", "leaf_a", "ghost"],
+        exclude_urns=["dom", "ghost"],
+    ))
+
+    assert all("RETURN DISTINCT d.urn AS urn" not in c for c in seen)
+    assert all("RETURN f.urn AS urn, labels(f)[0] AS label" not in c for c in seen)
+    got_edges = {(e.source_urn, e.target_urn) for e in result.edges}
+    assert got_edges == {("leaf_a", "leaf_b"), ("dom", "d_out")}
+    assert "g_out" not in result.downstream_urns
+
+
+def test_trace_closure_exclude_urns_keep_the_seam_edge_not_the_node():
+    """`exclude_urns` = what the client already holds. Hop 1 filters them in
+    the QUERY (cheaper than shipping and dropping), but a hop-2 edge INTO an
+    excluded node is a SEAM — the stitch between this step and the graph the
+    client already has — so the edge ships while the node does not."""
+    fake = _TraceFake()
+    fake.lineage = [("f", "a", "FLOWS"), ("f", "x", "FLOWS"), ("a", "x", "FLOWS")]
+    p = _make_provider(fake, hydrate=True)
+    seen = []
+    orig = fake.ro_query
+
+    async def spy(cypher, params=None, timeout=None, **kwargs):
+        if "AS otherUrn" in cypher:
+            seen.append(cypher)
+        return await orig(cypher, params=params, timeout=timeout, **kwargs)
+
+    p._ro_query = spy
+
+    result = _run(p.trace_closure(
+        "f", upstream_depth=0, downstream_depth=2,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=100, timeout_ms=5000,
+        exclude_urns=["x"],
+    ))
+
+    assert "NOT o.urn IN $exclude" in seen[0]          # hop 1 filters in the DB
+    assert "NOT o.urn IN $exclude" not in seen[1]      # hop 2 must not
+    shipped = {n.urn for n in result.nodes}
+    assert shipped == {"f", "a"}
+    got_edges = {(e.source_urn, e.target_urn) for e in result.edges}
+    assert ("a", "x") in got_edges                     # the seam survives
+    assert ("f", "x") not in got_edges                 # hop 1 never fetched it
+
+
+def test_trace_closure_cursor_pages_one_hub_to_exhaustion():
+    """The hub fallback: `after_cursor` pages ONE node's adjacency in ONE
+    direction instead of walking. Three pages of 3/3/1 over the 7 edges after
+    the cursor — disjoint, complete, and the anchor stays a frontier entry with
+    the next cursor until the page comes back short."""
+    fake = _TraceFake()
+    fake.adjacency[("hub", "outgoing")] = [(f"t{i}", "FLOWS") for i in range(8)]
+    fake.degrees = {"hub": {"in": 0, "out": 8}}
+    p = _make_provider(fake)
+
+    def _page(cursor):
+        return _run(p.trace_closure(
+            "hub", upstream_depth=0, downstream_depth=1,
+            lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+            max_nodes=3, timeout_ms=5000, after_cursor=cursor,
+        ))
+
+    # The first cursor comes from the hop that discovered the hub — edge id 0
+    # was already delivered there, so paging resumes strictly after it.
+    page1 = _page("e:0")
+    assert [f.urn for f in page1.frontier_down] == ["hub"]
+    assert page1.frontier_down[0].next_cursor == "e:3"
+    assert page1.frontier_down[0].total_count == 8
+    assert page1.downstream_urns == {"t1", "t2", "t3"}
+
+    page2 = _page(page1.frontier_down[0].next_cursor)
+    assert page2.frontier_down[0].next_cursor == "e:6"
+    assert page2.downstream_urns == {"t4", "t5", "t6"}
+
+    page3 = _page(page2.frontier_down[0].next_cursor)
+    assert page3.downstream_urns == {"t7"}
+    assert page3.frontier_down == []        # short page = the hub is drained
+
+    seen = [e.id for e in page1.edges] + [e.id for e in page2.edges] + [e.id for e in page3.edges]
+    assert len(seen) == len(set(seen)) == 7
+
+
+def test_trace_closure_rejects_an_unreadable_cursor():
+    """The endpoint guarantees `e:<int>`; the provider still refuses garbage
+    rather than silently paging from the start (which would re-ship a page the
+    client already has)."""
+    fake = _TraceFake()
+    p = _make_provider(fake)
+
+    try:
+        _run(p.trace_closure(
+            "hub", upstream_depth=0, downstream_depth=1,
+            lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+            max_nodes=3, timeout_ms=5000, after_cursor="e:not-an-int",
+        ))
+    except ValueError as exc:
+        assert "invalid cursor" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_trace_closure_seed_truncated_when_the_container_seed_hits_its_cap():
+    """A container with more lineage-bearing descendants than `max_nodes`: the
+    seed itself is partial, so the response says so twice — `seedTruncated` for
+    the cause, `truncationReason` for the global flag every caller reads."""
+    fake = _TraceFake()
+    for leaf in ("leaf_a", "leaf_b", "leaf_c"):
+        fake.contain("dom", leaf)
+        fake.lineage.append((leaf, "sink", "FLOWS"))
+    p = _make_provider(fake)
+
+    result = _run(p.trace_closure(
+        "dom", upstream_depth=2, downstream_depth=2,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=3, timeout_ms=5000,
+    ))
+
+    assert result.seed_truncated is True
+    assert result.truncated is True
+    assert result.truncation_reason == "max_nodes"
+
+
+def test_trace_closure_keeps_parallel_edges_between_one_pair():
+    """Two distinct edges between the same pair are two facts, not one. The
+    dedup key is the edge id — dedup on (source, target) would silently merge
+    a 'reads' and a 'writes' into whichever arrived first."""
+    fake = _TraceFake()
+    fake.lineage = [("a", "b", "FLOWS"), ("a", "b", "READS")]
+    p = _make_provider(fake)
+
+    result = _run(p.trace_closure(
+        "a", upstream_depth=0, downstream_depth=1,
+        lineage_edge_types=["FLOWS", "READS"], containment_edge_types=["HAS"],
+        max_nodes=100, timeout_ms=5000,
+    ))
+
+    assert len(result.edges) == 2
+    assert {e.edge_type for e in result.edges} == {"FLOWS", "READS"}
+    assert {(e.source_urn, e.target_urn) for e in result.edges} == {("a", "b")}
+
+
+def test_trace_closure_frontier_probe_says_unknown_and_drops_the_drained():
+    """Probe honesty, both halves. A candidate the degree probe could not
+    answer for keeps its entry with NO count (absence is unknown, never zero).
+    A candidate whose whole adjacency is already on screen is DROPPED — it has
+    nothing more to offer."""
+    fake = _TraceFake()
+    fake.lineage = [
+        ("c-1", "c0", "FLOWS"),
+        ("c0", "c1", "FLOWS"),
+        ("c1", "c2", "FLOWS"),
+    ]
+    fake.degrees = {"c2": {"in": 1, "out": 0}}   # c0 absent = unknown
+    p = _make_provider(fake)
+
+    result = _run(p.trace_closure(
+        "c1", upstream_depth=1, downstream_depth=1,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=1000, timeout_ms=5000,
+    ))
+
+    assert [(f.urn, f.total_count) for f in result.frontier_up] == [("c0", None)]
+    assert result.frontier_down == []
+
+
+def test_trace_closure_a_hop_that_hits_its_own_limit_still_reports_truncated():
+    """The silent-truncation trap. One direction, 12 children, max_nodes 8: the
+    hop's own LIMIT stops it at 7 rows, so the per-row budget check never fires
+    and every row that arrived was shipped. Without noticing that the hop came
+    back FULL, the response would claim `truncated: false` while five children
+    it never asked about sat in the graph — the client would believe it had the
+    hub's whole fan-out."""
+    fake = _TraceFake()
+    fake.lineage = [("hub", f"c{i}", "FLOWS") for i in range(12)]
+    fake.degrees = {
+        "hub": {"in": 0, "out": 12},
+        **{f"c{i}": {"in": 1, "out": 0} for i in range(12)},
+    }
+    p = _make_provider(fake, hydrate=True)
+
+    result = _run(p.trace_closure(
+        "hub", upstream_depth=0, downstream_depth=1,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=8, timeout_ms=5000,
+    ))
+
+    assert len({n.urn for n in result.nodes}) == 8
+    assert result.truncated is True
+    assert result.truncation_reason == "max_nodes"
+    assert [(f.urn, f.total_count) for f in result.frontier_down] == [("hub", 12)]
+
+
+def test_trace_closure_asymmetric_depth_keeps_the_shallow_side_frontier():
+    """Upstream 1, downstream 3: the upstream ring is done two hops before the
+    walk is. It still has to survive as frontier — otherwise asking for less
+    upstream would report upstream as EXHAUSTED, which is the opposite of what
+    the user asked for."""
+    fake = _TraceFake()
+    fake.lineage = [
+        ("c-1", "c0", "FLOWS"),
+        ("c0", "c1", "FLOWS"),
+        ("c1", "c2", "FLOWS"),
+        ("c2", "c3", "FLOWS"),
+    ]
+    fake.degrees = {"c0": {"in": 1, "out": 1}, "c3": {"in": 1, "out": 0}}
+    p = _make_provider(fake)
+
+    result = _run(p.trace_closure(
+        "c1", upstream_depth=1, downstream_depth=3,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=1000, timeout_ms=5000,
+    ))
+
+    assert result.downstream_urns == {"c2", "c3"}
+    assert [(f.urn, f.total_count) for f in result.frontier_up] == [("c0", 1)]
+    # Downstream reached the end of the graph before the end of its depth.
+    assert result.frontier_down == []
+
+
+def test_trace_closure_short_budget_drops_the_counts_not_the_frontier():
+    """With less than the probe's budget left, the frontier still names every
+    boundary node — it just admits it does not know how much is behind them.
+    Spending the last of the deadline on '+N' counts would risk the 504 the
+    whole method is shaped to avoid."""
+    fake = _TraceFake()
+    fake.lineage = [("c-1", "c0", "FLOWS"), ("c0", "c1", "FLOWS"), ("c1", "c2", "FLOWS")]
+    fake.degrees = {"c0": {"in": 1, "out": 1}, "c2": {"in": 1, "out": 1}}
+    p = _make_provider(fake)
+
+    result = _run(p.trace_closure(
+        "c1", upstream_depth=1, downstream_depth=1,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=1000, timeout_ms=1000,   # < the 1.5s probe gate
+    ))
+
+    assert [(f.urn, f.total_count) for f in result.frontier_up] == [("c0", None)]
+    assert [(f.urn, f.total_count) for f in result.frontier_down] == [("c2", None)]
