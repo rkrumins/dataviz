@@ -2,49 +2,71 @@
  * shareCodec — serialize a Lens exploration into a URL-safe token.
  *
  * A walked path is a finding; this lets an analyst hand a colleague the
- * exact picture (focus history + cursor, body mode, and the current
- * focal's frame/frontier state) as a link instead of a narration.
- * Versioned JSON → UTF-8 → base64url. Decoding is defensive: anything
- * malformed — bad base64, bad JSON, wrong version, wrong shapes —
- * returns null and the app simply opens normally (a share link must
- * never be able to break the canvas).
+ * exact picture (focus history + cursor, body mode, the header's
+ * direction/depth controls, and the current focal's LensViewState) as a
+ * link instead of a narration. Versioned JSON → UTF-8 → base64url.
+ * Decoding is defensive: anything malformed — bad base64, bad JSON,
+ * wrong version, wrong shapes — returns null and the app simply opens
+ * normally (a share link must never be able to break the canvas).
+ *
+ * v2 is the current shape (below). v1 — written before the walk-model
+ * swap (T10) — carried a state model (`closed`/`frontier`/`containers`/
+ * `contains`) that no longer exists, so decoding a v1 token restores only
+ * `entries`/`cursor`/`mode`: a colleague's old link still lands on the
+ * same walked path, in the same body mode, rather than failing outright.
  */
 
-export interface LensShareState {
+export type LensSharePreset = 'both' | 'in' | 'out'
+
+export interface LensShareStateV1 {
   v: 1
   /** Focus history entries (urns) and cursor position. */
   entries: string[]
   cursor: number
   mode: 'graph' | 'list'
-  /** Current focal's COLLAPSED frames (`${dir}:${parentUrn}`). Frames
-   *  open by default, so this is the exception list. Absent in links
-   *  written while frames were groups that opened closed — those carried
-   *  a `groups` list meaning the opposite, so it is deliberately not
-   *  read: an old link opens everything at today's default rather than
-   *  restoring inverted. */
-  closed: string[]
-  /** Current focal's expanded frontier keys (`${dir}:${urn}`). */
-  frontier: string[]
-  /** Current focal's opened containers (`${dir}:${urn}`). Absent in
-   *  links written before containers existed — decodes to []. */
-  containers: string[]
-  /** Of those, the ones switched to "everything inside". Absent in
-   *  older links — decodes to []. */
+}
+
+export interface LensShareStateV2 {
+  v: 2
+  /** Focus history entries (urns) and cursor position. */
+  entries: string[]
+  cursor: number
+  mode: 'graph' | 'list'
+  /** The header's direction preset in effect for the shared focal. */
+  direction: LensSharePreset
+  /** The initial-depth control's value in effect for the shared focal. */
+  depth: number
+  /** Current focal's LensViewState fields, verbatim (see focus-layout.ts):
+   *  `revealed` → `${'in'|'out'}:${urn}` → pages; `opened`/`collapsed` →
+   *  expanded/collapsed containment; `frameAll` → frames showing
+   *  everything inside; `framePages`/`frameQueries` → per-frame paging
+   *  and search. Selection is deliberately not carried — it is ephemeral
+   *  UI state, not part of the exploration. */
+  revealed: Array<[string, number]>
+  opened: string[]
+  collapsed: string[]
   frameAll: string[]
-  /** Contains-stack rows opened, by urn. Without these a link to an
-   *  entity whose structure you had unfolded opened it collapsed. */
-  contains: string[]
-  /** Per-frame page index and search text, so a link to "page 7,
-   *  filtered to revenue" does not open on page 1 unfiltered. */
   framePages: Array<[string, number]>
   frameQueries: Array<[string, string]>
 }
 
-export function encodeLensShare(state: Omit<LensShareState, 'v'>): string {
-  const json = JSON.stringify({ v: 1, ...state })
+/** v2 → the full exploration; v1 → the graceful subset described above. */
+export type LensShareState = LensShareStateV1 | LensShareStateV2
+
+export function encodeLensShare(state: Omit<LensShareStateV2, 'v'>): string {
+  const json = JSON.stringify({ v: 2, ...state })
   // UTF-8-safe base64url (labels/urns can contain any unicode).
   const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(json)))
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+const stringArray = (v: unknown): string[] | null =>
+  Array.isArray(v) && v.every(e => typeof e === 'string') ? v as string[] : null
+
+const pairArray = (v: unknown, valueOk: (v: unknown) => boolean): Array<[string, unknown]> | null => {
+  if (!Array.isArray(v)) return null
+  if (!v.every(e => Array.isArray(e) && e.length === 2 && typeof e[0] === 'string' && valueOk(e[1]))) return null
+  return v
 }
 
 export function decodeLensShare(raw: string): LensShareState | null {
@@ -54,40 +76,51 @@ export function decodeLensShare(raw: string): LensShareState | null {
     const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes))
     if (typeof parsed !== 'object' || parsed === null) return null
     const s = parsed as Record<string, unknown>
-    if (s.v !== 1) return null
+
+    // The shape both versions share.
     if (!Array.isArray(s.entries) || !s.entries.every(e => typeof e === 'string') || s.entries.length === 0) return null
     if (typeof s.cursor !== 'number' || s.cursor < 0 || s.cursor >= s.entries.length) return null
     if (s.mode !== 'graph' && s.mode !== 'list') return null
-    if (!Array.isArray(s.frontier) || !s.frontier.every(e => typeof e === 'string')) return null
-    // Optional so links written before these existed still open.
-    const containers = s.containers === undefined ? [] : s.containers
-    if (!Array.isArray(containers) || !containers.every(e => typeof e === 'string')) return null
-    const frameAll = s.frameAll === undefined ? [] : s.frameAll
-    if (!Array.isArray(frameAll) || !frameAll.every(e => typeof e === 'string')) return null
-    const contains = s.contains === undefined ? [] : s.contains
-    if (!Array.isArray(contains) || !contains.every(e => typeof e === 'string')) return null
-    const closed = s.closed === undefined ? [] : s.closed
-    if (!Array.isArray(closed) || !closed.every(e => typeof e === 'string')) return null
-    const pairs = (raw: unknown, valueOk: (v: unknown) => boolean) => {
-      if (raw === undefined) return []
-      if (!Array.isArray(raw)) return null
-      if (!raw.every(e => Array.isArray(e) && e.length === 2 && typeof e[0] === 'string' && valueOk(e[1]))) return null
-      return raw
+    const entries = s.entries as string[]
+    const cursor = s.cursor
+    const mode = s.mode
+
+    if (s.v === 1) {
+      // The exploration fields (closed/frontier/containers/contains/
+      // framePages/frameQueries) describe a state model that no longer
+      // exists — nothing consumes them, and a malformed shape there must
+      // not sink an otherwise-valid path + mode restore.
+      return { v: 1, entries, cursor, mode }
     }
-    const framePages = pairs(s.framePages, v => typeof v === 'number' && Number.isFinite(v) && v >= 0)
+    if (s.v !== 2) return null
+
+    if (s.direction !== 'both' && s.direction !== 'in' && s.direction !== 'out') return null
+    if (typeof s.depth !== 'number' || !Number.isFinite(s.depth) || s.depth < 1) return null
+
+    const opened = stringArray(s.opened)
+    if (opened === null) return null
+    const collapsed = stringArray(s.collapsed)
+    if (collapsed === null) return null
+    const frameAll = stringArray(s.frameAll)
+    if (frameAll === null) return null
+    const revealed = pairArray(s.revealed, v => typeof v === 'number' && Number.isFinite(v) && v >= 0)
+    if (revealed === null) return null
+    const framePages = pairArray(s.framePages, v => typeof v === 'number' && Number.isFinite(v) && v >= 0)
     if (framePages === null) return null
-    const frameQueries = pairs(s.frameQueries, v => typeof v === 'string')
+    const frameQueries = pairArray(s.frameQueries, v => typeof v === 'string')
     if (frameQueries === null) return null
+
     return {
-      v: 1,
-      entries: s.entries as string[],
-      cursor: s.cursor,
-      mode: s.mode,
-      closed: closed as string[],
-      frontier: s.frontier as string[],
-      containers: containers as string[],
-      frameAll: frameAll as string[],
-      contains: contains as string[],
+      v: 2,
+      entries,
+      cursor,
+      mode,
+      direction: s.direction,
+      depth: s.depth,
+      revealed: revealed as Array<[string, number]>,
+      opened,
+      collapsed,
+      frameAll,
       framePages: framePages as Array<[string, number]>,
       frameQueries: frameQueries as Array<[string, string]>,
     }
