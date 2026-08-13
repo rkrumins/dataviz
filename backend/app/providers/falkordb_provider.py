@@ -7972,6 +7972,12 @@ class FalkorDBProvider(GraphDataProvider):
             "ORDER BY id(r) "
             "LIMIT $limit"
         )
+        # Per-query bound, same as the sibling walk helpers — deliberately
+        # NOT the caller's whole remaining budget. Keeping every individual
+        # page query small is what lets the closure's overall deadline
+        # degrade to a truncated (200) response instead of one runaway
+        # query eating the whole request; a single label-qualified anchor
+        # page at LIMIT <= 2000 fits comfortably inside this bound.
         per_query_timeout = max(0.6, min(1.5, timeout))
         try:
             result = await self._ro_query(
