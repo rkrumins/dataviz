@@ -252,16 +252,32 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const seed = new Set(population)
 
     const groupCache = new Map<string, RevealGroup[]>()
-    /** Groups of not-yet-shown neighbours reachable from `near`, ranked.
-     *  Weight is raw hops — the wire the reveal would draw. */
-    const groupsFrom = (dir: LensDir, near: ReadonlySet<string>, cacheKey: string): RevealGroup[] => {
+    /**
+     * Groups of not-yet-shown neighbours reachable from `near`, ranked.
+     * Weight is raw hops — the wire the reveal would draw.
+     *
+     * `near` is which nodes the question is asked FROM; `inside` is the
+     * card's whole subtree and decides what counts as INTERNAL. They are
+     * separate parameters on purpose: the pill asks from what a card
+     * visually stands for, the click acts on the card's whole subtree,
+     * and if the internal test moved with `near` the two would disagree
+     * about a hop that leaves a collapsed sibling — a pill offering
+     * something the click could not deliver. Keeping `inside` fixed makes
+     * what the pill offers a SUBSET of what the click admits, always.
+     */
+    const groupsFrom = (
+        dir: LensDir,
+        near: ReadonlySet<string>,
+        inside: ReadonlySet<string>,
+        cacheKey: string,
+    ): RevealGroup[] => {
         const hit = groupCache.get(cacheKey)
         if (hit) return hit
         const byRoot = new Map<string, { weight: number; members: Set<string> }>()
         for (const hop of sg.lineageEdges) {
             const from = dir === 'in' ? hop.targetUrn : hop.sourceUrn
             const far = dir === 'in' ? hop.sourceUrn : hop.targetUrn
-            if (!near.has(from) || near.has(far) || seed.has(far)) continue
+            if (!near.has(from) || inside.has(far) || seed.has(far)) continue
             const root = rootOf(far)
             const group = byRoot.get(root) ?? { weight: 0, members: new Set<string>() }
             group.weight += 1
@@ -280,7 +296,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     /** What a REVEAL CLICK on this card admits: everything reachable from
      *  its whole subtree, whatever is currently open. */
     const rankedGroups = (dir: LensDir, urn: string): RevealGroup[] =>
-        groupsFrom(dir, subtreeOf(urn), `sub:${dir}:${urn}`)
+        groupsFrom(dir, subtreeOf(urn), subtreeOf(urn), `sub:${dir}:${urn}`)
 
     const revealedKeys = [...view.revealed.keys()].sort()
     const admittedGroups: RevealGroup[] = []
@@ -485,7 +501,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // What this direction could still show from data already in hand.
         // A group another card's reveal happened to admit is not offered
         // again — the count is what clicking would actually add.
-        const remainingGroups = groupsFrom(dir, owned, `own:${dir}:${urn}`)
+        const remainingGroups = groupsFrom(dir, owned, subtreeOf(urn), `own:${dir}:${urn}`)
             .filter(g => g.members.some(m => !population.has(m)))
         if (remainingGroups.length > 0) {
             return {

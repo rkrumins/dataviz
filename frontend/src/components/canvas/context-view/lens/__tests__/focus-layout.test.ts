@@ -267,6 +267,34 @@ describe('focus-layout — reveal paging', () => {
         expect(shown2.slice(0, REVEAL_PAGE)).toEqual(shown)
     })
 
+    it('never offers a reveal the click cannot deliver', () => {
+        // c2 lives INSIDE T and is only reachable by a hop from c1, which
+        // is also inside T. While T is collapsed it stands for c1 — and a
+        // pill there would act on T, whose own reveal treats c2 as
+        // internal and admits nothing. So T must stay silent, and the
+        // offer must appear once T is opened and c1 can speak for itself.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F'), wnode('T', 'dataset', 'src'), wnode('c1'), wnode('c2'), wnode('c3')],
+            // c1 and c3 both reach the focus, so T BRANCHES and stays a
+            // single collapsed card standing for both of them.
+            contains: [['T', 'c1'], ['T', 'c2'], ['T', 'c3']],
+            hops: [['c1', 'F'], ['c3', 'F'], ['c2', 'c1']],
+        })
+        const closed = layout(sg)
+        expect(cardFor(closed, 'T')!.kind).toBe('entity')
+        expect(cardFor(closed, 'T')!.pillUp).toBeNull()
+
+        const base = initialLensViewState(sg)
+        const opened = { ...base, expandedContainment: new Set([...base.expandedContainment, 'T']) }
+        const open = layout(sg, opened)
+        expect(cardFor(open, 'c1')!.pillUp).toMatchObject({ kind: 'reveal', count: 1, key: 'in:c1' })
+        // And clicking it delivers exactly what it promised.
+        const revealed = layout(sg, { ...opened, revealed: new Map([...opened.revealed, ['in:c1', 1]]) })
+        expect(cardFor(revealed, 'c2')).toBeDefined()
+        expect(cardFor(revealed, 'c1')!.pillUp).toBeNull()
+    })
+
     it('caps the reveal with an exact remaining count — never a silent truncation', () => {
         const sg = fanIn(new Array(20).fill(1))
         const g = layout(sg)
