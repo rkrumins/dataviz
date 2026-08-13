@@ -185,8 +185,10 @@ const toWalkDir = (dir: 'in' | 'out'): LensWalkDir => (dir === 'in' ? 'up' : 'do
 export interface LensWalkApi {
   extend: (cardUrn: string, dir: LensWalkDir, seedLeaves: string[]) => void
   page: (cardUrn: string, dir: LensWalkDir, cursor: string) => void
+  /** Re-kick a failed INITIAL fetch. A failed extend needs no twin:
+   *  retrying one is the same click on the same pill, so the ⊕ simply
+   *  calls `extend` again and the two can never drift apart. */
   retry: (focusUrn: string) => void
-  retryExtend: (cardUrn: string, dir: LensWalkDir, seedLeaves: string[]) => void
 }
 
 export interface LineageLensProps {
@@ -639,17 +641,25 @@ export function LineageLens({
     return () => window.clearTimeout(t)
   }, [lensOpen, lensViewMode, tourActive, hasCompletedTour, tourStart])
 
-  // The focal's own contents, asked for once — the roster half, which
-  // lineage cannot answer. Every read path strips childCount, so a
-  // gate on it would hide the affordance exactly where it matters.
+  // The focal's own roster, asked for once — the membership half, which
+  // lineage structurally cannot answer.
+  //
+  // Only when the focal could plausibly hold something: the walk found
+  // children inside it, or it declared a childCount. A column focal —
+  // the commonest thing this lens is opened on — holds nothing, and
+  // asking anyway spent a round trip on every hop of every walk. The
+  // gate never costs honesty: with no roster the focal simply does not
+  // claim a total it was never told.
+  const focalHolds = (sg.nodes.get(nodeId ?? '')?.children.length ?? 0) > 0
+    || ((sg.nodes.get(nodeId ?? '')?.node?.data?.childCount as number | undefined) ?? 0) > 0
   const focalKidsAskedRef = useRef<string | null>(null)
   useEffect(() => {
     if (!nodeId || !onLoadChildrenOf) return
     if (focalKidsAskedRef.current === nodeId) return
-    if (walkStatus !== 'done') return
+    if (walkStatus !== 'done' || !focalHolds) return
     focalKidsAskedRef.current = nodeId
     onLoadChildrenOf(nodeId)
-  }, [nodeId, onLoadChildrenOf, walkStatus])
+  }, [nodeId, onLoadChildrenOf, walkStatus, focalHolds])
 
   if (!nodeId) return null
 
@@ -1866,6 +1876,10 @@ function NeighborGroup({
   const [toggled, setToggled] = useState(false)
   const collapsed = !searching && (groupCount >= 3) !== toggled
   const parentColor = generateColorFromType(group.rows[0]?.type ?? 'entity')
+  // Connections, not rows: the column header counts them, the focal
+  // card counts them, and a row states its own ×N. One unit, so the
+  // three numbers on screen add up.
+  const groupConnections = group.rows.reduce((n, r) => n + r.weight, 0)
   return (
     <div className="mb-2.5">
       <div className="flex items-center gap-1 mb-1 min-w-0">
@@ -1873,15 +1887,18 @@ function NeighborGroup({
           type="button"
           onClick={() => setToggled(t => !t)}
           aria-expanded={!collapsed}
-          title={collapsed ? `Expand ${group.rows.length} connection${group.rows.length === 1 ? '' : 's'}` : 'Collapse group'}
+          title={collapsed ? `Expand ${group.rows.length} entit${group.rows.length === 1 ? 'y' : 'ies'}` : 'Collapse group'}
           className="flex-1 min-w-0 flex items-center gap-2 px-2 py-2 rounded-lg text-left bg-black/[0.03] dark:bg-white/[0.04] hover:bg-black/[0.06] dark:hover:bg-white/[0.07] transition-colors"
         >
           <LucideIcons.ChevronDown className={cn('w-4 h-4 flex-shrink-0 text-ink-muted transition-transform', collapsed && '-rotate-90')} />
           <LucideIcons.FolderTree className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted/70" />
           <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: parentColor }} />
           <span className="min-w-0 truncate text-[12px] font-semibold text-ink">{group.label}</span>
-          <span className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07] text-[10px] font-semibold tabular-nums text-ink-muted">
-            {group.rows.length}
+          <span
+            className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07] text-[10px] font-semibold tabular-nums text-ink-muted"
+            title={`${groupConnections} connection${groupConnections === 1 ? '' : 's'} from ${group.rows.length} entit${group.rows.length === 1 ? 'y' : 'ies'}`}
+          >
+            {groupConnections}
           </span>
         </button>
         <button

@@ -80,7 +80,6 @@ import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
  *  = amber (matches the list columns and the canvas). */
 const TINT_UP = '#0ea5e9'
 const TINT_DOWN = '#f59e0b'
-const TINT_CONTAIN = '#94a3b8'
 
 /**
  * Live interaction values delivered by CONTEXT rather than through node
@@ -233,22 +232,14 @@ function TypeIcon({ ctx, typeId, color, className }: { ctx: CardCtx; typeId: str
 }
 
 /** The tiny colored connection dots edges anchor to: incoming on the
- *  left (sky), outgoing on the right (amber). */
-function PortHandles({ focal }: { focal?: boolean }) {
+ *  left (sky), outgoing on the right (amber). Two, because lineage is
+ *  the only thing drawn as a wire — containment nests instead. */
+function PortHandles() {
   const dot = '!w-1.5 !h-1.5 !border-0 !min-w-0 !min-h-0 rounded-full'
   return (
     <>
       <Handle type="target" position={Position.Left} className={dot} style={{ backgroundColor: `${TINT_UP}99` }} />
       <Handle type="source" position={Position.Right} className={dot} style={{ backgroundColor: `${TINT_DOWN}99` }} />
-      {focal && (
-        <Handle
-          type="source"
-          id="contains"
-          position={Position.Bottom}
-          className={dot}
-          style={{ backgroundColor: `${TINT_CONTAIN}99` }}
-        />
-      )}
     </>
   )
 }
@@ -627,7 +618,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
           card.dimmed && 'opacity-30',
         )}
       >
-        <PortHandles focal />
+        <PortHandles />
         {/* The focus is where a walk starts, so both of its ⊕ live here
             — upstream on the left edge, downstream on the right. */}
         <WalkPills card={card} ctx={ctx} />

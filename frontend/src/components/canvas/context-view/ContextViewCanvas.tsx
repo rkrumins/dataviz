@@ -3127,10 +3127,10 @@ export function ContextViewCanvas({
   // reached and every card re-rendered on every canvas tick. It also
   // churned the deps of the in-frame search debounce, which could keep
   // the 300ms timer resetting forever. Depend on the methods.
-  const { extend: lensExtend, page: lensPage, retry: lensRetryWalk, retryExtend: lensRetryExtend } = lensWalk
+  const { extend: lensExtend, page: lensPage, retry: lensRetryWalk } = lensWalk
   const lensWalkApi = useMemo(
-    () => ({ extend: lensExtend, page: lensPage, retry: lensRetryWalk, retryExtend: lensRetryExtend }),
-    [lensExtend, lensPage, lensRetryWalk, lensRetryExtend],
+    () => ({ extend: lensExtend, page: lensPage, retry: lensRetryWalk }),
+    [lensExtend, lensPage, lensRetryWalk],
   )
   const { walkFor: lensWalkFor } = lensWalk
   const lensWalkEntry = lensFocal ? lensWalkFor(lensFocal) : null

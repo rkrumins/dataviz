@@ -663,11 +663,29 @@ describe('what is really inside a container', () => {
     expect(screen.getByText('no lineage')).toBeTruthy()
   })
 
-  it('asks the focal for its own contents once the walk has landed', () => {
+  it('asks a focal that HOLDS things for its own roster, once', () => {
+    const onLoadChildrenOf = vi.fn()
+    renderLens(['T'], doneWalk(walkModel('T', {
+      nodes: [
+        wnode('T', 'dataset', 'raw_orders', { childCount: 400 }),
+        wnode('c1', 'schemaField', 'order_id'),
+        wnode('F', 'dataset', 'stg_orders'),
+      ],
+      containmentEdges: [holds('T', 'c1')],
+      lineageEdges: [hop('c1', 'F')],
+      downstreamUrns: new Set(['F']),
+    })), { onLoadChildrenOf })
+    expect(onLoadChildrenOf).toHaveBeenCalledWith('T')
+    expect(onLoadChildrenOf).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not ask on behalf of a focal that holds nothing', () => {
+    // A column is the commonest thing this lens is opened on. Asking
+    // what is inside one spent a round trip on every hop of every walk
+    // to be told "nothing", every time.
     const onLoadChildrenOf = vi.fn()
     renderLens(['F'], tableWithColumns(), { onLoadChildrenOf })
-    expect(onLoadChildrenOf).toHaveBeenCalledWith('F')
-    expect(onLoadChildrenOf).toHaveBeenCalledTimes(1)
+    expect(onLoadChildrenOf).not.toHaveBeenCalled()
   })
 
   it('does not ask before the walk has landed — there is nothing to be inside yet', () => {
