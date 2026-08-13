@@ -37,13 +37,19 @@ export interface LensWalkData {
     /** Re-kick a failed (or unsupported, harmlessly) initial fetch. */
     retry: (focusUrn: string) => void
     /** Fetch one further hop from `cardUrn` (up or down), seeded from the
-     *  lineage-participating leaves the view found under it. */
+     *  lineage-participating leaves the view found under it. PRECONDITION:
+     *  the focal's own entry must already be status 'done' — the pill this
+     *  fires from only exists once the model has rendered. A call before
+     *  that is a caller bug and is silently ignored, by design (see
+     *  `runFrontierOp`). */
     extend: (cardUrn: string, dir: LensWalkDir, seedLeaves: string[]) => void
     /** Page a specific node's already-partial adjacency further, given its
      *  frontier entry's `nextCursor`. The hook never interprets cursors —
-     *  it forwards them verbatim. */
+     *  it forwards them verbatim. Same 'done'-entry precondition as
+     *  `extend`. */
     page: (cardUrn: string, dir: LensWalkDir, cursor: string) => void
-    /** Re-kick a failed extend (same request shape as `extend`). */
+    /** Re-kick a failed extend (same request shape and precondition as
+     *  `extend`). */
     retryExtend: (cardUrn: string, dir: LensWalkDir, seedLeaves: string[]) => void
 }
 
@@ -158,7 +164,19 @@ export function useLensWalk(
      *  focal's model — `focusUrn` is captured here at call time, so a
      *  response landing after a re-center still lands on the focal it was
      *  actually requested for, never on whatever is current when it
-     *  resolves (see the module docstring's supersede note). */
+     *  resolves (see the module docstring's supersede note).
+     *
+     *  PRECONDITION, enforced below: the focal's entry must already be
+     *  status 'done'. The pill either of these fire from only renders once
+     *  the focal's own model is in hand, so a call before that (initial
+     *  fetch still loading/errored/unsupported, or the cacheKey never
+     *  touched) is a caller bug, not a state to recover from — silently
+     *  ignored, by design. This also closes a real corruption: fabricating
+     *  a base model from `emptyWalkModel` for a not-yet-'done' entry let a
+     *  merge land while the initial fetch was still in flight, and that
+     *  fetch's success handler REPLACES the whole entry wholesale — the
+     *  merge (and its extendStatus marker) would vanish with no signal the
+     *  moment the initial response arrived. */
     const runFrontierOp = useCallback(async (
         cardUrn: string,
         dir: LensWalkDir,
@@ -167,17 +185,16 @@ export function useLensWalk(
         if (!focusUrn) return
         if (typeof provider?.traceClosure !== 'function') return   // unsupported: nothing to extend/page
         const cacheKey = cacheKeyFor(provider, focusUrn)
+        const startEntry = stateRef.current.get(cacheKey)
+        if (startEntry?.status !== 'done') return
         const statusKey = `${dir}:${cardUrn}`
         const flightKey = `${cacheKey}|${statusKey}`
         if (inFlightRef.current.has(flightKey)) return
         inFlightRef.current.add(flightKey)
         const session = sessionRef.current
-        const baseModel = stateRef.current.get(cacheKey)?.model ?? emptyWalkModel(focusUrn)
+        const baseModel = startEntry.model
 
-        setState(prev => {
-            const entry = prev.get(cacheKey) ?? { model: baseModel, status: 'done' as const, error: null, extendStatus: EMPTY_EXTEND_STATUS }
-            return setEntry(prev, cacheKey, withExtendStatus(entry, statusKey, 'loading'))
-        })
+        setState(prev => setEntry(prev, cacheKey, withExtendStatus(startEntry, statusKey, 'loading')))
 
         try {
             const res = await provider.traceClosure(buildRequest(baseModel))
@@ -185,6 +202,11 @@ export function useLensWalk(
             setState(prev => {
                 const entry = prev.get(cacheKey)
                 if (!entry) return prev   // session cleared/re-created before this landed
+                // SIZING NOTE: every continuation re-ships the anchor's
+                // seeds + every participant's containment spine — correct
+                // by design (nesting needs chains); merge dedupes, so
+                // accumulation is bounded by distinct participants, not by
+                // request count.
                 const merged = mergeClosures(entry.model, res, { rootUrn: cardUrn, direction: dir })
                 return setEntry(prev, cacheKey, withExtendStatus({ ...entry, model: merged }, statusKey, null))
             })

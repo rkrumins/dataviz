@@ -285,3 +285,53 @@ describe('useLensWalk — supersede', () => {
     expect(result.current.walkFor('b')!.model.nodes.some(n => n.urn === 'extra')).toBe(false)
   })
 })
+
+// REGRESSION (review fix round 1): extend/page used to fabricate a base
+// model from emptyWalkModel whenever no 'done' entry existed yet, so a
+// merge landed while the INITIAL fetch was still loading silently vanished
+// the moment that fetch's success handler replaced the whole entry. The
+// pill these fire from only exists once the model has rendered, so a call
+// before that is a caller bug — now a no-op, not a corruption.
+describe('useLensWalk — extend/page precondition (entry must be done)', () => {
+  it('extend before the initial fetch resolves is a no-op: no second call, no corruption once it lands', async () => {
+    let resolveInitial: ((v: TraceV2Result & LensClosureExtras) => void) | undefined
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      if (req.urn === 'a') return new Promise<TraceV2Result & LensClosureExtras>(resolve => { resolveInitial = resolve })
+      throw new Error(`unexpected call: ${JSON.stringify(req)}`)
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result } = renderHook(() => useLensWalk('a', provider))
+
+    // Still loading — the initial fetch hasn't resolved yet.
+    expect(result.current.walkFor('a')?.status).toBe('loading')
+
+    // Calling extend now must be a silent no-op.
+    act(() => result.current.extend('card', 'up', []))
+    expect(traceClosure).toHaveBeenCalledTimes(1)
+    expect(result.current.walkFor('a')!.extendStatus.size).toBe(0)
+
+    // Let the initial fetch land — its model must be intact, because
+    // nothing was ever merged in to be wiped.
+    act(() => {
+      resolveInitial?.(closureResult({ focus: { urn: 'a', level: 0, entityType: 'table' }, nodes: [gn('n1')] }))
+    })
+    await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('done'))
+    expect(result.current.walkFor('a')!.model.nodes.map(n => n.urn)).toEqual(['n1'])
+    expect(traceClosure).toHaveBeenCalledTimes(1)
+  })
+
+  it('extend on an entry that errored, or a focal never fetched, is also a no-op', async () => {
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      if (req.urn === 'a') throw new Error('backend down')
+      throw new Error(`unexpected call: ${JSON.stringify(req)}`)
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result } = renderHook(() => useLensWalk('a', provider))
+    await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('error'))
+
+    act(() => result.current.extend('card', 'up', []))
+    act(() => result.current.page('card', 'down', 'e:0'))
+    expect(traceClosure).toHaveBeenCalledTimes(1)
+    expect(result.current.walkFor('a')!.extendStatus.size).toBe(0)
+  })
+})
