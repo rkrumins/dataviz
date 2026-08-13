@@ -7157,9 +7157,11 @@ class FalkorDBProvider(GraphDataProvider):
         excluded: Set[str] = set(exclude_urns or [])
         seed_truncated = False
 
-        # Boundary bookkeeping. dict-as-ordered-set so the frontier a client
-        # sees is stable across identical requests. ``cut_*`` = stopped by the
-        # budget/deadline, ``depth_*`` = stopped by the requested depth.
+        # Boundary bookkeeping, dict-as-ordered-set: ``cut_*`` = stopped by the
+        # budget or the deadline, ``depth_*`` = stopped by the requested depth.
+        # The dicts buy dedup and, for the per-row cut insertions, row order.
+        # The ring folds below come from SETS, so those members land in hash
+        # order — this is not a sorted or fully insertion-ordered frontier.
         cut_up: Dict[str, None] = {}
         cut_down: Dict[str, None] = {}
         depth_up: Dict[str, None] = {}
@@ -7195,15 +7197,19 @@ class FalkorDBProvider(GraphDataProvider):
                 urn, anchor_label, "incoming" if up else "outgoing", ltypes,
                 after_id, max_nodes, max(0.0, deadline - time.monotonic()),
             )
+            # The anchor and the client's known set are "already visited" here,
+            # exactly as in the BFS below: their edges still ship (that is the
+            # seam), but the nodes are not re-shipped and are not re-attributed
+            # to a direction the client already filed them under.
+            known = excluded | {urn}
             discovered: Set[str] = {urn}
             for rec in rows:
                 _record_edge(rec)
                 other = rec.get("otherUrn")
-                if not other:
+                if not other or other in known:
                     continue
+                discovered.add(other)
                 (upstream_urns if up else downstream_urns).add(other)
-                if other not in excluded:
-                    discovered.add(other)
             if len(rows) >= max_nodes:
                 # A FULL page means there is more of this node's adjacency.
                 # Its entry is kept whatever the probe says — here the cursor,
@@ -7229,17 +7235,21 @@ class FalkorDBProvider(GraphDataProvider):
                 seed_capped = False
             else:
                 seed_timeout = max(0.6, min(1.5, deadline - time.monotonic()))
+                # Reserve at least half the node budget for the WALK. A fat
+                # container can have more lineage-bearing descendants than the
+                # whole budget; seeding all of them leaves nothing to spend on
+                # hops, and the client gets a board of nodes with no lineage on
+                # it — the one thing a lineage view must never be.
+                seed_limit = max(1, max_nodes // 2)
                 seed, seed_capped = await self._collect_lineage_seed(
-                    urn, focus_label, ltypes, ctypes, max_nodes, seed_timeout,
+                    urn, focus_label, ltypes, ctypes, seed_limit, seed_timeout,
                     exclude=excluded,
                 )
+            # A capped seed makes the response partial, but it must NOT stop the
+            # walk: the flag is folded into truncation_reason at the return, not
+            # here, because setting it now would fail the loop's
+            # `not truncation_reason` guard and ship a nodes-without-edges board.
             seed_truncated = seed_capped
-            if seed_truncated:
-                # The container holds more lineage-bearing descendants than the
-                # cap returned, so the response is partial before a single hop
-                # runs — the global flag has to say so too, not just the
-                # specific one.
-                truncation_reason = truncation_reason or "max_nodes"
 
             seed_set = {u for u, _ in seed}
             seed_labels = {u: lbl for u, lbl in seed}
@@ -7445,6 +7455,10 @@ class FalkorDBProvider(GraphDataProvider):
                         )
                 except Exception:
                     truncation_reason = truncation_reason or "ancestors_failed"
+
+        # The seed cap, folded in at the end: the walk ran on what it had, and
+        # the response still says out loud that it is partial.
+        truncation_reason = truncation_reason or ("max_nodes" if seed_truncated else None)
 
         return TraceClosureResult(
             nodes=list(nodes_by_urn.values()),

@@ -181,7 +181,10 @@ class _TraceFake:
                 if other in exclude:
                     continue
                 rows.append([s, t, f"raw-{eid}", et, other, None])
-            return _Result(rows)
+            # `LIMIT $limit` is part of the query, not an afterthought the
+            # caller applies: a hop that asks for 3 rows gets 3 rows back, so
+            # what the caller asked for is observable in what it receives.
+            return _Result(rows[:params["limit"]])
         if "RETURN f.urn AS urn, labels(f)[0] AS label" in cypher:
             # _collect_lineage_seed — TWO separately-valid queries (FalkorDB
             # rejects the combined `WITH [f] + collect(DISTINCT d)` form with
@@ -973,6 +976,18 @@ def test_trace_closure_cursor_pages_one_hub_to_exhaustion():
     seen = [e.id for e in page1.edges] + [e.id for e in page2.edges] + [e.id for e in page3.edges]
     assert len(seen) == len(set(seen)) == 7
 
+    # Paging keeps the walk's exclusion discipline: a node the client already
+    # holds keeps its EDGE (the seam) but is not re-shipped and is not filed
+    # under a direction again.
+    excluded_page = _run(p.trace_closure(
+        "hub", upstream_depth=0, downstream_depth=1,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=3, timeout_ms=5000, after_cursor="e:0",
+        exclude_urns=["t2"],
+    ))
+    assert excluded_page.downstream_urns == {"t1", "t3"}
+    assert len(excluded_page.edges) == 3
+
 
 def test_trace_closure_rejects_an_unreadable_cursor():
     """The endpoint guarantees `e:<int>`; the provider still refuses garbage
@@ -993,25 +1008,144 @@ def test_trace_closure_rejects_an_unreadable_cursor():
         raise AssertionError("expected ValueError")
 
 
-def test_trace_closure_seed_truncated_when_the_container_seed_hits_its_cap():
-    """A container with more lineage-bearing descendants than `max_nodes`: the
-    seed itself is partial, so the response says so twice — `seedTruncated` for
-    the cause, `truncationReason` for the global flag every caller reads."""
+def test_trace_closure_a_capped_seed_still_walks_and_still_says_so():
+    """A fat container: 8 lineage-bearing leaves, budget 8. Half the budget is
+    reserved for the WALK, so the seed takes 4 and the hops get the rest — the
+    user sees real lineage, not a board of nodes with no edges on it. The
+    response still admits both partial truths: `seedTruncated` for the leaves it
+    never seeded, `truncationReason` for the caller that reads one flag."""
     fake = _TraceFake()
-    for leaf in ("leaf_a", "leaf_b", "leaf_c"):
-        fake.contain("dom", leaf)
-        fake.lineage.append((leaf, "sink", "FLOWS"))
-    p = _make_provider(fake)
+    for i in range(1, 9):
+        fake.contain("dom", f"leaf_{i}")
+        fake.lineage.append((f"leaf_{i}", f"sink_{i}", "FLOWS"))
+    fake.degrees = {
+        **{f"leaf_{i}": {"in": 0, "out": 1} for i in range(1, 9)},
+        **{f"sink_{i}": {"in": 1, "out": 0} for i in range(1, 9)},
+    }
+    p = _make_provider(fake, hydrate=True)
 
     result = _run(p.trace_closure(
-        "dom", upstream_depth=2, downstream_depth=2,
+        "dom", upstream_depth=0, downstream_depth=1,
         lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
-        max_nodes=3, timeout_ms=5000,
+        max_nodes=8, timeout_ms=5000,
     ))
 
     assert result.seed_truncated is True
     assert result.truncated is True
     assert result.truncation_reason == "max_nodes"
+    # THE point of reserving budget: lineage actually came back.
+    got_edges = {(e.source_urn, e.target_urn) for e in result.edges}
+    assert got_edges == {("leaf_1", "sink_1"), ("leaf_2", "sink_2"), ("leaf_3", "sink_3")}
+    shipped = {n.urn for n in result.nodes}
+    assert len(shipped) == 8
+    assert "leaf_4" in shipped and "leaf_5" not in shipped   # seed took half, not all
+    # And the frontier is the handful of real walk candidates — leaf_4 was
+    # seeded but never expanded — not one entry per node on the board.
+    assert [(f.urn, f.total_count) for f in result.frontier_down] == [("leaf_4", 1)]
+
+
+def test_trace_closure_a_clean_walk_off_a_capped_seed_is_still_partial():
+    """The seed cap has to survive a walk that goes perfectly. Here every hop
+    completes inside its budget, so nothing in the walk sets a truncation
+    reason — and the answer is STILL partial, because the leaves it started
+    from were only some of the container's. Drop that fold and the response
+    quietly claims to be the whole picture."""
+    fake = _TraceFake()
+    for i in range(1, 5):
+        fake.contain("dom", f"leaf_{i}")
+    fake.lineage = [
+        ("leaf_1", "sink_1", "FLOWS"),
+        ("leaf_2", "sink_2", "FLOWS"),
+        # leaf_3/leaf_4 carry lineage too — incoming, so they seed but add no
+        # downstream hop of their own.
+        ("src_3", "leaf_3", "FLOWS"),
+        ("src_4", "leaf_4", "FLOWS"),
+    ]
+    fake.degrees = {f"sink_{i}": {"in": 1, "out": 0} for i in (1, 2)}
+    p = _make_provider(fake)
+
+    result = _run(p.trace_closure(
+        "dom", upstream_depth=0, downstream_depth=1,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=8, timeout_ms=5000,
+    ))
+
+    assert {(e.source_urn, e.target_urn) for e in result.edges} == {
+        ("leaf_1", "sink_1"), ("leaf_2", "sink_2"),
+    }
+    assert result.frontier_down == []       # the walk itself ran out of graph
+    assert result.seed_truncated is True
+    assert result.truncated is True
+    assert result.truncation_reason == "max_nodes"
+
+
+def test_trace_closure_asks_each_hop_for_only_what_still_fits():
+    """The per-hop LIMIT is the REMAINING budget, not `max_nodes` flat. Asking
+    for the whole budget every hop fetches rows the budget check can only throw
+    away — paid for in the database, dropped in Python, and every dropped row
+    takes its edge down with it."""
+    fake = _TraceFake()
+    fake.lineage = [
+        ("f", "a1", "FLOWS"), ("f", "a2", "FLOWS"),
+        ("a1", "b1", "FLOWS"), ("a2", "b2", "FLOWS"),
+    ]
+    p = _make_provider(fake)
+    limits = []
+    orig = fake.ro_query
+
+    async def spy(cypher, params=None, timeout=None, **kwargs):
+        if "AS otherUrn" in cypher:
+            limits.append(params["limit"])
+        return await orig(cypher, params=params, timeout=timeout, **kwargs)
+
+    p._ro_query = spy
+
+    result = _run(p.trace_closure(
+        "f", upstream_depth=0, downstream_depth=2,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=20, timeout_ms=5000,
+    ))
+
+    # Hop 1 runs with 1 node in hand, hop 2 with 3.
+    assert limits == [19, 17]
+    assert len(result.edges) == 4
+    assert result.truncated is False
+
+
+def test_trace_closure_cut_and_exclusion_leave_no_edge_pointing_at_nothing():
+    """The two rules composed, which is where an invariant usually dies: a hop
+    cut by `max_nodes` AND a seam edge into an excluded node, in one response.
+    Every edge endpoint must be either shipped in `nodes` or already held by the
+    client — those are the only two ways the canvas can draw it."""
+    fake = _TraceFake()
+    fake.lineage = [
+        ("p1", "f", "FLOWS"),       # hop 1 upstream
+        ("q1", "p1", "FLOWS"),      # hop 2 upstream: fills the budget …
+        ("q2", "p1", "FLOWS"),
+        ("q3", "p1", "FLOWS"),
+        ("f", "d1", "FLOWS"),       # hop 1 downstream
+        ("d1", "known", "FLOWS"),   # hop 2 downstream: the seam
+        ("d1", "e1", "FLOWS"),      # … and what the budget cut off
+        ("d1", "e2", "FLOWS"),
+    ]
+    p = _make_provider(fake, hydrate=True)
+
+    result = _run(p.trace_closure(
+        "f", upstream_depth=2, downstream_depth=2,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=6, timeout_ms=5000,
+        exclude_urns=["known"],
+    ))
+
+    assert result.truncation_reason == "max_nodes"
+    shipped = {n.urn for n in result.nodes}
+    assert "known" not in shipped
+    drawable = shipped | {"known"}
+    for e in result.edges:
+        assert e.source_urn in drawable and e.target_urn in drawable
+    got_edges = {(e.source_urn, e.target_urn) for e in result.edges}
+    assert ("d1", "known") in got_edges      # the seam survived …
+    assert ("d1", "e1") not in got_edges     # … the cut edge did not
 
 
 def test_trace_closure_keeps_parallel_edges_between_one_pair():
