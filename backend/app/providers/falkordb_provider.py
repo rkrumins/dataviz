@@ -4646,19 +4646,30 @@ class FalkorDBProvider(GraphDataProvider):
                         "RETURN n.urn AS u, labels(n)[0] AS label",
                         params={"urns": missing},
                     )
-                store_pipe = self._redis.pipeline(transaction=False)
-                store_count = 0
+                # The cache is an OPTIMIZATION, never a hard dependency. Resolve
+                # the result FIRST, then write the cache only if a client exists.
+                # This pipeline used to be opened BEFORE the loop, so a None
+                # client (unset CACHE_REDIS_URL, or the dedicated cache Redis
+                # simply DOWN — build_cache_client returns None by construction)
+                # raised before ``out`` was ever populated. That threw away labels
+                # which had resolved perfectly well and pushed the caller into the
+                # unlabeled-MATCH fallback — i.e. a FULL NODE SCAN, the
+                # 4-9s-on-2M-nodes antipattern this very cache exists to avoid.
+                # A cache outage must not knock every label lookup off its index.
+                resolved_labels: List[Tuple[str, str]] = []
                 for row in res.result_set or []:
                     urn, label = row[0], row[1]
                     if label:
                         safe = _sanitize_label(label)
                         out[urn] = safe
-                        store_pipe.hset(label_key, urn, safe)
-                        store_count += 1
+                        resolved_labels.append((urn, safe))
                     else:
                         out[urn] = None
-                if store_count > 0:
+                if resolved_labels and self._redis is not None:
                     try:
+                        store_pipe = self._redis.pipeline(transaction=False)
+                        for urn, safe in resolved_labels:
+                            store_pipe.hset(label_key, urn, safe)
                         await store_pipe.execute()
                     except Exception:
                         pass

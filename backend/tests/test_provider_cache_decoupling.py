@@ -84,3 +84,36 @@ def test_ancestor_chains_survive_a_cache_outage():
     chains = asyncio.run(provider._compute_and_store_ancestors_bulk(["a", "b"]))
 
     assert chains == {"a": ["parent-of-a"], "b": ["parent-of-b"]}
+
+
+class _Rows:
+    """Minimal stand-in for a FalkorDB query result."""
+
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+def test_urn_labels_survive_a_cache_outage():
+    """Guarantee 3 again, one layer down — the URN→label cache. Its store-back
+    pipeline was opened INSIDE the try that also assigns the output map, so with
+    no cache client it raised BEFORE a single resolved label was recorded: the
+    whole batch degraded to label ``None`` and every reader fell onto the
+    unlabeled full-scan path — the 4-9s-on-2M-nodes antipattern this very cache
+    exists to avoid. A cache outage must cost the WRITE, never the answer."""
+    provider = FalkorDBProvider(host="x", graph_name="g")
+    provider._redis = None   # build_cache_client returns None with no cache URL
+
+    async def _ro_query(cypher, params=None, **kw):
+        if "db.labels()" in cypher:
+            return _Rows([["Column"], ["Table"]])
+        seeded = {"Column": {"a"}, "Table": {"b"}}
+        for label, urns in seeded.items():
+            if f"(n:{label})" in cypher:
+                return _Rows([[u] for u in (params or {}).get("urns", []) if u in urns])
+        return _Rows([])
+
+    provider._ro_query = _ro_query
+
+    labels = asyncio.run(provider._resolve_urn_labels_bulk(["a", "b"]))
+
+    assert labels == {"a": "Column", "b": "Table"}
