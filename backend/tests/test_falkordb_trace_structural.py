@@ -44,6 +44,7 @@ class _TraceFake:
         self.lineage = []      # (src, tgt, type)
         self.agg = {}          # (src, tgt) -> {weight, sd, td, types}
         self.meta = ("cube", 2)
+        self.adjacency = {}    # (urn, direction) -> [(other_urn, edge_type)], id(r) == list index
 
     def contain(self, parent, child):
         self.children.setdefault(parent, []).append(child)
@@ -134,6 +135,75 @@ class _TraceFake:
                 if s in params["sUrns"] and t in params["tUrns"] and et in params["ltypes"]:
                     rows.append([s, t, et, f"raw-{s}-{t}", {}])
             return _Result(rows)
+        if "WHERE id(r) > $after" in cypher:
+            # _page_raw_lineage_single: cursor page over ONE node's
+            # adjacency. `self.adjacency[(urn, direction)]` is an ordered
+            # [(other_urn, edge_type)] list — the list index IS the fake's
+            # `id(r)`, so slicing by `after`/`limit` mirrors a real
+            # `WHERE id(r) > $after ... ORDER BY id(r) LIMIT $limit`.
+            urn = params["urn"]
+            after = params["after"]
+            limit = params["limit"]
+            incoming = "<-[r" in cypher
+            edges = self.adjacency.get((urn, "incoming" if incoming else "outgoing"), [])
+            page = [(eid, other, et) for eid, (other, et) in enumerate(edges) if eid > after][:limit]
+            rows = []
+            for eid, other, et in page:
+                if incoming:
+                    rows.append([eid, other, urn, et, other, None])
+                else:
+                    rows.append([eid, urn, other, et, other, None])
+            return _Result(rows)
+        if "AS otherUrn" in cypher:
+            # _expand_raw_lineage_set: one BFS hop over raw lineage for a
+            # frontier SET. Incoming (upstream) matches edges whose TARGET
+            # is in the frontier; outgoing (downstream) whose SOURCE is.
+            # ``otherUrn`` is the far (newly discovered) endpoint. Row
+            # shape: [sourceUrn, targetUrn, edgeId, edgeType, otherUrn,
+            # otherLabel]. `exclude`, when present, drops rows whose far
+            # endpoint is excluded — simulating the real `NOT o.urn IN
+            # $exclude` WHERE clause.
+            frontier = set(params.get("frontier", []))
+            exclude = set(params.get("exclude") or [])
+            incoming = "<-[r" in cypher
+            rows = []
+            for s, t, et in self.lineage:
+                if incoming and t in frontier:
+                    other = s
+                elif not incoming and s in frontier:
+                    other = t
+                else:
+                    continue
+                if other in exclude:
+                    continue
+                rows.append([s, t, f"raw-{s}-{t}", et, other, None])
+            return _Result(rows)
+        if "RETURN f.urn AS urn, labels(f)[0] AS label" in cypher:
+            # _collect_lineage_seed — TWO separately-valid queries (FalkorDB
+            # rejects the combined `WITH [f] + collect(DISTINCT d)` form with
+            # "_AR_EXP_UpdateEntityIdx: Unable to locate a value with alias
+            # f"; only a LIVE engine catches that, never a string-matching
+            # fake — the live gate comes in a later task).
+            #   (1) does the focus itself carry lineage? → LEAF focus
+            focus = params["urn"]
+            lin_nodes = {s for s, _, _ in self.lineage} | {t for _, t, _ in self.lineage}
+            return _Result([[focus, None]] if focus in lin_nodes else [])
+        if "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label" in cypher:
+            #   (2) which containment descendants carry lineage? → CONTAINER
+            #       focus, truncated at $cap (mirrors the real LIMIT so
+            #       seed_capped is exercisable against the fake).
+            focus = params["urn"]
+            cap = params["cap"]
+            lin_nodes = {s for s, _, _ in self.lineage} | {t for _, t, _ in self.lineage}
+            desc, stack = set(), [focus]
+            while stack:
+                x = stack.pop()
+                for c in self.children.get(x, []):
+                    if c not in desc:
+                        desc.add(c)
+                        stack.append(c)
+            matched = sorted(u for u in desc if u in lin_nodes)
+            return _Result([[u, None] for u in matched[:cap]])
         raise AssertionError(f"unhandled ro_query: {cypher}")
 
 
@@ -441,3 +511,173 @@ def test_an_anchor_that_matches_nothing_falls_back_to_itself():
     ))
     assert s_urns == ["dom"]
     assert t_urns == ["tbl_b"]
+
+
+# ── Closure walk primitives: seed / hop / page ─────────────────────────────
+#
+# _expand_raw_lineage_set, _collect_lineage_seed and _page_raw_lineage_single
+# back the upcoming trace_closure (added in a later task). Fakes here only
+# pattern-match Cypher strings and cannot validate real Cypher syntax — see
+# _collect_lineage_seed's own comment below for a case a live engine caught
+# that no string-matching fake could.
+
+
+def test_expand_raw_lineage_set_exclude_filters_far_endpoints():
+    """`exclude` adds a parameterized `NOT o.urn IN $exclude` clause and
+    drops excluded far-endpoints from the hop; without it the clause is
+    absent and nothing is filtered."""
+    fake = _TraceFake()
+    fake.lineage = [
+        ("hub", "keep1", "FLOWS"),
+        ("hub", "drop1", "FLOWS"),
+        ("hub", "keep2", "FLOWS"),
+    ]
+    p = _make_provider(fake)
+    seen = []
+
+    orig = fake.ro_query
+
+    async def spy(cypher, params=None, timeout=None, **kwargs):
+        seen.append(cypher)
+        return await orig(cypher, params=params, timeout=timeout, **kwargs)
+
+    p._ro_query = spy
+
+    out = _run(p._expand_raw_lineage_set(
+        frontier=["hub"], frontier_labels={"hub": "Hub"},
+        direction="outgoing", ltypes=["FLOWS"], limit=50, timeout_secs=2.0,
+        exclude=["drop1"],
+    ))
+    assert {r["otherUrn"] for r in out} == {"keep1", "keep2"}
+    assert any("NOT o.urn IN $exclude" in c for c in seen)
+
+    seen.clear()
+    out2 = _run(p._expand_raw_lineage_set(
+        frontier=["hub"], frontier_labels={"hub": "Hub"},
+        direction="outgoing", ltypes=["FLOWS"], limit=50, timeout_secs=2.0,
+    ))
+    assert {r["otherUrn"] for r in out2} == {"keep1", "drop1", "keep2"}
+    assert all("NOT o.urn IN $exclude" not in c for c in seen)
+
+
+def test_collect_lineage_seed_exclude_keeps_focus_row():
+    """`exclude` drops a descendant seed row but never the focus's own
+    row, even when the focus urn is itself listed in `exclude`."""
+    fake = _TraceFake()
+    fake.contain("dom", "leaf_a")
+    fake.contain("dom", "leaf_b")
+    fake.lineage = [("leaf_a", "leaf_b", "FLOWS"), ("dom", "elsewhere", "FLOWS")]
+    p = _make_provider(fake)
+
+    seed, capped = _run(p._collect_lineage_seed(
+        "dom", "Domain", ["FLOWS"], ["HAS"], cap=10, timeout_secs=2.0,
+        exclude={"leaf_a", "dom"},
+    ))
+    urns = {u for u, _ in seed}
+    assert "leaf_a" not in urns
+    assert "dom" in urns
+    assert "leaf_b" in urns
+    assert capped is False
+
+
+def test_collect_lineage_seed_seed_capped_reflects_limit_hit():
+    """seed_capped is False when the descendants query returns fewer rows
+    than its LIMIT, True when it returns exactly `cap` rows (the cap was
+    hit and more may exist)."""
+    fake = _TraceFake()
+    fake.contain("dom", "leaf_a")
+    fake.contain("dom", "leaf_b")
+    fake.contain("dom", "leaf_c")
+    fake.lineage = [
+        ("leaf_a", "x", "FLOWS"), ("leaf_b", "x", "FLOWS"), ("leaf_c", "x", "FLOWS"),
+    ]
+    p = _make_provider(fake)
+
+    _, capped_small = _run(p._collect_lineage_seed(
+        "dom", "Domain", ["FLOWS"], ["HAS"], cap=10, timeout_secs=2.0,
+    ))
+    assert capped_small is False
+
+    _, capped_hit = _run(p._collect_lineage_seed(
+        "dom", "Domain", ["FLOWS"], ["HAS"], cap=3, timeout_secs=2.0,
+    ))
+    assert capped_hit is True
+
+
+def test_page_raw_lineage_single_pages_disjoint_by_edge_id():
+    """7 outgoing edges off one anchor, limit 3: three calls page 3/3/1
+    disjoint rows in edge-id order, the last call's last_edge_id resumes
+    the next page correctly, and paging past the end returns ([], None)."""
+    fake = _TraceFake()
+    fake.adjacency[("hub", "outgoing")] = [(f"t{i}", "FLOWS") for i in range(7)]
+    p = _make_provider(fake)
+
+    page1, last1 = _run(p._page_raw_lineage_single(
+        "hub", "Hub", "outgoing", ["FLOWS"], None, 3, 2.0,
+    ))
+    assert [r["otherUrn"] for r in page1] == ["t0", "t1", "t2"]
+    assert last1 == 2
+
+    page2, last2 = _run(p._page_raw_lineage_single(
+        "hub", "Hub", "outgoing", ["FLOWS"], last1, 3, 2.0,
+    ))
+    assert [r["otherUrn"] for r in page2] == ["t3", "t4", "t5"]
+    assert last2 == 5
+
+    page3, last3 = _run(p._page_raw_lineage_single(
+        "hub", "Hub", "outgoing", ["FLOWS"], last2, 3, 2.0,
+    ))
+    assert [r["otherUrn"] for r in page3] == ["t6"]
+    assert last3 == 6
+
+    page4, last4 = _run(p._page_raw_lineage_single(
+        "hub", "Hub", "outgoing", ["FLOWS"], last3, 3, 2.0,
+    ))
+    assert page4 == []
+    assert last4 is None
+
+    all_urns = [r["otherUrn"] for r in page1 + page2 + page3]
+    assert len(all_urns) == len(set(all_urns)) == 7
+
+
+def test_page_raw_lineage_single_upstream_flips_source_target():
+    """Upstream direction (`<-[r]-`): sourceUrn is always the edge's true
+    source (the far endpoint `o`), targetUrn is the anchor — otherUrn
+    stays the far endpoint regardless of direction."""
+    fake = _TraceFake()
+    fake.adjacency[("hub", "incoming")] = [("up0", "FLOWS"), ("up1", "FLOWS")]
+    p = _make_provider(fake)
+
+    rows, last = _run(p._page_raw_lineage_single(
+        "hub", "Hub", "incoming", ["FLOWS"], None, 10, 2.0,
+    ))
+    assert [(r["sourceUrn"], r["targetUrn"], r["otherUrn"]) for r in rows] == [
+        ("up0", "hub", "up0"),
+        ("up1", "hub", "up1"),
+    ]
+    assert last == 1
+
+
+def test_page_raw_lineage_single_unlabeled_anchor_falls_back():
+    """A falsy `label` drops the label qualifier from the anchor match —
+    a single-node scan, accepted as a cheaper cost than an unlabeled
+    bucket across a whole frontier."""
+    fake = _TraceFake()
+    fake.adjacency[("hub", "outgoing")] = [("t0", "FLOWS")]
+    p = _make_provider(fake)
+    seen = {}
+
+    orig = fake.ro_query
+
+    async def spy(cypher, params=None, timeout=None, **kwargs):
+        if "WHERE id(r) > $after" in cypher:
+            seen["cypher"] = cypher
+        return await orig(cypher, params=params, timeout=timeout, **kwargs)
+
+    p._ro_query = spy
+    rows, _ = _run(p._page_raw_lineage_single(
+        "hub", "", "outgoing", ["FLOWS"], None, 10, 2.0,
+    ))
+    assert "MATCH (f {urn: $urn})" in seen["cypher"]
+    assert "MATCH (f:" not in seen["cypher"]
+    assert len(rows) == 1

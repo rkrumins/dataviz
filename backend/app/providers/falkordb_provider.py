@@ -7712,6 +7712,298 @@ class FalkorDBProvider(GraphDataProvider):
                     continue
         return out
 
+    async def _expand_raw_lineage_set(
+        self,
+        frontier: List[str],
+        frontier_labels: Dict[str, str],
+        direction: str,
+        ltypes: List[str],
+        limit: int,
+        timeout_secs: float,
+        exclude: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """One BFS hop over RAW lineage edges — the regime-independent core of
+        ``trace_closure``.
+
+        Unlike ``_expand_aggregated_set`` this walks the DECLARED lineage
+        rel-types directly (``[r:LTYPE1|LTYPE2|...]``) with NO neighbour
+        label/level filter: focus scoping comes from starting at the focus and
+        following its ACTUAL lineage, not from constraining peers. Reads the
+        MAIN graph (raw edges live there, not the projection graph), so it is
+        correct at the finest grain even in boundary regime where leaf rollups
+        are never materialised.
+
+        ``direction``: ``'incoming'`` walks upstream (``(f)<-[r]-(o)``),
+        ``'outgoing'`` walks downstream (``(f)-[r]->(o)``). Each returned record
+        is oriented source->target and carries ``otherUrn``/``otherLabel`` — the
+        far (newly-discovered) endpoint and its entity-type label — so the
+        caller seeds the next frontier ALREADY label-bucketed without a
+        separate label round-trip.
+
+        The frontier is bucketed by label so each sub-query uses the per-label
+        ``(:Label).urn`` index (there is no label-less URN index; an unlabeled
+        bucket pays one scan, still correct).
+
+        ``exclude``, when non-empty, adds a parameterized ``NOT o.urn IN
+        $exclude`` to every bucket's WHERE — the closure's already-visited
+        set, kept out of the DB round-trip's own results rather than
+        filtered in Python after the fact.
+        """
+        if not frontier or limit <= 0 or not ltypes:
+            return []
+
+        by_label: Dict[str, List[str]] = {}
+        for urn in frontier:
+            by_label.setdefault(frontier_labels.get(urn) or "", []).append(urn)
+
+        if direction == "incoming":
+            arrow = "<-[r:{rel}]-"
+            source_var, target_var = "o", "f"
+        else:
+            arrow = "-[r:{rel}]->"
+            source_var, target_var = "f", "o"
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+        per_query_timeout = max(0.6, min(1.5, timeout_secs))
+
+        queries: List[Tuple[str, Dict[str, Any]]] = []
+        for f_label, urns in by_label.items():
+            sl = _sanitize_label(f_label) if f_label else ""
+            label_clause = f":{sl}" if sl else ""
+            where_clause = "WHERE f.urn IN $frontier "
+            params: Dict[str, Any] = {"frontier": urns, "limit": limit}
+            if exclude:
+                where_clause += "AND NOT o.urn IN $exclude "
+                params["exclude"] = exclude
+            cypher = (
+                f"MATCH (f{label_clause}){arrow.format(rel=rel_alt)}(o) "
+                + where_clause
+                + f"RETURN {source_var}.urn AS sourceUrn, {target_var}.urn AS targetUrn, "
+                "id(r) AS edgeId, type(r) AS edgeType, "
+                "o.urn AS otherUrn, labels(o)[0] AS otherLabel "
+                "LIMIT $limit"
+            )
+            queries.append((cypher, params))
+
+        async def _run(c: str, p: Dict[str, Any]):
+            try:
+                return await self._ro_query(
+                    c, params=p, timeout=per_query_timeout, op="trace.closure_expand",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "trace_closure: raw lineage expand (%s) failed: %s",
+                    direction, exc,
+                )
+                return None
+
+        results = await asyncio.gather(*(_run(c, p) for c, p in queries))
+
+        out: List[Dict[str, Any]] = []
+        seen_edge_ids: Set[str] = set()
+        for result in results:
+            if result is None:
+                continue
+            for row in (result.result_set or []):
+                try:
+                    eid = str(row[2]) if row[2] is not None else f"raw-{row[0]}-{row[1]}"
+                    if eid in seen_edge_ids:
+                        continue
+                    seen_edge_ids.add(eid)
+                    out.append({
+                        "sourceUrn": row[0],
+                        "targetUrn": row[1],
+                        "edgeId": eid,
+                        "edgeType": str(row[3]) if row[3] else ltypes[0],
+                        "otherUrn": row[4],
+                        "otherLabel": row[5],
+                    })
+                    if len(out) >= limit:
+                        return out
+                except Exception:
+                    continue
+        return out
+
+    async def _collect_lineage_seed(
+        self,
+        focus_urn: str,
+        focus_label: str,
+        ltypes: List[str],
+        ctypes: List[str],
+        cap: int,
+        timeout_secs: float,
+        exclude: Optional[Set[str]] = None,
+    ) -> Tuple[List[Tuple[str, str]], bool]:
+        """The nodes to START the closure BFS from.
+
+        Lineage lives at the leaves, never on containers. A LEAF focus is its
+        own seed. A CONTAINER focus (a Domain/Layer/Table with no lineage of
+        its own) contributes nothing directly — so this is the ONE place
+        containment flows DOWNWARD: walk containment down to find which
+        descendants of the top-most node carry incident lineage, and seed from
+        those. The closure BFS then shows only their LINEAGE hops; containment
+        is never a hop. Bounded by ``cap`` (a container with more lineage
+        leaves than that spills to the lazy/coarse path — handled by the
+        caller's ``max_nodes`` truncation + cursor).
+
+        Returns ``(seed, seed_capped)`` where ``seed`` is a list of
+        ``(urn, entity_type_label)`` pairs (already label-bucketed for
+        index-seeking sub-queries — no extra label lookup) and
+        ``seed_capped`` is True when the descendants query returned exactly
+        its ``cap`` LIMIT (more lineage-bearing descendants may exist than
+        were returned — the caller reports ``seedTruncated``). ``exclude``
+        drops matching seed rows EXCEPT the focus's own row, which is never
+        excluded from its own walk.
+        """
+        if not ltypes:
+            return [(focus_urn, focus_label)], False
+
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+        per_query_timeout = max(0.6, min(1.5, timeout_secs))
+        sl = _sanitize_label(focus_label) if focus_label else ""
+        label_clause = f":{sl}" if sl else ""
+
+        # FalkorDB REJECTS the tempting single-round-trip form
+        #     WITH [f] + collect(DISTINCT d) AS cands
+        # (mixing a node alias with an aggregation) — it fails with
+        #     "_AR_EXP_UpdateEntityIdx: Unable to locate a value with alias f"
+        # VERIFIED against a live engine (a fake that string-matches Cypher
+        # cannot catch this). So: two separately-valid queries, GATHERED, and
+        # unioned in Python — a cursor role, not a filter:
+        #   (1) does the focus itself carry lineage?         → LEAF focus
+        #   (2) which containment descendants carry lineage? → CONTAINER focus
+        queries: List[Tuple[str, Dict[str, Any]]] = [(
+            f"MATCH (f{label_clause} {{urn: $urn}}) WHERE (f)-[:{rel_alt}]-() "
+            "RETURN f.urn AS urn, labels(f)[0] AS label",
+            {"urn": focus_urn},
+        )]
+        if ctypes:
+            ct_alt = "|".join(_sanitize_label(t) for t in ctypes)
+            hops = self._containment_hop_bound()
+            queries.append((
+                f"MATCH (f{label_clause} {{urn: $urn}})-[c:{ct_alt}*1..{hops}]->(d) "
+                f"WHERE (d)-[:{rel_alt}]-() "
+                "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label LIMIT $cap",
+                {"urn": focus_urn, "cap": cap},
+            ))
+
+        async def _run_seed(c: str, prm: Dict[str, Any]):
+            try:
+                return await self._ro_query(
+                    c, params=prm, timeout=per_query_timeout, op="trace.closure_seed",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "trace_closure: seed query failed for %s: %s", focus_urn, exc,
+                )
+                return None
+
+        results = await asyncio.gather(*(_run_seed(c, prm) for c, prm in queries))
+        if all(r is None for r in results):
+            # Every probe errored — degrade to the focus itself rather than
+            # reporting "no lineage", which would be a lie.
+            return [(focus_urn, focus_label)], False
+
+        seed_capped = False
+        if ctypes and len(results) > 1 and results[1] is not None:
+            seed_capped = len(results[1].result_set or []) == cap
+
+        seed: List[Tuple[str, str]] = []
+        seen: Set[str] = set()
+        for result in results:
+            if result is None:
+                continue
+            for row in (result.result_set or []):
+                u = row[0]
+                if not u or u in seen:
+                    continue
+                if exclude and u in exclude and u != focus_urn:
+                    continue
+                seen.add(u)
+                seed.append((u, (row[1] if len(row) > 1 else None) or ""))
+        return seed, seed_capped
+
+    async def _page_raw_lineage_single(
+        self,
+        urn: str,
+        label: str,
+        direction: str,
+        ltypes: List[str],
+        after_id: Optional[int],
+        limit: int,
+        timeout: float,
+    ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+        """Cursor page over ONE node's raw-lineage adjacency in ONE
+        direction — the lazy/coarse fallback for a single frontier node
+        whose full hop would blow the BFS budget, paired with
+        ``_expand_raw_lineage_set``'s batched hop.
+
+        Stable-ordered by ``id(r)`` and resumed via ``after_id`` (the
+        previous page's returned ``last_edge_id``; pass ``-1`` or ``None``
+        for the first page — both normalize to "from the start"). Row
+        dicts use the SAME keys as ``_expand_raw_lineage_set`` rows so
+        callers can share processing code between the batched and
+        single-node paths.
+
+        ``label`` falsy falls back to an unlabeled anchor match — a
+        single-node scan, so the missing per-label index is an accepted
+        cost here (unlike the frontier-wide bucketing in the sibling
+        helpers, where an unlabeled bucket would pay that cost per URN).
+        """
+        if not ltypes or limit <= 0:
+            return [], None
+
+        after = -1 if after_id is None else after_id
+        sl = _sanitize_label(label) if label else ""
+        label_clause = f":{sl}" if sl else ""
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+
+        if direction == "incoming":
+            arrow = f"<-[r:{rel_alt}]-"
+            source_expr, target_expr = "o.urn", "f.urn"
+        else:
+            arrow = f"-[r:{rel_alt}]->"
+            source_expr, target_expr = "f.urn", "o.urn"
+
+        cypher = (
+            f"MATCH (f{label_clause} {{urn: $urn}}){arrow}(o) "
+            "WHERE id(r) > $after "
+            f"RETURN id(r) AS edgeId, {source_expr} AS sourceUrn, {target_expr} AS targetUrn, "
+            "type(r) AS edgeType, o.urn AS otherUrn, labels(o)[0] AS otherLabel "
+            "ORDER BY id(r) "
+            "LIMIT $limit"
+        )
+        per_query_timeout = max(0.6, min(1.5, timeout))
+        try:
+            result = await self._ro_query(
+                cypher, params={"urn": urn, "after": after, "limit": limit},
+                timeout=per_query_timeout, op="trace.closure_page",
+            )
+        except Exception as exc:
+            logger.warning(
+                "trace_closure: page query failed for %s (%s): %s", urn, direction, exc,
+            )
+            return [], None
+
+        rows: List[Dict[str, Any]] = []
+        last_edge_id: Optional[int] = None
+        for row in (result.result_set or []):
+            try:
+                raw_eid = row[0]
+                eid_int = int(raw_eid) if raw_eid is not None else None
+                rows.append({
+                    "sourceUrn": row[1],
+                    "targetUrn": row[2],
+                    "edgeId": str(raw_eid) if raw_eid is not None else f"raw-{row[1]}-{row[2]}",
+                    "edgeType": str(row[3]) if row[3] else ltypes[0],
+                    "otherUrn": row[4],
+                    "otherLabel": row[5],
+                })
+                if eid_int is not None:
+                    last_edge_id = eid_int
+            except Exception:
+                continue
+        return rows, last_edge_id
+
     async def _collect_ancestor_urns(
         self, urns: List[str], ctypes: List[str],
     ) -> List[str]:
