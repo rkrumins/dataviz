@@ -16,8 +16,10 @@ import {
   mergeAncestors,
   mergeChildren,
   mergeDegrees,
+  mergeDrill,
   mergeExpansion,
   mergeNodes,
+  startDrill,
   type LensSessionState,
 } from '../lensGraph'
 import {
@@ -27,6 +29,8 @@ import {
   lensFrameId,
   LENS_COLUMN_W,
   LENS_COL_GAP,
+  LENS_CARD_W,
+  LENS_FRAME_PAD,
 } from '../buildLensLayout'
 
 const OPTS = { containmentEdgeTypes: ['CONTAINS'] }
@@ -314,5 +318,232 @@ describe('banners', () => {
     const truncated = layout.banners.filter(b => b.kind === 'truncated')
     expect(truncated).toHaveLength(1)
     expect(truncated[0].detail).toBe('fetch_limit')
+  })
+})
+
+/** Focal domain f —AGG→ B, drilled at B into level-aligned constituents
+ *  (true A-side endpoints live UNDER f and are not placed). */
+function drilledFixture(): LensSessionState {
+  let s = createLensSession('f')
+  s = mergeNodes(s, [node('f', 'domain', 'Domain F'), node('B', 'domain', 'Domain B')])
+  s = expand(s, 'down', 'f', [], trace({
+    edges: [edge('f', 'B', 'AGGREGATED', { weight: 9, sourceEdgeTypes: ['FLOWS_TO'] })],
+    nodes: [node('B', 'domain', 'Domain B')],
+  }))
+  const rollup = [...s.records.values()].find(r => r.aggregated)!
+  s = startDrill(s, rollup.id, 'B')
+  s = mergeDrill(s, rollup.id, trace({
+    nodes: [node('App1', 'app', 'App One'), node('App2', 'app', 'App Two'), node('fApp', 'app', 'F App')],
+    containmentEdges: [
+      edge('B', 'App1', 'CONTAINS'),
+      edge('B', 'App2', 'CONTAINS'),
+      edge('f', 'fApp', 'CONTAINS'),
+    ],
+    edges: [
+      edge('fApp', 'App1', 'AGGREGATED', { weight: 4 }),
+      edge('fApp', 'App2', 'AGGREGATED', { weight: 5 }),
+    ],
+  }), OPTS, 'B')
+  return s
+}
+
+describe('refined structure and wire resolution', () => {
+  it('keeps the drilled partner framed and anchors wires on the whole side', () => {
+    const layout = buildLensLayout(drilledFixture())
+    // fApp (true source, under the focal) is NOT carded; B stays framed.
+    expect(layout.cards.map(c => c.urn).sort()).toEqual(['App1', 'App2', 'B', 'f'])
+    const bFrame = layout.frames.find(f => f.urn === 'B')!
+    expect(bFrame.headerCardId).toBe(lensCardId('B'))
+    expect(bFrame.mode).toBe('all')
+    expect(bFrame.connectedCount).toBe(2)
+    expect(bFrame.stripY).toBeDefined()
+    // Both wires resolve their unplaced source to the focal card.
+    expect(layout.edges).toHaveLength(2)
+    for (const e of layout.edges) {
+      expect(e.sourceCardId).toBe(lensCardId('f'))
+    }
+    // The refined rollup no longer draws.
+    expect(layout.edges.some(e => e.targetCardId === lensCardId('B'))).toBe(false)
+  })
+
+  it('snaps wires to the true endpoint once opening the focal cards it', () => {
+    let s = drilledFixture()
+    s = mergeChildren(s, 'f', {
+      children: [node('fApp', 'app', 'F App')],
+      containmentEdges: [edge('f', 'fApp', 'CONTAINS')],
+      lineageEdges: [],
+      totalChildren: 1,
+      hasMore: false,
+      nextCursor: null,
+    }, OPTS)
+    const layout = buildLensLayout(s)
+    expect(layout.cards.some(c => c.urn === 'fApp')).toBe(true)
+    for (const e of layout.edges) {
+      expect(e.sourceCardId).toBe(lensCardId('fApp'))
+    }
+  })
+
+  it('merges records resolving to one card pair into a single wire', () => {
+    let s = createLensSession('f')
+    s = expand(s, 'down', 'f', [], trace({
+      edges: [edge('f', 'B', 'AGGREGATED', { weight: 9 })],
+      nodes: [node('B', 'domain', 'Domain B')],
+    }))
+    const rollup = [...s.records.values()].find(r => r.aggregated)!
+    s = mergeDrill(s, rollup.id, trace({
+      nodes: [node('App1', 'app'), node('fApp1', 'app'), node('fApp2', 'app')],
+      containmentEdges: [
+        edge('B', 'App1', 'CONTAINS'),
+        edge('f', 'fApp1', 'CONTAINS'),
+        edge('f', 'fApp2', 'CONTAINS'),
+      ],
+      edges: [
+        edge('fApp1', 'App1', 'AGGREGATED', { weight: 4 }),
+        edge('fApp2', 'App1', 'AGGREGATED', { weight: 5 }),
+        // An edge internal to one still-whole side never draws.
+        edge('fApp1', 'fApp2', 'AGGREGATED', { weight: 2 }),
+      ],
+    }), OPTS, 'B')
+    const layout = buildLensLayout(s)
+    expect(layout.edges).toHaveLength(1)
+    const wire = layout.edges[0]
+    expect(wire.recordIds).toHaveLength(2)
+    expect(wire.bundledCount).toBe(9)
+    expect(wire.sourceCardId).toBe(lensCardId('f'))
+    expect(wire.targetCardId).toBe(lensCardId('App1'))
+  })
+
+  it('a done-empty drill leaves the wire drawn but no longer drillable', () => {
+    let s = createLensSession('f')
+    s = expand(s, 'down', 'f', [], trace({
+      edges: [edge('f', 'B', 'AGGREGATED', { weight: 3 })],
+      nodes: [node('B', 'domain')],
+    }))
+    const rollup = [...s.records.values()].find(r => r.aggregated)!
+    s = mergeDrill(s, rollup.id, trace({ edges: [] }), OPTS, 'B')
+    const layout = buildLensLayout(s)
+    expect(layout.edges).toHaveLength(1)
+    expect(layout.edges[0].drillable).toBe(false)
+    expect(layout.edges[0].drillState).toBe('done')
+  })
+
+  it('counts column connections through resolution', () => {
+    const layout = buildLensLayout(drilledFixture())
+    expect(layout.columns.find(c => c.hop === 1)!.connections).toBe(2)
+  })
+})
+
+describe('connected | all membership', () => {
+  const withAllChildren = () => {
+    let s = drilledFixture()
+    s = mergeChildren(s, 'B', {
+      children: [node('App3', 'app', 'App Three'), node('App1', 'app', 'App One'), node('App2', 'app', 'App Two')],
+      containmentEdges: [
+        edge('B', 'App3', 'CONTAINS'),
+        edge('B', 'App1', 'CONTAINS'),
+        edge('B', 'App2', 'CONTAINS'),
+      ],
+      lineageEdges: [],
+      totalChildren: 3,
+      hasMore: false,
+      nextCursor: null,
+    }, OPTS)
+    return s
+  }
+
+  it('all mode shows everything, quiets the unconnected, leads with the connected', () => {
+    const layout = buildLensLayout(withAllChildren())
+    const bFrame = layout.frames.find(f => f.urn === 'B')!
+    expect(bFrame.mode).toBe('all')
+    expect(bFrame.totalMembers).toBe(3)
+    expect(bFrame.connectedCount).toBe(2)
+    expect(bFrame.containedTotal).toBe(3)
+    const members = layout.cards
+      .filter(c => c.parentFrameId === bFrame.id && c.id !== bFrame.headerCardId)
+      .sort((a, b) => a.y - b.y)
+    // Connected members lead despite App3 being first in server order.
+    expect(members.map(m => m.urn)).toEqual(['App1', 'App2', 'App3'])
+    expect(members.map(m => m.connected)).toEqual([true, true, false])
+  })
+
+  it('connected mode keeps unconnected contents off the board', () => {
+    const layout = buildLensLayout(withAllChildren(), { connectedFrames: new Set(['B']) })
+    const bFrame = layout.frames.find(f => f.urn === 'B')!
+    expect(bFrame.mode).toBe('connected')
+    expect(layout.cards.some(c => c.urn === 'App3')).toBe(false)
+    expect(layout.cards.filter(c => c.parentFrameId === bFrame.id)).toHaveLength(3)
+  })
+})
+
+describe('pass-through chain demotion', () => {
+  it('folds a walked single-child chain into one frame with the path named', () => {
+    let s = createLensSession('f')
+    s = mergeNodes(s, [node('C', 'domain', 'Domain C')])
+    s = expand(s, 'down', 'f', [], trace({
+      edges: [edge('f', 'C', 'AGGREGATED', { weight: 6 })],
+      nodes: [node('C', 'domain', 'Domain C')],
+    }))
+    const wave1 = [...s.records.values()].find(r => r.aggregated)!
+    s = startDrill(s, wave1.id, 'C')
+    s = mergeDrill(s, wave1.id, trace({
+      nodes: [node('PROD', 'domain', 'PROD'), node('fApp', 'app', 'F App')],
+      containmentEdges: [edge('C', 'PROD', 'CONTAINS'), edge('f', 'fApp', 'CONTAINS')],
+      edges: [edge('fApp', 'PROD', 'AGGREGATED', { weight: 6 })],
+    }), OPTS, 'C')
+    const wave2 = [...s.records.values()].find(r => r.aggregated && r.target === 'PROD')!
+    s = startDrill(s, wave2.id, 'PROD')
+    s = mergeDrill(s, wave2.id, trace({
+      nodes: [node('CURATED', 'domain', 'CURATED')],
+      containmentEdges: [edge('PROD', 'CURATED', 'CONTAINS')],
+      edges: [edge('fApp', 'CURATED', 'AGGREGATED', { weight: 6 })],
+    }), OPTS, 'PROD')
+    const wave3 = [...s.records.values()].find(r => r.aggregated && r.target === 'CURATED')!
+    s = startDrill(s, wave3.id, 'CURATED')
+    s = mergeDrill(s, wave3.id, trace({
+      nodes: [node('app1', 'app', 'Consumer App')],
+      containmentEdges: [edge('CURATED', 'app1', 'CONTAINS')],
+      edges: [edge('fApp', 'app1', 'AGGREGATED', { weight: 6 })],
+    }), OPTS, 'CURATED')
+
+    const layout = buildLensLayout(s)
+    // One frame — the walked intermediates fold into C's header path.
+    expect(layout.frames.map(f => f.urn)).toEqual(['C'])
+    const cFrame = layout.frames[0]
+    expect(cFrame.walkPath).toEqual(['PROD', 'CURATED'])
+    const app1 = layout.cards.find(c => c.urn === 'app1')!
+    expect(app1.parentFrameId).toBe(cFrame.id)
+    expect(layout.cards.some(c => c.urn === 'PROD' || c.urn === 'CURATED')).toBe(false)
+    // The wire runs whole-side to deepest member.
+    expect(layout.edges).toHaveLength(1)
+    expect(layout.edges[0].sourceCardId).toBe(lensCardId('f'))
+    expect(layout.edges[0].targetCardId).toBe(lensCardId('app1'))
+    // The capped/branching end stays live: the last record is drillable.
+    expect(layout.edges[0].drillable).toBe(true)
+  })
+})
+
+describe('column widths under nesting', () => {
+  it('grows a column for its deepest frame and shifts later columns', () => {
+    let s = drilledFixture()
+    // Drill App1 (anchor side) into a table — B ⊃ App1 ⊃ tbl, depth 2.
+    const mid = [...s.records.values()].find(r => r.aggregated && r.target === 'App1')!
+    s = startDrill(s, mid.id, 'App1')
+    s = mergeDrill(s, mid.id, trace({
+      nodes: [node('tbl', 'dataset', 'Orders')],
+      containmentEdges: [edge('App1', 'tbl', 'CONTAINS')],
+      edges: [edge('fApp', 'tbl', 'AGGREGATED', { weight: 4 })],
+    }), OPTS, 'App1')
+    // A hop-2 partner via App1's own expansion.
+    s = expand(s, 'down', 'App1', [edge('App1', 'ext')])
+
+    const layout = buildLensLayout(s)
+    const col1 = layout.columns.find(c => c.hop === 1)!
+    const col2 = layout.columns.find(c => c.hop === 2)!
+    expect(col1.w).toBe(LENS_CARD_W + 4 * LENS_FRAME_PAD)
+    expect(col1.w).toBeGreaterThan(LENS_COLUMN_W)
+    expect(col2.x).toBe(col1.x + col1.w + LENS_COL_GAP)
+    // Leaf cards never shrink below the base card width.
+    const tbl = layout.cards.find(c => c.urn === 'tbl')!
+    expect(tbl.w).toBeGreaterThanOrEqual(LENS_CARD_W)
   })
 })

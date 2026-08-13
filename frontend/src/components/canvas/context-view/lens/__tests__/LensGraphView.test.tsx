@@ -7,7 +7,7 @@
  * openChildren, banner retry → retryExpansion, double-click → onFocus.
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { GraphEdge, GraphNode, TraceV2Result } from '@/providers/GraphDataProvider'
 import { useSchemaStore } from '@/store/schema'
 import {
@@ -15,8 +15,11 @@ import {
   expansionKeyOf,
   failExpansion,
   mergeAncestors,
+  mergeChildren,
+  mergeDrill,
   mergeExpansion,
   mergeNodes,
+  startDrill,
   type LensSessionState,
 } from '../lensGraph'
 import type { LensSessionApi } from '../useLensSession'
@@ -68,6 +71,7 @@ function api(state: LensSessionState): LensSessionApi & { calls: Record<string, 
     expandLineage: vi.fn(),
     openChildren: vi.fn(),
     loadMoreChildren: vi.fn(),
+    connectedExpand: vi.fn(async () => ({ records: 1, capped: false })),
     drillRollup: vi.fn(),
     retryExpansion: vi.fn(),
     retryChildren: vi.fn(),
@@ -169,5 +173,130 @@ describe('LensGraphView', () => {
     expect(screen.getByText(/Partial picture/)).toBeInTheDocument()
     fireEvent.click(screen.getByText('Retry'))
     expect(session.calls.retryExpansion).toHaveBeenCalledWith('up', 'gold.orders')
+  })
+})
+
+// ── Connected expand routing ──────────────────────────────────────────
+
+/** Focal domain —AGG→ Domain B (undrilled rollup partner). */
+function domainSession(): LensSessionState {
+  let s = createLensSession('domainA')
+  s = mergeNodes(s, [
+    node('domainA', 'domain', 'Domain A'),
+    node('domainB', 'domain', 'Domain B'),
+  ])
+  s = mergeExpansion(
+    s,
+    expansionKeyOf('down', 'domainA'),
+    'domainA',
+    {
+      rawEdges: [],
+      rawTruncated: false,
+      trace: trace({
+        edges: [edge('domainA', 'domainB', 'AGGREGATED', { weight: 7, sourceEdgeTypes: ['CONSUMES'] })],
+        nodes: [node('domainB', 'domain', 'Domain B')],
+      }),
+    },
+    OPTS,
+  )
+  s = mergeExpansion(s, expansionKeyOf('up', 'domainA'), 'domainA', { rawEdges: [], rawTruncated: false, trace: trace() }, OPTS)
+  return s
+}
+
+/** The same, drilled at B into App1/App2 (connected) — plus B's full
+ *  children page carrying the unconnected App3. */
+function drilledDomainSession(): LensSessionState {
+  let s = domainSession()
+  const rollup = [...s.records.values()].find(r => r.aggregated)!
+  s = startDrill(s, rollup.id, 'domainB')
+  s = mergeDrill(s, rollup.id, trace({
+    nodes: [node('App1', 'app', 'App One'), node('App2', 'app', 'App Two')],
+    containmentEdges: [edge('domainB', 'App1', 'CONTAINS'), edge('domainB', 'App2', 'CONTAINS')],
+    edges: [
+      edge('domainA', 'App1', 'AGGREGATED', { weight: 3 }),
+      edge('domainA', 'App2', 'AGGREGATED', { weight: 4 }),
+    ],
+  }), OPTS, 'domainB')
+  s = mergeChildren(s, 'domainB', {
+    children: [node('App1', 'app', 'App One'), node('App2', 'app', 'App Two'), node('App3', 'app', 'App Three')],
+    containmentEdges: [
+      edge('domainB', 'App1', 'CONTAINS'),
+      edge('domainB', 'App2', 'CONTAINS'),
+      edge('domainB', 'App3', 'CONTAINS'),
+    ],
+    lineageEdges: [],
+    totalChildren: 3,
+    hasMore: false,
+    nextCursor: null,
+  }, OPTS)
+  return s
+}
+
+describe('connected expand routing', () => {
+  it('routes the chevron on a rollup partner to connectedExpand, not openChildren', () => {
+    const session = api(domainSession())
+    render(<LensGraphView session={session} onFocus={vi.fn()} />)
+    fireEvent.click(screen.getByLabelText('Open contents of domainB'))
+    expect(session.calls.connectedExpand).toHaveBeenCalledWith('domainB')
+    expect(session.calls.openChildren).not.toHaveBeenCalled()
+  })
+
+  it('falls back to a plain contents open when nothing per-child is mapped', async () => {
+    const session = api(domainSession())
+    session.calls.connectedExpand.mockResolvedValue({ records: 0, capped: false })
+    render(<LensGraphView session={session} onFocus={vi.fn()} />)
+    fireEvent.click(screen.getByLabelText('Open contents of domainB'))
+    await waitFor(() => expect(session.calls.openChildren).toHaveBeenCalledWith('domainB'))
+  })
+
+  it('folds an opened connected frame instead of re-firing anything', () => {
+    const session = api(drilledDomainSession())
+    render(<LensGraphView session={session} onFocus={vi.fn()} />)
+    fireEvent.click(screen.getByLabelText('Open contents of domainB'))
+    expect(session.calls.connectedExpand).not.toHaveBeenCalled()
+    expect(session.calls.openChildren).not.toHaveBeenCalled()
+  })
+
+  it('quiets unconnected members in all mode and toggles modes from the strip', () => {
+    const session = api(drilledDomainSession())
+    const { container } = render(<LensGraphView session={session} onFocus={vi.fn()} />)
+    // Default (no view gesture yet): all mode — App3 present but quiet.
+    expect(container.querySelector('[data-lens-card="App3"][data-lens-quiet]')).not.toBeNull()
+    expect(container.querySelector('[data-lens-card="App1"][data-lens-quiet]')).toBeNull()
+    expect(screen.getByText('3 inside · 2 connected')).toBeInTheDocument()
+    // Strip toggle → connected only: App3 leaves the board.
+    fireEvent.click(screen.getByText('Connected only'))
+    expect(container.querySelector('[data-lens-card="App3"]')).toBeNull()
+    expect(screen.getByText('2 connected')).toBeInTheDocument()
+    // Children are already loaded, so toggling back fetches nothing.
+    fireEvent.click(screen.getByText(/^Show all/))
+    expect(session.calls.openChildren).not.toHaveBeenCalled()
+    expect(container.querySelector('[data-lens-card="App3"]')).not.toBeNull()
+  })
+
+  it('Show all fetches children once when they were never loaded', () => {
+    const s = (() => {
+      let st = domainSession()
+      const rollup = [...st.records.values()].find(r => r.aggregated)!
+      st = startDrill(st, rollup.id, 'domainB')
+      st = mergeDrill(st, rollup.id, trace({
+        nodes: [node('App1', 'app', 'App One')],
+        containmentEdges: [edge('domainB', 'App1', 'CONTAINS')],
+        edges: [edge('domainA', 'App1', 'AGGREGATED', { weight: 3 })],
+      }), OPTS, 'domainB')
+      return st
+    })()
+    const session = api(s)
+    render(
+      <LensGraphView
+        session={session}
+        onFocus={vi.fn()}
+        initialConnectedFrames={new Set(['domainB'])}
+      />,
+    )
+    // Seeded connected mode: the strip offers Show all.
+    fireEvent.click(screen.getByText(/^Show all/))
+    expect(session.calls.openChildren).toHaveBeenCalledTimes(1)
+    expect(session.calls.openChildren).toHaveBeenCalledWith('domainB')
   })
 })

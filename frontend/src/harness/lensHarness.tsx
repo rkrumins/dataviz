@@ -110,6 +110,7 @@ function staticSession(): LensSessionApi {
   return {
     state: st,
     expandLineage: noop, openChildren: noop, loadMoreChildren: noop,
+    connectedExpand: async () => ({ records: 0, capped: false }),
     drillRollup: noop, retryExpansion: noop, retryChildren: noop,
   }
 }

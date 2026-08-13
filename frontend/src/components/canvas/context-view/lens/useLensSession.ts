@@ -1,10 +1,12 @@
 /**
  * useLensSession — the Lineage Lens's ONE data hook.
  *
- * Owns a LensSessionState per focal and exposes the four gestures:
- * lineage expansion (⊕ per direction), containment open (chevron +
- * load more), rollup drill, and retry. Every gesture is served by the
- * same request policy:
+ * Owns a LensSessionState per focal and exposes the gestures: lineage
+ * expansion (⊕ per direction), containment open (chevron + load more),
+ * connected expand (chevron on a rollup partner — drills every incident
+ * rollup anchored there and auto-walks pass-through levels), rollup
+ * drill (×N chip), and retry. Every expansion is served by the same
+ * request policy:
  *
  *   A (concrete truth)  getEdges on the node itself, raw lineage types
  *                       only — its real direct edges, at any grain;
@@ -26,6 +28,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GraphDataProvider, GraphEdge, GraphNode, TraceV2Result } from '@/providers/GraphDataProvider'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes } from '@/hooks/useViewSchema'
+import { isContainmentEdgeType } from '@/store/schema'
 import {
   createLensSession,
   expansionKeyOf,
@@ -41,9 +44,11 @@ import {
   mergeExpansion,
   mergeNodes,
   mergeReach,
+  recordIdOf,
   startChildren,
   startDrill,
   startExpansion,
+  visibleRecords,
   type ContainmentOptions,
   type LensDirection,
   type LensSessionState,
@@ -57,6 +62,10 @@ export const LENS_REACH_DEPTH = 10
 export const LENS_EDGE_LIMIT = 500
 /** Children fetched per chevron page ("load more" pages through). */
 export const LENS_CHILD_PAGE = 25
+/** Waves one connected expand may drill (the user's click plus the
+ *  auto-walk through pass-through levels). The cap is visible, not
+ *  silent: a capped chain ends on a still-drillable card. */
+export const LENS_WALK_CAP = 8
 
 export interface LensSessionApi {
   state: LensSessionState
@@ -66,12 +75,100 @@ export interface LensSessionApi {
   openChildren: (urn: string) => void
   /** Frame footer — fetch the next children page. */
   loadMoreChildren: (urn: string) => void
+  /** Chevron on a rollup partner — drill every shown aggregated record
+   *  with this EXACT endpoint, anchored here, auto-walking pass-through
+   *  levels. Resolves with how many constituent records landed (0 =
+   *  fall back to a plain contents open) and whether the walk hit its
+   *  step cap. */
+  connectedExpand: (urn: string) => Promise<{ records: number; capped: boolean }>
   /** ×N / rollup card — drill an aggregated record one structural step.
    *  `anchorUrn` names the side being opened. */
   drillRollup: (recordId: string, anchorUrn: string) => void
   /** Re-fire a failed gesture. */
   retryExpansion: (dir: LensDirection, urn: string) => void
   retryChildren: (urn: string) => void
+}
+
+interface LandedWave {
+  trace: TraceV2Result
+  recordId: string
+}
+
+/** Distinct constituent record ids a wave landed (echoes of the drilled
+ *  pair excluded — a record is never its own constituent). */
+function constituentIds(landed: LandedWave[], containmentEdgeTypes: string[]): Set<string> {
+  const ids = new Set<string>()
+  for (const { trace, recordId } of landed) {
+    for (const e of trace.edges) {
+      const type = (e.edgeType || '').toUpperCase()
+      if (isContainmentEdgeType(type, containmentEdgeTypes)) continue
+      if (!e.sourceUrn || !e.targetUrn || e.sourceUrn === e.targetUrn) continue
+      const id = recordIdOf(e.sourceUrn, e.targetUrn, type)
+      if (id !== recordId) ids.add(id)
+    }
+  }
+  return ids
+}
+
+/**
+ * One wave's auto-walk continuation: the sole still-aggregated
+ * anchor-side child this wave surfaced, with the records to drill next.
+ * Deliberately WAVE-LOCAL — the decision reads only the returned traces
+ * (their own containment map), never the merged React state, so the
+ * loop cannot race update batching. Returns null on branching (2+
+ * children), concrete edges (the walk reached raw truth), or nothing.
+ */
+function walkContinuation(
+  landed: LandedWave[],
+  anchorUrn: string,
+  containmentEdgeTypes: string[],
+): { child: string; records: Array<{ id: string; pair: { sourceUrn: string; targetUrn: string } }> } | null {
+  const parents = new Map<string, string>()
+  for (const { trace } of landed) {
+    for (const e of trace.containmentEdges) {
+      const type = (e.edgeType || '').toUpperCase()
+      if (!isContainmentEdgeType(type, containmentEdgeTypes)) continue
+      if (e.sourceUrn && e.targetUrn && !parents.has(e.targetUrn)) {
+        parents.set(e.targetUrn, e.sourceUrn)
+      }
+    }
+  }
+  const underAnchor = (urn: string): boolean => {
+    let cursor: string | undefined = urn
+    const guard = new Set<string>()
+    while (cursor && !guard.has(cursor)) {
+      if (cursor === anchorUrn) return true
+      guard.add(cursor)
+      cursor = parents.get(cursor)
+    }
+    return false
+  }
+  const byChild = new Map<string, Map<string, { id: string; pair: { sourceUrn: string; targetUrn: string } }>>()
+  for (const { trace, recordId } of landed) {
+    for (const e of trace.edges) {
+      const type = (e.edgeType || '').toUpperCase()
+      if (isContainmentEdgeType(type, containmentEdgeTypes)) continue
+      if (!e.sourceUrn || !e.targetUrn || e.sourceUrn === e.targetUrn) continue
+      if (recordIdOf(e.sourceUrn, e.targetUrn, type) === recordId) continue
+      const child =
+        e.sourceUrn !== anchorUrn && underAnchor(e.sourceUrn)
+          ? e.sourceUrn
+          : e.targetUrn !== anchorUrn && underAnchor(e.targetUrn)
+            ? e.targetUrn
+            : null
+      if (!child) continue
+      if (type !== 'AGGREGATED') return null
+      const bucket = byChild.get(child) ?? new Map()
+      bucket.set(recordIdOf(e.sourceUrn, e.targetUrn, type), {
+        id: recordIdOf(e.sourceUrn, e.targetUrn, type),
+        pair: { sourceUrn: e.sourceUrn, targetUrn: e.targetUrn },
+      })
+      byChild.set(child, bucket)
+    }
+  }
+  if (byChild.size !== 1) return null
+  const [child, bucket] = [...byChild][0]
+  return { child, records: [...bucket.values()] }
 }
 
 export function useLensSession(
@@ -89,7 +186,12 @@ export function useLensSession(
   )
 
   // Containment edges are parent→child on the wire — the same reading
-  // the canvas's own containment hierarchy uses unconditionally.
+  // the canvas's own containment hierarchy uses unconditionally, and
+  // the one the backend enforces end to end (ancestor chains, children
+  // queries and the aggregation cube all read parent→child). No
+  // invertedContainmentTypes is passed because no schema field exists
+  // to derive one from — direction is a data-model invariant, not a
+  // per-ontology variable.
   const containmentOpts = useMemo<ContainmentOptions>(
     () => ({ containmentEdgeTypes }),
     [containmentEdgeTypes],
@@ -268,9 +370,9 @@ export function useLensSession(
       recordId: string,
       pair: { sourceUrn: string; targetUrn: string },
       anchorUrn: string,
-    ) => {
-      if (!provider?.expandAggregated) return
-      apply(session, prev => startDrill(prev, recordId))
+    ): Promise<TraceV2Result | null> => {
+      if (!provider?.expandAggregated) return null
+      apply(session, prev => startDrill(prev, recordId, anchorUrn))
       try {
         const trace = await provider.expandAggregated({
           sourceUrn: pair.sourceUrn,
@@ -279,20 +381,73 @@ export function useLensSession(
           drillAnchor: anchorUrn,
           lineageEdgeTypes: rawLineageTypes.length > 0 ? rawLineageTypes : null,
         })
-        apply(session, prev => mergeDrill(prev, recordId, trace, containmentOpts))
-        const urns = trace.nodes.map(n => n.urn).filter(Boolean)
-        if (urns.length > 0 && provider.getNodeDegrees) {
-          const degrees = await provider
-            .getNodeDegrees(urns, rawLineageTypes.length > 0 ? rawLineageTypes : undefined)
-            .catch(() => ({}))
-          apply(session, prev => mergeDegrees(prev, degrees))
-        }
+        apply(session, prev => mergeDrill(prev, recordId, trace, containmentOpts, anchorUrn))
+        // Constituents deserve the same hydration as expansion partners:
+        // labels, childCount for their chevrons, parent context, degrees
+        // (the drill response's own node payload carries none of that).
+        await hydratePartners(session, anchorUrn, trace.edges)
+        return trace
       } catch {
         startedRef.current.delete(`drill:${recordId}`)
         apply(session, prev => failDrill(prev, recordId))
+        return null
       }
     },
-    [provider, rawLineageTypes, containmentOpts, apply],
+    [provider, rawLineageTypes, containmentOpts, apply, hydratePartners],
+  )
+
+  const connectedExpand = useCallback(
+    async (urn: string): Promise<{ records: number; capped: boolean }> => {
+      const session = sessionRef.current
+      // Exact-endpoint candidates only: the backend NULLS a drillAnchor
+      // that is not one of the pair's endpoints and silently switches
+      // to lockstep both-sides descent — different, wrong semantics.
+      const candidates = state
+        ? visibleRecords(state).filter(r => {
+            if (!r.rollupEdge) return false
+            if (r.source !== urn && r.target !== urn) return false
+            const drill = state.drills.get(r.id)
+            return !drill || drill.state === 'error'
+          })
+        : []
+      let revealed = 0
+      let capped = false
+      let steps = LENS_WALK_CAP
+      let wave = candidates.map(r => ({ id: r.id, pair: r.rollupEdge! }))
+      let anchor = urn
+      while (wave.length > 0) {
+        if (steps <= 0) {
+          capped = true
+          break
+        }
+        steps -= 1
+        const fired = wave.filter(w => {
+          const key = `drill:${w.id}`
+          if (startedRef.current.has(key)) return false
+          startedRef.current.add(key)
+          return true
+        })
+        if (fired.length === 0) break
+        const results = await Promise.all(
+          fired.map(w =>
+            fetchDrill(session, w.id, w.pair, anchor).then(trace =>
+              trace ? { trace, recordId: w.id } : null,
+            ),
+          ),
+        )
+        const landed = results.filter((r): r is LandedWave => r !== null)
+        if (landed.length === 0) break
+        revealed += constituentIds(landed, containmentOpts.containmentEdgeTypes).size
+        // Auto-walk: a pass-through level (exactly one still-aggregated
+        // child) drills straight on until branching or concrete edges.
+        const next = walkContinuation(landed, anchor, containmentOpts.containmentEdgeTypes)
+        if (!next) break
+        wave = next.records
+        anchor = next.child
+      }
+      return { records: revealed, capped }
+    },
+    [state, fetchDrill, containmentOpts],
   )
 
   // Session lifecycle: a new focal fetches its first paint — both raw
@@ -465,9 +620,10 @@ export function useLensSession(
       expandLineage,
       openChildren,
       loadMoreChildren,
+      connectedExpand,
       drillRollup,
       retryExpansion,
       retryChildren,
     }
-  }, [state, expandLineage, openChildren, loadMoreChildren, drillRollup, retryExpansion, retryChildren])
+  }, [state, expandLineage, openChildren, loadMoreChildren, connectedExpand, drillRollup, retryExpansion, retryChildren])
 }

@@ -23,6 +23,8 @@ import {
   mergeDrill,
   mergeExpansion,
   mergeNodes,
+  recordRenderStates,
+  resolveToCarded,
   shownEdgeFloors,
   startChildren,
   startDrill,
@@ -323,28 +325,240 @@ describe('children (containment opens)', () => {
 })
 
 describe('drills', () => {
-  it('places constituents on the side of the drilled pair they belong to', () => {
+  it('places only anchor-side constituents; the other side stays whole', () => {
     let s = createLensSession('f')
     s = expandDown(s, 'f', input({ rawEdges: [edge('f', 'sys', 'AGGREGATED', { weight: 2 })] }))
     const rollup = [...s.records.values()].find(r => r.aggregated)!
-    s = startDrill(s, rollup.id)
+    s = startDrill(s, rollup.id, 'sys')
     s = mergeDrill(
       s,
       rollup.id,
       emptyTrace({
-        nodes: [node('t1'), node('t2')],
-        containmentEdges: [edge('sys', 't1', 'CONTAINS'), edge('sys', 't2', 'CONTAINS')],
-        edges: [edge('f', 't1'), edge('f', 't2')],
+        nodes: [node('t1'), node('t2'), node('fSrc')],
+        containmentEdges: [
+          edge('sys', 't1', 'CONTAINS'),
+          edge('sys', 't2', 'CONTAINS'),
+          // The drill also names a finer endpoint UNDER the focal — the
+          // level-aligned shape real cubes return.
+          edge('f', 'fSrc', 'CONTAINS'),
+        ],
+        edges: [edge('f', 't1'), edge('fSrc', 't2')],
       }),
       OPTS,
+      'sys',
     )
     const drill = s.drills.get(rollup.id)!
     expect(drill.state).toBe('done')
+    expect(drill.anchorUrn).toBe('sys')
     expect(drill.recordIds).toHaveLength(2)
     expect(s.hops.get('t1')).toBe(1)
     expect(s.hops.get('t2')).toBe(1)
+    // Focal-side descendant is recorded but NOT placed: its wire keeps
+    // rendering through the focal card until that side is opened.
+    expect(s.hops.has('fSrc')).toBe(false)
+    expect(s.parents.get('fSrc')).toBe('f')
     // The drilled rollup is now covered by its own constituents.
     expect(isRollupCovered(s, s.records.get(rollup.id)!)).toBe(true)
+  })
+
+  it('excludes the backend echo of the drilled pair itself (done-empty terminal)', () => {
+    let s = createLensSession('f')
+    s = expandDown(s, 'f', input({ rawEdges: [edge('f', 'sys', 'AGGREGATED', { weight: 3 })] }))
+    const rollup = [...s.records.values()].find(r => r.aggregated)!
+    s = mergeDrill(
+      s,
+      rollup.id,
+      emptyTrace({ edges: [edge('f', 'sys', 'AGGREGATED', { weight: 3 })] }),
+      OPTS,
+      'sys',
+    )
+    const drill = s.drills.get(rollup.id)!
+    expect(drill.state).toBe('done')
+    expect(drill.recordIds).toHaveLength(0)
+    // An echo-only drill refines nothing: the record still draws.
+    expect(recordRenderStates(s).get(rollup.id)).toBe('shown')
+    expect(visibleRecords(s).map(r => r.id)).toEqual([rollup.id])
+  })
+})
+
+describe('refinement render states', () => {
+  /** f —AGG→ B, drilled at B into appA→App1 (AGG), drilled at App1
+   *  into t1→tbl1 (concrete): the three-level macro→micro chain. */
+  const chained = () => {
+    let s = createLensSession('f')
+    s = expandDown(s, 'f', input({ rawEdges: [edge('f', 'B', 'AGGREGATED', { weight: 8 })] }))
+    const top = [...s.records.values()].find(r => r.aggregated)!
+    s = startDrill(s, top.id, 'B')
+    s = mergeDrill(
+      s,
+      top.id,
+      emptyTrace({
+        nodes: [node('App1'), node('appA')],
+        containmentEdges: [edge('B', 'App1', 'CONTAINS'), edge('f', 'appA', 'CONTAINS')],
+        edges: [edge('appA', 'App1', 'AGGREGATED', { weight: 4 })],
+      }),
+      OPTS,
+      'B',
+    )
+    const mid = [...s.records.values()].find(r => r.aggregated && r.source === 'appA')!
+    s = startDrill(s, mid.id, 'App1')
+    s = mergeDrill(
+      s,
+      mid.id,
+      emptyTrace({
+        nodes: [node('tbl1'), node('t1')],
+        containmentEdges: [edge('App1', 'tbl1', 'CONTAINS'), edge('appA', 't1', 'CONTAINS')],
+        edges: [edge('t1', 'tbl1', 'FLOWS_TO')],
+      }),
+      OPTS,
+      'App1',
+    )
+    const leaf = [...s.records.values()].find(r => !r.aggregated)!
+    return { s, top, mid, leaf }
+  }
+
+  it('hides each refined step and shows only the deepest truth', () => {
+    const { s, top, mid, leaf } = chained()
+    const states = recordRenderStates(s)
+    expect(states.get(top.id)).toBe('refined')
+    expect(states.get(mid.id)).toBe('refined')
+    expect(states.get(leaf.id)).toBe('shown')
+    expect(visibleRecords(s).map(r => r.id)).toEqual([leaf.id])
+    // Structure stays derivable: refined endpoints keep their hops.
+    expect(s.hops.get('B')).toBe(1)
+    expect(s.hops.get('App1')).toBe(1)
+  })
+
+  it('folding an anchor un-refines its drill and folds the chain below', () => {
+    const { s, top, mid, leaf } = chained()
+    const atB = recordRenderStates(s, new Set(['B']))
+    expect(atB.get(top.id)).toBe('shown')
+    expect(atB.get(mid.id)).toBe('folded')
+    expect(atB.get(leaf.id)).toBe('folded')
+    expect(visibleRecords(s, new Set(['B'])).map(r => r.id)).toEqual([top.id])
+    const atApp1 = recordRenderStates(s, new Set(['App1']))
+    expect(atApp1.get(top.id)).toBe('refined')
+    expect(atApp1.get(mid.id)).toBe('shown')
+    expect(atApp1.get(leaf.id)).toBe('folded')
+  })
+
+  it('a record revealed by several drills folds only when no path shows it', () => {
+    let s = createLensSession('f')
+    s = expandDown(
+      s,
+      'f',
+      input({
+        rawEdges: [
+          edge('f', 'p', 'AGGREGATED', { weight: 2 }),
+          edge('f', 'q', 'AGGREGATED', { weight: 2 }),
+          edge('f', 'm', 'AGGREGATED', { weight: 2 }),
+          edge('f', 'dead', 'AGGREGATED', { weight: 2 }),
+        ],
+      }),
+    )
+    const id = (partner: string) =>
+      [...s.records.values()].find(r => r.target === partner)!.id
+    // p's drill reveals m (live path). q has NO drill, so its reveal of
+    // dead never fires; dead's own drill would reveal m too, but dead
+    // itself is folded — m must still be shown via p.
+    s = {
+      ...s,
+      drills: new Map([
+        [id('p'), { state: 'done' as const, recordIds: [id('m')], anchorUrn: 'p' }],
+        [id('dead'), { state: 'done' as const, recordIds: [id('m')], anchorUrn: 'dead' }],
+        [id('q'), { state: 'done' as const, recordIds: [id('dead')], anchorUrn: 'q' }],
+      ]),
+    }
+    // Make q's drill dead by folding q.
+    const states = recordRenderStates(s, new Set(['q']))
+    expect(states.get(id('q'))).toBe('shown')
+    expect(states.get(id('dead'))).toBe('folded')
+    expect(states.get(id('m'))).toBe('shown')
+  })
+})
+
+describe('structural coverage among shown records', () => {
+  it('a strictly finer aggregated record covers its coarser sibling', () => {
+    let s = createLensSession('f')
+    s = expandDown(s, 'f', input({ rawEdges: [edge('f', 'B', 'AGGREGATED', { weight: 6 })] }))
+    const top = [...s.records.values()].find(r => r.aggregated)!
+    // One wave lands the same truth at two grains (full-cube shape).
+    s = mergeDrill(
+      s,
+      top.id,
+      emptyTrace({
+        nodes: [node('App1'), node('fApp')],
+        containmentEdges: [edge('B', 'App1', 'CONTAINS'), edge('f', 'fApp', 'CONTAINS')],
+        edges: [
+          edge('f', 'App1', 'AGGREGATED', { weight: 4 }),
+          edge('fApp', 'App1', 'AGGREGATED', { weight: 4 }),
+        ],
+      }),
+      OPTS,
+      'B',
+    )
+    const visible = visibleRecords(s)
+    expect(visible).toHaveLength(1)
+    expect(visible[0].source).toBe('fApp')
+    expect(visible[0].target).toBe('App1')
+  })
+
+  it('mutual cover (corrupt containment cycle) keeps both records', () => {
+    let s = createLensSession('f')
+    s = expandDown(
+      s,
+      'f',
+      input({
+        rawEdges: [
+          edge('p', 'f', 'AGGREGATED', { weight: 2 }),
+          edge('c', 'f', 'AGGREGATED', { weight: 2 }),
+        ],
+        trace: emptyTrace({
+          containmentEdges: [edge('p', 'c', 'CONTAINS'), edge('c', 'p', 'CONTAINS')],
+        }),
+      }),
+    )
+    expect(visibleRecords(s)).toHaveLength(2)
+  })
+})
+
+describe('resolution and containment guards', () => {
+  it('resolves to the nearest carded self-or-ancestor', () => {
+    let s = createLensSession('f')
+    s = mergeAncestors(s, 'c', [node('b'), node('a')])
+    expect(resolveToCarded(s.parents, new Set(['c', 'a']), 'c')).toBe('c')
+    expect(resolveToCarded(s.parents, new Set(['b', 'a']), 'c')).toBe('b')
+    expect(resolveToCarded(s.parents, new Set(['a']), 'c')).toBe('a')
+    expect(resolveToCarded(s.parents, new Set(['z']), 'c')).toBeUndefined()
+  })
+
+  it('survives containment cycles without looping', () => {
+    const parents = new Map<string, string | null>([
+      ['x', 'y'],
+      ['y', 'x'],
+    ])
+    expect(resolveToCarded(parents, new Set(['q']), 'x')).toBeUndefined()
+  })
+
+  it('containment writes are first-write-wins', () => {
+    let s = createLensSession('f')
+    s = expandDown(
+      s,
+      'f',
+      input({
+        rawEdges: [edge('f', 'x')],
+        trace: emptyTrace({ containmentEdges: [edge('parent1', 'x', 'CONTAINS')] }),
+      }),
+    )
+    s = expandUp(
+      s,
+      'f',
+      input({
+        rawEdges: [edge('x', 'f')],
+        trace: emptyTrace({ containmentEdges: [edge('parent2', 'x', 'CONTAINS')] }),
+      }),
+    )
+    expect(s.parents.get('x')).toBe('parent1')
   })
 })
 
@@ -421,7 +635,7 @@ describe('key-namespace isolation (regression)', () => {
     const rollup = [...s.records.values()].find(r => r.aggregated)!
     s = startChildren(s, 'f')
     s = failChildren(s, 'f')
-    s = startDrill(s, rollup.id)
+    s = startDrill(s, rollup.id, 'a')
     s = failDrill(s, rollup.id)
     // The lineage expansion is untouched by the other two axes failing.
     expect(s.expansions.get(expansionKeyOf('down', 'f'))!.state).toBe('done')
@@ -462,9 +676,27 @@ describe('nodes and degrees', () => {
         ],
       }),
     )
-    const floors = shownEdgeFloors(s)
+    const floors = shownEdgeFloors(visibleRecords(s))
     expect(floors.get(expansionKeyOf('down', 'f'))).toBe(5)
     expect(floors.get(expansionKeyOf('up', 'a'))).toBe(4)
     expect(floors.get(expansionKeyOf('up', 'b'))).toBe(1)
+  })
+
+  it('floors count only the records the caller supplies', () => {
+    let s = createLensSession('f')
+    s = expandDown(
+      s,
+      'f',
+      input({
+        rawEdges: [
+          edge('f', 'a', 'AGGREGATED', { weight: 4 }),
+          edge('f', 'b', 'FLOWS_TO'),
+        ],
+      }),
+    )
+    const only = visibleRecords(s).filter(r => r.target === 'b')
+    const floors = shownEdgeFloors(only)
+    expect(floors.get(expansionKeyOf('down', 'f'))).toBe(1)
+    expect(floors.has(expansionKeyOf('up', 'a'))).toBe(false)
   })
 })

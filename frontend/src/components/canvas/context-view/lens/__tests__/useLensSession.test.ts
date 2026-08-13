@@ -63,7 +63,7 @@ interface ProviderScript {
     hasMore: boolean
     nextCursor?: string | null
   }
-  expand?: () => TraceV2Result
+  expand?: (req: { sourceUrn: string; targetUrn: string; drillAnchor?: string | null }) => TraceV2Result
 }
 
 function makeProvider(script: ProviderScript = {}) {
@@ -82,7 +82,10 @@ function makeProvider(script: ProviderScript = {}) {
       hasMore: false,
       nextCursor: null,
     })
-  const expandAggregated = vi.fn(async () => script.expand?.() ?? trace())
+  const expandAggregated = vi.fn(
+    async (req: { sourceUrn: string; targetUrn: string; drillAnchor?: string | null }) =>
+      script.expand?.(req) ?? trace(),
+  )
   const provider = {
     getEdges,
     getNodes,
@@ -325,6 +328,140 @@ describe('rollup drills', () => {
       drillAnchor: 'sys',
     }))
     expect(result.current!.state.hops.get('t1')).toBe(1)
+    expect(result.current!.state.drills.get(rollup.id)?.anchorUrn).toBe('sys')
+  })
+
+  it('hydrates drill constituents like expansion partners', async () => {
+    const { provider, getNodes, getNodeDegrees } = makeProvider({
+      edges: q => (q.sourceUrns?.[0] === 'f'
+        ? [ge('agg', 'f', 'sys', 'AGGREGATED', { weight: 3 })]
+        : []),
+      expand: () => trace({
+        nodes: [gn('t1')],
+        containmentEdges: [ge('c1', 'sys', 't1', 'CONTAINS')],
+        edges: [ge('raw1', 'f', 't1')],
+      }),
+    })
+    const { result } = renderHook(() => useLensSession('f', provider))
+    await waitFor(() => expect(result.current && doneAt(result.current, expansionKeyOf('down', 'f'))).toBe(true))
+    const rollup = [...result.current!.state.records.values()].find(r => r.aggregated)!
+    act(() => result.current!.drillRollup(rollup.id, 'sys'))
+    await waitFor(() => expect(result.current!.state.drills.get(rollup.id)?.state).toBe('done'))
+    // Names + childCount via getNodes, degrees via getNodeDegrees — the
+    // same bounded hydration expansions get.
+    await waitFor(() =>
+      expect(getNodes.mock.calls.some(c => (c[0].urns ?? []).includes('t1'))).toBe(true))
+    expect(getNodeDegrees.mock.calls.some(c => c[0].includes('t1'))).toBe(true)
+  })
+})
+
+describe('connected expand', () => {
+  it('drills every exact-endpoint candidate anchored at the expanded card', async () => {
+    const { provider, expandAggregated } = makeProvider({
+      edges: q => (q.sourceUrns?.[0] === 'f'
+        ? [
+            ge('a1', 'f', 'sysA', 'AGGREGATED', { weight: 2 }),
+            ge('a2', 'f', 'sysB', 'AGGREGATED', { weight: 2 }),
+          ]
+        : []),
+    })
+    const { result } = renderHook(() => useLensSession('f', provider))
+    await waitFor(() => expect(result.current && doneAt(result.current, expansionKeyOf('down', 'f'))).toBe(true))
+
+    let outcome: { records: number; capped: boolean } | undefined
+    await act(async () => {
+      outcome = await result.current!.connectedExpand('sysA')
+    })
+    // Only the record with sysA as an exact endpoint is drilled — the
+    // sibling rollup to sysB is not touched.
+    expect(expandAggregated).toHaveBeenCalledTimes(1)
+    expect(expandAggregated).toHaveBeenCalledWith(expect.objectContaining({
+      sourceUrn: 'f',
+      targetUrn: 'sysA',
+      nextLevel: null,
+      drillAnchor: 'sysA',
+    }))
+    expect(outcome).toEqual({ records: 0, capped: false })
+  })
+
+  it('returns zero without firing when nothing incident is drillable', async () => {
+    const { provider, expandAggregated } = makeProvider({
+      edges: q => (q.sourceUrns?.[0] === 'f' ? [ge('raw', 'f', 'plain')] : []),
+    })
+    const { result } = renderHook(() => useLensSession('f', provider))
+    await waitFor(() => expect(result.current && doneAt(result.current, expansionKeyOf('down', 'f'))).toBe(true))
+    let outcome: { records: number; capped: boolean } | undefined
+    await act(async () => {
+      outcome = await result.current!.connectedExpand('plain')
+    })
+    expect(expandAggregated).not.toHaveBeenCalled()
+    expect(outcome).toEqual({ records: 0, capped: false })
+  })
+
+  it('auto-walks a sole aggregated child and stops at branching', async () => {
+    const { provider, expandAggregated } = makeProvider({
+      edges: q => (q.sourceUrns?.[0] === 'f'
+        ? [ge('a1', 'f', 'C', 'AGGREGATED', { weight: 5 })]
+        : []),
+      expand: req => {
+        if (req.drillAnchor === 'C') {
+          return trace({
+            containmentEdges: [ge('cc1', 'C', 'PROD', 'CONTAINS'), ge('cc2', 'f', 'fApp', 'CONTAINS')],
+            edges: [ge('w1', 'fApp', 'PROD', 'AGGREGATED', { weight: 5 })],
+          })
+        }
+        if (req.drillAnchor === 'PROD') {
+          return trace({
+            containmentEdges: [ge('cc3', 'PROD', 'app1', 'CONTAINS'), ge('cc4', 'PROD', 'app2', 'CONTAINS')],
+            edges: [
+              ge('w2', 'fApp', 'app1', 'AGGREGATED', { weight: 2 }),
+              ge('w3', 'fApp', 'app2', 'AGGREGATED', { weight: 3 }),
+            ],
+          })
+        }
+        return trace()
+      },
+    })
+    const { result } = renderHook(() => useLensSession('f', provider))
+    await waitFor(() => expect(result.current && doneAt(result.current, expansionKeyOf('down', 'f'))).toBe(true))
+
+    let outcome: { records: number; capped: boolean } | undefined
+    await act(async () => {
+      outcome = await result.current!.connectedExpand('C')
+    })
+    // Wave 1 anchored C (the click), wave 2 anchored PROD (the sole
+    // aggregated child); app1/app2 branch, so the walk stops there.
+    expect(expandAggregated).toHaveBeenCalledTimes(2)
+    expect(expandAggregated.mock.calls[0][0]).toMatchObject({ drillAnchor: 'C' })
+    expect(expandAggregated.mock.calls[1][0]).toMatchObject({ drillAnchor: 'PROD' })
+    expect(outcome).toEqual({ records: 3, capped: false })
+    expect(result.current!.state.hops.get('PROD')).toBe(1)
+  })
+
+  it('stops a runaway chain at the step cap and says so', async () => {
+    const { provider, expandAggregated } = makeProvider({
+      edges: q => (q.sourceUrns?.[0] === 'f'
+        ? [ge('a1', 'f', 'n0', 'AGGREGATED', { weight: 1 })]
+        : []),
+      expand: req => {
+        const anchor = String(req.drillAnchor)
+        const depth = Number(anchor.slice(1))
+        const child = `n${depth + 1}`
+        return trace({
+          containmentEdges: [ge(`c${depth}`, anchor, child, 'CONTAINS')],
+          edges: [ge(`w${depth}`, 'fApp', child, 'AGGREGATED', { weight: 1 })],
+        })
+      },
+    })
+    const { result } = renderHook(() => useLensSession('f', provider))
+    await waitFor(() => expect(result.current && doneAt(result.current, expansionKeyOf('down', 'f'))).toBe(true))
+
+    let outcome: { records: number; capped: boolean } | undefined
+    await act(async () => {
+      outcome = await result.current!.connectedExpand('n0')
+    })
+    expect(expandAggregated).toHaveBeenCalledTimes(8)
+    expect(outcome).toEqual({ records: 8, capped: true })
   })
 })
 

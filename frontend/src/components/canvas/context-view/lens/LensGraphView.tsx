@@ -66,6 +66,8 @@ import {
   lensColumnKey,
   LENS_COLUMN_W,
   LENS_COL_GAP,
+  LENS_FRAME_PAD,
+  LENS_FRAME_STRIP_H,
   type LensBanner,
   type LensCard,
   type LensChevron,
@@ -81,6 +83,8 @@ export interface LensGraphViewProps {
   onFocus: (urn: string) => void
   onRevealOnCanvas?: (urn: string) => void
   onOpenDetails?: (urn: string) => void
+  /** Frames that open in connected-only mode (share replay seed). */
+  initialConnectedFrames?: ReadonlySet<string>
 }
 
 // ── Interaction context (kept off node data to avoid re-serializing) ──
@@ -88,9 +92,12 @@ export interface LensGraphViewProps {
 interface LensInteractions {
   expandLineage: (dir: LensDirection, urn: string) => void
   retryExpansion: (dir: LensDirection, urn: string) => void
-  toggleChildren: (urn: string) => void
+  /** The chevron travels with the gesture: routing (connected expand vs
+   *  plain open vs fold) reads the builder's own summary of this card. */
+  toggleChildren: (urn: string, chevron: LensChevron) => void
   loadMoreChildren: (urn: string) => void
-  drillRecord: (recordId: string) => void
+  drillRecords: (recordIds: string[]) => void
+  toggleFrameMode: (urn: string, mode: 'connected' | 'all') => void
   select: (urn: string) => void
   focus: (urn: string) => void
   framePage: (frameId: string, delta: number) => void
@@ -116,7 +123,7 @@ type LensEdgeData = {
   bundledCount: number
   drillable: boolean
   drillState?: string
-  recordId: string
+  recordIds: string[]
   emphasized: boolean
   io: { current: LensInteractions }
 }
@@ -173,25 +180,31 @@ function PillButton({ pill, urn, io }: { pill: LensPill; urn: string; io: { curr
 }
 
 function ChevronButton({ chevron, urn, io }: { chevron: LensChevron; urn: string; io: { current: LensInteractions } }) {
-  if (!chevron.offered && chevron.state === 'idle') return null
-  const open = chevron.state === 'done' || chevron.state === 'loading'
+  if (!chevron.offered && chevron.state === 'idle' && chevron.connectedCandidates === 0 && !chevron.connectedState) {
+    return null
+  }
+  const loading = chevron.state === 'loading' || chevron.connectedState === 'loading'
+  const errored = chevron.state === 'error' || chevron.connectedState === 'error'
+  const open = chevron.state === 'done' || chevron.connectedState === 'done' || loading
   return (
     <button
       type="button"
-      onClick={e => { e.stopPropagation(); io.current.toggleChildren(urn) }}
+      onClick={e => { e.stopPropagation(); io.current.toggleChildren(urn, chevron) }}
       className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-2xs text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5"
       title={
-        chevron.state === 'error'
+        errored
           ? 'Loading contents failed — retry'
           : open
             ? `Contents (${chevron.shown}${chevron.count !== undefined ? ` of ${chevron.count}` : ''} shown)`
-            : `Open contents${chevron.count !== undefined ? ` (${chevron.count})` : ''}`
+            : chevron.connectedCandidates > 0
+              ? `Show what connects inside${chevron.count !== undefined ? ` (${chevron.count} total)` : ''}`
+              : `Open contents${chevron.count !== undefined ? ` (${chevron.count})` : ''}`
       }
       aria-label={`Open contents of ${urn}`}
     >
-      {chevron.state === 'loading' ? (
+      {loading ? (
         <Loader2 size={11} className="animate-spin" aria-hidden />
-      ) : chevron.state === 'error' ? (
+      ) : errored ? (
         <AlertCircle size={11} className="text-red-500" aria-hidden />
       ) : open ? (
         <ChevronDown size={11} aria-hidden />
@@ -319,8 +332,9 @@ function CardNode({ data }: NodeProps<Node<CardNodeData>>) {
       style={{ borderLeftWidth: 3, borderLeftColor: accent }}
       className={`group relative flex h-full w-full cursor-pointer items-center gap-2 rounded-lg border bg-canvas-elevated px-2.5 transition-colors hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 ${
         selected ? 'ring-2 ring-accent-lineage border-black/[0.07] dark:border-white/[0.08]' : 'border-black/[0.07] dark:border-white/[0.08]'
-      } ${dimmed ? 'opacity-30' : ''}`}
+      } ${dimmed ? 'opacity-30' : card.connected === false ? 'opacity-45' : ''}`}
       data-lens-card={card.urn}
+      {...(card.connected === false ? { 'data-lens-quiet': true } : {})}
     >
       {handles}
       <div
@@ -390,6 +404,7 @@ function FrameNode({ data }: NodeProps<Node<FrameNodeData>>) {
     <div
       className="h-full w-full rounded-xl border-2 border-dashed bg-black/[0.02] dark:bg-white/[0.03]"
       style={{ borderColor: `${color}55` }}
+      data-lens-frame={frame.urn}
     >
       {!frame.headerCardId ? (
         <div className="flex h-[34px] items-center gap-1.5 px-2.5">
@@ -411,6 +426,52 @@ function FrameNode({ data }: NodeProps<Node<FrameNodeData>>) {
           <span className="ml-auto shrink-0 text-[9.5px] text-ink-muted/70">
             {frame.totalMembers} connected inside
           </span>
+        </div>
+      ) : null}
+      {frame.mode && frame.stripY !== undefined ? (
+        /* Connected-context strip: honest counts, the Connected|All
+           toggle, and the walked pass-through path. */
+        <div
+          className="absolute flex items-center gap-1.5 overflow-hidden whitespace-nowrap px-1.5 text-[9px] leading-none text-ink-muted"
+          style={{
+            top: frame.stripY - frame.y,
+            left: LENS_FRAME_PAD,
+            width: frame.w - 2 * LENS_FRAME_PAD,
+            height: LENS_FRAME_STRIP_H,
+          }}
+          data-lens-strip={frame.urn}
+        >
+          {frame.walkPath && frame.walkPath.length > 0 ? (
+            <span
+              className="min-w-0 truncate font-medium"
+              title={`Walked through ${frame.walkPath.join(' › ')} — single connected path`}
+            >
+              {frame.walkCapped ? '⋯ › ' : '› '}
+              {frame.walkPath.join(' › ')}
+            </span>
+          ) : null}
+          <span className="shrink-0 tabular-nums">
+            {frame.mode === 'connected'
+              ? `${frame.connectedCount ?? 0} connected`
+              : `${frame.totalMembers} inside · ${frame.connectedCount ?? 0} connected`}
+          </span>
+          <button
+            type="button"
+            className="nodrag ml-auto shrink-0 rounded-full border border-black/15 dark:border-white/15 px-1.5 py-px text-[9px] text-ink hover:border-accent-lineage hover:text-accent-lineage"
+            onClick={e => {
+              e.stopPropagation()
+              io.current.toggleFrameMode(frame.urn, frame.mode === 'connected' ? 'all' : 'connected')
+            }}
+            title={
+              frame.mode === 'connected'
+                ? 'Show everything inside (connected stay highlighted)'
+                : 'Show only what the lineage reaches'
+            }
+          >
+            {frame.mode === 'connected'
+              ? `Show all${frame.containedTotal !== undefined ? ` (${frame.containedTotal})` : ''}`
+              : 'Connected only'}
+          </button>
         </div>
       ) : null}
       {paged ? (
@@ -472,13 +533,21 @@ function LensEdgeComponent(props: EdgeProps<Edge<LensEdgeData>>) {
               <button
                 type="button"
                 className="rounded-full border border-black/15 dark:border-white/15 px-1 hover:border-accent-lineage hover:text-accent-lineage"
-                onClick={() => data.io.current.drillRecord(data.recordId)}
+                onClick={() => data.io.current.drillRecords(data.recordIds)}
                 title={`${data.label} — rolled-up connection standing for ${data.bundledCount} underlying; click to show constituents`}
               >
                 ×{data.bundledCount}
               </button>
             ) : (
-              <span title={`${data.label} — ${data.bundledCount} underlying connections`}>×{data.bundledCount}</span>
+              <span
+                title={
+                  data.drillState === 'done'
+                    ? `${data.label} — no further breakdown recorded`
+                    : `${data.label} — ${data.bundledCount} underlying connections`
+                }
+              >
+                ×{data.bundledCount}
+              </span>
             )
           ) : null}
         </div>
@@ -638,7 +707,7 @@ function CornerControls({ containerRef }: { containerRef: React.RefObject<HTMLDi
           <div className="mb-1 font-semibold text-ink">Reading the graph</div>
           <ul className="space-y-1">
             <li><strong className="text-ink">⊕</strong> — fetch that entity's next hop of lineage (per direction; numbers are measured, never guessed).</li>
-            <li><strong className="text-ink">›</strong> — open what's inside it, as deep as the estate goes.</li>
+            <li><strong className="text-ink">›</strong> — open what's inside it. On a rolled-up partner this opens <em>connected only</em> — exactly the contents the wires reach, walking straight through single-child levels; the frame header toggles to everything inside.</li>
             <li><strong className="text-ink">×N</strong> on a wire — a rolled-up connection; click to see its constituents.</li>
             <li><strong className="text-ink">Click</strong> inspects · <strong className="text-ink">double-click</strong> re-centers (Back/Forward retrace).</li>
             <li>Dashed wires are rollups; frames group entities inside their parent.</li>
@@ -697,7 +766,7 @@ function CornerControls({ containerRef }: { containerRef: React.RefObject<HTMLDi
   )
 }
 
-function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails }: LensGraphViewProps) {
+function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails, initialConnectedFrames }: LensGraphViewProps) {
   // The camera drives the LIVE instance from useReactFlow(); onInit is
   // only the readiness signal. Two dead ends documented so they are
   // never retried: an instance CAPTURED in onInit can be a zombie bound
@@ -716,6 +785,10 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
   const relationshipTypes = useViewRelationshipTypes()
   const [pages, setPages] = useState<ReadonlyMap<string, number>>(new Map())
   const [collapsedChildren, setCollapsedChildren] = useState<ReadonlySet<string>>(new Set())
+  const [connectedFrames, setConnectedFrames] = useState<ReadonlySet<string>>(
+    () => initialConnectedFrames ?? new Set(),
+  )
+  const [walkCapped, setWalkCapped] = useState<ReadonlySet<string>>(new Set())
   const [selectedUrn, setSelectedUrn] = useState<string | null>(null)
   const [hoveredUrn, setHoveredUrn] = useState<string | null>(null)
 
@@ -737,8 +810,8 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
   )
 
   const layout: LensLayout = useMemo(
-    () => buildLensLayout(session.state, { pages, canHaveChildren, collapsedChildren }),
-    [session.state, pages, canHaveChildren, collapsedChildren],
+    () => buildLensLayout(session.state, { pages, canHaveChildren, collapsedChildren, connectedFrames, walkCapped }),
+    [session.state, pages, canHaveChildren, collapsedChildren, connectedFrames, walkCapped],
   )
 
   // Interactions live behind a ref so node data stays referentially
@@ -749,46 +822,86 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
     retryExpansion: () => {},
     toggleChildren: () => {},
     loadMoreChildren: () => {},
-    drillRecord: () => {},
+    drillRecords: () => {},
+    toggleFrameMode: () => {},
     select: () => {},
     focus: () => {},
     framePage: () => {},
     hover: () => {},
   })
   useEffect(() => {
+    const toggleFold = (urn: string) => {
+      setCollapsedChildren(prev => {
+        const next = new Set(prev)
+        if (next.has(urn)) next.delete(urn)
+        else next.add(urn)
+        return next
+      })
+    }
+    // The connected expand is never a dead click: zero mapped records
+    // falls back to the plain contents open in "everything inside" mode.
+    const runConnectedExpand = async (urn: string) => {
+      setConnectedFrames(prev => new Set(prev).add(urn))
+      const { records, capped } = await session.connectedExpand(urn)
+      if (capped) setWalkCapped(prev => new Set(prev).add(urn))
+      if (records === 0) {
+        setConnectedFrames(prev => {
+          const next = new Set(prev)
+          next.delete(urn)
+          return next
+        })
+        session.openChildren(urn)
+      }
+    }
     ioRef.current = {
       expandLineage: session.expandLineage,
       retryExpansion: session.retryExpansion,
-      toggleChildren: (urn: string) => {
-        const kids = session.state.children.get(urn)
-        if (!kids) {
-          session.openChildren(urn)
+      toggleChildren: (urn: string, chevron: LensChevron) => {
+        // Routing, in order: in-flight waits; failures re-fire; open
+        // contents fold/unfold (data stays — a folded child that is a
+        // lineage partner in its own right stays on the board); rollup
+        // partners open CONNECTED (drill what the wires stand for);
+        // everything else opens its plain contents.
+        if (chevron.state === 'loading' || chevron.connectedState === 'loading') return
+        if (chevron.connectedState === 'error') {
+          void runConnectedExpand(urn)
           return
         }
-        if (kids.state === 'error') {
+        if (chevron.state === 'error') {
           session.retryChildren(urn)
           return
         }
-        // Loaded: the chevron folds the frame away and back — the data
-        // stays; a folded child that is a lineage partner in its own
-        // right stays on the board.
-        setCollapsedChildren(prev => {
-          const next = new Set(prev)
-          if (next.has(urn)) next.delete(urn)
-          else next.add(urn)
-          return next
-        })
+        if (chevron.connectedState === 'done' || session.state.children.has(urn)) {
+          toggleFold(urn)
+          return
+        }
+        if (chevron.connectedCandidates > 0) {
+          void runConnectedExpand(urn)
+          return
+        }
+        session.openChildren(urn)
       },
       loadMoreChildren: session.loadMoreChildren,
-      drillRecord: (recordId: string) => {
-        const record = session.state.records.get(recordId)
-        if (!record?.rollupEdge) return
-        // The side being OPENED is the endpoint farther from the focal —
-        // drilling an app→platform rollup means "open the platform".
-        const sourceHop = Math.abs(session.state.hops.get(record.source) ?? 0)
-        const targetHop = Math.abs(session.state.hops.get(record.target) ?? 0)
-        const anchor = targetHop >= sourceHop ? record.rollupEdge.targetUrn : record.rollupEdge.sourceUrn
-        session.drillRollup(recordId, anchor)
+      drillRecords: (recordIds: string[]) => {
+        for (const recordId of recordIds) {
+          const record = session.state.records.get(recordId)
+          if (!record?.rollupEdge) continue
+          // The side being OPENED is the endpoint farther from the focal —
+          // drilling an app→platform rollup means "open the platform".
+          const sourceHop = Math.abs(session.state.hops.get(record.source) ?? 0)
+          const targetHop = Math.abs(session.state.hops.get(record.target) ?? 0)
+          const anchor = targetHop >= sourceHop ? record.rollupEdge.targetUrn : record.rollupEdge.sourceUrn
+          session.drillRollup(recordId, anchor)
+        }
+      },
+      toggleFrameMode: (urn: string, mode: 'connected' | 'all') => {
+        if (mode === 'all' && !session.state.children.has(urn)) session.openChildren(urn)
+        setConnectedFrames(prev => {
+          const next = new Set(prev)
+          if (mode === 'connected') next.add(urn)
+          else next.delete(urn)
+          return next
+        })
       },
       select: (urn: string) => setSelectedUrn(prev => (prev === urn ? null : urn)),
       focus: onFocus,
@@ -838,7 +951,7 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
           id: `band:${col.hop}`,
           type: 'lensBand',
           position: { x: col.x, y: -44 },
-          width: LENS_COLUMN_W,
+          width: col.w,
           height: 36,
           data: { band: { title, counts, side } } satisfies BandNodeData,
           draggable: false,
@@ -846,19 +959,21 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
           zIndex: 0,
         }
       })
-    // Honest empty-direction whispers live IN board space, where the
-    // column would be — they can never overlap real content.
-    const focalHop = 0
+    // Honest empty-direction whispers live IN board space, one slot
+    // beyond the outermost real column — they can never overlap content
+    // even when a grown column shifted the geometry.
     const emptySides: Node[] = []
     const upDone = session.state.expansions.get(expansionKeyOf('up', session.state.focal))?.state === 'done'
     const downDone = session.state.expansions.get(expansionKeyOf('down', session.state.focal))?.state === 'done'
     const hasUpCol = layout.columns.some(c => c.hop < 0)
     const hasDownCol = layout.columns.some(c => c.hop > 0)
+    const leftmostX = layout.columns.length > 0 ? Math.min(...layout.columns.map(c => c.x)) : 0
+    const rightmostEdge = layout.columns.length > 0 ? Math.max(...layout.columns.map(c => c.x + c.w)) : 0
     if (upDone && !hasUpCol) {
       emptySides.push({
         id: 'band:empty-up',
         type: 'lensBand',
-        position: { x: (focalHop - 1) * (LENS_COLUMN_W + LENS_COL_GAP), y: -44 },
+        position: { x: leftmostX - LENS_COL_GAP - LENS_COLUMN_W, y: -44 },
         width: LENS_COLUMN_W,
         height: 36,
         data: { band: { title: 'No upstream lineage in the data source', side: 'none' } } satisfies BandNodeData,
@@ -871,7 +986,7 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
       emptySides.push({
         id: 'band:empty-down',
         type: 'lensBand',
-        position: { x: (focalHop + 1) * (LENS_COLUMN_W + LENS_COL_GAP), y: -44 },
+        position: { x: rightmostEdge + LENS_COL_GAP, y: -44 },
         width: LENS_COLUMN_W,
         height: 36,
         data: { band: { title: 'No downstream lineage in the data source', side: 'none' } } satisfies BandNodeData,
@@ -946,7 +1061,7 @@ function LensGraphViewInner({ session, onFocus, onRevealOnCanvas, onOpenDetails 
           bundledCount: e.bundledCount,
           drillable: e.drillable,
           ...(e.drillState ? { drillState: e.drillState } : {}),
-          recordId: e.recordId,
+          recordIds: e.recordIds,
           emphasized,
           io: ioRef,
         } satisfies LensEdgeData,
