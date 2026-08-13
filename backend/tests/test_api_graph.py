@@ -434,6 +434,62 @@ async def test_trace_closure_returns_scoped_lineage_through_cache_wrapper(test_c
     assert body["seedTruncated"] is False
 
 
+async def test_trace_closure_cache_hit_deserializes_the_subclass(test_client: AsyncClient, monkeypatch):
+    """The READ half of the round trip. Both wrapper tests around this one
+    always MISS, so `model_cls=TraceClosureResult` is only ever exercised on
+    the write side — nothing reaches `model_validate_json`, where the subclass
+    is actually reconstructed. That branch is where a `TraceResult` would
+    validate this very payload happily and silently drop frontierUp /
+    frontierDown / seedTruncated: a served-from-cache walk with no '+N more'
+    affordances and no cut flag, indistinguishable from a finished one. So
+    serve a cached document carrying values the stub provider could never
+    produce, and require them back."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    mock_engine, real_cache, redis = _make_scoped_engine_and_cache(_StubProvider())
+    urn = _get_sample_urn(mock_engine)
+
+    cached = TraceClosureResult(
+        nodes=[], edges=[], containmentEdges=[],
+        upstreamUrns=set(), downstreamUrns=set(),
+        focus=TraceFocus(urn=urn, level=0, entityType="dataset"),
+        effectiveLevel=0, isInherited=False, inheritedFromUrn=None,
+        truncated=True, truncationReason="max_nodes",
+        frontierUp=[TraceFrontierNode(urn="urn:cached:hub", totalCount=61, nextCursor="e:900")],
+        frontierDown=[],
+        seedTruncated=True,
+    ).model_dump_json(by_alias=True)
+    # get_or_compute reads the generation counter first, the cache key second.
+    redis.get.side_effect = [b"7", cached]
+
+    async def _override():
+        return mock_engine
+
+    app.dependency_overrides[graph_module.get_context_engine] = _override
+    monkeypatch.setattr(graph_module, "get_graph_cache", lambda: real_cache)
+    try:
+        resp = await test_client.post(
+            "/api/v1/test-ws/graph/trace/closure",
+            json={"urn": urn},
+        )
+    finally:
+        app.dependency_overrides.pop(graph_module.get_context_engine, None)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Served from the cache, never recomputed: the stub's own closure ships
+    # nodes/edges and the frontier urn:frontier:up1, and would have written back.
+    assert redis.set.await_count == 0
+    assert body["nodes"] == [] and body["edges"] == []
+    # The subclass fields survived the deserialize — the whole point.
+    assert body["frontierUp"] == [
+        {"urn": "urn:cached:hub", "totalCount": 61, "nextCursor": "e:900"}
+    ]
+    assert body["seedTruncated"] is True
+    assert body["truncationReason"] == "max_nodes"
+
+
 async def test_trace_closure_provider_not_implemented_returns_501_through_cache_wrapper(test_client: AsyncClient, monkeypatch):
     """Same scope-resolving setup as the success case above, but with the
     NotImplementedError-raising provider: proves the endpoint's
