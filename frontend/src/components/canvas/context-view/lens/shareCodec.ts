@@ -95,7 +95,13 @@ export function decodeLensShare(raw: string): LensShareState | null {
     if (s.v !== 2) return null
 
     if (s.direction !== 'both' && s.direction !== 'in' && s.direction !== 'out') return null
-    if (typeof s.depth !== 'number' || !Number.isFinite(s.depth) || s.depth < 1) return null
+    // Bounded to the depth control's own sanctioned maximum (1|2|3, see
+    // LineageLens.tsx) — a hostile or corrupted token must not be able to
+    // order a deeper walk than the UI itself can ever ask for. The server
+    // additionally clamps upstreamDepth/downstreamDepth to 25 on its own
+    // wire (TraceClosureRequest), so this is defense-in-depth for the UX,
+    // not the only wall.
+    if (typeof s.depth !== 'number' || !Number.isFinite(s.depth) || s.depth < 1 || s.depth > 3) return null
 
     const opened = stringArray(s.opened)
     if (opened === null) return null

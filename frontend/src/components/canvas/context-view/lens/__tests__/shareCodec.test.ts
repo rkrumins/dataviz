@@ -59,6 +59,14 @@ describe('lens shareCodec v2', () => {
     expect(decodeLensShare(forge({ v: 2, ...base, depth: 'two' }))).toBeNull()
   })
 
+  it('rejects a depth beyond what the UI can ever ask for — a hostile token cannot order a deeper walk', () => {
+    const base = fullV2()
+    // 3 is the depth control's own sanctioned maximum (see LineageLens.tsx).
+    expect(decodeLensShare(forge({ v: 2, ...base, depth: 3 }))?.v).toBe(2)
+    expect(decodeLensShare(forge({ v: 2, ...base, depth: 4 }))).toBeNull()
+    expect(decodeLensShare(forge({ v: 2, ...base, depth: 999999 }))).toBeNull()
+  })
+
   it('rejects malformed exploration fields rather than restoring nonsense', () => {
     const base = fullV2()
     expect(decodeLensShare(forge({ v: 2, ...base, opened: 'x' }))).toBeNull()
