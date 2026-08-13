@@ -361,7 +361,7 @@ TOURS.push({
   title: 'Explore lineage in Focus mode',
   description: 'Walk an entity\'s lineage interactively — inspect, focus, expand hop by hop, and share what you find.',
   icon: Focus,
-  estimate: '1 min',
+  estimate: '2 min',
   // Targets live inside the open Lens dialog on a view canvas. Offered
   // automatically the first time the graph body opens, and from Help
   // while you're on a view.
@@ -377,7 +377,7 @@ TOURS.push({
       placement: 'top',
       padding: -8,
       title: 'Explore the lineage',
-      body: '**Click** a card to inspect it. **Double-click** to focus there. The **⊕** on a card\'s outer edge reveals its next hop; **×N** opens the connections a rolled-up flow summarizes. **Drag** any card to arrange the picture — the connections follow it.',
+      body: '**Click** a card to inspect it. **Double-click** to focus there. The **⊕** on a card\'s outer edge walks one hop further — an exact count when the data source knows one, just the plus when it doesn\'t. The **chevron** opens what\'s inside a card, at any depth, instantly. **Drag** any card to arrange the picture — the connections follow it.',
     },
     {
       target: '[data-tour="lens-children-mode"]',
@@ -386,20 +386,30 @@ TOURS.push({
       body: 'Opening a table or platform shows just the parts that **connect** to your focus. Switch to **All** to see everything it holds — every column stays listed, with the ones carrying lineage highlighted in place.',
     },
     {
+      target: '[data-tour="lens-depth"]',
+      placement: 'bottom',
+      title: 'Set how far you reach',
+      body: 'The **1 / 2 / 3** control sets how many hops a *newly* focused entity fetches. Beside it, **Both / Root cause / Impact** narrows the picture to just what feeds this entity or just what it feeds — instantly, with nothing new to fetch.',
+    },
+    {
       target: '[data-tour="lens-toggle"]',
       placement: 'bottom',
       title: 'Two ways to read it',
       body: 'Prefer scanning to exploring? Switch to the **List** columns any time — the Lens remembers your choice.',
     },
     {
+      title: 'See the path, take it with you',
+      body: 'Hover or select any card to light up its path back to the focus. When you\'re ready to hand it off, the corner controls save the picture as a **PNG**, or the data itself as **JSON** or **CSV**.',
+    },
+    {
       target: '[data-tour="lens-share"]',
       placement: 'bottom',
       title: 'Share what you found',
-      body: 'Copy a link that reopens this exact exploration — the walked path and everything you expanded — for a colleague.',
+      body: 'Copy a link that reopens this exact exploration — the walked path, everything you expanded, and your depth and direction settings — for a colleague.',
     },
     {
       title: 'Retrace any time',
-      body: 'Every focus is recorded: **← / →** step back and forward, and the **Path** trail jumps anywhere you\'ve been. Press **?** in the header for the full gesture list.',
+      body: 'Every focus is recorded: **← / →** step back and forward, and the **Path** trail jumps anywhere you\'ve been. The **(?)** icon in the header has the full gesture list any time.',
     },
   ],
 })
