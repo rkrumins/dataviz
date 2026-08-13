@@ -24,6 +24,8 @@ capturing fake provider + a bare ContextEngine with _resolve_ontology
 monkey-patched).
 """
 import asyncio
+import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -374,3 +376,51 @@ def test_provider_raising_not_implemented_propagates():
     req = TraceClosureRequest.model_validate({"urn": "u1"})
     with pytest.raises(NotImplementedError):
         _run(ContextEngine.trace_closure(eng, req))
+
+
+# ── Shared fixture: the frontend/backend drift tripwire ─────────────────
+#
+# trace_closure_walk_fixture.json is a hand-written, realistic three-hop
+# walk (initial focus closure, an upstream extension with a seam edge, a
+# downstream hub page) consumed by BOTH suites: this test validates each
+# document against the wire model below; the frontend's
+# closure-adapter.test.ts loads the SAME file and feeds each document
+# through toLensClosure/mergeClosures. If the wire model ever drifts from
+# this shape, this test fails first.
+
+
+def _assert_subset_equal(expected, actual, path):
+    """`actual` (the round-tripped dump) may carry extra keys the fixture
+    omitted (defaulted fields, e.g. GraphNode.properties/tags) — this
+    checks only that every key/value the fixture DID specify survived the
+    round trip, recursively through nested dicts/lists."""
+    if isinstance(expected, dict):
+        assert isinstance(actual, dict), f"{path}: expected a dict, got {type(actual).__name__}"
+        for key, value in expected.items():
+            assert key in actual, f"{path}.{key}: missing from the round-tripped dump"
+            _assert_subset_equal(value, actual[key], f"{path}.{key}")
+    elif isinstance(expected, list):
+        assert isinstance(actual, list), f"{path}: expected a list, got {type(actual).__name__}"
+        assert len(expected) == len(actual), f"{path}: length {len(expected)} != {len(actual)}"
+        for i, (e, a) in enumerate(zip(expected, actual)):
+            _assert_subset_equal(e, a, f"{path}[{i}]")
+    else:
+        assert expected == actual, f"{path}: {expected!r} != {actual!r}"
+
+
+def test_shared_walk_fixture_round_trips_by_alias():
+    fixture_path = Path(__file__).parent / "fixtures" / "trace_closure_walk_fixture.json"
+    fixture = json.loads(fixture_path.read_text())
+
+    assert set(fixture.keys()) == {"initial", "extension", "hubPage"}
+
+    for name, doc in fixture.items():
+        result = TraceClosureResult.model_validate(doc)
+        dumped = result.model_dump(by_alias=True)
+        for key, expected in doc.items():
+            # upstreamUrns/downstreamUrns round-trip through a Python `set`
+            # (Set[str] fields) — order is not preserved, so compare as sets.
+            if key in ("upstreamUrns", "downstreamUrns"):
+                assert set(dumped[key]) == set(expected), f"{name}.{key}"
+                continue
+            _assert_subset_equal(expected, dumped[key], f"{name}.{key}")

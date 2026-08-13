@@ -1,0 +1,133 @@
+{
+  "initial": {
+    "nodes": [
+      { "urn": "urn:li:domain:dom_finance", "entityType": "domain", "displayName": "Finance" },
+      { "urn": "urn:li:application:app_sales", "entityType": "application", "displayName": "Sales App" },
+      { "urn": "urn:li:database:db_core", "entityType": "database", "displayName": "Core DB" },
+      { "urn": "urn:li:table:t_orders", "entityType": "table", "displayName": "Orders", "qualifiedName": "sales.core.orders" },
+      { "urn": "urn:li:application:app_ingest", "entityType": "application", "displayName": "Ingest App" },
+      { "urn": "urn:li:database:db_landing", "entityType": "database", "displayName": "Landing DB" },
+      { "urn": "urn:li:table:t_raw", "entityType": "table", "displayName": "Raw Orders", "qualifiedName": "finance.landing.raw_orders" },
+      { "urn": "urn:li:domain:dom_analytics", "entityType": "domain", "displayName": "Analytics" },
+      { "urn": "urn:li:application:app_bi", "entityType": "application", "displayName": "BI App" },
+      { "urn": "urn:li:database:db_marts", "entityType": "database", "displayName": "Marts DB" },
+      { "urn": "urn:li:table:t_report", "entityType": "table", "displayName": "Orders Report", "qualifiedName": "analytics.marts.orders_report" },
+      { "urn": "urn:li:table:t_report2", "entityType": "table", "displayName": "Orders Report Backup", "qualifiedName": "analytics.marts.orders_report_v2" }
+    ],
+    "edges": [
+      { "id": "e:1", "sourceUrn": "urn:li:table:t_raw", "targetUrn": "urn:li:table:t_orders", "edgeType": "FLOWS" },
+      { "id": "e:2", "sourceUrn": "urn:li:table:t_orders", "targetUrn": "urn:li:table:t_report", "edgeType": "FLOWS" },
+      { "id": "e:3", "sourceUrn": "urn:li:table:t_orders", "targetUrn": "urn:li:table:t_report", "edgeType": "FLOWS" },
+      { "id": "e:4", "sourceUrn": "urn:li:table:t_orders", "targetUrn": "urn:li:table:t_report2", "edgeType": "FLOWS" }
+    ],
+    "containmentEdges": [
+      { "id": "c:1", "sourceUrn": "urn:li:domain:dom_finance", "targetUrn": "urn:li:application:app_sales", "edgeType": "CONTAINS" },
+      { "id": "c:2", "sourceUrn": "urn:li:application:app_sales", "targetUrn": "urn:li:database:db_core", "edgeType": "CONTAINS" },
+      { "id": "c:3", "sourceUrn": "urn:li:database:db_core", "targetUrn": "urn:li:table:t_orders", "edgeType": "CONTAINS" },
+      { "id": "c:4", "sourceUrn": "urn:li:domain:dom_finance", "targetUrn": "urn:li:application:app_ingest", "edgeType": "CONTAINS" },
+      { "id": "c:5", "sourceUrn": "urn:li:application:app_ingest", "targetUrn": "urn:li:database:db_landing", "edgeType": "CONTAINS" },
+      { "id": "c:6", "sourceUrn": "urn:li:database:db_landing", "targetUrn": "urn:li:table:t_raw", "edgeType": "CONTAINS" },
+      { "id": "c:7", "sourceUrn": "urn:li:domain:dom_analytics", "targetUrn": "urn:li:application:app_bi", "edgeType": "CONTAINS" },
+      { "id": "c:8", "sourceUrn": "urn:li:application:app_bi", "targetUrn": "urn:li:database:db_marts", "edgeType": "CONTAINS" },
+      { "id": "c:9", "sourceUrn": "urn:li:database:db_marts", "targetUrn": "urn:li:table:t_report", "edgeType": "CONTAINS" },
+      { "id": "c:10", "sourceUrn": "urn:li:database:db_marts", "targetUrn": "urn:li:table:t_report2", "edgeType": "CONTAINS" }
+    ],
+    "upstreamUrns": ["urn:li:table:t_raw"],
+    "downstreamUrns": ["urn:li:table:t_report", "urn:li:table:t_report2"],
+    "focus": { "urn": "urn:li:table:t_orders", "level": 0, "entityType": "table" },
+    "effectiveLevel": 0,
+    "isInherited": false,
+    "inheritedFromUrn": null,
+    "truncated": false,
+    "truncationReason": null,
+    "frontierUp": [
+      { "urn": "urn:li:table:t_raw", "totalCount": 3, "nextCursor": null }
+    ],
+    "frontierDown": [
+      { "urn": "urn:li:table:t_report", "totalCount": 9, "nextCursor": "e:0" }
+    ],
+    "seedTruncated": false
+  },
+
+  "extension": {
+    "nodes": [
+      { "urn": "urn:li:domain:dom_finance", "entityType": "domain", "displayName": "Finance" },
+      { "urn": "urn:li:application:app_ingest", "entityType": "application", "displayName": "Ingest App" },
+      { "urn": "urn:li:database:db_landing", "entityType": "database", "displayName": "Landing DB" },
+      { "urn": "urn:li:table:t_raw", "entityType": "table", "displayName": "Raw Orders", "qualifiedName": "finance.landing.raw_orders" },
+      { "urn": "urn:li:domain:dom_vendor", "entityType": "domain", "displayName": "Vendor" },
+      { "urn": "urn:li:application:app_erp", "entityType": "application", "displayName": "ERP App" },
+      { "urn": "urn:li:database:db_staging", "entityType": "database", "displayName": "Staging DB" },
+      { "urn": "urn:li:table:t_src_a", "entityType": "table", "displayName": "Vendor Orders A", "qualifiedName": "vendor.staging.orders_a" },
+      { "urn": "urn:li:table:t_src_b", "entityType": "table", "displayName": "Vendor Orders B", "qualifiedName": "vendor.staging.orders_b" }
+    ],
+    "edges": [
+      { "id": "e:5", "sourceUrn": "urn:li:table:t_src_a", "targetUrn": "urn:li:table:t_raw", "edgeType": "FLOWS" },
+      { "id": "e:6", "sourceUrn": "urn:li:table:t_src_b", "targetUrn": "urn:li:table:t_raw", "edgeType": "FLOWS" },
+      { "id": "e:7", "sourceUrn": "urn:li:table:t_src_a", "targetUrn": "urn:li:table:t_orders", "edgeType": "FLOWS" }
+    ],
+    "containmentEdges": [
+      { "id": "c:4", "sourceUrn": "urn:li:domain:dom_finance", "targetUrn": "urn:li:application:app_ingest", "edgeType": "CONTAINS" },
+      { "id": "c:5", "sourceUrn": "urn:li:application:app_ingest", "targetUrn": "urn:li:database:db_landing", "edgeType": "CONTAINS" },
+      { "id": "c:6", "sourceUrn": "urn:li:database:db_landing", "targetUrn": "urn:li:table:t_raw", "edgeType": "CONTAINS" },
+      { "id": "c:11", "sourceUrn": "urn:li:domain:dom_vendor", "targetUrn": "urn:li:application:app_erp", "edgeType": "CONTAINS" },
+      { "id": "c:12", "sourceUrn": "urn:li:application:app_erp", "targetUrn": "urn:li:database:db_staging", "edgeType": "CONTAINS" },
+      { "id": "c:13", "sourceUrn": "urn:li:database:db_staging", "targetUrn": "urn:li:table:t_src_a", "edgeType": "CONTAINS" },
+      { "id": "c:14", "sourceUrn": "urn:li:database:db_staging", "targetUrn": "urn:li:table:t_src_b", "edgeType": "CONTAINS" }
+    ],
+    "upstreamUrns": ["urn:li:table:t_src_a", "urn:li:table:t_src_b"],
+    "downstreamUrns": [],
+    "focus": { "urn": "urn:li:table:t_raw", "level": 0, "entityType": "table" },
+    "effectiveLevel": 0,
+    "isInherited": false,
+    "inheritedFromUrn": null,
+    "truncated": false,
+    "truncationReason": null,
+    "frontierUp": [
+      { "urn": "urn:li:table:t_src_a", "totalCount": null, "nextCursor": null },
+      { "urn": "urn:li:table:t_src_b", "totalCount": 2, "nextCursor": null }
+    ],
+    "frontierDown": [],
+    "seedTruncated": false
+  },
+
+  "hubPage": {
+    "nodes": [
+      { "urn": "urn:li:domain:dom_analytics", "entityType": "domain", "displayName": "Analytics" },
+      { "urn": "urn:li:application:app_bi", "entityType": "application", "displayName": "BI App" },
+      { "urn": "urn:li:database:db_marts", "entityType": "database", "displayName": "Marts DB" },
+      { "urn": "urn:li:table:t_report", "entityType": "table", "displayName": "Orders Report", "qualifiedName": "analytics.marts.orders_report" },
+      { "urn": "urn:li:domain:dom_ops", "entityType": "domain", "displayName": "Operations" },
+      { "urn": "urn:li:application:app_reporting", "entityType": "application", "displayName": "Reporting App" },
+      { "urn": "urn:li:database:db_dash", "entityType": "database", "displayName": "Dashboards DB" },
+      { "urn": "urn:li:table:t_consumer_a", "entityType": "table", "displayName": "Exec Dashboard", "qualifiedName": "ops.dash.exec_dashboard" },
+      { "urn": "urn:li:table:t_consumer_b", "entityType": "table", "displayName": "Ops Dashboard", "qualifiedName": "ops.dash.ops_dashboard" }
+    ],
+    "edges": [
+      { "id": "e:8", "sourceUrn": "urn:li:table:t_report", "targetUrn": "urn:li:table:t_consumer_a", "edgeType": "FLOWS" },
+      { "id": "e:9", "sourceUrn": "urn:li:table:t_report", "targetUrn": "urn:li:table:t_consumer_b", "edgeType": "FLOWS" }
+    ],
+    "containmentEdges": [
+      { "id": "c:7", "sourceUrn": "urn:li:domain:dom_analytics", "targetUrn": "urn:li:application:app_bi", "edgeType": "CONTAINS" },
+      { "id": "c:8", "sourceUrn": "urn:li:application:app_bi", "targetUrn": "urn:li:database:db_marts", "edgeType": "CONTAINS" },
+      { "id": "c:9", "sourceUrn": "urn:li:database:db_marts", "targetUrn": "urn:li:table:t_report", "edgeType": "CONTAINS" },
+      { "id": "c:15", "sourceUrn": "urn:li:domain:dom_ops", "targetUrn": "urn:li:application:app_reporting", "edgeType": "CONTAINS" },
+      { "id": "c:16", "sourceUrn": "urn:li:application:app_reporting", "targetUrn": "urn:li:database:db_dash", "edgeType": "CONTAINS" },
+      { "id": "c:17", "sourceUrn": "urn:li:database:db_dash", "targetUrn": "urn:li:table:t_consumer_a", "edgeType": "CONTAINS" },
+      { "id": "c:18", "sourceUrn": "urn:li:database:db_dash", "targetUrn": "urn:li:table:t_consumer_b", "edgeType": "CONTAINS" }
+    ],
+    "upstreamUrns": [],
+    "downstreamUrns": ["urn:li:table:t_consumer_a", "urn:li:table:t_consumer_b"],
+    "focus": { "urn": "urn:li:table:t_report", "level": 0, "entityType": "table" },
+    "effectiveLevel": 0,
+    "isInherited": false,
+    "inheritedFromUrn": null,
+    "truncated": false,
+    "truncationReason": null,
+    "frontierUp": [],
+    "frontierDown": [
+      { "urn": "urn:li:table:t_report", "totalCount": 9, "nextCursor": "e:41" }
+    ],
+    "seedTruncated": false
+  }
+}
