@@ -22,6 +22,9 @@ from backend.common.models.graph import (
     EdgeQuery,
     OntologyMetadata,
     TopLevelNodesResult,
+    TraceClosureResult,
+    TraceFocus,
+    TraceFrontierNode,
 )
 from backend.app.services.context_engine import ContextEngine
 
@@ -136,10 +139,40 @@ class _StubProvider(GraphDataProvider):
     async def delete_edge(self, edge_id) -> bool:
         return True
 
+    async def trace_closure(
+        self, urn, upstream_depth, downstream_depth,
+        lineage_edge_types, containment_edge_types, max_nodes, timeout_ms,
+        seed_urns=None, exclude_urns=None, after_cursor=None,
+    ) -> TraceClosureResult:
+        # Deterministic scoped closure: the focus + its downstream lineage
+        # edge, plus one synthetic frontier entry so response tests can
+        # assert on frontierUp[0].totalCount / nextCursor.
+        return TraceClosureResult(
+            nodes=list(self._nodes.values()),
+            edges=list(self._edges),
+            containmentEdges=[],
+            upstreamUrns=set(),
+            downstreamUrns={e.target_urn for e in self._edges},
+            focus=TraceFocus(urn=urn, level=0, entityType="dataset"),
+            effectiveLevel=0,
+            isInherited=False,
+            inheritedFromUrn=None,
+            truncated=False,
+            truncationReason=None,
+            frontierUp=[TraceFrontierNode(urn="urn:frontier:up1", totalCount=7, nextCursor="e:42")],
+            frontierDown=[],
+            seedTruncated=False,
+        )
+
 
 class _UnavailableProvider(_StubProvider):
     async def search_nodes(self, query: str, limit: int = 10, **kw) -> List[GraphNode]:
         raise OSError("connection refused")
+
+
+class _NotImplementedClosureProvider(_StubProvider):
+    async def trace_closure(self, *args, **kwargs) -> TraceClosureResult:
+        raise NotImplementedError("stub does not support trace_closure")
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────
@@ -229,6 +262,112 @@ async def test_trace_downstream_only(graph_client):
         json={"urn": urn, "direction": "downstream", "depth": 2},
     )
     assert resp.status_code == 410
+
+
+# ── POST /trace/closure ──────────────────────────────────────────────
+
+async def test_trace_closure_returns_scoped_lineage(graph_client):
+    """POST /trace/closure runs the focus-scoped closure through the real
+    engine + route (stub only at the provider boundary) and returns the
+    scoped lineage subgraph as a 200, with the frontier surfaced under its
+    camelCase wire aliases and the health header set."""
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.headers.get("X-Provider-Health") == "unknown"
+    body = resp.json()
+    assert "nodes" in body and "edges" in body
+    assert len(body["edges"]) >= 1
+    assert body["truncated"] is False
+    assert body["frontierUp"][0]["totalCount"] == 7
+    assert body["frontierUp"][0]["nextCursor"] == "e:42"
+    assert body["seedTruncated"] is False
+
+
+async def test_trace_closure_after_cursor_with_seed_urns_422(graph_client):
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "upstream", "upstreamDepth": 1, "afterCursor": "e:1", "seedUrns": [urn]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_trace_closure_after_cursor_with_exclude_urns_422(graph_client):
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "upstream", "upstreamDepth": 1, "afterCursor": "e:1", "excludeUrns": [urn]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_trace_closure_after_cursor_with_direction_both_422(graph_client):
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "both", "afterCursor": "e:1"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_trace_closure_after_cursor_with_wrong_active_depth_422(graph_client):
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "upstream", "upstreamDepth": 2, "afterCursor": "e:1"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_trace_closure_after_cursor_bad_format_422(graph_client):
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "upstream", "upstreamDepth": 1, "afterCursor": "not-a-cursor"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_trace_closure_provider_not_implemented_returns_501(test_client: AsyncClient):
+    """A provider that doesn't support trace_closure maps to 501, not a
+    500 — the endpoint's compute path wraps NotImplementedError."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints.graph import get_context_engine
+
+    mock_engine = ContextEngine(provider=_NotImplementedClosureProvider())
+    urn = _get_sample_urn(mock_engine)
+
+    async def _override():
+        return mock_engine
+
+    app.dependency_overrides[get_context_engine] = _override
+    try:
+        resp = await test_client.post(
+            "/api/v1/test-ws/graph/trace/closure",
+            json={"urn": urn},
+        )
+    finally:
+        app.dependency_overrides.pop(get_context_engine, None)
+
+    assert resp.status_code == 501
+    assert resp.json()["detail"]["code"] == "trace_closure_unsupported"
 
 
 # ── GET /nodes/{urn} ──────────────────────────────────────────────────

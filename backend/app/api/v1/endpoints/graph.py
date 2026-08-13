@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
 from fastapi.responses import JSONResponse
@@ -21,6 +22,7 @@ from backend.app.models.graph import (
     ChildrenWithEdgesResult, TopLevelNodesResult,
     TraceRequest, TraceResult, ExpandRequest,
 )
+from backend.common.models.graph import TraceClosureRequest, TraceClosureResult
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.app.providers.falkordb_provider import CursorMismatchError
 from backend.common.models.search import SearchQuery
@@ -36,6 +38,7 @@ from backend.app.services.graph_cache import (
     ENDPOINT_NODES_QUERY,
     ENDPOINT_TOP_LEVEL,
     ENDPOINT_TRACE,
+    ENDPOINT_TRACE_CLOSURE,
     ENDPOINT_TRACE_EXPAND,
     get_graph_cache,
     get_source_stale_reason,
@@ -847,6 +850,80 @@ async def trace_v2(
         model_cls=TraceResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
+
+
+_TRACE_CLOSURE_AFTER_CURSOR_RE = re.compile(r"^e:\d+$")
+
+
+@router.post("/trace/closure", response_model=TraceClosureResult, response_model_by_alias=True, dependencies=[Depends(require_trace)])
+async def trace_closure(
+    response: Response,
+    request: TraceClosureRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+) -> TraceClosureResult:
+    """Focus-scoped, regime-independent lineage closure — one step of a
+    server-driven walk.
+
+    Walks raw lineage edges outward from ``urn`` (or from ``seedUrns`` when
+    continuing a walk from leaves the client already has), correct at the
+    finest grain regardless of aggregation regime — containment is used
+    only to nest results, never as a lineage hop. ``excludeUrns`` names
+    nodes the client already holds: never re-shipped in ``nodes``, but a
+    seam edge into one still is. ``afterCursor`` pages a single node's
+    adjacency in a single direction instead of walking further.
+
+    Two honesty corners of the wire contract clients must read correctly:
+      * ``truncated: true`` with EMPTY ``frontierUp``/``frontierDown`` is
+        reachable — the walk was cut, but everything reachable-and-unfinished
+        proved fully shown by the degree probe. Read it as "nothing more to
+        expand here despite the cut", not as a contradiction.
+      * A frontier entry's ``totalCount`` is the full-graph degree in that
+        direction — a cue, not a ledger. After hop-1 exclusion filtering it
+        can overstate what is actually still reachable.
+
+    Same bulkheads and never-504 contract as ``/trace/v2``. Unlike the
+    legacy trace routes, this endpoint IS enrolled in fair-share: a
+    click-driven walk bursts requests in a way a one-shot trace does not.
+    """
+    if request.after_cursor is not None:
+        if request.seed_urns or request.exclude_urns:
+            raise HTTPException(status_code=422, detail="afterCursor cannot be combined with seedUrns or excludeUrns")
+        if request.direction == "both":
+            raise HTTPException(status_code=422, detail="afterCursor requires direction to be 'upstream' or 'downstream', not 'both'")
+        active_depth = request.upstream_depth if request.direction == "upstream" else request.downstream_depth
+        if active_depth != 1:
+            raise HTTPException(status_code=422, detail="afterCursor requires the active direction's depth to be 1")
+        if not _TRACE_CLOSURE_AFTER_CURSOR_RE.match(request.after_cursor):
+            raise HTTPException(status_code=422, detail="afterCursor must match ^e:\\d+$")
+
+    await _enforce_fair_share(engine, ENDPOINT_TRACE_CLOSURE)
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
+
+    if request.seed_urns is not None or request.exclude_urns is not None:
+        # seedUrns/excludeUrns are semantically sets; sorting stabilizes the cache key.
+        request = request.model_copy(update={
+            "seed_urns": sorted(request.seed_urns) if request.seed_urns is not None else None,
+            "exclude_urns": sorted(request.exclude_urns) if request.exclude_urns is not None else None,
+        })
+
+    async def compute() -> TraceClosureResult:
+        return await engine.trace_closure(request)
+
+    try:
+        scope = _cache_scope(engine)
+        if scope is None:
+            return await compute()
+
+        return await get_graph_cache().get_or_compute(
+            scope=scope,
+            endpoint=ENDPOINT_TRACE_CLOSURE,
+            params=request.model_dump(mode="json", by_alias=True, exclude_none=True),
+            compute=_bounded_compute(engine, compute),
+            model_cls=TraceClosureResult,
+            on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail={"code": "trace_closure_unsupported", "message": str(exc)})
 
 
 @router.post("/trace/expand", response_model=TraceResult, response_model_by_alias=True, dependencies=[Depends(require_trace)])

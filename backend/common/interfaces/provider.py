@@ -10,7 +10,7 @@ from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
     LineageResult, GraphSchemaStats, OntologyMetadata,
     ChildrenWithEdgesResult, TopLevelNodesResult,
-    TraceResult,
+    TraceResult, TraceClosureResult,
 )
 
 
@@ -380,6 +380,40 @@ class GraphDataProvider(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not implement expand_aggregated. "
             "Required for the /trace/expand endpoint."
+        )
+
+    async def trace_closure(
+        self,
+        urn: str,
+        upstream_depth: int,
+        downstream_depth: int,
+        lineage_edge_types: List[str],
+        containment_edge_types: List[str],
+        max_nodes: int,
+        timeout_ms: int,
+        seed_urns: Optional[List[str]] = None,
+        exclude_urns: Optional[List[str]] = None,
+        after_cursor: Optional[str] = None,
+    ) -> TraceClosureResult:
+        """Focus-scoped, regime-independent lineage closure — ONE step of a walk.
+
+        Walks raw lineage edges outward from ``urn`` (upstream + downstream),
+        correct at the finest grain regardless of aggregation regime.
+        Containment is hydrated only to nest results, never used as a
+        lineage hop.
+
+        ``seed_urns`` continues a walk from known lineage participants
+        instead of reseeding from the focus. ``exclude_urns`` are nodes the
+        client already holds — never re-shipped in ``nodes``, but a seam
+        edge into one still is. ``after_cursor`` pages one node's adjacency
+        in one direction instead of walking further.
+
+        Default implementation raises NotImplementedError — override in
+        concrete providers (Neo4j, FalkorDB).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement trace_closure. "
+            "Required for the /trace/closure endpoint."
         )
 
     # ==========================================

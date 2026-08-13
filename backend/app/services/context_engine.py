@@ -13,6 +13,7 @@ from ..models.graph import (
 )
 from backend.common.models.graph import (
     TraceResultV2, TraceExpandRequest, TraceDelta, TraceMeta, MegaNodeInfo,
+    TraceClosureRequest, TraceClosureResult,
 )
 
 from ..providers.base import GraphDataProvider
@@ -1253,6 +1254,38 @@ class ContextEngine:
                 timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
                 include_containment_edges=req.include_containment_edges,
                 include_inherited_lineage=req.include_inherited_lineage,
+            )
+
+    async def trace_closure(self, req: TraceClosureRequest) -> TraceClosureResult:
+        """Focus-scoped, regime-independent lineage closure — ONE step of a walk.
+
+        The provider walks RAW lineage outward from the focus (or from
+        ``req.seed_urns`` when continuing a walk) — correct at the finest
+        grain regardless of aggregation regime, showing only lineage hops
+        (containment only seeds/nests). Deliberately NO level resolution:
+        the closure is level-free by design, unlike ``trace``. Behind the
+        same per-(provider, graph) trace semaphore + engine deadline.
+        """
+        resolved = await self._resolve_ontology()
+        edge_types = req.lineage_edge_types or list(resolved.lineage_edge_types or [])
+        containment_types = list(resolved.containment_edge_types or [])
+        max_nodes = min(req.max_nodes or ContextEngine.TRACE_MAX_NODES, ContextEngine.TRACE_MAX_NODES)
+        fn = getattr(self.provider, "trace_closure", None)
+        if fn is None:
+            raise NotImplementedError("provider does not support trace_closure")
+
+        async with self._trace_semaphore():
+            return await fn(
+                urn=req.urn,
+                upstream_depth=req.upstream_depth if req.direction in ("upstream", "both") else 0,
+                downstream_depth=req.downstream_depth if req.direction in ("downstream", "both") else 0,
+                lineage_edge_types=edge_types,
+                containment_edge_types=containment_types,
+                max_nodes=max_nodes,
+                timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
+                seed_urns=req.seed_urns,
+                exclude_urns=req.exclude_urns,
+                after_cursor=req.after_cursor,
             )
 
     # ------------------------------------------------------------------ #

@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
-    GraphNode, NodeQuery, TopLevelNodesResult, TraceResult,
+    GraphNode, NodeQuery, TopLevelNodesResult, TraceClosureResult, TraceResult,
 )
 from .versioned_branch_provider import VersionedBranchProvider
 
@@ -374,6 +374,20 @@ class DraftOverlayProvider:
             max_nodes, timeout_ms, use_raw_edges=use_raw_edges,
             include_containment_edges=include_containment_edges,
             drill_anchor=drill_anchor)
+        return await self._overlay_trace(base)
+
+    async def trace_closure(
+        self, urn: str, upstream_depth: int, downstream_depth: int,
+        lineage_edge_types: List[str], containment_edge_types: List[str],
+        max_nodes: int, timeout_ms: int, seed_urns: Optional[List[str]] = None,
+        exclude_urns: Optional[List[str]] = None, after_cursor: Optional[str] = None,
+    ) -> TraceClosureResult:
+        # Overlay lineage deltas can make frontier totalCount advisory-stale —
+        # acceptable (it is a cue, not a ledger).
+        base = await self._base.trace_closure(
+            urn, upstream_depth, downstream_depth, lineage_edge_types, containment_edge_types,
+            max_nodes, timeout_ms, seed_urns=seed_urns, exclude_urns=exclude_urns,
+            after_cursor=after_cursor)
         return await self._overlay_trace(base)
 
     async def _overlay_trace(self, base: TraceResult) -> TraceResult:
