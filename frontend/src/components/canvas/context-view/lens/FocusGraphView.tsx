@@ -81,6 +81,10 @@ import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 const TINT_UP = '#0ea5e9'
 const TINT_DOWN = '#f59e0b'
 
+/** Slate, for a card that stands for no entity: an unresolved type, or
+ *  the focal's contains-stack, which is chrome rather than a thing. */
+const NEUTRAL_ACCENT = '#94a3b8'
+
 /**
  * Live interaction values delivered by CONTEXT rather than through node
  * data — the difference between a snappy graph and a sluggish one.
@@ -132,10 +136,10 @@ const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
 
 interface CardCtx {
   edgeTypeInfo?: EdgeTypeInfoMap
-  /** The entity the whole picture is about. A focus that HOLDS things
-   *  is emitted as a frame rather than a focal card — correct, since it
-   *  has rows — and without this it was the only card on the board with
-   *  no sign it was the one you asked about. */
+  /** The entity the whole picture is about. Always a compact FOCAL card
+   *  — what it holds is the contains-stack attached below it — so this
+   *  is here for the cards that need to know which one it is, not for
+   *  the focal's own chrome. */
   focalId: string
   /** type id → {color, icon}, resolved ONCE for the whole graph. Cards
    *  used to each subscribe to the schema store and linear-scan the
@@ -406,7 +410,10 @@ function FrameAncestry({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   // the owner plus one ⋯ — the tooltip carries the chain either way.
   const deepestFirst = [...chain].reverse().slice(0, chain.length === 2 ? 2 : 1)
   const elided = chain.length - deepestFirst.length
-  const idFor = (level: string) => card.ancestryIds[chain.indexOf(level)] ?? card.parentId ?? ''
+  // By POSITION, never by label: two levels of one estate are routinely
+  // called the same thing (`PROD ⊃ … ⊃ PROD`), and looking the crumb up
+  // by its text sent the click to whichever one came first.
+  const idFor = (i: number) => card.ancestryIds[chain.length - 1 - i] ?? card.parentId ?? ''
   const title = `in ${chain.join(' › ')}`
   return (
     <span className="flex items-baseline gap-1 min-w-0 text-[9px] text-ink-muted/70" title={title}>
@@ -416,7 +423,7 @@ function FrameAncestry({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
           {i > 0 && <span className="flex-shrink-0 text-ink-muted/40" aria-hidden>·</span>}
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); ctx.onFocus(idFor(level)) }}
+            onClick={(e) => { e.stopPropagation(); ctx.onFocus(idFor(i)) }}
             className={cn(
               'nodrag hover:text-accent-lineage transition-colors',
               i === 0 ? 'whitespace-nowrap' : 'truncate min-w-0',
@@ -668,7 +675,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   const { card, ctx, focalStats } = data as unknown as {
     card: FocusCard
     ctx: CardCtx
-    focalStats?: { in: number; out: number }
+    focalStats?: { in: number; out: number; coarser: number }
   }
   // Reach arrives via context so a growing walk re-renders ONLY this
   // card — it used to invalidate every node in the graph.
@@ -681,7 +688,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   // so the text filter's own dim and the path floor cannot both be
   // spelled out and left to fight.
   const dim = card.dimmed ? 'opacity-30' : offPath ? OFF_PATH_CARD : undefined
-  const accent = card.type === 'not loaded' ? '#94a3b8' : ctx.visualFor(card.type).color
+  const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
 
   const activate = () => ctx.onSelect(card.nodeId)
   const keyActivate = (e: React.KeyboardEvent) => {
@@ -732,6 +739,18 @@ function FocusGraphCard({ data, selected }: NodeProps) {
         </p>
         {card.parentId && (
           <FocalBreadcrumb card={card} ctx={ctx} />
+        )}
+        {/* Hops the data source attached to a level ABOVE the focus.
+            Nothing above the focus is drawn, so there is no card for
+            them to land on — but they are facts, and a partner sitting
+            there with no wire on it needs the explanation. */}
+        {focalStats && focalStats.coarser > 0 && (
+          <p
+            className="text-[9px] italic text-ink-muted/70 truncate"
+            title={`${focalStats.coarser.toLocaleString()} connection${focalStats.coarser === 1 ? '' : 's'} the data source records against a level above ${card.label}. They are drawn nowhere: this picture never boxes the levels above the focus. Focus a breadcrumb above to see them.`}
+          >
+            +{focalStats.coarser.toLocaleString()} connect at a coarser grain
+          </p>
         )}
         {focalStats && (
           <div className="flex items-center gap-2.5 mt-1 pt-1 border-t border-black/[0.07] dark:border-white/[0.08] text-[10.5px] font-medium tabular-nums">
@@ -889,11 +908,17 @@ function FocusGraphCard({ data, selected }: NodeProps) {
 function FocusFrameNode({ data }: NodeProps) {
   const { card, ctx } = data as unknown as { card: FocusCard; ctx: CardCtx }
   const { onPath, offPath } = usePathState(card.id)
-  const accent = ctx.visualFor(card.type).color
+  // The CONTAINS-STACK: the focus's own contents, not an entity of its
+  // own (no urn, nowhere to re-center to, no wires). It is chrome, so it
+  // borrows none of the focal's identity — wearing the focus's type
+  // colour and icon made it read as a second copy of the focus.
+  const isStack = card.nodeId === null
+  const accent = isStack ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
+  // Whether anything will sit beside the name — see the name's width.
+  const hasAncestryChip = card.frameId === null && (card.ancestry.length > 0 || card.parentLabel !== null)
   // The thing you asked about, when it happens to hold things. It reads
   // as the anchor — solid border, the accent glow the focal card has —
   // rather than as one more container that drifted into the picture.
-  const isFocus = card.nodeId != null && card.nodeId === ctx.focalId
   const q = ctx.frameQueryFor?.(card.expandKey ?? '') ?? ''
   // A total is a claim: state it only when the last page has landed (or
   // the container reported its own count). Otherwise say "at least".
@@ -923,19 +948,17 @@ function FocusFrameNode({ data }: NodeProps) {
       style={{
         width: card.w,
         height: card.h,
-        borderColor: isFocus ? accent : `${accent}55`,
-        ...(isFocus ? { boxShadow: `0 10px 34px ${accent}33` } : {}),
+        borderColor: `${accent}55`,
       }}
       className={cn(
-        'relative rounded-xl border-2 pointer-events-none',
-        isFocus
-          ? 'bg-black/[0.03] dark:bg-white/[0.04]'
-          : 'border-dashed bg-black/[0.02] dark:bg-white/[0.03]',
-        onPath && !isFocus && 'ring-1 ring-accent-lineage/70',
+        'relative rounded-xl border-2 border-dashed pointer-events-none bg-black/[0.02] dark:bg-white/[0.03]',
+        onPath && 'ring-1 ring-accent-lineage/70',
         offPath && OFF_PATH_CARD,
       )}
     >
-      <PortHandles />
+      {/* The stack is the focal's own contents, and no wire ever lands on
+          it — its rows' lineage is drawn at the focal card above. */}
+      {!isStack && <PortHandles />}
       {/* An open container keeps its own lineage question: looking
           inside something must never end the walk. */}
       <WalkPills card={card} ctx={ctx} />
@@ -954,7 +977,9 @@ function FocusFrameNode({ data }: NodeProps) {
             ? <LucideIcons.ChevronDown className="w-3.5 h-3.5" />
             : <LucideIcons.ChevronRight className="w-3.5 h-3.5" />}
         </button>
-        <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5 flex-shrink-0" />
+        {isStack
+          ? <LucideIcons.Boxes className="w-3.5 h-3.5 flex-shrink-0" style={{ color: accent }} />
+          : <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5 flex-shrink-0" />}
         <div className="min-w-0 flex-1">
           {/* Name, then where it lives — the levels above it are text,
               never boxes, so the chip is how they are stated at all. */}
@@ -962,8 +987,13 @@ function FocusFrameNode({ data }: NodeProps) {
             {/* The NAME is the identity and takes what it needs first —
                 sharing the shrink evenly turned `clean_charges` into
                 `…n_charges`, which names nothing. The chip lives in
-                what is left, and truncates there. */}
-            <TailName className="block max-w-[62%] flex-shrink-0 text-[11.5px] font-semibold text-ink leading-tight">
+                what is left, and truncates there. With no chip beside
+                it the name keeps the whole line: capping it anyway
+                clipped `int_clean_products_t1` for no one's benefit. */}
+            <TailName className={cn(
+              'block text-[11.5px] font-semibold text-ink leading-tight',
+              hasAncestryChip && 'max-w-[62%] flex-shrink-0',
+            )}>
               {card.label}
             </TailName>
             <FrameAncestry card={card} ctx={ctx} />
@@ -1122,11 +1152,12 @@ const MemoFocusFrameNode = memo(FocusFrameNode, (prev, next) => {
 
 const MemoFocusGraphCard = memo(FocusGraphCard, (prev, next) => {
   if (prev.selected !== next.selected) return false
-  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { in: number; out: number } }
-  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { in: number; out: number } }
+  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { in: number; out: number; coarser: number } }
+  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { in: number; out: number; coarser: number } }
   return a.ctx === b.ctx
     && a.focalStats?.in === b.focalStats?.in
     && a.focalStats?.out === b.focalStats?.out
+    && a.focalStats?.coarser === b.focalStats?.coarser
     && sameCard(a.card, b.card)
 })
 
@@ -1200,9 +1231,13 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     : strong ? 1
       : offPath ? OFF_PATH_EDGE
         : d.containment ? 0.45 : 0.7
-  // A badge survives density only where the reader is actually looking.
-  const showLabel = (d.labelVisible ?? false) && !d.dimmed
-    && (!d.labelDense || strong)
+  // A ×N survives density only where the reader is actually looking. A
+  // CYCLE badge is not a count and is never suppressed: "this lineage
+  // loops back" is a fact about the data, and two wires between one pair
+  // read as a duplicate without it.
+  const showCount = (d.labelVisible ?? false) && !d.dimmed && (!d.labelDense || strong)
+  const showCycle = (d.cycleBack ?? false) && !d.dimmed
+  const showLabel = showCount || showCycle
   return (
     <>
       <BaseEdge
@@ -1225,20 +1260,20 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
               'absolute pointer-events-none px-1 py-px rounded-full bg-canvas-elevated border border-black/10 dark:border-white/10 text-[8.5px] font-semibold tabular-nums text-ink-muted shadow-sm',
               // Only a cycle badge needs to sit beside a count; a bare
               // count keeps exactly the box it has always had.
-              d.cycleBack && 'flex items-center gap-0.5',
+              showCycle && 'flex items-center gap-0.5',
             )}
           >
             {/* This hop runs back towards the focus rather than away
                 from it: the lineage loops. Said out loud, because two
                 wires between the same pair otherwise read as a
                 duplicate rather than a cycle. */}
-            {d.cycleBack && (
+            {showCycle && (
               <LucideIcons.RefreshCcw
                 className="w-2 h-2 text-amber-600 dark:text-amber-400"
                 aria-label="This connection loops back"
               />
             )}
-            {d.count > 1 && `×${d.count.toLocaleString()}`}
+            {showCount && `×${d.count.toLocaleString()}`}
           </div>
         </EdgeLabelRenderer>
       )}
@@ -1514,7 +1549,7 @@ export function FocusGraphView({
         selectable: false,
         focusable: false,
         data: card.kind === 'focal'
-          ? { card, ctx, focalStats: { in: focalIn, out: focalOut } }
+          ? { card, ctx, focalStats: { in: focalIn, out: focalOut, coarser: graph.hopsAtCoarserGrain } }
           : { card, ctx },
       }
     })
@@ -1590,7 +1625,7 @@ export function FocusGraphView({
       }
     }
     return nodes
-  }, [graph.cards, graph.bandTotals, graph.hiddenByChipsIn, graph.hiddenByChipsOut,
+  }, [graph.cards, graph.bandTotals, graph.hiddenByChipsIn, graph.hiddenByChipsOut, graph.hopsAtCoarserGrain,
     graph.modelHasUpstream, graph.modelHasDownstream, ctx, focalIn, focalOut, focalFetch, directionFilter])
 
   /**

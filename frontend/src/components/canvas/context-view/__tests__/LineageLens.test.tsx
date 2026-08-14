@@ -111,9 +111,6 @@ function renderLens(
   return { ...utils, api }
 }
 
-/** The chevron beside a card's name — "what is inside this". */
-const contentsChevron = (label: string) => screen.getByLabelText(`Show what's inside ${label}`)
-
 /** Cards on the board, by their rendered name. */
 const onBoard = (label: string) => screen.queryAllByText(label).length > 0
 
@@ -170,14 +167,15 @@ describe('the business journey — a table\'s lineage through a seven-level esta
     // The ANSWER — the actual upstream table — is visible without a
     // single click, because every level above it is a pass-through.
     expect(onBoard('loan_positions')).toBe(true)
-    // And not one of those levels is drawn as a box around it: five
-    // containment levels resolved, five levels of breadcrumb, no
-    // wrappers. (`RISK_DB` is the answer's OWNER, so it is named on the
-    // card; the levels above it live in the card's tooltip.)
-    for (const wrapper of ['Finance', 'RiskApp', 'PROD', 'CURATED']) {
+    // `RISK_DB` is where that hop ends, so it is the frame the answer is
+    // a row of — countable and searchable in place. The four levels above
+    // it are drawn as nothing at all: they are its breadcrumb, and only
+    // the deepest of them is named beside it (the rest are in its
+    // tooltip).
+    expect(onBoard('RISK_DB')).toBe(true)
+    for (const wrapper of ['Finance', 'RiskApp', 'PROD']) {
       expect(onBoard(wrapper)).toBe(false)
     }
-    expect(onBoard('RISK_DB')).toBe(true)
     // The focus itself, and its consumer.
     expect(screen.getAllByText('collaterals').length).toBeGreaterThan(0)
     expect(onBoard('risk_exposure_daily')).toBe(true)
@@ -190,18 +188,17 @@ describe('the business journey — a table\'s lineage through a seven-level esta
     expect(screen.getByText(/2 on this lineage · of 40/)).toBeTruthy()
   })
 
-  it('opens a branchy domain\'s lineage children in ONE click, with no fetch', () => {
+  it('a branchy domain arrives with its lineage children in it, and shuts on one click', () => {
     const { api } = renderLens(['F'], doneWalk(collateralsEstate()))
-    // Sales BRANCHES, so the walk stopped there rather than guessing
-    // which of its children was the answer.
-    expect(onBoard('orders_raw')).toBe(false)
-
-    fireEvent.click(contentsChevron('Sales'))
-
+    // Both of Sales's connected tables are where hops END, so Sales is
+    // the grain they are presented at and they are its rows — there is
+    // nothing to click to see the answer.
     expect(onBoard('orders_raw')).toBe(true)
     expect(onBoard('refunds_raw')).toBe(true)
-    // The model already held them — expanding is a re-projection, and
-    // it must never cost a round trip.
+    // Shutting it is still one click, and still a re-projection: the
+    // model already holds them, so neither direction costs a round trip.
+    fireEvent.click(screen.getByLabelText('Collapse Sales'))
+    expect(onBoard('orders_raw')).toBe(false)
     expect(api.extend).not.toHaveBeenCalled()
     expect(api.page).not.toHaveBeenCalled()
   })
@@ -672,9 +669,8 @@ describe('the shell around the picture', () => {
       upstreamUrns: new Set(['c1', 'c2']),
     })))
 
-    // A frame is a container someone OPENED — nothing is boxed for
-    // merely having been walked past.
-    fireEvent.click(contentsChevron('raw_orders'))
+    // The table is where the hops end, so it arrives as the frame its
+    // columns are rows of.
     const frame = document.querySelector('.react-flow__node-focusFrame')
     expect(frame?.className).toContain('draggable')
     // The column rides along as a child node, so dragging the table
@@ -804,7 +800,6 @@ describe('what is really inside a container', () => {
   it('flips a frame to everything inside, and asks the server for the roster', () => {
     const onLoadAllChildren = vi.fn()
     renderLens(['F'], tableWithColumns(), { onLoadAllChildren })
-    fireEvent.click(contentsChevron('raw_orders'))
     fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
     expect(onLoadAllChildren).toHaveBeenCalledWith('T')
   })
@@ -812,7 +807,6 @@ describe('what is really inside a container', () => {
   it('shows an unconnected child as present, and claiming nothing', () => {
     const onLoadAllChildren = vi.fn()
     const { rerender, api } = renderLens(['F'], tableWithColumns(), { onLoadAllChildren })
-    fireEvent.click(contentsChevron('raw_orders'))
     fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
 
     rerender(
@@ -873,7 +867,6 @@ describe('what is really inside a container', () => {
    *  which is the state a page turn actually happens in. */
   const openWideTable = (onLoadAllChildren: LoadRoster) => {
     const { rerender, api } = renderLens(['F'], wideTable(), { onLoadAllChildren })
-    fireEvent.click(contentsChevron('raw_orders'))
     fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
     rerender(
       <LineageLens

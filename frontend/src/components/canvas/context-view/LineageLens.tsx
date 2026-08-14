@@ -396,6 +396,10 @@ export function LineageLens({
         frameShowAll: new Set(walkSeed.frameAll),
         frameQueries: new Map(walkSeed.frameQueries),
         framePages: new Map(walkSeed.framePages),
+        // Not carried in a link: the grain a shared picture is drawn at
+        // is re-derived from the model the link replays, which is the
+        // same model the sharer saw.
+        walkedThrough: new Set(),
       },
     })
     setDirectionState({ nodeId, dir: walkSeed.direction })
@@ -412,6 +416,18 @@ export function LineageLens({
     walkStatus,
     directionFilter,
   }), [sg, view, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter])
+
+  // The grain is STICKY: a level once drawn through stays drawn through
+  // while this walk grows, or a second child arriving would turn a level
+  // the picture saw past into a card and swallow what is already on the
+  // board. The layout reports what it walked through; this folds it back
+  // in, grow-only, so it converges in one pass and re-centering (a new
+  // view state) starts clean.
+  useEffect(() => {
+    const seen = view.walkedThrough
+    if ([...layout.walkedThrough].every(u => seen.has(u))) return
+    editView(base => ({ ...base, walkedThrough: new Set(layout.walkedThrough) }))
+  }, [layout.walkedThrough, view.walkedThrough, editView])
 
   const neighbors = useMemo(() => walkNeighborRecords(sg), [sg])
   const inConnections = neighbors.incoming.reduce((n, r) => n + r.weight, 0)
