@@ -226,6 +226,87 @@ interface RevealGroup {
     memberWeight: ReadonlyMap<string, number>
 }
 
+/**
+ * Which drawn cards can reach each OTHER — the bounded "is this wire on a
+ * directed loop" check the cycle badge rests on, as a card id → component
+ * id map.
+ *
+ * Only components of MORE THAN ONE card are recorded: a lone card is
+ * trivially its own component and says nothing about looping, and the
+ * board never draws a wire from a card to itself (`byPair` above drops
+ * both self-pairs and pairs where one end contains the other). So two
+ * ends sharing a component is exactly "there is a directed path back".
+ *
+ * Iterative Tarjan. A lens board can carry a few thousand cards and
+ * lineage is chain-shaped, which is precisely the input the textbook
+ * recursive walk overflows the JS stack on.
+ */
+function sameComponent(edges: ReadonlyArray<FocusEdge>): Map<string, number> {
+    const adjacency = new Map<string, string[]>()
+    for (const e of edges) {
+        const list = adjacency.get(e.source)
+        if (list) list.push(e.target)
+        else adjacency.set(e.source, [e.target])
+        if (!adjacency.has(e.target)) adjacency.set(e.target, [])
+    }
+
+    const index = new Map<string, number>()
+    const low = new Map<string, number>()
+    const onStack = new Set<string>()
+    const stack: string[] = []
+    const component = new Map<string, number>()
+    let next = 0
+    let components = 0
+
+    const open = (node: string) => {
+        index.set(node, next)
+        low.set(node, next)
+        next += 1
+        stack.push(node)
+        onStack.add(node)
+    }
+
+    for (const root of adjacency.keys()) {
+        if (index.has(root)) continue
+        open(root)
+        // One frame per node on the walk: which node, and how far through
+        // its neighbours we have got.
+        const work: Array<{ node: string; at: number }> = [{ node: root, at: 0 }]
+        while (work.length > 0) {
+            const frame = work[work.length - 1]
+            const neighbours = adjacency.get(frame.node)!
+            if (frame.at < neighbours.length) {
+                const to = neighbours[frame.at]
+                frame.at += 1
+                if (!index.has(to)) {
+                    open(to)
+                    work.push({ node: to, at: 0 })
+                } else if (onStack.has(to)) {
+                    low.set(frame.node, Math.min(low.get(frame.node)!, index.get(to)!))
+                }
+                continue
+            }
+            work.pop()
+            const parent = work[work.length - 1]
+            if (parent) low.set(parent.node, Math.min(low.get(parent.node)!, low.get(frame.node)!))
+            if (low.get(frame.node) !== index.get(frame.node)) continue
+            const members: string[] = []
+            for (;;) {
+                const member = stack.pop()!
+                onStack.delete(member)
+                members.push(member)
+                if (member === frame.node) break
+            }
+            if (members.length > 1) {
+                const id = components
+                components += 1
+                for (const member of members) component.set(member, id)
+            }
+        }
+    }
+    return component
+}
+
 export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const {
         sg, view, query, hiddenTypes, extendStatus,
@@ -1439,15 +1520,26 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
     // ── edges ────────────────────────────────────────────────────────
 
-    /** A hop that goes BACKWARDS in the picture's own hop numbering
-     *  closes a cycle: `B → A` where A is nearer the focus than B on the
-     *  same side. Stated per-direction because a node can legitimately
-     *  sit on both sides of a diamond without any cycle existing. */
-    const closesCycle = (bundle: ProjectedLensEdge): boolean => {
+    /** A hop that goes BACKWARDS in the picture's own hop numbering:
+     *  `B → A` where A is STRICTLY nearer the focus than B on the same
+     *  side. Stated per-direction because a node can legitimately sit on
+     *  both sides of a diamond without any cycle existing.
+     *
+     *  STRICTLY, and that is the whole of R4. The rule used to be `≤`,
+     *  which stamped a loop on every ordinary flow between two cards at
+     *  the SAME hop — two consumers of the focus where one also feeds the
+     *  other is one-way lineage, and the picture called it a cycle
+     *  (reported: a ↺ on a peer flow that goes strictly one way). Equal
+     *  hops mean "same distance from the focus", never "backwards".
+     *
+     *  A same-hop wire that IS on a loop is caught by the other half of
+     *  the rule — `sameComponent` below, which asks the drawn board
+     *  itself rather than its numbering. */
+    const runsBackwards = (bundle: ProjectedLensEdge): boolean => {
         const s = hopsOf(bundle.sourceUrn)
         const t = hopsOf(bundle.targetUrn)
-        if (s.down != null && t.down != null && t.down <= s.down) return true
-        if (s.up != null && t.up != null && s.up <= t.up) return true
+        if (s.down != null && t.down != null && t.down < s.down) return true
+        if (s.up != null && t.up != null && s.up < t.up) return true
         return false
     }
 
@@ -1507,7 +1599,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         if (existing) {
             existing.count += bundle.weight
             if (existing.edgeTypeNorm !== norm) existing.edgeTypeNorm = ''
-            existing.cycleBack = existing.cycleBack || closesCycle(bundle)
+            existing.cycleBack = existing.cycleBack || runsBackwards(bundle)
             continue
         }
         byPair.set(id, {
@@ -1520,12 +1612,31 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             // match stays lit, or the filter would hide the answer's own
             // connections.
             dimmed: (byId.get(source)?.dimmed ?? false) && (byId.get(target)?.dimmed ?? false),
-            cycleBack: closesCycle(bundle),
+            cycleBack: runsBackwards(bundle),
             // Decided from the geometry, below — there is none yet.
             labelVisible: false,
         })
     }
     const edges: FocusEdge[] = [...byPair.values()]
+
+    // THE OTHER HALF OF R4: a wire whose two ends can reach each other
+    // over the DRAWN board is on a directed loop, whatever the hop
+    // numbering makes of it. Asked of the picture rather than of the
+    // model, because the badge is a claim about what the reader can see:
+    // a loop that runs through cards this page has not drawn is not a
+    // loop the reader can follow, and marking it would be pointing at
+    // something that is not there.
+    //
+    // Every wire of a loop is badged, not only the one that "closes" it
+    // — which of them closes it is an artefact of the order the walk
+    // happened to arrive in, and a single glyph beside an unmarked
+    // partner wire reads as a duplicate rather than as a cycle.
+    const component = sameComponent(edges)
+    for (const edge of edges) {
+        if (edge.cycleBack) continue
+        const c = component.get(edge.source)
+        if (c !== undefined && c === component.get(edge.target)) edge.cycleBack = true
+    }
 
     // ── 5. GEOMETRY ──────────────────────────────────────────────────
 

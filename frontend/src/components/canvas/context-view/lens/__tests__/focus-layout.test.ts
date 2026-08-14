@@ -1217,7 +1217,14 @@ describe('focus-layout — the ⊕ pill tells one of three truths', () => {
 // ── cycles ───────────────────────────────────────────────────────────
 
 describe('focus-layout — cycle badge', () => {
-    it('stamps only the hop that closes the loop', () => {
+    /** Every drawn wire, by the pair of CARDS it runs between. */
+    const wires = (g: { cards: FocusCard[]; edges: FocusEdge[] }) => {
+        const id = (u: string) => cardFor(g, u)!.id
+        const byPair = new Map(g.edges.map(e => [`${e.source} ${e.target}`, e]))
+        return (s: string, t: string) => byPair.get(`${id(s)} ${id(t)}`)
+    }
+
+    it('badges a REAL loop — both wires of a mutual pair are on it', () => {
         const sg = subgraph({
             focus: 'F',
             nodes: [wnode('F'), wnode('A'), wnode('B')],
@@ -1226,11 +1233,47 @@ describe('focus-layout — cycle badge', () => {
         })
         // B only exists once the walk steps out of A — one hop at a time.
         const g = layout(sg, withReveal(initialLensViewState(sg), 'out:A', 1))
-        const byPair = new Map(g.edges.map(e => [`${e.source} ${e.target}`, e]))
-        const id = (u: string) => cardFor(g, u)!.id
-        expect(byPair.get(`${id('B')} ${id('A')}`)!.cycleBack).toBe(true)
-        expect(byPair.get(`${id('F')} ${id('A')}`)!.cycleBack).toBe(false)
-        expect(byPair.get(`${id('A')} ${id('B')}`)!.cycleBack).toBe(false)
+        const wire = wires(g)
+        // `B → A` runs backwards in the picture's own hop numbering, and
+        // `A → B` closes the loop over the drawn cards. Both are the
+        // lineage looping; a glyph on only one of them read as a
+        // duplicate wire beside a lone marked one.
+        expect(wire('B', 'A')!.cycleBack).toBe(true)
+        expect(wire('A', 'B')!.cycleBack).toBe(true)
+        // The way in is not part of the loop.
+        expect(wire('F', 'A')!.cycleBack).toBe(false)
+    })
+
+    it('badges a LONGER directed loop — A → B → C → A, every hop of it', () => {
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F'), wnode('A'), wnode('B'), wnode('C')],
+            contains: [],
+            hops: [['F', 'A'], ['A', 'B'], ['B', 'C'], ['C', 'A']],
+        })
+        const g = layout(sg, withReveal(
+            withReveal(initialLensViewState(sg), 'out:A', 1), 'out:B', 1))
+        const wire = wires(g)
+        expect(wire('A', 'B')!.cycleBack).toBe(true)
+        expect(wire('B', 'C')!.cycleBack).toBe(true)
+        expect(wire('C', 'A')!.cycleBack).toBe(true)
+        expect(wire('F', 'A')!.cycleBack).toBe(false)
+    })
+
+    it('does NOT badge a sibling flow at the same hop — the reported false glyph', () => {
+        // Two consumers of the focus, and one of them also feeds the
+        // other. Both sit at hop 1, so the old `≤` rule read the peer
+        // flow as running backwards and stamped a loop on lineage that
+        // goes strictly one way.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F'), wnode('A'), wnode('B')],
+            contains: [],
+            hops: [['F', 'A'], ['F', 'B'], ['A', 'B']],
+        })
+        const g = layout(sg)
+        expect(wires(g)('A', 'B')!.cycleBack).toBe(false)
+        expect(g.edges.some(e => e.cycleBack)).toBe(false)
     })
 
     it('does not stamp a diamond — two paths to one node is not a cycle', () => {
