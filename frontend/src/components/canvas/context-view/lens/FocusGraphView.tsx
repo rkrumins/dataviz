@@ -562,6 +562,10 @@ const domSafe = (s: string): string =>
   s.replace(/[^a-zA-Z0-9-]/g, c => `_${c.charCodeAt(0).toString(36)}`)
 const rowDomId = (frameKey: string, urn: string): string =>
   `lens-row-${domSafe(frameKey)}-${domSafe(urn)}`
+/** The list itself, addressable for the same reason its rows are: a row
+ *  is not a DOM child of it, so handing the keyboard back to the list
+ *  after a click on one has to go through an id. */
+const listDomId = (frameKey: string): string => `lens-rows-${domSafe(frameKey)}`
 
 /** Hover action cluster shared by entity-ish cards. */
 function CardActions({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
@@ -830,7 +834,27 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
   const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
   const dim = card.dimmed ? (card.connected ? 'opacity-30' : 'opacity-20') : offPath ? OFF_PATH_CARD : undefined
 
-  const activate = () => ctx.onSelect(card.nodeId)
+  /**
+   * Click a row: preview it, and leave the KEYBOARD where the reader
+   * just put their attention — on the list this row belongs to.
+   *
+   * A row is an `option` its list owns by id, never a DOM child of it
+   * (React Flow draws rows as the frame's siblings), so a click that
+   * left focus outside the list left every arrow key aimed at the LENS,
+   * which walks the focus history — the board replaced under a reader
+   * browsing a table. The handoff is what makes T16's row keys reachable
+   * with a mouse at all; `preventScroll` because the list lives inside a
+   * transformed React Flow viewport and the browser's own scroll-into-
+   * view would jump the board.
+   */
+  const activate = () => {
+    ctx.onSelect(card.nodeId)
+    document.getElementById(listDomId(hostKey))?.focus({ preventScroll: true })
+    // AFTER the focus, deliberately: the list parks a fresh cursor on its
+    // first visible row when it gains focus, and the row the reader
+    // actually clicked is the one that should carry it.
+    if (card.nodeId) ctx.onRowCursor(hostKey, card.nodeId)
+  }
   // The ⊕ tucks INSIDE a row (there is no outside), so the content
   // yields exactly the room a pill owns and no label runs under one.
   const gutters = gutterEnds(card)
@@ -1535,6 +1559,9 @@ function FrameScrollRegion({ card, ctx, win }: {
         // — so it does that itself, below.
         className="nowheel nodrag pointer-events-auto absolute inset-x-0 bottom-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded-b-xl"
         style={{ top: FRAME_HEADER_H }}
+        // Addressable, so a click on one of the rows it owns can hand
+        // the keyboard back to it — see `FrameRow`'s activate.
+        id={listDomId(key)}
         // The single tab stop for the whole list: Tab must not have to
         // walk 400 columns to get past a table. Inside it, the arrow
         // keys move a cursor named by `aria-activedescendant` — the rows

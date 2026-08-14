@@ -22,7 +22,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 import { LineageLens, type LensWalkSeed } from '../LineageLens'
 import { useLensWalk } from '@/hooks/useLensWalk'
-import { lensFocalOf, lensPush, type LensHistory } from '../lens/lensHistory'
+import {
+  lensBackward, lensFocalOf, lensForwardStep, lensJump, lensPush, type LensHistory,
+} from '../lens/lensHistory'
 import { usePreferencesStore } from '@/store/preferences'
 import type {
   GraphDataProvider, GraphNode, TraceV2Result, LensClosureExtras,
@@ -136,8 +138,11 @@ function LensSeam({ provider, share, history: opened, prefDepth = 1, onRender }:
       walkApi={walkApi}
       walkSeed={walkSeed}
       onRecenter={(id) => setHistory(h => lensPush(h, id))}
-      onBack={() => {}}
-      onForward={() => {}}
+      // Verbatim from ContextViewCanvas: browser semantics over the
+      // walked path, and moving the cursor never drops a hop.
+      onBack={() => setHistory(lensBackward)}
+      onForward={() => setHistory(lensForwardStep)}
+      onJumpTo={(i) => setHistory(h => lensJump(h, i))}
       onClose={() => {}}
     />
   )
@@ -149,7 +154,10 @@ function LensSeam({ provider, share, history: opened, prefDepth = 1, onRender }:
  *  the instant the focal's name appears can read a half-settled grain. */
 async function openLens(props: Parameters<typeof LensSeam>[0]) {
   const utils = render(<LensSeam {...props} />)
-  await screen.findByText('collaterals')
+  // ALL of them: the seam wires the path trail exactly as the canvas
+  // does, so a walked trail names the focal on a chip as well as in the
+  // header and on the board.
+  await screen.findAllByText('collaterals')
   await act(async () => { await Promise.resolve() })
   return utils
 }
@@ -173,7 +181,7 @@ describe('lens seam — what the canvas derives and hands down', () => {
   it('the focal is the history CURSOR, not the first entry', async () => {
     const { provider, traceClosure } = makeProvider()
     render(<LensSeam provider={provider} share={{ v: 2, entries: ['u_prior', 'F'], cursor: 1, depth: 1 }} />)
-    await screen.findByText('collaterals')
+    await screen.findAllByText('collaterals')
 
     expect(traceClosure).toHaveBeenCalledTimes(1)
     expect(traceClosure.mock.calls[0]![0]).toMatchObject({ urn: 'F' })
@@ -278,5 +286,179 @@ describe('lens seam — one click, one action, one acknowledgement', () => {
 
     expect(screen.getAllByText('prior_ledger').length).toBeGreaterThan(0)
     expect(traceClosure).toHaveBeenCalledTimes(1)   // the initial fetch, and nothing since
+  })
+})
+
+// ── history navigation ───────────────────────────────────────────────
+
+/**
+ * A three-table chain — `alpha → bravo → charlie` — walked one hop at a
+ * time. Every focal's closure carries the whole chain, which is what a
+ * real one-hop-either-way trace returns from the middle of it.
+ */
+function chainEstate(urn: string): TraceV2Result & LensClosureExtras {
+  const up = { A: [], B: ['A'], C: ['B', 'A'] }[urn] ?? []
+  const down = { A: ['B', 'C'], B: ['C'], C: [] }[urn] ?? []
+  return {
+    focus: { urn, level: 0, entityType: 'dataset' },
+    nodes: [
+      gn('A', 'dataset', 'alpha'),
+      gn('B', 'dataset', 'bravo'),
+      gn('C', 'dataset', 'charlie'),
+    ],
+    edges: [ge('A', 'B'), ge('B', 'C')],
+    containmentEdges: [],
+    upstreamUrns: new Set(up),
+    downstreamUrns: new Set(down),
+    effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+    truncated: false, truncationReason: null,
+    frontierUp: [], frontierDown: [],
+    seedTruncated: false,
+  }
+}
+
+function chainProvider() {
+  const traceClosure = vi.fn(async (req: Record<string, unknown>) => chainEstate(req.urn as string))
+  return { provider: { scopeKey: 'ws1', traceClosure } as unknown as GraphDataProvider, traceClosure }
+}
+
+/** THE T17-A INVARIANT, as a question about this render: is this entity
+ *  drawn as a CARD on the board — not merely named in the header or on a
+ *  path chip? A navigation that lands on a blank board fails here. */
+const drawn = (label: string) =>
+  screen.queryAllByText(label).some(el => el.closest('.react-flow__node') !== null)
+
+/** Which entity the lens is currently ON, straight off the room's own
+ *  label — one unambiguous answer, whatever the board is showing. */
+const focalOnScreen = () =>
+  screen.getByRole('dialog').getAttribute('aria-label')?.replace('Connections of ', '')
+
+/** A key, where the user's focus actually is. The lens listens in the
+ *  CAPTURE phase, so what scopes a key is the element it was aimed at —
+ *  never who got to call `stopPropagation` first. */
+const press = async (key: string, target: Element | Document = document) => {
+  fireEvent.keyDown(target, { key })
+  await act(async () => { await Promise.resolve() })
+}
+
+/** Walk to a neighbour the way the board offers it: double-click. */
+async function walkTo(label: string) {
+  const card = screen.getAllByText(label).find(el => el.closest('.react-flow__node'))!
+  fireEvent.doubleClick(card)
+  await act(async () => { await Promise.resolve() })
+}
+
+/** Open the chain's lens on `alpha` and settle it. */
+async function openChain(provider: GraphDataProvider) {
+  const utils = render(<LensSeam provider={provider} history={{ entries: ['A'], cursor: 0 }} />)
+  await screen.findByText('alpha')
+  await act(async () => { await Promise.resolve() })
+  return utils
+}
+
+describe('lens seam — history navigation lands on a rendered board', () => {
+  it('Back and Forward retrace the walk, instantly, with cards on the board', async () => {
+    const { provider, traceClosure } = chainProvider()
+    await openChain(provider)
+    expect(drawn('alpha')).toBe(true)
+
+    await walkTo('bravo')
+    expect(drawn('bravo')).toBe(true)
+    await walkTo('charlie')
+    expect(drawn('charlie')).toBe(true)
+    const fetches = traceClosure.mock.calls.length
+
+    // Back to bravo: a focal this session already walked, so it comes
+    // out of the walk cache — no request, and a board with cards on it.
+    fireEvent.click(screen.getByTitle('Step back one hop (←)'))
+    await act(async () => { await Promise.resolve() })
+    expect(drawn('bravo')).toBe(true)
+    expect(traceClosure).toHaveBeenCalledTimes(fetches)
+
+    fireEvent.click(screen.getByTitle('Step back one hop (←)'))
+    await act(async () => { await Promise.resolve() })
+    expect(drawn('alpha')).toBe(true)
+    expect(traceClosure).toHaveBeenCalledTimes(fetches)
+
+    fireEvent.click(screen.getByTitle('Step forward one hop (→)'))
+    await act(async () => { await Promise.resolve() })
+    expect(drawn('bravo')).toBe(true)
+    expect(traceClosure).toHaveBeenCalledTimes(fetches)
+  })
+
+  it('the ← and → keys walk the history', async () => {
+    const { provider } = chainProvider()
+    await openChain(provider)
+    await walkTo('bravo')
+    expect(drawn('bravo')).toBe(true)
+
+    await press('ArrowLeft')
+    expect(focalOnScreen()).toBe('alpha')
+    expect(drawn('alpha')).toBe(true)
+
+    await press('ArrowRight')
+    expect(focalOnScreen()).toBe('bravo')
+    expect(drawn('bravo')).toBe(true)
+  })
+
+  it('…but never out from under a frame\'s rows', async () => {
+    // The trail already has a hop behind it, so ← has somewhere to go —
+    // which is exactly the state in which the mis-scoping showed up.
+    const { provider } = makeProvider()
+    await openLens({ provider, history: { entries: ['u_prior', 'F'], cursor: 1 } })
+
+    // INSIDE a frame's row list the arrows belong to the LIST (T16):
+    // they move the row cursor, and the lens must not take the board
+    // away mid-read. A row is an `option` of that list — owned by id
+    // (`aria-owns`) rather than nested inside it, because React Flow
+    // draws rows as the frame's SIBLINGS — so a scoping test that only
+    // knows the listbox element does not recognise the rows it owns.
+    const row = screen.getAllByText('amount').find(el => el.closest('[role="option"]'))!
+    await press('ArrowLeft', row.closest('[role="option"]')!)
+    expect(focalOnScreen()).toBe('collaterals')
+
+    // The list's own scroll region is the other half of the same list.
+    await press('ArrowLeft', document.querySelector('[role="listbox"]')!)
+    expect(focalOnScreen()).toBe('collaterals')
+
+    // Outside one, the same key walks the history.
+    await press('ArrowLeft')
+    expect(focalOnScreen()).toBe('prior_ledger')
+  })
+
+  it('clicking a row leaves the keyboard in that row\'s list', async () => {
+    const { provider } = makeProvider()
+    await openLens({ provider, history: { entries: ['u_prior', 'F'], cursor: 1 } })
+
+    const row = screen.getAllByText('amount').find(el => el.closest('[role="option"]'))!
+    fireEvent.click(row)
+    await act(async () => { await Promise.resolve() })
+
+    // The list has the keyboard, and its cursor is on the row that was
+    // clicked — so T16's arrows browse from there rather than firing at
+    // the lens, which is what walked the history away.
+    const list = document.activeElement as HTMLElement
+    expect(list?.getAttribute('role')).toBe('listbox')
+    expect(list.getAttribute('aria-activedescendant'))
+      .toBe(row.closest('[role="option"]')!.id)
+  })
+
+  it('a PATH chip jumps to that hop, and the board is drawn when it lands', async () => {
+    const { provider, traceClosure } = chainProvider()
+    await openChain(provider)
+    await walkTo('bravo')
+    await walkTo('charlie')
+    const fetches = traceClosure.mock.calls.length
+
+    fireEvent.click(screen.getByTitle(/^Jump to alpha/))
+    await act(async () => { await Promise.resolve() })
+    expect(drawn('alpha')).toBe(true)
+    expect(traceClosure).toHaveBeenCalledTimes(fetches)
+
+    // …and the trail is intact, so the walk can be replayed forwards.
+    fireEvent.click(screen.getByTitle(/^Jump to charlie/))
+    await act(async () => { await Promise.resolve() })
+    expect(drawn('charlie')).toBe(true)
+    expect(traceClosure).toHaveBeenCalledTimes(fetches)
   })
 })

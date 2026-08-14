@@ -668,8 +668,23 @@ export function LineageLens({
         // `closest` only exists on Elements — a key dispatched straight
         // at the window has no element to ask.
         const t = e.target as HTMLElement | null
+        // AN OPTION AS WELL AS ITS LISTBOX, and that is the whole of the
+        // reported unreliability: a frame's rows are not DOM DESCENDANTS
+        // of the list that owns them. React Flow draws every row as the
+        // frame's SIBLING (which is what lets a wire land on one row of a
+        // 400-column table), so the list owns them by id — `aria-owns`
+        // and `aria-activedescendant` — and `closest('[role=listbox]')`
+        // from a row finds nothing at all.
+        //
+        // Rows carry `tabIndex={-1}` and a click focuses one, so the
+        // shape is ordinary: click a row to preview it, press ← expecting
+        // T16's "step back out of the rows", and the LENS stepped a HOP
+        // back instead — the board replaced under a reader who was
+        // browsing a table. (The row's own handler could not have saved
+        // it either: this listener is in the CAPTURE phase, and nothing
+        // dispatched at a sibling ever reaches the list's `onKeyDown`.)
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'
-          || (typeof t.closest === 'function' && t.closest('[role="listbox"]')))) return
+          || (typeof t.closest === 'function' && t.closest('[role="listbox"],[role="option"]')))) return
         e.preventDefault()
         e.stopPropagation()
         if (e.key === 'ArrowLeft') onBack()
