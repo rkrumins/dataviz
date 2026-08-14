@@ -837,6 +837,13 @@ const gutterPos = (inFrame: boolean, upstream: boolean): string =>
     ? (upstream ? 'left-1' : 'right-1')
     : (upstream ? 'right-full mr-1.5' : 'left-full ml-1.5')
 
+/** In-frame REST anchor, in px from the row's own edge: `left-1` (4px)
+ *  + the icon-only rest width (`w-5`, 20px). F1 — a hovered/focused pill
+ *  pins THIS point and grows the far edge outward from it, so expansion
+ *  can only travel away from the row (past its own edge, into the
+ *  gutter) and never toward the row's content. */
+const GUTTER_REST_EDGE = 24
+
 /** ...and where it sits VERTICALLY.
  *
  *  A FRAME hangs its own ⊕ on its HEADER line, beside the name it acts
@@ -976,6 +983,15 @@ function actOnPill(ctx: Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage'>, p
   else ctx.onExtend?.(pill.key, pillTarget(pill.key), dir)
 }
 
+/** A reveal's REST-state card count, honestly abbreviated (F1 secondary)
+ *  — a 4-digit count no longer forces the pill past PILL_ZONE at rest;
+ *  it degrades to compact notation ("1.2K") rather than being clipped
+ *  mid-digit, which would read as a smaller, wrong number. The exact
+ *  count is still the one `pillHoverTitle` states in full. */
+function restCountLabel(n: number): string {
+  return n < 1000 ? n.toLocaleString() : Intl.NumberFormat('en', { notation: 'compact' }).format(n)
+}
+
 /**
  * The verb-first label a follow control SPEAKS (R1 — kills T16's raw
  * "+N" pill unit: "+408" told a reader nothing they could act on, and
@@ -1033,9 +1049,10 @@ function pillHoverTitle(card: FocusCard, pill: FocusPill, dir: 'in' | 'out'): st
  */
 function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; dir: 'in' | 'out'; ctx: CardCtx }) {
   const upstream = dir === 'in'
+  const inFrame = card.frameId != null
   // Upstream hangs off the left edge, downstream off the right: the pill
   // points the way the data flows, so a card carrying both is readable.
-  const pos = gutterPos(card.frameId != null, upstream)
+  const pos = gutterPos(inFrame, upstream)
   // z-20 puts the ⊕ above the hover toolbar (z-10) wherever the two ever
   // meet again: the pill is the affordance, so it wins by rule rather
   // than by DOM order.
@@ -1043,6 +1060,19 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
   const anchor = pillAnchor(card)
   const side = upstream ? 'upstream' : 'downstream'
   const act = () => actOnPill(ctx, pill, dir)
+  // F1 — expansion pins the REST edge (GUTTER_REST_EDGE) and lets the
+  // FAR edge move, so a hovered/focused in-frame pill grows outward
+  // (past the row's own edge) rather than inward over row content. A
+  // CSS custom property carries the row-width-dependent offset — the
+  // `right`/`left` Tailwind utility scale has no such value, and only
+  // the EXPANDED state needs it; the rest-state position is untouched
+  // (`pos`, above) so nothing moves unless the pill itself is hovered.
+  const outwardVar = inFrame ? { ['--pill-outer' as string]: `${card.w - GUTTER_REST_EDGE}px` } : undefined
+  const outward = inFrame
+    ? (upstream
+        ? 'hover:left-auto focus-visible:left-auto hover:right-[var(--pill-outer)] focus-visible:right-[var(--pill-outer)]'
+        : 'hover:right-auto focus-visible:right-auto hover:left-[var(--pill-outer)] focus-visible:left-[var(--pill-outer)]')
+    : ''
 
   if (pill.status === 'loading') {
     return (
@@ -1082,12 +1112,22 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
       onClick={(e) => { e.stopPropagation(); act() }}
       title={title}
       aria-label={title}
-      style={anchor}
+      style={{ ...anchor, ...outwardVar }}
       className={cn(
         base,
-        restCount != null ? 'px-1.5' : 'w-5 px-0',
-        // ON HOVER of whichever ancestor `group` this sits inside.
-        'group-hover:w-auto group-hover:px-2',
+        // REST width: a fixed icon (w-5), or — for a reveal's card count
+        // — padding only, capped so a 4-digit count still fits inside
+        // PILL_ZONE rather than overrunning it uninvited (F1 secondary).
+        restCount != null ? 'px-1.5 max-w-[36px] hover:max-w-none focus-visible:max-w-none' : 'w-5 px-0',
+        // Expands on ITS OWN hover/focus only — never the row's. The row
+        // used to carry the trigger (`group-hover`), so hovering ANY of
+        // its content (the chevron, the icon, the label) fired every
+        // pill on it at once, and the sweep landed on top of exactly the
+        // controls a reader was reaching for (F1). `group/pill` is a
+        // LOCAL group (named, so it cannot pick up the row's own
+        // unnamed `group`) that only the two children below read.
+        'group/pill hover:w-auto hover:px-2 focus-visible:w-auto focus-visible:px-2',
+        outward,
         pill.kind === 'reveal'
           ? 'bg-canvas-elevated border-accent-lineage/60 text-accent-lineage hover:border-accent-lineage hover:bg-accent-lineage/10'
           : 'bg-canvas-elevated border-black/15 dark:border-white/20 text-ink-muted hover:text-accent-lineage hover:border-accent-lineage/50',
@@ -1095,8 +1135,10 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
       )}
     >
       {upstream && <LucideIcons.Plus className="w-2.5 h-2.5 flex-shrink-0" />}
-      {restCount != null && <span className="group-hover:hidden">{restCount.toLocaleString()}</span>}
-      <span className="hidden group-hover:inline whitespace-nowrap">{verb}</span>
+      {restCount != null && (
+        <span className="group-hover/pill:hidden group-focus-visible/pill:hidden truncate">{restCountLabel(restCount)}</span>
+      )}
+      <span className="hidden group-hover/pill:inline group-focus-visible/pill:inline whitespace-nowrap">{verb}</span>
       {!upstream && <LucideIcons.Plus className="w-2.5 h-2.5 flex-shrink-0" />}
     </button>
   )

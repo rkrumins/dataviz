@@ -18,6 +18,17 @@
  * produce at all (jsdom does no layout or compositing). `&isolate=<cardId>`
  * overrides the fixture's own isolation, so any fixture can be sampled
  * with its off-cone treatment active at full board scale.
+ *
+ * `&focusPillLabel=<substring>` (Task 24, F1) — a static screenshot can
+ * never show a `:hover` state (no pointer, no interaction), and a follow
+ * pill's EXPANDED geometry is exactly what F1's fix is about. Keyboard
+ * focus renders the identical expanded state (by design — the fix gives
+ * `:focus-visible` the same classes as `:hover`), so this finds the
+ * first follow-pill `<button>` whose `aria-label` contains the
+ * substring and focuses it before the shot — no new component prop, no
+ * CSS forced open, just the real interactive state a reader reaches
+ * with Tab. See `useFocusPill` for why a single `.focus()` is not
+ * enough on its own.
  */
 import { StrictMode, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -73,6 +84,36 @@ function usePaintSampler(enabled: boolean): string | null {
 
 const noop = () => {}
 
+/** `&focusPillLabel=<substring>` — see the module doc comment. Two
+ *  things a single `element.focus()` does not survive on its own:
+ *
+ *  1. Chromium's `:focus-visible` heuristic treats a script `.focus()`
+ *     with no prior page interaction as undecided, and defaults it to
+ *     hidden. A synthetic Tab keydown right before it is the same nudge
+ *     a real keystroke gives the same heuristic.
+ *  2. React Flow settles its own node layout across render passes of
+ *     its own, outside this component's commit, and is free to recreate
+ *     the button in the process — losing the focus a single call set.
+ *     Re-asserting on an interval for the fixture's whole render window
+ *     is what survives that; `setInterval` still fires under the
+ *     screenshot script's `--virtual-time-budget` (unlike
+ *     `requestAnimationFrame`, which does not pump there at all). */
+function useFocusPill(labelSubstring: string | null): void {
+  useEffect(() => {
+    if (!labelSubstring) return
+    const tryFocus = () => {
+      const match = [...document.querySelectorAll<HTMLButtonElement>('button[aria-label]')]
+        .find(el => (el.getAttribute('aria-label') ?? '').includes(labelSubstring))
+      if (!match || document.activeElement === match) return
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+      match.focus()
+    }
+    tryFocus()
+    const id = setInterval(tryFocus, 100)
+    return () => clearInterval(id)
+  }, [labelSubstring])
+}
+
 export function Harness() {
   const params = new URLSearchParams(window.location.search)
   // Read and the hook called BEFORE the "unknown fixture" early return —
@@ -80,6 +121,7 @@ export function Harness() {
   // others, which is the one thing React's rules forbid.
   const perfMode = params.get('perf') === '1'
   const perfReport = usePaintSampler(perfMode)
+  useFocusPill(params.get('focusPillLabel'))
   const name = params.get('fixture') ?? 'walkCollaterals'
   const fixture = WALK_FIXTURES[name]
   if (!fixture) {

@@ -537,6 +537,98 @@ describe('the ⊕ tells the truth about what it costs', () => {
   })
 })
 
+// ── F1 — THE FOLLOW PILL NEVER BLOCKS THE ROW IT SITS ON ──────────────
+
+/**
+ * Reported (user screenshot, T24 F1, P0): T21's hover expansion keyed
+ * off the ROW's own `group` class, so pointing anywhere on the row —
+ * including its ContentsChevron — swept a ~100px ghost zone over the
+ * chevron, the type icon, and the leading label. A column that is
+ * itself a small struct (its own nested field) is the exact shape that
+ * carries both a ContentsChevron AND a follow pill on one row.
+ */
+describe('F1 — the follow pill never blocks the row it sits on', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
+  afterEach(() => cleanup())
+
+  const nestedColumnWithPill = () => doneWalk(walkModel('F', {
+    nodes: [
+      wnode('F', 'dataset', 'stg_orders'),
+      wnode('T', 'dataset', 'raw_orders', { childCount: 2 }),
+      wnode('c1', 'schemaField', 'shipping_address', { childCount: 1 }),
+      wnode('c1a', 'schemaField', 'postal_code'),
+      wnode('c2', 'schemaField', 'placed_at'),
+    ],
+    containmentEdges: [holds('T', 'c1'), holds('T', 'c2'), holds('c1', 'c1a')],
+    // `c1a` carries its own two-hop lineage into `c1`, so it is a real
+    // population member — visible once `c1`'s chevron opens it, not
+    // just a structural child the walk never asked about.
+    lineageEdges: [hop('c1a', 'c1'), hop('c1', 'F'), hop('c2', 'F')],
+    upstreamUrns: new Set(['c1', 'c2', 'c1a']),
+    // The one honest reason `c1`'s row also carries a follow pill.
+    frontierUp: [frontier('c1', 5)],
+  }))
+
+  it('clicking the row\'s ContentsChevron toggles ITS contents, never the follow pill (the exact repro)', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'all' })
+    const onLoadAllChildren = vi.fn()
+    const { api } = renderLens(['F'], nestedColumnWithPill(), { onLoadAllChildren })
+    const chevron = screen.getByLabelText("Show what's inside shipping_address")
+    const row = chevron.closest('[role="option"]')!
+    // The row-wide hover the old code keyed off — present, but inert now.
+    fireEvent.mouseEnter(row)
+    fireEvent.click(chevron)
+    expect(onLoadAllChildren).toHaveBeenCalledWith('c1')
+    expect(api.extend).not.toHaveBeenCalled()
+    expect(api.page).not.toHaveBeenCalled()
+    usePreferencesStore.setState({ lensFrameChildren: 'connected' })
+  })
+
+  it('the follow pill expands on its own hover/focus only, never the row\'s ambient one', () => {
+    renderLens(['F'], nestedColumnWithPill())
+    const pill = screen.getByTitle(/Loads the next hop upstream of shipping_address/)
+    // The row's `group` class used to be the trigger (`group-hover:`) —
+    // ANY hover on the row, including the chevron, expanded it.
+    expect(pill.className).not.toMatch(/(^|\s)group-hover:/)
+    expect(pill.className).toMatch(/(^|\s)hover:w-auto\b/)
+    expect(pill.className).toMatch(/(^|\s)focus-visible:w-auto\b/)
+  })
+
+  it('an in-frame pill\'s expanded state grows OUTWARD past the row edge, never into row content', () => {
+    renderLens(['F'], nestedColumnWithPill())
+    const pill = screen.getByTitle(/Loads the next hop upstream of shipping_address/)
+    // Upstream, in-frame: the rest anchor (`left-1`) is untouched, but
+    // the hover/focus state gives up `left` for a `right` pinned to the
+    // SAME visual point — so the only edge free to move is the one
+    // furthest from the row's content, and it can only move outward.
+    expect(pill.className).toMatch(/hover:left-auto\b/)
+    expect(pill.className).toMatch(/hover:right-\[var\(--pill-outer\)\]/)
+    expect(pill.style.getPropertyValue('--pill-outer')).toBeTruthy()
+  })
+
+  const massiveFanIn = () => {
+    const nodes = [wnode('F', 'dataset', 'dim_customer')]
+    const lineageEdges = []
+    for (let i = 0; i < 1234; i++) {
+      const urn = `s${i}`
+      nodes.push(wnode(urn, 'dataset', `source_${i}`))
+      lineageEdges.push(hop(urn, 'F'))
+    }
+    return walkModel('F', { nodes, lineageEdges, upstreamUrns: new Set(nodes.slice(1).map(n => n.urn)) })
+  }
+
+  it('a reveal pill with a 4-digit count stays inside PILL_ZONE at rest, degrading honestly', () => {
+    renderLens(['F'], doneWalk(massiveFanIn()))
+    const pill = screen.getByTitle(/Shows the next hop upstream of dim_customer/)
+    expect(pill.className).toMatch(/max-w-\[36px\]/)
+    // Ellipsis-clipped digits would silently claim a SMALLER, WRONG
+    // count ("1,2…" reads as a different number); compact notation
+    // ("1.2K") stays honest while fitting the capped rest width. The
+    // exact count is still what the hover title states in full.
+    expect(pill.textContent).toContain('1.2K')
+  })
+})
+
 // ── STATUS SURFACES ──────────────────────────────────────────────────
 
 describe('what the lens says while it cannot answer', () => {
