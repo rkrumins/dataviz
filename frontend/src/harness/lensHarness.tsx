@@ -88,7 +88,7 @@ export function Harness() {
           onSelect={noop}
           onFocus={noop}
           onToggleFrame={noop}
-          onSetFramePage={noop}
+          onFrameScroll={noop}
           onFrameQuery={noop}
           onToggleFrameAll={noop}
           onRevealMore={noop}

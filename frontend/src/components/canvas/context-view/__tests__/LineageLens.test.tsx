@@ -861,7 +861,10 @@ describe('what is really inside a container', () => {
     const { rerender, api } = renderLens(['F'], walk, { onLoadAllChildren })
     // Before the roster: the stack is open and says the answer is nothing,
     // rather than not being there at all.
-    expect(screen.getByText(/Nothing in here is on this lineage/)).toBeTruthy()
+    // And it names the entity it is about — the stack heads itself
+    // "Inside orders", never a bare "Contains" that names a box.
+    expect(screen.getByText(/Nothing inside orders is on this lineage/)).toBeTruthy()
+    expect(screen.getByText('Inside')).toBeTruthy()
     expect(screen.getByText(/0 on this lineage · of 2/)).toBeTruthy()
 
     fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
@@ -922,17 +925,19 @@ describe('what is really inside a container', () => {
   type LoadRoster = Mock<(urn: string, searchQuery?: string) => void>
 
   /** Flip the frame to "everything inside" and hand it the loaded page,
-   *  which is the state a page turn actually happens in. */
+   *  which is the state a scroll actually happens in. Returns a way to
+   *  re-render with a different roster status — a fetch that is in
+   *  flight is the state the scroll-end guard is about. */
   const openWideTable = (onLoadAllChildren: LoadRoster) => {
     const { rerender, api } = renderLens(['F'], wideTable(), { onLoadAllChildren })
     fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
-    rerender(
+    const show = (status: 'loading' | 'done') => rerender(
       <LineageLens
         history={{ entries: ['F'], cursor: 0 }}
         walk={wideTable()}
         walkApi={api}
         childrenAll={hundredLoaded}
-        childrenAllStatus={new Map([['T', 'done' as const]])}
+        childrenAllStatus={new Map([['T', status]])}
         onLoadAllChildren={onLoadAllChildren}
         onRecenter={vi.fn()}
         onBack={vi.fn()}
@@ -940,31 +945,69 @@ describe('what is really inside a container', () => {
         onClose={vi.fn()}
       />,
     )
-    // The flip itself asks for the roster; the turns are what this test
-    // is about.
+    show('done')
+    // The flip itself asks for the roster; the scrolling is what these
+    // tests are about.
     onLoadAllChildren.mockClear()
+    return { show }
   }
 
-  it('turns pages inside the loaded set without asking the server', () => {
+  /** The frame's own list region — one tab stop, and the thing a wheel
+   *  gesture and the arrow keys both act on.
+   *
+   *  Found by its label rather than by role: React Flow leaves an
+   *  UNMEASURED node `visibility: hidden`, and jsdom measures nothing, so
+   *  every card on the board is invisible to `getByRole`. The role is
+   *  asserted here instead, which keeps the a11y contract pinned without
+   *  depending on a layout jsdom will never do. */
+  const rowsRegion = (label: string) => {
+    const el = screen.getByLabelText(new RegExp(`^Rows inside ${label}\\.`))
+    expect(el.getAttribute('role')).toBe('listbox')
+    return el
+  }
+
+  /** Scroll a frame by `notches` mouse notches (100px each). */
+  const wheelRows = (label: string, notches: number) => {
+    const region = rowsRegion(label)
+    for (let i = 0; i < notches; i++) fireEvent.wheel(region, { deltaY: 100 })
+  }
+
+  it('scrolls inside the loaded set without asking the server', () => {
     const onLoadAllChildren: LoadRoster = vi.fn()
     openWideTable(onLoadAllChildren)
-    const next = screen.getByLabelText('Next page of raw_orders')
-    // Nine turns, all of them inside the hundred children already in
-    // hand. One server page backs ten render windows — asking on every
-    // Next spent nine round trips re-fetching what the frame held.
-    for (let i = 0; i < 9; i++) fireEvent.click(next)
-    expect(screen.getByText(/page 10 of/)).toBeTruthy()
+    // Ten notches ≈ 38 rows of travel, all of them inside the hundred
+    // children already in hand. One server page backs many rows of
+    // scrolling — asking per row would spend a round trip on a list the
+    // frame is already holding.
+    wheelRows('raw_orders', 10)
+    expect(screen.getByText(/showing 39–48 of/)).toBeTruthy()
     expect(onLoadAllChildren).not.toHaveBeenCalled()
   })
 
-  it('asks exactly once when a turn runs past what is loaded', () => {
+  it('asks exactly once per page as the scroll nears the end of what is loaded', () => {
     const onLoadAllChildren: LoadRoster = vi.fn()
-    openWideTable(onLoadAllChildren)
-    const next = screen.getByLabelText('Next page of raw_orders')
-    for (let i = 0; i < 10; i++) fireEvent.click(next)
-    // The tenth turn is the first window the loaded page cannot cover.
+    const { show } = openWideTable(onLoadAllChildren)
+    // Past row 82 the next window would run out of loaded rows, so the
+    // page after it is fetched while there is still list to read.
+    wheelRows('raw_orders', 22)
     expect(onLoadAllChildren).toHaveBeenCalledTimes(1)
     expect(onLoadAllChildren).toHaveBeenCalledWith('T', '')
+    // A scroll crosses that line on several consecutive steps. While the
+    // page it asked for is in flight, none of them asks again — one page
+    // is one round trip, however long the gesture is.
+    show('loading')
+    wheelRows('raw_orders', 8)
+    expect(onLoadAllChildren).toHaveBeenCalledTimes(1)
+  })
+
+  it('the window never runs past the rows in hand, however hard it is spun', () => {
+    const onLoadAllChildren: LoadRoster = vi.fn()
+    openWideTable(onLoadAllChildren)
+    wheelRows('raw_orders', 200)
+    // 102 rows in hand (a hundred roster + the two connected columns) —
+    // so the last window is 93–102 and no amount of spinning banks an
+    // offset the frame would have to scroll back through.
+    expect(screen.getByText(/showing 93–102 of/)).toBeTruthy()
   })
 
   it('asks a focal that HOLDS things for its own roster, once', () => {

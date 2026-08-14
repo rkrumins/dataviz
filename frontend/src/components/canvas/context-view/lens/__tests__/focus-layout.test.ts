@@ -25,7 +25,7 @@ import {
     type LensViewState,
     type FocusLayoutInput,
 } from '../focus-layout'
-import { FOCAL_H, FRAME_CHILD_CAP, type FocusCard, type FocusEdge } from '../focus-cards'
+import { FOCAL_H, FRAME_WINDOW, frameWindow, type FocusCard, type FocusEdge } from '../focus-cards'
 
 // ── fixtures ─────────────────────────────────────────────────────────
 
@@ -1166,12 +1166,13 @@ describe('focus-layout — dead-end honesty', () => {
     })
 })
 
-describe('focus-layout — frames page instead of growing', () => {
-    it('shows one fixed window of children and reports the rest', () => {
-        const nodes = [wnode('F'), wnode('T', 'dataset', 'wide_table', { childCount: 40 })]
+describe('focus-layout — frames scroll instead of growing', () => {
+    /** A wide table: `n` connected columns inside one frame. */
+    const wideTable = (n: number, childCount = 40) => {
+        const nodes = [wnode('F'), wnode('T', 'dataset', 'wide_table', { childCount })]
         const contains: Array<[string, string]> = []
         const hops: Array<[string, string]> = []
-        for (let i = 0; i < 20; i++) {
+        for (let i = 0; i < n; i++) {
             const c = `w${String(i).padStart(2, '0')}`
             nodes.push(wnode(c, 'schemaField', `column_${String(i).padStart(2, '0')}`))
             contains.push(['T', c])
@@ -1179,19 +1180,58 @@ describe('focus-layout — frames page instead of growing', () => {
         }
         const sg = subgraph({ focus: 'F', nodes, contains, hops })
         const base = initialLensViewState(sg)
-        const open = { ...base, expandedContainment: new Set([...base.expandedContainment, 'T']) }
+        return { sg, open: { ...base, expandedContainment: new Set([...base.expandedContainment, 'T']) } }
+    }
+
+    it('shows one fixed window of children and reports the rest', () => {
+        const { sg, open } = wideTable(20)
         const g = layout(sg, open)
         const frame = cardFor(g, 'T')!
         const rows = g.cards.filter(c => c.frameId === frame.id)
-        expect(rows).toHaveLength(FRAME_CHILD_CAP)
+        expect(rows).toHaveLength(FRAME_WINDOW)
         expect(frame.frameLoaded).toBe(20)
         expect(rows.map(r => r.nodeId)).toEqual(['w00', 'w01', 'w02', 'w03', 'w04', 'w05', 'w06', 'w07'])
-        // A later page is the SAME window moved, not a taller frame.
-        const paged = layout(sg, { ...open, framePages: new Map([['T', 1]]) })
-        const pagedRows = paged.cards.filter(c => c.frameId === cardFor(paged, 'T')!.id)
-        expect(pagedRows).toHaveLength(FRAME_CHILD_CAP)
-        expect(pagedRows[0].nodeId).toBe('w08')
-        expect(cardFor(paged, 'T')!.h).toBe(frame.h)
+        // Scrolling is the SAME window moved, not a taller frame — and it
+        // moves by ROWS, so a scroll of three starts three rows down.
+        const scrolled = layout(sg, { ...open, frameOffsets: new Map([['T', 3]]) })
+        const movedRows = scrolled.cards.filter(c => c.frameId === cardFor(scrolled, 'T')!.id)
+        expect(movedRows).toHaveLength(FRAME_WINDOW)
+        expect(movedRows[0].nodeId).toBe('w03')
+        expect(cardFor(scrolled, 'T')!.h).toBe(frame.h)
+    })
+
+    it('the window never travels past the rows in hand', () => {
+        const { sg, open } = wideTable(20)
+        // A restored share link (or a roster that shrank under a new
+        // search) can name an offset that no longer exists. It lands on
+        // the LAST windowful of rows rather than on empty space.
+        const g = layout(sg, { ...open, frameOffsets: new Map([['T', 900]]) })
+        const frame = cardFor(g, 'T')!
+        const rows = g.cards.filter(c => c.frameId === frame.id)
+        expect(frame.frameOffset).toBe(20 - FRAME_WINDOW)
+        expect(rows.map(r => r.nodeId)).toEqual(['w12', 'w13', 'w14', 'w15', 'w16', 'w17', 'w18', 'w19'])
+        const w = frameWindow(frame)
+        expect([w.from, w.to, w.total]).toEqual([13, 20, 20])
+        expect(w.atEnd).toBe(true)
+    })
+
+    it('a frame that fits needs no scroll, and says nothing about one', () => {
+        const { sg, open } = wideTable(3, 3)
+        const w = frameWindow(cardFor(layout(sg, open), 'T')!)
+        expect(w.scrollable).toBe(false)
+        expect([w.from, w.to, w.total, w.maxOffset]).toEqual([1, 3, 3, 0])
+    })
+
+    it('carries every row it holds, not only the windowed ones', () => {
+        // The keyboard cursor and the type-ahead reach rows the window has
+        // scrolled past — neither can ask the board for a card that is not
+        // drawn, so the frame states its whole row list.
+        const { sg, open } = wideTable(20)
+        const frame = cardFor(layout(sg, open), 'T')!
+        expect(frame.frameRows).toHaveLength(20)
+        expect(frame.frameRows[19]).toEqual({ urn: 'w19', label: 'column_19', canOpen: false })
+        // A row is not a frame, and carries no row list of its own.
+        expect(cardFor(layout(sg, open), 'w00')!.frameRows).toHaveLength(0)
     })
 
     it('the All roster shows what is inside but off the lineage, marked', () => {
@@ -1230,6 +1270,138 @@ describe('focus-layout — frames page instead of growing', () => {
         expect(cardFor(g, 'T')!.frameTotal).toBe(3)
         // Two of its three columns ARE on this lineage.
         expect(cardFor(g, 'T')!.frameEmpty).toBe(false)
+    })
+
+    describe('the divider between "on this lineage" and "everything else"', () => {
+        /** `n` connected columns then `m` roster-only ones, All mode. */
+        const mixedRoster = (n: number, m: number, offset?: number) => {
+            const nodes = [wnode('F'), wnode('T', 'dataset', 'src', { childCount: n + m })]
+            const contains: Array<[string, string]> = []
+            const hops: Array<[string, string]> = []
+            const roster: LensWalkNode[] = []
+            for (let i = 0; i < n; i++) {
+                const c = `c${i}`
+                nodes.push(wnode(c, 'schemaField', `on_lineage_${i}`))
+                contains.push(['T', c])
+                hops.push([c, 'F'])
+                roster.push(wnode(c, 'schemaField', `on_lineage_${i}`))
+            }
+            for (let i = 0; i < m; i++) roster.push(wnode(`x${i}`, 'schemaField', `other_${i}`))
+            const sg = subgraph({ focus: 'F', nodes, contains, hops })
+            const base = initialLensViewState(sg)
+            return layout(sg, {
+                ...base,
+                expandedContainment: new Set([...base.expandedContainment, 'T']),
+                frameShowAll: new Set(['T']),
+                ...(offset === undefined ? {} : { frameOffsets: new Map([['T', offset]]) }),
+            }, {
+                childrenAll: new Map([['T', { children: roster, hasMore: false, total: n + m }]]),
+                childrenAllStatus: new Map([['T', 'done']]),
+            })
+        }
+
+        it('sits between the two kinds of row, and counts what is below it', () => {
+            const g = mixedRoster(2, 3)
+            const frame = cardFor(g, 'T')!
+            const rows = g.cards.filter(c => c.frameId === frame.id)
+            expect(rows.map(r => r.nodeId ?? r.kind)).toEqual(['c0', 'c1', 'divider', 'x0', 'x1', 'x2'])
+            const divider = rows.find(r => r.kind === 'divider')!
+            expect(divider.label).toBe('everything else inside')
+            expect(divider.count).toBe(3)
+        })
+
+        it('is not drawn once the window has scrolled past it', () => {
+            // A divider is a claim about what is ON SCREEN. Left at the top
+            // of a window showing only roster rows, it would announce a
+            // boundary the reader cannot see.
+            const g = mixedRoster(2, 14, 6)
+            const rows = g.cards.filter(c => c.frameId === cardFor(g, 'T')!.id)
+            expect(rows.some(r => r.kind === 'divider')).toBe(false)
+            expect(rows[0].nodeId).toBe('x4')
+        })
+
+        it('needs both kinds of row to divide — never a lone header', () => {
+            expect(mixedRoster(2, 0).cards.some(c => c.kind === 'divider')).toBe(false)
+            expect(mixedRoster(0, 3).cards.some(c => c.kind === 'divider')).toBe(false)
+        })
+    })
+
+    describe('row cues — every one of them a fact the model already holds', () => {
+        const cueShape = () => {
+            const sg = subgraph({
+                focus: 'F',
+                nodes: [
+                    wnode('F'), wnode('T', 'dataset', 'src'),
+                    wnode('c0', 'schemaField', 'amount', { description: 'Gross charge amount' }),
+                    wnode('v0', 'view', 'amount_v'),
+                ],
+                contains: [['T', 'c0'], ['T', 'v0']],
+                hops: [['c0', 'F'], ['c0', 'F', 'JOINS'], ['v0', 'F'], ['F', 'c0']],
+            })
+            const base = initialLensViewState(sg)
+            return { sg, base }
+        }
+
+        it('states connection weight per side, straight off the walk model', () => {
+            const { sg, base } = cueShape()
+            const g = layout(sg, { ...base, expandedContainment: new Set([...base.expandedContainment, 'T']) })
+            // Two hops out of `c0` into the focus, one back into it — the
+            // same hops the wires are drawn from, counted the same way.
+            expect(cardFor(g, 'c0')!.flowsOut).toBe(2)
+            expect(cardFor(g, 'c0')!.flowsIn).toBe(1)
+            expect(cardFor(g, 'v0')!.flowsOut).toBe(1)
+            expect(cardFor(g, 'v0')!.flowsIn).toBe(0)
+        })
+
+        it('a row states its TYPE only where its frame holds more than one kind', () => {
+            const { sg, base } = cueShape()
+            const mixed = layout(sg, { ...base, expandedContainment: new Set([...base.expandedContainment, 'T']) })
+            expect(cardFor(mixed, 'c0')!.showType).toBe(true)
+            expect(cardFor(mixed, 'v0')!.showType).toBe(true)
+
+            // The same frame holding one kind says it once, on the frame.
+            const plain = subgraph({
+                focus: 'F',
+                nodes: [
+                    wnode('F'), wnode('T', 'dataset', 'src'),
+                    wnode('c0', 'schemaField', 'amount'), wnode('c1', 'schemaField', 'currency'),
+                ],
+                contains: [['T', 'c0'], ['T', 'c1']],
+                hops: [['c0', 'F'], ['c1', 'F']],
+            })
+            const pb = initialLensViewState(plain)
+            const g = layout(plain, { ...pb, expandedContainment: new Set([...pb.expandedContainment, 'T']) })
+            expect(cardFor(g, 'c0')!.showType).toBe(false)
+        })
+
+        it('a roster-only row carries its description and no lineage at all', () => {
+            const sg = subgraph({
+                focus: 'F',
+                nodes: [wnode('F'), wnode('T', 'dataset', 'src'), wnode('c0', 'schemaField', 'amount')],
+                contains: [['T', 'c0']],
+                hops: [['c0', 'F']],
+            })
+            const base = initialLensViewState(sg)
+            const g = layout(sg, {
+                ...base,
+                expandedContainment: new Set([...base.expandedContainment, 'T']),
+                frameShowAll: new Set(['T']),
+            }, {
+                childrenAll: new Map([['T', {
+                    children: [
+                        wnode('c0', 'schemaField', 'amount'),
+                        wnode('x0', 'schemaField', 'legacy_col', { description: 'Retired 2024' }),
+                    ],
+                    hasMore: false,
+                    total: 2,
+                }]]),
+                childrenAllStatus: new Map([['T', 'done']]),
+            })
+            const extra = cardFor(g, 'x0')!
+            expect(extra.connected).toBe(false)
+            expect(extra.description).toBe('Retired 2024')
+            expect([extra.flowsIn, extra.flowsOut]).toEqual([0, 0])
+        })
     })
 
     it('a frame\'s Find reaches the rows the frame was opened to show', () => {

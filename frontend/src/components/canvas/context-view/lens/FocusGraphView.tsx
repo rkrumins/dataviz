@@ -59,6 +59,7 @@ import {
   getNodesBounds,
   getViewportForBounds,
   useReactFlow,
+  useStore,
   type Edge,
   type EdgeProps,
   type Node,
@@ -72,8 +73,9 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, FRAME_FOOTER_H, framePager, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
+import { CARD_W, BAND_GAP, FRAME_HEADER_H, FRAME_PAD, frameWindow, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
 import { REVEAL_PAGE, pathToFocus, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
+import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 
 /** Direction tints — the house semantics: upstream = sky, downstream
@@ -120,6 +122,19 @@ const PathHighlightContext = createContext<{
   source: 'hover' | 'select'
 } | null>(null)
 
+/**
+ * Where the KEYBOARD is: which frame is being browsed, and which of its
+ * rows the cursor is resting on.
+ *
+ * Context for the same reason hover and reach are — arrowing down a
+ * 400-row table must re-render the two rows whose cursor state changed,
+ * never rebuild the nodes array. `frameKey` is the frame's own key (an
+ * entity urn), so a row can tell "the cursor is on ME" from "the cursor
+ * is on a row of some other frame that happens to share my urn" — which
+ * a diamond genuinely can produce.
+ */
+const RowCursorContext = createContext<{ frameKey: string; urn: string } | null>(null)
+
 /** Off the highlighted path, under a SELECTION. Quiet enough to read as
  *  background, light enough that every name is still legible — the old
  *  30% turned the rest of the board into grey ghosts. */
@@ -150,9 +165,17 @@ interface CardCtx {
   /** Open / close what a card holds. Free: a re-projection over the
    *  walk model, never a fetch. */
   onToggleFrame: (expandKey: string) => void
-  /** Move a frame's fixed page window to `page` (0-based), fetching the
-   *  next server page when the window runs past what has loaded. */
-  onSetFramePage: (openKey: string, page: number) => void
+  /** Rest a frame's scroll window on row `offset` (0-based, absolute),
+   *  fetching the next server page as the window nears what has loaded.
+   *  The VIEW clamps — it is the side that knows how many rows there
+   *  are — so a wheel spun past the end never banks an offset the frame
+   *  would then have to scroll back through. */
+  onFrameScroll: (openKey: string, offset: number) => void
+  /** A wheel gesture over a frame, in raw pixels. Resolved to whole rows
+   *  and clamped where the row count lives (the built graph), so a row —
+   *  which knows only which frame it is in — can simply hand the delta
+   *  over. */
+  onFrameWheel: (openKey: string, deltaPx: number) => void
   onFrameQuery: (openKey: string, q: string) => void
   /** Current text typed into a frame's own filter. */
   frameQueryFor?: (openKey: string) => string
@@ -162,6 +185,8 @@ interface CardCtx {
   onRetryFrameAll?: (openKey: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
+  /** Move the keyboard cursor inside a frame. `urn` null parks it. */
+  onRowCursor: (frameKey: string, urn: string | null) => void
   // ── Growing the walk ─────────────────────────────────────────────
   // Optional so a caller can render a picture it does not intend to be
   // grown (the visual harness does exactly that); the ⊕ renders only
@@ -197,7 +222,7 @@ interface FocusGraphViewProps {
   onSelect: (nodeId: string | null) => void
   onFocus: (nodeId: string) => void
   onToggleFrame: (expandKey: string) => void
-  onSetFramePage: (openKey: string, page: number) => void
+  onFrameScroll: (openKey: string, offset: number) => void
   onFrameQuery: (openKey: string, q: string) => void
   frameQueryFor?: (openKey: string) => string
   onToggleFrameAll?: (openKey: string) => void
@@ -251,6 +276,17 @@ function sameCard(a: FocusCard, b: FocusCard): boolean {
       const x = a[k] ?? null, y = b[k] ?? null
       if (x === null || y === null) { if (x !== y) return false; continue }
       if (x.onLineage !== y.onLineage || x.total !== y.total) return false
+      continue
+    }
+    // A frame's whole row list. Compared by VALUE like the rest — and
+    // cheaply, because the list is flat: a wide table rebuilds 400 tiny
+    // records, and a memo that missed here would re-render every frame
+    // on the board for every keystroke.
+    if (k === 'frameRows') {
+      const x = a[k], y = b[k]
+      if (x === y) continue
+      if (x.length !== y.length) return false
+      if (x.some((v, i) => v.urn !== y[i].urn || v.label !== y[i].label)) return false
       continue
     }
     if (a[k] !== b[k]) return false
@@ -490,6 +526,21 @@ const gutterEnds = (card: FocusCard) => ({
   right: card.pillDown != null || (card.deadEnd && card.band >= 0),
 })
 
+/**
+ * A DOM id for a row, so its frame's listbox can OWN it and point at it.
+ *
+ * Rows are React Flow SIBLINGS of their frame, not DOM descendants, so
+ * `aria-activedescendant` alone would name an element outside the
+ * listbox; `aria-owns` is the sanctioned way to state the relationship
+ * anyway. Scoped by the frame, because a diamond genuinely can put one
+ * entity in two frames at once. The escape is injective (`_` escapes
+ * itself), so two urns differing only in punctuation cannot collide.
+ */
+const domSafe = (s: string): string =>
+  s.replace(/[^a-zA-Z0-9-]/g, c => `_${c.charCodeAt(0).toString(36)}`)
+const rowDomId = (frameKey: string, urn: string): string =>
+  `lens-row-${domSafe(frameKey)}-${domSafe(urn)}`
+
 /** Hover action cluster shared by entity-ish cards. */
 function CardActions({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   if (!card.nodeId) return null
@@ -708,6 +759,184 @@ function ContentsCount({ card }: { card: FocusCard }) {
   )
 }
 
+/** How much of a wheel gesture makes one row of travel. Trackpads report
+ *  a few px per frame and a mouse notch ~100, so this has to be small
+ *  enough to feel continuous and large enough that one notch is not a
+ *  jump. */
+const WHEEL_PX_PER_ROW = 26
+
+/**
+ * ONE row language, for all three places children are browsed: the rows
+ * inside a partner's frame, the focal's contains-stack, and the roster a
+ * frame shows in "everything inside".
+ *
+ * They used to be two different renderings (a rich card squeezed into a
+ * row, and a quiet dashed strip) that agreed about nothing — different
+ * heights, different cues, one with a hover toolbar that landed on top of
+ * the ⊕ beside it. A child is a child: icon, name, and the cues the model
+ * can actually vouch for.
+ *
+ * Every cue is a fact already in hand, and each one earns its place:
+ *   • the ×N badge — hops between this row and the picture, compact,
+ *     with the same number spelled out in words on hover;
+ *   • its own type, but only where the frame holds more than one kind;
+ *   • its relationship, but only where its siblings do not share it;
+ *   • what it holds ("3 on this lineage · of 12");
+ *   • its description, last, in whatever room is left.
+ * A row the walk never reached keeps the quiet "no lineage" treatment —
+ * it is context, and it must never read as a connection.
+ */
+function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; selected: boolean }) {
+  const { onPath, offPath } = usePathState(card.id)
+  const cursor = useContext(RowCursorContext)
+  // The frame a row sits in is its containment parent — a row is only
+  // ever emitted among its own parent's children.
+  const hostKey = card.parentId ?? ''
+  const onCursor = cursor !== null && cursor.frameKey === hostKey && cursor.urn === card.nodeId
+  const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
+  const dim = card.dimmed ? (card.connected ? 'opacity-30' : 'opacity-20') : offPath ? OFF_PATH_CARD : undefined
+
+  const activate = () => ctx.onSelect(card.nodeId)
+  // The ⊕ tucks INSIDE a row (there is no outside), so the content
+  // yields exactly the room a pill owns and no label runs under one.
+  const gutters = gutterEnds(card)
+  const flows = card.flowsIn + card.flowsOut
+  const words = flows > 0
+    ? `${flows.toLocaleString()} flow${flows === 1 ? '' : 's'} · ${card.flowsIn.toLocaleString()} in / ${card.flowsOut.toLocaleString()} out`
+    : null
+
+  return (
+    <div
+      id={rowDomId(hostKey, card.nodeId ?? card.id)}
+      // An option of its frame's listbox — see `rowDomId`. The frame is
+      // the single tab stop; a row is reached with the arrow keys and
+      // named by `aria-activedescendant`, so Tab never has to walk 400
+      // columns to get past a table.
+      role="option"
+      aria-selected={selected}
+      tabIndex={-1}
+      // A wheel anywhere over a frame scrolls it, and a row is what the
+      // pointer is actually over. `nowheel` is what stops React Flow
+      // zooming the board out from under the gesture.
+      className={cn(
+        'nowheel group relative flex items-center gap-2 rounded-lg px-2.5 cursor-pointer transition-colors focus-visible:outline-none',
+        card.connected
+          ? 'border border-black/[0.07] dark:border-white/[0.08] bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50'
+          // Inside this, but off the lineage: background by default, and
+          // it lights up only when you point at it.
+          : 'border border-dashed border-black/[0.08] dark:border-white/[0.09] bg-transparent hover:border-accent-lineage/40 hover:bg-black/[0.02] dark:hover:bg-white/[0.03] opacity-60 hover:opacity-100',
+        selected ? 'ring-2 ring-accent-lineage' : onCursor ? 'ring-2 ring-accent-lineage/60' : onPath && 'ring-1 ring-accent-lineage/70',
+        dim,
+      )}
+      style={{
+        width: card.w,
+        height: card.h,
+        ...(card.connected ? { borderLeftWidth: 3, borderLeftColor: accent } : {}),
+        paddingLeft: gutters.left ? PILL_ZONE : undefined,
+        paddingRight: gutters.right ? PILL_ZONE : undefined,
+      }}
+      onWheel={(e) => {
+        e.stopPropagation()
+        ctx.onFrameWheel(hostKey, e.deltaY)
+      }}
+      onClick={activate}
+      onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
+      title={`${card.label}${card.description ? ` — ${card.description}` : ''}${
+        card.connected ? '' : ' — inside this, but no lineage with the focused entity'
+      } · click for a preview, double-click to focus`}
+    >
+      {card.wired && <PortHandles />}
+      <ContentsChevron card={card} ctx={ctx} />
+      <div
+        className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
+        style={{ backgroundColor: card.connected ? `${accent}1f` : 'transparent' }}
+      >
+        <TypeIcon ctx={ctx} typeId={card.type} color={accent} className={cn('w-3.5 h-3.5', !card.connected && 'opacity-60')} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className={cn('truncate text-[12px] leading-snug', card.connected ? 'font-medium text-ink' : 'text-ink-secondary')}>
+          {card.label}
+        </p>
+        <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug min-w-0">
+          {/* Which KIND of thing — only where the frame holds several. */}
+          {card.showType && (
+            <span
+              className="flex-shrink-0 px-1 rounded uppercase tracking-wide font-semibold"
+              style={{ backgroundColor: `${accent}1f`, color: accent }}
+            >
+              {card.type}
+            </span>
+          )}
+          {card.edgeTypeNorm && card.edgeTypeNorm !== card.frameSharedEdgeType && (
+            <>
+              <span
+                className="w-1 h-1 rounded-full flex-shrink-0"
+                style={{ backgroundColor: generateEdgeColorFromType(card.edgeTypeNorm) }}
+              />
+              <span
+                className="truncate uppercase tracking-wide"
+                title={ctx.edgeTypeInfo?.get(card.edgeTypeNorm)?.description}
+              >
+                {edgeLabelFor(card.edgeTypeNorm, ctx.edgeTypeInfo)}
+              </span>
+            </>
+          )}
+          {card.count > 1 && (
+            // Compact by default, spelled out when you point at it: "×17"
+            // is scannable down a column of forty rows, and "17 flows ·
+            // 12 in / 5 out" is what it MEANS.
+            <span
+              className="tabular-nums font-semibold text-ink-muted flex-shrink-0"
+              title={words ?? `${card.count.toLocaleString()} connections to this entity`}
+            >
+              ×{card.count.toLocaleString()}
+            </span>
+          )}
+          {card.contents && (
+            <>
+              {(card.showType || card.count > 1 || card.edgeTypeNorm) && <span className="text-ink-muted/40">·</span>}
+              <ContentsCount card={card} />
+            </>
+          )}
+          {card.description && (
+            <span className="truncate min-w-0 italic text-ink-muted/60">{card.description}</span>
+          )}
+          {!card.connected && !card.description && (
+            <span className="flex-shrink-0 text-ink-muted/50">no lineage</span>
+          )}
+        </p>
+      </div>
+      {/* A row that carries no lineage says so on its right edge, where
+          a connected row shows its ⊕ — so the two read as one column of
+          answers rather than as an absence. */}
+      {!card.connected && card.description && (
+        <span className="flex-shrink-0 text-[9px] text-ink-muted/50">no lineage</span>
+      )}
+      <WalkPills card={card} ctx={ctx} />
+    </div>
+  )
+}
+
+/** The quiet line between the rows that answer the question and the rows
+ *  that merely live here. Not an entity, so it is not a card you can
+ *  click — it is a sentence about the two groups either side of it. */
+function FrameDividerNode({ data }: NodeProps) {
+  const { card, ctx } = data as unknown as { card: FocusCard; ctx: CardCtx }
+  return (
+    <div
+      className="nowheel flex items-center gap-2 px-1 select-none"
+      style={{ width: card.w, height: card.h }}
+      onWheel={(e) => { e.stopPropagation(); ctx.onFrameWheel(card.parentId ?? '', e.deltaY) }}
+    >
+      <span className="h-px flex-1 bg-black/[0.08] dark:bg-white/[0.10]" />
+      <span className="flex-shrink-0 text-[9px] text-ink-muted/70 tabular-nums">
+        {card.label} — {card.count.toLocaleString()} item{card.count === 1 ? '' : 's'}
+      </span>
+      <span className="h-px flex-1 bg-black/[0.08] dark:bg-white/[0.10]" />
+    </div>
+  )
+}
+
 function FocusGraphCard({ data, selected }: NodeProps) {
   const { card, ctx, focalStats } = data as unknown as {
     card: FocusCard
@@ -755,7 +984,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
           dim,
         )}
       >
-        <PortHandles />
+        {card.wired && <PortHandles />}
         {/* The focus is where a walk starts, so both of its ⊕ live here
             — upstream on the left edge, downstream on the right. */}
         <WalkPills card={card} ctx={ctx} />
@@ -823,45 +1052,10 @@ function FocusGraphCard({ data, selected }: NodeProps) {
     )
   }
 
-  // ── Inside a frame, with no lineage to the focal ──
-  // Shown only in "everything inside" mode. Deliberately quiet: it is
-  // context, not an answer, and it must never look like a connection.
-  if (card.frameId && !card.connected) {
-    return (
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={activate}
-        onKeyDown={keyActivate}
-        onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
-        title={`${card.label}${card.description ? ` — ${card.description}` : ''} — inside this, but no lineage with the focused entity · double-click to focus`}
-        style={{ width: card.w, height: card.h }}
-        className={cn(
-          'group relative flex items-center gap-1.5 rounded-lg border border-dashed border-black/[0.08] dark:border-white/[0.09] bg-transparent px-2.5 cursor-pointer transition-colors hover:border-accent-lineage/40 hover:bg-black/[0.02] dark:hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-          selected && 'ring-2 ring-accent-lineage',
-          // Already background: something off the lineage sits at the
-          // off-path floor whether or not a path is highlighted.
-          card.dimmed ? 'opacity-20' : 'opacity-60 hover:opacity-100',
-        )}
-      >
-        <PortHandles />
-        <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3 h-3 flex-shrink-0 opacity-60" />
-        <span className="min-w-0 truncate text-[11px] text-ink-secondary">{card.label}</span>
-        <span className="flex-shrink-0 ml-auto text-[9px] text-ink-muted/50 group-hover:hidden">no lineage</span>
-        <CardActions card={card} ctx={ctx} />
-      </div>
-    )
-  }
+  // ── Inside a frame: ONE row language, whatever the row is ──
+  if (card.frameId) return <FrameRow card={card} ctx={ctx} selected={selected} />
 
-  // ── Entity: the rich neighbor card ──
-
-  // Inside a frame the ⊕ sits IN the card, so the content yields the
-  // room it needs. A top-level card's pills hang outside and take none.
-  const gutters = gutterEnds(card)
-  const gutter = card.frameId
-    ? { paddingLeft: gutters.left ? PILL_ZONE : undefined, paddingRight: gutters.right ? PILL_ZONE : undefined }
-    : undefined
-
+  // ── Entity: the rich neighbor card, at the top level of a band ──
   return (
     <div
       role="button"
@@ -870,14 +1064,14 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       onKeyDown={keyActivate}
       onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
       title={`${card.label}${card.description ? ` — ${card.description}` : ''} · click to inspect, double-click to focus`}
-      style={{ width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent, ...gutter }}
+      style={{ width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent }}
       className={cn(
         'group relative flex items-center gap-2 rounded-lg border border-black/[0.07] dark:border-white/[0.08] px-2.5 cursor-pointer transition-colors bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
         selected ? 'ring-2 ring-accent-lineage' : onPath && 'ring-1 ring-accent-lineage/70',
         dim,
       )}
     >
-      <PortHandles />
+      {card.wired && <PortHandles />}
       <ContentsChevron card={card} ctx={ctx} />
       {(
         <div
@@ -952,6 +1146,11 @@ function FocusGraphCard({ data, selected }: NodeProps) {
 function FocusFrameNode({ data }: NodeProps) {
   const { card, ctx } = data as unknown as { card: FocusCard; ctx: CardCtx }
   const { onPath, offPath } = usePathState(card.id)
+  // A frame nested inside another frame is also one of ITS rows, so it
+  // answers to the host's keyboard cursor like any other row does.
+  const rowCursor = useContext(RowCursorContext)
+  const hostKey = card.frameId ? card.parentId ?? '' : null
+  const onCursor = hostKey !== null && rowCursor?.frameKey === hostKey && rowCursor.urn === card.nodeId
   // The CONTAINS-STACK: the focus's own contents, not an entity of its
   // own (no urn, nowhere to re-center to, no wires). It is chrome, so it
   // borrows none of the focal's identity — wearing the focus's type
@@ -966,11 +1165,11 @@ function FocusFrameNode({ data }: NodeProps) {
   const q = ctx.frameQueryFor?.(card.expandKey ?? '') ?? ''
   // A total is a claim: state it only when the last page has landed (or
   // the container reported its own count). Otherwise say "at least".
-  const pager = framePager(card)
-  const total = pager.exact ? pager.rows.toLocaleString() : `${pager.rows.toLocaleString()}+`
+  const win = frameWindow(card)
+  const total = win.exact ? win.total.toLocaleString() : `${win.total.toLocaleString()}+`
   // Say which rows are on screen, not just how many exist — "showing
   // 21–40 of 428" is the sentence a 428-column table needs.
-  const range = pager.paged ? `showing ${pager.from.toLocaleString()}–${pager.to.toLocaleString()} of ${total}` : null
+  const range = win.scrollable ? `showing ${win.from.toLocaleString()}–${win.to.toLocaleString()} of ${total}` : null
   // In "everything inside" the search runs on the SERVER, so the counts
   // describe the matches, not the container — say which.
   const searching = card.frameShowingAll && q.trim().length > 0
@@ -989,6 +1188,9 @@ function FocusFrameNode({ data }: NodeProps) {
     : `${card.count.toLocaleString()} connected inside${via}${range ? ` · ${range}` : ''}`
   return (
     <div
+      {...(hostKey !== null && card.nodeId
+        ? { id: rowDomId(hostKey, card.nodeId), role: 'option' as const, 'aria-selected': false }
+        : {})}
       style={{
         width: card.w,
         height: card.h,
@@ -996,13 +1198,13 @@ function FocusFrameNode({ data }: NodeProps) {
       }}
       className={cn(
         'relative rounded-xl border-2 border-dashed pointer-events-none bg-black/[0.02] dark:bg-white/[0.03]',
-        onPath && 'ring-1 ring-accent-lineage/70',
+        onCursor ? 'ring-2 ring-accent-lineage/60' : onPath && 'ring-1 ring-accent-lineage/70',
         offPath && OFF_PATH_CARD,
       )}
     >
       {/* The stack is the focal's own contents, and no wire ever lands on
           it — its rows' lineage is drawn at the focal card above. */}
-      {!isStack && <PortHandles />}
+      {card.wired && <PortHandles />}
       {/* An open container keeps its own lineage question: looking
           inside something must never end the walk. */}
       <WalkPills card={card} ctx={ctx} />
@@ -1034,6 +1236,10 @@ function FocusFrameNode({ data }: NodeProps) {
                 what is left, and truncates there. With no chip beside
                 it the name keeps the whole line: capping it anyway
                 clipped `int_clean_products_t1` for no one's benefit. */}
+            {/* The contains-stack is the FOCUS'S contents, so it says
+                whose: "Inside fact_orders", never a bare "Contains" that
+                names a box rather than a thing. */}
+            {isStack && <span className="flex-shrink-0 text-[9.5px] text-ink-muted/70">Inside</span>}
             <TailName className={cn(
               'block text-[11.5px] font-semibold text-ink leading-tight',
               hasAncestryChip && 'max-w-[62%] flex-shrink-0',
@@ -1043,17 +1249,29 @@ function FocusFrameNode({ data }: NodeProps) {
             <FrameAncestry card={card} ctx={ctx} />
           </div>
           <p className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate">
-            {card.fetch === 'loading'
-              ? 'Looking inside…'
-              // When the roster is standing in for an empty lineage
-              // answer, WHY these rows are here outranks counting them —
-              // otherwise a full list of columns under "0 on this
-              // lineage" reads as the answer to a question nobody asked.
-              : card.contents && !fellBack
-                // Both numbers, exactly: what is in here on this
-                // lineage, and what is in here altogether.
-                ? <ContentsCount card={card} />
-                : inside}
+            {card.fetch === 'loading' ? 'Looking inside…' : (
+              <>
+                {/* When the roster is standing in for an empty lineage
+                    answer, WHY these rows are here outranks counting them
+                    — otherwise a full list of columns under "0 on this
+                    lineage" reads as the answer to a question nobody
+                    asked. */}
+                {card.contents && !fellBack
+                  // Both numbers, exactly: what is in here on this
+                  // lineage, and what is in here altogether.
+                  ? <ContentsCount card={card} />
+                  : <span className="truncate">{inside}</span>}
+                {/* And where in the list the reader currently is — a
+                    scroll that never says "21–40 of 428" is a list with
+                    no bottom. */}
+                {range && card.contents && !fellBack && (
+                  <>
+                    <span className="text-ink-muted/40">·</span>
+                    <span className="flex-shrink-0 tabular-nums">{range}</span>
+                  </>
+                )}
+              </>
+            )}
           </p>
         </div>
         {/* Connected ⇄ All. The default answers "what in here is on this
@@ -1098,7 +1316,7 @@ function FocusFrameNode({ data }: NodeProps) {
         {/* Find one by name without reading everything — offered only
             when there IS more than one screenful, because reserving the
             room truncated the frame's own name on every frame. */}
-        {(pager.paged || card.frameShowingAll) && (
+        {(win.scrollable || card.frameShowingAll) && (
           <input
             value={q}
             onChange={(e) => ctx.onFrameQuery(card.expandKey ?? '', e.target.value)}
@@ -1106,7 +1324,7 @@ function FocusFrameNode({ data }: NodeProps) {
             placeholder="Find…"
             aria-label={card.frameShowingAll ? `Search inside ${card.label}` : `Filter what is inside ${card.label}`}
             title={card.frameShowingAll
-              ? `Search every entity inside ${card.label}, not only the page on screen`
+              ? `Search every entity inside ${card.label}, not only the rows on screen`
               : 'Filter what is inside'}
             className="nodrag flex-shrink-0 w-16 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
           />
@@ -1148,49 +1366,194 @@ function FocusFrameNode({ data }: NodeProps) {
       )}
       {card.frameEmpty && card.frameLoaded === 0 && card.fetch === null && (
         <p className="absolute inset-x-2.5 top-[52px] text-[10px] text-ink-muted/70 italic leading-snug">
-          {/* The contains-stack is not an entity, so it has no name to
-              put here — "nothing inside Contains" names a box, not a
-              thing. The focal card sits directly above it. */}
-          Nothing {card.nodeId ? `inside ${card.label}` : 'in here'} is on this lineage.
+          Nothing inside {card.label} is on this lineage.
           {ctx.onToggleFrameAll && ' Show everything inside to see what it holds.'}
         </p>
       )}
-      {/* Fixed-window pager. The frame keeps its size as you move
-          through it, so a 500-column table sits on the board like any
-          other card. Next past the fetched set asks the server for one
-          more page and holds this one until it lands. */}
-      {pager.paged && card.childrenOpen && (
-        <div
-          className="pointer-events-auto absolute inset-x-0 bottom-0 flex items-center justify-center gap-2 px-2.5"
-          style={{ height: FRAME_FOOTER_H }}
-        >
-          <button
-            type="button"
-            disabled={!pager.canPrev}
-            onClick={(e) => { e.stopPropagation(); ctx.onSetFramePage(card.expandKey ?? '', card.framePage - 1) }}
-            aria-label={`Previous page of ${card.label}`}
-            title="Previous page"
-            className="nodrag w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08] disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed"
-          >
-            <LucideIcons.ChevronLeft className="w-3 h-3" />
-          </button>
-          <span className="text-[9.5px] tabular-nums text-ink-muted/80">
-            {card.fetch === 'loading'
-              ? 'loading…'
-              : `page ${(card.framePage + 1).toLocaleString()} of ${pager.pageCount.toLocaleString()}${pager.exact ? '' : '+'}`}
-          </span>
-          <button
-            type="button"
-            disabled={!pager.canNext || card.fetch === 'loading'}
-            onClick={(e) => { e.stopPropagation(); ctx.onSetFramePage(card.expandKey ?? '', card.framePage + 1) }}
-            aria-label={`Next page of ${card.label}`}
-            title="Next page"
-            className="nodrag w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08] disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed"
-          >
-            <LucideIcons.ChevronRight className="w-3 h-3" />
-          </button>
-        </div>
+      {card.childrenOpen && (
+        <FrameScrollRegion card={card} ctx={ctx} win={win} />
       )}
+    </div>
+  )
+}
+
+/**
+ * The frame's BODY as a browsable list: a wheel scrolls it, a keyboard
+ * walks it, and a thumb on its right edge says where in the list you are.
+ *
+ * It is a region rather than a real scroll container because the rows are
+ * React Flow nodes, not DOM children of the frame — that is what lets a
+ * wire land on one row of a 400-column table. So the window moves by
+ * WHOLE ROWS: a row is either fully drawn inside its frame or not drawn
+ * at all, which is exactly the clipping a native scroller would give and
+ * is the one thing an overflow-less absolute layout cannot fake.
+ *
+ * It sits UNDER the rows (see zIndex where nodes are built), so it is the
+ * wheel target only in the frame's own margins; the rows forward theirs.
+ */
+function FrameScrollRegion({ card, ctx, win }: {
+  card: FocusCard
+  ctx: CardCtx
+  win: ReturnType<typeof frameWindow>
+}) {
+  const key = card.expandKey ?? ''
+  const cursor = useContext(RowCursorContext)
+  const rows = card.frameRows
+  const cursorIndex = cursor?.frameKey === key
+    ? rows.findIndex(r => r.urn === cursor.urn)
+    : -1
+  // Type-ahead buffer: consecutive letters compose one search, a pause
+  // starts a new one. Held in a ref because it is not visible state —
+  // re-rendering the frame per keystroke would be a rebuild for nothing.
+  const typed = useRef<{ text: string; at: number }>({ text: '', at: 0 })
+
+  const scrollTo = (offset: number) =>
+    ctx.onFrameScroll(key, Math.max(0, Math.min(offset, win.maxOffset)))
+
+  /** Put the cursor on row `i`, bringing the window to it. */
+  const moveCursor = (i: number) => {
+    const next = Math.max(0, Math.min(i, rows.length - 1))
+    const row = rows[next]
+    if (!row) return
+    ctx.onRowCursor(key, row.urn)
+    if (next < win.offset) scrollTo(next)
+    else if (next >= win.offset + win.size) scrollTo(next - win.size + 1)
+  }
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const at = cursorIndex
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      e.stopPropagation()
+      moveCursor(at < 0 ? win.offset : at + (e.key === 'ArrowDown' ? 1 : -1))
+      return
+    }
+    if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault()
+      e.stopPropagation()
+      moveCursor(e.key === 'Home' ? 0 : rows.length - 1)
+      return
+    }
+    if (e.key === 'Enter' && at >= 0) {
+      e.preventDefault()
+      e.stopPropagation()
+      // Shift is the second gesture the mouse spells double-click:
+      // Enter previews, Shift+Enter commits to walking there.
+      if (e.shiftKey) ctx.onFocus(rows[at].urn)
+      else ctx.onSelect(rows[at].urn)
+      return
+    }
+    if (e.key === 'ArrowRight' && at >= 0 && rows[at].canOpen) {
+      e.preventDefault()
+      e.stopPropagation()
+      ctx.onToggleFrame(rows[at].urn)
+      return
+    }
+    if (e.key === 'ArrowLeft' || e.key === 'Escape') {
+      // Step OUT: drop the preview and the cursor, and leave the frame
+      // header focused. Escape must not reach the lens's own handler
+      // and close the whole dialog while a row is being read.
+      if (at < 0 && e.key === 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      ctx.onSelect(null)
+      ctx.onRowCursor(key, null)
+      return
+    }
+    // Type-ahead — the way anyone finds `posted_at` in a 400-column
+    // table without reaching for the mouse. Client-side over the rows in
+    // hand; a miss hands the letters to the frame's own Find, which asks
+    // the server about the rows that have NOT loaded.
+    if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey && e.key !== ' ') {
+      e.stopPropagation()
+      const now = Date.now()
+      const text = (now - typed.current.at < 800 ? typed.current.text : '') + e.key.toLowerCase()
+      typed.current = { text, at: now }
+      const from = at < 0 ? 0 : at + (text.length === 1 ? 1 : 0)
+      const order = [...rows.slice(from), ...rows.slice(0, from)]
+      const hit = order.find(r => r.label.toLowerCase().startsWith(text))
+        ?? order.find(r => r.label.toLowerCase().includes(text))
+      if (hit) moveCursor(rows.findIndex(r => r.urn === hit.urn))
+      else ctx.onFrameQuery(key, text)
+    }
+  }
+
+  return (
+    <>
+      <div
+        // `nowheel` is what stops React Flow zooming the board out from
+        // under a scroll; `nodrag` stops a scroll-drag panning it.
+        className="nowheel nodrag pointer-events-auto absolute inset-x-0 bottom-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded-b-xl"
+        style={{ top: FRAME_HEADER_H }}
+        // The single tab stop for the whole list: Tab must not have to
+        // walk 400 columns to get past a table. Inside it, the arrow
+        // keys move a cursor named by `aria-activedescendant` — the rows
+        // are owned rather than contained, because React Flow renders
+        // them as the frame's siblings (see `rowDomId`).
+        role="listbox"
+        tabIndex={0}
+        aria-label={`Rows inside ${card.label}. Up and down to move, Enter to preview, Shift+Enter to focus, right arrow to open, Escape to leave.`}
+        aria-activedescendant={cursorIndex >= 0 ? rowDomId(key, rows[cursorIndex].urn) : undefined}
+        // Only the rows actually DRAWN: an owned id that names nothing
+        // is a broken relationship, not a generous one.
+        aria-owns={rows.slice(win.offset, win.offset + win.size).map(r => rowDomId(key, r.urn)).join(' ') || undefined}
+        onKeyDown={onKeyDown}
+        onWheel={(e) => { e.stopPropagation(); ctx.onFrameWheel(key, e.deltaY) }}
+        onFocus={() => { if (cursorIndex < 0 && rows.length > 0) ctx.onRowCursor(key, rows[win.offset]?.urn ?? rows[0].urn) }}
+      />
+      {/* Where in the list you are. A thumb rather than a page number,
+          because the list has no pages any more — and it is draggable,
+          so a 400-row table is one gesture from end to end. */}
+      {win.scrollable && (
+        <FrameScrollThumb card={card} win={win} onScroll={scrollTo} />
+      )}
+      {/* The next page, on its way in. A shimmer where the rows will be
+          is the honest statement: they are coming, and this is how many. */}
+      {card.fetch === 'loading' && win.atEnd && (
+        <div className="absolute inset-x-2.5 bottom-2 h-6 rounded-lg bg-black/[0.05] dark:bg-white/[0.06] animate-pulse" />
+      )}
+    </>
+  )
+}
+
+/** The scroll thumb: size says how much of the list is on screen,
+ *  position says where. Dragging it moves the window. */
+function FrameScrollThumb({ card, win, onScroll }: {
+  card: FocusCard
+  win: ReturnType<typeof frameWindow>
+  onScroll: (offset: number) => void
+}) {
+  const trackH = Math.max(0, card.h - FRAME_HEADER_H - FRAME_PAD * 2)
+  const span = Math.max(1, win.loaded)
+  const thumbH = Math.max(18, Math.round(trackH * Math.min(1, win.size / span)))
+  const travel = Math.max(0, trackH - thumbH)
+  const thumbY = win.maxOffset === 0 ? 0 : Math.round(travel * (win.offset / win.maxOffset))
+  return (
+    <div
+      className="nodrag pointer-events-auto absolute w-1.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07]"
+      style={{ top: FRAME_HEADER_H + FRAME_PAD, right: 3, height: trackH }}
+      aria-hidden
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        const track = e.currentTarget
+        const rect = track.getBoundingClientRect()
+        const move = (ev: PointerEvent) => {
+          const t = travel === 0 ? 0 : (ev.clientY - rect.top - thumbH / 2) / travel
+          onScroll(Math.round(Math.max(0, Math.min(1, t)) * win.maxOffset))
+        }
+        move(e.nativeEvent)
+        const up = () => {
+          window.removeEventListener('pointermove', move)
+          window.removeEventListener('pointerup', up)
+        }
+        window.addEventListener('pointermove', move)
+        window.addEventListener('pointerup', up)
+      }}
+    >
+      <div
+        className="absolute inset-x-0 rounded-full bg-black/25 dark:bg-white/30"
+        style={{ top: thumbY, height: thumbH }}
+      />
     </div>
   )
 }
@@ -1243,7 +1606,18 @@ function BandLabelNode({ data }: NodeProps) {
   )
 }
 
-const NODE_TYPES = { focusCard: MemoFocusGraphCard, focusFrame: MemoFocusFrameNode, bandLabel: BandLabelNode }
+const MemoFrameDividerNode = memo(FrameDividerNode, (prev, next) => {
+  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx }
+  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx }
+  return a.ctx === b.ctx && sameCard(a.card, b.card)
+})
+
+const NODE_TYPES = {
+  focusCard: MemoFocusGraphCard,
+  focusFrame: MemoFocusFrameNode,
+  focusDivider: MemoFrameDividerNode,
+  bandLabel: BandLabelNode,
+}
 
 // ── Edge ─────────────────────────────────────────────────────────────
 
@@ -1333,6 +1707,190 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
 }
 
 const EDGE_TYPES = { focusEdge: FocusGraphEdgeComp }
+
+// ── Peek ─────────────────────────────────────────────────────────────
+
+/**
+ * The PEEK — one click on a row, and what that row IS, beside it.
+ *
+ * It replaces the hover toolbar rows used to carry. That toolbar
+ * appeared exactly where the pointer was on its way to the ⊕ beside it,
+ * and half its area was padding with no handler behind it: the reported
+ * "the + needs three clicks". A click now has one meaning on a row —
+ * show me this — and the actions live in a panel that is not in the way
+ * of anything.
+ *
+ * Positioned in SCREEN space beside the row, from the board's own
+ * transform, so it never scales with zoom (a 10px panel at 0.25× is not
+ * a panel) and never has to be laid out by the builder. Subscribing to
+ * the transform HERE, rather than lifting it into the view, is what
+ * keeps a pan re-rendering this panel alone.
+ */
+function LensPeek({ card, host, ctx, onDismiss }: {
+  card: FocusCard
+  /** The frame the row sits in, when it sits in one — the panel docks to
+   *  its right edge so it never covers the rows either side. */
+  host: FocusCard | null
+  ctx: CardCtx
+  onDismiss: () => void
+}) {
+  const [tx, ty, zoom] = useStore(s => s.transform)
+  const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
+  const anchor = host ?? card
+  const x = (anchor.x + anchor.w) * zoom + tx + 10
+  const y = (card.y + card.h / 2) * zoom + ty
+  const flows = card.flowsIn + card.flowsOut
+  const pill = card.band < 0 ? card.pillUp ?? card.pillDown : card.pillDown ?? card.pillUp
+  const pillDir: 'in' | 'out' = pill != null && pill === card.pillUp ? 'in' : 'out'
+  const act = 'w-full flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
+
+  return (
+    <div
+      role="dialog"
+      aria-label={`Preview of ${card.label}`}
+      className="nowheel nodrag absolute z-50 w-[236px] -translate-y-1/2 rounded-xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-xl shadow-black/20 p-2.5"
+      style={{ left: x, top: y }}
+      onClick={(e) => e.stopPropagation()}
+      onWheel={(e) => e.stopPropagation()}
+    >
+      <div className="flex items-start gap-1.5">
+        <div
+          className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
+          style={{ backgroundColor: `${accent}1f` }}
+        >
+          <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-[12px] font-semibold text-ink leading-tight break-words">{card.label}</p>
+          <p className="text-[9px] font-bold uppercase tracking-[0.1em] truncate" style={{ color: accent }}>
+            {card.type}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label="Close preview"
+          className="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+        >
+          <LucideIcons.X className="w-3 h-3" />
+        </button>
+      </div>
+      {/* Where it lives — the same crumb the board draws, so the panel
+          never disagrees with the picture it is sitting on. */}
+      {(card.ancestry.length > 0 || card.parentLabel) && (
+        <p className="mt-1.5 flex items-center gap-1 min-w-0 text-[9.5px] text-ink-muted" title={`in ${card.ancestry.join(' › ')}`}>
+          <LucideIcons.CornerLeftUp className="w-2.5 h-2.5 flex-shrink-0" />
+          <span className="truncate">
+            in {card.ancestry.length > 0 ? card.ancestry.join(' › ') : card.parentLabel}
+          </span>
+        </p>
+      )}
+      {card.description && (
+        <p className="mt-1.5 text-[10px] text-ink-secondary leading-snug line-clamp-3">{card.description}</p>
+      )}
+      {/* What the walk knows about it, in words rather than a badge —
+          and a floor is marked as a floor, never rounded into a total. */}
+      <div className="mt-2 pt-1.5 border-t border-black/[0.07] dark:border-white/[0.08] space-y-0.5 text-[10px] tabular-nums">
+        <p className="flex items-center gap-2.5">
+          <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
+            <LucideIcons.ArrowDownLeft className="w-3 h-3" />
+            {card.flowsIn.toLocaleString()} in
+          </span>
+          <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+            <LucideIcons.ArrowUpRight className="w-3 h-3" />
+            {card.flowsOut.toLocaleString()} out
+          </span>
+          <span className="text-ink-muted/70">
+            {flows === 0 ? 'no lineage here' : `${flows.toLocaleString()} flow${flows === 1 ? '' : 's'} in this walk`}
+          </span>
+        </p>
+        {pill?.count != null && pill.count > 0 && (
+          <p className="text-ink-muted/70">
+            {pill.count.toLocaleString()} more {pillDir === 'in' ? 'upstream' : 'downstream'} not fetched yet
+          </p>
+        )}
+        {card.contents && (
+          <p className="text-ink-muted/70">
+            <ContentsCount card={card} />
+          </p>
+        )}
+        {card.freshness && timeAgo(card.freshness) && (
+          <p className="flex items-center gap-1 text-ink-muted/70">
+            <LucideIcons.Clock className="w-2.5 h-2.5 flex-shrink-0" />
+            Last synced {timeAgo(card.freshness)}
+          </p>
+        )}
+      </div>
+      <div className="mt-2 space-y-1">
+        {/* Only the moves this row can actually make. A "walk from here"
+            over a drained direction would be a button that does nothing,
+            which is the whole complaint the ⊕ states honestly. */}
+        {pill && ctx.onExtend && ctx.onRevealMore && (
+          <button
+            type="button"
+            onClick={() => {
+              onDismiss()
+              if (pill.kind === 'reveal') ctx.onRevealMore?.(pill.key)
+              else if (pill.kind === 'page' && pill.cursor) ctx.onPage?.(pillTarget(pill.key), pillDir, pill.cursor)
+              else ctx.onExtend?.(pill.key, pillTarget(pill.key), pillDir)
+            }}
+            className={cn(act, 'bg-accent-lineage/12 border border-accent-lineage/35 text-accent-lineage hover:bg-accent-lineage/20')}
+          >
+            <LucideIcons.Plus className="w-3 h-3" />
+            Walk further {pillDir === 'in' ? 'upstream' : 'downstream'}
+            {pill.count != null && <span className="ml-auto tabular-nums opacity-70">{pill.count.toLocaleString()}</span>}
+          </button>
+        )}
+        {card.nodeId && (
+          <button
+            type="button"
+            onClick={() => ctx.onFocus(card.nodeId!)}
+            className={cn(act, 'border border-black/10 dark:border-white/10 text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]')}
+          >
+            <LucideIcons.Focus className="w-3 h-3" />
+            Focus here
+          </button>
+        )}
+        {card.canOpenChildren && card.expandKey && (
+          <button
+            type="button"
+            onClick={() => { onDismiss(); ctx.onToggleFrame(card.expandKey!) }}
+            className={cn(act, 'border border-black/10 dark:border-white/10 text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]')}
+          >
+            <LucideIcons.ChevronRight className="w-3 h-3" />
+            {card.childrenOpen ? 'Close what is inside' : 'Open what is inside'}
+          </button>
+        )}
+        {(ctx.onRevealOnCanvas || ctx.onOpenDetails) && card.nodeId && (
+          <div className="flex items-center gap-1 pt-0.5">
+            {ctx.onRevealOnCanvas && (
+              <button
+                type="button"
+                onClick={() => void ctx.onRevealOnCanvas?.(card.nodeId!)}
+                title="Reveal on canvas"
+                className={cn(act, 'justify-center text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]')}
+              >
+                <LucideIcons.Crosshair className="w-3 h-3" />
+                Canvas
+              </button>
+            )}
+            {ctx.onOpenDetails && (
+              <button
+                type="button"
+                onClick={() => ctx.onOpenDetails?.(card.nodeId!)}
+                title="Open details"
+                className={cn(act, 'justify-center text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]')}
+              >
+                <LucideIcons.PanelRight className="w-3 h-3" />
+                Details
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
 
 // ── Controls ─────────────────────────────────────────────────────────
 
@@ -1511,7 +2069,7 @@ export function FocusGraphView({
   onSelect,
   onFocus,
   onToggleFrame,
-  onSetFramePage,
+  onFrameScroll,
   onFrameQuery,
   frameQueryFor,
   onToggleFrameAll,
@@ -1545,6 +2103,44 @@ export function FocusGraphView({
     }
   }, [schema])
 
+  // Where the keyboard is inside a frame. Ephemeral view state — a
+  // cursor is not part of the exploration a share link replays — and it
+  // reaches the rows by CONTEXT, so arrowing down a 400-row table
+  // re-renders the two rows whose ring changed, not the board.
+  const [rowCursor, setRowCursor] = useState<{ frameKey: string; urn: string } | null>(null)
+  const onRowCursor = useCallback((frameKey: string, urn: string | null) => {
+    setRowCursor(urn === null ? null : { frameKey, urn })
+  }, [])
+
+  /**
+   * A wheel over a frame, resolved to whole rows.
+   *
+   * Rows are React Flow nodes, so a frame cannot be a real scroll
+   * container (see `FrameScrollRegion`) — this is the substitute, and it
+   * is where the CLAMP lives, because banking an offset the frame cannot
+   * reach makes the next scroll-back do nothing at all. The remainder
+   * carries over between events so a trackpad's 3px-per-frame stream
+   * moves the list at the same rate a mouse notch does.
+   */
+  const wheelDebt = useRef(new Map<string, number>())
+  const cardByKey = useMemo(() => {
+    const m = new Map<string, FocusCard>()
+    for (const c of graph.cards) if (c.kind === 'frame' && c.expandKey) m.set(c.expandKey, c)
+    return m
+  }, [graph.cards])
+  const onFrameWheel = useCallback((key: string, deltaPx: number) => {
+    const card = cardByKey.get(key)
+    if (!card) return
+    const win = frameWindow(card)
+    if (win.maxOffset === 0) return
+    const debt = (wheelDebt.current.get(key) ?? 0) + deltaPx
+    const rows = Math.trunc(debt / WHEEL_PX_PER_ROW)
+    wheelDebt.current.set(key, debt - rows * WHEEL_PX_PER_ROW)
+    if (rows === 0) return
+    const next = Math.max(0, Math.min(win.offset + rows, win.maxOffset))
+    if (next !== win.offset) onFrameScroll(key, next)
+  }, [cardByKey, onFrameScroll])
+
   const ctx = useMemo<CardCtx>(() => ({
     edgeTypeInfo,
     focalId,
@@ -1552,17 +2148,19 @@ export function FocusGraphView({
     onSelect,
     onFocus,
     onToggleFrame,
-    onSetFramePage,
+    onFrameScroll,
+    onFrameWheel,
     onFrameQuery,
     frameQueryFor,
     onToggleFrameAll,
     onRetryFrameAll,
     onRevealOnCanvas,
     onOpenDetails,
+    onRowCursor,
     onRevealMore,
     onExtend,
     onPage,
-  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onSetFramePage, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRevealMore, onExtend, onPage])
+  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onRevealMore, onExtend, onPage])
 
   const focalIn = focalStats.in
   const focalOut = focalStats.out
@@ -1591,7 +2189,7 @@ export function FocusGraphView({
       const parent = card.frameId ? frameById.get(card.frameId) : undefined
       return {
         id: card.id,
-        type: card.kind === 'frame' ? 'focusFrame' : 'focusCard',
+        type: card.kind === 'frame' ? 'focusFrame' : card.kind === 'divider' ? 'focusDivider' : 'focusCard',
         zIndex: depthOf(card) * 2 + (card.kind === 'frame' ? 0 : 1),
         ...(parent ? { parentId: parent.id } : {}),
         position: parent
@@ -1788,6 +2386,32 @@ export function FocusGraphView({
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
   useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion)
 
+  // The PEEK belongs to a ROW: a click on one asks "what is this", and
+  // this is the answer, beside it. Top-level cards keep the lens's own
+  // detail strip — they have room beneath them and no frame to dock to.
+  const peekCard = useMemo(
+    () => (selectedId ? graph.cards.find(c => c.nodeId === selectedId && c.frameId !== null) ?? null : null),
+    [graph.cards, selectedId],
+  )
+  const peekHost = useMemo(
+    () => (peekCard ? graph.cards.find(c => c.id === peekCard.frameId) ?? null : null),
+    [graph.cards, peekCard],
+  )
+  // Esc closes the preview before anything else sees the key — the lens
+  // itself closes on Esc, and dismissing a panel must not close the room
+  // it is sitting in.
+  useEffect(() => {
+    if (!peekCard) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      onSelect(null)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [peekCard, onSelect])
+
   return (
     <div
       className={cn(
@@ -1801,6 +2425,7 @@ export function FocusGraphView({
       <ReachContext.Provider value={reachValue}>
       <HoverContext.Provider value={hoveredId}>
       <PathHighlightContext.Provider value={pathHighlightValue}>
+      <RowCursorContext.Provider value={rowCursor}>
       <ReactFlowProvider>
         <ReactFlow
           nodes={nodes}
@@ -1849,8 +2474,18 @@ export function FocusGraphView({
             focalUrn={focalId}
             onResetLayout={moved.size > 0 ? resetLayout : undefined}
           />
+          {peekCard && (
+            <LensPeek
+              key={peekCard.id}
+              card={peekCard}
+              host={peekHost}
+              ctx={ctx}
+              onDismiss={() => onSelect(null)}
+            />
+          )}
         </ReactFlow>
       </ReactFlowProvider>
+      </RowCursorContext.Provider>
       </PathHighlightContext.Provider>
       </HoverContext.Provider>
       </ReachContext.Provider>

@@ -29,22 +29,19 @@ export const edgeLabelFor = (norm: string, info?: EdgeTypeInfoMap): string =>
 /** How far up the containment chain a card's provenance ribbon walks. */
 export const ANCESTRY_CAP = 6
 
-/** Children per page inside a frame.
+/** Rows a frame shows at once — the SCROLL WINDOW, not a page.
  *
- *  Sized so the frame stays a CARD, not a column. At 12/20 one page of
- *  a wide table came out ~1,030px tall — the viewport's fitView then
+ *  Sized so the frame stays a CARD, not a column. At 12/20 one screenful
+ *  of a wide table came out ~1,030px tall — the viewport's fitView then
  *  zoomed to ~0.4 and every label on the board became unreadable. The
- *  fixed window stopped the frame growing per click; it also has to be
- *  small enough that the frame is legible next to the focal. */
-export const FRAME_CHILD_CAP = 8
-/** Same, but in "show all children" mode — rows are shorter there, so a
+ *  fixed window is what keeps a 500-column table the same size as a
+ *  5-column one; what MOVES it is a scroll rather than a page click. */
+export const FRAME_WINDOW = 8
+/** Same, but in "everything inside" mode — rows are shorter there, so a
  *  couple more fit in the same height. */
-export const FRAME_ALL_CAP = 10
+export const FRAME_WINDOW_ALL = 10
 
 export const FRAME_HEADER_H = 46
-/** The Prev · page N of M · Next strip, present only when there is more
- *  than one page. */
-export const FRAME_FOOTER_H = 26
 export const FRAME_PAD = 10
 
 /** Placeholder type for an entity the lens could not resolve. Named so
@@ -68,12 +65,16 @@ export const CARD_H = 64
  *  Sized to the name alone rather than to a subtitle that will not
  *  render. `rowHeight` below is the single place that decides. */
 export const CHILD_ROW_H = 36
+/** The quiet "everything else inside — N items" line that separates the
+ *  rows on this lineage from the rows that merely live here. */
+export const DIVIDER_ROW_H = 22
 
 /** How tall a row inside a frame must be.
  *
- *  A row prints a subtitle only when it has something the frame has not
- *  already said: a relationship its siblings do not share. Otherwise the
- *  name is the whole row. */
+ *  A row prints a SECOND LINE of its own only when it carries a
+ *  relationship its siblings do not share — everything else a row says
+ *  (its type where the frame mixes kinds, its ×N, what it holds, its
+ *  description) fits the one cue line a 36px row already has. */
 export function rowHeight(sharedEdgeType: string, ownEdgeType: string): number {
   return ownEdgeType !== '' && ownEdgeType !== sharedEdgeType ? CARD_H : CHILD_ROW_H
 }
@@ -85,45 +86,75 @@ export const NEST_INDENT = 16
 export const CONTAINS_STACK_GAP = 18
 
 /**
- * What a frame's pager knows — derived, so the layout that reserves the
- * footer's room and the view that draws it can never disagree.
+ * What a frame's SCROLL WINDOW knows — derived, so the layout that sizes
+ * the frame, the view that draws the rows, and the consumer that fetches
+ * the next page can never disagree about where the reader is.
  *
- * `pageCount` is a FLOOR whenever `exact` is false: with pages still on
- * the server the honest statement is "of 6+", not a guess at the rest.
+ * `total` is a FLOOR whenever `exact` is false: with pages still on the
+ * server the honest statement is "of 40+", not a guess at the rest.
  */
-export function framePager(card: FocusCard) {
-  const size = Math.max(1, card.framePageSize)
+export function frameWindow(card: FocusCard) {
+  const size = Math.max(1, card.frameWindowSize)
   // `frameTotal` is the CONTAINER's child count — every column of the
   // table, not the connected ones. It only describes the frame's extent
   // in "everything inside" mode. Applying it in Connected mode said
-  // "3 connected · showing 1–12 of 428 · page 1 of 36" over three rows,
-  // with 35 pages that hold nothing and a Next that could not move
-  // (Connected mode has no further pages to fetch).
+  // "3 connected · showing 1–12 of 428" over three rows, with 425 rows
+  // that will never arrive (Connected mode has no further pages to
+  // fetch).
   const exact = card.frameShowingAll ? card.frameTotal >= 0 : true
-  // Rows the frame can actually reach. In "all" mode the connected
-  // children are appended to the server's child list, so the roster can
-  // run past the container's own count; paging to `frameTotal` alone
-  // would strand them on a page that does not exist.
-  const rows = card.frameShowingAll
+  // Rows that EXIST, as far as anything has said: what has loaded, or
+  // the container's own count when it is larger (the rest is still on
+  // the server). In "all" mode the connected children are appended to
+  // the server's child list, so the roster can run past the container's
+  // own count — hence the max rather than either one alone.
+  const total = card.frameShowingAll
     ? Math.max(card.frameLoaded, card.frameTotal >= 0 ? card.frameTotal : 0)
     : card.frameLoaded
-  const from = rows === 0 ? 0 : card.framePage * size + 1
-  const to = Math.min(card.framePage * size + size, rows)
-  const pageCount = Math.max(1, Math.ceil(rows / size))
+  // Rows the frame can actually PUT ON SCREEN right now. Scrolling can
+  // never run past what has been fetched; reaching the end is what asks
+  // for the next page.
+  const loaded = card.frameLoaded
+  const offset = Math.min(Math.max(0, card.frameOffset), Math.max(0, loaded - size))
+  const from = loaded === 0 ? 0 : offset + 1
+  const to = Math.min(offset + size, loaded)
   const hasMore = card.frameShowingAll && card.frameHasMore
   return {
-    rows,
+    /** Rows that exist (a floor when `exact` is false). */
+    total,
+    /** Rows in hand — what the window can reach without a fetch. */
+    loaded,
+    offset,
+    size,
     from,
     to,
-    pageCount,
     exact,
-    paged: pageCount > 1 || hasMore,
-    canPrev: card.framePage > 0,
-    canNext: to < rows || hasMore,
+    hasMore,
+    /** More rows than fit: the frame scrolls. */
+    scrollable: loaded > size || hasMore,
+    /** The window is resting on the last loaded row — the moment to ask
+     *  the server for the next page. */
+    atEnd: to >= loaded,
+    /** The furthest the window may travel. */
+    maxOffset: Math.max(0, loaded - size),
   }
 }
 
-export type FocusCardKind = 'focal' | 'entity' | 'frame'
+export type FocusCardKind = 'focal' | 'entity' | 'frame' | 'divider'
+
+/** One row a frame holds, in order — enough for the view to run a
+ *  type-ahead and move a keyboard cursor over rows the window has
+ *  scrolled past, without every row having to be a card on the board. */
+export interface FrameRowRef {
+  urn: string
+  label: string
+  /** It holds things, so the keyboard's "open inside" means something
+   *  here. False for a leaf — an affordance offered over a leaf is a
+   *  key press that does nothing. */
+  canOpen: boolean
+}
+
+/** Shared empty row list, so a card without rows never churns a memo. */
+export const NO_FRAME_ROWS: ReadonlyArray<FrameRowRef> = Object.freeze([])
 
 /**
  * The ⊕ on a card, in exactly one of three states — and the state
@@ -184,12 +215,28 @@ export interface FocusCard {
   label: string
   /** Entity description when known — hover context for business users. */
   description: string | null
+  /** When the data source last synced this entity, VERBATIM off the
+   *  payload (`lastSyncedAt`), null when it never said. Kept raw so the
+   *  layout stays a pure function of its inputs — formatting it here
+   *  would make two builds of one picture differ by the clock. */
+  freshness: string | null
   /** Entity type id; 'not loaded' when the walk could not resolve one. */
   type: string
   parentId: string | null
   parentLabel: string | null
   /** Raw hops this card's subtree carries to the rest of the picture. */
   count: number
+  /** Hops the walk model holds AT THIS ENTITY, per side — the sentence a
+   *  row states in words when you point at it ("17 flows · 12 in / 5
+   *  out"). Straight off the model's own degree, so it counts the same
+   *  hops the wires do; 0/0 for a row the walk never reached (a roster
+   *  extra), which is exactly the "no lineage" case. */
+  flowsIn: number
+  flowsOut: number
+  /** This row's frame holds more than one kind of thing, so the row says
+   *  which it is. In a frame of eight columns the chip would be eight
+   *  identical labels; in a frame of columns AND views it is the answer. */
+  showType: boolean
   /** The one relationship type this card's hops share, '' when they
    *  differ or it carries none. */
   edgeTypeNorm: string
@@ -232,14 +279,19 @@ export interface FocusCard {
   ancestry: string[]
   /** The same chain as urns, so each crumb is a place you can go. */
   ancestryIds: string[]
-  /** Frame cards only — which page of children is on screen (0-based),
-   *  already clamped to what has actually loaded. Paging shows ONE page
-   *  at a time so a 500-column table and a 5-column one occupy the same
-   *  room: raising a cap instead grew the frame past ~2,000px and
-   *  multiplied the card count with every click. */
-  framePage: number
-  /** Frame cards only — children per page. */
-  framePageSize: number
+  /** Frame cards only — the first row on screen (0-based row index),
+   *  already clamped to what has actually loaded. The frame shows ONE
+   *  window at a time so a 500-column table and a 5-column one occupy
+   *  the same room: rendering every row instead grew the frame past
+   *  ~2,000px and multiplied the card count with every open. Scrolling
+   *  MOVES this window; it never grows the frame. */
+  frameOffset: number
+  /** Frame cards only — rows the window holds. */
+  frameWindowSize: number
+  /** Frame cards only — every row it holds, in order, whether or not the
+   *  window is currently on it. The board draws only the window; the
+   *  keyboard cursor and the type-ahead need the whole list. */
+  frameRows: ReadonlyArray<FrameRowRef>
   /** This entity can hold things, so it offers to open its contents.
    *  Independent of the ⊕: "what is inside this" and "what connects to
    *  this next" are different questions and get different controls,
@@ -251,6 +303,12 @@ export interface FocusCard {
   expandKey: string | null
   /** Frame cards: its rows are on screen. Mirrors `childrenOpen`. */
   expanded: boolean
+  /** A wire actually lands on this card, so it needs the ports one
+   *  anchors to. False for a card nothing connects to in this picture —
+   *  a roster extra, or a contains-stack row whose lineage is drawn at
+   *  the focal above it. Two coloured dots that no line ever reaches
+   *  read as a connection the reader then goes looking for. */
+  wired: boolean
   /** The walk reached this card and NOTHING further exists beyond it —
    *  a claim about the data source, made only once the walk says so. */
   deadEnd: boolean
@@ -395,7 +453,6 @@ export function layoutBands(cards: FocusCard[]) {
     c.h = kids.length === 0 && !c.childrenOpen
       ? FRAME_HEADER_H
       : FRAME_HEADER_H + FRAME_PAD + Math.max(inner, kids.length === 0 ? CARD_H : 0) + FRAME_PAD
-        + (framePager(c).paged ? FRAME_FOOTER_H : 0)
   }
   // Children FILL their frame, and a nested frame is wider still (it
   // carries its own padding), so each host widens to hold what it holds.

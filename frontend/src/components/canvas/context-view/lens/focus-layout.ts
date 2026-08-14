@@ -52,14 +52,17 @@ import {
     CARD_H,
     CARD_W,
     CHILD_ROW_H,
+    DIVIDER_ROW_H,
     FOCAL_H,
-    FRAME_ALL_CAP,
-    FRAME_CHILD_CAP,
+    FRAME_WINDOW,
+    FRAME_WINDOW_ALL,
+    NO_FRAME_ROWS,
     UNRESOLVED_TYPE,
     type FocusCard,
     type FocusEdge,
     type FocusGraph,
     type FocusPill,
+    type FrameRowRef,
 } from './focus-cards'
 
 /** Upstream ('in') and downstream ('out') — the lens's own words. The
@@ -128,7 +131,9 @@ export interface LensViewState {
      *  with the rest of this state when the focus changes. */
     walkedThrough: ReadonlySet<string>
     frameQueries: ReadonlyMap<string, string>
-    framePages: ReadonlyMap<string, number>
+    /** Per frame: the first row its scroll window is resting on (0-based
+     *  row index), clamped by the layout to what has actually loaded. */
+    frameOffsets: ReadonlyMap<string, number>
 }
 
 /** One entity's roster — "what is really in here", connected or not.
@@ -188,7 +193,7 @@ export function initialLensViewState(sg: LensSubgraph<LensWalkNode>): LensViewSt
         frameShowAll: new Set(),
         walkedThrough: new Set(),
         frameQueries: new Map(),
-        framePages: new Map(),
+        frameOffsets: new Map(),
     }
 }
 
@@ -811,18 +816,18 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
     const baseCard = (): Omit<FocusCard, 'id' | 'kind' | 'nodeId' | 'band' | 'label' | 'type'> => ({
         x: 0, y: 0, w: CARD_W, h: CARD_H,
-        description: null,
+        description: null, freshness: null,
         parentId: null, parentLabel: null,
-        count: 1, edgeTypeNorm: '',
+        count: 1, flowsIn: 0, flowsOut: 0, showType: false, edgeTypeNorm: '',
         frameId: null, depth: 0,
         ancestry: EMPTY_STRINGS, ancestryIds: EMPTY_STRINGS,
         frameEmpty: false,
         connected: true, frameShowingAll: false, frameConnectedCount: 0,
         frameLoaded: 0, frameTotal: -1, frameHasMore: false,
         frameSharedEdgeType: '',
-        framePage: 0, framePageSize: FRAME_CHILD_CAP,
+        frameOffset: 0, frameWindowSize: FRAME_WINDOW, frameRows: NO_FRAME_ROWS,
         canOpenChildren: false, childrenOpen: false,
-        expandKey: null, expanded: false, deadEnd: false,
+        expandKey: null, expanded: false, wired: false, deadEnd: false,
         fetch: null, dimmed: false,
         pillUp: null, pillDown: null, contents: null,
     })
@@ -917,11 +922,15 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const parent = nodeOf(urn)?.parent ?? null
 
         const roster = childrenAll.get(urn)
+        const rosterNodes = new Map((roster?.children ?? []).map(n => [n.id, n]))
         const rosterExtras = showAll
             ? (roster?.children ?? [])
                 .map(n => n.id)
                 .filter(id => !visible.has(id) && !cardIdByUrn.has(id))
             : []
+        // Connected first, then everything else inside — the order the
+        // divider row below announces, and the order a reader wants:
+        // what answers the question, then what merely lives here.
         const rows = [...kids, ...rosterExtras]
         // The FOCUS is always a compact card. What it holds is stated by
         // the contains-stack attached below it (further down), never by
@@ -935,9 +944,14 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const { pillUp, pillDown, deadEnd } = focusContents.has(urn)
             ? { pillUp: null, pillDown: null, deadEnd: false }
             : walkStateOf(urn, isFrame, band)
-        const pageSize = showAll ? FRAME_ALL_CAP : FRAME_CHILD_CAP
-        const pageCount = Math.max(1, Math.ceil(rows.length / pageSize))
-        const page = Math.min(Math.max(0, view.framePages.get(urn) ?? 0), pageCount - 1)
+        const windowSize = showAll ? FRAME_WINDOW_ALL : FRAME_WINDOW
+        // The scroll window can never travel past what has loaded: a
+        // restored share link, or a roster that shrank under a new
+        // search, must land on rows rather than on empty space.
+        const offset = Math.min(
+            Math.max(0, view.frameOffsets.get(urn) ?? 0),
+            Math.max(0, rows.length - windowSize),
+        )
         const frameQuery = (view.frameQueries.get(urn) ?? '').trim().toLowerCase()
 
         const card: FocusCard = {
@@ -950,6 +964,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             depth,
             label,
             description: (dataOf(urn).description as string | undefined) ?? null,
+            freshness: (dataOf(urn).lastSyncedAt as string | undefined) ?? null,
             type: typeFor(urn),
             frameId: hostFrameId,
             parentId: parent,
@@ -957,10 +972,13 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             ancestry: ancestry.map(labelFor),
             ancestryIds: ancestry,
             count: Math.max(1, weightOf(urn)),
+            flowsIn: nodeOf(urn)?.degreeUp ?? 0,
+            flowsOut: nodeOf(urn)?.degreeDown ?? 0,
             canOpenChildren: (nodeOf(urn)?.children.length ?? 0) > 0,
             childrenOpen: isFrame,
             expandKey: urn,
             expanded: isFrame,
+            wired: drawnIn.has(urn) || drawnOut.has(urn),
             contents: contentsOf(urn),
             pillUp,
             pillDown,
@@ -982,8 +1000,18 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             frameLoaded: showAll ? rows.length : kids.length,
             frameTotal: showAll ? (roster?.total ?? -1) : (contentsOf(urn)?.total ?? -1),
             frameHasMore: showAll ? (roster?.hasMore ?? false) : false,
-            framePage: page,
-            framePageSize: pageSize,
+            frameOffset: offset,
+            frameWindowSize: windowSize,
+            // Every row, not only the windowed ones: the keyboard cursor
+            // and the type-ahead reach rows the window has scrolled past,
+            // and neither can ask the board for a card that is not drawn.
+            frameRows: isFrame || isFocus
+                ? rows.map((child): FrameRowRef => ({
+                    urn: child,
+                    label: visible.has(child) ? labelFor(child) : labelOf(child, rosterNodes.get(child)),
+                    canOpen: visible.has(child) && (nodeOf(child)?.children.length ?? 0) > 0,
+                }))
+                : NO_FRAME_ROWS,
             fetch: isFocus && walkStatus === 'loading' ? 'loading'
                 : isFocus && walkStatus === 'error' ? 'error'
                     : showAll && childrenAllStatus.get(urn) === 'loading' ? 'loading'
@@ -1020,7 +1048,11 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                 // focus already has a card. A second card for one entity
                 // is exactly what `pushCard` refuses.
                 nodeId: null,
-                label: 'Contains',
+                // It keeps the FOCUS'S NAME rather than a bare "Contains":
+                // the view heads it "Inside fact_orders", and every count
+                // and empty-state sentence built from `label` then names
+                // the thing the reader asked about instead of naming a box.
+                label,
                 description: null,
                 h: CARD_H,
                 frameId: null,
@@ -1032,9 +1064,11 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                 parentLabel: null,
                 childrenOpen: rows.length > 0,
                 expanded: rows.length > 0,
-                // The walk's own ⊕ belongs to the focal card, once.
+                // The walk's own ⊕ belongs to the focal card, once — and
+                // so does every wire, so the stack has no ports either.
                 pillUp: null,
                 pillDown: null,
+                wired: false,
                 deadEnd: false,
                 dimmed: false,
                 fetch: showAll && childrenAllStatus.get(urn) === 'loading' ? 'loading'
@@ -1045,16 +1079,38 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         } else if (!isFrame) return
 
         // ONE fixed window of rows, so a 500-column table and a 5-column
-        // one occupy the same room and a page click moves the window
-        // rather than growing the frame.
-        for (const child of rows.slice(page * pageSize, page * pageSize + pageSize)) {
+        // one occupy the same room and scrolling MOVES the window rather
+        // than growing the frame.
+        for (let i = offset; i < Math.min(offset + windowSize, rows.length); i++) {
+            const child = rows[i]
+            // Where "what is on this lineage" ends and "what else is in
+            // here" begins — said once, quietly, instead of leaving the
+            // reader to notice the rows went grey. Drawn only when the
+            // boundary is actually inside the window; scrolled past, it
+            // is not a fact about what is on screen.
+            if (i === kids.length && kids.length > 0 && rosterExtras.length > 0) {
+                pushCard({
+                    ...baseCard(),
+                    id: `div:${urn}`,
+                    kind: 'divider',
+                    nodeId: null,
+                    band,
+                    h: DIVIDER_ROW_H,
+                    depth: depth + 1,
+                    label: 'everything else inside',
+                    type: UNRESOLVED_TYPE,
+                    frameId: host.id,
+                    count: rosterExtras.length,
+                    canOpenChildren: false,
+                })
+            }
             if (visible.has(child)) {
                 emit(child, host.id, depth + 1, band, frameQuery)
                 continue
             }
             // Inside this, but off the lineage. Only ever shown in "All",
             // and marked, because it must never read as a connection.
-            const node = (roster?.children ?? []).find(n => n.id === child)
+            const node = rosterNodes.get(child)
             const rosterLabel = labelOf(child, node)
             pushCard({
                 ...baseCard(),
@@ -1065,6 +1121,11 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                 h: CHILD_ROW_H,
                 depth: depth + 1,
                 label: rosterLabel,
+                description: (node?.data?.description as string | undefined) ?? null,
+                // `lastSyncedAt` rides in the payload but is not on the
+                // canvas node's declared shape (see toCanvasNode), so it
+                // is read the same way the walk model's own payload is.
+                freshness: ((node?.data as Record<string, unknown> | undefined)?.lastSyncedAt as string | undefined) ?? null,
                 type: (node?.data?.type as string) ?? UNRESOLVED_TYPE,
                 frameId: host.id,
                 parentId: urn,
@@ -1100,14 +1161,28 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // not 64. Decided here so the view can never suppress what the layout
     // reserved room for.
     const byId = new Map(cards.map(c => [c.id, c]))
+    const rowsByFrame = new Map<string, FocusCard[]>()
     for (const card of cards) {
-        if (card.kind !== 'frame') continue
-        const rows = cards.filter(c => c.frameId === card.id && c.connected)
-        const types = rows.map(r => edgeTypeOf(r.id))
-        card.frameSharedEdgeType = types.length > 0 && types.every(t => t === types[0]) ? types[0] : ''
+        if (!card.frameId) continue
+        const list = rowsByFrame.get(card.frameId)
+        if (list) list.push(card)
+        else rowsByFrame.set(card.frameId, [card])
     }
     for (const card of cards) {
-        if (!card.frameId || !card.connected) continue
+        if (card.kind !== 'frame') continue
+        const own = (rowsByFrame.get(card.id) ?? []).filter(c => c.kind !== 'divider')
+        const types = own.filter(c => c.connected).map(r => edgeTypeOf(r.id))
+        card.frameSharedEdgeType = types.length > 0 && types.every(t => t === types[0]) ? types[0] : ''
+        // A row states WHICH KIND of thing it is only where its frame
+        // holds more than one kind. Eight columns each chipped
+        // "schemaField" is eight identical labels crowding out the eight
+        // names that differ; a frame holding columns AND views is where
+        // the chip is the answer to "what am I looking at".
+        const kinds = new Set(own.map(c => c.type))
+        for (const row of own) row.showType = kinds.size > 1
+    }
+    for (const card of cards) {
+        if (!card.frameId || !card.connected || card.kind === 'divider') continue
         const host = byId.get(card.frameId)
         if (!host) continue
         card.edgeTypeNorm = edgeTypeOf(card.id)

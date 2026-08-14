@@ -39,9 +39,17 @@ export interface LensShareStateV2 {
   /** Current focal's LensViewState fields, verbatim (see focus-layout.ts):
    *  `revealed` → `${'in'|'out'}:${urn}` → pages; `opened`/`collapsed` →
    *  expanded/collapsed containment; `frameAll` → frames showing
-   *  everything inside; `framePages`/`frameQueries` → per-frame paging
-   *  and search. Selection is deliberately not carried — it is ephemeral
-   *  UI state, not part of the exploration. */
+   *  everything inside; `framePages`/`frameQueries` → where each frame is
+   *  scrolled to and what it is searching. Selection is deliberately not
+   *  carried — it is ephemeral UI state, not part of the exploration.
+   *
+   *  `framePages` KEEPS ITS WIRE NAME while frames no longer page: it is
+   *  now read as a ROW OFFSET (see `LensViewState.frameOffsets`). Both
+   *  are a non-negative position into a frame's row list, and the layout
+   *  clamps it to the rows in hand, so a link written before the pagers
+   *  died still lands its reader somewhere real — which renaming the
+   *  field would not, because a v2 token missing it decodes to null and
+   *  loses the whole walked path with it. */
   revealed: Array<[string, number]>
   opened: string[]
   collapsed: string[]

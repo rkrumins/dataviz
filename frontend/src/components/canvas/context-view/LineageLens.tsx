@@ -57,7 +57,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useTourStore } from '@/features/tour/tourStore'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { lensFocalOf, type LensHistory } from './lens/lensHistory'
-import { labelOf, edgeLabelFor, FRAME_ALL_CAP, type EdgeTypeInfoMap, type LensReach } from './lens/focus-cards'
+import { labelOf, edgeLabelFor, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach } from './lens/focus-cards'
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
 
@@ -196,7 +196,9 @@ export interface LensWalkApi {
  * A restored exploration, applied ONCE to the focal it names — decoded
  * from a share v2 token (see shareCodec.ts). `revealed`/`opened`/
  * `collapsed`/`frameAll`/`framePages`/`frameQueries` are exactly a
- * `LensViewState`'s own fields; a revealed key whose card never lands in
+ * `LensViewState`'s own fields (`framePages` keeps the wire name it was
+ * minted with and is read as `frameOffsets` — see the codec's own note);
+ * a revealed key whose card never lands in
  * the fetched model simply no-ops under the population fixpoint — the
  * same safety `buildFocusLayout` already gives a stale key, so a seed
  * can never reach outside the walk it is applied to. Frontier EXTENDS
@@ -395,7 +397,7 @@ export function LineageLens({
         collapsedContainment: new Set(walkSeed.collapsed),
         frameShowAll: new Set(walkSeed.frameAll),
         frameQueries: new Map(walkSeed.frameQueries),
-        framePages: new Map(walkSeed.framePages),
+        frameOffsets: new Map(walkSeed.framePages),
         // Not carried in a link: the grain a shared picture is drawn at
         // is re-derived from the model the link replays, which is the
         // same model the sharer saw.
@@ -514,10 +516,10 @@ export function LineageLens({
       if (q) queries.set(urn, q)
       else queries.delete(urn)
       // A new search is a new list — start it at the top rather than
-      // leaving the window parked on a page the matches may not reach.
-      const pages = new Map(base.framePages)
-      pages.delete(urn)
-      return { ...base, frameQueries: queries, framePages: pages }
+      // leaving the window parked where the matches may not reach.
+      const offsets = new Map(base.frameOffsets)
+      offsets.delete(urn)
+      return { ...base, frameQueries: queries, frameOffsets: offsets }
     })
   }, [editView])
 
@@ -551,32 +553,40 @@ export function LineageLens({
     return () => clearTimeout(t)
   }, [frameQueriesNow, frameShowAllNow, childrenAll, onLoadAllChildren])
 
-  /** Move a frame's fixed window to an absolute page. Fetching is
-   *  decoupled from the window: one server page backs several render
-   *  pages, so we only ask when the window runs past what is loaded. */
-  const setFramePage = useCallback((urn: string, page: number) => {
+  /**
+   * Rest a frame's scroll window on an absolute row. Fetching is
+   * decoupled from scrolling: one server page backs many rows of travel,
+   * so we only ask when the window nears the end of what is loaded.
+   *
+   * `offset` arrives already clamped by the view (which is the side that
+   * knows how many rows there are), so this only ever records it.
+   */
+  const setFrameOffset = useCallback((urn: string, offset: number) => {
     let showingAll = false
     let q = ''
     editView(base => {
       showingAll = base.frameShowAll.has(urn)
-      // The page we turn to belongs to whatever list is on screen.
+      // The rows we scroll into belong to whatever list is on screen.
       // Asking without the query made the hook see a DIFFERENT question
-      // and refetch page 1 unfiltered.
+      // and refetch the first page unfiltered.
       q = base.frameQueries.get(urn) ?? ''
-      const pages = new Map(base.framePages)
-      pages.set(urn, Math.max(0, page))
-      return { ...base, framePages: pages }
+      const offsets = new Map(base.frameOffsets)
+      offsets.set(urn, Math.max(0, offset))
+      return { ...base, frameOffsets: offsets }
     })
     if (!showingAll) return
+    // One page is one ask. A scroll crosses the "nearly there" line on
+    // several consecutive steps, and each of them would otherwise fire
+    // its own fetch for the page already on its way.
+    if (childrenAllStatus.get(urn) === 'loading') return
     const loaded = childrenAll.get(urn)
-    // One SERVER page backs several render pages — a hundred children is
-    // ten windows of ten — so a page turn inside what is already loaded
-    // must not ask for anything. Without this, nine of every ten Next
-    // clicks spent a round trip re-fetching a list the frame was already
-    // holding.
-    const wanted = (Math.max(0, page) + 1) * FRAME_ALL_CAP
+    // One SERVER page backs many rows of scrolling, so travelling inside
+    // what is already loaded must not ask for anything. The page is
+    // fetched a windowful BEFORE the reader reaches the end, so the list
+    // keeps moving instead of stopping dead at the last loaded row.
+    const wanted = Math.max(0, offset) + FRAME_WINDOW_ALL * 2
     if (!loaded || (loaded.hasMore && loaded.children.length < wanted)) onLoadAllChildren?.(urn, q)
-  }, [editView, childrenAll, onLoadAllChildren])
+  }, [editView, childrenAll, childrenAllStatus, onLoadAllChildren])
 
   const retryFrameAll = useCallback(
     (urn: string) => onLoadAllChildren?.(urn, view.frameQueries.get(urn) ?? ''),
@@ -694,7 +704,7 @@ export function LineageLens({
       opened: [...view.expandedContainment],
       collapsed: [...view.collapsedContainment],
       frameAll: [...view.frameShowAll],
-      framePages: [...view.framePages],
+      framePages: [...view.frameOffsets],
       frameQueries: [...view.frameQueries],
     })
     const url = new URL(window.location.href)
@@ -1318,7 +1328,7 @@ export function LineageLens({
                 onSelect={setSelection}
                 onFocus={onRecenter}
                 onToggleFrame={toggleContents}
-                onSetFramePage={setFramePage}
+                onFrameScroll={setFrameOffset}
                 onFrameQuery={setFrameQuery}
                 frameQueryFor={frameQueryFor}
                 onToggleFrameAll={toggleFrameAll}
