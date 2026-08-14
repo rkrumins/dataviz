@@ -107,14 +107,28 @@ milliseconds even 8 levels deep on multi-million-edge graphs. Same
 answers, same response shape. Trace is unaffected: trace-at-level reads
 same-level cells (still materialized) and already uses raw edges at the
 finest level. A hard write budget (`AGGREGATION_MAX_MATERIALIZED_EDGES`,
-default 50M) fails a job loudly — terminally, no retries, with a
+default 16M) fails a job loudly — terminally, no retries, with a
 per-level composition breakdown in the error — rather than ever letting
-a result OOM the shared instance. That default is a RUNAWAY BACKSTOP,
-not a sizing guard: it sits well above what any real graph produces (a
-1M-node / 2M-edge graph yields a few million canonical pairs) so
-ordinary large graphs complete instead of failing on the budget, and at
-~0.5KB/edge the instance's own `maxmemory`/`noeviction` ceiling is the
-real protection long before 50M is reached. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
+a result OOM the shared instance.
+
+**Size it against ONE SHARD.** A FalkorDB graph key lives entirely on one
+node — Redis Cluster does NOT split a graph, so sharding scales the
+*number* of graphs you can host, not the size of any one, and running on
+a cluster gives a single large graph zero extra headroom
+(`backend/app/providers/falkordb_connection.py` module docstring). The
+reference cluster (`deploy/k8s/overlays/production-cluster/`) runs
+`maxmemory 40gb` per shard against ~22GB planned usage — about 18GB of
+headroom — and its capacity model assumes a largest single graph of ~8GB
+(`docs/INFRASTRUCTURE_LAUNCH_SCALE.md` §2.2). The 16M default is ~8GB at
+~0.5KB/edge: it matches that assumption and still clears the few million
+canonical pairs a 1M-node / 2M-edge graph produces by roughly 4x.
+
+The budget is a backstop, not a sizing guard — it exists so a pathological
+result fails loudly instead of filling the shard. That matters *more* on a
+cluster: `noeviction` at the shard cap fails writes for every graph on
+that shard, and with `cluster-require-full-coverage no` the rest of the
+cluster keeps serving, so the failure is partial and confusing rather
+than obvious. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
 true` restores the legacy full cube (budget-guarded); jobs without an
 ontology level map — or with a SINGLE-LEVEL map (no container types) —
 fall back to it automatically. An empty graph completes as a clean
@@ -258,7 +272,7 @@ pipeline).
 | `AGGREGATION_SCAN_SHRINK_FLOOR` | 10000 | Smallest range width the shrink-on-timeout ladder descends to (a floor-width timeout is an outage and fails the run) |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs (legacy mode only) |
 | `AGGREGATION_MATERIALIZE_FINE_PAIRS` | auto | `auto` picks cube-vs-boundary by estimate; `true`/`false` force the legacy full cube (leaf-involving + mixed-level pairs) |
-| `AGGREGATION_MAX_MATERIALIZED_EDGES` | 50000000 | Hard write budget (fail loud, never OOM) — a runaway backstop, not a sizing guard |
+| `AGGREGATION_MAX_MATERIALIZED_EDGES` | 16000000 | Hard write budget (fail loud, never OOM). ~8GB at 0.5KB/edge — sized against ONE SHARD, since a graph never spans shards. Ceiling 50M |
 | `AGGREGATION_MAX_CUBE_EDGES` | 8000000 | Ceiling on the AUTO-mode full-cube estimate. Deliberately separate from the write budget: sharing them meant raising the backstop silently turned `auto` into full-cube. Not per-job tunable |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves) |
@@ -288,9 +302,10 @@ Every job records `worker_id`, and completed jobs persist `run_stats`
 
 Memory budget per large job at 2M nodes / 5M edges: child→parent map
 ~200MB + accumulator ~250MB + ID cache ~125MB ≈ under 1GB; worker pods
-ship with a 4Gi limit. Note the accumulator is bounded by the PAIRS a
-graph actually produces, not by `AGGREGATION_MAX_PENDING_PAIRS` — the
-cap is only the early-flush trigger. At the 50M default the cap is far
+ship with a 4Gi limit. This is WORKER memory, not graph memory — it is
+unaffected by FalkorDB's topology. Note the accumulator is bounded by the
+PAIRS a graph actually produces, not by `AGGREGATION_MAX_PENDING_PAIRS` —
+the cap is only the early-flush trigger. At the 50M default the cap is far
 above the 4Gi budget (~50M pairs is ~5GB packed), so it will not fire
 before the pod's memory limit does. That is deliberate for graphs in the
 low-millions of pairs, where flushing costs write round-trips and buys

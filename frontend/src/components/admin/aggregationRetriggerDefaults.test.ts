@@ -17,7 +17,7 @@ const CONFIGURED_DEFAULTS: AggregationTuning = {
     writePacingRatio: 1.0,
     extractConcurrency: 1,
     maxPendingPairs: 50_000_000,
-    maxMaterializedEdges: 50_000_000,
+    maxMaterializedEdges: 16_000_000,
 }
 
 /** A job frozen with cramped settings — the shape that keeps re-failing. */
@@ -42,7 +42,7 @@ describe('buildInitialOverridesFromJob', () => {
         expect(value.tuning).toEqual(CONFIGURED_DEFAULTS)
         // The cramped 2M budget on the job row is exactly what fails a
         // 1M-node / 2M-edge graph; it must not come back.
-        expect(value.tuning?.maxMaterializedEdges).toBe(50_000_000)
+        expect(value.tuning?.maxMaterializedEdges).toBe(16_000_000)
     })
 
     it('uses the default retries and stall timeout, not the job row values', () => {

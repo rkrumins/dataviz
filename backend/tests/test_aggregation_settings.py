@@ -151,10 +151,14 @@ def test_pipeline_defaults_clear_the_large_graph_target(monkeypatch):
     assert mat._max_pending_pairs() == 50_000_000
     assert mat._pacing_ratio() == 1.0
     assert mat._extract_concurrency() == 1
-    assert mat._max_materialized_edges() == 50_000_000
+    # Sized against ONE SHARD: a graph key lives entirely on one node, so
+    # cluster mode gives a single graph no extra room. 16M x ~0.5KB ~= 8GB,
+    # inside the reference cluster's ~18GB per-shard headroom.
+    assert mat._max_materialized_edges() == 16_000_000
     # Separate from the write budget on purpose — see
     # test_auto_mode_cube_ceiling_is_independent_of_write_budget.
     assert mat._max_cube_edges() == 8_000_000
+    # A cube the write budget would reject must never be selected.
     assert mat._max_cube_edges() < mat._max_materialized_edges()
     # Rollup storage stays on AUTO: forcing the full cube is what OOMs a
     # multi-million-edge instance.

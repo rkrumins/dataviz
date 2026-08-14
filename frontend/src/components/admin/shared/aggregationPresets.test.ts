@@ -15,7 +15,11 @@ import { CONFIG_PRESETS, PRESET_TIMEOUT_MINUTES } from './AggregationOverridesFo
 describe('aggregation config presets', () => {
     it('gives every profile the same capacity floor', () => {
         for (const preset of CONFIG_PRESETS) {
-            expect(preset.tuning.maxMaterializedEdges, preset.id).toBe(50_000_000)
+            // Graph-store budget: sized against ONE shard, since a graph key
+            // never spans shards. Must stay in step with the backend default
+            // in falkordb_materialize._max_materialized_edges.
+            expect(preset.tuning.maxMaterializedEdges, preset.id).toBe(16_000_000)
+            // Worker RSS budget — independent of graph-store topology.
             expect(preset.tuning.maxPendingPairs, preset.id).toBe(50_000_000)
             expect(preset.timeoutMinutes, preset.id).toBe(PRESET_TIMEOUT_MINUTES)
         }

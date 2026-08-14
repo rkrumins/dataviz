@@ -51,7 +51,7 @@ const TUNING_FIELDS: TuningField[] = [
     { key: 'extractConcurrency', label: 'Extract concurrency', min: 1, max: 4, placeholder: '1', help: 'Parallel read scans per job' },
     { key: 'applyChunk', label: 'Apply chunk', min: 1_000, max: 200_000, placeholder: '20000', help: 'Pairs written per apply chunk' },
     { key: 'deleteChunk', label: 'Delete chunk', min: 100, max: 50_000, placeholder: '10000', help: 'Stale edges deleted per query' },
-    { key: 'maxMaterializedEdges', label: 'Write budget (edges)', min: 10_000, max: 50_000_000, placeholder: '50000000', help: 'Fail loudly instead of exceeding this' },
+    { key: 'maxMaterializedEdges', label: 'Write budget (edges)', min: 10_000, max: 50_000_000, placeholder: '16000000', help: 'Fail loudly instead of exceeding this; sized per graph-store node' },
 ]
 
 function DefaultsDialog({ onClose }: { onClose: () => void }) {
