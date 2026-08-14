@@ -164,28 +164,29 @@ describe('the business journey — a table\'s lineage through a seven-level esta
   beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' }))
   afterEach(() => cleanup())
 
-  it('shows the upstream TABLE immediately, nested under its whole spine', () => {
+  it('shows the upstream TABLE immediately, with its whole spine as breadcrumb', () => {
     renderLens(['F'], doneWalk(collateralsEstate()))
 
-    // Every level of the spine is on the board — the walk resolved a
-    // structure the old builder collapsed into one card.
-    for (const level of ['Finance', 'RiskApp', 'PROD', 'CURATED', 'RISK_DB']) {
-      expect(onBoard(level)).toBe(true)
-    }
-    // And the ANSWER — the actual upstream table — is visible without a
+    // The ANSWER — the actual upstream table — is visible without a
     // single click, because every level above it is a pass-through.
     expect(onBoard('loan_positions')).toBe(true)
-    // The focus itself, nested in its own table.
+    // And not one of those levels is drawn as a box around it: five
+    // containment levels resolved, five levels of breadcrumb, no
+    // wrappers. (`RISK_DB` is the answer's OWNER, so it is named on the
+    // card; the levels above it live in the card's tooltip.)
+    for (const wrapper of ['Finance', 'RiskApp', 'PROD', 'CURATED']) {
+      expect(onBoard(wrapper)).toBe(false)
+    }
+    expect(onBoard('RISK_DB')).toBe(true)
+    // The focus itself, and its consumer.
     expect(screen.getAllByText('collaterals').length).toBeGreaterThan(0)
     expect(onBoard('risk_exposure_daily')).toBe(true)
   })
 
   it('states honest counts for what a container holds, at both grains', () => {
     renderLens(['F'], doneWalk(collateralsEstate()))
-    // RISK_DB holds twelve things; exactly one of them is on this
-    // lineage. Both numbers, or the card is either a lie or a mystery.
-    expect(screen.getByText(/1 on this lineage · of 12/)).toBeTruthy()
-    // A branchy domain the walk did NOT open states the same way.
+    // Sales holds forty things; exactly two of them are on this lineage.
+    // Both numbers, or the card is either a lie or a mystery.
     expect(screen.getByText(/2 on this lineage · of 40/)).toBeTruthy()
   })
 
@@ -662,14 +663,18 @@ describe('the shell around the picture', () => {
     renderLens(['F'], doneWalk(walkModel('F', {
       nodes: [
         wnode('F', 'dataset', 'stg_orders'),
-        wnode('T', 'dataset', 'raw_orders', { childCount: 2 }),
+        wnode('T', 'dataset', 'raw_orders', { childCount: 4 }),
         wnode('c1', 'schemaField', 'order_id'),
+        wnode('c2', 'schemaField', 'placed_at'),
       ],
-      containmentEdges: [holds('T', 'c1')],
-      lineageEdges: [hop('c1', 'F')],
-      upstreamUrns: new Set(['c1']),
+      containmentEdges: [holds('T', 'c1'), holds('T', 'c2')],
+      lineageEdges: [hop('c1', 'F'), hop('c2', 'F')],
+      upstreamUrns: new Set(['c1', 'c2']),
     })))
 
+    // A frame is a container someone OPENED — nothing is boxed for
+    // merely having been walked past.
+    fireEvent.click(contentsChevron('raw_orders'))
     const frame = document.querySelector('.react-flow__node-focusFrame')
     expect(frame?.className).toContain('draggable')
     // The column rides along as a child node, so dragging the table
@@ -781,20 +786,25 @@ describe('what is really inside a container', () => {
   beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' }))
   afterEach(() => cleanup())
 
+  // TWO columns on the lineage, so the table is the grain the answer is
+  // presented at — a level with a single connected child is chrome the
+  // walk sees through, and is never drawn as a box.
   const tableWithColumns = () => doneWalk(walkModel('F', {
     nodes: [
       wnode('F', 'dataset', 'stg_orders'),
       wnode('T', 'dataset', 'raw_orders', { childCount: 4 }),
       wnode('c1', 'schemaField', 'order_id'),
+      wnode('c2', 'schemaField', 'placed_at'),
     ],
-    containmentEdges: [holds('T', 'c1')],
-    lineageEdges: [hop('c1', 'F')],
-    upstreamUrns: new Set(['c1']),
+    containmentEdges: [holds('T', 'c1'), holds('T', 'c2')],
+    lineageEdges: [hop('c1', 'F'), hop('c2', 'F')],
+    upstreamUrns: new Set(['c1', 'c2']),
   }))
 
   it('flips a frame to everything inside, and asks the server for the roster', () => {
     const onLoadAllChildren = vi.fn()
     renderLens(['F'], tableWithColumns(), { onLoadAllChildren })
+    fireEvent.click(contentsChevron('raw_orders'))
     fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
     expect(onLoadAllChildren).toHaveBeenCalledWith('T')
   })
@@ -802,6 +812,7 @@ describe('what is really inside a container', () => {
   it('shows an unconnected child as present, and claiming nothing', () => {
     const onLoadAllChildren = vi.fn()
     const { rerender, api } = renderLens(['F'], tableWithColumns(), { onLoadAllChildren })
+    fireEvent.click(contentsChevron('raw_orders'))
     fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
 
     rerender(
@@ -840,10 +851,11 @@ describe('what is really inside a container', () => {
       wnode('F', 'dataset', 'stg_orders'),
       wnode('T', 'dataset', 'raw_orders', { childCount: 400 }),
       wnode('c1', 'schemaField', 'order_id'),
+      wnode('c2', 'schemaField', 'placed_at'),
     ],
-    containmentEdges: [holds('T', 'c1')],
-    lineageEdges: [hop('c1', 'F')],
-    upstreamUrns: new Set(['c1']),
+    containmentEdges: [holds('T', 'c1'), holds('T', 'c2')],
+    lineageEdges: [hop('c1', 'F'), hop('c2', 'F')],
+    upstreamUrns: new Set(['c1', 'c2']),
   }))
 
   const hundredLoaded = new Map([['T', {
@@ -861,6 +873,7 @@ describe('what is really inside a container', () => {
    *  which is the state a page turn actually happens in. */
   const openWideTable = (onLoadAllChildren: LoadRoster) => {
     const { rerender, api } = renderLens(['F'], wideTable(), { onLoadAllChildren })
+    fireEvent.click(contentsChevron('raw_orders'))
     fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
     rerender(
       <LineageLens
@@ -982,7 +995,7 @@ describe('the real wire shape reaches the board', () => {
     expect(screen.getByRole('dialog')).toBeTruthy()
     const board = screen.getByRole('dialog').textContent ?? ''
     expect(board).toContain('Orders')       // the focus
-    expect(board).toContain('Ingest App')   // initial only
+    expect(board).toContain('Raw Orders')   // initial only
     expect(board).toContain('Vendor')       // extension only
   })
 })

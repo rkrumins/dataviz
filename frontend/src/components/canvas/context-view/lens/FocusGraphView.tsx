@@ -381,54 +381,55 @@ function FocalBreadcrumb({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
 }
 
 /**
- * The containment above a TOP-LEVEL frame, as one line of text.
+ * The containment above a TOP-LEVEL frame, as a chip beside its name:
+ * `int_clean_charges_t1  in SILVER · Snowflake`.
  *
- * This is the other half of "frames only where they clarify": a level
- * the layout refused to draw as geometry — because it spanned the board,
- * or because it sat above the focus — still has to be SAID, or a frame
- * called `GOLD` in the upstream column has lost the fact that it lives
- * in Snowflake. Twelve pixels of breadcrumb instead of ~90px of nesting
- * chrome per level, and every crumb is somewhere you can go.
+ * This is the other half of "no passive wrappers": the levels the layout
+ * walked through to reach this entity are never drawn as boxes, so they
+ * have to be SAID, or a frame called `clean_charges` in the upstream
+ * column has lost the fact that it lives in SILVER. Twelve pixels of
+ * text instead of ~90px of nesting chrome per level, and every crumb is
+ * somewhere you can go.
  *
- * Only ever on a top-level frame: nested inside its parent, the level
- * above is the header two pixels up.
+ * Deepest first — the owner is what distinguishes `int_clean_orders_t1`
+ * from `_t2`, so it leads and never gives up room; the levels above it
+ * are context and truncate. Only ever on a top-level frame: nested
+ * inside its parent, the level above is the header two pixels up.
  */
 function FrameAncestry({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   const chain = card.ancestry.length > 0 ? card.ancestry : card.parentLabel ? [card.parentLabel] : []
   if (card.frameId !== null || chain.length === 0) return null
-  // ONE name — the owner — and a mark for whatever is above it. A frame
-  // header has ~200px of subtitle to share with its counts, which two
-  // names do not fit into: `Snowflake › BRONZE` shrank to `Sn… › B…`,
-  // naming neither, and then to a bare `› BRONZE`. The whole chain
-  // stays in the tooltip, and the ⋯ is itself somewhere you can go.
-  const owner = chain[chain.length - 1]
-  const above = chain.slice(0, -1)
+  // A frame header has ~130px beside the name: two SHORT names fit, and
+  // three came out as `in CURATED · P… · Ris…` — three names, none of
+  // them readable. So both levels are named when both are all there is
+  // (`in SILVER · Snowflake`, the reported case), and anything deeper is
+  // the owner plus one ⋯ — the tooltip carries the chain either way.
+  const deepestFirst = [...chain].reverse().slice(0, chain.length === 2 ? 2 : 1)
+  const elided = chain.length - deepestFirst.length
+  const idFor = (level: string) => card.ancestryIds[chain.indexOf(level)] ?? card.parentId ?? ''
   const title = `in ${chain.join(' › ')}`
   return (
-    <>
-      <span className="flex items-center gap-0.5 flex-shrink-0" title={title}>
-        <LucideIcons.CornerLeftUp className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/60" />
-        {above.length > 0 && (
+    <span className="flex items-baseline gap-1 min-w-0 text-[9px] text-ink-muted/70" title={title}>
+      <span className="flex-shrink-0">in</span>
+      {deepestFirst.map((level, i) => (
+        <span key={`${level}-${i}`} className={cn('flex items-baseline gap-1', i === 0 ? 'flex-shrink-0' : 'min-w-0')}>
+          {i > 0 && <span className="flex-shrink-0 text-ink-muted/40" aria-hidden>·</span>}
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.ancestryIds[0] ?? '') }}
-            title={`${above.length} level${above.length === 1 ? '' : 's'} above: ${above.join(' › ')}`}
-            className="nodrag flex-shrink-0 text-ink-muted/50 hover:text-accent-lineage transition-colors"
+            onClick={(e) => { e.stopPropagation(); ctx.onFocus(idFor(level)) }}
+            className={cn(
+              'nodrag hover:text-accent-lineage transition-colors',
+              i === 0 ? 'whitespace-nowrap' : 'truncate min-w-0',
+            )}
           >
-            ⋯›
+            {level}
           </button>
-        )}
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.ancestryIds[chain.length - 1] ?? card.parentId ?? '') }}
-          title={title}
-          className="nodrag whitespace-nowrap hover:text-accent-lineage transition-colors"
-        >
-          {owner}
-        </button>
-      </span>
-      <span className="flex-shrink-0 text-ink-muted/40" aria-hidden>·</span>
-    </>
+        </span>
+      ))}
+      {elided > 0 && (
+        <span className="flex-shrink-0 text-ink-muted/50" aria-hidden>⋯</span>
+      )}
+    </span>
   )
 }
 
@@ -955,13 +956,19 @@ function FocusFrameNode({ data }: NodeProps) {
         </button>
         <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5 flex-shrink-0" />
         <div className="min-w-0 flex-1">
-          <TailName className="block text-[11.5px] font-semibold text-ink leading-tight">
-            {card.label}
-          </TailName>
-          <p className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate">
-            {/* Where this frame lives, when the levels above it are
-                breadcrumbs rather than boxes. */}
+          {/* Name, then where it lives — the levels above it are text,
+              never boxes, so the chip is how they are stated at all. */}
+          <div className="flex items-baseline gap-1.5 min-w-0">
+            {/* The NAME is the identity and takes what it needs first —
+                sharing the shrink evenly turned `clean_charges` into
+                `…n_charges`, which names nothing. The chip lives in
+                what is left, and truncates there. */}
+            <TailName className="block max-w-[62%] flex-shrink-0 text-[11.5px] font-semibold text-ink leading-tight">
+              {card.label}
+            </TailName>
             <FrameAncestry card={card} ctx={ctx} />
+          </div>
+          <p className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate">
             {card.fetch === 'loading'
               ? 'Looking inside…'
               : card.contents
@@ -1026,14 +1033,19 @@ function FocusFrameNode({ data }: NodeProps) {
             className="nodrag flex-shrink-0 w-16 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
           />
         )}
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
-          title={`Focus ${card.label}`}
-          className="nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
-        >
-          <LucideIcons.Focus className="w-3 h-3" />
-        </button>
+        {/* The contains-stack is the focus's own contents — there is
+            nowhere to re-center TO, and the focal card is already the
+            centre. Only a frame that IS an entity offers this. */}
+        {card.nodeId && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.nodeId!) }}
+            title={`Focus ${card.label}`}
+            className="nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+          >
+            <LucideIcons.Focus className="w-3 h-3" />
+          </button>
+        )}
       </div>
 
       {card.fetch === 'loading' && (
