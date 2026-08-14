@@ -1398,11 +1398,16 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                     canOpen: visible.has(child) && (nodeOf(child)?.children.length ?? 0) > 0,
                 }))
                 : NO_FRAME_ROWS,
+            // T24 F6 — 'unsupported' used to fall through to `null`
+            // (indistinguishable from "never asked"), so a provider
+            // that cannot list contents left the frame silently empty:
+            // no spinner, no error, no retry — wired, but dead.
             fetch: isFocus && walkStatus === 'loading' ? 'loading'
                 : isFocus && walkStatus === 'error' ? 'error'
                     : showAll && childrenAllStatus.get(urn) === 'loading' ? 'loading'
                         : showAll && childrenAllStatus.get(urn) === 'error' ? 'error'
-                            : null,
+                            : showAll && childrenAllStatus.get(urn) === 'unsupported' ? 'unsupported'
+                                : null,
             dimmed: !matches(label) || (hostQuery !== '' && !label.toLowerCase().includes(hostQuery)),
         }
         const id = pushCard(card)
@@ -1446,6 +1451,32 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                     type: UNRESOLVED_TYPE,
                     frameId: card.id,
                     count: rosterExtras.length,
+                    canOpenChildren: false,
+                })
+            }
+            // T24 F6, state (i) — flipping to "everything inside" and
+            // finding NOTHING beyond what was already connected looks
+            // identical to the toggle having silently failed (the row
+            // list is unchanged either way). Confirm it worked instead
+            // of leaving the reader to infer a null result from an
+            // unchanged list — but only once the roster has genuinely
+            // finished (not mid-fetch, and not merely this page: a
+            // roster with more pages still might turn up something).
+            if (showAll && connectedRows.length > 0 && rosterExtras.length === 0
+                && !roster?.hasMore && childrenAllStatus.get(urn) === 'done'
+                && i === rows.length - 1) {
+                pushCard({
+                    ...baseCard(),
+                    id: `div-all:${urn}`,
+                    kind: 'divider',
+                    nodeId: null,
+                    band,
+                    h: DIVIDER_ROW_H,
+                    depth: depth + 1,
+                    label: 'everything inside is already on this lineage',
+                    type: UNRESOLVED_TYPE,
+                    frameId: card.id,
+                    count: 0,
                     canOpenChildren: false,
                 })
             }

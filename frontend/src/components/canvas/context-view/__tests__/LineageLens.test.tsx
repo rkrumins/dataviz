@@ -898,7 +898,7 @@ describe('the shell around the picture', () => {
   it('the container default is a preference, persisted like the body mode', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' })
     renderLens(['b'], simple())
-    fireEvent.click(screen.getByTitle(/Opened containers show everything inside/))
+    fireEvent.click(screen.getByTitle(/Containers you open next show everything inside/))
     expect(usePreferencesStore.getState().lensFrameChildren).toBe('all')
     usePreferencesStore.setState({ lensFrameChildren: 'connected' })
   })
@@ -978,6 +978,17 @@ describe('the shell around the picture', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 })
     renderLens(['b'], { ...simple(), deepenStatus: 'loading' })
     expect(screen.getByLabelText('Fetching deeper lineage for this entity')).toBeTruthy()
+  })
+
+  it('the header-level Connected|All control states its scope, not hover-only (T24 F6)', () => {
+    // Reported: this control wears the SAME icons as the per-frame
+    // Connected|All pair on an open frame, but seeds only the NEXT
+    // container opened — it never touches one already open — and read
+    // as a global toggle because nothing on its face said otherwise.
+    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    renderLens(['b'], simple())
+    const group = screen.getByLabelText(/What containers you open next will show/)
+    expect(within(group).getByText('Next')).toBeTruthy()
   })
 
   it('the direction preset filters the board view-side, with no fetch, and toggles back cleanly', () => {
@@ -1451,6 +1462,67 @@ describe('what is really inside a container', () => {
     expect(screen.getByText('internal_notes')).toBeTruthy()
     // It lives in there, but it must never read as a connection.
     expect(screen.getByText('no lineage')).toBeTruthy()
+  })
+
+  it('a provider that cannot list contents says so, with no dead Retry (T24 F6)', () => {
+    // Reported: 'unsupported' fell through to the SAME `fetch: null`
+    // an entity that was never asked at all carries, so the frame just
+    // sat there — wired, but dead: no spinner, no error, no retry.
+    const onLoadAllChildren = vi.fn()
+    const { rerender, api } = renderLens(['F'], tableWithColumns(), { onLoadAllChildren })
+    fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
+
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={tableWithColumns()}
+        walkApi={api}
+        childrenAllStatus={new Map([['T', 'unsupported' as const]])}
+        onLoadAllChildren={onLoadAllChildren}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(screen.getByText(/This source can't list contents here/)).toBeTruthy()
+    // Not a transient failure — retrying could never satisfy it, so no
+    // dead Retry is offered for it (unlike the genuine 'error' case).
+    expect(screen.queryByText('Retry')).toBeNull()
+  })
+
+  it('confirms nothing more exists once "everything inside" turns up nothing new (T24 F6)', () => {
+    // Reported: flipping Connected -> All and finding NOTHING beyond
+    // what was already connected looks IDENTICAL to the toggle having
+    // silently failed — the row list does not change either way.
+    const onLoadAllChildren = vi.fn()
+    const { rerender, api } = renderLens(['F'], tableWithColumns(), { onLoadAllChildren })
+    fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
+
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={tableWithColumns()}
+        walkApi={api}
+        // The server's own roster is EXACTLY the two columns already
+        // connected — nothing extra, and fully drained (no more pages).
+        childrenAll={new Map([['T', {
+          children: [
+            { id: 'c1', data: { label: 'order_id', type: 'schemaField' } },
+            { id: 'c2', data: { label: 'placed_at', type: 'schemaField' } },
+          ],
+          hasMore: false,
+          total: 2,
+        }]]) as never}
+        childrenAllStatus={new Map([['T', 'done' as const]])}
+        onLoadAllChildren={onLoadAllChildren}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(screen.getByText(/everything inside is already on this lineage/)).toBeTruthy()
   })
 
   it('says a roster is not an answer when nothing inside is on the lineage', () => {

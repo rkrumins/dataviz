@@ -1683,9 +1683,30 @@ describe('focus-layout — frames scroll instead of growing', () => {
             expect(rows[0].nodeId).toBe('x4')
         })
 
-        it('needs both kinds of row to divide — never a lone header', () => {
-            expect(mixedRoster(2, 0).cards.some(c => c.kind === 'divider')).toBe(false)
+        it('with nothing connected, there is nothing to divide OR confirm', () => {
+            // No connected rows at all — neither the "everything else"
+            // boundary nor T24 F6's "already on this lineage"
+            // confirmation has anything to say about.
             expect(mixedRoster(0, 3).cards.some(c => c.kind === 'divider')).toBe(false)
+        })
+
+        it('T24 F6 — connected rows with NOTHING beyond them get the "already on this lineage" divider instead of none at all', () => {
+            // Reported: flipping to "everything inside" and finding
+            // nothing new looked identical to the toggle having
+            // silently failed. `mixedRoster(2, 0)` is exactly that
+            // shape (2 connected, 0 roster-only) — it used to draw NO
+            // divider at all, the same as a frame nobody had ever
+            // flipped to All.
+            const g = mixedRoster(2, 0)
+            const frame = cardFor(g, 'T')!
+            const rows = g.cards.filter(c => c.frameId === frame.id)
+            const divider = rows.find(r => r.kind === 'divider')!
+            expect(divider).toBeTruthy()
+            expect(divider.label).toBe('everything inside is already on this lineage')
+            // A count of 0 here would read as "0 items exist", not "0
+            // MORE items beyond what is already shown" — see the
+            // renderer's own guard against appending it.
+            expect(divider.count).toBe(0)
         })
     })
 

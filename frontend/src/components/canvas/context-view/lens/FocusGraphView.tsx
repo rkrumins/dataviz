@@ -1518,7 +1518,10 @@ function FrameDividerNode({ data }: NodeProps) {
     >
       <span className="h-px flex-1 bg-black/[0.08] dark:bg-white/[0.10]" />
       <span className="flex-shrink-0 text-[9px] text-ink-muted/70 tabular-nums">
-        {card.label} — {card.count.toLocaleString()} item{card.count === 1 ? '' : 's'}
+        {/* T24 F6's "already on this lineage" divider is a complete
+            sentence on its own — a count of 0 appended to it would read
+            as "0 items", the opposite of what it is confirming. */}
+        {card.label}{card.count > 0 ? ` — ${card.count.toLocaleString()} item${card.count === 1 ? '' : 's'}` : ''}
       </span>
       <span className="h-px flex-1 bg-black/[0.08] dark:bg-white/[0.10]" />
     </div>
@@ -2078,6 +2081,16 @@ function FocusFrameNode({ data, selected }: NodeProps) {
             Retry
           </button>
         </div>
+      )}
+      {/* T24 F6 — a provider that cannot list contents used to leave the
+          frame silently empty; retrying would not help (it is not a
+          transient failure), so this states the honest limit instead
+          of offering a Retry the source could never satisfy. */}
+      {hasContents && card.fetch === 'unsupported' && (
+        <p className="absolute inset-x-2.5 flex items-center gap-1.5 text-[10px] text-ink-muted/70 leading-snug" style={{ top: bodyTop }}>
+          <LucideIcons.CircleSlash className="w-3 h-3 flex-shrink-0" />
+          <span className="truncate">This source can&apos;t list contents here.</span>
+        </p>
       )}
       {hasContents && card.frameEmpty && card.frameLoaded === 0 && card.fetch === null && (
         <p className="absolute inset-x-2.5 text-[10px] text-ink-muted/70 italic leading-snug" style={{ top: bodyTop }}>

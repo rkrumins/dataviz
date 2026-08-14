@@ -1240,19 +1240,29 @@ export function LineageLens({
               </div>
               {/* What a container opens into, by default. Each frame can
                   still be flipped on its own; this sets the starting
-                  point for the next one you open (persisted). */}
+                  point for the next one you open (persisted).
+                  T24 F6 — this control wears the SAME icons/labels as
+                  the per-frame Connected|All pair on an open frame, but
+                  does something entirely different (seeds only the NEXT
+                  container opened; it never touches one already open) —
+                  reported as reading like a global toggle it is not.
+                  "Next" is the always-visible half of that distinction;
+                  the hover title carries the rest. */}
               {lensViewMode === 'graph' && (
                 <div
                   data-tour="lens-children-mode"
                   role="group"
-                  aria-label="What opened containers show"
-                  className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                  aria-label="What containers you open next will show"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
                 >
+                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
+                    Next
+                  </span>
                   {([
                     { mode: 'connected', Icon: LucideIcons.Link2, label: 'Connected',
-                      title: 'Opened containers show only what is on this lineage' },
+                      title: 'Containers you open next show only what is on this lineage — this does not change one already open' },
                     { mode: 'all', Icon: LucideIcons.Rows3, label: 'All',
-                      title: 'Opened containers show everything inside, with lineage marked where it exists' },
+                      title: 'Containers you open next show everything inside, with lineage marked where it exists — this does not change one already open' },
                   ] as const).map(({ mode, Icon, label, title }) => (
                     <button
                       key={mode}

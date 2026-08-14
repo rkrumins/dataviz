@@ -434,7 +434,11 @@ export interface FocusCard {
   /** The walk reached this card and NOTHING further exists beyond it —
    *  a claim about the data source, made only once the walk says so. */
   deadEnd: boolean
-  fetch: 'loading' | 'error' | null
+  /** T24 F6 — `'unsupported'` used to map to `null` (the SAME value an
+   *  entity never asked at all carries), so a provider that cannot list
+   *  contents rendered nothing at all: no spinner, no error, no retry —
+   *  the frame just sat there, wired but dead. */
+  fetch: 'loading' | 'error' | 'unsupported' | null
   /** Text-filter miss — rendered dimmed, never removed. */
   dimmed: boolean
   /** The ⊕ on this card's upstream side, or null when drained. */
