@@ -981,7 +981,13 @@ def test_trace_closure_cursor_pages_one_hub_to_exhaustion():
     back short."""
     fake = _TraceFake()
     fake.adjacency[("hub", "outgoing")] = [(f"t{i}", "FLOWS") for i in range(8)]
-    fake.degrees = {"hub": {"in": 0, "out": 8}}
+    # Every partner is DRAINED (nothing downstream of it), so the frontier
+    # below is the hub and nothing else — an assertion about what the probe
+    # rules out, not about partners the fake forgot to describe.
+    fake.degrees = {
+        "hub": {"in": 0, "out": 8},
+        **{f"t{i}": {"in": 1, "out": 0} for i in range(8)},
+    }
     p = _make_provider(fake)
 
     def _page(cursor):
@@ -1019,6 +1025,61 @@ def test_trace_closure_cursor_pages_one_hub_to_exhaustion():
     ))
     assert excluded_page.downstream_urns == {"t0", "t2"}
     assert len(excluded_page.edges) == 3
+
+
+def test_trace_closure_a_paged_partner_carries_its_own_frontier():
+    """A partner discovered on a CURSOR PAGE was never walked FROM — the page
+    read the anchor's adjacency, not the partner's — so it is a boundary node
+    exactly like a depth-exhausted ring, and it gets the same treatment: probed,
+    and kept in the frontier when it has more than the client can see.
+
+    Filing it under no direction at all was the bug. Every paged-in partner
+    shipped with no frontier entry and no probe, and a node with no entry is
+    what the lens stamps "no further lineage — the walk ends here". A drained
+    hub's partners were told the truth by accident; a live one's were not."""
+    fake = _TraceFake()
+    fake.adjacency[("hub", "outgoing")] = [(f"t{i}", "FLOWS") for i in range(4)]
+    fake.adjacency[("sink", "incoming")] = [(f"u{i}", "FLOWS") for i in range(4)]
+    fake.degrees = {
+        "hub": {"in": 0, "out": 4},
+        "sink": {"in": 4, "out": 0},
+        # Three partners have lineage of their own; the fourth is a dead end.
+        **{f"t{i}": {"in": 1, "out": 2} for i in range(3)},
+        "t3": {"in": 1, "out": 0},
+        **{f"u{i}": {"in": 3, "out": 1} for i in range(3)},
+        "u3": {"in": 0, "out": 1},
+    }
+    p = _make_provider(fake)
+
+    page = _run(p.trace_closure(
+        "hub", upstream_depth=0, downstream_depth=1,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=4, timeout_ms=5000, after_cursor="e:0",
+    ))
+
+    entries = {f.urn: f for f in page.frontier_down}
+    assert [entries[f"t{i}"].total_count for i in range(3)] == [2, 2, 2]
+    # No cursor on a partner: nothing about IT was left half-read, so its
+    # affordance is a re-root via seedUrns, never a resume of someone else's
+    # page. (The anchor's own entry keeps the resume.)
+    assert all(entries[f"t{i}"].next_cursor is None for i in range(3))
+    assert entries["hub"].next_cursor == "e:4"
+    # t3 has everything it owns already on screen: an honest dead end, and
+    # the fix must not invent a pill for it.
+    assert "t3" not in entries
+    assert page.frontier_up == []
+
+    # The upstream page files its partners under UP, not under the direction
+    # the downstream page happens to use.
+    up_page = _run(p.trace_closure(
+        "sink", upstream_depth=1, downstream_depth=0,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=4, timeout_ms=5000, after_cursor="e:0",
+    ))
+    up_entries = {f.urn: f for f in up_page.frontier_up}
+    assert [up_entries[f"u{i}"].total_count for i in range(3)] == [3, 3, 3]
+    assert "u3" not in up_entries          # in-degree 0: nothing behind it
+    assert up_page.frontier_down == []
 
 
 def test_trace_closure_rejects_an_unreadable_cursor():

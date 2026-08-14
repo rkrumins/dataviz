@@ -536,6 +536,70 @@ async def test_hub_truncates_then_pages_its_whole_adjacency(estate):
     assert not any(f.urn == "hub" for f in pages[-1].frontier_down)
     # Every page is one hub's adjacency — the hub itself is never re-walked.
     assert all(pg.upstream_urns == set() for pg in pages)
+    # These partners are genuine dead ends (nothing flows out of them), and a
+    # real degree probe says so, so no page offers a chevron on one. The
+    # partners that DO have more are the next test.
+    assert [f.urn for pg in pages for f in pg.frontier_down] == ["hub", "hub"]
+
+
+# ── Estate: a hub whose partners carry lineage of their own ───────────
+#
+#     hub -> q0..q5 -> z0..z5      (six partners, each with an onward hop)
+#     hub -> dead                  (a seventh with nothing beyond it)
+#
+# The hub is wider than one page, so every partner arrives on a CURSOR PAGE —
+# the path that used to file them under no direction at all.
+
+HUB_DEEP_SEED = "CREATE " + ", ".join([
+    "(kb:Box {urn:'kb', displayName:'the-box'})",
+    "(hub:Doc {urn:'hub', displayName:'hub'})",
+    "(dead:Doc {urn:'dead', displayName:'dead-end'})",
+    *[f"(q{i}:Doc {{urn:'q{i}', displayName:'partner-{i}'}})" for i in range(6)],
+    *[f"(z{i}:Doc {{urn:'z{i}', displayName:'onward-{i}'}})" for i in range(6)],
+    *[f"(hub)-[:FLOWS_TO]->(q{i})" for i in range(6)],
+    "(hub)-[:FLOWS_TO]->(dead)",
+    *[f"(q{i})-[:FLOWS_TO]->(z{i})" for i in range(6)],
+    "(kb)-[:CONTAINS]->(hub)",
+    *[f"(kb)-[:CONTAINS]->(q{i})" for i in range(6)],
+])
+
+
+async def test_a_paged_partner_carries_its_own_frontier(estate):
+    """THE dead-end bug, live. A partner that arrives on a cursor page was never
+    walked FROM — the page read the ANCHOR's adjacency — so it stands exactly
+    where a depth-exhausted ring stands, and it has to be offered like one.
+
+    Filing paged partners under no direction shipped them with no frontier
+    entry and no probe, and a node with no entry is what the lens states as
+    "no further lineage — the walk ends here". Every one of these six had a
+    hop waiting behind it. The seventh really is a dead end, and the same
+    probe is what proves it — the fix must not put a chevron on that one."""
+    p = await estate("hubdeep", HUB_DEEP_SEED)
+
+    entries, partners, cursor = {}, set(), "e:0"
+    while cursor is not None:
+        page = await p.trace_closure(
+            urn="hub", upstream_depth=0, downstream_depth=1,
+            lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+            max_nodes=4, timeout_ms=15000, after_cursor=cursor,
+        )
+        partners |= set(page.downstream_urns)
+        for f in page.frontier_down:
+            if f.urn != "hub":
+                entries[f.urn] = f
+        assert page.frontier_up == [], "a downstream page files nothing upstream"
+        anchor = next((f for f in page.frontier_down if f.urn == "hub"), None)
+        assert len(entries) <= 7, "runaway paging"
+        cursor = anchor.next_cursor if anchor else None
+
+    assert partners == {f"q{i}" for i in range(6)} | {"dead"}
+    # Every partner with something behind it is offered, with the count a real
+    # probe measured — and the one with nothing is silently absent.
+    assert sorted(entries) == [f"q{i}" for i in range(6)]
+    assert all(f.total_count == 1 for f in entries.values())
+    # No cursor on a partner: nothing about IT was left half-read, so its
+    # affordance is a re-root via seedUrns, never a resume of the hub's page.
+    assert all(f.next_cursor is None for f in entries.values())
 
 
 # ── Estate: a container with more lineage-bearing leaves than fit ─────

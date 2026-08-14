@@ -7225,6 +7225,14 @@ class FalkorDBProvider(GraphDataProvider):
                     continue
                 discovered.add(other)
                 (upstream_urns if up else downstream_urns).add(other)
+                # A partner arrives here UNWALKED — the page read the ANCHOR's
+                # adjacency, never this node's — which is exactly the shape of
+                # a ring the last allowed hop discovered. So it is filed like
+                # one: a depth-boundary candidate, probed below and kept only
+                # if it has more than the client can see. Filing it nowhere
+                # (the bug) shipped a partner with no frontier entry at all,
+                # and a partner with no entry is stamped "the walk ends here".
+                (depth_up if up else depth_down)[other] = None
             if len(rows) >= max_nodes:
                 # A FULL page means there is more of this node's adjacency.
                 # Its entry is kept whatever the probe says — here the cursor,
@@ -7400,8 +7408,18 @@ class FalkorDBProvider(GraphDataProvider):
         frontier_up: List[TraceFrontierNode] = []
         frontier_down: List[TraceFrontierNode] = []
         if candidates_up or candidates_down:
-            probe_up = candidates_up[:CLOSURE_FRONTIER_PROBE_CAP]
-            probe_down = candidates_down[:CLOSURE_FRONTIER_PROBE_CAP]
+            def _probe_slice(candidates: List[str]) -> List[str]:
+                # A full page files a budget's worth of partners as candidates,
+                # and they queue AHEAD of the anchor — enough to push the one
+                # entry a draining client is actually reading past the cap. The
+                # anchor goes first; everything else keeps candidate order.
+                if paged_anchor is not None and paged_anchor in candidates:
+                    rest = [u for u in candidates if u != paged_anchor]
+                    return [paged_anchor, *rest[:CLOSURE_FRONTIER_PROBE_CAP - 1]]
+                return candidates[:CLOSURE_FRONTIER_PROBE_CAP]
+
+            probe_up = _probe_slice(candidates_up)
+            probe_down = _probe_slice(candidates_down)
             degrees: Dict[str, Dict[str, int]] = {}
             if (deadline - time.monotonic()) < 1.5:
                 # Not enough budget for the probe wave. The frontier still

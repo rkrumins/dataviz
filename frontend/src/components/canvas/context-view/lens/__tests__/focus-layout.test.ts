@@ -1131,6 +1131,39 @@ describe('focus-layout — dead-end honesty', () => {
         expect(cardFor(g, 'F')!.deadEnd).toBe(false)
         expect(cardFor(g, 'F')!.pillDown).toMatchObject({ kind: 'extend', count: null })
     })
+
+    it('a partner a PAGE delivered is offered, never stamped as the end', () => {
+        // The shape after draining one page of a wide hub: four partners
+        // arrived on a cursor page, three with lineage of their own and one
+        // with none. The server files each of them in the frontier, so the
+        // three carry a ⊕ and only the genuinely drained one is stamped.
+        //
+        // The provider used to file paged partners under no direction at
+        // all. They arrived with no frontier entry, and a partner with no
+        // entry is exactly what this view calls the end of the walk — so a
+        // drained page put "the walk ends here" on four live nodes.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F'), wnode('q0'), wnode('q1'), wnode('q2'), wnode('q3')],
+            contains: [],
+            hops: [['F', 'q0'], ['F', 'q1'], ['F', 'q2'], ['F', 'q3']],
+            frontierDown: [
+                { urn: 'F', totalCount: 7, nextCursor: 'e:4' },
+                ...['q0', 'q1', 'q2'].map(urn => ({ urn, totalCount: 1, nextCursor: null })),
+            ],
+        })
+        const g = layout(sg)
+        for (const urn of ['q0', 'q1', 'q2']) {
+            expect(cardFor(g, urn)!.pillDown).toMatchObject({ kind: 'extend', count: 1 })
+            expect(cardFor(g, urn)!.deadEnd).toBe(false)
+        }
+        // q3 got the same probe and has nothing behind it: no pill, and the
+        // stamp it deserves. Honest emptiness is the point — not silence.
+        expect(cardFor(g, 'q3')!.pillDown).toBeNull()
+        expect(cardFor(g, 'q3')!.deadEnd).toBe(true)
+        // And the anchor keeps the page's own resume.
+        expect(cardFor(g, 'F')!.pillDown).toMatchObject({ kind: 'page', cursor: 'e:4' })
+    })
 })
 
 describe('focus-layout — frames page instead of growing', () => {
