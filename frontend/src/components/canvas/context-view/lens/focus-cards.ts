@@ -58,7 +58,15 @@ export const CARD_W = 240
  *  two levels of nesting still fit inside one band slot
  *  (CARD_W + BAND_GAP). */
 export const FRAME_CONTENT_W = CARD_W + 50
-export const FOCAL_H = 120
+/** The focal card's height.
+ *
+ *  Sized to what it SAYS: a type chip and a name, the breadcrumb of where
+ *  it lives, the "connect at a coarser grain" whisper when there is one,
+ *  and the Reach line. It was 120 while it also carried a "N in / N out"
+ *  row; that row was the walk's own loaded degree — a number that grew
+ *  every time the reader clicked — and taking it out left a card two
+ *  thirds full, which reads as something failing to render. */
+export const FOCAL_H = 100
 export const CARD_H = 64
 /** A frame row with nothing to say beneath its name — its relationship
  *  is stated once on the frame, and it stands for no coarser grain.
@@ -78,6 +86,18 @@ export const DIVIDER_ROW_H = 22
 export function rowHeight(sharedEdgeType: string, ownEdgeType: string): number {
   return ownEdgeType !== '' && ownEdgeType !== sharedEdgeType ? CARD_H : CHILD_ROW_H
 }
+/** How long a drawn wire must be before it can carry a badge.
+ *
+ *  Two places decide with this and they have to agree: the LAYOUT picks
+ *  which bundles get a badge from the geometry it just computed, and the
+ *  VIEW re-checks it against the coordinates React Flow is actually
+ *  drawing between. They diverge for a render whenever a node has not
+ *  been measured yet — right after a reveal, most of all — and the
+ *  layout's "yes" then paints a chip over a wire that has collapsed to a
+ *  point. Reported live as ×15 ×14 ×13 ×12 ×11 stacked in mid-air beside
+ *  a frame with no arrow under any of them. */
+export const LABEL_MIN_RUN = 90
+
 export const BAND_GAP = 130
 export const CARD_GAP = 10
 /** Indent for cards hanging below the focal in its own band. */

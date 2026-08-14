@@ -2218,3 +2218,61 @@ describe('column-grain wiring', () => {
         expect(cardFor(g, 'f:channel')!.deadEnd).toBe(false)
     })
 })
+
+// ── no orphan wires, no orphan labels ────────────────────────────────
+//
+// REPORTED (user): bundle-label chips (×15 ×14 ×13 ×12 ×11) hanging in
+// space to the left of a frame with no visible source card and no arrow
+// under them. A label is a thing SAID ABOUT a wire; with no wire it is a
+// number floating over the board with nothing to attach it to.
+
+describe('every edge and every label has both its ends on the board', () => {
+    /** A wide column estate with the partner's rows SCROLLED, which is
+     *  where rows exist in the model but not on the board. */
+    const wideEstate = () => {
+        const cols = Array.from({ length: 14 }, (_, i) => `c${String(i).padStart(2, '0')}`)
+        const nodes = [
+            wnode('T1', 'dataset', 'int_clean_orders_t1', { childCount: 40 }),
+            wnode('F', 'dataset', 'int_clean_orders_t2', { childCount: 40 }),
+        ]
+        const contains: Array<[string, string]> = []
+        const hops: Array<[string, string, string]> = []
+        for (const c of cols) {
+            nodes.push(wnode(`t1:${c}`, 'schemaField', c), wnode(`f:${c}`, 'schemaField', c))
+            contains.push(['T1', `t1:${c}`], ['F', `f:${c}`])
+            hops.push([`t1:${c}`, `f:${c}`, 'TRANSFORMS'])
+        }
+        return subgraph({ focus: 'F', nodes, hops, contains })
+    }
+
+    const check = (g: ReturnType<typeof layout>) => {
+        const drawn = new Set(g.cards.map(c => c.id))
+        for (const e of g.edges) {
+            expect({ id: e.id, source: drawn.has(e.source) }).toEqual({ id: e.id, source: true })
+            expect({ id: e.id, target: drawn.has(e.target) }).toEqual({ id: e.id, target: true })
+        }
+        // A label belongs to a wire, so there is no such thing as one
+        // without an edge to hang it on.
+        for (const e of g.edges) {
+            if (!e.labelVisible) continue
+            expect(drawn.has(e.source) && drawn.has(e.target)).toBe(true)
+        }
+    }
+
+    it('holds with both estates wide open', () => check(layout(wideEstate())))
+
+    it('holds when a frame is scrolled past the rows a wire lands on', () => {
+        const sg = wideEstate()
+        const base = initialLensViewState(sg)
+        for (const offset of [0, 3, 6, 9]) {
+            check(layout(sg, { ...base, frameOffsets: new Map([['T1', offset], ['F', offset]]) }))
+        }
+    })
+
+    it('holds for every fixture shape this suite builds', () => {
+        for (const sg of [sharedPlatform(), collateralEstate(), platformEstate(), columnGrainEstate()]) {
+            check(layout(sg))
+            check(layout(sg, shut(initialLensViewState(sg), sg.focusUrn)))
+        }
+    })
+})

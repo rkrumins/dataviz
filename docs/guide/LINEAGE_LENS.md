@@ -35,10 +35,15 @@ direction-tinted edges.
 Data flows **left to right** throughout, so the layout reads the same way the
 canvas does. Each connected entity appears **once**, however many
 relationships reach it — when more than one hop connects it to your focus, the
-card and the wire between them say so ("×3") rather than drawing it twice.
+**wire** between them says so ("×3") rather than drawing it twice. That number
+lives on the wire and nowhere else: a card used to carry its own running
+tally, but that counted how much of the entity the walk had LOADED, so it grew
+every time you clicked and named nothing that had changed. What a card says is
+what it holds, and what it can still show you.
 Neighbors that belong to the same parent — say, six fields of one dataset —
 are drawn **inside a frame named for that dataset**, one row each, with their
-own counts and their own wires. A column is never a peer of its own table:
+own wires; a wire lands on the finest thing on screen at both of its ends, so
+two tables opened to their columns show you which column feeds which. A column is never a peer of its own table:
 where it comes from is the box it sits in, not a caption you have to squint
 at. Wide tables **scroll** inside a fixed window
 rather than growing it, so a 500-column source sits on the board like any
@@ -142,8 +147,8 @@ The Lens is built for exploring, not just reading:
   board** — what comes back is drawn where it lands, in its own hop column,
   the moment it arrives — and it adds exactly that, never more, and never a
   guess. The pill's number is always the same thing: **how many more
-  connections there are that way**, the same unit the column headers, a
-  card's **×N** and the focal's in/out all count in. When the data source
+  connections there are that way**, the same unit the column headers count
+  in. When the data source
   hasn't told the Lens how many, the pill still offers the click with no
   number attached — there may be more, the Lens simply hasn't asked yet. A hub with
   more connections than fit in one response hands back a bookmark, and the

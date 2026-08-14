@@ -575,9 +575,12 @@ describe('the list body and the graph body are two renderings of one model', () 
   it('agrees about the counts whichever body is on screen', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph' })
     const { unmount } = renderLens(['F'], doneWalk(model()))
-    // The focal card, in the graph.
-    expect(screen.getByText('2 in')).toBeTruthy()
-    expect(screen.getByText('1 out')).toBeTruthy()
+    // The focal card, in the graph. Its number is REACH — what the data
+    // source named around this entity — not the walk's own loaded degree:
+    // "2 in / 1 out" used to sit here and grew every time the user
+    // clicked, which is what E deleted it for.
+    expect(screen.getByText(/Reach: 2 upstream/)).toBeTruthy()
+    expect(screen.getByText(/1 downstream/)).toBeTruthy()
     unmount()
 
     usePreferencesStore.setState({ lensViewMode: 'list' })

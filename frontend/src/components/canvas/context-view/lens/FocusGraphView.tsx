@@ -73,7 +73,7 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, FRAME_HEADER_H, FRAME_PAD, frameWindow, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
+import { CARD_W, BAND_GAP, FRAME_HEADER_H, FRAME_PAD, LABEL_MIN_RUN, frameWindow, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
 import { REVEAL_PAGE, pathToFocus, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
@@ -489,7 +489,13 @@ function ProvenanceRibbon({ card }: { card: FocusCard }) {
       {chain.length > 1 && (
         <span className="flex-shrink-0 text-ink-muted/40" aria-hidden>⋯›</span>
       )}
-      <TailName className="text-ink-muted" title={`in ${chain.join(' › ')}`}>{owner}</TailName>
+      {/* A FLOOR under the truncation. The tail is what identifies an
+          entity (`int_clean_orders_t1` vs `_t2`), so this elides from the
+          left — but with no floor a squeezed row rendered "…ake" for
+          Snowflake, which identifies nothing and reads as something
+          broken. Below the floor the row's own counts give up their space
+          instead; the tooltip carries the whole chain either way. */}
+      <TailName className="text-ink-muted min-w-[3.5rem]" title={`in ${chain.join(' › ')}`}>{owner}</TailName>
     </span>
   )
 }
@@ -775,7 +781,10 @@ function ContentsCount({ card }: { card: FocusCard }) {
   const { onLineage, total } = card.contents
   return (
     <span
-      className="flex-shrink-0 tabular-nums"
+      // Shrinks BEFORE the owner's name does (which has a floor under
+      // it): where the row is tight, a readable "in SILVER" beats a
+      // complete count beside a name reading "…ake".
+      className="truncate min-w-0 tabular-nums"
       title={total != null
         ? `${onLineage.toLocaleString()} of the ${total.toLocaleString()} things inside ${card.label} carry lineage here`
         : `${onLineage.toLocaleString()} things inside ${card.label} carry lineage here`}
@@ -826,10 +835,10 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
   // The ⊕ tucks INSIDE a row (there is no outside), so the content
   // yields exactly the room a pill owns and no label runs under one.
   const gutters = gutterEnds(card)
-  const flows = card.flowsIn + card.flowsOut
-  const words = flows > 0
-    ? `${flows.toLocaleString()} flow${flows === 1 ? '' : 's'} · ${card.flowsIn.toLocaleString()} in / ${card.flowsOut.toLocaleString()} out`
-    : null
+  // The row's flow tally used to hang off its ×N as a tooltip. Both are
+  // gone: the peek panel states it in words, scoped to what it actually
+  // is ("1 flow in this walk"), which is the honest home for a number
+  // that describes the FETCH rather than the entity.
 
   return (
     <div
@@ -907,20 +916,17 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
               </span>
             </>
           )}
-          {card.count > 1 && (
-            // Compact by default, spelled out when you point at it: "×17"
-            // is scannable down a column of forty rows, and "17 flows ·
-            // 12 in / 5 out" is what it MEANS.
-            <span
-              className="tabular-nums font-semibold text-ink-muted flex-shrink-0"
-              title={words ?? `${card.count.toLocaleString()} connections to this entity`}
-            >
-              ×{card.count.toLocaleString()}
-            </span>
-          )}
+          {/* NO ×N HERE. It was a WITHIN-MODEL degree — how much of this
+              entity the walk happens to have loaded — so it grew as the
+              user walked (reported live: ×102 → ×174 under one click)
+              while naming nothing that had changed about the entity. A
+              number that moves when you look at it is not a fact; it is
+              an artefact of looking. What this row says is what it holds
+              and what it can still offer; the flows live on the wire
+              (once, as a bundle) and in the peek. */}
           {card.contents && (
             <>
-              {(card.showType || card.count > 1 || card.edgeTypeNorm) && <span className="text-ink-muted/40">·</span>}
+              {(card.showType || card.edgeTypeNorm) && <span className="text-ink-muted/40">·</span>}
               <ContentsCount card={card} />
             </>
           )}
@@ -1044,18 +1050,12 @@ function FocusGraphCard({ data, selected }: NodeProps) {
             +{focalStats.coarser.toLocaleString()} connect at a coarser grain
           </p>
         )}
-        {focalStats && (
-          <div className="flex items-center gap-2.5 mt-1 pt-1 border-t border-black/[0.07] dark:border-white/[0.08] text-[10.5px] font-medium tabular-nums">
-            <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
-              <LucideIcons.ArrowDownLeft className="w-3 h-3" />
-              {focalStats.in} in
-            </span>
-            <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
-              <LucideIcons.ArrowUpRight className="w-3 h-3" />
-              {focalStats.out} out
-            </span>
-          </div>
-        )}
+        {/* "N in / N out" was the same accumulator one grain up: the
+            walk's own loaded degree, which grows with every click and
+            answers a question about the FETCH rather than about the
+            entity. Reach below is the macro number that survives — it
+            counts what the data source NAMED, states its floors, and
+            only ever grows because more genuinely exists. */}
         {/* How far the walk has reached — the question Focus mode gets
             opened to answer, counted off the model the board draws
             rather than measured separately. An open frontier makes
@@ -1132,17 +1132,9 @@ function FocusGraphCard({ data, selected }: NodeProps) {
               </span>
             </>
           )}
-          {card.count > 1 && (
-            <span
-              className="tabular-nums font-semibold text-ink-muted flex-shrink-0"
-              title={`${card.count.toLocaleString()} connections to this entity`}
-            >
-              ×{card.count.toLocaleString()}
-            </span>
-          )}
+          {/* No ×N on a frame either — same accumulator, same reason. */}
           {card.contents && (
             <>
-              <span className="text-ink-muted/40">·</span>
               <ContentsCount card={card} />
             </>
           )}
@@ -1745,8 +1737,19 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // CYCLE badge is not a count and is never suppressed: "this lineage
   // loops back" is a fact about the data, and two wires between one pair
   // read as a duplicate without it.
-  const showCount = (d.labelVisible ?? false) && !d.dimmed && (!d.labelDense || strong)
-  const showCycle = (d.cycleBack ?? false) && !d.dimmed
+  //
+  // ...and only where the wire BEING DRAWN can hold one. `labelVisible`
+  // is the layout's answer, computed from the geometry it just laid out;
+  // these coordinates are React Flow's, and the two disagree for a render
+  // whenever a node has not been measured yet — every reveal, and every
+  // drag. The layout's stale "yes" then painted a chip over a wire that
+  // had collapsed to a point: the reported ×15 ×14 ×13 ×12 ×11 stacked in
+  // mid-air with no arrow under them. A badge is a thing SAID ABOUT a
+  // wire, so it is decided by the wire that is there.
+  const drawnRun = Math.hypot(targetX - sourceX, targetY - sourceY)
+  const roomForLabel = drawnRun >= LABEL_MIN_RUN
+  const showCount = (d.labelVisible ?? false) && roomForLabel && !d.dimmed && (!d.labelDense || strong)
+  const showCycle = (d.cycleBack ?? false) && roomForLabel && !d.dimmed
   const showLabel = showCount || showCycle
   return (
     <>

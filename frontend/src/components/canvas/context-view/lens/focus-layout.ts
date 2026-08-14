@@ -50,6 +50,7 @@ import {
     layoutBands,
     rowHeight,
     ANCESTRY_CAP,
+    LABEL_MIN_RUN,
     CARD_H,
     CARD_W,
     CHILD_ROW_H,
@@ -83,10 +84,10 @@ export const REVEAL_PAGE = 12
  *  for reveal pages, pills and expand keys. */
 export const revealKey = (dir: LensDir, urn: string): string => `${dir}:${urn}`
 
-/** How long a drawn bundle must be before it can carry its ×N badge,
- *  and the box that badge occupies — two labels closer than this overlap
- *  into an unreadable smudge, so the second one is not drawn. */
-const LABEL_MIN_RUN = 90
+/** The box a badge occupies — two labels closer than this overlap into
+ *  an unreadable smudge, so the second one is not drawn. (How LONG a run
+ *  must be to carry one at all is `LABEL_MIN_RUN`, shared with the view,
+ *  which re-checks it against the wire it actually draws.) */
 const LABEL_W = 56
 const LABEL_H = 22
 
