@@ -28,6 +28,13 @@
  * frequent interaction may rebuild the node or edge arrays:
  *   • hover   → HoverContext; the edges array keeps its identity and
  *               only the SVG paths re-render.
+ *   • isolate → ConeStore, a `useSyncExternalStore` subscription rather
+ *               than a `Provider` value (Task 20, P1) — a `Provider`
+ *               re-renders every `useContext` consumer regardless of a
+ *               memo comparator sitting beside it, which is what made a
+ *               single hover-intent toggle re-render every card, frame
+ *               and band label on the board; a toggle now re-renders
+ *               only the cards/edges whose own on-cone answer changed.
  *   • reach   → ReachContext; a growing walk re-renders the focal
  *               card alone, not all N nodes.
  *   • select  → React Flow's own `selected` flag, node identity kept
@@ -43,7 +50,7 @@
  * The viewport re-frames on FOCAL change only: expanding grows the
  * picture in place instead of yanking it away from what you opened.
  */
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -106,10 +113,6 @@ const ReachContext = createContext<LensReach | null>(null)
  * pointing at (see `isolationCone` in focus-layout.ts), and the one
  * highlight this board has. `null` = nothing isolated, so nothing dims.
  *
- * Context, not card/edge data: isolating must re-render the affected
- * cards and edges alone, never rebuild the arrays (see the PERF CONTRACT
- * above) — the same reason HoverContext/ReachContext exist.
- *
  * It replaced a path-to-focus-only highlight, which answered a narrower
  * question ("how does this reach the focus") with a strictly smaller
  * answer: the focus lies on the cone whenever it is reachable, so one
@@ -117,14 +120,81 @@ const ReachContext = createContext<LensReach | null>(null)
  * which is the only difference the treatment makes — a sticky isolation
  * also names itself in a chip that says how to leave.
  */
-const IsolationContext = createContext<{
+interface IsolationSnapshot {
   cardIds: ReadonlySet<string>
   edgeIds: ReadonlySet<string>
   /** Drawn hops from the anchor; 0 for the anchor and what it holds. */
   hops: ReadonlyMap<string, number>
   anchorId: string
   sticky: boolean
-} | null>(null)
+}
+
+/**
+ * A SUBSCRIPTION STORE for the isolation cone (Task 20, P1), delivered
+ * through `useSyncExternalStore` instead of `React.Context`.
+ *
+ * Context does not do what the PERF CONTRACT above claims for it: a
+ * `Provider` value change re-renders EVERY `useContext` consumer
+ * unconditionally, and the memo comparators sitting beside `useConeState`
+ * (:1867 area) cannot stop it — a consumed context change bypasses memo
+ * entirely. Measured before touching this (see `perf.test.tsx`, P0):
+ * one hover-intent toggle re-rendered every card, frame and band label
+ * on the board, not the handful whose cone answer actually changed.
+ *
+ * `useSyncExternalStore` still notifies every subscriber, but each
+ * component's own selector (`onCone`/`isAnchor`/`hopsOf`, called through
+ * `useConeState` below) decides whether ITS render is actually needed —
+ * React skips the render when the returned PRIMITIVE is `Object.is`-equal
+ * to what it returned last time. So a toggle re-renders only the cards
+ * whose on-cone/off-cone/hop answer crossed a boundary. Selectors return
+ * primitives ONLY (never a fresh object) — see `navCatalogue.ts`'s own
+ * note on this: a fresh object from `getSnapshot` reads as "changed"
+ * every call and spins into a render loop.
+ *
+ * One instance per `FocusGraphView` mount (created in a ref, never a
+ * module singleton — a lens can have more than one board on screen).
+ * `HoverContext`/`ReachContext` are untouched: neither fans out to the
+ * whole board the way isolation did, so converting them is not this
+ * task's fix.
+ */
+class ConeStore {
+  private value: IsolationSnapshot | null = null
+  private readonly listeners = new Set<() => void>()
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  set(next: IsolationSnapshot | null): void {
+    if (this.value === next) return
+    this.value = next
+    // Counted (dev-gated, see renderProbe.ts): the P1 budget is "a sweep
+    // fires ≤2 store notifications" — this is that count, measured at
+    // its source rather than inferred from how many components re-ran.
+    bumpRenderCount('ConeStore.notify')
+    for (const listener of this.listeners) listener()
+  }
+
+  raw = (): IsolationSnapshot | null => this.value
+  onCone = (cardId: string): boolean => this.value != null && this.value.cardIds.has(cardId)
+  onConeEdge = (edgeId: string): boolean => this.value != null && this.value.edgeIds.has(edgeId)
+  isAnchor = (cardId: string): boolean => this.value != null && this.value.anchorId === cardId
+  hopsOf = (cardId: string): number | null => this.value?.hops.get(cardId) ?? null
+  /** How many of `cardIds` (a band's own column) are on the cone — for
+   *  `BandLabelNode`'s "· N on this path", without the nodes array ever
+   *  rebuilding on a hover. */
+  countOnCone = (cardIds: readonly string[]): number => {
+    if (this.value == null) return 0
+    let n = 0
+    for (const id of cardIds) if (this.value.cardIds.has(id)) n++
+    return n
+  }
+}
+
+/** Fallback only — `FocusGraphView` always provides its own instance.
+ *  A shared default keeps every consumer hook-safe without a null check. */
+const IsolationStoreContext = createContext<ConeStore>(new ConeStore())
 
 /**
  * Where the KEYBOARD is: which frame is being browsed, and which of its
@@ -288,15 +358,16 @@ function useConeState(cardId: string): {
   offCone: boolean
   hops: number | null
 } {
-  const iso = useContext(IsolationContext)
-  if (iso === null) return { anchor: false, onCone: false, offCone: false, hops: null }
-  const onCone = iso.cardIds.has(cardId)
-  return {
-    anchor: iso.anchorId === cardId,
-    onCone,
-    offCone: !onCone,
-    hops: iso.hops.get(cardId) ?? null,
-  }
+  const store = useContext(IsolationStoreContext)
+  // Four primitive selectors, not one object one — see ConeStore's own
+  // doc comment: a fresh object out of `useSyncExternalStore` reads as
+  // "changed" on every notify, which is the render-loop trap the
+  // codebase's own `navCatalogue.ts` already ran into and documented.
+  const isolating = useSyncExternalStore(store.subscribe, () => store.raw() !== null)
+  const onCone = useSyncExternalStore(store.subscribe, () => store.onCone(cardId))
+  const anchor = useSyncExternalStore(store.subscribe, () => store.isAnchor(cardId))
+  const hops = useSyncExternalStore(store.subscribe, () => store.hopsOf(cardId))
+  return { anchor, onCone, offCone: isolating && !onCone, hops }
 }
 
 /**
@@ -1079,8 +1150,9 @@ function FocusGraphCard({ data, selected }: NodeProps) {
     card: FocusCard
     ctx: CardCtx
   }
-  // The isolation arrives via context so a hover re-renders only the
-  // cards whose cone state actually changed.
+  // The isolation arrives via a subscription store (`useConeState`, P1)
+  // so a hover re-renders only the cards whose cone state actually
+  // changed, not every card on the board.
   const { anchor, onCone, offCone, hops } = useConeState(card.id)
   // One class, decided here: two `opacity-*` utilities on one element
   // are settled by their order in the stylesheet, not in the class list,
@@ -1895,10 +1967,11 @@ function BandLabelNode({ data }: NodeProps) {
   const d = data as unknown as { band?: number; sub?: string; whisper?: string; cardIds?: string[] }
   // HOP CONTEXT while a cone is isolated: how much of THIS column the
   // reader's lineage runs through. Counted here, from the ids the band
-  // already knows and the cone already in context — so the numbers cost
-  // nothing and the nodes array never rebuilds on a hover.
-  const iso = useContext(IsolationContext)
-  const onPath = iso === null ? 0 : (d.cardIds ?? []).filter(id => iso.cardIds.has(id)).length
+  // already knows and the cone already in the store — so the numbers
+  // cost nothing and the nodes array never rebuilds on a hover.
+  const store = useContext(IsolationStoreContext)
+  const isolating = useSyncExternalStore(store.subscribe, () => store.raw() !== null)
+  const onPath = useSyncExternalStore(store.subscribe, () => store.countOnCone(d.cardIds ?? []))
   if (d.whisper) {
     return (
       <div style={{ width: CARD_W }} className="pointer-events-none text-[10.5px] italic text-ink-muted/60 leading-snug">
@@ -1912,11 +1985,11 @@ function BandLabelNode({ data }: NodeProps) {
   return (
     <div style={{ width: CARD_W }} className="pointer-events-none flex items-baseline gap-1.5 whitespace-nowrap">
       {isUp
-        ? <LucideIcons.ArrowDownLeft className={cn('w-3 h-3 self-center text-sky-500', iso !== null && onPath === 0 && 'opacity-40')} />
-        : <LucideIcons.ArrowUpRight className={cn('w-3 h-3 self-center text-amber-500', iso !== null && onPath === 0 && 'opacity-40')} />}
+        ? <LucideIcons.ArrowDownLeft className={cn('w-3 h-3 self-center text-sky-500', isolating && onPath === 0 && 'opacity-40')} />
+        : <LucideIcons.ArrowUpRight className={cn('w-3 h-3 self-center text-amber-500', isolating && onPath === 0 && 'opacity-40')} />}
       <span className={cn(
         'text-[9.5px] font-bold uppercase tracking-[0.12em]',
-        iso !== null && onPath === 0 ? 'text-ink-muted/40' : 'text-ink-muted/70',
+        isolating && onPath === 0 ? 'text-ink-muted/40' : 'text-ink-muted/70',
       )}>
         {isUp
           ? hop === 1 ? 'Data Sources' : `Sources · hop ${hop}`
@@ -1973,10 +2046,13 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // makes React Flow reconcile every edge).
   const hoveredId = useContext(HoverContext)
   const emphasized = hoveredId != null && (source === hoveredId || target === hoveredId)
-  // The isolation — same context-routing reason as above.
-  const iso = useContext(IsolationContext)
-  const onCone = iso != null && iso.edgeIds.has(id)
-  const offCone = iso != null && !onCone
+  // The isolation — a subscription store rather than context, so a
+  // toggle re-renders only the edges whose own on-cone answer changed
+  // (Task 20, P1). See ConeStore's doc comment.
+  const isoStore = useContext(IsolationStoreContext)
+  const onCone = useSyncExternalStore(isoStore.subscribe, () => isoStore.onConeEdge(id))
+  const isolating = useSyncExternalStore(isoStore.subscribe, () => isoStore.raw() !== null)
+  const offCone = isolating && !onCone
   const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
   const strong = emphasized || onCone
   /**
@@ -1985,8 +2061,10 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
    * instead of being one flat band of highlight. Measured at the nearer
    * of its two ends, because a wire is as close as its closest card.
    */
+  const sourceHops = useSyncExternalStore(isoStore.subscribe, () => isoStore.hopsOf(source))
+  const targetHops = useSyncExternalStore(isoStore.subscribe, () => isoStore.hopsOf(target))
   const coneHops = onCone
-    ? Math.min(iso!.hops.get(source) ?? 99, iso!.hops.get(target) ?? 99)
+    ? Math.min(sourceHops ?? 99, targetHops ?? 99)
     : null
   const adjacent = coneHops !== null && coneHops <= 1
   // Highlighting STRENGTHENS what it points at, and quiets the rest only
@@ -2854,6 +2932,18 @@ export function FocusGraphView({
     [graph.cards, isolationValue],
   )
 
+  // One ConeStore per mount (Task 20, P1) — `isolationValue` stays the
+  // single source of truth computed above; this only changes HOW it
+  // reaches the board's cards/edges/band-labels. `useLayoutEffect` so the
+  // store's subscribers update in the SAME commit, before paint — a
+  // hover never shows a stale frame first and a correct one a tick later.
+  // `useState`'s lazy initializer, not a ref read during render: this
+  // project's hooks lint (react-hooks/refs) forbids `ref.current` reads
+  // in the render body, even the classic "lazy-init a stable instance"
+  // idiom — the initializer function here runs exactly once, on mount.
+  const [isolationStore] = useState(() => new ConeStore())
+  useLayoutEffect(() => { isolationStore.set(isolationValue) }, [isolationStore, isolationValue])
+
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
   useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion)
 
@@ -2885,7 +2975,7 @@ export function FocusGraphView({
     >
       <ReachContext.Provider value={reachValue}>
       <HoverContext.Provider value={hoveredId}>
-      <IsolationContext.Provider value={isolationValue}>
+      <IsolationStoreContext.Provider value={isolationStore}>
       <RowCursorContext.Provider value={rowCursor}>
       <ReactFlowProvider>
         <ReactFlow
@@ -2974,7 +3064,7 @@ export function FocusGraphView({
         </ReactFlow>
       </ReactFlowProvider>
       </RowCursorContext.Provider>
-      </IsolationContext.Provider>
+      </IsolationStoreContext.Provider>
       </HoverContext.Provider>
       </ReachContext.Provider>
     </div>

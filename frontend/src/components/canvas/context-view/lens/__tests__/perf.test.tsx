@@ -158,17 +158,71 @@ describe('P0 — perf harness (Task 20)', () => {
           act(() => { vi.advanceTimersByTime(50) })
           act(() => { fireEvent.mouseLeave(t) })
         }
-        // Settle on the last one.
+        // Settle on the last one, then clear it — the brief's exact
+        // shape: "a continuous sweep ... fires ≤1 isolation + 1 clear,
+        // never N", pinned as ≤2 store notifications.
         act(() => { fireEvent.mouseEnter(targets[targets.length - 1]) })
         act(() => { vi.advanceTimersByTime(250) })
+        act(() => { fireEvent.mouseLeave(targets[targets.length - 1]) })
 
         const totalRendered = [...renderCounts.values()].reduce((n, v) => n + v, 0)
+        const storeNotifications = renderCounts.get('ConeStore.notify') ?? 0
         console.log(
           `[P0-b] walkWideHub boardNodes=${board.length} sweepCommits=${profiler.commitCount} `
           + `sweepMs=${profiler.totalMs.toFixed(2)} totalComponentRenders=${totalRendered} `
+          + `storeNotifications=${storeNotifications} `
           + `(${JSON.stringify(Object.fromEntries(renderCounts))})`,
         )
         expect(profiler.commitCount).toBeGreaterThan(0)
+        // THE budget: a sweep across 10 cards fires at most one isolation
+        // and one clear at the store — never one per card swept.
+        expect(storeNotifications).toBeLessThanOrEqual(2)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    /**
+     * The P1 claim in its clearest form: switching the ANCHOR while
+     * isolation STAYS active. `walkWideHub`'s 40 downstream reports are
+     * independent siblings of F — each report's own cone is {report, F},
+     * so moving from one to another should touch only those two cards on
+     * EACH side of the switch, never the other 38 reports (whose
+     * on-cone/off-cone answer does not change — they were off-cone before
+     * the switch and stay off-cone after it).
+     */
+    it('walkWideHub: switching anchors while isolation stays on touches only what changed', () => {
+      vi.useFakeTimers()
+      try {
+        resetRenderCounts()
+        const profiler = makeProfilerRecorder()
+        const { container } = renderBoard('walkWideHub', profiler)
+        const reports = nodes(container).filter(n => /report_\d+/.test(n.textContent ?? ''))
+        expect(reports.length).toBeGreaterThanOrEqual(2)
+        const [reportA, reportB] = reports
+
+        act(() => { fireEvent.mouseEnter(reportA) })
+        act(() => { vi.advanceTimersByTime(250) })
+
+        profiler.reset()
+        resetRenderCounts()
+        // Straight from A to B, never releasing isolation in between.
+        act(() => { fireEvent.mouseEnter(reportB) })
+        act(() => { vi.advanceTimersByTime(250) })
+
+        const switchRenders = new Map(renderCounts)
+        const totalRendered = [...switchRenders.values()].reduce((n, v) => n + v, 0)
+        console.log(
+          `[P1] walkWideHub anchor-switch (isolation stays on): reportCount=${reports.length} `
+          + `commits=${profiler.commitCount} ms=${profiler.totalMs.toFixed(2)} `
+          + `totalComponentRenders=${totalRendered} (${JSON.stringify(Object.fromEntries(switchRenders))})`,
+        )
+        // Far fewer than the whole board (151 nodes) — the fix's actual
+        // point: an anchor switch touches a handful of cards, not the
+        // board. A generous ceiling (30) so this cannot flake on an
+        // unrelated re-render while still catching a regression back to
+        // whole-board fan-out.
+        expect(totalRendered).toBeLessThan(30)
       } finally {
         vi.useRealTimers()
       }
