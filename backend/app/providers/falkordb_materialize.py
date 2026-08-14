@@ -234,14 +234,23 @@ def _max_materialized_edges() -> int:
     FalkorDB's RAM at ~0.5KB/edge — exceeding the instance's memory
     kills it for every graph it hosts.
 
-    Default 16M ≈ 8GB at 0.5KB/edge. Sized against ONE SHARD, because a
+    Default 25M ≈ 12.5GB at 0.5KB/edge. Sized against ONE SHARD, because a
     FalkorDB graph key lives entirely on one node — Redis Cluster does not
     split a graph, so sharding scales the NUMBER of graphs, not the size
     of any one (see ``falkordb_connection`` module docstring). The
     reference cluster runs ``maxmemory 40gb`` per shard at ~22GB planned
-    usage, so ~18GB of headroom, and its capacity model assumes a largest
-    single graph of ~8GB — this budget matches that and still clears the
-    ~3-4M boundary pairs a 1M-node / 2M-edge graph produces by ~4x.
+    usage, so ~18GB of headroom; this budget claims ~70% of that.
+
+    Boundary pairs run ~1.5-2x raw edge count, so 25M covers a graph of
+    roughly 12-16M edges — 6-8x the 1M-node / 2M-edge floor the defaults
+    target, which is the point: that floor is a MINIMUM, not the ceiling.
+
+    NOTE this is ABOVE the ~8GB "largest single graph" figure in
+    ``docs/INFRASTRUCTURE_LAUNCH_SCALE.md`` §2.2, and that doc's headroom
+    covers skew + largest graph + growth together. Because keyslot
+    placement is not load-aware, two graphs near this budget landing on
+    one shard is the case that gets tight — watch per-shard
+    ``used_memory`` and rebalance by moving a graph, per that doc.
 
     It is a backstop, not a sizing guard: it exists so a pathological
     result fails LOUDLY here rather than filling the shard. That matters
@@ -250,7 +259,7 @@ def _max_materialized_edges() -> int:
     ``cluster-require-full-coverage no`` the rest of the cluster keeps
     serving, so it degrades partially instead of obviously. Raise it per
     job (ceiling 50M) only on an instance with the headroom to match."""
-    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 16_000_000, 10_000, 50_000_000)
+    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 25_000_000, 10_000, 50_000_000)
 
 
 def _max_cube_edges() -> int:

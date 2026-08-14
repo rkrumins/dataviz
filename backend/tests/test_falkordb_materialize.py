@@ -1562,7 +1562,7 @@ def test_auto_mode_materializes_full_cube_within_budget():
     assert result["run_stats"]["regime"] == "cube"
     assert result["run_stats"]["cube_estimate"] >= len(agg)
     # The DEFAULT budget (no tuning override here) — sized per shard.
-    assert result["run_stats"]["materialize_budget"] == 16_000_000
+    assert result["run_stats"]["materialize_budget"] == 25_000_000
     assert fake.meta["edgeCount"] == len(agg)
     assert fake.meta["maxDepth"] == 2
     # Depth stamps on every row, structural on the self-nesting shape.

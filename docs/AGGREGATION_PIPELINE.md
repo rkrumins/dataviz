@@ -107,7 +107,7 @@ milliseconds even 8 levels deep on multi-million-edge graphs. Same
 answers, same response shape. Trace is unaffected: trace-at-level reads
 same-level cells (still materialized) and already uses raw edges at the
 finest level. A hard write budget (`AGGREGATION_MAX_MATERIALIZED_EDGES`,
-default 16M) fails a job loudly — terminally, no retries, with a
+default 25M) fails a job loudly — terminally, no retries, with a
 per-level composition breakdown in the error — rather than ever letting
 a result OOM the shared instance.
 
@@ -118,10 +118,18 @@ a cluster gives a single large graph zero extra headroom
 (`backend/app/providers/falkordb_connection.py` module docstring). The
 reference cluster (`deploy/k8s/overlays/production-cluster/`) runs
 `maxmemory 40gb` per shard against ~22GB planned usage — about 18GB of
-headroom — and its capacity model assumes a largest single graph of ~8GB
-(`docs/INFRASTRUCTURE_LAUNCH_SCALE.md` §2.2). The 16M default is ~8GB at
-~0.5KB/edge: it matches that assumption and still clears the few million
-canonical pairs a 1M-node / 2M-edge graph produces by roughly 4x.
+headroom. The 25M default is ~12.5GB at ~0.5KB/edge, roughly 70% of that.
+Boundary pairs run ~1.5-2x raw edge count, so it covers a graph of about
+12-16M edges — several times the 1M-node / 2M-edge floor the defaults
+target, which is the point: that floor is a MINIMUM, not a ceiling.
+
+Note this sits **above** the ~8GB "largest single graph" figure in
+[Infrastructure: Launch Scale](/docs/infra-launch-scale) §2.2, whose 18GB of
+headroom covers skew *and* the largest graph *and* growth together.
+Because keyslot placement is deterministic rather than load-aware, the
+case to watch is two graphs near this budget landing on the same shard —
+monitor per-shard `used_memory` and rebalance by moving a graph, per that
+document.
 
 The budget is a backstop, not a sizing guard — it exists so a pathological
 result fails loudly instead of filling the shard. That matters *more* on a
@@ -272,7 +280,7 @@ pipeline).
 | `AGGREGATION_SCAN_SHRINK_FLOOR` | 10000 | Smallest range width the shrink-on-timeout ladder descends to (a floor-width timeout is an outage and fails the run) |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs (legacy mode only) |
 | `AGGREGATION_MATERIALIZE_FINE_PAIRS` | auto | `auto` picks cube-vs-boundary by estimate; `true`/`false` force the legacy full cube (leaf-involving + mixed-level pairs) |
-| `AGGREGATION_MAX_MATERIALIZED_EDGES` | 16000000 | Hard write budget (fail loud, never OOM). ~8GB at 0.5KB/edge — sized against ONE SHARD, since a graph never spans shards. Ceiling 50M |
+| `AGGREGATION_MAX_MATERIALIZED_EDGES` | 25000000 | Hard write budget (fail loud, never OOM). ~12.5GB at 0.5KB/edge — sized against ONE SHARD, since a graph never spans shards. Ceiling 50M |
 | `AGGREGATION_MAX_CUBE_EDGES` | 8000000 | Ceiling on the AUTO-mode full-cube estimate. Deliberately separate from the write budget: sharing them meant raising the backstop silently turned `auto` into full-cube. Not per-job tunable |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves) |

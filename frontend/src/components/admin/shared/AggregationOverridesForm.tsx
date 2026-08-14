@@ -147,7 +147,7 @@ const TUNING_FIELDS: TuningFieldSpec[] = [
         label: 'Materialization budget',
         tip: 'Hard ceiling on stored AGGREGATED edges (~0.5KB of graph memory each). A backstop, not a sizing guard — forced full detail fails loudly instead of exceeding it. Size it against a SINGLE graph store node: a graph never spans cluster shards, so sharding adds no headroom for one large graph. Auto storage decides cube-vs-diagonal against its own ceiling, so raising this does not change that choice.',
         help: 'Max stored rollup edges (10,000-50,000,000)',
-        min: 10_000, max: 50_000_000, placeholder: 16_000_000,
+        min: 10_000, max: 50_000_000, placeholder: 25_000_000,
     },
 ]
 
@@ -331,8 +331,9 @@ const CAPACITY_FLOOR = {
     maxPendingPairs: 50_000_000,
     // Graph-store bound, so sized against ONE SHARD: a graph key never
     // spans shards, and the reference cluster runs maxmemory 40gb per
-    // shard with ~18GB free. 16M x ~0.5KB ~= 8GB.
-    maxMaterializedEdges: 16_000_000,
+    // shard with ~18GB free. 25M x ~0.5KB ~= 12.5GB, covering a graph
+    // several times the 1M-node / 2M-edge floor.
+    maxMaterializedEdges: 25_000_000,
 } as const
 
 /**
