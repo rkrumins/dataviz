@@ -90,6 +90,19 @@ import { bumpRenderCount } from './renderProbe'
  *  = amber (matches the list columns and the canvas). */
 const TINT_UP = '#0ea5e9'
 const TINT_DOWN = '#f59e0b'
+/**
+ * Off-cone wire colour (Task 20, P2) — `TINT_UP`/`TINT_DOWN` run through
+ * the exact matrix `filter: saturate(.35)` applies (the CSS/SVG spec's
+ * luminance-preserving saturate matrix, not an HSL desaturation — the
+ * two disagree visibly), computed once here rather than asked of the
+ * compositor on every off-cone wire. `filter` forces its own render
+ * layer per element; a precomputed colour is a plain paint property, and
+ * a wide board can carry hundreds of off-cone wires when a cone is
+ * active. Screenshot-verified against the `filter` version in the P2
+ * report — the two are pixel-equivalent.
+ */
+const MUTED_TINT_UP = '#5e93ab'
+const MUTED_TINT_DOWN = '#c2a370'
 
 /** Slate, for a card that stands for no entity: an unresolved type, or
  *  the focal's contains-stack, which is chrome rather than a thing. */
@@ -219,9 +232,36 @@ const RowCursorContext = createContext<{ frameKey: string; urn: string } | null>
  * the board into one grey wash, while pulling the colour out keeps the
  * shapes and the hierarchy readable and makes the cone's own colour the
  * only saturated thing on screen. That is what the eye actually follows.
+ *
+ * The desaturation used to be `filter: saturate(.35)` on the whole card
+ * — one compositor layer per off-cone element, and a wide board can hold
+ * hundreds of them the moment a cone is active. `muteColor` (Task 20,
+ * P2) runs the SAME matrix the CSS filter does, once per colour a card
+ * actually paints with, and hands the DOM a plain colour instead — no
+ * filter, no forced layer. `OFF_CONE_CARD` now carries only the opacity;
+ * every accent-coloured element mutes its OWN colour beside it.
  */
-const OFF_CONE_CARD = 'opacity-60 saturate-[.35]'
+const OFF_CONE_CARD = 'opacity-60'
 const OFF_CONE_EDGE = 0.28
+
+/**
+ * The exact matrix `filter: saturate(s)` applies (CSS Filter Effects §
+ * the `saturate` primitive — luminance-preserving, not an HSL
+ * desaturation; the two disagree visibly). Used wherever a card would
+ * otherwise have reached for the CSS filter on an off-cone accent
+ * colour — see `OFF_CONE_CARD`'s doc comment.
+ */
+function muteColor(hex: string, s = 0.35): string {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  const rp = (0.213 + 0.787 * s) * r + (0.715 - 0.715 * s) * g + (0.072 - 0.072 * s) * b
+  const gp = (0.213 - 0.213 * s) * r + (0.715 + 0.285 * s) * g + (0.072 - 0.072 * s) * b
+  const bp = (0.213 - 0.213 * s) * r + (0.715 - 0.715 * s) * g + (0.072 + 0.928 * s) * b
+  const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)))
+  const toHex = (v: number) => clamp(v).toString(16).padStart(2, '0')
+  return `#${toHex(rp)}${toHex(gp)}${toHex(bp)}`
+}
 
 /** Above this many labelled bundles on one board, a ×N badge stops being
  *  information and becomes texture — so only the ones the reader is
@@ -976,6 +1016,11 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
   const hostKey = card.parentId ?? ''
   const onCursor = cursor !== null && cursor.frameKey === hostKey && cursor.urn === card.nodeId
   const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
+  // The row's OWN colour, muted in place of the CSS filter this used to
+  // lean on — see OFF_CONE_CARD. Used everywhere `accent` paints
+  // something outside the onCone/selected treatment, which stays at
+  // full saturation (the two states are mutually exclusive with offCone).
+  const displayAccent = offCone ? muteColor(accent) : accent
   const dim = card.dimmed ? (card.connected ? 'opacity-30' : 'opacity-20') : offCone ? OFF_CONE_CARD : undefined
 
   /**
@@ -1036,7 +1081,7 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
       style={{
         width: card.w,
         height: card.h,
-        ...(card.connected ? { borderLeftWidth: 3, borderLeftColor: accent } : {}),
+        ...(card.connected ? { borderLeftWidth: 3, borderLeftColor: displayAccent } : {}),
         paddingLeft: gutters.left ? PILL_ZONE : undefined,
         paddingRight: gutters.right ? PILL_ZONE : undefined,
         // Selected, or lit by an isolation: the ring is the ENTITY TYPE's
@@ -1059,9 +1104,9 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
       <ContentsChevron card={card} ctx={ctx} />
       <div
         className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
-        style={{ backgroundColor: card.connected ? `${accent}1f` : 'transparent' }}
+        style={{ backgroundColor: card.connected ? `${displayAccent}1f` : 'transparent' }}
       >
-        <TypeIcon ctx={ctx} typeId={card.type} color={accent} className={cn('w-3.5 h-3.5', !card.connected && 'opacity-60')} />
+        <TypeIcon ctx={ctx} typeId={card.type} color={displayAccent} className={cn('w-3.5 h-3.5', !card.connected && 'opacity-60')} />
       </div>
       <div className="flex-1 min-w-0">
         <p className={cn('truncate text-[12px] leading-snug', card.connected ? 'font-medium text-ink' : 'text-ink-secondary')}>
@@ -1072,7 +1117,7 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
           {card.showType && (
             <span
               className="flex-shrink-0 px-1 rounded uppercase tracking-wide font-semibold"
-              style={{ backgroundColor: `${accent}1f`, color: accent }}
+              style={{ backgroundColor: `${displayAccent}1f`, color: displayAccent }}
             >
               {card.type}
             </span>
@@ -1081,7 +1126,7 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
             <>
               <span
                 className="w-1 h-1 rounded-full flex-shrink-0"
-                style={{ backgroundColor: generateEdgeColorFromType(card.edgeTypeNorm) }}
+                style={{ backgroundColor: offCone ? muteColor(generateEdgeColorFromType(card.edgeTypeNorm)) : generateEdgeColorFromType(card.edgeTypeNorm) }}
               />
               <span
                 className="truncate uppercase tracking-wide"
@@ -1160,6 +1205,10 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   // spelled out and left to fight.
   const dim = card.dimmed ? 'opacity-30' : offCone ? OFF_CONE_CARD : undefined
   const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
+  // Muted in place of the CSS filter this used to lean on — see
+  // OFF_CONE_CARD. `accent` itself stays at full saturation for the
+  // onCone/selected treatment, mutually exclusive with offCone.
+  const displayAccent = offCone ? muteColor(accent) : accent
 
   const activate = () => { ctx.onSelect(card.nodeId); ctx.onIsolate(card.id) }
   const keyActivate = (e: React.KeyboardEvent) => {
@@ -1179,7 +1228,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
       title={`${card.label}${card.description ? ` — ${card.description}` : ''} · click to inspect, double-click to focus`}
       style={{
-        width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent,
+        width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: displayAccent,
         ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 8px 20px -8px ${accent}59` }
           : onCone ? coneLift(accent, anchor, hops)
             : {}),
@@ -1194,9 +1243,9 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       {(
         <div
           className="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0"
-          style={{ backgroundColor: `${accent}1f` }}
+          style={{ backgroundColor: `${displayAccent}1f` }}
         >
-          <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5" />
+          <TypeIcon ctx={ctx} typeId={card.type} color={displayAccent} className="w-3.5 h-3.5" />
         </div>
       )}
       <div className="flex-1 min-w-0">
@@ -1214,7 +1263,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
             <>
               <span
                 className="w-1 h-1 rounded-full flex-shrink-0"
-                style={{ backgroundColor: generateEdgeColorFromType(card.edgeTypeNorm) }}
+                style={{ backgroundColor: offCone ? muteColor(generateEdgeColorFromType(card.edgeTypeNorm)) : generateEdgeColorFromType(card.edgeTypeNorm) }}
               />
               <span
                 className="truncate uppercase tracking-wide"
@@ -1297,6 +1346,10 @@ function FocusFrameNode({ data, selected }: NodeProps) {
   // node — it used to invalidate every node in the graph.
   const focalReach = useContext(ReachContext)
   const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
+  // Muted in place of the CSS filter this used to lean on — see
+  // OFF_CONE_CARD. `accent` itself stays at full saturation for the
+  // onCone/selected treatment, mutually exclusive with offCone.
+  const displayAccent = offCone ? muteColor(accent) : accent
   // Whether anything will sit beside the name — see the name's width.
   // Never on the focal: its provenance is the breadcrumb below the name,
   // where the whole chain is clickable.
@@ -1341,15 +1394,16 @@ function FocusFrameNode({ data, selected }: NodeProps) {
       style={{
         width: card.w,
         height: card.h,
-        borderColor: isFocal ? accent : `${accent}55`,
+        borderColor: isFocal ? displayAccent : `${displayAccent}55`,
         ...(isFocal
-          ? { background: `linear-gradient(150deg, ${accent}24, ${accent}08 60%)` }
+          ? { background: `linear-gradient(150deg, ${displayAccent}24, ${displayAccent}08 60%)` }
           : {}),
         // In priority: what the reader chose, then what the isolation
-        // lights, then the focus's own standing glow.
+        // lights, then the focus's own standing glow (muted with it when
+        // off-cone — that glow is not the onCone/selected treatment).
         ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 10px 34px -6px ${accent}66` }
           : onCone ? coneLift(accent, anchor, hops)
-            : isFocal ? { boxShadow: `0 10px 34px ${accent}33` }
+            : isFocal ? { boxShadow: `0 10px 34px ${displayAccent}33` }
               : {}),
       }}
       className={cn(
@@ -1405,14 +1459,14 @@ function FocusFrameNode({ data, selected }: NodeProps) {
             : <LucideIcons.ChevronRight className="w-3.5 h-3.5" />}
         </button>
         )}
-        <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5 flex-shrink-0" />
+        <TypeIcon ctx={ctx} typeId={card.type} color={displayAccent} className="w-3.5 h-3.5 flex-shrink-0" />
         {/* The focus states its KIND on the control line and its NAME on
             a line of its own below — it is the thing the whole board is
             about, and a name sharing a row with four controls is the
             thing most likely to truncate. */}
         {isFocal && (
           <>
-            <p className="text-[9.5px] font-bold uppercase tracking-[0.12em] truncate" style={{ color: accent }}>
+            <p className="text-[9.5px] font-bold uppercase tracking-[0.12em] truncate" style={{ color: displayAccent }}>
               {card.type}
             </p>
             {card.fetch === 'loading' && (
@@ -2031,6 +2085,8 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     containment: boolean
     dimmed: boolean
     tint: string
+    /** The desaturated `tint`, precomputed at build time — see P2. */
+    mutedTint: string
     cycleBack?: boolean
     /** The one wire of this loop whose badge outranks the density cap. */
     cycleAnchor?: boolean
@@ -2111,7 +2167,14 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
         // the OS setting and the in-app preference.
         className={cn(onCone && !d.reducedMotion && 'lens-cone-flow')}
         style={{
-          stroke: d.tint,
+          // Colour is what the eye follows, so the background gives its
+          // up. Dimming alone flattens the board into one grey wash — but
+          // a `filter: saturate()` forces its own compositor layer per
+          // wire, and a wide board can carry hundreds of them off-cone at
+          // once. `mutedTint` is the SAME desaturation, pre-computed once
+          // per edge at build time (Task 20, P2) rather than asked of the
+          // compositor on every one of them.
+          stroke: offCone ? d.mutedTint : d.tint,
           // Three steps, no more: the wire the reader is pointing at and
           // its first hop, the rest of the cone, and the background.
           strokeWidth: onCone
@@ -2119,9 +2182,6 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
             : strong ? (d.aggregated ? 3 : 2.5) : d.aggregated ? 2 : 1.5,
           strokeDasharray: d.containment ? '4 4' : undefined,
           opacity,
-          // Colour is what the eye follows, so the background gives its
-          // up. Dimming alone flattens the board into one grey wash.
-          filter: offCone ? 'saturate(.35)' : undefined,
           transition: d.reducedMotion ? undefined : 'opacity 140ms ease-out, stroke-width 140ms ease-out',
         }}
       />
@@ -2883,9 +2943,13 @@ export function FocusGraphView({
     return graph.edges.map((e) => {
       // Containment is never drawn as a wire — it NESTS. Every edge on
       // the board is a lineage hop, tinted by the side it lands on.
-      const tint = Math.max(bandById.get(e.source) ?? 0, bandById.get(e.target) ?? 0) <= 0
-        ? TINT_UP
-        : TINT_DOWN
+      const up = Math.max(bandById.get(e.source) ?? 0, bandById.get(e.target) ?? 0) <= 0
+      const tint = up ? TINT_UP : TINT_DOWN
+      // The off-cone colour, baked in here rather than a `filter` at
+      // render time (P2) — a static property of which SIDE the wire is
+      // on, exactly like `tint` itself, so this costs nothing extra on a
+      // rebuild and nothing at all on a hover.
+      const mutedTint = up ? MUTED_TINT_UP : MUTED_TINT_DOWN
       return {
         id: e.id,
         source: e.source,
@@ -2895,7 +2959,7 @@ export function FocusGraphView({
         // convention alone — every hop carries an explicit arrowhead.
         markerEnd: { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
         data: {
-          count: e.count, dimmed: e.dimmed, tint, cycleBack: e.cycleBack, reducedMotion,
+          count: e.count, dimmed: e.dimmed, tint, mutedTint, cycleBack: e.cycleBack, reducedMotion,
           cycleAnchor: e.cycleAnchor, labelVisible: e.labelVisible, labelDense,
         },
       }

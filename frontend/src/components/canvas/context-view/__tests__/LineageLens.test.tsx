@@ -822,9 +822,10 @@ describe('pointing at an element isolates its lineage cone', () => {
   /** The off-cone floor. Deliberately not the old 30%: a highlight that
    *  turns the rest of the board into grey ghosts costs the reader the
    *  context they were reading the cone against. Desaturated as well as
-   *  dimmed, because opacity alone flattens the board. */
+   *  dimmed, because opacity alone flattens the board — desaturation is a
+   *  precomputed muted colour now (Task 20, P2), not a CSS filter class,
+   *  so it shows up as a DIFFERENT `borderLeftColor` rather than a class. */
   const QUIET = 'opacity-60'
-  const FLAT = 'saturate-[.35]'
   /** On the cone: lifted with its own type colour. */
   const lit = (el: HTMLElement) => el.style.boxShadow !== ''
 
@@ -837,7 +838,10 @@ describe('pointing at an element isolates its lineage cone', () => {
     expect(lit(nodeFor('label-c'))).toBe(true)
     // ...and NOT the other producer of the same target.
     expect(nodeFor('label-d').className).toContain(QUIET)
-    expect(nodeFor('label-d').className).toContain(FLAT)
+    // Same entity type as the lit `label-a` (both `dataset`), so their
+    // full-saturation accent is identical — a DIFFERENT rendered colour
+    // on the off-cone one is the desaturation, applied without a filter.
+    expect(nodeFor('label-d').style.borderLeftColor).not.toBe(nodeFor('label-a').style.borderLeftColor)
     // Quiet, never invisible: the floor holds.
     expect(nodeFor('label-d').className).not.toContain('opacity-30')
     expect(nodeFor('label-a').className).not.toContain(QUIET)
