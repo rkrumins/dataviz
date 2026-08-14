@@ -157,7 +157,7 @@ async function openLens(props: Parameters<typeof LensSeam>[0]) {
 /** Show the producer already in hand. Until it is on the board the ⊕
  *  offers THAT (free before costly), which is a different pill. */
 async function revealPrior() {
-  fireEvent.click(await screen.findByTitle(/Show 1 more upstream — already loaded, nothing to fetch/))
+  fireEvent.click(await screen.findByTitle(/Show 1 more upstream connection — already loaded, nothing to fetch/))
 }
 
 /** Collapse `customers`, so its ⊕ has to speak for the columns it hides.
@@ -225,7 +225,7 @@ describe('lens seam — one click, one action, one acknowledgement', () => {
     await collapseTable()
 
     // 9 + 4, minus the one producer now on the board.
-    fireEvent.click(await screen.findByTitle(/Walk one hop further upstream of customers \(12 more\)/))
+    fireEvent.click(await screen.findByTitle(/Walk one hop further upstream of customers \(12 more connections\)/))
 
     expect(traceClosure).toHaveBeenCalledTimes(2)
     expect(traceClosure.mock.calls[1]![0]).toMatchObject({
@@ -260,7 +260,7 @@ describe('lens seam — one click, one action, one acknowledgement', () => {
     const { provider, traceClosure } = makeProvider()
     await openLens({ provider })
 
-    fireEvent.click(await screen.findByTitle(/Load the rest of what is downstream of collaterals \(12 more\)/))
+    fireEvent.click(await screen.findByTitle(/Load the rest of what is downstream of collaterals \(12 more connections\)/))
 
     expect(traceClosure).toHaveBeenCalledTimes(2)
     expect(traceClosure.mock.calls[1]![0]).toMatchObject({

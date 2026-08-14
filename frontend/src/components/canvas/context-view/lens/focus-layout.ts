@@ -205,6 +205,11 @@ interface RevealGroup {
     root: string
     weight: number
     members: string[]
+    /** Hops per member. A group is ranked by its WHOLE weight (frozen, so
+     *  paging cannot re-order the board), but a pill has to say what is
+     *  still OUT there — and once part of a group is drawn, the rest of it
+     *  is worth only the hops reaching the members that are not. */
+    memberWeight: ReadonlyMap<string, number>
 }
 
 export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
@@ -310,19 +315,24 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     ): RevealGroup[] => {
         const hit = groupCache.get(cacheKey)
         if (hit) return hit
-        const byRoot = new Map<string, { weight: number; members: Set<string> }>()
+        const byRoot = new Map<string, { weight: number; members: Map<string, number> }>()
         for (const hop of sg.lineageEdges) {
             const from = dir === 'in' ? hop.targetUrn : hop.sourceUrn
             const far = dir === 'in' ? hop.sourceUrn : hop.targetUrn
             if (!near.has(from) || inside.has(far) || seed.has(far)) continue
             const root = rootOf(far)
-            const group = byRoot.get(root) ?? { weight: 0, members: new Set<string>() }
+            const group = byRoot.get(root) ?? { weight: 0, members: new Map<string, number>() }
             group.weight += 1
-            group.members.add(far)
+            group.members.set(far, (group.members.get(far) ?? 0) + 1)
             byRoot.set(root, group)
         }
         const ranked = [...byRoot.entries()]
-            .map(([root, g]) => ({ root, weight: g.weight, members: [...g.members].sort() }))
+            .map(([root, g]) => ({
+                root,
+                weight: g.weight,
+                members: [...g.members.keys()].sort(),
+                memberWeight: g.members,
+            }))
             .sort((a, b) =>
                 b.weight - a.weight
                 || labelFor(a.root).localeCompare(labelFor(b.root))
@@ -766,9 +776,26 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const remainingGroups = groupsFrom(dir, owned, subtreeOf(urn), `own:${dir}:${urn}`)
             .filter(g => g.members.some(m => !population.has(m)))
         if (remainingGroups.length > 0) {
+            // CONNECTIONS, the same unit every other number on this board
+            // uses — the band headers, a card's ×N, the focal's in/out. A
+            // reveal that counted GROUPS put two different units in one
+            // place on one card: "+246" (connections the server has not
+            // shipped) became "+1" (one group in hand) after a click, and
+            // the badge read as changing its mind about how much was out
+            // there. Exact here, because these hops are already in hand.
+            let count = 0
+            for (const g of remainingGroups) {
+                for (const m of g.members) {
+                    if (!population.has(m)) count += g.memberWeight.get(m) ?? 0
+                }
+            }
             return {
                 kind: 'reveal',
-                count: remainingGroups.length,
+                count,
+                // How many CARDS one click puts on the board — the wording
+                // needs it (a page is a page of groups, not of hops), and
+                // the badge must never be it.
+                groups: remainingGroups.length,
                 key: revealKey(dir, urn),
                 cursor: undefined,
                 status: undefined,

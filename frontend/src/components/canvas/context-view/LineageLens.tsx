@@ -46,6 +46,7 @@ import {
 import {
   buildFocusLayout,
   initialLensViewState,
+  revealKey,
   type LensDirectionFilter,
   type LensFetchStatus,
   type LensRoster,
@@ -420,15 +421,35 @@ export function LineageLens({
     })
   }, [editView])
 
-  /** One further hop from this card, seeded by what is underneath it. */
+  /**
+   * ONE CLICK, ONE VISIBLE DELIVERY.
+   *
+   * A fetch alone does not put anything on the board. The layout admits a
+   * card's neighbours only where the view state has opened a REVEAL PAGE on
+   * that card, and an extend/page click used to open none — so the response
+   * merged into the model, the card's ×N and the focal's reach both grew,
+   * and the picture did not change. The pill then re-read the model, found
+   * the arrivals sitting there unadmitted, and offered them as a REVEAL: the
+   * reported "+246, click, nothing, +1, click again".
+   *
+   * So the page is opened HERE, at click time. It costs nothing when there
+   * is nothing local to admit — which is always, because a card with
+   * anything left to reveal shows a reveal pill and never reaches this
+   * handler — and it is what makes the fetched cohort render the moment the
+   * merge lands. A cohort larger than one page still leaves an honest
+   * remainder behind; what it can never do again is deliver nothing.
+   */
   const extendWalk = useCallback((_key: string, urn: string, dir: 'in' | 'out') => {
+    revealMore(revealKey(dir, urn))
     walkApi.extend(urn, toWalkDir(dir), seedLeavesFor(sg, urn, dir))
-  }, [walkApi, sg])
+  }, [walkApi, sg, revealMore])
 
-  /** The rest of THIS node's adjacency, with the server's own cursor. */
+  /** The rest of THIS node's adjacency, with the server's own cursor —
+   *  and, for the same reason as `extendWalk`, room to draw what arrives. */
   const pageWalk = useCallback((urn: string, dir: 'in' | 'out', cursor: string) => {
+    revealMore(revealKey(dir, urn))
     walkApi.page(urn, toWalkDir(dir), cursor)
-  }, [walkApi])
+  }, [walkApi, revealMore])
 
   /** Which cards the LAYOUT opened by itself, so a click on one can
    *  close it. Read from the built cards rather than re-deriving the

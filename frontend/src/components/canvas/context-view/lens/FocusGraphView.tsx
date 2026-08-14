@@ -268,7 +268,7 @@ function sameCard(a: FocusCard, b: FocusCard): boolean {
     if (k === 'pillUp' || k === 'pillDown') {
       const x = a[k] ?? null, y = b[k] ?? null
       if (x === null || y === null) { if (x !== y) return false; continue }
-      if (x.kind !== y.kind || x.count !== y.count || x.key !== y.key
+      if (x.kind !== y.kind || x.count !== y.count || x.groups !== y.groups || x.key !== y.key
         || x.cursor !== y.cursor || x.status !== y.status) return false
       continue
     }
@@ -677,15 +677,20 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
   }
 
   const n = pill.count
-  // The badge is the REMAINDER; one click delivers a page of it. Saying
-  // "show 18 more" over a control that shows twelve is a promise the
-  // click cannot keep, so name both numbers when they differ.
-  const thisClick = n != null ? Math.min(n, REVEAL_PAGE) : null
+  // The badge is the remainder in CONNECTIONS, whatever the pill's kind —
+  // one number, one meaning, in the unit the rest of the board already
+  // counts in. The wording carries what the badge cannot: a reveal
+  // delivers a page of GROUPS, so where the remainder needs more than one
+  // click, say so rather than promising all of it at once.
+  const more = (v: number) => `${v.toLocaleString()} more connection${v === 1 ? '' : 's'}`
   const title = pill.kind === 'reveal'
-    ? `Show ${thisClick?.toLocaleString()} more ${side}${n != null && n > REVEAL_PAGE ? ` (${n.toLocaleString()} waiting)` : ''} — already loaded, nothing to fetch`
+    ? `Show ${n != null ? `${n.toLocaleString()} more ${side} connection${n === 1 ? '' : 's'}` : `more ${side}`} — already loaded, nothing to fetch${
+      pill.groups != null && pill.groups > REVEAL_PAGE
+        ? ` (this click brings the first ${REVEAL_PAGE} of ${pill.groups.toLocaleString()} cards)`
+        : ''}`
     : pill.kind === 'page'
-      ? `Load the rest of what is ${side} of ${card.label}${n != null ? ` (${n.toLocaleString()} more)` : ''}`
-      : `Walk one hop further ${side} of ${card.label}${n != null ? ` (${n.toLocaleString()} more)` : ''}`
+      ? `Load the rest of what is ${side} of ${card.label}${n != null ? ` (${more(n)})` : ''}`
+      : `Walk one hop further ${side} of ${card.label}${n != null ? ` (${more(n)})` : ''}`
   return (
     <button
       type="button"
@@ -1866,8 +1871,11 @@ function LensPeek({ card, host, ctx, onDismiss }: {
           </span>
         </p>
         {pill?.count != null && pill.count > 0 && (
+          // Connections, like the line above it and like the ⊕ badge this
+          // panel's own Walk button carries — one unit everywhere.
           <p className="text-ink-muted/70">
-            {pill.count.toLocaleString()} more {pillDir === 'in' ? 'upstream' : 'downstream'} not fetched yet
+            {pill.count.toLocaleString()} more {pillDir === 'in' ? 'upstream' : 'downstream'} connection
+            {pill.count === 1 ? '' : 's'} {pill.kind === 'reveal' ? 'already loaded' : 'not fetched yet'}
           </p>
         )}
         {card.contents && (

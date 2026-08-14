@@ -833,6 +833,90 @@ describe('focus-layout — reveal paging', () => {
 
 // ── pills ────────────────────────────────────────────────────────────
 
+describe('focus-layout — every ⊕ counts the same thing: connections', () => {
+    /** Thirteen sources, three parallel hops each. Twelve fit one page; the
+     *  thirteenth is left, and it is worth THREE connections, not one card. */
+    const tiedFanIn = () => {
+        const nodes = [wnode('F')]
+        const hops: Array<[string, string, string]> = []
+        for (let i = 0; i < 13; i++) {
+            const urn = `s${String(i).padStart(2, '0')}`
+            nodes.push(wnode(urn, 'dataset', `source_${String(i).padStart(2, '0')}`))
+            // Three relationships between the same pair — one card, three hops.
+            for (const t of ['DERIVES_FROM', 'JOINS', 'FEEDS']) hops.push([urn, 'F', t])
+        }
+        return subgraph({ focus: 'F', nodes, contains: [], hops })
+    }
+
+    it('a reveal counts the CONNECTIONS still to draw, not the cards', () => {
+        const sg = tiedFanIn()
+        const g = layout(sg)
+        // Twelve of thirteen groups drawn; one left.
+        expect(g.cards.filter(c => c.band === -1)).toHaveLength(12)
+        const pill = cardFor(g, 'F')!.pillUp!
+        expect(pill.kind).toBe('reveal')
+        // The unit is connections — the same one the band headers, a card's
+        // ×N and the focal's in/out all count in. Counting GROUPS here put
+        // two meanings in one place on one card: an extend's "+246"
+        // (connections) became a reveal's "+1" (a card) after a click.
+        expect(pill.count).toBe(3)
+        // Cards are still known — the wording needs them, the badge must
+        // never be them.
+        expect(pill.groups).toBe(1)
+    })
+
+    it('a group half-drawn by ANOTHER card is worth only what is left of it', () => {
+        // `x` and `y` live in one container. `A` reaches both, `B` reaches
+        // only `x` — twice. Revealing from B draws `x`, and A's pill must
+        // then offer the ONE connection that reaches `y`, not the two its
+        // group was ranked by.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [
+                wnode('F'), wnode('A', 'dataset', 'a'), wnode('B', 'dataset', 'b'),
+                wnode('R', 'CONTAINER', 'shared'), wnode('x', 'dataset', 'x'), wnode('y', 'dataset', 'y'),
+            ],
+            contains: [['R', 'x'], ['R', 'y']],
+            hops: [
+                ['F', 'A'], ['F', 'B'],
+                ['A', 'x'], ['A', 'y'],
+                ['B', 'x', 'DERIVES_FROM'], ['B', 'x', 'JOINS'],
+            ],
+        })
+        const base = initialLensViewState(sg)
+        const before = layout(sg, base)
+        expect(cardFor(before, 'A')!.pillDown).toMatchObject({ kind: 'reveal', count: 2, groups: 1 })
+        expect(cardFor(before, 'B')!.pillDown).toMatchObject({ kind: 'reveal', count: 2, groups: 1 })
+
+        const after = layout(sg, withReveal(base, revealKey('out', 'B'), 1))
+        expect(urns(after)).toContain('x')
+        expect(cardFor(after, 'A')!.pillDown).toMatchObject({ kind: 'reveal', count: 1, groups: 1 })
+        // B has nothing left to offer at all.
+        expect(cardFor(after, 'B')!.pillDown).toBeNull()
+    })
+
+    it('extend and page count connections too, and claim no card count', () => {
+        // The frontier sits on the FOCUS, whose neighbours are already
+        // drawn — so there is nothing local left to reveal and the pill is
+        // the fetch it honestly is. `totalCount` is the data source's own
+        // adjacency count (a degree), so the remainder is what it has not
+        // shipped: connections, in both states.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F'), wnode('U', 'dataset', 'u'), wnode('D', 'dataset', 'd')],
+            contains: [],
+            hops: [['U', 'F'], ['F', 'D']],
+            frontierUp: [{ urn: 'F', totalCount: 247, nextCursor: null }],
+            frontierDown: [{ urn: 'F', totalCount: 96, nextCursor: 'e:41' }],
+        })
+        const focal = cardFor(layout(sg), 'F')!
+        expect(focal.pillUp).toMatchObject({ kind: 'extend', count: 246 })
+        expect(focal.pillUp!.groups).toBeUndefined()
+        expect(focal.pillDown).toMatchObject({ kind: 'page', count: 95, cursor: 'e:41' })
+        expect(focal.pillDown!.groups).toBeUndefined()
+    })
+})
+
 describe('focus-layout — the ⊕ pill tells one of three truths', () => {
     /** `U2 → U → focus`, with U's own upstream page already revealed, so
      *  nothing is left to reveal locally and the pill has to speak about

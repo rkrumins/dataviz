@@ -207,7 +207,7 @@ describe('the business journey — a table\'s lineage through a seven-level esta
     const { api } = renderLens(['F'], doneWalk(collateralsEstate()))
     // "6 more upstream of loan_positions" — the remainder the data
     // source reported, minus what is already in hand.
-    fireEvent.click(screen.getByTitle(/Walk one hop further upstream of loan_positions \(6 more\)/))
+    fireEvent.click(screen.getByTitle(/Walk one hop further upstream of loan_positions \(6 more connections\)/))
     expect(api.extend).toHaveBeenCalledWith('t0', 'up', ['t0'])
   })
 
@@ -344,7 +344,7 @@ describe('the ⊕ tells the truth about what it costs', () => {
     const { api } = renderLens(['F'], doneWalk(crowdedFanIn()))
     // Twelve of fourteen fit on the first page.
     expect(onBoard('source_12')).toBe(false)
-    fireEvent.click(screen.getByTitle(/Show 2 more upstream — already loaded, nothing to fetch/))
+    fireEvent.click(screen.getByTitle(/Show 2 more upstream connections — already loaded, nothing to fetch/))
     expect(onBoard('source_12')).toBe(true)
     expect(onBoard('source_13')).toBe(true)
     expect(api.extend).not.toHaveBeenCalled()
@@ -360,7 +360,7 @@ describe('the ⊕ tells the truth about what it costs', () => {
 
   it('an exact remainder is stated; an unknown one is never invented', () => {
     renderLens(['F'], doneWalk(pillCatalogue()))
-    const exact = screen.getByTitle(/Walk one hop further upstream of has_48_more \(48 more\)/)
+    const exact = screen.getByTitle(/Walk one hop further upstream of has_48_more \(48 more connections\)/)
     expect(exact.textContent).toContain('48')
     // The server did not report a total. A countless chevron, not a
     // fabricated number.
@@ -385,6 +385,87 @@ describe('the ⊕ tells the truth about what it costs', () => {
   it('a genuinely drained direction is marked as ended, not left blank', () => {
     renderLens(['F'], doneWalk(pillCatalogue()))
     expect(screen.getAllByLabelText('End of upstream lineage').length).toBeGreaterThan(0)
+  })
+
+  /**
+   * ONE CLICK, ONE VISIBLE DELIVERY — the reported defect, as the user hit it.
+   *
+   * `GOLD` sits downstream of the focus with a frontier the server reported
+   * and NOTHING of its own left to reveal locally. Clicking its ⊕ fetched:
+   * the model grew, the card's ×N grew, the focal's reach grew — and the
+   * board did not change, because admitting a card's neighbours needs a
+   * REVEAL PAGE on that card and an extend click never opened one. The pill
+   * then flipped to a reveal of "1", and only the SECOND click drew anything.
+   */
+  const extendChain = (withConsumer: boolean) => doneWalk(walkModel('F', {
+    nodes: [
+      wnode('F', 'dataset', 'clean_tickets'),
+      wnode('GOLD', 'CONTAINER', 'GOLD', { childCount: 8 }),
+      ...(withConsumer ? [wnode('MART', 'dataset', 'mart_tickets_daily')] : []),
+    ],
+    lineageEdges: [
+      hop('F', 'GOLD'),
+      ...(withConsumer ? [hop('GOLD', 'MART')] : []),
+    ],
+    downstreamUrns: new Set(withConsumer ? ['GOLD', 'MART'] : ['GOLD']),
+    // The server says 246 more connections hang off GOLD downstream.
+    frontierDown: [{ urn: 'GOLD', totalCount: 246, nextCursor: null }],
+  }))
+
+  it('ONE click on an extend ⊕ delivers a VISIBLE cohort — no second click', () => {
+    const api = makeApi()
+    const { rerender } = renderLens(['F'], extendChain(false), {}, api)
+    expect(onBoard('mart_tickets_daily')).toBe(false)
+
+    fireEvent.click(screen.getByTitle(/Walk one hop further downstream of GOLD/))
+    expect(api.extend).toHaveBeenCalledTimes(1)
+    expect(api.extend).toHaveBeenCalledWith('GOLD', 'down', ['GOLD'])
+
+    // The merged response lands, exactly as `useLensWalk` would hand it over.
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={extendChain(true)}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    // VISIBLE. Not fetched-but-unrevealed, and not one click short.
+    expect(onBoard('mart_tickets_daily')).toBe(true)
+    // ...in its own hop band, at the grain the layout presents it.
+    expect(screen.getByText(/Consumers · hop 2/)).toBeTruthy()
+    // And no second click was needed to get there.
+    expect(api.extend).toHaveBeenCalledTimes(1)
+    // The residual pill is honest and in the SAME unit it started in —
+    // one of the 246 connections is now drawn, so 245 remain. It does not
+    // flip to a card count and read as changing its mind.
+    expect(screen.getByTitle(/Walk one hop further downstream of GOLD \(245 more connections\)/)).toBeTruthy()
+  })
+
+  it('the ⊕ badge counts CONNECTIONS in every state — one pill, one unit', () => {
+    // The defect's other half: "+246" (unfetched connections) became "+1"
+    // (groups in hand) in the same place on the same card, so the number
+    // appeared to change its mind about the size of what was out there.
+    // Every state now counts the thing the rest of the board counts — the
+    // band headers, the card ×N, the focal's in/out are all connections.
+    renderLens(['F'], extendChain(false))
+    // 247 the server knows about, one already drawn.
+    const extend = screen.getByTitle(/Walk one hop further downstream of GOLD \(246 more connections\)/)
+    expect(extend.textContent).toContain('246')
+
+    cleanup()
+    // A reveal: fourteen sources, twelve drawn, two waiting — and those two
+    // carry one connection each, which is what the badge says.
+    renderLens(['F'], doneWalk(crowdedFanIn()))
+    const reveal = screen.getByTitle(/Show 2 more upstream connections — already loaded, nothing to fetch/)
+    expect(reveal.textContent).toContain('2')
+
+    cleanup()
+    renderLens(['F'], doneWalk(pillCatalogue()))
+    expect(screen.getByTitle(/Load the rest of what is upstream of partially_loaded \(96 more connections\)/)).toBeTruthy()
   })
 
   it('offers no ⊕ at all until the focal\'s own model has landed', () => {
@@ -1135,7 +1216,7 @@ describe('browsing what is inside — the peek and the keyboard', () => {
     expect(within(panel as HTMLElement).getByText(/Natural key from the source system/)).toBeTruthy()
     // Lineage, counted off the walk model rather than measured again.
     expect(within(panel as HTMLElement).getByText(/1 flow in this walk/)).toBeTruthy()
-    expect(within(panel as HTMLElement).getByText(/9 more upstream not fetched yet/)).toBeTruthy()
+    expect(within(panel as HTMLElement).getByText(/9 more upstream connections not fetched yet/)).toBeTruthy()
     expect(within(panel as HTMLElement).getByText(/Last synced 3h ago/)).toBeTruthy()
   })
 

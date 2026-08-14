@@ -173,7 +173,18 @@ export const NO_FRAME_ROWS: ReadonlyArray<FrameRowRef> = Object.freeze([])
  */
 export interface FocusPill {
   kind: 'reveal' | 'extend' | 'page'
+  /** How much more lineage is out there this way, in CONNECTIONS — the
+   *  unit every other number on the board uses (band headers, a card's
+   *  ×N, the focal's in/out). One unit in all three states on purpose:
+   *  counting groups in one and connections in another put two meanings
+   *  in one place on one card, and the badge read as changing its mind
+   *  about the size of what was out there. `null` only where the data
+   *  source genuinely did not say. */
   count: number | null
+  /** Reveal only: how many CARDS one click puts on the board. The wording
+   *  needs it — a page is a page of groups, not of hops — and the badge
+   *  must never be it. */
+  groups?: number
   key: string
   cursor?: string
   status?: 'loading' | 'error'
