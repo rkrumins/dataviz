@@ -703,6 +703,12 @@ export const LayerColumn = React.memo(function LayerColumn({
   // snapping the user back to the focus and preventing them from scrolling
   // up or down through the lineage. With the guard the focus is centered
   // when a trace starts; afterwards the user's scroll position is theirs.
+  //
+  // T24 F5 — "Trace from here" vertically centered the focus row inside
+  // its OWN column via the virtualizer, but never brought the COLUMN
+  // itself into the canvas's horizontal viewport — the same "3-click
+  // reveal" gap `revealTarget`'s own effect (below) already closed for a
+  // search hit. Chains the identical two-rAF horizontal scrollIntoView.
   const lastCenteredFocusRef = useRef<string | null>(null)
   useEffect(() => {
     if (!traceFocusId) {
@@ -712,9 +718,22 @@ export const LayerColumn = React.memo(function LayerColumn({
     if (lastCenteredFocusRef.current === traceFocusId) return
     const flatIndex = nodeToFlatIndexMap.get(traceFocusId)
     if (flatIndex === undefined) return
+    const targetId = traceFocusId
     const timer = setTimeout(() => {
       virtualizer.scrollToIndex(flatIndex, { align: 'center', behavior: 'smooth' })
-      lastCenteredFocusRef.current = traceFocusId
+      lastCenteredFocusRef.current = targetId
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const row = document.getElementById(`layer-node-${targetId}`)
+          if (row) {
+            row.scrollIntoView({
+              inline: 'center',
+              block: 'nearest',
+              behavior: 'smooth',
+            })
+          }
+        })
+      })
     }, 100)
     return () => clearTimeout(timer)
   }, [traceFocusId, nodeToFlatIndexMap, virtualizer])

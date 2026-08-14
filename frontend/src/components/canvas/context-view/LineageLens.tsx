@@ -1950,20 +1950,28 @@ export function LineageLens({
                 : 'Click a connection to re-center · Esc to close'}
             </p>
             <div className="ml-auto flex items-center gap-2">
-              {onLocateAll && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const ids = [...new Set([...neighbors.incoming, ...neighbors.outgoing].map(r => r.urn))]
-                    onClose()
-                    void onLocateAll(ids)
-                  }}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-                >
-                  <LucideIcons.Frame className="w-3 h-3" />
-                  Reveal all on canvas
-                </button>
-              )}
+              {onLocateAll && (() => {
+                // Computed once so the button's own COUNT and the click's
+                // target list can never disagree — T24 F5: showing the
+                // count up front is informed consent for a large reveal
+                // (the virtualizer-aware walk that follows takes real
+                // time per target, one at a time), so no confirm dialog
+                // is needed either.
+                const revealIds = [...new Set([...neighbors.incoming, ...neighbors.outgoing].map(r => r.urn))]
+                return (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose()
+                      void onLocateAll(revealIds)
+                    }}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                  >
+                    <LucideIcons.Frame className="w-3 h-3" />
+                    Reveal {revealIds.length.toLocaleString()} on canvas
+                  </button>
+                )
+              })()}
               {onTrace && (
                 <button
                   type="button"

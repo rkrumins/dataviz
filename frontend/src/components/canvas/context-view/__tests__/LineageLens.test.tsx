@@ -1046,7 +1046,10 @@ describe('the shell around the picture', () => {
     const onLocateAll = vi.fn()
     const onClose = vi.fn()
     renderLens(['b'], simple(), { onLocateAll, onClose })
-    fireEvent.click(screen.getByText('Reveal all on canvas'))
+    // T24 F5 — the count is now part of the button's own face ("Reveal
+    // N on canvas"), informed consent for what could be a slow,
+    // one-at-a-time reveal walk for a large set.
+    fireEvent.click(screen.getByText('Reveal 2 on canvas'))
     expect(onClose).toHaveBeenCalled()
     expect(onLocateAll).toHaveBeenCalledWith(['a', 'c'])
   })

@@ -47,6 +47,7 @@ import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { useRevealNode } from '@/hooks/useRevealNode'
+import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
@@ -2219,64 +2220,6 @@ export function ContextViewCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortedLayers, sortOverrides, viewDefaultSortMode])
 
-  // Reveal-and-focus: clicking a neighbor in the drawer's Lineage section
-  // expands collapsed ancestors (lazy-loading from the backend if needed),
-  // then scrolls the now-visible target into view. Works during trace mode
-  // because visibility here is governed by parentMap + expandedNodes, not
-  // by trace state directly. See [useRevealNode](../../../hooks/useRevealNode.ts).
-  const revealAndFocus = useRevealNode({
-    parentMap,
-    setExpandedNodes,
-    loadChildren: loadChildrenSorted,
-    provider,
-    focus: (id: string) => {
-      const el = document.getElementById(`layer-node-${id}`)
-      el?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center',
-        inline: 'center',
-      })
-    },
-  })
-
-  // Multi-locate: reveal each target with skipFocus so per-node scrolls
-  // don't fight each other during the cascade, then compute the
-  // horizontal bounding-box of all revealed targets and centre the union
-  // in the layered scroll container. Vertical seek defers to the first
-  // target's scrollIntoView — vertical union centring would risk scrolling
-  // past important rows in tall columns.
-  const locateManyOnCanvas = useCallback(
-    async (ids: string[]) => {
-      await Promise.allSettled(
-        ids.map((id) => revealAndFocus(id, { skipFocus: true })),
-      )
-      // Let any expand-driven re-layout commit before measuring.
-      await new Promise<void>((r) => requestAnimationFrame(() => r()))
-
-      const container = horizontalScrollRef.current
-      if (!container) return
-      const els = ids
-        .map((id) => document.getElementById(`layer-node-${id}`))
-        .filter((el): el is HTMLElement => !!el)
-      if (els.length === 0) return
-
-      const containerRect = container.getBoundingClientRect()
-      const rects = els.map((el) => el.getBoundingClientRect())
-      const minLeft = Math.min(...rects.map((r) => r.left))
-      const maxRight = Math.max(...rects.map((r) => r.right))
-      const unionCenterX = (minLeft + maxRight) / 2
-      const viewportCenterX = containerRect.left + containerRect.width / 2
-      const horizontalDelta = unionCenterX - viewportCenterX
-
-      container.scrollTo({
-        left: container.scrollLeft + horizontalDelta,
-        behavior: 'smooth',
-      })
-      els[0]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    },
-    [revealAndFocus],
-  )
-
   // Registry of per-column imperative geometry APIs, keyed by layer id.
   // Identity-stable Map (state initializer, never re-set) — columns
   // register/unregister via effect; the edge overlay reads it
@@ -2294,6 +2237,44 @@ export function ContextViewCanvas({
     revealPulseRef.current += 1
     setRevealTarget({ id: nodeId, pulse: revealPulseRef.current })
   }, [])
+
+  // Reveal-and-focus: clicking a neighbor in the drawer's Lineage section
+  // expands collapsed ancestors (lazy-loading from the backend if needed),
+  // then scrolls the now-visible target into view. Works during trace mode
+  // because visibility here is governed by parentMap + expandedNodes, not
+  // by trace state directly. See [useRevealNode](../../../hooks/useRevealNode.ts).
+  //
+  // T24 F5 — `focus` used to scrollIntoView a plain
+  // `document.getElementById` lookup, which returns null for any row the
+  // virtualizer has not rendered (below the overscan window) — an
+  // off-window "Reveal on canvas" click silently did nothing.
+  // `scrollHitIntoView` is the same virtualizer-aware pulse
+  // `revealSearchHit` already used, below.
+  const revealAndFocus = useRevealNode({
+    parentMap,
+    setExpandedNodes,
+    loadChildren: loadChildrenSorted,
+    provider,
+    focus: scrollHitIntoView,
+  })
+
+  // Multi-locate (T24 F5): reveal each target (expanding collapsed
+  // ancestors), then walk each one through the SAME virtualizer-aware
+  // pulse `scrollHitIntoView` uses for a single hit — the old approach
+  // queried the DOM for the whole set up front, which only ever found
+  // whatever ALREADY happened to be rendered, so a target below the
+  // overscan window silently never arrived, with zero feedback that
+  // anything had failed. Extracted to `useLocateManyOnCanvas` (own file,
+  // own tests) for the same reason `useRevealNode`/`useRevealSearchHit`
+  // are hooks rather than inline closures here: this component has no
+  // test harness of its own to reach the logic through.
+  const locateManyOnCanvas = useLocateManyOnCanvas({
+    revealAndFocus,
+    scrollHitIntoView,
+    getElementById: (id) => document.getElementById(`layer-node-${id}`),
+    getScrollContainer: () => horizontalScrollRef.current,
+    showToast: (type, message) => { useToastStore.getState().addToast({ type, message }) },
+  })
 
   // Reveal callback for advanced-search hits and pin clicks. Walks the
   // ancestor chain, expanding each step so the deep hit becomes
@@ -4243,7 +4224,7 @@ export function ContextViewCanvas({
             onTraceDown={(nodeId) => traceDownstreamWithSmartLevel(nodeId)}
             onFullTrace={(nodeId) => traceFullLineageWithSmartLevel(nodeId)}
             onFocusNode={revealAndFocus}
-            onLocateMany={locateManyOnCanvas}
+            onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
           />
         )}
         {!builderOpen && !buildOpen && !drawerNodeId && isEdgePanelOpen && (
