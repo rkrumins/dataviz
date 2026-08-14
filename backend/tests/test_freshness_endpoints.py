@@ -173,19 +173,30 @@ def _patch_fleet_collaborators(monkeypatch, *, signals=None, events=None,
 
 
 def _patch_cadence(monkeypatch, *, global_secs=None, overrides=None,
-                   drift_auto=None):
+                   drift_auto=None, states=None):
     """Stub the two F9 cadence reads: the cached global cadence and the
-    batched per-source override map. Neither touches ``session.execute`` so
-    the queued-result ordering the other collaborators rely on is preserved."""
+    batched per-source state map. Neither touches ``session.execute`` so
+    the queued-result ordering the other collaborators rely on is preserved.
+
+    ``overrides`` stays a ``{ds_id: secs}`` shorthand for the rebuild-interval
+    column; ``states`` sets any other state-row field (drift verdict, the
+    reconcile overrides) for a source."""
     async def _cadence(session):
         return AggregationCadence(
             rebuild_min_interval_secs=global_secs, drift_auto_rebuild=drift_auto,
         )
     monkeypatch.setattr(svc_mod, "read_global_cadence", _cadence)
 
-    async def _overrides(session, ds_ids):
-        return dict(overrides or {})
-    monkeypatch.setattr(svc_mod, "_rebuild_override_map", _overrides)
+    merged = {
+        ds_id: {"rebuild_min_interval_secs": secs}
+        for ds_id, secs in (overrides or {}).items()
+    }
+    for ds_id, fields in (states or {}).items():
+        merged.setdefault(ds_id, {}).update(fields)
+
+    async def _states(session, ds_ids):
+        return {k: dict(v) for k, v in merged.items()}
+    monkeypatch.setattr(svc_mod, "_state_map", _states)
 
 
 # ── Fleet assembly ──────────────────────────────────────────────────────

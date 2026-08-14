@@ -488,12 +488,26 @@ class RefreshResponse(BaseModel):
 # ── Freshness cockpit (operator-facing read models) ──────────────────
 
 
+# Origins that are machine-initiated. Everything else is a person acting
+# through the API or a connector on their behalf. Derived rather than stored:
+# ``origin`` + ``actor`` already carry it.
+_AUTOMATIC_ORIGINS = frozenset({"drift", "reconcile", "reconcile-sweep", "script"})
+
+
 class RefreshEventSummary(BaseModel):
     """One row of the refresh_events audit trail, trimmed to what the
     freshness views render. Populated from ``RefreshEventORM``."""
     origin: str
     outcome: str
     ts: str
+    actor: Optional[str] = None
+    # WHY, for a reconciliation event: the typed detector code plus the counts
+    # behind it. ``None`` on every other kind of refresh.
+    reason: Optional[str] = None
+    evidence: Optional[Dict] = None
+    # "automatic" | "manual", derived from origin — the UI shows this rather
+    # than making the reader decode an origin vocabulary.
+    mode: Optional[str] = None
 
     class Config:
         populate_by_name = True
@@ -527,6 +541,16 @@ class FreshnessRow(BaseModel):
     drifted: Optional[bool] = None
     running_job_id: Optional[str] = Field(None, alias="runningJobId")
     last_event: Optional[RefreshEventSummary] = Field(None, alias="lastEvent")
+
+    # ── Reconciliation ────────────────────────────────────────────────
+    # Read straight off ``data_source_state`` — the sweep stamps them, the
+    # read path never recomputes them (it must stay pure SQL + Redis).
+    drift_state: Optional[str] = Field(None, alias="driftState")
+    auto_reconcile: Optional[bool] = Field(None, alias="autoReconcile")
+    last_checked_at: Optional[str] = Field(None, alias="lastCheckedAt")
+    last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
+    last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
+    last_reconcile_mode: Optional[str] = Field(None, alias="lastReconcileMode")
 
     class Config:
         populate_by_name = True
@@ -568,6 +592,33 @@ class FreshnessDoc(FreshnessRow):
     last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
     retry_count: Optional[int] = Field(None, alias="retryCount")
 
+    # ── Reconciliation detail ─────────────────────────────────────────
+    # The two numbers the drawer's integrity meter compares. ``observed`` is
+    # what the stats service last counted in the graph; ``expected`` is what
+    # the last successful job reported writing.
+    observed_aggregated_edges: Optional[int] = Field(
+        None, alias="observedAggregatedEdges",
+    )
+    expected_aggregated_edges: Optional[int] = Field(
+        None, alias="expectedAggregatedEdges",
+    )
+    stats_as_of: Optional[str] = Field(None, alias="statsAsOf")
+    # The check-cadence trio, mirroring the rebuild-interval trio above so the
+    # drawer can say where the value came from without reading global settings.
+    reconcile_interval_override_secs: Optional[int] = Field(
+        None, alias="reconcileIntervalOverrideSecs",
+    )
+    resolved_reconcile_interval_secs: Optional[int] = Field(
+        None, alias="resolvedReconcileIntervalSecs",
+    )
+    reconcile_interval_source: Optional[str] = Field(
+        None, alias="reconcileIntervalSource",
+    )
+    next_check_at: Optional[str] = Field(None, alias="nextCheckAt")
+    # Non-null when the sweep is deliberately not acting on this source
+    # (no ontology, suspended by the breaker, overlay not observable…).
+    blocked_reason: Optional[str] = Field(None, alias="blockedReason")
+
     class Config:
         populate_by_name = True
 
@@ -586,6 +637,8 @@ class FreshnessSummary(BaseModel):
     recomputing: int = Field(0)  # stale marker present
     needs_attention: int = Field(0, alias="needsAttention")  # marker present OR failed
     cache_stamped: int = Field(0, alias="cacheStamped")  # cacheAsOf non-null
+    # driftState is a drifting/overlayMissing verdict from the last sweep.
+    drifting: int = Field(0)
 
     class Config:
         populate_by_name = True
@@ -605,6 +658,7 @@ class ProviderFreshnessSummary(BaseModel):
     not_built: int = Field(0, alias="notBuilt")
     needs_attention: int = Field(0, alias="needsAttention")
     cache_stamped: int = Field(0, alias="cacheStamped")
+    drifting: int = Field(0)
 
     class Config:
         populate_by_name = True
@@ -717,10 +771,27 @@ class AggregationSettingsResponse(BaseModel):
 
 class FreshnessSettingsRequest(BaseModel):
     """PATCH /data-sources/{id}/freshness-settings body — the per-source
-    rebuild-interval override. ``None`` clears the override (back to the
-    resolved global/env default)."""
+    overrides. ``None`` on any field clears that override (back to the
+    resolved global/env default).
+
+    Every field means "clear" when explicitly sent as null, so the handler
+    MUST apply only the keys actually present in the request body
+    (``model_fields_set``). Treating an absent field as null would make a
+    partial PATCH impossible: sending only ``autoReconcileEnabled`` would
+    silently wipe the rebuild-interval override.
+    """
     rebuild_min_interval_secs: Optional[int] = Field(
         None, alias="rebuildMinIntervalSecs", ge=0, le=86400,
+    )
+    auto_reconcile_enabled: Optional[bool] = Field(
+        None, alias="autoReconcileEnabled",
+        description="Per-source automatic-reconciliation flag. Null inherits "
+                    "the global setting.",
+    )
+    reconcile_check_interval_secs: Optional[int] = Field(
+        None, alias="reconcileCheckIntervalSecs", ge=300, le=86400,
+        description="How often this source is checked for drift. Null "
+                    "inherits the global cadence.",
     )
 
     class Config:
@@ -728,12 +799,139 @@ class FreshnessSettingsRequest(BaseModel):
 
 
 class FreshnessSettingsResponse(BaseModel):
-    """The stored per-source override after a PATCH (echoes the effective
-    override; ``None`` = no override, source resolves global/env)."""
+    """The stored per-source overrides after a PATCH (each echoes the
+    effective override; ``None`` = no override, source resolves global/env)."""
     data_source_id: str = Field(alias="dataSourceId")
     rebuild_min_interval_secs: Optional[int] = Field(
         None, alias="rebuildMinIntervalSecs",
     )
+    auto_reconcile_enabled: Optional[bool] = Field(
+        None, alias="autoReconcileEnabled",
+    )
+    reconcile_check_interval_secs: Optional[int] = Field(
+        None, alias="reconcileCheckIntervalSecs",
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+# ── Reconciliation (the drift / overlay-integrity sweep) ─────────────
+
+
+class ReconcileFinding(BaseModel):
+    """One source the sweep would act on (or did). Powers the preview, so an
+    operator can see the blast radius before switching automation on."""
+    data_source_id: str = Field(alias="dataSourceId")
+    name: Optional[str] = None
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    provider_name: Optional[str] = Field(None, alias="providerName")
+    reason: str
+    evidence: Dict = Field(default_factory=dict)
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileRun(BaseModel):
+    """One pass of the sweep — the "when did this last run and what did it
+    find" record, one row per pass rather than per source."""
+    id: str
+    started_at: Optional[str] = Field(None, alias="startedAt")
+    finished_at: Optional[str] = Field(None, alias="finishedAt")
+    mode: str = "auto"
+    actor: Optional[str] = None
+    scanned: int = 0
+    skipped: int = 0
+    seeded: int = 0
+    findings: int = 0
+    actions: int = 0
+    errors: int = 0
+    by_reason: Dict[str, int] = Field(default_factory=dict, alias="byReason")
+    by_skip: Dict[str, int] = Field(default_factory=dict, alias="bySkip")
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcilePolicyResponse(BaseModel):
+    """Resolved global policy plus the env defaults behind it, so the editor
+    can seed from ``persisted ?? envDefault`` and a no-op save round-trips the
+    real current default instead of pinning a wrong value — the same contract
+    ``AggregationSettingsResponse`` already honours for cadence."""
+    enabled: Optional[bool] = None
+    check_interval_secs: Optional[int] = Field(None, alias="checkIntervalSecs")
+    max_actions_per_run: Optional[int] = Field(None, alias="maxActionsPerRun")
+    shrink_tolerance_pct: Optional[int] = Field(None, alias="shrinkTolerancePct")
+    detectors: Optional[List[str]] = None
+
+    env_enabled: bool = Field(True, alias="envEnabled")
+    env_check_interval_secs: int = Field(3600, alias="envCheckIntervalSecs")
+    env_max_actions_per_run: int = Field(10, alias="envMaxActionsPerRun")
+    env_shrink_tolerance_pct: int = Field(10, alias="envShrinkTolerancePct")
+    env_stats_max_age_secs: int = Field(2700, alias="envStatsMaxAgeSecs")
+    all_detectors: List[str] = Field(default_factory=list, alias="allDetectors")
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileOverviewResponse(BaseModel):
+    """GET /freshness/reconciliation — policy plus recent runs."""
+    policy: ReconcilePolicyResponse
+    runs: List[ReconcileRun] = Field(default_factory=list)
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcilePolicyRequest(BaseModel):
+    """PUT /freshness/reconciliation. Partial-update semantics, same as the
+    per-source PATCH: only explicitly-sent keys are written."""
+    enabled: Optional[bool] = None
+    check_interval_secs: Optional[int] = Field(
+        None, alias="checkIntervalSecs", ge=300, le=86400,
+    )
+    max_actions_per_run: Optional[int] = Field(
+        None, alias="maxActionsPerRun", ge=0, le=200,
+    )
+    shrink_tolerance_pct: Optional[int] = Field(
+        None, alias="shrinkTolerancePct", ge=0, le=100,
+    )
+    detectors: Optional[List[str]] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileRunRequest(BaseModel):
+    """POST /freshness/reconcile-now."""
+    dry_run: bool = Field(False, alias="dryRun")
+    data_source_ids: Optional[List[str]] = Field(None, alias="dataSourceIds")
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileRunInternal(ReconcileRunRequest):
+    """Body for the Control Plane's sweep twin — adds ``actor``, the
+    initiator's user id forwarded by the viz proxy (which forces it, so a
+    caller cannot attribute a sweep to someone else). Mirrors
+    ``RefreshRequestInternal``."""
+    actor: Optional[str] = Field(None, max_length=128)
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileRunResponse(BaseModel):
+    """The outcome of an on-demand sweep. ``findings`` is populated on a dry
+    run so the preview can render what WOULD be reconciled."""
+    run: Optional[ReconcileRun] = None
+    findings: List[ReconcileFinding] = Field(default_factory=list)
+    # True when another replica held the sweep lock, so nothing ran.
+    skipped: bool = False
 
     class Config:
         populate_by_name = True

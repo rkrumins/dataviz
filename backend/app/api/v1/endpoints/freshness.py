@@ -50,6 +50,10 @@ from backend.app.services.aggregation.schemas import (
     FreshnessFleetResponse,
     FreshnessSettingsRequest,
     FreshnessSettingsResponse,
+    ReconcileOverviewResponse,
+    ReconcilePolicyRequest,
+    ReconcilePolicyResponse,
+    ReconcileRunResponse,
     RefreshRequest,
     RefreshResponse,
 )
@@ -217,7 +221,7 @@ async def refresh_data_source(
 @router.patch(
     "/data-sources/{ds_id}/freshness-settings",
     response_model=FreshnessSettingsResponse,
-    summary="Set or clear a data source's rebuild-cadence override",
+    summary="Set or clear a data source's rebuild cadence and reconciliation overrides",
     dependencies=[Depends(_REQUIRE_DS_MANAGE)],
 )
 async def patch_freshness_settings(
@@ -227,27 +231,122 @@ async def patch_freshness_settings(
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Persist the per-source rebuild-interval override (``None`` clears it).
-    The body carries only the interval — there is no client-controlled
-    actor/origin here — and it is validated (0–86400) by
-    ``FreshnessSettingsRequest`` before this handler runs, in both modes."""
+    """Persist the per-source overrides (``null`` on a field clears it). The
+    body carries only settings — there is no client-controlled actor/origin
+    here — and every field is range-validated by ``FreshnessSettingsRequest``
+    before this handler runs, in both modes.
+
+    **Partial-update semantics.** Only fields the client actually sent are
+    written. Every field here treats an explicit ``null`` as "clear the
+    override", so applying absent fields too would make a partial PATCH
+    impossible: sending only ``autoReconcileEnabled`` would silently wipe the
+    rebuild-interval override.
+    """
     if _PROXY_ENABLED:
         raw = await request.body()
         return await _proxy(
             "PATCH", f"/aggregation/data-sources/{ds_id}/freshness-settings",
             request,
-            body=raw or _json.dumps(body.model_dump(by_alias=True)).encode(),
+            body=raw or _json.dumps(
+                body.model_dump(by_alias=True, exclude_unset=True)
+            ).encode(),
         )
     from backend.app.services.aggregation.service import NotFoundError
 
+    sent = body.model_fields_set
+    stored_interval = None
     try:
-        stored = await svc.set_source_rebuild_interval(
-            ds_id, body.rebuild_min_interval_secs, session,
-        )
+        if "rebuild_min_interval_secs" in sent:
+            stored_interval = await svc.set_source_rebuild_interval(
+                ds_id, body.rebuild_min_interval_secs, session,
+            )
+        recon = {}
+        if {"auto_reconcile_enabled", "reconcile_check_interval_secs"} & sent:
+            kwargs = {}
+            if "auto_reconcile_enabled" in sent:
+                kwargs["enabled"] = body.auto_reconcile_enabled
+            if "reconcile_check_interval_secs" in sent:
+                kwargs["check_interval_secs"] = body.reconcile_check_interval_secs
+            recon = await svc.set_source_reconcile_settings(
+                ds_id, session, **kwargs,
+            )
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     return FreshnessSettingsResponse(
-        data_source_id=ds_id, rebuild_min_interval_secs=stored,
+        data_source_id=ds_id,
+        rebuild_min_interval_secs=stored_interval,
+        auto_reconcile_enabled=recon.get("reconcile_enabled"),
+        reconcile_check_interval_secs=recon.get("reconcile_check_interval_secs"),
+    )
+
+
+# ── Reconciliation: policy, runs, preview, on-demand sweep ───────────
+#
+# The two READ routes are served in-process in both proxy and direct mode,
+# same as ``GET /freshness``: they are pure SQL over tables the web tier
+# already reads (``assemble_fleet_freshness`` reads ``data_source_state``
+# in-process via ``_state_map`` today). The WRITE routes proxy, because the
+# sweeper and the aggregation service live on the Control Plane.
+
+
+@router.get(
+    "/freshness/reconciliation",
+    response_model=ReconcileOverviewResponse,
+    summary="Automatic-reconciliation policy and recent sweep runs",
+    dependencies=[Depends(_require_ingestion_read)],
+)
+async def get_reconciliation(
+    session: AsyncSession = Depends(get_readonly_db_session),
+    limit: int = Query(20, ge=1, le=100),
+):
+    from backend.app.services.aggregation.service import (
+        assemble_reconcile_overview,
+    )
+
+    return await assemble_reconcile_overview(session, limit=limit)
+
+
+@router.put(
+    "/freshness/reconciliation",
+    response_model=ReconcilePolicyResponse,
+    summary="Update the global automatic-reconciliation policy",
+    dependencies=[Depends(_REQUIRE_PROVIDER_MANAGE)],
+)
+async def put_reconciliation(
+    body: ReconcilePolicyRequest,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Platform-admin only: the policy governs every workspace's sources.
+    Partial-update semantics, same rule as the per-source PATCH above."""
+    from backend.app.services.aggregation.service import save_reconcile_policy
+
+    return await save_reconcile_policy(
+        session, body, sent=body.model_fields_set,
+    )
+
+
+@router.post(
+    "/freshness/reconcile-now",
+    response_model=ReconcileRunResponse,
+    summary="Run a reconciliation sweep now (or preview one)",
+)
+async def reconcile_now(
+    request: Request,
+    user: User = Depends(_REQUIRE_PROVIDER_MANAGE),
+):
+    """Always proxies: the sweeper is a Control Plane background component,
+    and there is no in-process equivalent — the same reason the provider and
+    fleet refresh batches always proxy.
+
+    ``actor`` is forced server-side, so a caller cannot attribute a manual
+    sweep to someone else.
+    """
+    raw = await request.body()
+    forwarded = _json.loads(raw) if raw else {}
+    forwarded["actor"] = user.id
+    return await _proxy(
+        "POST", "/aggregation/reconcile/run", request,
+        body=_json.dumps(forwarded).encode(),
     )
 
 

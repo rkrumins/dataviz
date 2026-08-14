@@ -282,6 +282,8 @@ from .schemas import (  # noqa: E402
     DriftCheckResponse,
     FreshnessSettingsRequest,
     FreshnessSettingsResponse,
+    ReconcileRunInternal,
+    ReconcileRunResponse,
     RefreshRequestInternal,
     RefreshResponse,
     ResumeOverrides,
@@ -633,14 +635,88 @@ async def set_freshness_settings(
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(_get_session),
 ):
+    """Partial-update semantics, matching the web-tier route: only fields the
+    caller actually sent are written, because ``null`` on any of them means
+    "clear the override"."""
+    sent = body.model_fields_set
+    stored_interval = None
+    recon = {}
     try:
-        stored = await svc.set_source_rebuild_interval(
-            ds_id, body.rebuild_min_interval_secs, session,
-        )
+        if "rebuild_min_interval_secs" in sent:
+            stored_interval = await svc.set_source_rebuild_interval(
+                ds_id, body.rebuild_min_interval_secs, session,
+            )
+        if {"auto_reconcile_enabled", "reconcile_check_interval_secs"} & sent:
+            kwargs = {}
+            if "auto_reconcile_enabled" in sent:
+                kwargs["enabled"] = body.auto_reconcile_enabled
+            if "reconcile_check_interval_secs" in sent:
+                kwargs["check_interval_secs"] = body.reconcile_check_interval_secs
+            recon = await svc.set_source_reconcile_settings(
+                ds_id, session, **kwargs,
+            )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return FreshnessSettingsResponse(
-        data_source_id=ds_id, rebuild_min_interval_secs=stored,
+        data_source_id=ds_id,
+        rebuild_min_interval_secs=stored_interval,
+        auto_reconcile_enabled=recon.get("reconcile_enabled"),
+        reconcile_check_interval_secs=recon.get("reconcile_check_interval_secs"),
+    )
+
+
+# ── POST /aggregation/reconcile/run ──────────────────────────────────
+
+@app.post(
+    "/aggregation/reconcile/run",
+    response_model=ReconcileRunResponse,
+    summary="Run a reconciliation sweep now (or preview one)",
+)
+async def run_reconcile(body: ReconcileRunInternal):
+    """On-demand twin of the scheduled sweep. Explicit ``dataSourceIds``
+    bypass per-source due-ness, so an operator can reconcile one source
+    without waiting for its next check window."""
+    from backend.app.db.engine import get_jobs_session
+
+    from .reconcile_sweeper import ReconciliationSweeper
+    from .schemas import ReconcileFinding, ReconcileRunResponse
+
+    sweeper = ReconciliationSweeper(get_jobs_session)
+    result = await sweeper.sweep(
+        dry_run=body.dry_run,
+        data_source_ids=body.data_source_ids,
+        mode="preview" if body.dry_run else "manual",
+        actor=body.actor,
+    )
+    if result is None:
+        # Another replica holds the sweep lock — nothing ran, and that is a
+        # normal outcome rather than an error.
+        return ReconcileRunResponse(skipped=True)
+    return ReconcileRunResponse(
+        run=_run_model_cp(result),
+        findings=[
+            ReconcileFinding(
+                data_source_id=a.data_source_id,
+                workspace_id=a.workspace_id,
+                reason=a.reason,
+                evidence=a.evidence,
+            )
+            for a in result.pending
+        ],
+    )
+
+
+def _run_model_cp(result):
+    """SweepResult → the wire model (the sweep's in-memory tallies, not a
+    re-read of the row it just wrote)."""
+    from .schemas import ReconcileRun
+
+    return ReconcileRun(
+        id=result.run_id, mode=result.mode, scanned=result.scanned,
+        skipped=result.skipped, seeded=result.seeded,
+        findings=result.findings, actions=result.actions,
+        errors=result.errors, by_reason=result.by_reason,
+        by_skip=result.by_skip,
     )
 
 
