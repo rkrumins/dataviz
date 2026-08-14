@@ -889,6 +889,11 @@ export function LineageLens({
   // depth control) as a link a colleague can open exactly where you left
   // it. Encoded on demand, from whatever is on screen right now.
   const [shareCopied, setShareCopied] = useState(false)
+  // T24 F3 — the PATH bar's own "Copy path" (text) gets the same
+  // copied-state feedback the header's link button already had, so
+  // BOTH of the bar's actions confirm the click rather than one of them
+  // doing so silently.
+  const [pathCopied, setPathCopied] = useState(false)
   const copyShareLink = () => {
     const token = encodeLensShare({
       entries,
@@ -1470,12 +1475,40 @@ export function LineageLens({
                           : labelFor(id)
                       }).join(' → '),
                     )
+                    setPathCopied(true)
+                    window.setTimeout(() => setPathCopied(false), 1600)
                   }}
-                  title="Copy this path as text (fact_support.ticket_key → System A → …)"
-                  className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                  title="Copy this path as TEXT (fact_support.ticket_key → System A → …) — for a doc or a chat message, not a clickable link"
+                  className={cn(
+                    'flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium transition-colors',
+                    pathCopied
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06]',
+                  )}
                 >
-                  <LucideIcons.Copy className="w-3 h-3" />
-                  Copy path
+                  {pathCopied ? <LucideIcons.Check className="w-3 h-3" /> : <LucideIcons.Copy className="w-3 h-3" />}
+                  {pathCopied ? 'Copied' : 'Copy path'}
+                </button>
+                {/* T24 F3 — the working share link (`copyShareLink`, same
+                    codec as the header's Link2 button) lived ONLY in the
+                    header, invisible from here — a reader scanning the
+                    path for "how do I share this" found only the TEXT
+                    action beside it. Same call, same URL; a distinct
+                    label and icon keep text-vs-link from reading as one
+                    offer twice. */}
+                <button
+                  type="button"
+                  onClick={copyShareLink}
+                  title="Copy a LINK to this view — opens exactly where you are now, for a colleague to click"
+                  className={cn(
+                    'flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium transition-colors',
+                    shareCopied
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06]',
+                  )}
+                >
+                  {shareCopied ? <LucideIcons.Check className="w-3 h-3" /> : <LucideIcons.Link2 className="w-3 h-3" />}
+                  {shareCopied ? 'Copied' : 'Copy link to this view'}
                 </button>
               </div>
             </div>

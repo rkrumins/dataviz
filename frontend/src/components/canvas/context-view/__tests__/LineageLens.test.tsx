@@ -849,6 +849,32 @@ describe('the shell around the picture', () => {
     expect(onJumpTo).toHaveBeenCalledWith(2)
   })
 
+  it('the PATH bar\'s own link action produces the identical URL the header button does (T24 F3)', () => {
+    // The working share mechanism (`copyShareLink`) used to live ONLY
+    // in the header — invisible from the PATH bar, where "Copy path"
+    // only ever copied plain TEXT. Reported: a reader scanning the path
+    // for "how do I share this" found no link action there at all.
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 2 })
+    const writeText = vi.fn()
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    renderLens(['a', 'b', 'c'], simple(), { history: { entries: ['a', 'b', 'c'], cursor: 1 }, onJumpTo: vi.fn() })
+
+    fireEvent.click(screen.getByLabelText('Copy exploration link'))
+    fireEvent.click(screen.getByTitle(/Copy a LINK to this view/))
+    expect(writeText).toHaveBeenCalledTimes(2)
+    // Byte-identical: the SAME call (`copyShareLink`), not a second
+    // codec path that could quietly drift from the header's.
+    expect(writeText.mock.calls[0][0]).toBe(writeText.mock.calls[1][0])
+
+    // "Copy path" is a DIFFERENT action (plain text, not a link) —
+    // distinct labels keep the two from reading as one offer twice.
+    fireEvent.click(screen.getByTitle(/Copy this path as TEXT/))
+    expect(writeText).toHaveBeenCalledTimes(3)
+    expect(writeText.mock.calls[2][0]).not.toContain('http')
+
+    usePreferencesStore.setState({ lensInitialDepth: 1 })
+  })
+
   it('the body toggle switches to the list and persists the preference', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['b'], simple())
