@@ -2068,11 +2068,24 @@ const MemoFrameDividerNode = memo(FrameDividerNode, (prev, next) => {
   return a.ctx === b.ctx && sameCard(a.card, b.card)
 })
 
+/**
+ * The one node type the other three's memo pattern had not reached
+ * (Task 20, P4): `baseNodes`'s own memo keeps a band label's `data`
+ * reference stable across a selection/peek change (nothing in `data` —
+ * `band`/`sub`/`whisper`/`cardIds` — depends on `selectedId`), but with
+ * no memo boundary here React Flow re-ran this component anyway on
+ * every nodes-array rebuild. Only 2-4 of these exist per board, so the
+ * cost was never the fan-out P1 fixed — but "same array refs across an
+ * unrelated change" (the brief's own words) means the reference doing
+ * nothing is the bug, however small.
+ */
+const MemoBandLabelNode = memo(BandLabelNode, (prev, next) => prev.data === next.data)
+
 const NODE_TYPES = {
   focusCard: MemoFocusGraphCard,
   focusFrame: MemoFocusFrameNode,
   focusDivider: MemoFrameDividerNode,
-  bandLabel: BandLabelNode,
+  bandLabel: MemoBandLabelNode,
 }
 
 // ── Edge ─────────────────────────────────────────────────────────────

@@ -274,6 +274,91 @@ describe('P0 — perf harness (Task 20)', () => {
     }
   })
 
+  /**
+   * Task 20, P4 — React Flow render hygiene. `nodeTypes`/`edgeTypes` are
+   * verified module-level constants by inspection (`NODE_TYPES`/
+   * `EDGE_TYPES` in FocusGraphView.tsx, outside any component); no
+   * `defaultEdgeOptions` prop is used at all, so there is nothing there
+   * to destabilize. This is the one claim worth PROVING rather than
+   * reading: a selection change (peek open/close) must re-render only
+   * the cards whose OWN `selected` flag flipped, not the board.
+   */
+  describe('(P4) selection changes touch only the affected cards', () => {
+    it('walkWideHub: selecting a different report re-renders two cards, not the board', () => {
+      const profiler = makeProfilerRecorder()
+      const fixture = WALK_FIXTURES.walkWideHub
+      const built = buildWalk(fixture)
+      const { rerender, container } = render(
+        <Profiler id="board" onRender={profiler.onRender}>
+          <ReactFlowProvider>
+            <FocusGraphView
+              graph={built.graph}
+              focalId={built.focalId}
+              focalFetch="done"
+              focalReach={built.reach}
+              directionFilter={built.directionFilter}
+              selectedId={null}
+              isolatedId={null}
+              reducedMotion
+              onSelect={noop}
+              onFocus={noop}
+              onToggleFrame={noop}
+              onFrameScroll={noop}
+              onFrameQuery={noop}
+              onToggleFrameAll={noop}
+              onRevealMore={noop}
+              onExtend={noop}
+              onPage={noop}
+            />
+          </ReactFlowProvider>
+        </Profiler>,
+      )
+      const board = nodes(container)
+      expect(board.length).toBeGreaterThan(10)
+
+      profiler.reset()
+      resetRenderCounts()
+      // A peek open — the SAME props FocusGraphView would get from a
+      // parent that just set `view.selection`.
+      rerender(
+        <Profiler id="board" onRender={profiler.onRender}>
+          <ReactFlowProvider>
+            <FocusGraphView
+              graph={built.graph}
+              focalId={built.focalId}
+              focalFetch="done"
+              focalReach={built.reach}
+              directionFilter={built.directionFilter}
+              selectedId="dn000"
+              isolatedId={null}
+              reducedMotion
+              onSelect={noop}
+              onFocus={noop}
+              onToggleFrame={noop}
+              onFrameScroll={noop}
+              onFrameQuery={noop}
+              onToggleFrameAll={noop}
+              onRevealMore={noop}
+              onExtend={noop}
+              onPage={noop}
+            />
+          </ReactFlowProvider>
+        </Profiler>,
+      )
+      const totalRendered = [...renderCounts.values()].reduce((n, v) => n + v, 0)
+      console.log(
+        `[P4] walkWideHub select dn000: boardNodes=${board.length} commits=${profiler.commitCount} `
+        + `ms=${profiler.totalMs.toFixed(2)} totalComponentRenders=${totalRendered} `
+        + `(${JSON.stringify(Object.fromEntries(renderCounts))})`,
+      )
+      // Exactly the one card that GAINED `selected` — nothing else has a
+      // reason to. A generous ceiling (10, not 1) so this does not flake
+      // on an unrelated re-render while still catching the board-wide
+      // fan-out this test exists to rule out.
+      expect(totalRendered).toBeLessThan(10)
+    })
+  })
+
   describe('(e) initial mount', () => {
     it('walkSharedPlatform: mount-phase actualDuration', () => {
       const profiler = makeProfilerRecorder()
