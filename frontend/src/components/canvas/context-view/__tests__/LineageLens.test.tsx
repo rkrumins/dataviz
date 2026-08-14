@@ -80,14 +80,24 @@ function walkModel(focusUrn: string, parts: Partial<Omit<LensWalkModel, 'focusUr
   }
 }
 
-const doneWalk = (model: LensWalkModel, extendStatus?: Map<string, 'loading' | 'error'>): WalkEntry => ({
+const doneWalk = (
+  model: LensWalkModel,
+  extendStatus?: Map<string, 'loading' | 'error'>,
+  // T24 F4 — the depth THIS fixture's walk was fetched at. Defaults to
+  // the depth preference's own default (1), so an existing fixture that
+  // never cared about F4 still reads as "already fetched at 1" rather
+  // than as some depth deeper than whatever a test happens to click.
+  depth = 1,
+): WalkEntry => ({
   model, status: 'done', error: null, extendStatus: extendStatus ?? new Map(),
+  depth, deepenStatus: null,
 })
 
 const makeApi = () => ({
   extend: vi.fn(),
   page: vi.fn(),
   retry: vi.fn(),
+  deepen: vi.fn(),
 })
 
 type Api = ReturnType<typeof makeApi>
@@ -531,7 +541,7 @@ describe('the ⊕ tells the truth about what it costs', () => {
     // `useLensWalk` holds an EMPTY model until the first response, and
     // ignores an extend before the focal is 'done' — so there is
     // nothing to hang a pill on, and no dead click to make.
-    renderLens(['F'], { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map() })
+    renderLens(['F'], { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map(), depth: 1, deepenStatus: null })
     expect(screen.queryByTitle(/Loads the next hop/)).toBeNull()
     expect(screen.queryByTitle(/Shows the next hop/)).toBeNull()
   })
@@ -636,13 +646,14 @@ describe('what the lens says while it cannot answer', () => {
   afterEach(() => cleanup())
 
   it('narrates the walk instead of claiming "no connections"', () => {
-    renderLens(['F'], { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map() })
+    renderLens(['F'], { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map(), depth: 1, deepenStatus: null })
     expect(screen.getByText(/Walking the lineage from the data source/)).toBeTruthy()
   })
 
   it('surfaces a failure with its reason, and a Retry that re-kicks the walk', () => {
     const { api } = renderLens(['F'], {
       model: walkModel('F', {}), status: 'error', error: 'provider unreachable', extendStatus: new Map(),
+      depth: 1, deepenStatus: null,
     })
     expect(screen.getByText(/provider unreachable/)).toBeTruthy()
     fireEvent.click(screen.getByText('Retry'))
@@ -650,7 +661,7 @@ describe('what the lens says while it cannot answer', () => {
   })
 
   it('says plainly when the data source cannot walk lineage at all', () => {
-    renderLens(['F'], { model: walkModel('F', {}), status: 'unsupported', error: null, extendStatus: new Map() })
+    renderLens(['F'], { model: walkModel('F', {}), status: 'unsupported', error: null, extendStatus: new Map(), depth: 1, deepenStatus: null })
     expect(screen.getByText(/can't walk lineage/)).toBeTruthy()
     // NOT the empty-direction whisper: that is a claim about what the
     // data source said, and it was never asked.
@@ -701,7 +712,7 @@ describe('reach — how far the walk got, and whether that is all of it', () => 
 
   it('claims no reach at all while the walk is still running', () => {
     usePreferencesStore.setState({ lensViewMode: 'list' })
-    renderLens(['F'], { model: reachModel(true), status: 'loading', error: null, extendStatus: new Map() })
+    renderLens(['F'], { model: reachModel(true), status: 'loading', error: null, extendStatus: new Map(), depth: 1, deepenStatus: null })
     expect(screen.queryByText(/Fed by|feeds/)).toBeNull()
     expect(screen.getByText(/Walking the lineage…/)).toBeTruthy()
   })
@@ -906,16 +917,67 @@ describe('the shell around the picture', () => {
     expect(() => fireEvent.click(screen.getByLabelText('Export lineage data as CSV'))).not.toThrow()
   })
 
-  it('the initial-depth control is a preference, and touches no walk call', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 })
-    const { api } = renderLens(['b'], simple())
-    fireEvent.click(screen.getByTitle(/Fetch 2 hops each way/))
-    expect(usePreferencesStore.getState().lensInitialDepth).toBe(2)
-    // Changing it never touches the CURRENT focal's walk — only what a
-    // future focus fetches.
+  it('the initial-depth preference persists for the NEXT focal, independent of the current one (T24 F4)', () => {
+    // T24 F4 changed WHAT a click does for the current focal (a deeper
+    // click now fetches it immediately — see the dedicated tests below)
+    // but not this half: the preference still governs whatever the
+    // reader focuses next, and a click that fetches nothing for an
+    // already-deep-enough current focal is exactly that case.
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 3 })
+    const { api } = renderLens(['b'], { ...simple(), depth: 3 })
+    fireEvent.click(screen.getByTitle(/Fetch 1 hop each way/))
+    expect(usePreferencesStore.getState().lensInitialDepth).toBe(1)
+    expect(api.deepen).not.toHaveBeenCalled()
     expect(api.extend).not.toHaveBeenCalled()
     expect(api.retry).not.toHaveBeenCalled()
     usePreferencesStore.setState({ lensInitialDepth: 1 })
+  })
+
+  it('a HIGHER depth click deepens the current focal immediately (T24 F4)', () => {
+    // Reported: clicking 1/2/3 only ever wrote the preference —
+    // useLensWalk's cache key excludes depth and the started-guard
+    // never refetches, so the CURRENT focal never grew no matter what
+    // was clicked. `walk.depth` (1, via `simple()`'s default) is what
+    // the click now compares against.
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 })
+    const { api } = renderLens(['b'], simple())
+    fireEvent.click(screen.getByTitle(/Fetch 3 hops each way/))
+    expect(usePreferencesStore.getState().lensInitialDepth).toBe(3)
+    // Exactly one merge-fetch, for the current focal, at the clicked depth.
+    expect(api.deepen).toHaveBeenCalledTimes(1)
+    expect(api.deepen).toHaveBeenCalledWith(3)
+    // Not the extend/page/retry machinery — this is its own call.
+    expect(api.extend).not.toHaveBeenCalled()
+    expect(api.retry).not.toHaveBeenCalled()
+    usePreferencesStore.setState({ lensInitialDepth: 1 })
+  })
+
+  it('a lower-or-equal depth click fetches nothing and shows the inline note (T24 F4)', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 })
+    const { api } = renderLens(['b'], { ...simple(), depth: 2 })
+    expect(screen.queryByText(/Applies to your next walk/)).toBeNull()
+
+    fireEvent.click(screen.getByTitle(/Fetch 2 hops each way/))   // equal to walk.depth
+    expect(api.deepen).not.toHaveBeenCalled()
+    expect(screen.getByText(/Applies to your next walk/)).toBeTruthy()
+
+    usePreferencesStore.setState({ lensInitialDepth: 1 })
+  })
+
+  it('the depth control shows an always-visible caption, not only a hover title (T24 F4)', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 })
+    renderLens(['b'], simple())
+    // Visible text inside the group, found without hovering or reading
+    // a `title` attribute — the group's own `aria-label` doesn't count
+    // as a VISIBLE caption for a sighted reader.
+    const group = screen.getByLabelText(/Hops to fetch/)
+    expect(within(group).getByText('Depth')).toBeTruthy()
+  })
+
+  it('shows a spinner on the control while a deepen is in flight', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 })
+    renderLens(['b'], { ...simple(), deepenStatus: 'loading' })
+    expect(screen.getByLabelText('Fetching deeper lineage for this entity')).toBeTruthy()
   })
 
   it('the direction preset filters the board view-side, with no fetch, and toggles back cleanly', () => {
@@ -1788,7 +1850,7 @@ describe('what is really inside a container', () => {
     const onLoadChildrenOf = vi.fn()
     renderLens(
       ['F'],
-      { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map() },
+      { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map(), depth: 1, deepenStatus: null },
       { onLoadChildrenOf },
     )
     expect(onLoadChildrenOf).not.toHaveBeenCalled()

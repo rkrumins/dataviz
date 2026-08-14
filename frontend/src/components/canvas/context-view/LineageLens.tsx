@@ -202,6 +202,9 @@ export interface LensWalkApi {
    *  retrying one is the same click on the same pill, so the ⊕ simply
    *  calls `extend` again and the two can never drift apart. */
   retry: (focusUrn: string) => void
+  /** T24 F4 — re-fetch the CURRENT focal at a deeper depth and merge.
+   *  See `useLensWalk`'s `LensWalkData.deepen` for the full contract. */
+  deepen: (newDepth: number) => void
 }
 
 /**
@@ -894,6 +897,10 @@ export function LineageLens({
   // BOTH of the bar's actions confirm the click rather than one of them
   // doing so silently.
   const [pathCopied, setPathCopied] = useState(false)
+  // T24 F4 — a same-or-shallower depth click fetches nothing (the
+  // entity already has that much); this is the brief confirmation that
+  // told the reader so, instead of a click that visibly did nothing.
+  const [depthNote, setDepthNote] = useState(false)
   const copyShareLink = () => {
     const token = encodeLensShare({
       entries,
@@ -1173,34 +1180,63 @@ export function LineageLens({
                   {shareCopied ? <LucideIcons.Check className="w-4 h-4" /> : <LucideIcons.Link2 className="w-4 h-4" />}
                 </button>
               </InfoTooltip>
-              {/* Initial depth — how many hops each direction a NEWLY
-                  focused entity fetches. Never refetches the current
-                  focal: a card already in hand keeps the depth it was
-                  fetched at (useLensWalk's own cache contract), so this
-                  control only ever changes what happens NEXT. */}
-              <div
-                data-tour="lens-depth"
-                role="group"
-                aria-label="Hops to fetch when you focus a new entity"
-                className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-              >
-                {([1, 2, 3] as const).map((d) => (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => setLensInitialDepth(d)}
-                    title={`Fetch ${d} hop${d === 1 ? '' : 's'} each way for entities you focus next — this entity keeps the depth it was already fetched at`}
-                    aria-pressed={lensInitialDepth === d}
-                    className={cn(
-                      'flex items-center justify-center w-6 h-6 rounded-md text-[10.5px] font-semibold tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                      lensInitialDepth === d
-                        ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                        : 'text-ink-muted hover:text-ink',
-                    )}
-                  >
-                    {d}
-                  </button>
-                ))}
+              {/* Initial depth — how many hops each direction. T24 F4:
+                  clicking DEEPER than the current focal's own fetched
+                  depth now re-fetches and merges it immediately (the old
+                  "never touches the current focal" copy was simply
+                  wrong — it only ever wrote a preference, so a reader
+                  who clicked 3 hoping to see further from HERE got
+                  nothing until their next focus). Clicking the same
+                  depth or shallower still only sets the preference —
+                  served hops are never trimmed (that is T23's window). */}
+              <div className="relative" data-tour="lens-depth">
+                <div
+                  role="group"
+                  aria-label="Hops to fetch — deepens this entity now if it needs more, and sets the depth for what you focus next"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  {/* Always visible, not hover-only (F4) — the per-button
+                      title carries the full explanation; this is the
+                      short version a reader never has to hover for. */}
+                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
+                    Depth
+                  </span>
+                  {([1, 2, 3] as const).map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      disabled={walk?.deepenStatus === 'loading'}
+                      onClick={() => {
+                        setLensInitialDepth(d)
+                        if (walk?.status !== 'done') return
+                        if (d > walk.depth) {
+                          walkApi.deepen(d)
+                        } else {
+                          setDepthNote(true)
+                          window.setTimeout(() => setDepthNote(false), 1600)
+                        }
+                      }}
+                      title={`Fetch ${d} hop${d === 1 ? '' : 's'} each way — deepens this entity now if it needs more, and sets the depth for what you focus next`}
+                      aria-pressed={lensInitialDepth === d}
+                      className={cn(
+                        'flex items-center justify-center w-6 h-6 rounded-md text-[10.5px] font-semibold tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 disabled:opacity-50 disabled:cursor-wait',
+                        lensInitialDepth === d
+                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                          : 'text-ink-muted hover:text-ink',
+                      )}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                  {walk?.deepenStatus === 'loading' && (
+                    <LucideIcons.Loader2 className="w-3 h-3 mr-1 animate-spin text-accent-lineage" aria-label="Fetching deeper lineage for this entity" />
+                  )}
+                </div>
+                {depthNote && (
+                  <span className="absolute top-full left-0 mt-1 z-50 whitespace-nowrap px-2 py-1 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 text-[9.5px] text-ink-muted shadow-md">
+                    Applies to your next walk — this entity already has that much (or more)
+                  </span>
+                )}
               </div>
               {/* What a container opens into, by default. Each frame can
                   still be flipped on its own; this sets the starting
