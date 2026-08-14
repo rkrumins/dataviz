@@ -141,4 +141,32 @@ describe('useLensChildren', () => {
     expect(result.current.allResults.size).toBe(0)
     expect(result.current.allStatus.size).toBe(0)
   })
+
+  it('drops what it holds when the provider scope changes', async () => {
+    // A urn means nothing without the graph it belongs to: two data
+    // sources routinely carry the same entity name, and "what is inside
+    // it" is a different answer in each. `useLensWalk` folds
+    // `provider.scopeKey` into its cache key for this; the roster is
+    // exposed keyed by urn, so it drops the session instead — the same
+    // guarantee, and no second spelling of the key to get wrong.
+    const first = makeProvider(() => ({ children: [gn('from-source-a')], hasMore: false }))
+    const second = makeProvider(() => ({ children: [gn('from-source-b')], hasMore: false }))
+    ;(first.provider as { scopeKey?: string }).scopeKey = 'ws1/source-a'
+    ;(second.provider as { scopeKey?: string }).scopeKey = 'ws1/source-b'
+
+    const { result, rerender } = renderHook(
+      ({ p }: { p: GraphDataProvider }) => useLensChildren('F', p),
+      { initialProps: { p: first.provider } },
+    )
+    act(() => result.current.loadAllChildren('C'))
+    await waitFor(() => expect(result.current.allResults.get('C')?.children).toHaveLength(1))
+
+    rerender({ p: second.provider })
+    expect(result.current.allResults.size).toBe(0)
+
+    // …and the same urn now answers from the source that is actually open.
+    act(() => result.current.loadAllChildren('C'))
+    await waitFor(() => expect(result.current.allStatus.get('C')).toBe('done'))
+    expect(result.current.allResults.get('C')!.children[0]!.id).toBe('from-source-b')
+  })
 })

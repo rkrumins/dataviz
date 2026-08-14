@@ -1228,6 +1228,65 @@ describe('focus-layout — frames page instead of growing', () => {
         expect(cardFor(g, 'c9')!.connected).toBe(false)
         expect(cardFor(g, 'T')!.frameShowingAll).toBe(true)
         expect(cardFor(g, 'T')!.frameTotal).toBe(3)
+        // Two of its three columns ARE on this lineage.
+        expect(cardFor(g, 'T')!.frameEmpty).toBe(false)
+    })
+
+    it('a frame\'s Find reaches the rows the frame was opened to show', () => {
+        // The box searched only the UNCONNECTED extras — i.e. everything
+        // except the rows a reader opened the frame for. Typing a column
+        // name did nothing to the columns.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [
+                wnode('F'), wnode('T', 'dataset', 'src'),
+                wnode('c0', 'schemaField', 'amount'), wnode('c1', 'schemaField', 'currency'),
+            ],
+            contains: [['T', 'c0'], ['T', 'c1']],
+            hops: [['c0', 'F'], ['c1', 'F']],
+        })
+        const base = initialLensViewState(sg)
+        const g = layout(sg, {
+            ...base,
+            expandedContainment: new Set([...base.expandedContainment, 'T']),
+            frameQueries: new Map([['T', 'curr']]),
+        })
+        // Dimmed, never removed — a row a search hid is a row you cannot
+        // see is there, which is the same lie as a filter that deletes.
+        expect(cardFor(g, 'c0')!.dimmed).toBe(true)
+        expect(cardFor(g, 'c1')!.dimmed).toBe(false)
+        // The frame itself is not its own row: it stays lit.
+        expect(cardFor(g, 'T')!.dimmed).toBe(false)
+    })
+
+    it('says so when nothing inside is on the lineage, instead of a roster that reads like an answer', () => {
+        // The focus connects at TABLE grain: its columns are in the
+        // container, and not one of them is on this lineage. Opening
+        // "everything inside" then fills the stack with rows that connect
+        // to nothing — which reads as an answer unless the frame says
+        // plainly that it isn't one.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F', 'dataset', 'orders'), wnode('U', 'dataset', 'raw_orders')],
+            contains: [],
+            hops: [['U', 'F']],
+        })
+        const base = initialLensViewState(sg)
+        const g = layout(sg, { ...base, frameShowAll: new Set(['F']) }, {
+            childrenAll: new Map([['F', {
+                children: [wnode('k0', 'schemaField', 'id'), wnode('k1', 'schemaField', 'total')],
+                hasMore: false,
+                total: 2,
+            }]]),
+            childrenAllStatus: new Map([['F', 'done']]),
+        })
+        const stack = g.cards.find(c => c.id === 'co:F')!
+        expect(stack.frameEmpty).toBe(true)
+        expect(stack.frameConnectedCount).toBe(0)
+        expect(stack.frameLoaded).toBe(2)
+        // The claim is about the MODEL, so a partner that DOES hold
+        // lineage children never makes it.
+        expect(cardFor(g, 'U')!.frameEmpty).toBe(false)
     })
 })
 
@@ -1439,5 +1498,30 @@ describe('focus-layout — walk export, pure and server-free', () => {
         // not the literal string "null".
         expect(lines.some(l => l.startsWith('DB,RISK_DB,DATABASE,,0'))).toBe(true)
         expect(csv).not.toContain('null')
+    })
+
+    it('defuses a name a spreadsheet would run as a formula', () => {
+        // These are entity names out of someone's catalogue, and Excel and
+        // Sheets execute a cell that OPENS with = + - @. An exported
+        // lineage picture must not run anything on the desk of whoever
+        // opens it.
+        const payload = {
+            focus: 'x',
+            generatedAt: '2026-08-14T00:00:00.000Z',
+            nodes: [
+                { urn: '=cmd|calc', name: '@SUM(A1)', type: '+t', parentUrn: '-x', depth: -1 },
+                { urn: 'plain', name: 'Revenue', type: 't', parentUrn: null, depth: 0 },
+            ],
+            edges: [{ sourceUrn: '=a', targetUrn: 'b', type: 'FLOWS', weight: 2 }],
+        }
+        const lines = walkExportToCsv(payload).split('\n')
+
+        expect(lines[1]).toBe("'=cmd|calc,'@SUM(A1),'+t,'-x,-1")
+        // A NUMBER is never a formula: defusing a negative depth into
+        // `'-1` would corrupt the column it was meant to protect.
+        expect(lines[1].endsWith(',-1')).toBe(true)
+        // And an ordinary name is left exactly as it was.
+        expect(lines[2]).toBe('plain,Revenue,t,,0')
+        expect(lines[lines.length - 1]).toBe("'=a,b,FLOWS,2")
     })
 })

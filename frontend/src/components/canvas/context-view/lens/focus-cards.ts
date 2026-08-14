@@ -198,8 +198,6 @@ export interface FocusCard {
   /** Nesting level, 0 for a top-level card. Drives the indent; the tree
    *  itself is derived, never stored. */
   depth: number
-  /** Frame cards only — server capped the expansion (counts are floors). */
-  frameTruncated: boolean
   /** Frame cards only — opened, and nothing inside connects to the focal. */
   frameEmpty: boolean
   /** Frame CHILD only: is this on the lineage? False for a child that

@@ -816,7 +816,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         count: 1, edgeTypeNorm: '',
         frameId: null, depth: 0,
         ancestry: EMPTY_STRINGS, ancestryIds: EMPTY_STRINGS,
-        frameTruncated: false, frameEmpty: false,
+        frameEmpty: false,
         connected: true, frameShowingAll: false, frameConnectedCount: 0,
         frameLoaded: 0, frameTotal: -1, frameHasMore: false,
         frameSharedEdgeType: '',
@@ -861,15 +861,20 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         return { pillUp, pillDown, deadEnd }
     }
 
+    /** How many things this entity holds ALTOGETHER, when it says so:
+     *  the payload's own count first, then whatever the roster has
+     *  reached. Never a guess. */
+    const heldTotal = (urn: string): number | null => {
+        const declared = dataOf(urn).childCount
+        return typeof declared === 'number' && declared >= 0
+            ? declared
+            : childrenAll.get(urn)?.total ?? null
+    }
+
     const contentsOf = (urn: string): { onLineage: number; total: number | null } | null => {
         const children = nodeOf(urn)?.children ?? []
         if (children.length === 0) return null
-        const declared = dataOf(urn).childCount
-        const roster = childrenAll.get(urn)
-        const total = typeof declared === 'number' && declared >= 0
-            ? declared
-            : roster?.total ?? null
-        return { onLineage: children.length, total }
+        return { onLineage: children.length, total: heldTotal(urn) }
     }
 
     /** The type of the one hop this card carries, when it carries exactly
@@ -892,7 +897,18 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      * self-nesting ontology (Node ⊃ Node ⊃ Node) nests as many times as
      * the data does.
      */
-    const emit = (urn: string, hostFrameId: string | null, depth: number, band: number) => {
+    const emit = (
+        urn: string,
+        hostFrameId: string | null,
+        depth: number,
+        band: number,
+        /** The Find text of the frame this row sits in. A search has to
+         *  reach what is ON SCREEN — a box that only ever dimmed the
+         *  UNCONNECTED extras searched everything except the rows the
+         *  frame was opened to show. Dims, like the board-wide filter:
+         *  a row removed by a search is a row you cannot see is there. */
+        hostQuery = '',
+    ) => {
         const kids = rankCards((nodeOf(urn)?.children ?? []).filter(c => visible.has(c)))
         const showAll = view.frameShowAll.has(urn)
         const isFocus = urn === sg.focusUrn
@@ -950,6 +966,18 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             pillDown,
             deadEnd,
             frameShowingAll: showAll,
+            // Nothing inside this is on this lineage — a fact about the
+            // MODEL (the walk ships every lineage-carrying descendant),
+            // not about what this page happens to show, so it stays true
+            // whatever the chips or the reveal pages have done.
+            //
+            // It is what makes "everything inside" honest: a table whose
+            // lineage attaches at TABLE grain opens onto its columns with
+            // "nothing here is on this lineage · showing everything
+            // inside", instead of a roster that reads like an answer to a
+            // question nobody asked. Carried by the focus too, because
+            // its contains-stack is the same frame at a different address.
+            frameEmpty: (isFrame || isFocus) && (nodeOf(urn)?.children.length ?? 0) === 0,
             frameConnectedCount: kids.length,
             frameLoaded: showAll ? rows.length : kids.length,
             frameTotal: showAll ? (roster?.total ?? -1) : (contentsOf(urn)?.total ?? -1),
@@ -961,7 +989,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                     : showAll && childrenAllStatus.get(urn) === 'loading' ? 'loading'
                         : showAll && childrenAllStatus.get(urn) === 'error' ? 'error'
                             : null,
-            dimmed: !matches(label),
+            dimmed: !matches(label) || (hostQuery !== '' && !label.toLowerCase().includes(hostQuery)),
         }
         const id = pushCard(card)
         if (id !== card.id) return
@@ -974,10 +1002,18 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // must not do is enclose the focal.
         let host = card
         if (isFocus) {
-            const holds = (nodeOf(urn)?.children.length ?? 0) > 0 || rosterExtras.length > 0
+            // A table whose lineage attaches at TABLE grain holds plenty
+            // and carries none of it on this walk. The stack still opens
+            // — that is where "0 on this lineage · of 9" and "nothing
+            // inside is on this lineage" get said. Dropping it left the
+            // reader with no way to ask what is in there and no statement
+            // that the answer is nothing.
+            const declared = heldTotal(urn) ?? 0
+            const holds = (nodeOf(urn)?.children.length ?? 0) > 0 || rosterExtras.length > 0 || declared > 0
             if (!holds) return
             host = {
                 ...card,
+                contents: contentsOf(urn) ?? { onLineage: 0, total: heldTotal(urn) },
                 id: `co:${urn}`,
                 kind: 'frame',
                 // No urn of its own: it is the focus's contents, and the
@@ -1013,7 +1049,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // rather than growing the frame.
         for (const child of rows.slice(page * pageSize, page * pageSize + pageSize)) {
             if (visible.has(child)) {
-                emit(child, host.id, depth + 1, band)
+                emit(child, host.id, depth + 1, band, frameQuery)
                 continue
             }
             // Inside this, but off the lineage. Only ever shown in "All",
@@ -1381,9 +1417,19 @@ export function buildWalkExport(
 
 /** Quote a CSV field only when it needs it (comma, quote or newline),
  *  doubling any interior quotes. `null` renders as an empty field, never
- *  the literal string "null". */
+ *  the literal string "null".
+ *
+ *  A field that OPENS with `= + - @` is a formula to Excel and Sheets,
+ *  and these fields are entity names straight from someone's catalogue —
+ *  so an export of a lineage picture could execute on the desk of
+ *  whoever opened it. A leading apostrophe is the standard defusing: the
+ *  spreadsheet shows the text and runs nothing. */
 function csvField(v: string | number | null): string {
-    const s = v === null ? '' : String(v)
+    // Numbers are never formulas, and a negative depth defused into
+    // `'-1` would be a corrupted column, not a safer one.
+    if (typeof v === 'number') return String(v)
+    const raw = v ?? ''
+    const s = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 

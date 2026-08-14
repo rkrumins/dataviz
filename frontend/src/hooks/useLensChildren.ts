@@ -140,6 +140,26 @@ export function useLensChildren(
     )
     const loadChildrenOf = useCallback((urn: string) => pageChildren(urn), [pageChildren])
 
+    /**
+     * A urn means nothing without the graph it belongs to. `useLensWalk`
+     * folds `provider.scopeKey` into its cache key for exactly this
+     * reason; here the results are EXPOSED keyed by urn (the layout does
+     * `childrenAll.get(urn)`), so the scope cannot live in the key
+     * without being unwrapped again at the boundary. A scope change is
+     * therefore a session boundary — same guarantee, no second spelling
+     * of the key for a consumer to get wrong: one data source's children
+     * can never answer for another's identically-named entity.
+     */
+    const scopeKey = provider?.scopeKey ?? ''
+    const scopeRef = useRef(scopeKey)
+    useEffect(() => {
+        if (scopeRef.current === scopeKey) return
+        scopeRef.current = scopeKey
+        sessionRef.current += 1
+        inFlightRef.current.clear()
+        setState(emptyState())
+    }, [scopeKey])
+
     // Session lifecycle: clear everything when the lens closes so a new
     // session starts from the data source, not from a stale picture.
     useEffect(() => {

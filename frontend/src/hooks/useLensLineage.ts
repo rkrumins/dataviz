@@ -9,21 +9,17 @@
  *
  * This hook fetches each VISITED focal node's true 1-hop lineage (both
  * directions) plus partner entity names straight from the provider the
- * first time that node appears in the focus history, fetches an
- * aggregated row's underlying connections when the user drills it
- * (same provider query the canvas's expandEdge uses), and exposes
- * ensureFetched for the graph mode's frontier (⊕) hop expansion — the
- * same once-per-session fetch for an arbitrary node. Results are held
+ * first time that node appears in the focus history. Results are held
  * lens-locally and merged into the Lens's derivation — nothing is
  * written to the canvas store, so exploring in the lens never mutates a
  * curated view's scope (same invariant as the external preview).
  *
  * Bounded by construction: two edge queries (EDGE_FETCH_LIMIT each) +
- * chunked name lookups per visited node, one pair query per drilled
- * aggregate, each fetched once per lens session (the cache clears when
- * the lens closes). Failures degrade to store-only data with a visible
- * 'error' status the Lens surfaces with a Retry — never a silent gap.
- * Truncation at the fetch limit is reported, never hidden.
+ * chunked name lookups per visited node, each fetched once per lens
+ * session (the cache clears when the lens closes). Failures degrade to
+ * store-only data with a visible 'error' status the Lens surfaces with a
+ * Retry — never a silent gap. Truncation at the fetch limit is reported,
+ * never hidden.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
@@ -34,8 +30,6 @@ import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
 /** Per-direction edge cap per focal node — two queries per node.
  *  Exported so the Lens's truncation copy states the real number. */
 export const EDGE_FETCH_LIMIT = 500
-/** Underlying-edge cap per drilled aggregate (one pair query). */
-const DRILL_FETCH_LIMIT = 200
 /** Partner-name lookups are chunked and capped; overflow falls back to
  *  URN-derived labels in the Lens (labelOf), never blank rows. */
 const NAME_CHUNK = 200
@@ -54,32 +48,18 @@ export interface LensLineageData {
   truncatedIds: Set<string>
   /** Re-kick a failed focal fetch. */
   retry: (nodeId: string) => void
-  /** Underlying edges fetched per drilled aggregate (aggregate edge id). */
-  drillEdges: Map<string, LineageEdge[]>
-  /** Per-drill fetch status (aggregate edge id). */
-  drillStatus: Map<string, LensFetchStatus>
-  /** Fetch an aggregated edge's underlying connections (idempotent per
-   *  edge id; a failed fetch may be re-kicked by calling again). */
-  fetchDrill: (edge: LineageEdge) => void
-  /** Fetch a node's 1-hop lineage if not already started — the graph
-   *  mode's frontier expansion (idempotent; retry() re-kicks errors). */
-  ensureFetched: (nodeId: string) => void
 }
 
 interface FetchState {
   edgesByNode: Map<string, { edges: LineageEdge[]; truncated: boolean }>
   nodesByUrn: Map<string, LineageNode>
   status: Map<string, LensFetchStatus>
-  drillEdges: Map<string, LineageEdge[]>
-  drillStatus: Map<string, LensFetchStatus>
 }
 
 const emptyState = (): FetchState => ({
   edgesByNode: new Map(),
   nodesByUrn: new Map(),
   status: new Map(),
-  drillEdges: new Map(),
-  drillStatus: new Map(),
 })
 
 export function useLensLineage(
@@ -96,7 +76,6 @@ export function useLensLineage(
   // Fetches already started this session (prevents effect re-kicks);
   // errors stay in here — retry is explicit, never a loop.
   const startedRef = useRef<Set<string>>(new Set())
-  const drillStartedRef = useRef<Set<string>>(new Set())
   // URNs whose names were already looked up (across fetches).
   const namedRef = useRef<Set<string>>(new Set())
   // Session token — bumped when the lens closes so in-flight results
@@ -129,7 +108,7 @@ export function useLensLineage(
     // requested URN as "named" (even ones getNodes didn't return) left
     // them permanently unresolvable — they surfaced as an "unresolved"
     // group of raw-id rows. Un-returned URNs stay eligible for a later
-    // resolve attempt (a revisit or drill), bounded by startedRef.
+    // resolve attempt on a revisit, bounded by startedRef.
     const returned = new Set(named.map(n => n.id))
     for (const u of capped) if (returned.has(u)) namedRef.current.add(u)
     return named
@@ -227,68 +206,12 @@ export function useLensLineage(
     }
   }, [provider, lineageEdgeTypes, containmentEdgeTypes, resolveNames])
 
-  /**
-   * Fetch the raw edges an aggregated row rolls up.
-   *
-   * KNOWN LIMITATION, stated because the docstring used to claim the
-   * opposite: `getEdges` is an EXACT urn match on both ends
-   * (`a.urn IN $sourceUrns AND b.urn IN $targetUrns`), so it does NOT
-   * resolve descendants. It therefore only finds constituents when the
-   * aggregate's own endpoints are the concrete ones. Resolving a
-   * table→table rollup into its column pairs needs `expandAggregated`,
-   * which nothing calls any more. Until then this returns what it can
-   * and the row reports the remainder honestly rather than inventing it.
-   */
-  const fetchDrill = useCallback((edge: LineageEdge) => {
-    if (!provider || drillStartedRef.current.has(edge.id)) return
-    drillStartedRef.current.add(edge.id)
-    const session = sessionRef.current
-    setState(prev => {
-      const drillStatus = new Map(prev.drillStatus)
-      drillStatus.set(edge.id, 'loading')
-      return { ...prev, drillStatus }
-    })
-    void (async () => {
-      try {
-        const types = lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined
-        const res = await provider.getEdges({
-          sourceUrns: [edge.source],
-          targetUrns: [edge.target],
-          edgeTypes: types,
-          limit: DRILL_FETCH_LIMIT,
-        })
-        const fetched = res.map(toCanvasEdge)
-        const named = await resolveNames(fetched.flatMap(e => [e.source, e.target]))
-        if (session !== sessionRef.current) return
-        setState(prev => {
-          const drillEdges = new Map(prev.drillEdges)
-          drillEdges.set(edge.id, fetched)
-          const nodesByUrn = named.length > 0 ? new Map(prev.nodesByUrn) : prev.nodesByUrn
-          for (const n of named) nodesByUrn.set(n.id, n)
-          const drillStatus = new Map(prev.drillStatus)
-          drillStatus.set(edge.id, 'done')
-          return { ...prev, drillEdges, nodesByUrn, drillStatus }
-        })
-      } catch {
-        if (session !== sessionRef.current) return
-        // Allow a re-click to retry a failed drill fetch.
-        drillStartedRef.current.delete(edge.id)
-        setState(prev => {
-          const drillStatus = new Map(prev.drillStatus)
-          drillStatus.set(edge.id, 'error')
-          return { ...prev, drillStatus }
-        })
-      }
-    })()
-  }, [provider, lineageEdgeTypes, resolveNames])
-
   // Session lifecycle: fetch every visited node once; clear on close.
   useEffect(() => {
     if (visitedIds.length === 0) {
-      if (startedRef.current.size > 0 || drillStartedRef.current.size > 0) {
+      if (startedRef.current.size > 0) {
         sessionRef.current += 1
         startedRef.current.clear()
-        drillStartedRef.current.clear()
         namedRef.current.clear()
         setState(emptyState())
       }
@@ -300,9 +223,6 @@ export function useLensLineage(
   }, [visitedIds, fetchNode])
 
   const retry = useCallback((nodeId: string) => void fetchNode(nodeId), [fetchNode])
-  const ensureFetched = useCallback((nodeId: string) => {
-    if (!startedRef.current.has(nodeId)) void fetchNode(nodeId)
-  }, [fetchNode])
 
   const supplementalEdges = useMemo(() => {
     const all: LineageEdge[] = []
@@ -329,9 +249,5 @@ export function useLensLineage(
     status: state.status,
     truncatedIds,
     retry,
-    drillEdges: state.drillEdges,
-    drillStatus: state.drillStatus,
-    fetchDrill,
-    ensureFetched,
   }
 }

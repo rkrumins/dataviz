@@ -271,10 +271,19 @@ describe('the business journey — a table\'s lineage through a seven-level esta
     expect(onBoard('refunds_raw')).toBe(true)
     // Root cause only: the downstream card the preset hides.
     expect(onBoard('risk_exposure_daily')).toBe(false)
+    // …and the header counts THIS picture. Three producers are drawn and
+    // the one consumer is not, so "4 connections" beside a board showing
+    // three would be the only number on screen describing something else.
+    expect(screen.getByText(/^3 connections/)).toBeTruthy()
     // A seed is a re-projection over the model already fetched — never a
     // round trip, however much it opens.
     expect(api.extend).not.toHaveBeenCalled()
     expect(api.page).not.toHaveBeenCalled()
+  })
+
+  it('the header counts every side again when the preset is Both', () => {
+    renderLens(['F'], doneWalk(collateralsEstate()))
+    expect(screen.getByText(/^4 connections/)).toBeTruthy()
   })
 })
 
@@ -833,6 +842,55 @@ describe('what is really inside a container', () => {
     expect(screen.getByText('internal_notes')).toBeTruthy()
     // It lives in there, but it must never read as a connection.
     expect(screen.getByText('no lineage')).toBeTruthy()
+  })
+
+  it('says a roster is not an answer when nothing inside is on the lineage', () => {
+    // The focus connects at TABLE grain — none of its own columns carries
+    // this lineage. Opening "everything inside" then fills the stack with
+    // rows that connect to nothing, and a list of columns under a lineage
+    // picture reads as the answer unless the frame says it is not one.
+    const onLoadAllChildren = vi.fn()
+    const walk = doneWalk(walkModel('F', {
+      nodes: [
+        wnode('F', 'dataset', 'orders', { childCount: 2 }),
+        wnode('U', 'dataset', 'raw_orders'),
+      ],
+      lineageEdges: [hop('U', 'F')],
+      upstreamUrns: new Set(['U']),
+    }))
+    const { rerender, api } = renderLens(['F'], walk, { onLoadAllChildren })
+    // Before the roster: the stack is open and says the answer is nothing,
+    // rather than not being there at all.
+    expect(screen.getByText(/Nothing in here is on this lineage/)).toBeTruthy()
+    expect(screen.getByText(/0 on this lineage · of 2/)).toBeTruthy()
+
+    fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
+    expect(onLoadAllChildren).toHaveBeenCalledWith('F')
+
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={walk}
+        walkApi={api}
+        childrenAll={new Map([['F', {
+          children: [
+            { id: 'k0', data: { label: 'order_total', type: 'schemaField' } },
+            { id: 'k1', data: { label: 'placed_at', type: 'schemaField' } },
+          ],
+          hasMore: false,
+          total: 2,
+        }]]) as never}
+        childrenAllStatus={new Map([['F', 'done' as const]])}
+        onLoadAllChildren={onLoadAllChildren}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('order_total')).toBeTruthy()
+    expect(screen.getByText(/nothing here is on this lineage · showing everything inside/)).toBeTruthy()
   })
 
   /**

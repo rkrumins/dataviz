@@ -782,7 +782,12 @@ export function LineageLens({
       }
     : null
 
-  const headerConnections = inConnections + outConnections
+  // The header counts what the header's own preset is showing. Under
+  // "Root cause" the board draws no consumers, no downstream pill and no
+  // downstream band — a count line still totalling them is the one number
+  // on screen that describes a different picture.
+  const headerConnections = (directionFilter === 'out' ? 0 : inConnections)
+    + (directionFilter === 'in' ? 0 : outConnections)
   const q = query.trim().toLowerCase()
   const filterFn = (r: WalkNeighbor) => q === '' || r.label.toLowerCase().includes(q)
 
