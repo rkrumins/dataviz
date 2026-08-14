@@ -9,6 +9,8 @@ import { cn } from '@/lib/utils'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { useJob } from '@/hooks/useJob'
 import { getProviderLogo } from '../ProviderLogos'
+import { Callout } from '@/components/ui/Callout'
+import { BudgetMeter } from './BudgetMeter'
 import {
     formatDuration, timeAgo, triggerLabel, STATUS_CONFIG, type DataSourceMeta,
     PHASES, PHASE_BANDS, PhaseStepper, phaseLabel,
@@ -189,6 +191,16 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     const statRegime = typeof job.runStats?.regime === 'string' ? job.runStats.regime : null
     const statCubeEstimate = typeof job.runStats?.cube_estimate === 'number' ? job.runStats.cube_estimate : null
     const statBudget = typeof job.runStats?.materialize_budget === 'number' ? job.runStats.materialize_budget : null
+    // On a budget FAILURE the pipeline never returns a result, so the worker
+    // persists the exception's own numbers instead — this is what the run
+    // would have written had it been allowed to.
+    const statProjected = typeof job.runStats?.budget_projected === 'number' ? job.runStats.budget_projected : null
+    const budgetExceeded = job.failureCategory === 'budget'
+    // Pairs actually stored on a successful run; the projected count on a
+    // failed one. Either way it is what to measure against the budget.
+    const budgetUsed = budgetExceeded
+        ? statProjected
+        : (typeof job.runStats?.pairs === 'number' ? job.runStats.pairs : null)
     // Conformance advisories (identity / casing gaps) recorded in run_stats.
     // Advisory-only backend signal — a completed run can still carry these,
     // so surface them here instead of leaving a green row that scanned zero.
@@ -661,33 +673,32 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                             edges than expected (identity or edge-type casing gap). */}
                                         {advisories.length > 0 && (
                                             <div className="space-y-1.5">
-                                                {advisories.map((adv, i) => {
-                                                    const isError = adv.severity === 'error'
-                                                    return (
-                                                        <div
-                                                            key={`${adv.kind}-${i}`}
-                                                            className={cn(
-                                                                'flex items-start gap-2 rounded-lg px-3 py-2 border',
-                                                                isError
-                                                                    ? 'bg-red-500/[0.06] border-red-500/20'
-                                                                    : 'bg-amber-500/[0.06] border-amber-500/20',
-                                                            )}
-                                                        >
-                                                            {isError
-                                                                ? <AlertCircle className="w-3.5 h-3.5 text-red-500 flex-shrink-0 mt-0.5" />
-                                                                : <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />}
-                                                            <p className={cn(
-                                                                'text-[11px] leading-relaxed',
-                                                                isError
-                                                                    ? 'text-red-600/90 dark:text-red-400/90'
-                                                                    : 'text-amber-600/90 dark:text-amber-400/90',
-                                                            )}>
-                                                                {adv.message}
-                                                            </p>
-                                                        </div>
-                                                    )
-                                                })}
+                                                {advisories.map((adv, i) => (
+                                                    <Callout
+                                                        key={`${adv.kind}-${i}`}
+                                                        tone={adv.severity === 'error' ? 'critical' : 'warning'}
+                                                        // A budget-pressure advisory is the one case where the
+                                                        // headroom itself is the message — show the meter with it.
+                                                        footer={
+                                                            adv.kind === 'budget_pressure' && budgetUsed && statBudget
+                                                                ? <BudgetMeter used={budgetUsed} budget={statBudget} />
+                                                                : undefined
+                                                        }
+                                                    >
+                                                        {adv.message}
+                                                    </Callout>
+                                                ))}
                                             </div>
+                                        )}
+
+                                        {/* Budget headroom on a clean run. Without this the budget is
+                                            invisible right up until the run that fails on it. Suppressed
+                                            when an advisory or the failure callout already carries the
+                                            meter, so it never appears twice. */}
+                                        {!budgetExceeded
+                                            && budgetUsed !== null && statBudget
+                                            && !advisories.some(a => a.kind === 'budget_pressure') && (
+                                            <BudgetMeter used={budgetUsed} budget={statBudget} />
                                         )}
 
                                         {/* Timeline */}
@@ -748,11 +759,27 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         Likely caused by server restarts during processing, not a job logic failure.
                                                     </p>
                                                 )}
-                                                {job.errorMessage.includes('max_materialized_edges') && (
-                                                    <p className="mt-2 text-[10px] text-amber-400/80 flex items-center gap-1.5">
-                                                        <AlertTriangle className="w-3 h-3 flex-shrink-0" />
-                                                        The computed result exceeds the write budget — deterministic, so the job was not retried. Raise Max Materialized Edges in tuning only if the FalkorDB instance has memory headroom.
-                                                    </p>
+                                                {/* Budget overshoot: classified server-side, so this no
+                                                    longer depends on the error prose keeping its wording.
+                                                    Retrying cannot help — the count is deterministic — so
+                                                    the guidance names the two things that actually move it. */}
+                                                {budgetExceeded && (
+                                                    <Callout
+                                                        tone="warning"
+                                                        title="This will fail again unchanged"
+                                                        className="mt-3"
+                                                        footer={budgetUsed && statBudget ? (
+                                                            <BudgetMeter used={budgetUsed} budget={statBudget} exceeded />
+                                                        ) : undefined}
+                                                    >
+                                                        The result is larger than the write budget. The count is
+                                                        deterministic, so the job was not retried and a re-run
+                                                        produces the same number. Either raise{' '}
+                                                        <span className="font-semibold">Materialization budget</span>{' '}
+                                                        in Fine-Tune Performance — only if the graph store has the
+                                                        memory headroom, at ~0.5KB per edge — or reduce what gets
+                                                        materialized by leaving Rollup storage on Auto.
+                                                    </Callout>
                                                 )}
                                                 {job.errorMessage.includes('write lease held') && (
                                                     <p className="mt-2 text-[10px] text-amber-400/80 flex items-center gap-1.5">

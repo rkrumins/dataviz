@@ -22,6 +22,11 @@ import {
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
 import type { AggregationTuning } from '@/services/aggregationService'
+import {
+    writeDutyCyclePct,
+    describeWriteBudget,
+    describePendingPairs,
+} from './aggregationScale'
 
 // ============================================
 // Public Contract
@@ -111,6 +116,13 @@ interface TuningFieldSpec {
     placeholder: number
     step?: number
     float?: boolean
+    /**
+     * What the current number MEANS, recomputed as the operator types.
+     * The static `help` states the accepted range; this states the
+     * consequence — GB of memory, a duty cycle, the graph size covered —
+     * which is the part that actually informs the choice.
+     */
+    derive?: (n: number) => string
 }
 
 const TUNING_FIELDS: TuningFieldSpec[] = [
@@ -127,6 +139,7 @@ const TUNING_FIELDS: TuningFieldSpec[] = [
         tip: 'Idle time inserted between write chunks, as a ratio of the previous chunk’s duration. Higher values leave more headroom for live queries but make the job slower; 0 disables pacing entirely.',
         help: 'Pause between writes (0-10)',
         min: 0, max: 10, placeholder: 1.0, step: 0.1, float: true,
+        derive: n => `≈${writeDutyCyclePct(n)}% write duty cycle — higher pacing is gentler and slower`,
     },
     {
         key: 'maxPendingPairs',
@@ -134,6 +147,7 @@ const TUNING_FIELDS: TuningFieldSpec[] = [
         tip: 'Maximum aggregated pairs held in memory before the pipeline flushes early. Lower values reduce worker RSS at the cost of more flush cycles.',
         help: 'Pairs held in memory (50,000-50,000,000)',
         min: 50_000, max: 50_000_000, placeholder: 50_000_000,
+        derive: describePendingPairs,
     },
     {
         key: 'extractConcurrency',
@@ -141,6 +155,7 @@ const TUNING_FIELDS: TuningFieldSpec[] = [
         tip: 'Number of parallel extract scans. Higher values speed up the extract phase but put more read load on the provider.',
         help: 'Parallel scans (1-4)',
         min: 1, max: 4, placeholder: 1,
+        derive: n => (n <= 1 ? 'Serial scans — gentlest on the provider, slowest extract' : `${n} scans in parallel`),
     },
     {
         key: 'maxMaterializedEdges',
@@ -148,6 +163,7 @@ const TUNING_FIELDS: TuningFieldSpec[] = [
         tip: 'Hard ceiling on stored AGGREGATED edges (~0.5KB of graph memory each). A backstop, not a sizing guard — forced full detail fails loudly instead of exceeding it. Size it against a SINGLE graph store node: a graph never spans cluster shards, so sharding adds no headroom for one large graph. Auto storage decides cube-vs-diagonal against its own ceiling, so raising this does not change that choice.',
         help: 'Max stored rollup edges (10,000-50,000,000)',
         min: 10_000, max: 50_000_000, placeholder: 25_000_000,
+        derive: describeWriteBudget,
     },
 ]
 
@@ -255,6 +271,19 @@ export function TuningFields({ value, onChange, disabled = false }: TuningFields
                             className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink placeholder:text-ink-muted/50 outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
                         />
                         <p className="text-[10px] text-ink-muted mt-1">{spec.help}</p>
+                        {/* What the CURRENT value means. Falls back to the
+                            placeholder, because an empty field still runs at
+                            that default — showing nothing there would imply
+                            the setting is inert. */}
+                        {spec.derive && (
+                            <p className="text-[10px] text-indigo-500/80 dark:text-indigo-400/80 mt-0.5 leading-relaxed">
+                                {spec.derive(
+                                    typeof value[spec.key] === 'number'
+                                        ? (value[spec.key] as number)
+                                        : spec.placeholder,
+                                )}
+                            </p>
+                        )}
                     </div>
                 ))}
             </div>

@@ -662,6 +662,17 @@ class AggregationWorker:
             except Exception as e:
                 job.status = "failed"
                 job.error_message = str(e)[:2000]
+                # Persist whatever the failure knows STRUCTURALLY. Without
+                # this a budget-exceeded job — the one failure an operator
+                # most needs to understand — stores no run_stats at all, so
+                # its detail panel is blank and the projected edge count
+                # survives only as prose inside error_message.
+                stats = getattr(e, "as_run_stats", None)
+                if hasattr(job, "run_stats") and callable(stats):
+                    try:
+                        job.run_stats = json.dumps(stats())
+                    except (TypeError, ValueError):
+                        pass
                 logger.error("Aggregation job %s failed: %s", job_id, e, exc_info=True)
 
                 await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")

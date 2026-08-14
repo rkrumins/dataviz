@@ -301,6 +301,11 @@ class AggregationJobResponse(BaseModel):
     resumable: bool  # True when status is 'failed'/'cancelled' (manual resume always allowed)
     retry_count: int = Field(alias="retryCount")
     error_message: Optional[str] = Field(None, alias="errorMessage")
+    # Coarse, UI-facing classification of ``error_message`` (see
+    # ``classify_failure``). The job detail previously had to substring-match
+    # the error prose to decide which guidance to render, which silently
+    # broke whenever the wording moved; this hands it the category directly.
+    failure_category: Optional[str] = Field(None, alias="failureCategory")
     estimated_completion_at: Optional[str] = Field(None, alias="estimatedCompletionAt")
     started_at: Optional[str] = Field(None, alias="startedAt")
     completed_at: Optional[str] = Field(None, alias="completedAt")

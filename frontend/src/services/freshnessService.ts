@@ -18,6 +18,9 @@ export type RefreshScope = 'auto' | 'read-caches' | 'rollups' | 'full' | 'clear'
 /** Coarse, UI-facing classification of a failed rebuild — drives the drawer's
  *  resolution guidance. Mirrors the backend ``classify_failure`` categories. */
 export type FailureCategory =
+    // Deterministic write-budget overshoot. Distinct from out_of_memory:
+    // that one is transient and worth retrying, this one reproduces exactly.
+    | 'budget'
     | 'out_of_memory'
     | 'provider_unavailable'
     | 'ontology'

@@ -1271,9 +1271,54 @@ def test_write_budget_guard_fails_loud_instead_of_oom(monkeypatch):
     # exception type.
     with pytest.raises(
         mat.MaterializationBudgetExceeded, match="max_materialized_edges"
-    ):
+    ) as excinfo:
         _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
     assert fake.agg == {}
+
+    # The numbers must survive STRUCTURALLY, not only as prose. A failed job
+    # persists no pipeline result, so without these the detail panel has
+    # nothing to render and the projected count is trapped in the message.
+    exc = excinfo.value
+    assert exc.cap == 4
+    assert exc.projected > 4
+    assert exc.composition, "expected a per-rank-pair composition histogram"
+    stats = exc.as_run_stats()
+    assert stats["materialize_budget"] == 4
+    assert stats["budget_projected"] == exc.projected
+
+
+def test_budget_pressure_warns_while_the_run_still_succeeds(monkeypatch):
+    """A run near the ceiling completes green and looks identical to an
+    empty one; the next growth increment then fails terminally with no
+    warning. The advisory is the only chance to act before that."""
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+
+    # Budget just above what this graph produces → over the 75% ratio.
+    monkeypatch.setattr(mat, "_max_materialized_edges", lambda: 2)
+    result = _run(_materialize(p))
+
+    assert result["errors"] == 0, "pressure is a warning, never a failure"
+    advisories = result["run_stats"].get("advisories") or []
+    pressure = [a for a in advisories if a["kind"] == "budget_pressure"]
+    assert pressure, f"expected a budget_pressure advisory, got {advisories}"
+    assert pressure[0]["severity"] == "warning"
+    assert pressure[0]["budget"] == 2
+    assert pressure[0]["percent"] >= 75
+
+
+def test_no_budget_advisory_with_headroom(monkeypatch):
+    """The common case stays silent — an advisory that always fires is noise."""
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+
+    monkeypatch.setattr(mat, "_max_materialized_edges", lambda: 1_000_000)
+    result = _run(_materialize(p))
+
+    advisories = result["run_stats"].get("advisories") or []
+    assert not [a for a in advisories if a["kind"] == "budget_pressure"]
 
 
 def test_cross_level_raw_edges_keep_direct_pair(monkeypatch):

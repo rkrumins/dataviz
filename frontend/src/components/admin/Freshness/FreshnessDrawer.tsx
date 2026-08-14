@@ -235,6 +235,17 @@ interface CategoryGuidance {
 }
 
 const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
+    // A budget overshoot is DETERMINISTIC — the same input computes the same
+    // count every time, and the job is deliberately not retried. Before this
+    // category existed it fell through to `unknown`, whose advice is "Retry
+    // the rebuild": a loop that cannot succeed. Retry is therefore hidden
+    // outright rather than merely cautioned against.
+    budget: {
+        why: 'The aggregated result would be larger than the write budget allows, so it was refused before anything was written.',
+        how: 'Raise the materialization budget in Fine-Tune Performance — only if the graph store has memory headroom, at roughly 0.5KB per stored edge — or leave Rollup storage on Auto so less is pre-created.',
+        note: 'Retrying will not help: the size is computed from the data and comes out the same every time.',
+        showClear: true, showRetry: false, primary: 'clear',
+    },
     out_of_memory: {
         why: 'The graph store ran out of memory while building aggregated lineage for this large source.',
         how: 'Free up memory in the graph store (remove unused graphs) or raise its memory limit, then retry the rebuild.',

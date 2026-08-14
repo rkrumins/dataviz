@@ -825,6 +825,17 @@ def test_source_probe_failure_degrades_without_raising(monkeypatch):
         ("ConnectionError: provider unavailable, connection refused", "provider_unavailable"),
         ("host unreachable", "provider_unavailable"),
         ("some completely unrelated failure", "unknown"),
+        # A budget overshoot is DETERMINISTIC and never retried, so it must
+        # not fall through to "unknown" — that guidance says "retry the
+        # rebuild", which sends the operator round a loop that cannot
+        # succeed. It also names the memory it protects, so it has to be
+        # matched BEFORE out_of_memory or the OOM substrings swallow it.
+        (
+            "aggregation would materialize ~5600000 :AGGREGATED edges, exceeding "
+            "max_materialized_edges=25000000 ... Writing this would risk "
+            "exhausting the FalkorDB instance's memory.",
+            "budget",
+        ),
     ],
 )
 def test_classify_failure_category_and_order(error_message, expected):

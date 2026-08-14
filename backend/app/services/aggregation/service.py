@@ -844,6 +844,7 @@ class AggregationService:
             resumable=_is_resumable(job),
             retry_count=job.retry_count,
             error_message=job.error_message,
+            failure_category=classify_failure(job.error_message),
             estimated_completion_at=estimated,
             started_at=job.started_at,
             completed_at=job.completed_at,
@@ -2416,6 +2417,7 @@ class AggregationService:
             resumable=_is_resumable(job),
             retry_count=job.retry_count,
             error_message=job.error_message,
+            failure_category=classify_failure(job.error_message),
             estimated_completion_at=estimated,
             started_at=job.started_at,
             completed_at=job.completed_at,
@@ -2460,9 +2462,19 @@ def classify_failure(error_message: Optional[str]) -> Optional[str]:
     ``provider_unavailable`` because a FalkorDB OOM error is often wrapped
     in connection/availability language (e.g. "provider unavailable: OOM
     command not allowed..."), which would otherwise misclassify the more
-    actionable OOM case as a generic provider outage."""
+    actionable OOM case as a generic provider outage.
+
+    ``budget`` is checked FIRST and separately from ``out_of_memory``: its
+    message names the memory it is protecting, so an OOM-substring match
+    would swallow it — and the two need opposite advice. An OOM is
+    transient and worth retrying; a budget overshoot is DETERMINISTIC and
+    never retried, so telling the operator to "retry the rebuild" (which
+    the generic ``unknown`` guidance did) sends them round a loop that
+    cannot succeed."""
     if not error_message:
         return None
+    if "max_materialized_edges" in error_message:
+        return "budget"
     if (
         "OutOfMemoryError" in error_message
         or "used memory > 'maxmemory'" in error_message

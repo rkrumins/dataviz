@@ -58,6 +58,9 @@ export interface AggregationJobResponse {
   maxRetries?: number;
   timeoutSecs?: number;
   errorMessage?: string;
+  /** Coarse server-side classification of errorMessage (see classify_failure).
+   *  Lets the UI pick guidance without substring-matching the error prose. */
+  failureCategory?: string;
   estimatedCompletionAt?: string;
   startedAt?: string;
   completedAt?: string;

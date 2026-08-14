@@ -282,7 +282,34 @@ class MaterializationBudgetExceeded(ValueError):
     """The computed result is larger than ``max_materialized_edges``.
 
     Deterministic: recomputing yields the same count, so the worker must
-    fail the job terminally instead of consuming its retry budget."""
+    fail the job terminally instead of consuming its retry budget.
+
+    Carries the numbers STRUCTURALLY as well as in the message. The job
+    detail has to show what the run would have written and by how much it
+    overshot; parsing that back out of the prose is the kind of coupling
+    that breaks the moment the wording changes."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        projected: Optional[int] = None,
+        cap: Optional[int] = None,
+        composition: Optional[Dict[str, int]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.projected = projected
+        self.cap = cap
+        self.composition = composition or {}
+
+    def as_run_stats(self) -> Dict[str, Any]:
+        """The failure's numbers in ``run_stats`` shape, so a failed job's
+        detail panel renders from the same fields a successful one does."""
+        return {
+            "budget_projected": self.projected,
+            "materialize_budget": self.cap,
+            "budget_composition": self.composition,
+        }
 
 
 class MaterializationPreconditionFailed(ValueError):
@@ -773,8 +800,44 @@ class AggregationPipeline:
             })
         return advisories
 
+    # Fraction of the write budget a COMPLETED run may consume before the
+    # job detail warns. The budget failure is terminal and never retried,
+    # so the only useful moment to raise it is while runs still succeed.
+    _BUDGET_PRESSURE_RATIO = 0.75
+
+    def _budget_advisory(self, affected: int) -> Optional[Dict[str, Any]]:
+        """Warn while there is still headroom left to act on.
+
+        A run at 95% of budget completes green and looks identical to one
+        at 5%; the next growth increment then fails terminally with no
+        warning at all. Surface the pressure on the successful run."""
+        cap = self._knob_int(
+            "max_materialized_edges", _max_materialized_edges, 10_000, 50_000_000,
+        )
+        if not cap or affected < cap * self._BUDGET_PRESSURE_RATIO:
+            return None
+        pct = round(affected * 100 / cap)
+        return {
+            "kind": "budget_pressure",
+            "severity": "warning",
+            "used": affected,
+            "budget": cap,
+            "percent": pct,
+            "message": (
+                f"This run stored {affected:,} rollup edges — {pct}% of the "
+                f"{cap:,} write budget. Exceeding the budget fails a job "
+                "terminally and is NOT retried, so raise the budget (or reduce "
+                "what is materialized) before the graph grows further. Each "
+                "edge costs ~0.5KB of graph memory, and a graph never spans "
+                "cluster shards, so size it against a single node."
+            ),
+        }
+
     def _result(self, affected: int = 0) -> Dict[str, Any]:
         advisories = self._conformance_advisories()
+        pressure = self._budget_advisory(affected)
+        if pressure is not None:
+            advisories.append(pressure)
         return {
             "processed": self._scanned,
             "aggregated_edges_affected": affected,
@@ -1707,19 +1770,24 @@ class AggregationPipeline:
         flushed = self._flushed
         projected = len(flushed) + sum(1 for k in self._acc if k not in flushed)
         if projected > cap:
+            composition = self._budget_composition_counts()
+            top = sorted(composition.items(), key=lambda kv: -kv[1])[:5]
             raise MaterializationBudgetExceeded(
                 f"aggregation would materialize ~{projected} :AGGREGATED edges "
-                f"({self._budget_composition()}), exceeding "
+                f"({', '.join(f'{n}: {c}' for n, c in top)}), exceeding "
                 f"max_materialized_edges={cap} for graph "
                 f"'{self.p._graph_name}'. Writing this would risk exhausting the "
                 f"FalkorDB instance's memory. This count is deterministic — the "
                 f"job is not retried. Fixes: keep the default level-based "
                 f"materialization (materialize_fine_pairs=false) so only "
                 f"same-level container pairs are stored; raise the cap via "
-                f"tuning only if the instance has headroom (~0.5KB per edge)."
+                f"tuning only if the instance has headroom (~0.5KB per edge).",
+                projected=projected,
+                cap=cap,
+                composition=dict(top),
             )
 
-    def _budget_composition(self) -> str:
+    def _budget_composition_counts(self) -> Dict[str, int]:
         """Per-rank-pair histogram of the would-be result, so operators
         can see WHAT exceeded the budget. Only computed on failure."""
         counts: Dict[str, int] = {}
@@ -1727,8 +1795,7 @@ class AggregationPipeline:
             sid, tid = _unpack(key)
             name = f"{self._pair_bucket(sid)}→{self._pair_bucket(tid)}"
             counts[name] = counts.get(name, 0) + 1
-        top = sorted(counts.items(), key=lambda kv: -kv[1])[:5]
-        return ", ".join(f"{name}: {n}" for name, n in top)
+        return counts
 
     # -- node resolution -------------------------------------------------------
 
