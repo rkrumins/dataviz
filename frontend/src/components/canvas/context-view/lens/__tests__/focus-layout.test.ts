@@ -2004,7 +2004,7 @@ describe('focus-layout — isolationCone (what one element\'s lineage covers)', 
     const edge = (id: string, source: string, target: string): FocusEdge =>
         ({
             id, source, target, count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false, cycleAnchor: false, labelVisible: false,
-            grainCoarse: false, sameAncestorFrame: null, labelT: 0.5,
+            grainCoarse: false, sameAncestorFrame: null, labelT: 0.5, seamSlotted: false,
         })
     const card = (id: string, frameId: string | null = null): FocusCard =>
         ({ ...({} as FocusCard), id, nodeId: id, frameId, kind: 'entity' })
@@ -2267,7 +2267,7 @@ describe('focus-layout — the grain seam (R1)', () => {
             ({
                 id, source, target, count: 1, edgeTypeNorm: '', dimmed: false,
                 cycleBack: false, cycleAnchor: false, labelVisible: false,
-                grainCoarse, sameAncestorFrame: null, labelT: 0.5,
+                grainCoarse, sameAncestorFrame: null, labelT: 0.5, seamSlotted: false,
             })
         // MKT → IOT lands on IoT's OWN frame — nothing to do with TXN,
         // one of IoT's rows, specifically.
@@ -2398,6 +2398,41 @@ describe('focus-layout — badge legibility (R3)', () => {
         // Both wires would sit on the exact same spot at the plain
         // midpoint — the old single-slot placement could show only one.
         expect(wire1.labelT).not.toBe(wire2.labelT)
+    })
+
+    it('fix round 1 — a convergent fan too dense for every candidate leaves the innermost wires UNSLOTTED, never overlapping', () => {
+        // Ten coarse rows of ONE frame (GOLD), all feeding the SAME
+        // target — the exact shape `walkGrainSeam` carries, just wider.
+        // The outermost rows have room to find a clear candidate; the
+        // rows packed nearest the middle do not, however many candidates
+        // are tried. The review's own finding: `showSeam` had no
+        // fallback for this case, and drew the badge at a stale/default
+        // spot regardless — this pins the layout's OWN honest "no slot"
+        // signal (`seamSlotted`) the view now reads.
+        const nums = Array.from({ length: 10 }, (_, i) => String(i))
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [
+                wnode('F', 'dataset', 'focus_entity'),
+                wnode('GOLD', 'CONTAINER', 'GOLD', { childCount: 10 }),
+                ...nums.map(i => wnode(`S${i}`, 'dataset', `source_${i}`, { childCount: 5 })),
+            ],
+            contains: nums.map((i): [string, string] => ['GOLD', `S${i}`]),
+            hops: nums.map((i): [string, string] => [`S${i}`, 'F']),
+        })
+        const g = layout(sg)
+        const coarse = g.edges.filter(e => e.grainCoarse)
+        // Not a vacuous pass: some genuinely fail (the finding this pin
+        // exists for) and some genuinely succeed (the mechanism still
+        // works where there IS room) — on the SAME board, at once.
+        const unslotted = coarse.filter(e => !e.seamSlotted)
+        const slotted = coarse.filter(e => e.seamSlotted)
+        expect(unslotted.length).toBeGreaterThan(0)
+        expect(slotted.length).toBeGreaterThan(0)
+        // An unslotted wire still carries `labelT: 0.5` (the harmless
+        // default) — it is the VIEW's job to withhold the badge for it,
+        // never this flag's job to fake a position.
+        for (const e of unslotted) expect(e.labelT).toBe(0.5)
     })
 
     it('a single bundle with no competitor keeps the plain midpoint (unchanged from before this task)', () => {

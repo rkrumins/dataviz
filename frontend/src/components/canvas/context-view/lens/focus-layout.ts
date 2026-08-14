@@ -1644,6 +1644,8 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             grainCoarse: bundleCoarse,
             // Filled in just below, once every card's `frameId` is fixed.
             sameAncestorFrame: null,
+            // Filled in by the badge-placement pass, below `layoutBands`.
+            seamSlotted: false,
         })
     }
     const edges: FocusEdge[] = [...byPair.values()]
@@ -1785,6 +1787,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // pass's real estate too; the seam chip's OWN visibility is the
         // view's call (T22, R1 rule 2: cone-only), not this flag's.
         if (edge.count > 1) edge.labelVisible = true
+        // A coarse wire that found NO clear candidate must not fall back
+        // to drawing its badge at a stale/default spot anyway — that is
+        // the exact overlap this pass exists to prevent, just for a seam
+        // badge instead of a ×N one. `seamSlotted` stays false for it;
+        // the view withholds the badge, and only the badge (fix round 1).
+        if (edge.grainCoarse) edge.seamSlotted = true
         edge.labelT = slot.t
     }
 

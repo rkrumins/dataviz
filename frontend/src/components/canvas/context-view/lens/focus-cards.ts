@@ -489,6 +489,15 @@ export interface FocusEdge {
    *  a straight line between two points already inside it can never
    *  leave it (T22, R2). */
   sameAncestorFrame: string | null
+  /** A grain-coarse wire found a collision-free slot for its seam badge
+   *  in the SAME placement pass `labelVisible` comes from. `false` means
+   *  every candidate along this wire's own length collided with an
+   *  already-placed label — the view must not fall back to drawing the
+   *  badge at a stale/default position anyway, which is the exact
+   *  overlap R3 exists to prevent, just for a seam badge instead of a
+   *  ×N one (T22, R3 fix round 1). The wire's own muted/dashed treatment
+   *  is unaffected — only the badge is withheld. */
+  seamSlotted: boolean
 }
 
 export interface FocusGraph {

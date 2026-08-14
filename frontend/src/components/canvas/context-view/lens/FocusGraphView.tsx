@@ -2436,6 +2436,11 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
      *  (T22, R1). Cone-only: read alongside `onCone` below, never on its
      *  own — the un-isolated board's bundles are unchanged. */
     grainCoarse?: boolean
+    /** The layout found this coarse wire a collision-free slot for its
+     *  seam badge (T22, R3 fix round 1) — `false` means every candidate
+     *  along the wire's own length collided with an already-placed
+     *  label, and the badge must be withheld rather than drawn stale. */
+    seamSlotted?: boolean
     /** Both cards sit under this drawn ancestor frame — route INSIDE its
      *  bounds (T22, R2). */
     sameAncestorFrame?: string | null
@@ -2531,7 +2536,13 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // count and its own honesty chip stacked in the same spot would be the
   // exact confetti `labelDense` exists to stop, and the grain fact
   // outranks the raw count here regardless of density.
-  const showSeam = seam && roomForLabel && !d.dimmed
+  // A coarse wire that lost the collision-avoidance search entirely
+  // (every candidate along ITS OWN length already claimed) must not fall
+  // back to drawing its badge at a stale/default position — the exact
+  // overlap R3 exists to prevent, just for a seam badge instead of a ×N
+  // one (fix round 1). The wire's own muted/dashed treatment is
+  // unaffected; only the badge is withheld.
+  const showSeam = seam && (d.seamSlotted ?? false) && roomForLabel && !d.dimmed
   const showCount = (d.labelVisible ?? false) && roomForLabel && !d.dimmed && (!d.labelDense || strong) && !showSeam
   const showCycle = (d.cycleBack ?? false) && roomForLabel && !d.dimmed
     && (!d.labelDense || strong || (d.cycleAnchor ?? false)) && !showSeam
@@ -3464,7 +3475,7 @@ export function FocusGraphView({
         data: {
           count: e.count, dimmed: e.dimmed, tint, mutedTint, cycleBack: e.cycleBack, reducedMotion,
           cycleAnchor: e.cycleAnchor, labelVisible: e.labelVisible, labelDense, trail,
-          labelT: e.labelT, grainCoarse: e.grainCoarse, sameAncestorFrame: e.sameAncestorFrame,
+          labelT: e.labelT, grainCoarse: e.grainCoarse, seamSlotted: e.seamSlotted, sameAncestorFrame: e.sameAncestorFrame,
           sourcePillUp: cardById.get(e.source)?.pillUp ?? null,
           targetPillDown: cardById.get(e.target)?.pillDown ?? null,
         },
