@@ -784,16 +784,22 @@ describe('the shell around the picture', () => {
   })
 })
 
-// ── PATH-TO-FOCUS HIGHLIGHT ──────────────────────────────────────────
+// ── ISOLATION (T18 R5) ───────────────────────────────────────────────
 
-describe('hovering or selecting a card highlights its path to the focus', () => {
+describe('hovering or clicking a card isolates its lineage cone', () => {
   beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
 
+  /** `label-a` and `label-sib` BOTH feed the focus, and neither has
+   *  anything to do with the other — which is what isolating one of them
+   *  has to be able to say. */
   const simple = () => doneWalk(walkModel('b', {
-    nodes: [wnode('a', 'dataset', 'label-a'), wnode('b', 'dataset', 'label-b'), wnode('c', 'dataset', 'label-c')],
-    lineageEdges: [hop('a', 'b'), hop('b', 'c')],
-    upstreamUrns: new Set(['a']),
+    nodes: [
+      wnode('a', 'dataset', 'label-a'), wnode('b', 'dataset', 'label-b'),
+      wnode('c', 'dataset', 'label-c'), wnode('sib', 'dataset', 'label-sib'),
+    ],
+    lineageEdges: [hop('a', 'b'), hop('b', 'c'), hop('sib', 'b')],
+    upstreamUrns: new Set(['a', 'sib']),
     downstreamUrns: new Set(['c']),
   }))
   // The card's OWN root (role="button") carries the dimmed opacity class;
@@ -805,51 +811,78 @@ describe('hovering or selecting a card highlights its path to the focus', () => 
     return onCanvas.closest('[role="button"]')!
   }
 
-  /** The off-path floor a SELECTION quiets to. Deliberately not the old
-   *  30%: a highlight that turns the rest of the board into grey ghosts
-   *  costs the reader the context they were reading the path against. */
+  /** The floor everything OFF the cone quiets to. Deliberately not the
+   *  old 30%: an isolation that turns the rest of the board into grey
+   *  ghosts costs the reader the context they were reading it against. */
   const QUIET = 'opacity-60'
-  /** What being ON the path looks like. */
+  /** What being ON the cone looks like. */
   const LIT = 'ring-1 ring-accent-lineage/70'
 
-  it('selecting a card quiets what is off its path — to a floor that is still readable', () => {
+  it('a CLICK isolates the cone and quiets the rest — to a floor that is still readable', () => {
     renderLens(['b'], simple())
     fireEvent.click(screen.getByText('label-a'))
-    // 'a' is one direct hop from the focus 'b' — 'c' is not on that path.
-    expect(nodeFor('label-c').className).toContain(QUIET)
-    expect(nodeFor('label-c').className).not.toContain('opacity-30')
+    // 'a' feeds the focus, which feeds 'c': both are on a's cone. Its
+    // SIBLING feeds the same focus and has nothing to do with it.
     expect(nodeFor('label-a').className).not.toContain(QUIET)
+    expect(nodeFor('label-c').className).not.toContain(QUIET)
+    expect(nodeFor('label-sib').className).toContain(QUIET)
+    expect(nodeFor('label-sib').className).not.toContain('opacity-30')
   })
 
-  it('deselecting (pane click) clears the highlight — nothing stays quieted', () => {
+  it('deselecting (pane click) clears the isolation — nothing stays quieted', () => {
     renderLens(['b'], simple())
     fireEvent.click(screen.getByText('label-a'))
-    expect(nodeFor('label-c').className).toContain(QUIET)
+    expect(nodeFor('label-sib').className).toContain(QUIET)
     fireEvent.click(document.querySelector('.react-flow__pane')!)
-    expect(nodeFor('label-c').className).not.toContain(QUIET)
+    expect(nodeFor('label-sib').className).not.toContain(QUIET)
   })
 
-  it('hovering (past the 150ms intent delay) LIGHTS the path and dims nothing, and clears on mouse leave', () => {
+  it('HOVER isolates too, past the intent delay, and restores on mouse leave', () => {
     vi.useFakeTimers()
     try {
       renderLens(['b'], simple())
       fireEvent.mouseEnter(nodeFor('label-a'))
-      act(() => { vi.advanceTimersByTime(149) })
+      // A pointer merely crossing the card changes nothing.
+      act(() => { vi.advanceTimersByTime(249) })
       expect(nodeFor('label-a').className).not.toContain(LIT)
+      expect(nodeFor('label-sib').className).not.toContain(QUIET)
       act(() => { vi.advanceTimersByTime(1) })
-      // The path is stated by lighting it up...
+      // RESTING on it isolates: the cone is lit, everything else quiets.
+      // At column grain, strengthening alone is invisible among forty
+      // near-parallel wires — the answer has to be that the rest recedes.
       expect(nodeFor('label-a').className).toContain(LIT)
-      // ...and a pointer sweeping the board never washes the board out.
-      expect(nodeFor('label-c').className).not.toContain(QUIET)
-      expect(nodeFor('label-c').className).not.toContain('opacity-30')
+      expect(nodeFor('label-sib').className).toContain(QUIET)
+      // ...and the card being pointed at never dims.
+      expect(nodeFor('label-a').className).not.toContain(QUIET)
       fireEvent.mouseLeave(nodeFor('label-a'))
       expect(nodeFor('label-a').className).not.toContain(LIT)
+      expect(nodeFor('label-sib').className).not.toContain(QUIET)
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('a diamond highlights both branches', () => {
+  it('HOVER outranks a sticky selection while it lasts, and falls back to it after', () => {
+    vi.useFakeTimers()
+    try {
+      renderLens(['b'], simple())
+      // Sticky: 'sib' is chosen, so a's cone is the quiet one.
+      fireEvent.click(screen.getByText('label-sib'))
+      expect(nodeFor('label-a').className).toContain(QUIET)
+      // Hovering 'a' takes over — a's cone lights, sib's quiets.
+      fireEvent.mouseEnter(nodeFor('label-a'))
+      act(() => { vi.advanceTimersByTime(250) })
+      expect(nodeFor('label-a').className).not.toContain(QUIET)
+      expect(nodeFor('label-sib').className).toContain(QUIET)
+      // Leaving falls back to the selection, never to nothing.
+      fireEvent.mouseLeave(nodeFor('label-a'))
+      expect(nodeFor('label-a').className).toContain(QUIET)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a diamond lights both branches', () => {
     // H is two hops from the focus, so it needs A's and B's own pages
     // revealed too — a seed is the simplest way to land it on the board
     // without a click standing in for the thing under test.
