@@ -40,6 +40,7 @@ import { relationshipLabel } from '@/lib/relationshipLabel'
 import type { WalkEntry, LensWalkDir } from '@/hooks/useLensWalk'
 import { emptyWalkModel, type LensWalkNode } from './lens/closure-adapter'
 import {
+  boundaryFrontierFilter,
   buildLensSubgraph,
   type LensSubgraph,
 } from './lens/lens-subgraph'
@@ -159,6 +160,15 @@ function seedLeavesFor(
   cardUrn: string,
   dir: 'in' | 'out',
 ): string[] {
+  // THE BOUNDARY RULE, the same call the ⊕ counts by, so the seeds and
+  // the badge can never disagree. Focus-relative, exactly like the badge:
+  // a partner card's members all sit outside the focus and are seeded as
+  // they always were; the FOCAL's are seeded only where the picture has
+  // seen them reach out of the focus. Seeded from the rest, a container's
+  // extend re-asks for its own inside — every one of those urns is
+  // already held and excluded, so the fetch returns nothing and the click
+  // delivers nothing (reported live: Snowflake's "+211").
+  const offers = boundaryFrontierFilter(sg, sg.focusUrn, dir)
   const members: Array<{ urn: string; degree: number }> = []
   const stack = [cardUrn]
   const seen = new Set<string>()
@@ -170,7 +180,7 @@ function seedLeavesFor(
     if (!node) continue
     const degree = dir === 'in' ? node.degreeUp : node.degreeDown
     const frontier = dir === 'in' ? node.frontierUp : node.frontierDown
-    if (degree > 0 || frontier != null) members.push({ urn, degree })
+    if ((degree > 0 || frontier != null) && offers(urn)) members.push({ urn, degree })
     for (const child of node.children) stack.push(child)
   }
   return members
@@ -373,10 +383,12 @@ export function LineageLens({
         frameShowAll: new Set(walkSeed.frameAll),
         frameQueries: new Map(walkSeed.frameQueries),
         frameOffsets: new Map(walkSeed.framePages),
-        // Not carried in a link: the grain a shared picture is drawn at
-        // is re-derived from the model the link replays, which is the
-        // same model the sharer saw.
+        // Not carried in a link: the grain a shared picture is drawn at,
+        // and the slots its cards hold, are both re-derived from the
+        // model the link replays — which is the same model the sharer
+        // saw, so they come out the same.
         walkedThrough: new Set(),
+        drawnRank: new Map(),
       },
     })
     setDirectionState({ nodeId, dir: walkSeed.direction })
@@ -405,6 +417,16 @@ export function LineageLens({
     if ([...layout.walkedThrough].every(u => seen.has(u))) return
     editView(base => ({ ...base, walkedThrough: new Set(layout.walkedThrough) }))
   }, [layout.walkedThrough, view.walkedThrough, editView])
+
+  // And so is the ORDER. A card's rank comes from its weight, and weight
+  // grows as the walk does — so a merge re-ordered cards already on the
+  // board, under the pointer of the user whose click caused the merge.
+  // The layout reports the slot each drawn entity holds; this folds it
+  // back, grow-only, so arrivals append instead of shuffling.
+  useEffect(() => {
+    if (layout.drawnRank.size === view.drawnRank.size) return
+    editView(base => ({ ...base, drawnRank: new Map(layout.drawnRank) }))
+  }, [layout.drawnRank, view.drawnRank, editView])
 
   const neighbors = useMemo(() => walkNeighborRecords(sg), [sg])
   const inConnections = neighbors.incoming.reduce((n, r) => n + r.weight, 0)
@@ -835,12 +857,23 @@ export function LineageLens({
   // A cap applies to the whole fetch, so it makes BOTH sides floors; a
   // frontier only makes its own side one.
   const capped = (model?.truncated ?? false) || (model?.seedTruncated ?? false)
+  // A "+" says the data source has MORE OF THIS SIDE. A frontier entry
+  // on a node inside the focus whose lineage never leaves it says no
+  // such thing — it is the inside having more inside — so the floor is
+  // read through the same boundary rule the ⊕ and its seeds use.
+  // Reported live: the platform Snowflake, whose 51 interior frontier
+  // entries put a "+" on a side its own closure reports as empty.
+  const moreThisWay = (dir: 'in' | 'out'): boolean => {
+    if (!model || !nodeId) return false
+    const offers = boundaryFrontierFilter(sg, nodeId, dir)
+    return (dir === 'in' ? model.frontierUp : model.frontierDown).some(f => offers(f.urn))
+  }
   const reach: LensReach | null = model && walkStatus === 'done'
     ? {
         up: model.upstreamUrns.size,
         down: model.downstreamUrns.size,
-        moreUp: capped || model.frontierUp.length > 0,
-        moreDown: capped || model.frontierDown.length > 0,
+        moreUp: capped || moreThisWay('in'),
+        moreDown: capped || moreThisWay('out'),
       }
     : null
 

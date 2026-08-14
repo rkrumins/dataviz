@@ -396,6 +396,10 @@ export interface FocusGraph {
    *  `LensViewState.walkedThrough`; see the note there for why the grain
    *  has to be sticky. */
   walkedThrough: ReadonlySet<string>
+  /** Where every entity drawn so far SITS, by first-draw order. The
+   *  consumer folds it back into `LensViewState.drawnRank`; a card on the
+   *  board never moves because the walk grew under it. */
+  drawnRank: ReadonlyMap<string, number>
   /** Per band key `${dir}:${band}`: cards shown vs total available. */
   bandTotals: Map<string, {
     shown: number

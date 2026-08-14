@@ -331,6 +331,91 @@ export function visibleLensNodes<N extends LensNodeLike>(
     return out
 }
 
+/**
+ * THE BOUNDARY RULE for one entity's own walk.
+ *
+ * `root` stands for everything inside it, so its lineage is the hops
+ * that CROSS its subtree boundary. Hops between two of its own members
+ * are its contents' business — the contains-stack's ×counts and the
+ * drill view — and never its direction sets, its Reach, or a walk pill.
+ *
+ * Two sets, from one O(V+E) pass over the model:
+ *
+ *  • `crossing` — members with at least one hop in `dir` that leaves the
+ *    subtree. These are the only nodes a walk outward from `root` can
+ *    honestly be seeded from, because they are the only ones known to
+ *    have anything outward at all.
+ *  • `interiorOnly` — members whose hops in `dir` ALL stay inside. Their
+ *    unfetched remainder is, on this evidence, more of the inside; a
+ *    fetch seeded from them can only bring back what is already held.
+ *
+ * A member with no hops in `dir` at all is in NEITHER set: nothing is
+ * known about it in that direction, which is a different statement from
+ * either of these two.
+ *
+ * Reported live (2026-08-14): the platform Snowflake. 2,426 hops, every
+ * one interior — the closure's own `upstreamUrns` comes back EMPTY — and
+ * 51 frontier entries on interior nodes. Summed as if they were the
+ * platform's own remainder they read "+211"; the click fetched more of
+ * the inside, drew nothing, and the badge grew to +384.
+ */
+export function boundaryHops<N extends LensNodeLike>(
+    sg: LensSubgraph<N>,
+    root: string,
+    dir: 'in' | 'out',
+): { subtree: Set<string>; crossing: Set<string>; interiorOnly: Set<string> } {
+    const subtree = new Set<string>()
+    const stack = [root]
+    while (stack.length > 0) {
+        const urn = stack.pop()!
+        if (subtree.has(urn) || !sg.nodes.has(urn)) continue
+        subtree.add(urn)
+        for (const child of sg.nodes.get(urn)!.children) stack.push(child)
+    }
+
+    const crossing = new Set<string>()
+    const seen = new Set<string>()
+    for (const hop of sg.lineageEdges) {
+        const near = dir === 'in' ? hop.targetUrn : hop.sourceUrn
+        const far = dir === 'in' ? hop.sourceUrn : hop.targetUrn
+        if (!subtree.has(near)) continue
+        seen.add(near)
+        if (!subtree.has(far)) crossing.add(near)
+    }
+    const interiorOnly = new Set<string>()
+    for (const urn of seen) if (!crossing.has(urn)) interiorOnly.add(urn)
+    return { subtree, crossing, interiorOnly }
+}
+
+/**
+ * Does this node's unfetched remainder speak for a walk OUT of `root`?
+ *
+ * The one predicate behind three surfaces that must agree exactly — the
+ * ⊕ badge (`focus-layout`), the seeds the click sends
+ * (`seedLeavesFor`), and the Reach line's "+" floor. A badge promising
+ * what its own fetch cannot go and get is the defect this exists to
+ * stop.
+ *
+ *  • `root` itself — offered unless PROVEN interior (it has hops this
+ *    way and every one stays inside). "Nothing walked this way yet" is
+ *    not interior, and an unwalked direction's ⊕ is exactly the case
+ *    that matters most.
+ *  • inside `root` — only a boundary CROSSER, something already seen to
+ *    reach out. Anything else inside is a fact about itself, not about
+ *    the thing the reader asked about.
+ *  • outside `root` — always. A partner's frontier is the partner's.
+ */
+export function boundaryFrontierFilter<N extends LensNodeLike>(
+    sg: LensSubgraph<N>,
+    root: string,
+    dir: 'in' | 'out',
+): (urn: string) => boolean {
+    const { subtree, crossing, interiorOnly } = boundaryHops(sg, root, dir)
+    return (urn: string) => urn === root
+        ? !interiorOnly.has(urn)
+        : !subtree.has(urn) || crossing.has(urn)
+}
+
 /** A lineage hop as actually drawn: between two VISIBLE nodes. */
 export interface ProjectedLensEdge {
     /** A currently-visible node. Direction is verbatim from the underlying

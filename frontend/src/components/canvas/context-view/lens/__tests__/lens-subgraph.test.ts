@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  boundaryFrontierFilter,
   buildLensSubgraph,
   focusAncestorChain,
   projectLensEdges,
@@ -356,5 +357,58 @@ describe('projectLensEdges — directional projection', () => {
     const population = new Set(['A'])   // Z is known to the model but outside the loaded population
     const visible = new Set(['A', 'Z'])
     expect(projectLensEdges(sg, population, visible)).toEqual([])
+  })
+})
+
+describe('boundaryFrontierFilter — whose remainder is the focus\'s to walk', () => {
+  /**
+   * `PLAT ⊃ {IN ⊃ src, OUT ⊃ dst, quiet}` with the lineage running
+   * INSIDE the platform, plus one member that genuinely reaches out.
+   *
+   * The reported live shape (2026-08-14): a platform focus whose closure
+   * carries 2,426 hops, every one interior — its own `upstreamUrns` comes
+   * back EMPTY — and 51 frontier entries on interior nodes. Summed as the
+   * platform's own remainder they read "+211"; the click could only ever
+   * fetch more of the inside, which was already held.
+   */
+  const estate = () => buildLensSubgraph({
+    focusUrn: 'PLAT',
+    nodes: ['PLAT', 'IN', 'OUT', 'src', 'dst', 'quiet', 'reacher', 'FAR', 'far_t'].map(n),
+    containmentEdges: [
+      ce('PLAT', 'IN'), ce('PLAT', 'OUT'), ce('PLAT', 'quiet'), ce('PLAT', 'reacher'),
+      ce('IN', 'src'), ce('OUT', 'dst'), ce('FAR', 'far_t'),
+    ],
+    lineageEdges: [
+      le('src', 'dst'),          // interior
+      le('src', 'PLAT'),         // the aggregation worker's own rollup: interior
+      le('far_t', 'reacher'),    // and one that genuinely crosses in
+    ],
+  })
+
+  it('drops what the picture has PROVEN is interior — including the focus itself', () => {
+    const offers = boundaryFrontierFilter(estate(), 'PLAT', 'in')
+    // Every hop reaching the platform comes from inside it. Its own
+    // `totalCount` is its own inside, however large the number is.
+    expect(offers('PLAT')).toBe(false)
+    // A member whose only producer is a sibling: more of the same.
+    expect(offers('dst')).toBe(false)
+  })
+
+  it('keeps a member the picture has SEEN reach out of the focus', () => {
+    expect(boundaryFrontierFilter(estate(), 'PLAT', 'in')('reacher')).toBe(true)
+  })
+
+  it('keeps a partner: a frontier outside the focus is the partner\'s own', () => {
+    const offers = boundaryFrontierFilter(estate(), 'PLAT', 'in')
+    expect(offers('far_t')).toBe(true)
+    expect(offers('FAR')).toBe(true)
+  })
+
+  it('an unwalked direction is not an interior one — the focus keeps its ⊕', () => {
+    // Nothing has been walked downstream at all. "Not looked yet" is the
+    // case a frontier exists FOR, and refusing it would strand the walk.
+    expect(boundaryFrontierFilter(estate(), 'quiet', 'out')('quiet')).toBe(true)
+    // Same for a leaf focus, whose whole subtree is itself.
+    expect(boundaryFrontierFilter(estate(), 'dst', 'in')('dst')).toBe(true)
   })
 })

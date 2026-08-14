@@ -2010,3 +2010,108 @@ describe('the focus is never missing from its own board', () => {
         expect(layout(deepColumnEstate(3, { partner: true })).focusRecovered).toBe(false)
     })
 })
+
+// ── a container focus is bounded by its own subtree ──────────────────
+//
+// REPORTED LIVE (2026-08-14 09.13): focusing the platform Snowflake
+// offered "+211" upstream; clicking it fetched, drew NOTHING new, and
+// the badge GREW to +384. The rows re-ordered under the click
+// (SILVER and INTERMEDIATE_T2 swapped) and Reach read "0+ upstream"
+// over a platform full of lineage.
+//
+// The live closure for that focus says it exactly: 567 nodes, 2,426
+// hops, `upstreamUrns` EMPTY — every one of those hops is interior, and
+// the backend's own direction sets already say so — and 51 frontier
+// entries, every one of them on a node INSIDE the platform. Those
+// entries are what "+211" was summing: full-graph degrees of interior
+// nodes, most of which is more interior. Fetching it can only ever bring
+// back more of the inside, which the picture already had.
+
+/** `PLAT ⊃ {UP ⊃ upstream table, DOWN ⊃ downstream table}` with the
+ *  lineage running INSIDE the platform, plus a real consumer outside it.
+ *  Frontier entries sit on the interior nodes, exactly as the server
+ *  ships them. */
+function platformEstate(over: { extraInterior?: boolean } = {}): LensSubgraph<LensWalkNode> {
+    const nodes = [
+        wnode('PLAT', 'dataPlatform', 'Snowflake', { childCount: 14 }),
+        wnode('BRONZE', 'container', 'BRONZE', { childCount: 5 }),
+        wnode('SILVER', 'container', 'SILVER', { childCount: 9 }),
+        wnode('INT_T2', 'container', 'INTERMEDIATE_T2', { childCount: 7 }),
+        wnode('r_tbl', 'dataset', 'raw_orders'),
+        wnode('s_tbl', 'dataset', 'clean_orders'),
+        wnode('t_tbl', 'dataset', 'int_clean_orders_t2'),
+        wnode('BI', 'dataPlatform', 'BI'),
+        wnode('dash', 'dataset', 'exec_dashboard'),
+    ]
+    const contains: Array<[string, string]> = [
+        ['PLAT', 'BRONZE'], ['PLAT', 'SILVER'], ['PLAT', 'INT_T2'],
+        ['BRONZE', 'r_tbl'], ['SILVER', 's_tbl'], ['INT_T2', 't_tbl'], ['BI', 'dash'],
+    ]
+    // Every hop upstream of an interior node comes from ANOTHER interior
+    // node — the live estate exactly (2,426 hops, `upstreamUrns` empty).
+    const hops: Array<[string, string, string]> = [
+        ['r_tbl', 's_tbl', 'TRANSFORMS'],
+        ['BRONZE', 'SILVER', 'AGGREGATED'],
+        ['s_tbl', 't_tbl', 'TRANSFORMS'],
+        ['SILVER', 't_tbl', 'AGGREGATED'],
+        ['t_tbl', 'dash', 'TRANSFORMS'],
+    ]
+    if (over.extraInterior) {
+        // What one click's merge brought back: more hops out of SILVER,
+        // enough to out-weigh INTERMEDIATE_T2 and swap the two rows.
+        nodes.push(wnode('s_tbl2', 'dataset', 'clean_charges'))
+        contains.push(['SILVER', 's_tbl2'])
+        hops.push(
+            ['s_tbl2', 't_tbl', 'TRANSFORMS'], ['s_tbl2', 't_tbl', 'JOINS'],
+            ['s_tbl', 'dash', 'TRANSFORMS'], ['s_tbl2', 'dash', 'TRANSFORMS'],
+            ['s_tbl2', 'dash', 'JOINS'],
+        )
+    }
+    return subgraph({
+        focus: 'PLAT', nodes, hops, contains,
+        // Every entry on a node INSIDE the platform — the live shape.
+        frontierUp: [
+            { urn: 's_tbl', totalCount: 96, nextCursor: null },
+            { urn: 't_tbl', totalCount: 115, nextCursor: null },
+            { urn: 'SILVER', totalCount: 57, nextCursor: null },
+        ],
+        frontierDown: [{ urn: 'dash', totalCount: 4, nextCursor: null }],
+    })
+}
+
+describe('a container focus counts only what crosses its own boundary', () => {
+    it('offers no upstream walk pill built from its own interior', () => {
+        const g = layout(platformEstate())
+        const focal = cardFor(g, 'PLAT')!
+        // "+211" was `Σ(totalCount − degree)` over three interior nodes.
+        // Nothing about them is a statement about what reaches the
+        // PLATFORM from outside, so there is nothing honest to offer.
+        expect(focal.pillUp).toBeNull()
+    })
+
+    it('still offers what genuinely crosses the boundary', () => {
+        // The consumer outside the platform is real lineage of the
+        // platform, and its frontier is the platform's to walk.
+        const g = layout(platformEstate())
+        expect(cardFor(g, 'dash')).toBeTruthy()
+        expect(cardFor(g, 'BI')?.pillDown ?? cardFor(g, 'dash')?.pillDown).toBeTruthy()
+    })
+
+    it('never re-orders a card that is already drawn when the walk grows', () => {
+        // The user's own click swapped SILVER and INTERMEDIATE_T2 under
+        // the pointer. A merge may change what a badge says; it may never
+        // change where a card is.
+        const before = layout(platformEstate())
+        const order = (g: { cards: FocusCard[] }) =>
+            g.cards.filter(c => c.kind !== 'divider' && c.nodeId).map(c => c.nodeId!)
+        const first = order(before)
+
+        // The same view state, one merge later: two more interior hops,
+        // which is exactly what re-weighted the rows.
+        const grown = platformEstate({ extraInterior: true })
+        const after = order(layout(grown, { ...initialLensViewState(grown), drawnRank: before.drawnRank }))
+
+        // Everything already drawn keeps its relative order; arrivals append.
+        expect(after.filter(u => first.includes(u))).toEqual(first.filter(u => after.includes(u)))
+    })
+})

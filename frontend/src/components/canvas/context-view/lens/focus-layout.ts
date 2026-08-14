@@ -36,6 +36,7 @@
  */
 import type { LineageNode } from '@/store/canvas'
 import {
+    boundaryFrontierFilter,
     focusAncestorChain,
     projectLensEdges,
     visibleLensNodes,
@@ -130,6 +131,17 @@ export interface LensViewState {
      *  Nothing already drawn may be taken away by a walk growing. Reset
      *  with the rest of this state when the focus changes. */
     walkedThrough: ReadonlySet<string>
+    /** Where each already-drawn entity SITS, by the order it was first
+     *  drawn in. Grow-only, and fed back from `FocusGraph.drawnRank` the
+     *  same way `walkedThrough` is.
+     *
+     *  Rank is computed from weight, and weight grows as the walk does —
+     *  so without this a merge re-ordered cards that were already on the
+     *  board, under the pointer of the user whose click caused the merge
+     *  (reported live: SILVER and INTERMEDIATE_T2 swapping places). A
+     *  drawn card holds its position for this view state's lifetime;
+     *  arrivals append; weight updates change badges, never positions. */
+    drawnRank: ReadonlyMap<string, number>
     frameQueries: ReadonlyMap<string, string>
     /** Per frame: the first row its scroll window is resting on (0-based
      *  row index), clamped by the layout to what has actually loaded. */
@@ -192,6 +204,7 @@ export function initialLensViewState(sg: LensSubgraph<LensWalkNode>): LensViewSt
         collapsedContainment: new Set(),
         frameShowAll: new Set(),
         walkedThrough: new Set(),
+        drawnRank: new Map(),
         frameQueries: new Map(),
         frameOffsets: new Map(),
     }
@@ -579,6 +592,38 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      */
     const focusContents = new Set(subtreeOf(sg.focusUrn))
     focusContents.delete(sg.focusUrn)
+
+    /**
+     * What the focus can honestly offer to walk, per direction — see
+     * `boundaryHops`, which is also what seeds the extend the ⊕ fires
+     * (`seedLeavesFor`), so the badge and the fetch can never disagree.
+     *
+     * The focus's OWN frontier is offered unless the picture has proven
+     * it interior — it has hops this way and every one of them stays
+     * inside. "Nothing walked this way yet" is not interior, and that is
+     * the case an unwalked direction's ⊕ exists for.
+     *
+     * A node INSIDE the focus may speak for the focus's walk only when it
+     * is a BOUNDARY CROSSER: something the picture has seen reach out. Its
+     * remainder plausibly reaches out too, and a fetch seeded from it has
+     * somewhere to go. Its own unfetched adjacency is otherwise a fact
+     * about IT, not about the thing the reader asked about.
+     *
+     * On this estate that is the whole of the report: the aggregation
+     * worker materialises a rollup hop from every interior column to the
+     * platform, so the platform's own `totalCount` of 321 is 321 pieces
+     * of its own inside, and its 50 interior frontier entries are 50 more.
+     *
+     * A table whose columns carry its lineage keeps its ⊕: those columns'
+     * hops LEAVE the table, so their remainder leaves it too.
+     *
+     * OUTSIDE the focus nothing changes: a partner card's frontier is a
+     * statement about the partner, and this rule never touches it.
+     */
+    const offerable = {
+        in: boundaryFrontierFilter(sg, sg.focusUrn, 'in'),
+        out: boundaryFrontierFilter(sg, sg.focusUrn, 'out'),
+    }
     const wired = new Set([...visibleOrder].filter(u => !focusContents.has(u)))
     const projected = projectLensEdges(sg, population, wired)
 
@@ -693,7 +738,19 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     for (const urn of demoted) {
         const node = model.get(urn)
         if (!node?.frontierUp && !node?.frontierDown) continue
-        const host = focusAncestors.has(urn) ? sg.focusUrn : unitUnder(urn)
+        // NEVER from ABOVE the focus. A badge is a promise about what one
+        // click delivers, and the focal's extend is seeded from the
+        // FOCUS's own leaves — it cannot fetch a containment ancestor's
+        // adjacency at the ancestor's coarser grain.
+        //
+        // Reported live: a column whose platform carries `:AGGREGATED`
+        // rollups grew a "+320" on the focal (321 the platform reports,
+        // less the 1 hop in hand). Clicking it returned the column's own
+        // ancestor chain — four nodes already held, nothing drawn — and
+        // the badge stayed +320 forever. Those coarser hops are already
+        // stated honestly, once, by `hopsAtCoarserGrain`.
+        if (focusAncestors.has(urn)) continue
+        const host = unitUnder(urn)
         if (!host || host === urn) continue
         const folded = foldedFrontiers.get(host) ?? new Set<string>()
         folded.add(urn)
@@ -749,9 +806,14 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         weightCache.set(urn, n)
         return n
     }
+    /** A card already on the board keeps the slot it was first drawn in;
+     *  anything else ranks by weight, behind all of them. */
+    const UNDRAWN = Number.MAX_SAFE_INTEGER
+    const drawnRankOf = (urn: string): number => view.drawnRank.get(urn) ?? UNDRAWN
     const rankCards = (urns: string[]): string[] =>
         [...urns].sort((a, b) =>
-            weightOf(b) - weightOf(a)
+            drawnRankOf(a) - drawnRankOf(b)
+            || weightOf(b) - weightOf(a)
             || labelFor(a).localeCompare(labelFor(b))
             || a.localeCompare(b))
 
@@ -877,7 +939,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // drawn separately must not re-offer theirs — five nested frames
         // each growing their own copy of one column's "+2" is what this
         // set exists to prevent.
+        //
+        // Never a remainder the picture's own evidence says is INTERIOR
+        // to the focus — see `interiorOnly`. That is the whole of the
+        // reported "+211 that grew to +384 and drew nothing".
         const entries = [...ownedBy(urn), ...(foldedFrontiers.get(urn) ?? [])]
+            .filter(u => offerable[dir](u))
             .sort()
             .map(u => ({ urn: u, node: model.get(u)! }))
             .map(({ urn: u, node }) => ({
@@ -1482,6 +1549,16 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         return false
     }
 
+    // The frozen slots the NEXT build reads: what earlier builds of this
+    // view state drew, plus whatever this one added, in the order it drew
+    // them. Append-only, so a card can never be moved by a later merge —
+    // and dense, so `size` is always the next free slot.
+    const drawnRank = new Map(view.drawnRank)
+    let nextRank = drawnRank.size
+    for (const card of cards) {
+        if (card.nodeId && !drawnRank.has(card.nodeId)) drawnRank.set(card.nodeId, nextRank++)
+    }
+
     return {
         cards,
         edges,
@@ -1497,6 +1574,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // in (see `LensViewState.walkedThrough`) so a level once seen
         // through stays seen through while the walk grows.
         walkedThrough: new Set([...view.walkedThrough, ...walkedThrough]),
+        drawnRank,
         bandTotals,
     }
 }
