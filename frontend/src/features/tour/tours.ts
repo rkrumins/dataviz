@@ -389,7 +389,7 @@ TOURS.push({
       target: '[data-tour="lens-depth"]',
       placement: 'bottom',
       title: 'Set how far you reach',
-      body: 'The **1 / 2 / 3** control sets how many hops a *newly* focused entity fetches. Beside it, **Both / Root cause / Impact** narrows the picture to just what feeds this entity or just what it feeds — instantly, with nothing new to fetch.',
+      body: 'The **1 / 2 / 3** control sets how many hops a *newly* focused entity fetches. Further along the same row, **Both / Root cause / Impact** narrows the picture to just what feeds this entity or just what it feeds — instantly, with nothing new to fetch.',
     },
     {
       target: '[data-tour="lens-toggle"]',

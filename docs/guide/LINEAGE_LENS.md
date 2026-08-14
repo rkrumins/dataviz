@@ -160,15 +160,16 @@ The Lens is built for exploring, not just reading:
   the estate actually goes.
 
   The card unfolds into a frame holding **only the entities inside it that
-  connect to the card it hangs off**. At the first hop that's the entity you
-  focused; further out it's the card's own partner, and the frame's header
-  names it ("4 connected to `STG_ORDERS`") so you always know which question
-  was answered. Those children are ordinary cards with chevrons of their own,
+  are on this lineage**, and the header counts them at both grains that
+  matter — "3 on this lineage · of 12" — so a frame is safe to leave
+  collapsed. Those children are ordinary cards with chevrons of their own,
   so frames nest — table → column → field, without ever re-centering, and
   without limit. A platform that merely passes lineage through a single
-  container is walked through for you, with the levels it skipped shown in
-  the frame's header. Frames say how many they hold and state plainly when
-  nothing inside connects rather than leaving you guessing.
+  container is walked through for you, and the levels it skipped are named
+  beside the frame's own name as a **breadcrumb chip** ("`clean_charges`
+  *in SILVER · Snowflake*"), each crumb somewhere you can go — never drawn
+  as a box around it. Frames state plainly when nothing inside is on this
+  lineage rather than leaving you guessing.
 - **Show everything inside**, not just the connected part, with the small
   toggle in a frame's header (**⛓ Connected** | **▤ All**). "All" lists every
   column, table or dataset the container holds, in the source system's own
