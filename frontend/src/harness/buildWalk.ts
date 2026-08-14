@@ -37,6 +37,8 @@ export function buildWalk(fixture: WalkFixture) {
     directionFilter: fixture.directionFilter,
     selectedId: fixture.selectedId ?? null,
     isolatedId: fixture.isolatedId ?? null,
+    trailUrns: new Set(fixture.trailUrns ?? []),
+    trailAdjacent: new Set((fixture.trailAdjacent ?? []).map(([a, b]) => [a, b].sort().join('|'))),
     // THE SAME derivation the app uses, imported rather than restated:
     // a "+" means the data source has more of THIS SIDE, and a frontier
     // entry on a node inside the focus whose lineage never leaves it says

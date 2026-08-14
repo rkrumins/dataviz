@@ -66,13 +66,16 @@ many times as it does in the data source. Above the frames, the focal names
 you can click to move up a level; those levels are always *text*, never
 another nested box, so a deep hierarchy stays readable instead of turning into
 boxes inside boxes inside boxes. The focal card shows a quick tally — how many
-connections come *in* and how many go *out* — and its **reach so far**: how
-many distinct entities the walk has reached, transitively, upstream and
-downstream ("Reach: 12 upstream · 47 downstream"). This isn't a separate
-measurement; it's exactly what the walk has found up to this point, so it
-grows as you click ⊕ to reach further. While the data source has more than the
-walk has reached yet, the number shows as a floor ("47+") — the Lens never
-invents a number. **Every number here is the data source's own truth, fetched
+connections come *in* and how many go *out* — and one **orientation
+sentence**: how many distinct entities the walk has reached, transitively,
+upstream and downstream, and how many separate systems they span ("Fed by 12
+sources across 4 systems · feeds 47 consumers across 3"). "Across N systems"
+only appears when it says something a raw count doesn't — one system alone
+isn't worth naming. This isn't a separate measurement; it's exactly what the
+walk has found up to this point, so it grows as you follow a card further.
+While the data source has more than the walk has reached yet, the number
+shows as a floor ("47+") — the Lens never invents a number. **Every number here
+is the data source's own truth, fetched
 live the moment you focus** — whether or not the canvas happens to have that
 entity loaded. The Lens never answers a lineage question by reading the
 canvas; it asks the data source directly, one hop at a time, and shows exactly
@@ -137,34 +140,49 @@ The Lens is built for exploring, not just reading:
   (dimmed) in the **Path** trail. Click any chip in the trail to jump straight
   there. Focusing somewhere new after stepping back starts a fresh forward
   path from that point.
-- **Walk one hop further** with the **⊕ pill** on a card's outer edge. The
-  Lens starts by fetching just your focus and its immediate neighbours —
-  one hop each way by default, or however many you've set (below) — directly
-  from the data source. Click ⊕ and the Lens shows more of that entity's
+- **Follow a card further** — hover its edge (or a row's, or the focus's own)
+  for its follow control, a compact **⊕** at rest that opens into a plain
+  verb on hover: **"Load upstream"**, **"Show 3 more sources"**. Click, and
+  the Lens grows the board from *exactly that entity* — a row's follow seeds
+  the walk from that row alone, not its whole table. The Lens starts by
+  fetching just your focus and its immediate neighbours — one hop each way by
+  default, or however many you've set (below) — directly from the data
+  source. Click a follow control and the Lens shows more of that entity's
   lineage: instantly, if an earlier hop already brought back more than fit on
-  the board, or with a quick fetch for *that one entity's* next hop once
-  there's nothing left in hand. Either way **one click puts something on the
-  board** — what comes back is drawn where it lands, in its own hop column,
-  the moment it arrives — and it adds exactly that, never more, and never a
-  guess. The pill's number is always the same thing: **how many more
-  connections there are that way**, the same unit the column headers count
-  in. When the data source
-  hasn't told the Lens how many, the pill still offers the click with no
-  number attached — there may be more, the Lens simply hasn't asked yet. A hub with
-  more connections than fit in one response hands back a bookmark, and the
-  same ⊕ keeps pulling from where it left off, unnoticed, until the hub is
-  drained. A **⊘** where a pill would be is a genuine dead end: the data
+  the board (the control reads "Show N more" — cards that will actually
+  appear), or with a quick fetch for *that one entity's* next hop once
+  there's nothing left in hand (the control reads "Load upstream", with no
+  number attached — never a fabricated one). Either way **one click puts
+  something on the board** — what comes back is drawn where it lands, in its
+  own hop column, the moment it arrives — and it adds exactly that, never
+  more, and never a guess. The raw connection count behind a fetch lives in
+  the control's own hover text, the peek, and on the wires — never on the
+  control's face, which speaks a verb. A hub with more connections than fit
+  in one response hands back a bookmark, and the same follow control keeps
+  pulling from where it left off, unnoticed, until the hub is drained. A
+  **⊘** where a follow control would be is a genuine dead end: the data
   source has confirmed there is nothing further that way, and the Lens only
   ever says that once the walk has actually finished asking — never as a
   guess.
+- **Spotlight anything** by hovering or clicking it — its lineage cone lights
+  up on the board, everything else quiets to a floor. Click to stick it, and
+  a chip at the bottom states its scope honestly: how much of its lineage is
+  already drawn versus how much the data source knows about in total ("3 of
+  8 known upstream flows on this board"), with a button to follow the rest
+  and a button to focus there. **Esc**, or a click on the board behind
+  everything, clears one layer at a time.
+- **The trail** — every card you've explicitly focused, or grown the board
+  from with a follow click, carries a small persistent mark, and the wire
+  between two consecutive stops in your walk draws slightly firmer. It's a
+  record of where you've actually been, not a suggestion of where to go.
 - A small **loop icon** on a wire means that hop curls back *toward* your
   focus rather than away from it — the lineage genuinely cycles, and the Lens
   says so rather than letting two wires between the same pair read as a plain
   duplicate.
 - **Open any card into what's inside it** with the **chevron** on its body —
   a column of a table, the tables of a platform, the fields of a column. This
-  is a different question from the ⊕ pill next to it, and the two never
-  interfere: a card can offer both, and looking inside something never ends
+  is a different question from the follow control next to it, and the two
+  never interfere: a card can offer both, and looking inside something never ends
   the walk through it. Opening costs no fetch at all — it's a re-projection of
   lineage the Lens already holds — so it's instant, and it nests as deep as
   the estate actually goes.

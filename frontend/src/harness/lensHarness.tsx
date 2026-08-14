@@ -105,6 +105,8 @@ export function Harness() {
           directionFilter={built.directionFilter}
           selectedId={built.selectedId}
           isolatedId={isolatedId}
+          trailUrns={built.trailUrns}
+          trailAdjacent={built.trailAdjacent}
           // Shots are taken with motion OFF, so a screenshot is never a
           // frame of an animation — except where the motion is the thing
           // being looked at. The drift along an isolated cone is drawn

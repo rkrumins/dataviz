@@ -1024,6 +1024,103 @@ describe('pointing at an element isolates its lineage cone', () => {
     // only card is too.
     expect(screen.getAllByText(/· 1 on this path/).length).toBe(2)
   })
+
+  // ── THE SPOTLIGHT CHIP (R0) ──────────────────────────────────────────
+
+  /** U is upstream of F with nothing of its own drawn yet — the server
+   *  says six connections exist, all still to fetch. */
+  const spotlightEstate = () => doneWalk(walkModel('F', {
+    nodes: [wnode('F', 'dataset', 'focus_entity'), wnode('U', 'dataset', 'upstream_one')],
+    lineageEdges: [hop('U', 'F')],
+    upstreamUrns: new Set(['U']),
+    frontierUp: [frontier('U', 6)],
+  }))
+
+  /** The chip's own card, scoped so `getByText('Focus here')` cannot
+   *  collide with the detail strip's identical button — a top-level
+   *  card's click both selects (opens the strip) and isolates (opens
+   *  the chip) at once. */
+  const spotlightChip = () => screen.getByText(/its lineage within this walk/).closest('.rounded-2xl')! as HTMLElement
+
+  it('states its scope honestly — drawn vs. known, never "everything" by omission', () => {
+    renderLens(['F'], spotlightEstate())
+    fireEvent.click(screen.getByText('upstream_one'))
+    const chip = spotlightChip()
+    expect(within(chip).getByText(/upstream_one/)).toBeTruthy()
+    // Nothing of U's own upstream is drawn yet; six are known from the
+    // server's frontier — 0 of 6, not "6" and not "everything".
+    expect(within(chip).getByText('0 of 6 known upstream flows on this board')).toBeTruthy()
+  })
+
+  it('the bridge control follows the anchor\'s remaining lineage, element-precise', () => {
+    const api = makeApi()
+    renderLens(['F'], spotlightEstate(), {}, api)
+    fireEvent.click(screen.getByText('upstream_one'))
+    fireEvent.click(within(spotlightChip()).getByText('Load its remaining upstream (6)'))
+    // Seeded from U alone — the same call U's own ⊕ would make, not the
+    // focus's.
+    expect(api.extend).toHaveBeenCalledWith('U', 'up', ['U'])
+  })
+
+  it('the second bridge control re-anchors the board on the spotlighted element', () => {
+    const onRecenter = vi.fn()
+    renderLens(['F'], spotlightEstate(), { onRecenter })
+    fireEvent.click(screen.getByText('upstream_one'))
+    fireEvent.click(within(spotlightChip()).getByText('Focus here'))
+    expect(onRecenter).toHaveBeenCalledWith('U')
+  })
+
+  it('offers no bridge control once a direction is fully drained — never a dead click', () => {
+    renderLens(['b'], siblings())
+    fireEvent.click(screen.getByText('label-a'))
+    const chip = spotlightChip()
+    // label-a's own upstream is drained in this fixture (no frontier
+    // configured) — the honest floor states every one is already on the
+    // board, and there is nothing left to promise a fetch for.
+    expect(within(chip).getByText(/known upstream flows? — every one on this board/)).toBeTruthy()
+    expect(within(chip).queryByText(/Load its remaining/)).toBeNull()
+  })
+})
+
+// ── THE TRAIL ────────────────────────────────────────────────────────
+
+describe('THE TRAIL — cards the reader has explicitly walked through', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
+  afterEach(() => cleanup())
+
+  const TRAIL_TITLE = "Part of the path you've walked"
+  /** Whether the card drawn for `label` carries the mark. */
+  const marked = (label: string) => {
+    const card = screen.getAllByText(label).find(el => el.closest('.react-flow__node'))!.closest('.react-flow__node')!
+    return card.querySelector(`[title="${TRAIL_TITLE}"]`) !== null
+  }
+
+  it('marks a card the reader focused earlier in this session, and not a stranger to it', () => {
+    // U was the PRIOR focal (focus history); W was never visited.
+    renderLens(['U', 'F'], doneWalk(walkModel('F', {
+      nodes: [wnode('F', 'dataset', 'collaterals'), wnode('U', 'dataset', 'prior_stop'), wnode('W', 'dataset', 'never_visited')],
+      lineageEdges: [hop('U', 'F'), hop('W', 'F')],
+      upstreamUrns: new Set(['U', 'W']),
+    })))
+    expect(marked('prior_stop')).toBe(true)
+    expect(marked('never_visited')).toBe(false)
+    // The current focal is also somewhere the reader has explicitly
+    // walked to — it is where they are standing.
+    expect(marked('collaterals')).toBe(true)
+  })
+
+  it('marks a card an extend/page click grew the board from, even one that never became the focal', () => {
+    const api = makeApi()
+    renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [wnode('F', 'dataset', 'focus_entity'), wnode('U', 'dataset', 'upstream_one')],
+      lineageEdges: [hop('U', 'F')],
+      upstreamUrns: new Set(['U']),
+      frontierUp: [frontier('U', 6)],
+    })), {}, api)
+    expect(marked('upstream_one')).toBe(false)
+    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of upstream_one/))
+    expect(marked('upstream_one')).toBe(true)
+  })
 })
 
 // ── EVERYTHING INSIDE ────────────────────────────────────────────────

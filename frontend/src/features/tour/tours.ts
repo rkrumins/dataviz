@@ -377,7 +377,7 @@ TOURS.push({
       placement: 'top',
       padding: -8,
       title: 'Explore the lineage',
-      body: '**Click** a card to inspect it. **Double-click** to focus there. The **⊕** on a card\'s outer edge walks one hop further — an exact count when the data source knows one, just the plus when it doesn\'t. The **chevron** opens what\'s inside a card, at any depth, instantly. **Drag** any card to arrange the picture — the connections follow it.',
+      body: '**Click** a card to inspect it. **Double-click** to focus there. **Hover** a card\'s edge for its follow control — "Load upstream", "Show 3 more sources" — and click to grow the board from exactly that entity. The **chevron** opens what\'s inside a card, at any depth, instantly. **Drag** any card to arrange the picture — the connections follow it.',
     },
     {
       target: '[data-tour="lens-children-mode"]',
@@ -406,7 +406,7 @@ TOURS.push({
     },
     {
       title: 'See the path, take it with you',
-      body: 'Hover or select any card to light up its path back to the focus. When you\'re ready to hand it off, the corner controls save the picture as a **PNG**, or the data itself as **JSON** or **CSV**.',
+      body: 'Hover or click any card to spotlight its lineage on the board. Click it to stick, and a chip at the bottom states exactly what it knows — drawn versus known — with a button to follow further and one to focus there. When you\'re ready to hand it off, the corner controls save the picture as a **PNG**, or the data itself as **JSON** or **CSV**.',
     },
     {
       target: '[data-tour="lens-share"]',

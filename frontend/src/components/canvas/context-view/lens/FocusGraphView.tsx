@@ -458,7 +458,12 @@ function TrailMark() {
     <span
       aria-hidden
       title="Part of the path you've walked"
-      className="pointer-events-none absolute -top-1 -right-1 w-1.5 h-1.5 rounded-full bg-ink-muted/70 dark:bg-white/50 ring-2 ring-canvas-elevated"
+      // The app's own lineage accent, not a generic grey — a corner dot
+      // reads as "a fact about this walk" the same colour everything
+      // else lineage-shaped already speaks in (the spotlight chip's
+      // icon, the cone flow). Solid rather than a translucent grey: at
+      // 8px a soft opacity read as almost nothing against the card.
+      className="pointer-events-none absolute -top-1 -right-1 w-2 h-2 rounded-full bg-accent-lineage ring-2 ring-canvas-elevated"
     />
   )
 }
@@ -1085,8 +1090,14 @@ function InlineFollow({ pill, dir, ctx }: { pill: FocusPill; dir: 'in' | 'out'; 
 function spotlightScope(card: FocusCard): { pill: FocusPill | null; dir: 'in' | 'out'; dirWord: string; countsText: string } {
   // The SAME tie-break LensPeek uses: which side of the board the anchor
   // sits on decides which direction leads when both have something left.
-  const pill = card.band < 0 ? card.pillUp ?? card.pillDown : card.pillDown ?? card.pillUp
-  const dir: 'in' | 'out' = pill != null && pill === card.pillUp ? 'in' : 'out'
+  const preferUp = card.band < 0
+  const pill = preferUp ? card.pillUp ?? card.pillDown : card.pillDown ?? card.pillUp
+  // Which side the chip actually describes: whichever pill it found, or
+  // — when NEITHER side has one — the anchor's own natural side. Without
+  // this a card with no pill anywhere fell through to a hard-coded
+  // 'out': an UPSTREAM card with nothing left to fetch stated its
+  // (unrelated) downstream degree instead of its own drained upstream.
+  const dir: 'in' | 'out' = pill ? (pill === card.pillUp ? 'in' : 'out') : (preferUp ? 'in' : 'out')
   const dirWord = dir === 'in' ? 'upstream' : 'downstream'
   const known0 = dir === 'in' ? card.flowsIn : card.flowsOut
   const drawn = Math.max(0, pill?.kind === 'reveal' ? known0 - (pill.count ?? 0) : known0)

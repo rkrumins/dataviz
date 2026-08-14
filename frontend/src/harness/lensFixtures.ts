@@ -71,6 +71,14 @@ export interface WalkFixture {
    *  state a click leaves behind, which is the only way to look at the
    *  isolation in a still picture. */
   isolatedId?: string
+  /** THE TRAIL (T21) — urns to mark as explicitly walked through, the
+   *  same state `LineageLens` accumulates from focus history and
+   *  extend/page anchors. A still picture can't drive a real walk, so
+   *  this is the only way to photograph the mark. */
+  trailUrns?: string[]
+  /** Consecutive stops in the walked path, as `[from, to]` urn pairs —
+   *  the wires that draw slightly firmer. */
+  trailAdjacent?: Array<[string, string]>
 }
 
 const scripted = (
@@ -131,6 +139,11 @@ const walkCollaterals = (): WalkFixture => ({
   // Open the branch too, so the shot shows the whole nest AND its
   // answer: five rects deep, three tables at the bottom.
   script: base => scripted(base, { expand: ['DB'] }),
+  // THE TRAIL (T21): as if the reader walked loan_positions → collaterals
+  // → risk_exposure_daily. t1/t2/DB and the rest of the spine carry no
+  // mark — the contrast is the point.
+  trailUrns: ['t0', 'F', 'OUT'],
+  trailAdjacent: [['t0', 'F'], ['F', 'OUT']],
 })
 
 /** Two paths that rejoin. The rejoin node must be ONE card, and the
