@@ -17,8 +17,8 @@
  * which clear 3:1 on both surfaces where the raw tokens do not.
  */
 import {
-    AlertTriangle, Ban, CheckCircle2, CircleDashed, EyeOff, PauseCircle,
-    ShieldAlert, Waves,
+    AlertTriangle, Ban, CheckCircle2, CircleDashed, EyeOff, GitBranch,
+    PauseCircle, ShieldAlert, Waves,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -31,6 +31,7 @@ export type DriftState =
     | 'blocked'
     | 'unobservable'
     | 'suspended'
+    | 'managed'
 
 interface Spec {
     Icon: typeof Waves
@@ -78,6 +79,21 @@ export const DRIFT_SPEC: Record<DriftState, Spec> = {
             'This source projects its rollups into a separate graph, which the ' +
             'statistics scan does not read — so their integrity cannot be checked ' +
             'from counts. Drift in the raw data is still detected.',
+    },
+    // Sky, not indigo. Measured against the six tones already in this map,
+    // indigo-600 lands ΔE 7.5 from violet-600 ('Blocked') to normal vision —
+    // worse than the red/amber pair documented above, and ΔE 1.3 under
+    // protanopia. sky-600 is the only candidate that adds no new collision:
+    // with it in the set the worst pair is still the pre-existing 14.4.
+    // (cyan 11.8 vs emerald, blue 12.4 vs violet, teal 4.9 vs emerald.)
+    managed: {
+        Icon: GitBranch,
+        label: 'Version controlled',
+        tone: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
+        title:
+            'This graph is mastered in the platform and backed by Postgres. Its ' +
+            'rolled-up lineage is maintained by version control on every publish, ' +
+            'so automatic reconciliation does not apply.',
     },
     suspended: {
         Icon: AlertTriangle,

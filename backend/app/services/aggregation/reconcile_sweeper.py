@@ -216,7 +216,14 @@ class ReconciliationSweeper:
     # ── Phase A: locked, pure SQL ────────────────────────────────────
 
     async def _phase_a(self, result, data_source_ids, dry_run):
-        """Returns ``(actions, nudges)``, or ``None`` if the lock is held."""
+        """Returns ``(actions, nudges)``, or ``None`` if the sweep did not run
+        — the lock is held by another replica, or the versioned-source lookup
+        below is cold and unavailable."""
+        from backend.app.services.versioned_sources import (
+            VersionedLookupUnavailable,
+            versioned_data_source_ids,
+        )
+
         from .models import AggregationDataSourceStateORM
         from .service import (
             read_global_cadence,
@@ -228,6 +235,25 @@ class ReconciliationSweeper:
 
         actions: List[_Action] = []
         nudges: List[tuple] = []
+
+        # Resolved BEFORE the lock is claimed. The graphver store sits behind
+        # its own engine and possibly its own database, and the advisory lock
+        # is transaction-scoped — it must not span a second store.
+        #
+        # Deferring on a cold failure is deliberate. Both fail-open answers are
+        # wrong: assuming nothing is versioned loses the guard and lets a
+        # structural false positive rebuild graphs that may not exist, while
+        # assuming everything is versioned silently stops reconciling the
+        # fleet. The next tick is 60s away against an hourly check interval, so
+        # waiting costs nothing.
+        try:
+            versioned = await versioned_data_source_ids()
+        except VersionedLookupUnavailable as exc:
+            logger.warning(
+                "reconcile sweep deferred: cannot determine which data "
+                "sources are versioned (%s) — retrying on the next tick", exc,
+            )
+            return None
 
         async with self._session_factory() as session:
             if not await self._claim_lock(session):
@@ -251,7 +277,7 @@ class ReconciliationSweeper:
                 return actions, nudges
 
             ds_ids = [s.data_source_id for s in states]
-            ctx = await self._batch_context(session, ds_ids)
+            ctx = await self._batch_context(session, ds_ids, versioned)
 
             first_builds = 0
             for state in states:
@@ -292,6 +318,11 @@ class ReconciliationSweeper:
                         # A clean pass clears the breaker: whatever was wrong
                         # is fixed, so the next real finding starts fresh.
                         state.reconcile_consecutive_actions = 0
+                        self._adopt(state, obs)
+                    elif verdict.skip == "platform_mastered":
+                        # Never acted on, but keep the baseline moving with the
+                        # source so that one later taken back out of versioning
+                        # does not read as drifted on its first sweep after.
                         self._adopt(state, obs)
                     elif verdict.skip in ("stats_stale", "stats_unhealthy"):
                         if len(nudges) < _NUDGE_CAP:
@@ -387,12 +418,15 @@ class ReconciliationSweeper:
             ).limit(_SCAN_CAP)
         return list((await session.execute(stmt)).scalars().all())
 
-    async def _batch_context(self, session, ds_ids) -> Dict[str, Dict]:
+    async def _batch_context(self, session, ds_ids, versioned) -> Dict[str, Dict]:
         """Four batched reads, joined in memory.
 
         Batched rather than one wide JOIN because these tables live in three
         different domains (``DOMAIN_OWNERSHIP.md``) — the same shape
         ``_rebuild_override_map`` uses.
+
+        ``versioned`` is the set of platform-mastered data source ids, resolved
+        by the caller before the lock (see :meth:`_phase_a`).
         """
         from backend.app.db.models import (
             DataSourcePollingConfigORM,
@@ -422,6 +456,11 @@ class ReconciliationSweeper:
                 deleted=bool(deleted_at) or is_active is False,
                 ontology_id=ontology_id,
                 provider_id=provider_id,
+                # Versioned: Postgres masters the graph and FalkorDB is a
+                # rebuildable read cache, so every count-based signal here is
+                # measuring the wrong backend half the time. See
+                # reconcile._guard.
+                platform_mastered=ds_id in versioned,
                 # A dedicated projection writes AGGREGATED to ANOTHER graph,
                 # which get_stats() never scans — so the observed count is
                 # permanently 0 and means nothing. See reconcile._overlay_missing.
@@ -569,6 +608,7 @@ class ReconciliationSweeper:
             provider_id=c.get("provider_id"),
             deleted=c.get("deleted", False),
             ontology_id=c.get("ontology_id"),
+            platform_mastered=c.get("platform_mastered", False),
             has_stats=c.get("has_stats", False),
             stats_age_secs=stats_age,
             stats_as_of=c.get("stats_as_of"),

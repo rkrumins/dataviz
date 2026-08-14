@@ -196,13 +196,20 @@ function ReconciliationSection({ doc }: { doc: FreshnessDoc }) {
     const source = doc.reconcileIntervalSource ?? 'default'
     const state = (doc.driftState ?? undefined) as DriftState | undefined
     const spec = state ? DRIFT_SPEC[state] : undefined
+    // A versioned graph is mastered in Postgres with FalkorDB as a rebuildable
+    // read cache, so version control maintains its rollups on every publish and
+    // this panel's controls would be inert. Explain that instead of offering
+    // switches that do nothing.
+    const isManaged = state === 'managed'
     // A verdict of drifting/overlayMissing means the panel is reporting a
     // problem, so the card carries the tone rather than staying neutral.
     const tone = state === 'overlayMissing'
         ? 'border-red-500/25 bg-red-500/[0.04]'
         : state === 'drifting' || state === 'suspended'
             ? 'border-amber-500/25 bg-amber-500/[0.05]'
-            : 'border-glass-border bg-black/[0.02] dark:bg-white/[0.02]'
+            : isManaged
+                ? 'border-sky-500/25 bg-sky-500/[0.04]'
+                : 'border-glass-border bg-black/[0.02] dark:bg-white/[0.02]'
 
     const saveInterval = (value: number | null) => {
         // Send ONLY this field: an explicit null clears an override, so a
@@ -266,13 +273,38 @@ function ReconciliationSection({ doc }: { doc: FreshnessDoc }) {
 
             {spec && <p className="text-[11px] text-ink-muted leading-relaxed">{spec.title}</p>}
 
-            <OverlayIntegrityMeter
-                observed={doc.observedAggregatedEdges}
-                expected={doc.expectedAggregatedEdges}
-                statsAsOf={doc.statsAsOf}
-                unobservable={doc.driftState === 'unobservable'}
-                className="pt-0.5"
-            />
+            {isManaged ? (
+                <div className="rounded-lg border border-sky-500/20 bg-sky-500/[0.05] p-2.5 space-y-1.5">
+                    <p className="text-[11px] text-ink-secondary leading-relaxed">
+                        This graph is mastered here and stored in Postgres. FalkorDB
+                        holds a rebuildable copy of it, so counting rollups in the
+                        graph would measure the copy rather than the source of
+                        truth — which is why no integrity meter is shown.
+                    </p>
+                    <p className="text-[11px] text-ink-secondary leading-relaxed">
+                        Version control rebuilds the rolled-up lineage itself as each
+                        change is published, and falls back to a full rebuild when it
+                        cannot do that incrementally. Nothing here needs to.
+                    </p>
+                    {doc.workspaceId && (
+                        <Link
+                            to={`/workspaces/${doc.workspaceId}`}
+                            className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-600 dark:text-sky-400 hover:underline"
+                        >
+                            Open version control for this source
+                            <ArrowUpRight className="w-3 h-3" />
+                        </Link>
+                    )}
+                </div>
+            ) : (
+                <OverlayIntegrityMeter
+                    observed={doc.observedAggregatedEdges}
+                    expected={doc.expectedAggregatedEdges}
+                    statsAsOf={doc.statsAsOf}
+                    unobservable={doc.driftState === 'unobservable'}
+                    className="pt-0.5"
+                />
+            )}
 
             <div className="grid grid-cols-2 gap-x-4 gap-y-2 pt-1">
                 <Fact label="Last checked">
@@ -306,7 +338,9 @@ function ReconciliationSection({ doc }: { doc: FreshnessDoc }) {
                 </Fact>
             </div>
 
-            {canManage && (
+            {/* Hidden, not disabled, for a versioned source: every one of these
+                controls governs a sweep that will never act on it. */}
+            {canManage && !isManaged && (
                 <div className="pt-1.5 border-t border-glass-border/60 space-y-2">
                     <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">

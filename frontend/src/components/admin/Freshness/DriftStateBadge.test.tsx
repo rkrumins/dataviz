@@ -34,6 +34,26 @@ describe('DriftStateBadge', () => {
         expect(new Set(icons).size).toBeGreaterThanOrEqual(6)
     })
 
+    it('keeps "Version controlled" apart from "Blocked" by more than colour', () => {
+        // Measured: indigo-600 ↔ violet-600 is ΔE 7.5 to normal vision and 1.3
+        // under protanopia — worse than the red/amber pair this file exists
+        // for. The tone was moved to sky for that reason; the icon and label
+        // are what actually carry the distinction, so assert those.
+        expect(DRIFT_SPEC.managed.Icon).not.toBe(DRIFT_SPEC.blocked.Icon)
+        expect(DRIFT_SPEC.managed.tone).not.toContain('indigo')
+        expect(DRIFT_SPEC.managed.tone).not.toContain('violet')
+    })
+
+    it('distinguishes a version-controlled source from an unobservable one', () => {
+        // Both mean "the overlay count proves nothing", for entirely different
+        // reasons: a dedicated projection writes rollups to another graph,
+        // while a versioned source may not be reading FalkorDB at all. The
+        // cockpit must not collapse them into one state.
+        expect(DRIFT_SPEC.managed.Icon).not.toBe(DRIFT_SPEC.unobservable.Icon)
+        expect(DRIFT_SPEC.managed.title).toMatch(/version control/i)
+        expect(DRIFT_SPEC.unobservable.title).toMatch(/separate graph/i)
+    })
+
     it('gives every state a distinct label', () => {
         const labels = STATES.map(s => DRIFT_SPEC[s].label)
         expect(new Set(labels).size).toBe(labels.length)

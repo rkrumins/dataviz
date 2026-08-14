@@ -48,6 +48,7 @@ REASONS: Tuple[str, ...] = (
 # row was stale" look identical without this.
 SKIP_REASONS: Tuple[str, ...] = (
     "deleted",            # soft-deleted or deactivated data source
+    "platform_mastered",  # versioned — the projector owns its rollups
     "no_ontology",        # trigger() would raise OntologyResolutionError
     "no_stats",           # the stats service has never profiled it
     "stats_stale",        # counts too old to trust
@@ -68,7 +69,7 @@ SKIP_REASONS: Tuple[str, ...] = (
 # the read path stays pure SQL — it must never run detection work.
 DRIFT_STATES: Tuple[str, ...] = (
     "inSync", "drifting", "overlayMissing", "neverBuilt",
-    "blocked", "unobservable", "suspended",
+    "blocked", "unobservable", "suspended", "managed",
 )
 
 # Reason → the drift state it implies.
@@ -85,6 +86,7 @@ _SKIP_STATE: Dict[str, str] = {
     "no_ontology": "blocked",
     "suspended": "suspended",
     "in_sync": "inSync",
+    "platform_mastered": "managed",
 }
 
 
@@ -103,6 +105,10 @@ class Observation:
     # ── public.workspace_data_sources ────────────────────────────────
     deleted: bool = False
     ontology_id: Optional[str] = None
+    # Mastered by the versioning store (a live ``graphver.graphs`` row), so
+    # Postgres is the source of truth and FalkorDB a rebuildable read cache.
+    # Resolved by the sweeper; see ``_guard``.
+    platform_mastered: bool = False
 
     # ── public.data_source_stats (the stats service's output) ─────────
     has_stats: bool = False
@@ -229,6 +235,25 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
     else owns this source" come before the ones that mean "not yet"."""
     if obs.deleted:
         return "deleted"
+    if obs.platform_mastered:
+        # A versioned source inverts everything below. Postgres is the source
+        # of truth and FalkorDB a rebuildable read cache, so when the
+        # projection is not fresh the stats scan runs against Postgres — which
+        # has no :AGGREGATED rows by construction. ``observed_aggregated`` is
+        # then 0 for a perfectly healthy source, and ``overlay_missing`` would
+        # fire every sweep. Raw drift is no better: every publish moves the
+        # counts, and the projector nudges the stats poll seconds later.
+        #
+        # Nor is there anything to do. FalkorProjector maintains :AGGREGATED
+        # incrementally per committed window from the same pair rules the batch
+        # pipeline uses, and hands off to ``agg.trigger()`` via
+        # ``on_rollups_stale`` wherever it cannot (full seed, oversized move
+        # window, verify-heal reseed) — on all three projector wirings.
+        #
+        # So this comes SECOND, ahead of every "someone else owns this" guard,
+        # because that is exactly what it asserts. Recorded and surfaced as
+        # 'managed', never acted on.
+        return "platform_mastered"
     if obs.aggregation_status == "skipped":
         return "opted_out"
     if obs.ontology_id is None:

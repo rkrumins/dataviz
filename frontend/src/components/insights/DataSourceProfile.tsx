@@ -218,7 +218,10 @@ function AggregationStatusCard({ dataSourceId }: { dataSourceId: string; wsId: s
                 {data.lastReconciledAt && (
                     <DetailRow label="Last reconciled" value={timeAgo(data.lastReconciledAt)} />
                 )}
-                {data.driftDetected && (
+                {/* Suppressed for a versioned graph: telling someone to
+                    re-aggregate a source whose rollups version control rebuilds
+                    on every publish contradicts the badge below it. */}
+                {data.driftDetected && data.driftState !== 'managed' && (
                     <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">
                         Source changed since last aggregation — re-aggregate from the workspace to refresh.
                     </p>
@@ -229,13 +232,22 @@ function AggregationStatusCard({ dataSourceId }: { dataSourceId: string; wsId: s
                 {(data.driftState && data.driftState !== 'inSync') && (
                     <div className="mt-2.5 flex flex-wrap items-center gap-2">
                         <DriftStateBadge state={data.driftState} />
-                        {data.autoReconcile === false && <AutoReconcileOffBadge />}
-                        <Link
-                            to="/ingestion?tab=freshness&fstatus=drifting"
-                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
-                        >
-                            Open Freshness <ArrowUpRight className="w-3 h-3" />
-                        </Link>
+                        {/* A versioned source is not "automation off" — the
+                            sweep deliberately never acts on it — and the
+                            drifting filter would not contain it, so the link
+                            would land on a list it is absent from. The badge's
+                            own tooltip carries the explanation. */}
+                        {data.driftState !== 'managed' && (
+                            <>
+                                {data.autoReconcile === false && <AutoReconcileOffBadge />}
+                                <Link
+                                    to="/ingestion?tab=freshness&fstatus=drifting"
+                                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                                >
+                                    Open Freshness <ArrowUpRight className="w-3 h-3" />
+                                </Link>
+                            </>
+                        )}
                     </div>
                 )}
             </div>

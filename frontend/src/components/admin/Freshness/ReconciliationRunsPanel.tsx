@@ -29,6 +29,7 @@ import { useReconcileNow, useReconciliation } from './useFreshness'
  *  than being dropped, so a new detector is visible before it is pretty. */
 const SKIP_LABEL: Record<string, string> = {
     deleted: 'Deleted',
+    platform_mastered: 'Version controlled',
     no_ontology: 'No ontology assigned',
     no_stats: 'Never profiled',
     stats_stale: 'Statistics too old to trust',

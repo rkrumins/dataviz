@@ -99,6 +99,28 @@ def _no_redis(monkeypatch):
     return marked
 
 
+@pytest.fixture(autouse=True)
+def _versioned(monkeypatch):
+    """Stub the versioned-data-source lookup.
+
+    It reads the ``graphver`` store through its own engine, which does not
+    exist here — and a cold failure correctly DEFERS the whole sweep, so
+    without this every test below would assert against a sweep that never ran.
+    Returns a mutable set a test can add to in order to make a source
+    platform-mastered.
+    """
+    versioned: set = set()
+
+    async def _fake_versioned_ids(**_kw):
+        return frozenset(versioned)
+
+    monkeypatch.setattr(
+        "backend.app.services.versioned_sources.versioned_data_source_ids",
+        _fake_versioned_ids,
+    )
+    return versioned
+
+
 class _FakeJob:
     id = "agg_fake"
 
@@ -367,6 +389,87 @@ async def test_dedicated_projection_is_never_read_as_a_wiped_overlay(session_fac
     assert result.actions == 0
     assert svc.signals == []
     assert (await _state(session_factory)).drift_state == "unobservable"
+
+
+@pytest.mark.asyncio
+async def test_versioned_source_is_evaluated_but_never_dispatched(
+    session_factory, _versioned,
+):
+    """A versioned source is mastered in Postgres with FalkorDB as a
+    rebuildable read cache. When the projection is not fresh the stats scan
+    runs against Postgres, which has no :AGGREGATED rows at all — so a healthy
+    source reports zero rollups. Acting on that queues a full rebuild of a
+    graph that may not currently exist, and the job stamps ``_AggMeta``, which
+    stalls the next projection and reproduces the same reading next sweep.
+    """
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.scanned == 1
+    assert result.findings == 0
+    assert result.actions == 0
+    # The structural assertion: nothing was handed to the service at all.
+    assert svc.signals == [] and svc.triggers == []
+    assert result.by_skip.get("platform_mastered") == 1
+
+    state = await _state(session_factory)
+    assert state.drift_state == "managed"
+    assert state.last_reconcile_checked_at is not None
+    assert state.last_reconciled_at is None
+
+
+@pytest.mark.asyncio
+async def test_versioned_source_still_advances_its_baseline(
+    session_factory, _versioned,
+):
+    """Never acted on, but the baseline keeps moving — otherwise a source
+    later taken back out of versioning reads as drifted on its first sweep
+    afterwards, from counts that changed while nobody was watching."""
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 900, "AGGREGATED": 500},
+        raw_fingerprint="fp_stale",
+    )
+    _versioned.add("ds_1")
+
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+
+    state = await _state(session_factory)
+    assert state.raw_fingerprint != "fp_stale"
+    assert state.raw_edge_count == 900
+
+
+@pytest.mark.asyncio
+async def test_a_cold_versioned_lookup_defers_the_whole_sweep(
+    session_factory, monkeypatch,
+):
+    """Both fail-open answers are wrong — assuming nothing is versioned loses
+    the guard, assuming everything is stops reconciling the fleet — so the
+    sweep defers instead, and must not stamp a verdict on the way out."""
+    from backend.app.services.versioned_sources import (
+        VersionedLookupUnavailable,
+    )
+
+    async def _unavailable(**_kw):
+        raise VersionedLookupUnavailable("graphver unreachable")
+
+    monkeypatch.setattr(
+        "backend.app.services.versioned_sources.versioned_data_source_ids",
+        _unavailable,
+    )
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result is None
+    assert svc.signals == [] and svc.triggers == []
+    state = await _state(session_factory)
+    assert state.drift_state is None
+    assert state.last_reconcile_checked_at is None
 
 
 @pytest.mark.asyncio

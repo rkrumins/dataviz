@@ -70,6 +70,7 @@ collide with the schema digest for a source that happens to have no overlay.
 | Guard | Without it |
 |---|---|
 | `overlay_unobservable` (dedicated projection) | Its rollups live in a graph `get_stats()` never scans, so the observed count is permanently zero — and dedicated projection is used for the *largest* graphs. Every one of them would rebuild hourly, forever. Detectors 1–2 sit out; drift and first-build still apply. |
+| `platform_mastered` (versioned source) | Postgres masters the graph, so every count-based signal measures a rebuildable cache instead of the source of truth — and the projector already maintains the rollups. See the section below; without it the sweep closes a self-sustaining loop with the projection watermark. |
 | `stats_predates_build` | A source rebuilt two minutes ago still reports its pre-rebuild count. Acting on it re-fires the same finding forever. |
 | NULL baseline = seed | The first sweep over a fleet would classify every source as drifted and queue a fleet-wide rebuild. |
 | `expected > 0` on detector 1 | A containment-only graph legitimately materialises an empty cube and would rebuild forever. |
@@ -95,6 +96,65 @@ Detector 3 calls `svc.trigger(..., trigger_source="schedule")` **directly**, not
 design, and that remains true. `trigger()` applies the stored global tuning
 defaults, so an auto-queued job inherits the configuration that clears a
 1M-node / 2M-edge graph with no extra plumbing.
+
+## Versioned (platform-mastered) sources
+
+A graph mastered inside the platform inverts everything above. Postgres
+(`graphver`) is the source of truth and FalkorDB is a **rebuildable read cache**
+of committed `main`. Such sources are 1:1 with a data source, are polled by the
+stats service with no special-casing, and get an `aggregation.data_source_state`
+row as soon as the projector's rollup hook fires — so they land in the sweep's
+candidate set like anything else.
+
+**They are guarded out of every detector** (`platform_mastered`, evaluated
+second, immediately after `deleted`), recorded, and surfaced as **Version
+controlled**. Two independent reasons:
+
+1. **The counts measure the wrong backend.** `ContextEngine` routes a versioned
+   source's reads to FalkorDB only while `projection_watermark(...)["fresh"]`
+   holds; otherwise they come from Postgres, which has no `:AGGREGATED` rows by
+   construction. So `observed_aggregated == 0` for a perfectly healthy source.
+   That is not rare — LRU eviction under a per-provider RAM budget, a repoint,
+   and an unfaithful-seed hold all clear the watermark, the last of them
+   indefinitely. `stats_stale` does not help: an evicted source is polled on
+   schedule, so its counts are fresh, just measured elsewhere. Raw drift is no
+   better — every publish moves the counts and `nudge_stats_after_projection`
+   re-polls seconds later.
+2. **There is nothing to do.** `FalkorProjector` maintains `:AGGREGATED`
+   incrementally per committed window from the same `pair_rules` the batch
+   pipeline uses, and hands off to `agg.trigger()` through `on_rollups_stale`
+   wherever it cannot — a full seed, a move window past `_MOVE_EDGE_CAP`, or a
+   verify-heal reseed. All three projector wirings carry that hook.
+
+Left unguarded these compound into a loop: the sweep queues a job → the job
+stamps `_AggMeta` → the next projection's verify counts it as an extra entity →
+the watermark is pinned → reads fall back to Postgres → the overlay reads as
+wiped → the sweep queues a job. Each turn increments the breaker until the
+source is suspended.
+
+Identification is a live `graphver.graphs` row, resolved by
+`services/versioned_sources.py` — an app-layer bridge in the same position as
+`projection_target.py`, since the versioning package stays decoupled from the
+management DB. `workspace_data_sources.source_mode` cannot answer it: `'managed'`
+is written only by the blank-model wizard and a one-off script, never by the
+bootstrap path, so most versioned sources have it NULL. The read runs **before**
+the advisory lock (a second engine may be a second database), caches for 10
+minutes, serves the last good answer through a blip, and on a cold failure
+**defers the whole sweep** to the next 60s tick — both fail-open answers are
+wrong, and an hourly check loses nothing by waiting.
+
+The baseline is still adopted on every pass, so a source later taken back out of
+versioning does not read as drifted on its first sweep afterwards.
+
+> **Known gap — no shared lock with the projector.** The projector holds a
+> Postgres session advisory lock `hashtext("gvproj:{graph_id}")`; the
+> aggregation worker holds a Redis lease `agg:graphwrite:{host:port}:{graph}`.
+> Disjoint namespaces over the same graph, and a projector full seed opens with
+> `client.delete()` on the whole key, so an aggregation job landing mid-projection
+> is unguarded — including one the projector queued itself. `trigger()`'s
+> graph-level guard only sees other aggregation jobs; it cannot consult
+> `graphver.projection_state`. Observe-only means this feature adds no new
+> exposure, but the gap predates it and is not closed here.
 
 ## Configuration
 
@@ -152,6 +212,15 @@ control plane. `actor` is forced server-side.
 > destructive.
 
 ## UI
+
+A version-controlled source shows the **Version controlled** badge, swaps the
+integrity meter for an explanation of why counting rollups would measure the
+wrong thing, and **hides** the per-source toggle and interval override rather
+than disabling them — every one of those controls governs a sweep that will
+never act on it. Its tone is `sky`, not `indigo`: measured against the six tones
+already in `DRIFT_SPEC`, indigo-600 sits ΔE 7.5 from violet-600 ("Blocked") to
+normal vision — worse than the red/amber pair below — and 1.3 apart under
+protanopia. sky-600 is the only candidate that adds no new collision.
 
 Ingestion → Freshness: a "Drifting" stat tile and filter facet, a per-row
 verdict badge with its reason, a Reconciliation panel in the source drawer

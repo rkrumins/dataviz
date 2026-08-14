@@ -56,7 +56,9 @@ beforeAll(() => {
 import { Freshness } from './index'
 import { FreshnessRow, primaryAction, overflowActions } from './FreshnessRow'
 import { FreshnessDrawer } from './FreshnessDrawer'
-import { compareSeverity, freshnessState, severityRank } from './freshnessTriage'
+import {
+    compareSeverity, freshnessState, isDrifting, needsAttention, severityRank,
+} from './freshnessTriage'
 import type { FreshnessRow as FreshnessRowData } from '@/services/freshnessService'
 
 const recent = new Date(Date.now() - 5 * 60_000).toISOString()
@@ -237,6 +239,16 @@ describe('Freshness cockpit', () => {
             severityRank(pending), severityRank(cooldown), severityRank(ready),
             severityRank(notBuilt),
         ]).toEqual([0, 1, 2, 3, 4, 5, 6])
+
+        // A version-controlled source is NOT drifting and does not need
+        // attention. It is deliberately excluded from every detector because
+        // version control maintains its rollups, so surfacing it as a problem
+        // would put a permanent false alarm in the cockpit. Mirrors
+        // ``_DRIFTING_STATES`` in service.py, which excludes it too.
+        const managed = mk({ name: 'managed', aggregationStatus: 'ready', driftState: 'managed' })
+        expect(isDrifting(managed)).toBe(false)
+        expect(needsAttention(managed)).toBe(false)
+        expect(severityRank(managed)).toBe(severityRank(ready))
 
         const shuffled = [ready, notBuilt, failed, cooldown, pending, recomputing, drifting]
         expect(shuffled.slice().sort(compareSeverity).map(r => r.name))

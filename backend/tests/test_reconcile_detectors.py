@@ -138,6 +138,82 @@ def test_dedicated_projection_still_detects_never_aggregated():
     assert v.reason == "never_aggregated"
 
 
+# ── Versioned (platform-mastered) sources ───────────────────────────────
+# These invert the whole model: Postgres masters the graph and FalkorDB is a
+# rebuildable read cache, so when the projection is not fresh the stats scan
+# runs against Postgres — which carries no :AGGREGATED rows at all. Every
+# count-based signal is then measuring the wrong backend, and the projector
+# already maintains the rollups itself.
+
+
+@pytest.mark.parametrize(
+    "perturbation",
+    [
+        # Wiped overlay — would be overlay_missing.
+        dict(observed_aggregated=0),
+        # Shrunk overlay — would be overlay_shrunk.
+        dict(observed_aggregated=100),
+        # Raw counts moved — would be raw_drift. This is what a publish
+        # looks like, and the projector nudges the stats poll seconds later.
+        dict(observed_raw_fingerprint="fp_new"),
+        # Never built — would be never_aggregated.
+        dict(
+            aggregation_status=None, has_completed_job=False,
+            expected_aggregated=0, observed_aggregated=0,
+            stored_raw_fingerprint=None,
+        ),
+    ],
+)
+def test_versioned_source_never_acts_whatever_the_counts_say(perturbation):
+    v = evaluate(_obs(platform_mastered=True, **perturbation), POLICY)
+    assert v.reason is None
+    assert not v.should_act
+    assert v.skip == "platform_mastered"
+    assert v.drift_state == "managed"
+
+
+def test_versioned_source_without_the_flag_would_have_fired():
+    """The counterpart of the case above — proof the guard is what stops it,
+    not some other precondition in the fixtures."""
+    assert evaluate(_obs(observed_aggregated=0), POLICY).reason == "overlay_missing"
+
+
+def test_platform_mastered_outranks_every_other_skip():
+    """It is second only to ``deleted``, ahead of every "someone else owns
+    this" guard — because that is precisely what it asserts: the projector
+    owns this source's rollups."""
+    for other in (
+        dict(aggregation_status="skipped"),        # opted_out
+        dict(ontology_id=None),                    # no_ontology
+        dict(has_stats=False),                     # no_stats
+        dict(stats_age_secs=999_999),              # stats_stale
+        dict(job_in_flight=True),                  # in_flight
+        dict(stale_marker=True),                   # already_marked
+        dict(reconcile_enabled=False),             # disabled
+        dict(consecutive_actions=99),              # suspended
+    ):
+        v = evaluate(_obs(platform_mastered=True, **other), POLICY)
+        assert v.skip == "platform_mastered", other
+
+
+def test_deleted_still_outranks_platform_mastered():
+    v = evaluate(_obs(platform_mastered=True, deleted=True), POLICY)
+    assert v.skip == "deleted"
+
+
+def test_managed_is_distinct_from_unobservable():
+    """Two different reasons an overlay count means nothing, and the cockpit
+    must not conflate them: a dedicated projection writes rollups to another
+    graph, while a versioned source may not be reading FalkorDB at all."""
+    assert (
+        evaluate(_obs(overlay_observable=False), POLICY).drift_state
+        == "unobservable"
+    )
+    assert (
+        evaluate(_obs(platform_mastered=True), POLICY).drift_state == "managed"
+    )
+
+
 # ── D2 overlay_shrunk ───────────────────────────────────────────────────
 
 def test_overlay_shrunk_respects_the_tolerance_band():
