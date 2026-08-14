@@ -63,6 +63,7 @@ import {
   Panel,
   Position,
   getBezierPath,
+  getStraightPath,
   getNodesBounds,
   getViewportForBounds,
   useReactFlow,
@@ -80,7 +81,7 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, FRAME_FOOTER_H, FRAME_PAD, headerHeight, holdsRows, labelFitsRun, frameWindow, edgeLabelFor, orientationHalf, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
+import { CARD_W, BAND_GAP, FRAME_FOOTER_H, FRAME_PAD, headerHeight, holdsRows, labelFitsRun, frameWindow, edgeLabelFor, orientationHalf, type EdgeTypeInfoMap, type FocusCard, type FocusEdge, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
 import { REVEAL_PAGE, isolationCone, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
@@ -121,6 +122,15 @@ const NEUTRAL_ACCENT = '#94a3b8'
  */
 const HoverContext = createContext<string | null>(null)
 const ReachContext = createContext<LensReach | null>(null)
+/**
+ * THE GRAIN SEAM's "trace columns" (T22, R1) — the three walk-hook
+ * callbacks an edge's seam chip needs to dispatch the SAME action a
+ * card's own ⊕ would (`actOnPill`), delivered by context for the reason
+ * `HoverContext` is: the edge component has no `CardCtx` of its own (only
+ * cards do), and threading it through `edge.data` would put a FUNCTION in
+ * data React Flow diffs on every rebuild.
+ */
+const FollowContext = createContext<Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage'>>({})
 /**
  * ISOLATION — the visible lineage cone of whatever the reader is
  * pointing at (see `isolationCone` in focus-layout.ts), and the one
@@ -955,10 +965,12 @@ function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
 const pillTarget = (key: string): string => key.slice(key.indexOf(':') + 1)
 
 /** THE ONE PLACE a pill's three kinds resolve to a walk-hook call —
- *  shared by the on-card control, the focal's inline follow, and the
- *  spotlight chip's bridge button, so none of the three can ever
- *  disagree about what one click does. */
-function actOnPill(ctx: CardCtx, pill: FocusPill, dir: 'in' | 'out') {
+ *  shared by the on-card control, the focal's inline follow, the
+ *  spotlight chip's bridge button, and the grain seam's "trace columns"
+ *  (T22), so none of them can ever disagree about what one click does.
+ *  Takes only the three callbacks it uses, not the whole `CardCtx` — the
+ *  seam chip lives on an EDGE, which has no card context of its own. */
+function actOnPill(ctx: Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage'>, pill: FocusPill, dir: 'in' | 'out') {
   if (pill.kind === 'reveal') ctx.onRevealMore?.(pill.key)
   else if (pill.kind === 'page' && pill.cursor) ctx.onPage?.(pillTarget(pill.key), dir, pill.cursor)
   else ctx.onExtend?.(pill.key, pillTarget(pill.key), dir)
@@ -1113,6 +1125,20 @@ function InlineFollow({ pill, dir, ctx }: { pill: FocusPill; dir: 'in' | 'out'; 
   )
 }
 
+/** Of the DRAWN wires on one side of a card, how many raw hops are
+ *  column-certain versus at a coarser grain (T22, R1 rule 3) — the same
+ *  `grainCoarse` the seam paints, read from the actual board rather than
+ *  re-derived, so the chip's count and the wire's own treatment can never
+ *  disagree about which flows are which. */
+function coarseFlows(edges: readonly FocusEdge[], cardId: string, dir: 'in' | 'out'): number {
+  let coarse = 0
+  for (const e of edges) {
+    if (!e.grainCoarse) continue
+    if (dir === 'in' ? e.target === cardId : e.source === cardId) coarse += e.count
+  }
+  return coarse
+}
+
 /**
  * One direction's line in the spotlight chip — its honest drawn-vs-known
  * text, and the pill (if any) a bridge button can act on.
@@ -1132,14 +1158,22 @@ function InlineFollow({ pill, dir, ctx }: { pill: FocusPill; dir: 'in' | 'out'; 
  * the reported "Orders (IoT) has no lineage to Marketing" misread — 0 of
  * 66 upstream flows were FETCHED, not zero recorded — so that shape gets
  * its own honest sentence rather than falling into the "drained" wording.
+ *
+ * R1 rule 3 (T22) — THE SEAM'S HONESTY EXTENDS HERE: of what IS drawn,
+ * some may be at table grain rather than column-certain. Said as its own
+ * clause, never folded into the main count — "3 known flows, 2 at table
+ * grain" is a different claim from "3 known flows", and conflating them
+ * is the exact over-claim this task exists to stop.
  */
-function spotlightSide(card: FocusCard, dir: 'in' | 'out'): { pill: FocusPill | null; text: string } {
+function spotlightSide(card: FocusCard, dir: 'in' | 'out', edges: readonly FocusEdge[]): { pill: FocusPill | null; text: string } {
   const pill = dir === 'in' ? card.pillUp : card.pillDown
   const dirWord = dir === 'in' ? 'upstream' : 'downstream'
   const known0 = dir === 'in' ? card.flowsIn : card.flowsOut
   const drawn = Math.max(0, pill?.kind === 'reveal' ? known0 - (pill.count ?? 0) : known0)
+  const coarse = coarseFlows(edges, card.id, dir)
+  const seamClause = coarse > 0 ? ` (${coarse.toLocaleString()} at table grain)` : ''
   if (!pill) {
-    return { pill: null, text: `${known0.toLocaleString()} known ${dirWord} flow${known0 === 1 ? '' : 's'} — every one on this board` }
+    return { pill: null, text: `${known0.toLocaleString()} known ${dirWord} flow${known0 === 1 ? '' : 's'} — every one on this board${seamClause}` }
   }
   if (drawn === 0) {
     return {
@@ -1153,8 +1187,8 @@ function spotlightSide(card: FocusCard, dir: 'in' | 'out'): { pill: FocusPill | 
   return {
     pill,
     text: known != null
-      ? `${drawn.toLocaleString()} of ${known.toLocaleString()} known ${dirWord} flows on this board`
-      : `${drawn.toLocaleString()} known ${dirWord} flow${drawn === 1 ? '' : 's'} on this board — the data source may have more`,
+      ? `${drawn.toLocaleString()} of ${known.toLocaleString()} known ${dirWord} flows on this board${seamClause}`
+      : `${drawn.toLocaleString()} known ${dirWord} flow${drawn === 1 ? '' : 's'} on this board — the data source may have more${seamClause}`,
   }
 }
 
@@ -1169,13 +1203,13 @@ function spotlightSide(card: FocusCard, dir: 'in' | 'out'): { pill: FocusPill | 
  * natural one is the pre-existing, honest "this card was never asked"
  * gap — not the reported defect, which is a KNOWN frontier going unsaid.
  */
-function spotlightScope(card: FocusCard): {
+function spotlightScope(card: FocusCard, edges: readonly FocusEdge[]): {
   up: { pill: FocusPill | null; text: string } | null
   down: { pill: FocusPill | null; text: string } | null
 } {
   const natural: 'in' | 'out' = card.band < 0 ? 'in' : 'out'
-  const up = spotlightSide(card, 'in')
-  const down = spotlightSide(card, 'out')
+  const up = spotlightSide(card, 'in', edges)
+  const down = spotlightSide(card, 'out', edges)
   return {
     up: natural === 'in' || up.pill ? up : null,
     down: natural === 'out' || down.pill ? down : null,
@@ -2395,6 +2429,21 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
      *  walked path. Minimal treatment — a slightly firmer line, nothing
      *  that competes with the cone's own highlight. */
     trail?: boolean
+    /** Where along the straight source→target line the badge/seam chip
+     *  sits, 0..1 — see `FocusEdge.labelT` (T22, R3). */
+    labelT?: number
+    /** This wire is NOT column-certain — see `FocusEdge.grainCoarse`
+     *  (T22, R1). Cone-only: read alongside `onCone` below, never on its
+     *  own — the un-isolated board's bundles are unchanged. */
+    grainCoarse?: boolean
+    /** Both cards sit under this drawn ancestor frame — route INSIDE its
+     *  bounds (T22, R2). */
+    sameAncestorFrame?: string | null
+    /** THE GRAIN SEAM's "trace columns" — the ⊕ (if any) that continues
+     *  this wire further in the direction it already runs, one per
+     *  possible "far" side. */
+    sourcePillUp?: FocusPill | null
+    targetPillDown?: FocusPill | null
   }
   // Hover emphasis is derived here from context: the edges ARRAY stays
   // identity-stable, so sweeping the pointer never rebuilds it (nor
@@ -2408,7 +2457,24 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   const onCone = useSyncExternalStore(isoStore.subscribe, () => isoStore.onConeEdge(id))
   const isolating = useSyncExternalStore(isoStore.subscribe, () => isoStore.raw() !== null)
   const offCone = isolating && !onCone
-  const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
+  // IN-FRAME ROUTING (T22, R2): both cards already sit inside
+  // `sameAncestorFrame`'s own rect — a straight line between two points
+  // already inside a (convex) rect can never leave it, which the ordinary
+  // bezier's control points can: the reported out-and-back exterior arc
+  // with arrowheads piling up at the frame's own border. Surgical on
+  // purpose — only THIS case swaps the path function; every other wire
+  // keeps the router exactly as it was.
+  const [path] = d.sameAncestorFrame
+    ? getStraightPath({ sourceX, sourceY, targetX, targetY })
+    : getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
+  // The badge's own slot (T22, R3) — along the STRAIGHT line between the
+  // ports, which is what the layout's own collision pass measured against
+  // (a shallow bezier puts its label here to within a few pixels; for a
+  // same-ancestor wire this IS the drawn path). `labelT` is 0.5 — the
+  // plain midpoint — unless another badge already claimed that spot.
+  const labelT = d.labelT ?? 0.5
+  const labelX = sourceX + (targetX - sourceX) * labelT
+  const labelY = sourceY + (targetY - sourceY) * labelT
   const strong = emphasized || onCone
   /**
    * HOW FAR ALONG the cone this wire runs — the near lineage reads
@@ -2422,6 +2488,18 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     ? Math.min(sourceHops ?? 99, targetHops ?? 99)
     : null
   const adjacent = coneHops !== null && coneHops <= 1
+  // THE GRAIN SEAM (T22, R1) — cone-only, per rule 2: a coarse wire never
+  // carries the same certainty treatment as a column-true one, but ONLY
+  // while it is actually part of an isolated cone. The un-isolated
+  // board's bundles are unchanged — `grainCoarse` sits on the data
+  // whether or not anything is isolated, and `onCone` is what gates it.
+  const seam = onCone && (d.grainCoarse ?? false)
+  // Whichever end sits FARTHER from the anchor is the coarse
+  // CONTINUATION — the same "walk further from here" a card's own ⊕
+  // already offers on that side, dispatched through the identical action.
+  const farIsSource = (sourceHops ?? -1) > (targetHops ?? -1)
+  const continuationPill = seam ? (farIsSource ? d.sourcePillUp : d.targetPillDown) ?? null : null
+  const follow = useContext(FollowContext)
   // Highlighting STRENGTHENS what it points at, and quiets the rest only
   // to a floor that stays legible — a highlight that turns the board into
   // grey ghosts costs the reader the context they are reading against.
@@ -2449,10 +2527,14 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // mid-air with no arrow under them. A badge is a thing SAID ABOUT a
   // wire, so it is decided by the wire that is there.
   const roomForLabel = labelFitsRun(sourceX, sourceY, targetX, targetY)
-  const showCount = (d.labelVisible ?? false) && roomForLabel && !d.dimmed && (!d.labelDense || strong)
+  // The seam chip OWNS the one label slot a wire has — a table-grain
+  // count and its own honesty chip stacked in the same spot would be the
+  // exact confetti `labelDense` exists to stop, and the grain fact
+  // outranks the raw count here regardless of density.
+  const showSeam = seam && roomForLabel && !d.dimmed
+  const showCount = (d.labelVisible ?? false) && roomForLabel && !d.dimmed && (!d.labelDense || strong) && !showSeam
   const showCycle = (d.cycleBack ?? false) && roomForLabel && !d.dimmed
-    && (!d.labelDense || strong || (d.cycleAnchor ?? false))
-  const showLabel = showCount || showCycle
+    && (!d.labelDense || strong || (d.cycleAnchor ?? false)) && !showSeam
   return (
     <>
       <BaseEdge
@@ -2463,8 +2545,10 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
         // the one piece of motion on this board, and only ever on the
         // wires the reader asked about. A class rather than an inline
         // animation so the app's own reduced-motion rules reach it, both
-        // the OS setting and the in-app preference.
-        className={cn(onCone && !d.reducedMotion && 'lens-cone-flow')}
+        // the OS setting and the in-app preference. A SEAM wire never
+        // drifts — motion reads as "certain and moving", the opposite of
+        // what this wire is saying.
+        className={cn(onCone && !seam && !d.reducedMotion && 'lens-cone-flow')}
         style={{
           // Colour is what the eye follows, so the background gives up
           // its saturation. Dimming alone flattens the board into one grey wash — but
@@ -2472,8 +2556,11 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
           // wire, and a wide board can carry hundreds of them off-cone at
           // once. `mutedTint` is the SAME desaturation, pre-computed once
           // per edge at build time (Task 20, P2) rather than asked of the
-          // compositor on every one of them.
-          stroke: offCone ? d.mutedTint : d.tint,
+          // compositor on every one of them. A SEAM wire takes the SAME
+          // muted colour an off-cone wire does — table-grain knowledge is
+          // not the cone's own full-saturation certainty, whatever its
+          // opacity or dash says beside it.
+          stroke: offCone || seam ? d.mutedTint : d.tint,
           // Three steps, no more: the wire the reader is pointing at and
           // its first hop, the rest of the cone, and the background.
           strokeWidth: onCone
@@ -2484,12 +2571,51 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
               // more (what runs through THIS point, right now).
               : d.trail ? (d.aggregated ? 2.5 : 2)
                 : d.aggregated ? 2 : 1.5,
-          strokeDasharray: d.containment ? '4 4' : undefined,
+          // A SEAM wire's own fine, static dash — distinct from
+          // containment's chunkier one and the cone-flow's animated one,
+          // reading as "muted" rather than "moving" (T22, R1).
+          strokeDasharray: seam ? '2 3' : d.containment ? '4 4' : undefined,
           opacity,
           transition: d.reducedMotion ? undefined : 'opacity 140ms ease-out, stroke-width 140ms ease-out',
         }}
       />
-      {showLabel && (
+      {showSeam && (
+        // THE GRAIN SEAM's own chip (T22, R1) — quiet at rest, on
+        // purpose: a wide text pill on every coarse wire of a six-way
+        // fan-in is the exact confetti this codebase's own follow
+        // controls (T21, R1) were rewritten to stop being. A compact
+        // badge instead, matching that rule — the honest words live in
+        // its title/aria-label, one hover away, never fabricated,
+        // never hidden. A real button when the far side can answer
+        // finer; an inert one when it honestly cannot (R1.1).
+        <EdgeLabelRenderer>
+          {continuationPill ? (
+            <button
+              type="button"
+              title={`Table grain from here — trace the columns this wire feeds${continuationPill.count != null ? ` · ${continuationPill.count.toLocaleString()} data flow${continuationPill.count === 1 ? '' : 's'} recorded` : ''}`}
+              aria-label="Table grain from here — trace columns"
+              onClick={(e) => {
+                e.stopPropagation()
+                actOnPill(follow, continuationPill, farIsSource ? 'in' : 'out')
+              }}
+              style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
+              className="nodrag pointer-events-auto absolute w-4 h-4 rounded-full flex items-center justify-center bg-canvas-elevated border border-amber-500/50 text-amber-600 dark:text-amber-400 shadow-sm hover:bg-amber-500/10 hover:border-amber-500"
+            >
+              <LucideIcons.Layers className="w-2.5 h-2.5" />
+            </button>
+          ) : (
+            <span
+              title="Table grain from here — the data source has not reported finer detail for this connection"
+              aria-label="Table grain from here — no finer detail available"
+              style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
+              className="pointer-events-none absolute w-4 h-4 rounded-full flex items-center justify-center bg-canvas-elevated border border-black/10 dark:border-white/15 text-ink-muted/60 shadow-sm"
+            >
+              <LucideIcons.Layers className="w-2.5 h-2.5" />
+            </span>
+          )}
+        </EdgeLabelRenderer>
+      )}
+      {(showCount || showCycle) && (
         <EdgeLabelRenderer>
           <div
             style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`, opacity: offCone ? OFF_CONE_EDGE : 1 }}
@@ -3295,6 +3421,18 @@ export function FocusGraphView({
     // two consecutive walked hops can be found regardless of which end
     // the picture happened to draw the wire from.
     const urnById = new Map(graph.cards.map(c => [c.id, c.nodeId]))
+    // THE GRAIN SEAM's "trace columns" (T22, R1) — the ⊕, if any, that
+    // continues a coarse wire FURTHER in the direction it already runs:
+    // the source's own upstream pill (this wire's source going further
+    // up) and the target's own downstream pill (going further down).
+    // Baked in here, statically, rather than resolved against the
+    // isolation anchor — which side of a coarse wire is "the far one"
+    // depends on which anchor is isolated, and re-deriving it in the
+    // EDGE COMPONENT from the anchor-relative hop distance it already
+    // reads off `ConeStore` costs nothing extra on a hover; rebuilding
+    // this array on every isolation change would (the PERF CONTRACT
+    // above — isolation must never rebuild nodes/edges).
+    const cardById = new Map(graph.cards.map(c => [c.id, c]))
     // Whether the board as a whole is too busy for every badge it could
     // draw — a property of the picture, so it is decided once here
     // rather than re-counted inside every edge. EVERY badge counts
@@ -3326,6 +3464,9 @@ export function FocusGraphView({
         data: {
           count: e.count, dimmed: e.dimmed, tint, mutedTint, cycleBack: e.cycleBack, reducedMotion,
           cycleAnchor: e.cycleAnchor, labelVisible: e.labelVisible, labelDense, trail,
+          labelT: e.labelT, grainCoarse: e.grainCoarse, sameAncestorFrame: e.sameAncestorFrame,
+          sourcePillUp: cardById.get(e.source)?.pillUp ?? null,
+          targetPillDown: cardById.get(e.target)?.pillDown ?? null,
         },
       }
     })
@@ -3375,8 +3516,8 @@ export function FocusGraphView({
   // stable, analyzable value to close over rather than an IIFE inline in
   // the return.
   const spotlight = useMemo(
-    () => (anchorCard ? spotlightScope(anchorCard) : null),
-    [anchorCard],
+    () => (anchorCard ? spotlightScope(anchorCard, graph.edges) : null),
+    [anchorCard, graph.edges],
   )
 
   // One ConeStore per mount (Task 20, P1) — `isolationValue` stays the
@@ -3451,6 +3592,7 @@ export function FocusGraphView({
       <HoverContext.Provider value={hoveredId}>
       <IsolationStoreContext.Provider value={isolationStore}>
       <TrailStoreContext.Provider value={trailStore}>
+      <FollowContext.Provider value={ctx}>
       <RowCursorContext.Provider value={rowCursor}>
       <ReactFlowProvider>
         <ReactFlow
@@ -3585,6 +3727,7 @@ export function FocusGraphView({
         </ReactFlow>
       </ReactFlowProvider>
       </RowCursorContext.Provider>
+      </FollowContext.Provider>
       </TrailStoreContext.Provider>
       </IsolationStoreContext.Provider>
       </HoverContext.Provider>

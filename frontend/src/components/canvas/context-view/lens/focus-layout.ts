@@ -1756,7 +1756,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const LABEL_CANDIDATES = [0.5, 0.35, 0.65, 0.2, 0.8]
     const placed: Array<{ x: number; y: number }> = []
     for (const edge of edges) {
-        if (edge.count <= 1) continue
+        // A ×N badge needs count > 1 to have anything to say; a grain
+        // SEAM chip (T22, R1) needs a slot too, whatever its count is —
+        // it is drawn whenever the wire is coarse, not when it is
+        // bundled. Both compete for the same collision-avoided real
+        // estate, so both are placed in the SAME pass.
+        if (edge.count <= 1 && !edge.grainCoarse) continue
         const s = byId.get(edge.source)
         const t = byId.get(edge.target)
         if (!s || !t) continue
@@ -1775,7 +1780,11 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         }
         if (!slot) continue
         placed.push({ x: slot.x, y: slot.y })
-        edge.labelVisible = true
+        // `labelVisible` stays what it always meant — a ×N worth
+        // showing — even though a coarse wire now competes for this
+        // pass's real estate too; the seam chip's OWN visibility is the
+        // view's call (T22, R1 rule 2: cone-only), not this flag's.
+        if (edge.count > 1) edge.labelVisible = true
         edge.labelT = slot.t
     }
 
@@ -2006,8 +2015,13 @@ export function isolationCone(
             if (!e.grainCoarse || (e.source !== seamHost && e.target !== seamHost)) continue
             edgeIds.add(e.id)
             const far = e.source === seamHost ? e.target : e.source
+            // The ancestor frame itself reads NEARER than whatever its own
+            // bundle reaches — it is, after all, where the anchor lives —
+            // so the view's "which side continues" (source vs target hop
+            // distance) still resolves correctly for a seam edge exactly
+            // as it does for an ordinary graded one.
             if (!hops.has(seamHost)) hops.set(seamHost, SEAM_HOP_DEPTH)
-            if (!hops.has(far)) hops.set(far, SEAM_HOP_DEPTH)
+            if (!hops.has(far)) hops.set(far, SEAM_HOP_DEPTH + 1)
         }
         seamHost = cardById.get(seamHost)?.frameId ?? null
     }

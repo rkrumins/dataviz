@@ -47,10 +47,17 @@ const FIXTURES = process.argv.slice(2).length
   // ...and the SCALE MANDATE (user, 2026-08-14): a 20-hop chain, and a
   // hub of 100 upstream across twelve systems plus 40 downstream — so a
   // performance fix that only looks fast on a five-card board is caught.
+  //
+  // ...and THE GRAIN SEAM (Task 22, user 2026-08-14): a cone that once
+  // presented table-grain knowledge as column-grain fact (over-claim) and
+  // its mirror, a row's cone going dark through a coarse hop its own
+  // frame carries (under-claim) — plus the in-frame routing and badge
+  // legibility the same estate exercises.
   : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall', 'walkDirectionAndHighlight',
     'walkSharedPlatform', 'walkSharedPlatformLeaf', 'walkSharedPlatformOneColumn', 'walkDensePills',
     'walkChildrenRich', 'walkChildrenScrolled', 'walkColumnFocus', 'walkPlatformFocus',
-    'walkIsolatedCone', 'walkIsolatedLeafCone', 'walkLongChain', 'walkWideHub']
+    'walkIsolatedCone', 'walkIsolatedLeafCone', 'walkLongChain', 'walkWideHub',
+    'walkGrainSeam', 'walkGrainSeamUnderclaim']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH
