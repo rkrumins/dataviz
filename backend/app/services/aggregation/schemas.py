@@ -644,6 +644,43 @@ class AggregationCadence(BaseModel):
                     "detects drift. Unset → env default.",
     )
 
+    # ── Automatic reconciliation (the drift / overlay-integrity sweep) ──
+    # Carried here rather than in a new column because ``cadence_json`` is
+    # already the persisted-global store, already read through the cached
+    # ``read_global_cadence``, already env-echoed by ``get_settings``, and
+    # already editable from the Freshness cadence dialog. A separate store
+    # would duplicate all four.
+    reconcile_enabled: Optional[bool] = Field(
+        None, alias="reconcileEnabled",
+        description="Whether the sweep may automatically reconcile sources "
+                    "whose rollups have drifted. Unset → env default.",
+    )
+    reconcile_check_interval_secs: Optional[int] = Field(
+        None, alias="reconcileCheckIntervalSecs", ge=300, le=86400,
+        description="How often each source is checked for drift. The 300s "
+                    "floor keeps a mistyped value from hammering the fleet. "
+                    "Unset → env default.",
+    )
+    reconcile_max_actions_per_run: Optional[int] = Field(
+        None, alias="reconcileMaxActionsPerRun", ge=0, le=200,
+        description="Cap on rebuilds queued by a single sweep. The remainder "
+                    "is picked up next sweep. 0 = detect but never act.",
+    )
+    reconcile_shrink_tolerance_pct: Optional[int] = Field(
+        None, alias="reconcileShrinkTolerancePct", ge=0, le=100,
+        description="How far the observed rollup may fall below the expected "
+                    "count before it reads as shrunk. The two numbers are "
+                    "measured at different instants, so some slack is "
+                    "required, not merely kind.",
+    )
+    reconcile_detectors: Optional[List[str]] = Field(
+        None, alias="reconcileDetectors",
+        description="Which detectors may ACT, from overlay_missing, "
+                    "overlay_shrunk, never_aggregated, raw_drift. Unset = "
+                    "all enabled; an EMPTY list = all disabled (detection "
+                    "still runs and is still surfaced).",
+    )
+
     class Config:
         populate_by_name = True
 

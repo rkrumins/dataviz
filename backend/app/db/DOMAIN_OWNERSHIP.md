@@ -39,7 +39,7 @@ each domain as a well-fenced module in one service.
 | **provider** | `providers`, `catalog_items` | Pure infrastructure — no tenant data, no PII. |
 | **ontology** | `ontologies`, `ontology_audit_log`, `ontology_source_mappings` | Versioned + immutable audit log. `revision` is the optimistic concurrency token. |
 | **visualization** | `context_models`, `views`, `view_favourites` | References ontology + workspace by ID only. `ontology_digest` captures schema fingerprint at save time. |
-| **aggregation** | `aggregation_jobs`, `data_source_polling_configs` | Job lifecycle. Hot writes (checkpoints). |
+| **aggregation** | `aggregation_jobs`, `data_source_polling_configs`, `reconcile_runs` | Job lifecycle. Hot writes (checkpoints). `reconcile_runs` is one row per reconciliation sweep (not per data source), trimmed to 30 days. |
 | **stats** | `data_source_stats` | Read-mostly cache. Tolerant of staleness. |
 | **platform** | `feature_flags`, `feature_categories`, `feature_definitions`, `feature_registry_meta`, `announcements`, `announcement_config`, `management_db_config`, `schema_migrations` | Reference + global config. |
 | **events** | `outbox_events` | Cross-domain contract. Every domain writes here; consumers drain. |

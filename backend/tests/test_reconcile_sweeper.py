@@ -1,0 +1,578 @@
+"""Integration tests for the reconciliation sweep.
+
+Runs against a real in-memory SQLite database (the ``aggregation`` schema is
+attached, matching conftest) with a fake aggregation service, so the batched
+reads, the two-phase structure, the caps and the persistence are all
+genuinely exercised rather than mocked away.
+
+The regressions locked down here are the expensive ones:
+
+  * the FIRST sweep over a fleet with no baseline must SEED and dispatch
+    nothing — otherwise turning this on rebuilds every source at once,
+  * a source whose stats row predates its last rebuild must not be acted on,
+    or it re-fires the same finding forever,
+  * the sweeper must never be able to reach a graph provider,
+  * a preview must write no dispatches.
+"""
+import asyncio
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import event, select
+from sqlalchemy.ext.asyncio import (
+    AsyncSession, async_sessionmaker, create_async_engine,
+)
+
+from backend.app.db.engine import Base
+from backend.app.db.models import (
+    DataSourcePollingConfigORM,
+    DataSourceStatsORM,
+    ProviderORM,
+    RefreshEventORM,
+    WorkspaceDataSourceORM,
+    WorkspaceORM,
+)
+from backend.app.services.aggregation.fingerprint import (
+    raw_fingerprint_from_counts,
+)
+from backend.app.services.aggregation.models import (
+    AggregationDataSourceStateORM,
+    AggregationJobORM,
+    ReconcileRunORM,
+)
+from backend.app.services.aggregation.reconcile_sweeper import (
+    ReconciliationSweeper,
+)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.isoformat()
+
+
+def _ago(**kw) -> str:
+    return _iso(datetime.now(timezone.utc) - timedelta(**kw))
+
+
+# ── Fixtures ────────────────────────────────────────────────────────────
+
+
+@pytest_asyncio.fixture
+async def session_factory():
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", connect_args={"check_same_thread": False},
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _attach(dbapi_conn, _rec):
+        dbapi_conn.execute("ATTACH DATABASE ':memory:' AS aggregation")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False,
+    )
+    yield factory
+    await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _no_redis(monkeypatch):
+    """Stub the fleet-wide stale-marker SCAN.
+
+    There is no Redis here, so the real call spends its full timeout failing
+    to connect on every sweep. That timeout is correct production behaviour
+    (see ``_STALE_SCAN_TIMEOUT_S``) and is not what these tests are about, so
+    they return an explicit marker set instead. ``_marked`` lets a test opt
+    into the marked case.
+    """
+    marked: list = []
+
+    async def _fake_list_stale_sources():
+        return [("ws_1", ds) for ds in marked]
+
+    monkeypatch.setattr(
+        "backend.app.services.graph_cache.list_stale_sources",
+        _fake_list_stale_sources,
+    )
+    return marked
+
+
+class _FakeJob:
+    id = "agg_fake"
+
+
+class _FakeService:
+    """Records dispatches instead of performing them."""
+
+    def __init__(self):
+        self.signals = []
+        self.triggers = []
+
+    async def signal_source_changed(self, ds_id, session, **kw):
+        self.signals.append((ds_id, kw))
+        return None
+
+    async def trigger(self, ds_id, request, trigger_source, session):
+        self.triggers.append((ds_id, trigger_source, request.idempotency_key))
+        return _FakeJob()
+
+
+async def _seed(
+    factory,
+    *,
+    ds_id="ds_1",
+    entity_counts=None,
+    edge_counts=None,
+    stats_age_secs=60,
+    agg_status="ready",
+    expected_edges=500,
+    raw_fingerprint="__match__",
+    last_aggregated_ago_secs=86_400,
+    ontology_id="bp_1",
+    projection_mode=None,
+    checked_at=None,
+    consecutive=0,
+    reconcile_enabled=None,
+    job_rows=(("completed", 86_400),),
+    polling_enabled=True,
+    polling_status="success",
+):
+    """Create one data source with everything the sweep reads.
+
+    ``raw_fingerprint="__match__"`` stores the fingerprint the observed counts
+    will produce, i.e. "no drift". Pass ``None`` for a never-seen source, or a
+    literal for a mismatch.
+    """
+    entity_counts = entity_counts if entity_counts is not None else {"Table": 100}
+    edge_counts = (
+        edge_counts if edge_counts is not None
+        else {"FLOWS_TO": 200, "AGGREGATED": 500}
+    )
+    observed_fp, _, raw_edges = raw_fingerprint_from_counts(
+        entity_counts, edge_counts,
+    )
+    if raw_fingerprint == "__match__":
+        raw_fingerprint = observed_fp
+
+    async with factory() as s:
+        # Shared parents — _seed is called repeatedly to build a fleet.
+        if await s.get(WorkspaceORM, "ws_1") is None:
+            s.add(WorkspaceORM(id="ws_1", name="ws"))
+            s.add(ProviderORM(
+                id="prov_1", name="p", provider_type="falkordb",
+                host="h", port=1, credentials="{}",
+            ))
+            await s.flush()
+        s.add(WorkspaceDataSourceORM(
+            id=ds_id, workspace_id="ws_1", provider_id="prov_1",
+            graph_name=f"g_{ds_id}", ontology_id=ontology_id,
+            projection_mode=projection_mode,
+        ))
+        s.add(DataSourceStatsORM(
+            data_source_id=ds_id,
+            node_count=sum(entity_counts.values()),
+            edge_count=sum(edge_counts.values()),
+            entity_type_counts=json.dumps(entity_counts),
+            edge_type_counts=json.dumps(edge_counts),
+            updated_at=_ago(seconds=stats_age_secs),
+        ))
+        s.add(DataSourcePollingConfigORM(
+            data_source_id=ds_id, is_enabled=polling_enabled,
+            last_status=polling_status,
+        ))
+        s.add(AggregationDataSourceStateORM(
+            data_source_id=ds_id, workspace_id="ws_1",
+            aggregation_status=agg_status,
+            aggregation_edge_count=expected_edges,
+            last_aggregated_at=(
+                _ago(seconds=last_aggregated_ago_secs)
+                if last_aggregated_ago_secs is not None else None
+            ),
+            raw_fingerprint=raw_fingerprint,
+            raw_node_count=sum(entity_counts.values()),
+            raw_edge_count=raw_edges,
+            last_reconcile_checked_at=checked_at,
+            reconcile_consecutive_actions=consecutive,
+            reconcile_enabled=reconcile_enabled,
+        ))
+        for i, (status, age) in enumerate(job_rows):
+            s.add(AggregationJobORM(
+                id=f"agg_{ds_id}_{i}", data_source_id=ds_id,
+                workspace_id="ws_1", status=status,
+                updated_at=_ago(seconds=age), created_at=_ago(seconds=age),
+            ))
+        await s.commit()
+
+
+async def _state(factory, ds_id="ds_1"):
+    async with factory() as s:
+        return await s.get(AggregationDataSourceStateORM, ds_id)
+
+
+# ── Structural guarantee ────────────────────────────────────────────────
+
+
+def test_sweeper_cannot_reach_a_graph_provider():
+    """It takes a session factory and a service getter — no registry. This is
+    the structural reason it can never make a graph call, and it should stay
+    true by construction rather than by discipline."""
+    import inspect
+
+    params = inspect.signature(ReconciliationSweeper.__init__).parameters
+    assert set(params) == {"self", "session_factory", "service_getter"}
+
+
+# ── The first-sweep storm regression ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_first_sweep_seeds_and_dispatches_nothing(session_factory):
+    """No baseline means no drift verdict is possible. Acting here would
+    rebuild the entire fleet the moment this feature is switched on."""
+    for i in range(5):
+        await _seed(
+            session_factory, ds_id=f"ds_{i}", raw_fingerprint=None,
+        )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.scanned == 5
+    assert result.seeded == 5
+    assert result.actions == 0
+    assert svc.signals == [] and svc.triggers == []
+
+    st = await _state(session_factory, "ds_0")
+    assert st.raw_fingerprint is not None  # baseline adopted
+    assert st.last_reconcile_checked_at is not None
+
+
+# ── Detection end to end ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_wiped_overlay_is_detected_and_signalled(session_factory):
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},  # AGGREGATED absent entirely
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.findings == 1
+    assert result.actions == 1
+    assert result.by_reason == {"overlay_missing": 1}
+
+    ds_id, kw = svc.signals[0]
+    assert ds_id == "ds_1"
+    assert kw["origin"] == "reconcile-sweep"
+    assert kw["audit_reason"] == "overlay_missing"
+    assert kw["evidence"]["expectedAggregatedEdges"] == 500
+    assert kw["evidence"]["observedAggregatedEdges"] == 0
+
+    st = await _state(session_factory)
+    assert st.drift_state == "overlayMissing"
+    assert st.last_reconcile_reason == "overlay_missing"
+    assert st.last_reconciled_at is not None
+    assert st.reconcile_consecutive_actions == 1
+
+
+@pytest.mark.asyncio
+async def test_raw_drift_is_detected_with_before_and_after_counts(session_factory):
+    await _seed(session_factory, raw_fingerprint="fp_old")
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_reason == {"raw_drift": 1}
+    _, kw = svc.signals[0]
+    assert kw["evidence"]["rawFingerprintBefore"] == "fp_old"
+    assert kw["evidence"]["rawFingerprintAfter"] != "fp_old"
+    st = await _state(session_factory)
+    assert st.drift_state == "drifting"
+
+
+@pytest.mark.asyncio
+async def test_never_built_source_gets_a_first_build_via_trigger(session_factory):
+    """It must NOT go through signal_source_changed — that path treats a
+    'none' status as not-applicable by design and would be a no-op."""
+    await _seed(
+        session_factory,
+        agg_status="none", expected_edges=0, raw_fingerprint=None,
+        edge_counts={"FLOWS_TO": 200}, job_rows=(),
+        last_aggregated_ago_secs=None,
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_reason == {"never_aggregated": 1}
+    assert svc.signals == []
+    ds_id, trigger_source, idem = svc.triggers[0]
+    assert (ds_id, trigger_source) == ("ds_1", "schedule")
+    assert idem.startswith("reconcile:first:ds_1:")
+
+    async with session_factory() as s:
+        events = (await s.execute(select(RefreshEventORM))).scalars().all()
+    assert len(events) == 1
+    assert events[0].origin == "reconcile-sweep"
+    assert events[0].reason == "never_aggregated"
+
+
+@pytest.mark.asyncio
+async def test_healthy_source_is_left_alone(session_factory):
+    await _seed(session_factory)
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.findings == 0
+    assert result.by_skip == {"in_sync": 1}
+    assert svc.signals == []
+    assert (await _state(session_factory)).drift_state == "inSync"
+
+
+# ── Guards that matter most ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stats_predating_the_last_rebuild_are_not_evidence(session_factory):
+    """A source rebuilt two minutes ago still reports its PRE-rebuild
+    AGGREGATED count. Acting on that re-fires the same finding forever."""
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},   # looks wiped…
+        stats_age_secs=3_600,            # …but the stats predate the rebuild
+        last_aggregated_ago_secs=60,
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.actions == 0
+    assert result.by_skip == {"stats_stale": 1}
+    assert svc.signals == []
+
+
+@pytest.mark.asyncio
+async def test_dedicated_projection_is_never_read_as_a_wiped_overlay(session_factory):
+    """Its AGGREGATED edges live in another graph that get_stats() never
+    scans, so the observed count is permanently 0 — and dedicated projection
+    is used for the LARGEST graphs."""
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        projection_mode="dedicated",
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.actions == 0
+    assert svc.signals == []
+    assert (await _state(session_factory)).drift_state == "unobservable"
+
+
+@pytest.mark.asyncio
+async def test_a_source_in_rebuild_cooldown_is_deferred(session_factory):
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        last_aggregated_ago_secs=60,     # inside the 900s default window
+        stats_age_secs=30,               # and the stats are newer than that
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip == {"cooldown": 1}
+    assert svc.signals == []
+
+
+@pytest.mark.asyncio
+async def test_a_recently_failed_rebuild_backs_off(session_factory):
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        job_rows=(("failed", 60),),
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip == {"failed_backoff": 1}
+    assert svc.signals == []
+
+
+@pytest.mark.asyncio
+async def test_a_marked_source_is_left_to_the_marker_reconciler(
+    session_factory, _no_redis,
+):
+    """A stale marker means the source already had its invalidation and
+    belongs to ``scheduler._reconcile_stale_markers``. Two mechanisms must
+    never both retry one rebuild."""
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _no_redis.append("ds_1")
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip == {"already_marked": 1}
+    assert svc.signals == []
+
+
+@pytest.mark.asyncio
+async def test_an_in_flight_rebuild_is_left_alone(session_factory):
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        job_rows=(("running", 30),),
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert result.by_skip == {"in_flight": 1}
+
+
+@pytest.mark.asyncio
+async def test_per_source_opt_out_detects_but_never_acts(session_factory):
+    """The cockpit must stay honest about drift even where automation is
+    off — that is the whole point of surfacing the finding anyway."""
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        reconcile_enabled=False,
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.actions == 0
+    assert result.by_skip == {"disabled": 1}
+    assert svc.signals == []
+
+
+@pytest.mark.asyncio
+async def test_breaker_suspends_a_source_that_keeps_re_firing(session_factory):
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        consecutive=3,
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip == {"suspended": 1}
+    assert svc.signals == []
+    assert (await _state(session_factory)).drift_state == "suspended"
+
+
+@pytest.mark.asyncio
+async def test_a_clean_pass_resets_the_breaker(session_factory):
+    await _seed(session_factory, consecutive=2)
+    svc = _FakeService()
+    await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert (await _state(session_factory)).reconcile_consecutive_actions == 0
+
+
+# ── Caps and pacing ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_action_cap_bounds_one_sweep(session_factory):
+    for i in range(15):
+        await _seed(
+            session_factory, ds_id=f"ds_{i}",
+            edge_counts={"FLOWS_TO": 200},
+        )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.findings == 15
+    assert result.actions == 10          # AGGREGATION_RECONCILE_MAX_ACTIONS
+    assert len(svc.signals) == 10
+
+
+@pytest.mark.asyncio
+async def test_first_builds_are_capped_separately(session_factory):
+    """A fresh install with many unbuilt sources drains one per sweep rather
+    than queueing every full build at once."""
+    for i in range(5):
+        await _seed(
+            session_factory, ds_id=f"ds_{i}",
+            agg_status="none", expected_edges=0, raw_fingerprint=None,
+            edge_counts={"FLOWS_TO": 200}, job_rows=(),
+            last_aggregated_ago_secs=None,
+        )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.findings == 5
+    assert len(svc.triggers) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_source_checked_recently_is_not_re_evaluated(session_factory):
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        checked_at=_ago(seconds=30),
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert result.scanned == 0
+
+
+# ── Preview ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_preview_finds_without_acting(session_factory):
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep(
+        dry_run=True, mode="preview",
+    )
+
+    assert result.findings == 1
+    assert result.actions == 0
+    assert svc.signals == [] and svc.triggers == []
+    assert [p.reason for p in result.pending] == ["overlay_missing"]
+
+
+# ── Run records ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_each_sweep_records_a_run_with_its_tallies(session_factory):
+    await _seed(session_factory, ds_id="ds_a", edge_counts={"FLOWS_TO": 200})
+    await _seed(session_factory, ds_id="ds_b")
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    async with session_factory() as s:
+        runs = (await s.execute(select(ReconcileRunORM))).scalars().all()
+    assert len(runs) == 1
+    run = runs[0]
+    assert run.id == result.run_id
+    assert run.mode == "auto"
+    assert run.scanned == 2 and run.findings == 1 and run.actions == 1
+    detail = json.loads(run.detail)
+    assert detail["byReason"] == {"overlay_missing": 1}
+    assert detail["bySkip"] == {"in_sync": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_dispatch_failure_is_counted_not_raised(session_factory):
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+
+    class _Boom(_FakeService):
+        async def signal_source_changed(self, ds_id, session, **kw):
+            raise RuntimeError("provider down")
+
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _Boom(),
+    ).sweep()
+    assert result.errors == 1
+    assert result.actions == 0
+
+
+@pytest.mark.asyncio
+async def test_no_active_service_defers_rather_than_crashing(session_factory):
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    result = await ReconciliationSweeper(session_factory, lambda: None).sweep()
+    assert result.findings == 1
+    assert result.actions == 0
+    assert result.errors == 1

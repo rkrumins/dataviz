@@ -155,6 +155,21 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Stuck-job reconciler started")
 
+    # 8.5 Reconciliation sweep — a different subsystem from the reconciler
+    # above despite the shared word. That one keeps JOBS honest; this one
+    # keeps the :AGGREGATED OVERLAY honest, detecting a wipe, a shrink, a
+    # never-built source or raw-count drift from the stats service's cached
+    # counts. It is given no registry by construction, so it can never make a
+    # graph call; its own advisory lock (a distinct key) keeps replicas from
+    # double-sweeping.
+    from .reconcile_sweeper import run_reconcile_sweeper
+    recon_sweeper_shutdown = asyncio.Event()
+    recon_sweeper_task = asyncio.create_task(
+        run_reconcile_sweeper(get_jobs_session, recon_sweeper_shutdown),
+        name="aggregation-reconcile-sweeper",
+    )
+    logger.info("Reconciliation sweeper started")
+
     # 9. State-sync consumer (WS1.2). Projects aggregation status events
     # from the events stream into public.workspace_data_sources (the
     # viz-service's local read hint) and invalidates aggregated-read
@@ -189,6 +204,12 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(reconciler_task, timeout=2.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             reconciler_task.cancel()
+    recon_sweeper_shutdown.set()
+    if not recon_sweeper_task.done():
+        try:
+            await asyncio.wait_for(recon_sweeper_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            recon_sweeper_task.cancel()
     await state_sync.stop()
     state_sync_task.cancel()
     try:

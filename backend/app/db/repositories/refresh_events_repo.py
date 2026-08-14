@@ -42,10 +42,18 @@ async def emit_refresh_event(
     actions: Optional[dict] = None,
     outcome: str,
     detail: Optional[str] = None,
+    reason: Optional[str] = None,
+    evidence: Optional[dict] = None,
 ) -> Optional[str]:
     """Record one refresh/audit event. Returns the new event id, or
     ``None`` on any failure (broken factory, DB error, etc.) — never
-    raises."""
+    raises.
+
+    ``reason`` and ``evidence`` are the reconciliation sweep's "why": a typed
+    detector code plus the counts behind it. They are deliberately separate
+    from ``actions``, which is contractually "what the signal DID" and is
+    surfaced as a ``List[str]`` on the wire — overloading it would break both
+    readers."""
     factory = session_factory_or_none or get_async_session
     try:
         async with factory() as session:
@@ -61,6 +69,8 @@ async def emit_refresh_event(
                 actions=json.dumps(actions) if actions else None,
                 outcome=outcome,
                 detail=detail,
+                reason=reason,
+                evidence=json.dumps(evidence) if evidence else None,
             )
             session.add(row)
             await session.commit()

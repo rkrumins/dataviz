@@ -68,6 +68,35 @@ AGGREGATION_DRIFT_AUTO_REBUILD = (
     .strip().lower() in ("1", "true", "yes", "on")
 )
 
+# ── Automatic reconciliation defaults ────────────────────────────────────
+# Env fallbacks for the reconciliation sweep, kept HERE beside the cadence
+# defaults so ``get_settings`` reports exactly the value the sweep resolves
+# against — the same discipline the drift-auto flag above documents.
+AGGREGATION_RECONCILE_ENABLED = (
+    __import__("os").getenv("AGGREGATION_RECONCILE_ENABLED", "true")
+    .strip().lower() in ("1", "true", "yes", "on")
+)
+AGGREGATION_RECONCILE_INTERVAL_SECS = int(
+    __import__("os").getenv("AGGREGATION_RECONCILE_INTERVAL_SECS", "3600")
+)
+AGGREGATION_RECONCILE_MAX_ACTIONS = int(
+    __import__("os").getenv("AGGREGATION_RECONCILE_MAX_ACTIONS", "10")
+)
+AGGREGATION_RECONCILE_SHRINK_TOLERANCE_PCT = int(
+    __import__("os").getenv("AGGREGATION_RECONCILE_SHRINK_TOLERANCE_PCT", "10")
+)
+# How stale the stats row may be before a finding is untrustworthy. Default
+# 3x the stats service's own 900s idle poll interval: acting on stale counts
+# is how a false positive rebuilds a multi-million-node graph.
+AGGREGATION_RECONCILE_STATS_MAX_AGE_SECS = int(
+    __import__("os").getenv("AGGREGATION_RECONCILE_STATS_MAX_AGE_SECS", "2700")
+)
+# Consecutive actions on one source before the breaker trips and it is
+# suspended for a human. Guards against a finding we can never clear.
+AGGREGATION_RECONCILE_BREAKER_CAP = int(
+    __import__("os").getenv("AGGREGATION_RECONCILE_BREAKER_CAP", "3")
+)
+
 
 # ── F9: configurable rebuild cadence ─────────────────────────────────────
 # The env-only cooldown/drift knobs are now overridable by a persisted
@@ -96,6 +125,56 @@ def resolve_rebuild_interval(
     if global_secs is not None:
         return global_secs
     return AGGREGATION_REBUILD_MIN_INTERVAL_SECS
+
+
+def resolve_reconcile_enabled(
+    override: Optional[bool], global_value: Optional[bool],
+) -> bool:
+    """Per-source override → persisted global → env default.
+
+    Same shape as :func:`resolve_rebuild_interval`: ``None`` at a level means
+    "unset, fall through"; ``False`` is a real value (the per-source opt-out)
+    and is honored, not treated as unset.
+    """
+    if override is not None:
+        return override
+    if global_value is not None:
+        return global_value
+    return AGGREGATION_RECONCILE_ENABLED
+
+
+def resolve_reconcile_interval(
+    override_secs: Optional[int], global_secs: Optional[int],
+) -> int:
+    """Per-source override → persisted global → env default (3600)."""
+    if override_secs is not None:
+        return override_secs
+    if global_secs is not None:
+        return global_secs
+    return AGGREGATION_RECONCILE_INTERVAL_SECS
+
+
+def reconcile_policy_from_cadence(cadence) -> "ReconcilePolicy":
+    """Build the detectors' :class:`Policy` from the persisted global cadence.
+
+    ``reconcile_detectors`` is the one field that must be read with ``is not
+    None`` rather than truthiness: an EMPTY list is a real configuration
+    ("every detector off"), and a truthiness check would silently turn them
+    all back on.
+    """
+    from .reconcile import Policy as ReconcilePolicy
+
+    detectors = getattr(cadence, "reconcile_detectors", None)
+    shrink = getattr(cadence, "reconcile_shrink_tolerance_pct", None)
+    return ReconcilePolicy(
+        stats_max_age_secs=AGGREGATION_RECONCILE_STATS_MAX_AGE_SECS,
+        shrink_tolerance_pct=(
+            shrink if shrink is not None
+            else AGGREGATION_RECONCILE_SHRINK_TOLERANCE_PCT
+        ),
+        breaker_cap=AGGREGATION_RECONCILE_BREAKER_CAP,
+        detectors=None if detectors is None else tuple(detectors),
+    )
 
 
 def invalidate_global_cadence_cache() -> None:
@@ -1368,6 +1447,8 @@ class AggregationService:
         self, ds_id: str, session: AsyncSession, *,
         reason: str = "external_load", force: bool = False,
         origin: str = "api", actor: str = "internal",
+        audit_reason: Optional[str] = None,
+        evidence: Optional[dict] = None,
     ) -> SourceChangedResponse:
         """Convergence entry point after a DIRECT write to a source's graph.
 
@@ -1394,6 +1475,12 @@ class AggregationService:
         before the rebuild completes re-invalidates harmlessly and the
         idempotency key collapses the duplicate job; if the rebuild fails,
         the stored fingerprint stays old so the next signal retries.
+
+        ``audit_reason`` / ``evidence`` are carried straight through to the
+        one audit event this call emits — the reconciliation sweep uses them
+        to record WHY it acted and the counts behind it. They change no
+        behaviour here; the one-row-per-signal contract that
+        ``refresh_source(scope="auto")`` depends on is preserved.
         """
         from .models import AggregationDataSourceStateORM
 
@@ -1448,6 +1535,7 @@ class AggregationService:
             event_id = await self._emit_signal_event(
                 workspace_id=workspace_id, ds_id=ds_id, origin=origin,
                 actor=actor, gate="unchanged", actions={}, outcome="noop",
+                audit_reason=audit_reason, evidence=evidence,
             )
             return SourceChangedResponse(
                 changed=False,
@@ -1601,6 +1689,7 @@ class AggregationService:
             workspace_id=workspace_id, ds_id=ds_id, origin=origin,
             actor=actor, gate=("forced" if force else "changed"),
             actions=actions, outcome=outcome, detail=trigger_detail,
+            audit_reason=audit_reason, evidence=evidence,
         )
 
         return SourceChangedResponse(
@@ -1615,7 +1704,7 @@ class AggregationService:
 
     async def _emit_signal_event(
         self, *, workspace_id, ds_id, origin, actor, gate, actions, outcome,
-        detail=None,
+        detail=None, audit_reason=None, evidence=None,
     ) -> Optional[str]:
         """Best-effort audit emit for one ``signal_source_changed`` outcome.
 
@@ -1637,6 +1726,8 @@ class AggregationService:
                 actions=actions,
                 outcome=outcome,
                 detail=detail,
+                reason=audit_reason,
+                evidence=evidence,
             )
         except Exception as exc:
             logger.warning(

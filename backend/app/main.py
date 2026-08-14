@@ -933,6 +933,24 @@ async def lifespan(_app: FastAPI):
                 asyncio.create_task(agg_scheduler.start())
                 logger.info("Aggregation scheduler started")
 
+                # Reconciliation sweep — detects a wiped/shrunk :AGGREGATED
+                # overlay, a never-built source, or raw-count drift from the
+                # stats service's cached counts, and queues a rebuild. Takes
+                # no provider registry by construction: it never touches the
+                # graph. Same runs_scheduler() gate as the scheduler above.
+                from .services.aggregation.reconcile_sweeper import (
+                    run_reconcile_sweeper,
+                )
+                _app.state._recon_sweeper_shutdown = asyncio.Event()
+                _app.state._recon_sweeper_task = asyncio.create_task(
+                    run_reconcile_sweeper(
+                        get_jobs_session,
+                        _app.state._recon_sweeper_shutdown,
+                    ),
+                    name="aggregation-reconcile-sweeper",
+                )
+                logger.info("Reconciliation sweeper started")
+
             # Stuck-job reconciler — runs wherever the aggregation worker
             # lives. Lock-aware: the per-job exec lock is the liveness
             # signal, so a job whose executor died (lock expired) is
@@ -1287,6 +1305,22 @@ async def lifespan(_app: FastAPI):
             _reconciler_task.cancel()
             try:
                 await _reconciler_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Same for the reconciliation sweeper — it commits state-row writes, so
+    # it must stop before the DB pool goes away.
+    _recon_shutdown = getattr(_app.state, "_recon_sweeper_shutdown", None)
+    _recon_task = getattr(_app.state, "_recon_sweeper_task", None)
+    if _recon_shutdown is not None:
+        _recon_shutdown.set()
+    if _recon_task is not None and not _recon_task.done():
+        try:
+            await asyncio.wait_for(_recon_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _recon_task.cancel()
+            try:
+                await _recon_task
             except (asyncio.CancelledError, Exception):
                 pass
 

@@ -169,6 +169,38 @@ async def init_aggregation_db() -> None:
                     END IF;
                 END $$
                 """,
+                # Automatic reconciliation (2026-08-14), mirrored in alembic
+                # 20260814_1200_agg_reconcile. Per-source policy, the drift
+                # baseline (AGGREGATED-excluded, so it survives a rebuild),
+                # the checked/acted stamps, the stored drift verdict, and the
+                # circuit-breaker counter. The CP and worker boot against this
+                # table before alembic has necessarily run, so they carry the
+                # same columns here.
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS reconcile_enabled BOOLEAN NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS reconcile_check_interval_secs INTEGER NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS raw_fingerprint TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS raw_node_count INTEGER NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS raw_edge_count INTEGER NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS last_reconcile_checked_at TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS last_reconciled_at TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS last_reconcile_reason TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS last_reconcile_mode TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS drift_state TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS reconcile_consecutive_actions "
+                "INTEGER NULL DEFAULT 0",
+                f"CREATE INDEX IF NOT EXISTS ix_ds_state_recon_due "
+                f"ON {SCHEMA_NAME}.data_source_state (last_reconcile_checked_at)",
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:

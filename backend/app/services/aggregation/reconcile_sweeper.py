@@ -1,0 +1,772 @@
+"""ReconciliationSweeper — the scheduled drift / overlay-integrity sweep.
+
+Detects data sources whose ``:AGGREGATED`` overlay has fallen out of step
+with their raw graph and queues a rebuild, using ONLY the counts the stats
+service already collects. **This class takes no provider registry**, which
+is the structural guarantee — asserted in the tests — that it can never make
+a graph call of its own.
+
+Not to be confused with two neighbours that also say "reconcile":
+
+  * ``reconciler.py`` is the stuck-JOB reconciler (dead-worker liveness).
+  * ``scheduler._reconcile_stale_markers`` re-signals sources already
+    carrying a Redis stale marker. This sweeper defers to it: any marked
+    source is skipped, so the two never both retry one rebuild.
+
+The pass is deliberately two-phase, because the advisory lock is
+transaction-scoped and ``engine.py`` forbids holding a session across an
+outbound network call:
+
+  Phase A — lock held, pure SQL, no network. Read candidates, evaluate,
+            write ``last_reconcile_checked_at`` / seeded baselines / the run
+            header, commit (releasing the lock). Emits an action list.
+  Phase B — no lock. Dispatch each action on its own short session, then
+            record outcomes.
+
+The ``last_reconcile_checked_at`` write inside Phase A *is* the cross-replica
+mutual exclusion: a replica that loses the race finds no due candidates.
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Optional
+
+from sqlalchemy import select, text
+
+from .reconcile import Observation, Verdict, evaluate
+
+logger = logging.getLogger(__name__)
+
+
+# How often the loop wakes. Deliberately NOT the check interval: the tick is
+# cheap (one bounded query that returns nothing when nothing is due), and
+# per-SOURCE due-ness honours the configurable interval. Waking every 60s
+# means a cadence change takes effect within a minute — matching what the
+# settings dialog promises — and sources stagger instead of all firing at the
+# top of the hour.
+_SWEEP_TICK_SECS = 60.0
+
+# SQL LIMIT on one pass. Bounds the read regardless of fleet size; the
+# remainder is picked up next tick (ordering is oldest-checked-first, so
+# nothing starves).
+_SCAN_CAP = 200
+
+# Cold-start guard, separate from the general action cap. A fresh install
+# with 200 never-aggregated sources drains at one first build per sweep
+# rather than queueing 200 full builds at once.
+_FIRST_BUILD_CAP = 1
+
+# Per-pass cap on stats-poll nudges for sources whose counts are too stale
+# to trust. Best-effort; the next sweep sees fresh numbers.
+_NUDGE_CAP = 25
+
+# Floor on the SQL-side due-ness cutoff. The query is deliberately permissive
+# (it cannot know each source's override) and Python filters exactly.
+_MIN_CHECK_INTERVAL_SECS = 300
+
+_RUN_RETENTION_DAYS = 30
+
+# Ceiling on the fleet-wide stale-marker SCAN. Mirrors the scheduler's
+# SCHEDULER_DRIFT_CHECK_TIMEOUT convention: a slow or unreachable dependency
+# must not be able to stall the sweep.
+_STALE_SCAN_TIMEOUT_S = float(
+    __import__("os").getenv("AGGREGATION_RECONCILE_SCAN_TIMEOUT", "3")
+)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass
+class _Action:
+    """One dispatch decided in Phase A, carried out in Phase B."""
+    data_source_id: str
+    workspace_id: Optional[str]
+    reason: str
+    evidence: Dict
+    first_build: bool
+
+
+@dataclass
+class SweepResult:
+    """What one pass observed and did. Persisted as a ``reconcile_runs`` row
+    and returned to the on-demand API."""
+    run_id: str
+    mode: str = "auto"
+    scanned: int = 0
+    skipped: int = 0
+    seeded: int = 0
+    findings: int = 0
+    actions: int = 0
+    errors: int = 0
+    by_reason: Dict[str, int] = field(default_factory=dict)
+    by_skip: Dict[str, int] = field(default_factory=dict)
+    # Populated on preview runs so the UI can show what WOULD be reconciled.
+    pending: List[_Action] = field(default_factory=list)
+
+    def detail_json(self) -> str:
+        return json.dumps({
+            "byReason": self.by_reason,
+            "bySkip": self.by_skip,
+            "sample": [a.data_source_id for a in self.pending[:20]],
+        })
+
+
+class ReconciliationSweeper:
+    """Owns the I/O around the pure detectors in ``reconcile.py``.
+
+    ``service_getter`` is a callable returning the wired ``AggregationService``
+    (or ``None`` before startup completes), matching how the scheduler reaches
+    it — the sweeper must not capture a service that does not exist yet.
+    """
+
+    def __init__(
+        self,
+        session_factory: Callable[[], Any],
+        service_getter: Optional[Callable[[], Any]] = None,
+    ) -> None:
+        self._session_factory = session_factory
+        if service_getter is None:
+            from .service import get_active_service
+            service_getter = get_active_service
+        self._service_getter = service_getter
+        self._running = False
+
+    # ── Loop ─────────────────────────────────────────────────────────
+
+    async def start(self, shutdown: Optional[asyncio.Event] = None) -> None:
+        self._running = True
+        logger.info(
+            "Reconciliation sweeper started (tick=%ds, scan_cap=%d)",
+            int(_SWEEP_TICK_SECS), _SCAN_CAP,
+        )
+        while self._running and not (shutdown and shutdown.is_set()):
+            try:
+                result = await self.sweep()
+                if result and (result.findings or result.actions):
+                    logger.info(
+                        "reconcile sweep %s: scanned=%d findings=%d actions=%d "
+                        "seeded=%d skipped=%d errors=%d",
+                        result.run_id, result.scanned, result.findings,
+                        result.actions, result.seeded, result.skipped,
+                        result.errors,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # A failed pass must never kill the loop.
+                logger.error(
+                    "reconcile sweep failed: %s", exc, exc_info=True,
+                )
+            if shutdown is not None:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        shutdown.wait(), timeout=_SWEEP_TICK_SECS,
+                    )
+                    return
+            else:
+                await asyncio.sleep(_SWEEP_TICK_SECS)
+
+    async def stop(self) -> None:
+        self._running = False
+
+    # ── One pass ─────────────────────────────────────────────────────
+
+    async def sweep(
+        self,
+        *,
+        dry_run: bool = False,
+        data_source_ids: Optional[List[str]] = None,
+        mode: str = "auto",
+        actor: Optional[str] = None,
+        record: bool = True,
+    ) -> Optional[SweepResult]:
+        """Run one pass. ``dry_run`` evaluates and records but acts on nothing
+        — that is what the preview endpoint uses to show blast radius before
+        automation is switched on.
+
+        Returns ``None`` when another replica holds the sweep lock.
+        """
+        result = SweepResult(run_id=f"rcn_{uuid.uuid4().hex[:12]}", mode=mode)
+
+        phase_a = await self._phase_a(result, data_source_ids, dry_run)
+        if phase_a is None:
+            return None
+        actions, nudges = phase_a
+
+        for ds_id, ws_id in nudges:
+            await self._nudge_stats(ds_id, ws_id)
+
+        if not dry_run:
+            await self._phase_b(actions, result, mode, actor)
+        else:
+            result.pending = actions
+
+        if record:
+            await self._record_run(result, actor)
+        return result
+
+    # ── Phase A: locked, pure SQL ────────────────────────────────────
+
+    async def _phase_a(self, result, data_source_ids, dry_run):
+        """Returns ``(actions, nudges)``, or ``None`` if the lock is held."""
+        from .models import AggregationDataSourceStateORM
+        from .service import (
+            read_global_cadence,
+            reconcile_policy_from_cadence,
+            resolve_rebuild_interval,
+            resolve_reconcile_enabled,
+            resolve_reconcile_interval,
+        )
+
+        actions: List[_Action] = []
+        nudges: List[tuple] = []
+
+        async with self._session_factory() as session:
+            if not await self._claim_lock(session):
+                return None
+
+            cadence = await read_global_cadence(session)
+            policy = reconcile_policy_from_cadence(cadence)
+            global_enabled = getattr(cadence, "reconcile_enabled", None)
+            global_interval = getattr(
+                cadence, "reconcile_check_interval_secs", None,
+            )
+            max_actions = getattr(cadence, "reconcile_max_actions_per_run", None)
+            if max_actions is None:
+                from .service import AGGREGATION_RECONCILE_MAX_ACTIONS
+                max_actions = AGGREGATION_RECONCILE_MAX_ACTIONS
+
+            states = await self._candidates(
+                session, data_source_ids, global_interval,
+            )
+            if not states:
+                return actions, nudges
+
+            ds_ids = [s.data_source_id for s in states]
+            ctx = await self._batch_context(session, ds_ids)
+
+            first_builds = 0
+            for state in states:
+                obs = self._observe(
+                    state, ctx, policy,
+                    reconcile_enabled=resolve_reconcile_enabled(
+                        state.reconcile_enabled, global_enabled,
+                    ),
+                    rebuild_interval=resolve_rebuild_interval(
+                        state.rebuild_min_interval_secs,
+                        cadence.rebuild_min_interval_secs,
+                    ),
+                )
+                # Per-source due-ness: the SQL cutoff is permissive because it
+                # cannot know each source's override, so the exact check is
+                # here. A not-yet-due source is left untouched (no checked_at
+                # write) and reappears on a later tick.
+                interval = resolve_reconcile_interval(
+                    state.reconcile_check_interval_secs, global_interval,
+                )
+                if data_source_ids is None and not self._is_due(state, interval):
+                    continue
+
+                result.scanned += 1
+                verdict = evaluate(obs, policy)
+                state.last_reconcile_checked_at = _now_iso()
+                state.drift_state = verdict.drift_state
+
+                if verdict.skip:
+                    result.skipped += 1
+                    result.by_skip[verdict.skip] = (
+                        result.by_skip.get(verdict.skip, 0) + 1
+                    )
+                    if verdict.seed:
+                        result.seeded += 1
+                        self._adopt(state, obs)
+                    elif verdict.skip == "in_sync":
+                        # A clean pass clears the breaker: whatever was wrong
+                        # is fixed, so the next real finding starts fresh.
+                        state.reconcile_consecutive_actions = 0
+                        self._adopt(state, obs)
+                    elif verdict.skip in ("stats_stale", "stats_unhealthy"):
+                        if len(nudges) < _NUDGE_CAP:
+                            nudges.append((state.data_source_id, state.workspace_id))
+                    continue
+
+                result.findings += 1
+                result.by_reason[verdict.reason] = (
+                    result.by_reason.get(verdict.reason, 0) + 1
+                )
+
+                if dry_run or len(actions) >= max_actions:
+                    if not dry_run and len(actions) >= max_actions:
+                        logger.info(
+                            "reconcile sweep: action cap (%d) reached — %s "
+                            "deferred to the next sweep",
+                            max_actions, state.data_source_id,
+                        )
+                    if dry_run:
+                        actions.append(_Action(
+                            data_source_id=state.data_source_id,
+                            workspace_id=state.workspace_id,
+                            reason=verdict.reason,
+                            evidence=verdict.evidence,
+                            first_build=verdict.reason == "never_aggregated",
+                        ))
+                    continue
+
+                first_build = verdict.reason == "never_aggregated"
+                if first_build:
+                    if first_builds >= _FIRST_BUILD_CAP:
+                        continue
+                    first_builds += 1
+
+                actions.append(_Action(
+                    data_source_id=state.data_source_id,
+                    workspace_id=state.workspace_id,
+                    reason=verdict.reason,
+                    evidence=verdict.evidence,
+                    first_build=first_build,
+                ))
+                # Advance the baseline AT ACTION TIME so this finding cannot
+                # re-fire every sweep while the rebuild is in flight. If the
+                # rebuild then fails, retry is the stale-marker reconciler's
+                # job — two mechanisms must never both retry one rebuild.
+                self._adopt(state, obs)
+                state.last_reconciled_at = _now_iso()
+                state.last_reconcile_reason = verdict.reason
+                state.last_reconcile_mode = "manual" if data_source_ids else "auto"
+                state.reconcile_consecutive_actions = (
+                    state.reconcile_consecutive_actions or 0
+                ) + 1
+
+            await session.commit()  # releases the advisory lock
+        return actions, nudges
+
+    async def _claim_lock(self, session) -> bool:
+        """Transaction-scoped advisory lock, distinct from the stuck-job
+        reconciler's so the two sweeps never block each other. A non-Postgres
+        backend (unit fakes) simply proceeds — single-instance semantics."""
+        try:
+            got = (await session.execute(text(
+                "SELECT pg_try_advisory_xact_lock("
+                "hashtextextended('agg:reconcile-sweep', 0))"
+            ))).scalar()
+            return got not in (False, 0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return True
+
+    async def _candidates(self, session, data_source_ids, global_interval):
+        """Bounded, oldest-checked-first. Explicit ids bypass due-ness (the
+        on-demand path)."""
+        from .models import AggregationDataSourceStateORM as S
+
+        stmt = select(S)
+        if data_source_ids:
+            stmt = stmt.where(S.data_source_id.in_(data_source_ids))
+        else:
+            interval = min(
+                global_interval or _MIN_CHECK_INTERVAL_SECS,
+                _MIN_CHECK_INTERVAL_SECS,
+            )
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(seconds=interval)
+            ).isoformat()
+            stmt = stmt.where(
+                (S.last_reconcile_checked_at.is_(None))
+                | (S.last_reconcile_checked_at < cutoff)
+            ).order_by(
+                S.last_reconcile_checked_at.asc().nullsfirst()
+            ).limit(_SCAN_CAP)
+        return list((await session.execute(stmt)).scalars().all())
+
+    async def _batch_context(self, session, ds_ids) -> Dict[str, Dict]:
+        """Four batched reads, joined in memory.
+
+        Batched rather than one wide JOIN because these tables live in three
+        different domains (``DOMAIN_OWNERSHIP.md``) — the same shape
+        ``_rebuild_override_map`` uses.
+        """
+        from backend.app.db.models import (
+            DataSourcePollingConfigORM,
+            DataSourceStatsORM,
+            WorkspaceDataSourceORM,
+        )
+        from .fingerprint import raw_fingerprint_from_counts
+        from .models import AggregationJobORM
+
+        out: Dict[str, Dict] = {d: {} for d in ds_ids}
+
+        # 1. The data source itself (deleted? which ontology? projection?).
+        rows = (await session.execute(
+            select(
+                WorkspaceDataSourceORM.id,
+                WorkspaceDataSourceORM.deleted_at,
+                WorkspaceDataSourceORM.is_active,
+                WorkspaceDataSourceORM.ontology_id,
+                WorkspaceDataSourceORM.provider_id,
+                WorkspaceDataSourceORM.projection_mode,
+            ).where(WorkspaceDataSourceORM.id.in_(ds_ids))
+        )).all()
+        seen = set()
+        for ds_id, deleted_at, is_active, ontology_id, provider_id, proj in rows:
+            seen.add(ds_id)
+            out[ds_id].update(
+                deleted=bool(deleted_at) or is_active is False,
+                ontology_id=ontology_id,
+                provider_id=provider_id,
+                # A dedicated projection writes AGGREGATED to ANOTHER graph,
+                # which get_stats() never scans — so the observed count is
+                # permanently 0 and means nothing. See reconcile._overlay_missing.
+                overlay_observable=(proj or "in_source") != "dedicated",
+            )
+        for ds_id in ds_ids:
+            if ds_id not in seen:
+                # A state row with no live data source: treat as deleted.
+                out[ds_id]["deleted"] = True
+
+        # 2. The stats service's output — the whole evidence base.
+        now = datetime.now(timezone.utc)
+        stat_rows = (await session.execute(
+            select(DataSourceStatsORM).where(
+                DataSourceStatsORM.data_source_id.in_(ds_ids)
+            )
+        )).scalars().all()
+        for row in stat_rows:
+            try:
+                entity_counts = json.loads(row.entity_type_counts or "{}")
+                edge_counts = json.loads(row.edge_type_counts or "{}")
+            except (TypeError, ValueError):
+                entity_counts, edge_counts = {}, {}
+            fp, observed_agg, raw_edges = raw_fingerprint_from_counts(
+                entity_counts, edge_counts,
+            )
+            age = None
+            updated = _parse_iso(row.updated_at)
+            if updated is not None:
+                age = max(0, int((now - updated).total_seconds()))
+            out[row.data_source_id].update(
+                has_stats=True,
+                stats_age_secs=age,
+                stats_as_of=row.updated_at,
+                stats_updated=updated,
+                node_count=int(row.node_count or 0),
+                observed_aggregated=observed_agg,
+                observed_raw_fingerprint=fp,
+                observed_raw_edge_total=raw_edges,
+            )
+
+        # 3. Is the stats poll itself healthy?
+        poll_rows = (await session.execute(
+            select(
+                DataSourcePollingConfigORM.data_source_id,
+                DataSourcePollingConfigORM.is_enabled,
+                DataSourcePollingConfigORM.last_status,
+            ).where(DataSourcePollingConfigORM.data_source_id.in_(ds_ids))
+        )).all()
+        for ds_id, enabled, last_status in poll_rows:
+            out[ds_id].update(
+                stats_polling_enabled=bool(enabled),
+                stats_last_status=last_status,
+            )
+
+        # 4. Job history, in ONE query: in-flight rebuilds, whether one ever
+        # completed, and when the most recent attempt failed. The last of
+        # those is the failure backoff — computed from the batched rows rather
+        # than ``scheduler._recently_failed``, which issues a query per source
+        # and would mean 200 round-trips on a full scan.
+        job_rows = (await session.execute(
+            select(
+                AggregationJobORM.data_source_id,
+                AggregationJobORM.status,
+                AggregationJobORM.updated_at,
+            )
+            .where(AggregationJobORM.data_source_id.in_(ds_ids))
+            # NULLS LAST: a freshly-created (pending) job has updated_at=NULL,
+            # which Postgres ranks FIRST on DESC and SQLite ranks last — pin
+            # both to "latest updated row wins, never a NULL".
+            .order_by(AggregationJobORM.updated_at.desc().nullslast())
+        )).all()
+        latest_seen: set = set()
+        for ds_id, status, updated_at in job_rows:
+            entry = out.setdefault(ds_id, {})
+            if status in ("pending", "running"):
+                entry["job_in_flight"] = True
+            if status == "completed":
+                entry["has_completed_job"] = True
+            if ds_id not in latest_seen:
+                latest_seen.add(ds_id)
+                if status == "failed":
+                    entry["last_failed_at"] = _parse_iso(updated_at)
+
+        # 5. Stale markers — ONE bounded Redis SCAN for the whole fleet. A
+        # marked source already had its invalidation and belongs to
+        # ``scheduler._reconcile_stale_markers``; two mechanisms must never
+        # both retry one rebuild.
+        #
+        # Time-boxed on purpose. An unreachable Redis takes seconds to fail
+        # its connect, and a large keyspace makes the SCAN itself unbounded —
+        # either would stall every sweep. Both degrade to "not marked", which
+        # is the same direction every other read of this marker fails in: the
+        # worst case is that the marker reconciler and this sweep both act on
+        # one source, which the idempotency key collapses anyway.
+        try:
+            from backend.app.services.graph_cache import list_stale_sources
+            marked = await asyncio.wait_for(
+                list_stale_sources(), timeout=_STALE_SCAN_TIMEOUT_S,
+            )
+            for _ws, marked_ds in marked:
+                if marked_ds in out:
+                    out[marked_ds]["stale_marker"] = True
+        except asyncio.CancelledError:
+            raise
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.debug("reconcile sweep: stale-marker scan skipped: %s", exc)
+
+        return out
+
+    def _observe(
+        self, state, ctx, policy, *, reconcile_enabled, rebuild_interval,
+    ) -> Observation:
+        c = ctx.get(state.data_source_id, {})
+        stats_updated = c.get("stats_updated")
+        last_agg = _parse_iso(state.last_aggregated_at)
+        # A source rebuilt more recently than the stats row was written still
+        # reports its PRE-rebuild AGGREGATED count. Acting on that re-fires the
+        # same finding forever — so treat it as stale, not as evidence.
+        if (
+            stats_updated is not None and last_agg is not None
+            and stats_updated < last_agg
+        ):
+            stats_age = None
+        else:
+            stats_age = c.get("stats_age_secs")
+
+        # The rebuild throttle, evaluated against the SAME resolved window the
+        # signal's own cooldown gate uses — so the sweep never queues work the
+        # signal would immediately defer.
+        in_cooldown = _within_cooldown(last_agg, rebuild_interval)
+        # Failure backoff: a permanently-failing source must not be re-signaled
+        # every sweep.
+        failed_at = c.get("last_failed_at")
+        recently_failed = (
+            failed_at is not None
+            and rebuild_interval > 0
+            and (datetime.now(timezone.utc) - failed_at).total_seconds()
+            < rebuild_interval
+        )
+
+        return Observation(
+            data_source_id=state.data_source_id,
+            workspace_id=state.workspace_id,
+            provider_id=c.get("provider_id"),
+            deleted=c.get("deleted", False),
+            ontology_id=c.get("ontology_id"),
+            has_stats=c.get("has_stats", False),
+            stats_age_secs=stats_age,
+            stats_as_of=c.get("stats_as_of"),
+            node_count=c.get("node_count", 0),
+            observed_aggregated=c.get("observed_aggregated", 0),
+            observed_raw_fingerprint=c.get("observed_raw_fingerprint"),
+            observed_raw_edge_total=c.get("observed_raw_edge_total", 0),
+            stats_polling_enabled=c.get("stats_polling_enabled", True),
+            stats_last_status=c.get("stats_last_status"),
+            has_state=True,
+            aggregation_status=state.aggregation_status,
+            expected_aggregated=int(state.aggregation_edge_count or 0),
+            stored_raw_fingerprint=state.raw_fingerprint,
+            stored_raw_node_count=state.raw_node_count,
+            stored_raw_edge_count=state.raw_edge_count,
+            consecutive_actions=int(state.reconcile_consecutive_actions or 0),
+            job_in_flight=c.get("job_in_flight", False),
+            has_completed_job=c.get("has_completed_job", False),
+            stale_marker=c.get("stale_marker", False),
+            in_cooldown=in_cooldown,
+            recently_failed=recently_failed,
+            overlay_observable=c.get("overlay_observable", True),
+            reconcile_enabled=reconcile_enabled,
+        )
+
+    @staticmethod
+    def _is_due(state, interval_secs: int) -> bool:
+        if interval_secs <= 0:
+            return True
+        last = _parse_iso(state.last_reconcile_checked_at)
+        if last is None:
+            return True
+        elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+        return elapsed >= interval_secs
+
+    @staticmethod
+    def _adopt(state, obs: Observation) -> None:
+        """Write the observed shape as the new baseline."""
+        if obs.observed_raw_fingerprint is None:
+            return
+        state.raw_fingerprint = obs.observed_raw_fingerprint
+        state.raw_node_count = obs.node_count
+        state.raw_edge_count = obs.observed_raw_edge_total
+
+    # ── Phase B: unlocked dispatch ───────────────────────────────────
+
+    async def _phase_b(self, actions, result, mode, actor) -> None:
+        svc = self._service_getter()
+        if svc is None:
+            logger.warning(
+                "reconcile sweep: no active aggregation service — %d action(s) "
+                "deferred to the next sweep", len(actions),
+            )
+            result.errors += len(actions)
+            return
+
+        for action in actions:
+            try:
+                async with self._session_factory() as session:
+                    if action.first_build:
+                        await self._dispatch_first_build(
+                            svc, session, action, actor,
+                        )
+                    else:
+                        await svc.signal_source_changed(
+                            action.data_source_id, session,
+                            reason=action.reason,
+                            origin="reconcile-sweep",
+                            actor=actor or "internal",
+                            audit_reason=action.reason,
+                            evidence=action.evidence,
+                        )
+                result.actions += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                result.errors += 1
+                logger.warning(
+                    "reconcile sweep: dispatch failed for %s (%s): %s",
+                    action.data_source_id, action.reason, exc,
+                )
+
+    async def _dispatch_first_build(self, svc, session, action, actor) -> None:
+        """Queue the very first aggregation for an onboarded source.
+
+        Deliberately NOT via ``signal_source_changed``: that path treats a
+        ``none`` status as not-applicable by design, so it would be a no-op
+        here. ``trigger`` applies the stored global tuning defaults, so this
+        job inherits the configuration that covers every graph size with no
+        extra plumbing.
+        """
+        from .schemas import AggregationTriggerRequest
+        from backend.app.db.repositories.refresh_events_repo import (
+            emit_refresh_event,
+        )
+
+        fp = action.evidence.get("rawFingerprintAfter") or "new"
+        job = await svc.trigger(
+            action.data_source_id,
+            AggregationTriggerRequest(
+                idempotency_key=(
+                    f"reconcile:first:{action.data_source_id}:{fp}"
+                ),
+            ),
+            "schedule",
+            session,
+        )
+        await emit_refresh_event(
+            self._session_factory,
+            workspace_id=action.workspace_id,
+            data_source_id=action.data_source_id,
+            origin="reconcile-sweep",
+            actor=actor or "internal",
+            scope="rollups",
+            gate="changed",
+            actions={"job_id": job.id, "first_build": True},
+            outcome="accepted",
+            reason=action.reason,
+            evidence=action.evidence,
+        )
+
+    async def _nudge_stats(self, ds_id, workspace_id) -> None:
+        """Ask the stats service to re-poll a source whose counts were too
+        stale to act on, so the next sweep has fresh numbers. Best-effort."""
+        if not workspace_id:
+            return
+        try:
+            from backend.insights_service.enqueue import mark_stats_changed
+            await mark_stats_changed(ds_id, workspace_id)
+        except Exception as exc:
+            logger.debug("reconcile sweep: stats nudge failed for %s: %s", ds_id, exc)
+
+    # ── Run record ───────────────────────────────────────────────────
+
+    async def _record_run(self, result: SweepResult, actor) -> None:
+        """Persist the pass, and trim old ones. Never raises: losing a run
+        record must not fail the sweep it describes."""
+        from .models import ReconcileRunORM
+
+        try:
+            async with self._session_factory() as session:
+                session.add(ReconcileRunORM(
+                    id=result.run_id,
+                    started_at=_now_iso(),
+                    finished_at=_now_iso(),
+                    mode=result.mode,
+                    actor=actor,
+                    scanned=result.scanned,
+                    skipped=result.skipped,
+                    seeded=result.seeded,
+                    findings=result.findings,
+                    actions=result.actions,
+                    errors=result.errors,
+                    detail=result.detail_json(),
+                ))
+                cutoff = (
+                    datetime.now(timezone.utc)
+                    - timedelta(days=_RUN_RETENTION_DAYS)
+                ).isoformat()
+                await session.execute(
+                    ReconcileRunORM.__table__.delete().where(
+                        ReconcileRunORM.started_at < cutoff
+                    )
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning("reconcile sweep: run record failed: %s", exc)
+
+
+def _within_cooldown(
+    last_aggregated: Optional[datetime], interval_secs: int,
+) -> bool:
+    """Mirror of ``AggregationService._within_rebuild_cooldown``, taking the
+    already-parsed timestamp. Kept as a plain function so Phase A can evaluate
+    it over a batch without a service handle."""
+    if interval_secs <= 0 or last_aggregated is None:
+        return False
+    elapsed = (datetime.now(timezone.utc) - last_aggregated).total_seconds()
+    return elapsed < interval_secs
+
+
+def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    """Tolerant ISO parse; assumes UTC when naive. ``None`` on bad input so a
+    single malformed timestamp never breaks a fleet sweep."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts)
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+async def run_reconcile_sweeper(
+    session_factory: Callable[[], Any],
+    shutdown: asyncio.Event,
+    service_getter: Optional[Callable[[], Any]] = None,
+) -> None:
+    """Entrypoint for the background task, mirroring ``run_reconciler``."""
+    sweeper = ReconciliationSweeper(session_factory, service_getter)
+    await sweeper.start(shutdown)
