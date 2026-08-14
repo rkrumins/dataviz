@@ -476,10 +476,10 @@ function FrameAncestry({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   )
 }
 
+/** Where a TOP-LEVEL card lives. Rows never carry one: inside a frame
+ *  the header already names the owner, right above them, and repeating
+ *  it on every row is the noise the frame was for. */
 function ProvenanceRibbon({ card }: { card: FocusCard }) {
-  // Inside a frame the header already names the owner, right above this
-  // row. Repeating it on every row is the noise the frame was for.
-  if (card.frameId) return null
   if (card.ancestry.length === 0 && !card.parentLabel) return null
   const chain = card.ancestry.length > 0 ? card.ancestry : [card.parentLabel!]
   const owner = chain[chain.length - 1]
