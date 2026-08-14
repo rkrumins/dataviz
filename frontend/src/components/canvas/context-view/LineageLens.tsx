@@ -432,12 +432,21 @@ export function LineageLens({
    * the arrivals sitting there unadmitted, and offered them as a REVEAL: the
    * reported "+246, click, nothing, +1, click again".
    *
-   * So the page is opened HERE, at click time. It costs nothing when there
-   * is nothing local to admit — which is always, because a card with
-   * anything left to reveal shows a reveal pill and never reaches this
-   * handler — and it is what makes the fetched cohort render the moment the
-   * merge lands. A cohort larger than one page still leaves an honest
-   * remainder behind; what it can never do again is deliver nothing.
+   * So the page is opened HERE, at click time, and it is what makes the
+   * fetched cohort render the moment the merge lands.
+   *
+   * THE INVARIANT THAT MAKES THAT SAFE, stated exactly: `pillFor` offers a
+   * fetch only once NOTHING reachable from this card's subtree is still
+   * unadmitted, and the page this opens admits from that same subtree —
+   * one `rankedGroups` call, shared. So at the moment of an extend or page
+   * click the budget has no competitor, and the arrivals are the only
+   * thing it can spend itself on. (It did NOT hold while the pill asked
+   * from what a card visually stands for: an open frame's rows own
+   * themselves, so a frame could offer a fetch with a dozen unrevealed
+   * row-neighbours still queued, and they would take the page instead.)
+   *
+   * A cohort larger than one page still leaves an honest remainder behind;
+   * what it can never do again is deliver nothing.
    */
   const extendWalk = useCallback((_key: string, urn: string, dir: 'in' | 'out') => {
     revealMore(revealKey(dir, urn))

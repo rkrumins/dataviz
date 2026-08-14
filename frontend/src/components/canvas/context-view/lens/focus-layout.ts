@@ -298,19 +298,20 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      * Groups of not-yet-shown neighbours reachable from `near`, ranked.
      * Weight is raw hops — the wire the reveal would draw.
      *
-     * `near` is which nodes the question is asked FROM; `inside` is the
-     * card's whole subtree and decides what counts as INTERNAL. They are
-     * separate parameters on purpose: the pill asks from what a card
-     * visually stands for, the click acts on the card's whole subtree,
-     * and if the internal test moved with `near` the two would disagree
-     * about a hop that leaves a collapsed sibling — a pill offering
-     * something the click could not deliver. Keeping `inside` fixed makes
-     * what the pill offers a SUBSET of what the click admits, always.
+     * ONE set, asked FROM and tested as INTERNAL: the card's whole
+     * subtree. The pill and the click must agree exactly — the badge is a
+     * promise about what one click will draw, so a set the badge did not
+     * count is a card that appears unannounced, and a set the click will
+     * not admit is a number that never arrives. (They used to differ: the
+     * pill asked from what a card VISUALLY STANDS FOR and the click acted
+     * on the subtree, which is a superset the moment a frame is open and
+     * its rows own themselves. An open frame's ⊕ then spent its page on
+     * its rows' neighbours — cards the badge never counted, and, when
+     * twelve of them outranked a just-fetched cohort, instead of it.)
      */
     const groupsFrom = (
         dir: LensDir,
-        near: ReadonlySet<string>,
-        inside: ReadonlySet<string>,
+        subtree: ReadonlySet<string>,
         cacheKey: string,
     ): RevealGroup[] => {
         const hit = groupCache.get(cacheKey)
@@ -319,7 +320,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         for (const hop of sg.lineageEdges) {
             const from = dir === 'in' ? hop.targetUrn : hop.sourceUrn
             const far = dir === 'in' ? hop.sourceUrn : hop.targetUrn
-            if (!near.has(from) || inside.has(far) || seed.has(far)) continue
+            if (!subtree.has(from) || subtree.has(far) || seed.has(far)) continue
             const root = rootOf(far)
             const group = byRoot.get(root) ?? { weight: 0, members: new Map<string, number>() }
             group.weight += 1
@@ -340,10 +341,11 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         groupCache.set(cacheKey, ranked)
         return ranked
     }
-    /** What a REVEAL CLICK on this card admits: everything reachable from
-     *  its whole subtree, whatever is currently open. */
+    /** What a REVEAL CLICK on this card admits — and, because they are the
+     *  same call, exactly what its ⊕ counts: everything reachable from its
+     *  whole subtree, whatever is currently open. */
     const rankedGroups = (dir: LensDir, urn: string): RevealGroup[] =>
-        groupsFrom(dir, subtreeOf(urn), subtreeOf(urn), `sub:${dir}:${urn}`)
+        groupsFrom(dir, subtreeOf(urn), `sub:${dir}:${urn}`)
 
     const revealedKeys = [...view.revealed.keys()].sort()
     const admittedGroups: RevealGroup[] = []
@@ -766,15 +768,54 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      * that node, and `page(thatUrn, dir, cursor)` is what the consumer
      * calls. Both obey the one rule: split the key, pass the urn.
      */
+    /**
+     * Is something DRAWN INSIDE this card already offering these reveals?
+     *
+     * The subtree set the pill and the click now share is the right set to
+     * COUNT and to ADMIT — but not always the right place to OFFER. An open
+     * frame's rows are cards of their own, each with its own ⊕ against its
+     * own neighbours; a frame that offered them again would grow a second
+     * copy of every row's pill in its gutter, which is the confetti
+     * `standsFor` was built to stop.
+     *
+     * So the offer goes to the finest grain that can act on it, and a card
+     * with a wired descendant that still has something free waits. It loses
+     * nothing: its own question comes back the moment those are drawn, and
+     * until then the rows' pills are sitting right there. It is also what
+     * keeps the fetch honest — see `pillFor`'s frontier branch.
+     */
+    const drawnInsideOffers = (urn: string, dir: LensDir): boolean => {
+        const sub = subtreeOf(urn)
+        for (const hop of sg.lineageEdges) {
+            const from = dir === 'in' ? hop.targetUrn : hop.sourceUrn
+            const far = dir === 'in' ? hop.sourceUrn : hop.targetUrn
+            // A hop out of a descendant that is drawn in its own right...
+            if (from === urn || !sub.has(from) || !wired.has(from)) continue
+            // ...to something this card does not already contain...
+            if (sub.has(far) || seed.has(far)) continue
+            // ...and has not yet put on the board.
+            if (!population.has(far)) return true
+        }
+        return false
+    }
+
     const pillFor = (urn: string, dir: LensDir): FocusPill | null => {
-        const owned = ownedBy(urn)
         // What this direction could still show from data already in hand:
         // the REMAINDER, not one page of it. A group another card's reveal
         // already put on the board is not offered again, and — because the
         // admission loop charges a page only for what it introduces — every
         // group counted here is one a click can actually reach.
-        const remainingGroups = groupsFrom(dir, owned, subtreeOf(urn), `own:${dir}:${urn}`)
+        //
+        // THE SAME CALL the admission loop makes for this key, so the badge
+        // below counts exactly the set one click draws from, and a fetch is
+        // never offered while anything free is still queued underneath it.
+        const remainingGroups = rankedGroups(dir, urn)
             .filter(g => g.members.some(m => !population.has(m)))
+        // Something drawn inside this card offers these already, at the
+        // grain that owns them. Nothing is offered twice, and nothing is
+        // offered here until they are gone — which is also what makes the
+        // frontier branch below safe to reach.
+        if (remainingGroups.length > 0 && drawnInsideOffers(urn, dir)) return null
         if (remainingGroups.length > 0) {
             // CONNECTIONS, the same unit every other number on this board
             // uses — the band headers, a card's ×N, the focal's in/out. A
@@ -804,7 +845,20 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // The card speaks for what it stands for — its own frontier, plus
         // that of anything collapsed inside it, plus that of any level
         // the picture walked THROUGH to present this card.
-        const entries = [...owned, ...(foldedFrontiers.get(urn) ?? [])]
+        //
+        // Reaching here means NOTHING reachable from this card's subtree is
+        // still waiting to be drawn — the reveal branch above returned on
+        // both of its outcomes. That is the invariant the consumer's
+        // extend/page click leans on: the reveal page it opens has no
+        // competitor, so the cohort it fetches is the only thing that page
+        // can spend itself on. Break it and the P1 comes back.
+        //
+        // `ownedBy` and NOT the subtree here, unlike the reveal above: a
+        // frontier is a fact about ONE node, and a card whose rows are
+        // drawn separately must not re-offer theirs — five nested frames
+        // each growing their own copy of one column's "+2" is what this
+        // set exists to prevent.
+        const entries = [...ownedBy(urn), ...(foldedFrontiers.get(urn) ?? [])]
             .sort()
             .map(u => ({ urn: u, node: model.get(u)! }))
             .map(({ urn: u, node }) => ({
@@ -958,7 +1012,16 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // Connected first, then everything else inside — the order the
         // divider row below announces, and the order a reader wants:
         // what answers the question, then what merely lives here.
-        const rows = [...kids, ...rosterExtras]
+        //
+        // Rows already carded elsewhere are dropped HERE rather than
+        // silently refused by `pushCard` when the window reaches them: a
+        // row this list counts but never draws is a row the scroll window
+        // skips, a count that overstates, and — because the frame's list
+        // region OWNS its rows by id for assistive tech — an
+        // `aria-owns` naming an element that does not exist and a
+        // keyboard cursor that can land on nothing.
+        const connectedRows = kids.filter(child => !cardIdByUrn.has(child))
+        const rows = [...connectedRows, ...rosterExtras]
         // The FOCUS is always a compact card. What it holds is stated by
         // the contains-stack attached below it (further down), never by
         // swelling the thing you asked about into a frame the rest of the
@@ -1023,8 +1086,8 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             // question nobody asked. Carried by the focus too, because
             // its contains-stack is the same frame at a different address.
             frameEmpty: (isFrame || isFocus) && (nodeOf(urn)?.children.length ?? 0) === 0,
-            frameConnectedCount: kids.length,
-            frameLoaded: showAll ? rows.length : kids.length,
+            frameConnectedCount: connectedRows.length,
+            frameLoaded: showAll ? rows.length : connectedRows.length,
             frameTotal: showAll ? (roster?.total ?? -1) : (contentsOf(urn)?.total ?? -1),
             frameHasMore: showAll ? (roster?.hasMore ?? false) : false,
             frameOffset: offset,
@@ -1115,7 +1178,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             // reader to notice the rows went grey. Drawn only when the
             // boundary is actually inside the window; scrolled past, it
             // is not a fact about what is on screen.
-            if (i === kids.length && kids.length > 0 && rosterExtras.length > 0) {
+            if (i === connectedRows.length && connectedRows.length > 0 && rosterExtras.length > 0) {
                 pushCard({
                     ...baseCard(),
                     id: `div:${urn}`,
@@ -1205,7 +1268,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // "schemaField" is eight identical labels crowding out the eight
         // names that differ; a frame holding columns AND views is where
         // the chip is the answer to "what am I looking at".
-        const kinds = new Set(own.map(c => c.type))
+        //
+        // An UNRESOLVED type is not a second kind — it is the absence of
+        // one. Counting it turned a single unresolved roster row into a
+        // chip on all eight columns, saying "these differ" about rows
+        // that do not.
+        const kinds = new Set(own.map(c => c.type).filter(t => t !== UNRESOLVED_TYPE))
         for (const row of own) row.showType = kinds.size > 1
     }
     for (const card of cards) {

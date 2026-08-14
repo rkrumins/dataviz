@@ -532,9 +532,11 @@ const gutterEnds = (card: FocusCard) => ({
  * Rows are React Flow SIBLINGS of their frame, not DOM descendants, so
  * `aria-activedescendant` alone would name an element outside the
  * listbox; `aria-owns` is the sanctioned way to state the relationship
- * anyway. Scoped by the frame, because a diamond genuinely can put one
- * entity in two frames at once. The escape is injective (`_` escapes
- * itself), so two urns differing only in punctuation cannot collide.
+ * anyway. Scoped by the frame because that is what the id IS — a row OF
+ * this list — and it keeps the id readable in a DOM inspector; one
+ * entity gets one card (`pushCard` refuses a second), so the urn alone
+ * would also be unique. The escape is injective (`_` escapes itself), so
+ * two urns differing only in punctuation cannot collide.
  */
 const domSafe = (s: string): string =>
   s.replace(/[^a-zA-Z0-9-]/g, c => `_${c.charCodeAt(0).toString(36)}`)
@@ -1148,7 +1150,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
  * a header that stays interactive while the body lets clicks through to
  * the child cards sitting on top.
  */
-function FocusFrameNode({ data }: NodeProps) {
+function FocusFrameNode({ data, selected }: NodeProps) {
   const { card, ctx } = data as unknown as { card: FocusCard; ctx: CardCtx }
   const { onPath, offPath } = usePathState(card.id)
   // A frame nested inside another frame is also one of ITS rows, so it
@@ -1200,8 +1202,11 @@ function FocusFrameNode({ data }: NodeProps) {
     : `${card.count.toLocaleString()} connected inside${via}`
   return (
     <div
+      // A nested frame is one of its host's rows, so it answers to the
+      // host's list the way any other row does — including saying whether
+      // IT is the one selected.
       {...(hostKey !== null && card.nodeId
-        ? { id: rowDomId(hostKey, card.nodeId), role: 'option' as const, 'aria-selected': false }
+        ? { id: rowDomId(hostKey, card.nodeId), role: 'option' as const, 'aria-selected': !!selected }
         : {})}
       style={{
         width: card.w,
@@ -1507,6 +1512,17 @@ function FrameScrollRegion({ card, ctx, win }: {
       <div
         // `nowheel` is what stops React Flow zooming the board out from
         // under a scroll; `nodrag` stops a scroll-drag panning it.
+        //
+        // THE TRADE, stated: this region is pointer-events-auto, so the
+        // slivers of a frame body that are not covered by a row — the
+        // gaps between rows and the padding at its edges — no longer
+        // reach the pane, and the board cannot be PANNED by grabbing one.
+        // Rows were never pan targets either (a React Flow node is not in
+        // the pane's subtree, and a frame's rows are not draggable), so
+        // what is lost is those slivers and nothing else; the board still
+        // pans from anywhere outside a frame. What the region must not
+        // also swallow is the pane's other job — dismissing what is open
+        // — so it does that itself, below.
         className="nowheel nodrag pointer-events-auto absolute inset-x-0 bottom-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded-b-xl"
         style={{ top: FRAME_HEADER_H }}
         // The single tab stop for the whole list: Tab must not have to
@@ -1522,6 +1538,11 @@ function FrameScrollRegion({ card, ctx, win }: {
         // is a broken relationship, not a generous one.
         aria-owns={rows.slice(win.offset, win.offset + win.size).map(r => rowDomId(key, r.urn)).join(' ') || undefined}
         onKeyDown={onKeyDown}
+        // Empty space inside a frame is still background: clicking it
+        // drops the preview and the selection, exactly as clicking the
+        // board around it does. Without this the region silently ate the
+        // pane's dismiss over every open container.
+        onClick={() => ctx.onSelect(null)}
         onWheel={(e) => { e.stopPropagation(); ctx.onFrameWheel(key, e.deltaY) }}
         onFocus={() => { if (cursorIndex < 0 && rows.length > 0) ctx.onRowCursor(key, rows[win.offset]?.urn ?? rows[0].urn) }}
         // The cursor is a FOCUS affordance: a ring left behind on a list
@@ -1532,7 +1553,11 @@ function FrameScrollRegion({ card, ctx, win }: {
           400-row table is one gesture from end to end) and the numbers
           under it. At the FOOT of the list rather than in the header,
           which has ~94px between the name and the Find box and clipped
-          "6 on this lineage · showing 1–10 of 60" halfway through. */}
+          "6 on this lineage · showing 1–10 of 60" halfway through.
+          It is also where the next page ANNOUNCES ITSELF: a shimmer row
+          could not, because the rows are React Flow siblings drawn ABOVE
+          this frame and the page is fetched a windowful EARLY — so it sat
+          under the rows, at a moment the window was never resting on. */}
       {win.scrollable && (
         <>
           <FrameScrollThumb card={card} win={win} onScroll={scrollTo} />
@@ -1540,17 +1565,15 @@ function FrameScrollRegion({ card, ctx, win }: {
             className="pointer-events-none absolute bottom-[2px] right-2.5 text-[9px] tabular-nums text-ink-muted/75 leading-none"
             title={`Rows ${win.from.toLocaleString()}–${win.to.toLocaleString()} of ${
               win.exact ? win.total.toLocaleString() : `${win.total.toLocaleString()}+`
-            } inside ${card.label}`}
+            } inside ${card.label}${card.fetch === 'loading' ? ' — fetching the next page' : ''}`}
           >
             {win.from.toLocaleString()}–{win.to.toLocaleString()} of{' '}
             {win.exact ? win.total.toLocaleString() : `${win.total.toLocaleString()}+`}
+            {card.fetch === 'loading' && (
+              <span className="text-accent-lineage/80"> · loading…</span>
+            )}
           </span>
         </>
-      )}
-      {/* The next page, on its way in. A shimmer where the rows will be
-          is the honest statement: they are coming, and this is how many. */}
-      {card.fetch === 'loading' && win.atEnd && (
-        <div className="absolute inset-x-2.5 bottom-2 h-6 rounded-lg bg-black/[0.05] dark:bg-white/[0.06] animate-pulse" />
       )}
     </>
   )
@@ -1599,6 +1622,9 @@ function FrameScrollThumb({ card, win, onScroll }: {
 }
 
 const MemoFocusFrameNode = memo(FocusFrameNode, (prev, next) => {
+  // `selected` is read now (a nested frame is one of its host's rows and
+  // says so), so a memo that ignored it would freeze that state.
+  if (prev.selected !== next.selected) return false
   const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx }
   const b = next.data as unknown as { card: FocusCard; ctx: CardCtx }
   return a.ctx === b.ctx && sameCard(a.card, b.card)
@@ -1893,21 +1919,43 @@ function LensPeek({ card, host, ctx, onDismiss }: {
       <div className="mt-2 space-y-1">
         {/* Only the moves this row can actually make. A "walk from here"
             over a drained direction would be a button that does nothing,
-            which is the whole complaint the ⊕ states honestly. */}
-        {pill && ctx.onExtend && ctx.onRevealMore && (
+            which is the whole complaint the ⊕ states honestly — and the
+            handler this kind of pill DISPATCHES to is the one that has to
+            be present, not whichever handler happened to be named here. */}
+        {pill && (pill.kind === 'reveal' ? ctx.onRevealMore : pill.kind === 'page' ? ctx.onPage : ctx.onExtend) && (
           <button
             type="button"
+            // In flight, this is a status rather than a control — the same
+            // rule the ⊕ itself obeys, so the two can never disagree about
+            // whether a click has been taken. A failed one offers the SAME
+            // click again, which is what retry means.
+            disabled={pill.status === 'loading'}
             onClick={() => {
               onDismiss()
               if (pill.kind === 'reveal') ctx.onRevealMore?.(pill.key)
               else if (pill.kind === 'page' && pill.cursor) ctx.onPage?.(pillTarget(pill.key), pillDir, pill.cursor)
               else ctx.onExtend?.(pill.key, pillTarget(pill.key), pillDir)
             }}
-            className={cn(act, 'bg-accent-lineage/12 border border-accent-lineage/35 text-accent-lineage hover:bg-accent-lineage/20')}
+            className={cn(
+              act,
+              pill.status === 'error'
+                ? 'bg-amber-500/10 border border-amber-500/40 text-amber-700 dark:text-amber-400 hover:bg-amber-500/20'
+                : 'bg-accent-lineage/12 border border-accent-lineage/35 text-accent-lineage hover:bg-accent-lineage/20 disabled:opacity-60',
+            )}
           >
-            <LucideIcons.Plus className="w-3 h-3" />
-            Walk further {pillDir === 'in' ? 'upstream' : 'downstream'}
-            {pill.count != null && <span className="ml-auto tabular-nums opacity-70">{pill.count.toLocaleString()}</span>}
+            {pill.status === 'loading'
+              ? <LucideIcons.Loader2 className="w-3 h-3 animate-spin" />
+              : pill.status === 'error'
+                ? <LucideIcons.AlertTriangle className="w-3 h-3" />
+                : <LucideIcons.Plus className="w-3 h-3" />}
+            {pill.status === 'loading'
+              ? 'Fetching…'
+              : pill.status === 'error'
+                ? 'Couldn’t fetch — try again'
+                : `Walk further ${pillDir === 'in' ? 'upstream' : 'downstream'}`}
+            {pill.status == null && pill.count != null && (
+              <span className="ml-auto tabular-nums opacity-70">{pill.count.toLocaleString()}</span>
+            )}
           </button>
         )}
         {card.nodeId && (

@@ -1081,6 +1081,31 @@ describe('what is really inside a container', () => {
     expect(onLoadAllChildren).toHaveBeenCalledTimes(1)
   })
 
+  it('says the next page is on its way, where the reader is already looking', () => {
+    // A shimmer ROW could not: the rows are React Flow siblings drawn
+    // above the frame, and the page is fetched a windowful early — so it
+    // sat under them, at a moment the window was never resting on. The
+    // position readout beside the thumb is uncovered and always in view.
+    const onLoadAllChildren: LoadRoster = vi.fn()
+    const { show } = openWideTable(onLoadAllChildren)
+    expect(screen.queryByText(/loading…/)).toBeNull()
+    show('loading')
+    expect(screen.getByText(/loading…/)).toBeTruthy()
+    show('done')
+    expect(screen.queryByText(/loading…/)).toBeNull()
+  })
+
+  it('empty space inside a frame still dismisses, like the board around it', () => {
+    // The list region covers the frame body to catch a wheel and hold the
+    // keyboard focus — which also put it in front of the pane, whose job
+    // it is to drop what is open when you click away from it.
+    renderLens(['F'], tableWithColumns())
+    fireEvent.click(screen.getByText('order_id').closest('[role="option"]')!)
+    expect(document.querySelector('[aria-label^="Preview of"]')).toBeTruthy()
+    fireEvent.click(screen.getByLabelText(/^Rows inside raw_orders\./))
+    expect(document.querySelector('[aria-label^="Preview of"]')).toBeNull()
+  })
+
   it('the window never runs past the rows in hand, however hard it is spun', () => {
     const onLoadAllChildren: LoadRoster = vi.fn()
     openWideTable(onLoadAllChildren)

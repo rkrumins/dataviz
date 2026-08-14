@@ -448,11 +448,11 @@ const walkSharedPlatformOneColumn = (): WalkFixture => ({
  *
  * A downstream table opened onto four columns, every one of them with
  * more lineage beyond it AND the table itself with more: a ⊕ on each row
- * at the frame's inner edge, plus the frame's own ⊕ just outside it, plus
- * a hover toolbar that appears over the row you are pointing at. Those
- * three used to land on top of each other — a row's pill straddled the
- * frame's border, four pixels from the frame's pill, under a toolbar that
- * only shows up once your pointer is already there.
+ * at the frame's inner edge, plus the frame's own ⊕ just outside it. They
+ * used to land on top of each other — a row's pill straddled the frame's
+ * border, four pixels from the frame's pill, under a hover toolbar that
+ * only appeared once the pointer was already on its way to that pill.
+ * (The toolbar is gone: a row's actions live in the preview panel now.)
  *
  * EXPECTED: every pill fully inside its own row, a clear gutter to the
  * frame's border, and the frame's own pill separated from all of them.

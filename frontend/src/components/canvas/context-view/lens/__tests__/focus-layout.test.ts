@@ -895,6 +895,89 @@ describe('focus-layout — every ⊕ counts the same thing: connections', () => 
         expect(cardFor(after, 'B')!.pillDown).toBeNull()
     })
 
+    /**
+     * THE WIRED-DESCENDANT SHAPE — the way the P1 could come back.
+     *
+     * An OPEN frame's rows are drawn as cards of their own, so they own
+     * themselves. While the ⊕ asked from what a card visually STANDS FOR
+     * and the click admitted from its whole SUBTREE, the frame's badge
+     * could not see its rows' unrevealed neighbours — and one click spent
+     * its page on them: cards the badge never counted, and, with more than
+     * a page of them, INSTEAD of a just-fetched cohort.
+     */
+    const openFrameWithQueuedRows = () => {
+        const nodes = [wnode('F'), wnode('T', 'dataset', 'wide_table', { childCount: 30 })]
+        const contains: Array<[string, string]> = []
+        const hops: Array<[string, string]> = []
+        // Fourteen columns on this lineage, each with a source of its own
+        // that no page has revealed yet — more than one page holds.
+        for (let i = 0; i < 14; i++) {
+            const col = `c${String(i).padStart(2, '0')}`
+            const src = `s${String(i).padStart(2, '0')}`
+            nodes.push(wnode(col, 'schemaField', `column_${String(i).padStart(2, '0')}`))
+            nodes.push(wnode(src, 'dataset', `source_${String(i).padStart(2, '0')}`))
+            contains.push(['T', col])
+            hops.push([col, 'F'], [src, col])
+        }
+        const sg = subgraph({
+            focus: 'F',
+            nodes,
+            contains,
+            hops,
+            // ...and the TABLE itself has a frontier the data source reported.
+            frontierUp: [{ urn: 'T', totalCount: 300, nextCursor: null }],
+        })
+        const base = initialLensViewState(sg)
+        return { sg, open: { ...base, expandedContainment: new Set([...base.expandedContainment, 'T']) } }
+    }
+
+    it('an open frame NEVER offers a fetch while its rows still hold something free', () => {
+        const { sg, open } = openFrameWithQueuedRows()
+        const g = layout(sg, open)
+        // This is the invariant `extendWalk` leans on, stated as a fact
+        // about the frame: it cannot be showing an extend here, so the
+        // reveal page that click opens can never be spent on the fourteen
+        // row-neighbours queued underneath instead of on what it fetched.
+        expect(cardFor(g, 'T')!.pillUp).toBeNull()
+        // The offer is where it can be acted on — one ⊕ per row, counting
+        // that row's own connection, and no second copy in the frame's
+        // gutter saying the same thing about all of them at once.
+        expect(cardFor(g, 'c00')!.pillUp).toMatchObject({ kind: 'reveal', count: 1, groups: 1 })
+        // One per row ON SCREEN. The six scrolled past keep theirs — a
+        // window decides what is drawn, never what is offered.
+        expect(g.cards.filter(c => c.pillUp?.kind === 'reveal')).toHaveLength(FRAME_WINDOW)
+        expect(cardFor(g, 'c13')).toBeUndefined()
+    })
+
+    it('a card that DOES offer a reveal counts exactly what its click draws', () => {
+        // Nothing is drawn inside a leaf row, so its badge and its click
+        // are the same set by construction — and a click delivers it.
+        const { sg, open } = openFrameWithQueuedRows()
+        const before = layout(sg, open)
+        expect(urns(before)).not.toContain('s00')
+        const clicked = layout(sg, withReveal(open, revealKey('in', 'c00'), 1))
+        expect(urns(clicked)).toContain('s00')
+        // Delivered in full, so nothing is left to offer.
+        expect(cardFor(clicked, 'c00')!.pillUp).toBeNull()
+        // ...and its neighbours' offers are untouched.
+        expect(cardFor(clicked, 'c01')!.pillUp).toMatchObject({ kind: 'reveal', count: 1 })
+    })
+
+    it('only once the free ones are drawn does the frame offer its own fetch', () => {
+        const { sg, open } = openFrameWithQueuedRows()
+        // Every row's reveal taken, exactly as fourteen clicks would.
+        let view: LensViewState = open
+        for (let i = 0; i < 14; i++) {
+            view = withReveal(view, revealKey('in', `c${String(i).padStart(2, '0')}`), 1)
+        }
+        const drained = layout(sg, view)
+        expect(urns(drained)).toContain('s13')
+        // 300 the data source knows of, at TABLE grain; its columns'
+        // fourteen are drawn but they are the columns' own degree, not the
+        // table's, so the remainder it reports is its own.
+        expect(cardFor(drained, 'T')!.pillUp).toMatchObject({ kind: 'extend', count: 300 })
+    })
+
     it('extend and page count connections too, and claim no card count', () => {
         // The frontier sits on the FOCUS, whose neighbours are already
         // drawn — so there is nothing local left to reveal and the pill is
@@ -1456,6 +1539,65 @@ describe('focus-layout — frames scroll instead of growing', () => {
             const pb = initialLensViewState(plain)
             const g = layout(plain, { ...pb, expandedContainment: new Set([...pb.expandedContainment, 'T']) })
             expect(cardFor(g, 'c0')!.showType).toBe(false)
+        })
+
+        it('an UNRESOLVED type is not a second kind — it is the absence of one', () => {
+            // One roster row the walk could not type turned a frame of
+            // eight identical columns into eight chips saying "these
+            // differ", about rows that do not.
+            const sg = subgraph({
+                focus: 'F',
+                nodes: [
+                    wnode('F'), wnode('T', 'dataset', 'src'),
+                    wnode('c0', 'schemaField', 'amount'), wnode('c1', 'schemaField', 'currency'),
+                ],
+                contains: [['T', 'c0'], ['T', 'c1']],
+                hops: [['c0', 'F'], ['c1', 'F']],
+            })
+            const base = initialLensViewState(sg)
+            const g = layout(sg, {
+                ...base,
+                expandedContainment: new Set([...base.expandedContainment, 'T']),
+                frameShowAll: new Set(['T']),
+            }, {
+                childrenAll: new Map([['T', {
+                    // No `type` on the payload at all — the walk never
+                    // resolved this one.
+                    children: [{ id: 'x0', data: { label: 'mystery_col' } } as unknown as LensWalkNode],
+                    hasMore: false,
+                    total: 3,
+                }]]),
+                childrenAllStatus: new Map([['T', 'done']]),
+            })
+            expect(cardFor(g, 'x0')!.type).toBe('not loaded')
+            expect(cardFor(g, 'c0')!.showType).toBe(false)
+            expect(cardFor(g, 'x0')!.showType).toBe(false)
+        })
+
+        it('a row already carded elsewhere is not counted as one of this frame\'s', () => {
+            // A row this list counts but never draws is a scroll window
+            // that skips, a count that overstates, and an `aria-owns`
+            // naming an element that does not exist.
+            const sg = subgraph({
+                focus: 'F',
+                nodes: [
+                    wnode('F'), wnode('A', 'dataset', 'a'), wnode('B', 'dataset', 'b'),
+                    wnode('x', 'dataset', 'shared_child'),
+                ],
+                // `x` lives in A, and both A and B reach the focus.
+                contains: [['A', 'x']],
+                hops: [['x', 'F'], ['A', 'F'], ['B', 'F'], ['B', 'x']],
+            })
+            const g = layout(sg)
+            const frames = g.cards.filter(c => c.kind === 'frame' && c.nodeId !== null)
+            // Whichever frame drew it, exactly one card exists for `x`...
+            expect(g.cards.filter(c => c.nodeId === 'x')).toHaveLength(1)
+            // ...and no frame's row list names a row it did not draw.
+            for (const f of frames) {
+                const drawn = g.cards.filter(c => c.frameId === f.id && c.kind !== 'divider').map(c => c.nodeId)
+                for (const r of f.frameRows) expect(drawn).toContain(r.urn)
+                expect(f.frameLoaded).toBe(f.frameRows.length)
+            }
         })
 
         it('a roster-only row carries its description and no lineage at all', () => {
