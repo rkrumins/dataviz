@@ -226,15 +226,34 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // can still contain one.
 
     const ancestorCache = new Map<string, string[]>()
-    /** Containment ancestors, ROOT-FIRST, capped like the old builder's
-     *  provenance ribbon. */
+    /**
+     * Containment ancestors, ROOT-FIRST. WHOLE chain, cycle-guarded.
+     *
+     * This is a STRUCTURAL walk, not the provenance ribbon: the
+     * population is seeded from it (`admit`), `rootOf` reads its head,
+     * and the focus-ancestor set is built from it. It used to stop at
+     * ANCESTRY_CAP — a DISPLAY constant for how many crumbs a card
+     * prints — and six levels down that quietly broke the one invariant
+     * the rest of this file leans on.
+     *
+     * REPORTED LIVE (blank board, 2026-08-14): past six ancestors the
+     * population no longer contained the model's own root, so the root
+     * was filtered out of the visible order, so the pass that collects
+     * top-level units — which starts at nodes whose parent is null —
+     * never entered the focus's branch at all. The focal card, its
+     * contains-stack and every wire that lands on it went with it; with
+     * nothing else outside the chain, the board came out EMPTY.
+     *
+     * The cap still applies where it was always meant to: `emit` slices
+     * the ribbon it prints (see `ribbon`).
+     */
     const ancestorsOf = (urn: string): string[] => {
         const hit = ancestorCache.get(urn)
         if (hit) return hit
         const out: string[] = []
         const seen = new Set<string>([urn])
         let cursor = model.get(urn)?.parent ?? null
-        while (cursor && !seen.has(cursor) && out.length < ANCESTRY_CAP) {
+        while (cursor && !seen.has(cursor)) {
             seen.add(cursor)
             out.push(cursor)
             cursor = model.get(cursor)?.parent ?? null
@@ -999,7 +1018,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const showAll = view.frameShowAll.has(urn)
         const isFocus = urn === sg.focusUrn
         const label = labelFor(urn)
-        const ancestry = ancestorsOf(urn)
+        // The PROVENANCE RIBBON — the deepest levels, which are the ones
+        // that identify the entity. This is where ANCESTRY_CAP belongs and
+        // the only place it applies: it says how many crumbs a card
+        // prints, and nothing about which entities are in the picture.
+        // The two ran together until a seven-level estate came out blank.
+        const ancestry = ancestorsOf(urn).slice(-ANCESTRY_CAP)
         const parent = nodeOf(urn)?.parent ?? null
 
         const roster = childrenAll.get(urn)
@@ -1246,6 +1270,34 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         emit(unit, null, 0, band)
     }
 
+    // ── LAST RESORT: the focus is never missing from its own board ────
+    //
+    // Everything above is geometry, and geometry has ways of losing
+    // things: an estate deeper than the population walk admitted (the
+    // reported blank), a root the view state has shut, a containment
+    // shape nobody has met yet. None of them change the one fact the
+    // reader asked about — this entity, and what connects to it.
+    //
+    // So: if the model has the focus and the picture does not, draw it.
+    // A focal card alone, saying what it is and that the rest could not
+    // be placed, is worth incomparably more than an empty board — and
+    // `focusRecovered` makes the view say so out loud rather than
+    // present a diminished picture as the whole answer.
+    //
+    // Deliberately a SYMPTOM guard, not a cause fix: it fires after the
+    // real repair above (population ancestor-closure) and asserts in dev
+    // precisely so the next cause is found rather than absorbed.
+    const focusRecovered = model.has(sg.focusUrn) && !cardIdByUrn.has(sg.focusUrn)
+    if (focusRecovered) {
+        if (import.meta.env.DEV) {
+            console.error(
+                '[lens] the layout did not place the focus on its own board — recovered the focal card.',
+                { focus: sg.focusUrn, cards: cards.length, population: population.size },
+            )
+        }
+        emit(sg.focusUrn, null, 0, signedHop(sg.focusUrn))
+    }
+
     // A frame states its rows' one shared relationship, and that decides
     // the ROW HEIGHT — a row with nothing to put in a subtitle is 36px,
     // not 64. Decided here so the view can never suppress what the layout
@@ -1439,6 +1491,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         modelHasUpstream: modelHasSide('in'),
         modelHasDownstream: modelHasSide('out'),
         hopsAtCoarserGrain,
+        focusRecovered,
         // Grow-only: what this build walked through, PLUS what earlier
         // builds of the same view state did. The consumer folds it back
         // in (see `LensViewState.walkedThrough`) so a level once seen

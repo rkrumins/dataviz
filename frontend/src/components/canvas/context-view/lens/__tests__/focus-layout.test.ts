@@ -1923,3 +1923,90 @@ describe('focus-layout — walk export, pure and server-free', () => {
         expect(lines[lines.length - 1]).toBe("'=a,b,FLOWS,2")
     })
 })
+
+// ── the board is never empty while the model has the focus ───────────
+//
+// REPORTED LIVE (2026-08-14 09.13–09.21): focusing the SCHEMAFIELD
+// `channel` drew nothing at all — no focal card, no bands, no wires —
+// while the header and the path bar stayed perfectly fine. Another
+// column focus in the same estate drew correctly, so the blank needs a
+// SHAPE, and these are the two that produce it.
+//
+// The estate is the live dev graph's own: that source's ontology lists
+// AGGREGATED as a LINEAGE edge type, and the aggregation worker
+// materialises a rollup hop from a column to every coarser grain above
+// it — including the column's own platform. So a column's lineage
+// genuinely includes `Snowflake → channel` and `channel → Snowflake`,
+// where Snowflake is the column's own containment root.
+
+/** `A0 ⊃ A1 ⊃ … ⊃ A{levels-1} ⊃ F`, F a leaf column.
+ *
+ *  `hopFrom` is the chain index the rollup pair runs to and from — the
+ *  live estate has one per ancestor level, and WHICH of them the picture
+ *  sees decides whether the chain gets repaired by accident: a hop to an
+ *  ancestor the population never admitted re-admits it as a partner,
+ *  while a hop to one it did admit leaves the estate exactly as broken as
+ *  it was. `partner` adds an ordinary column upstream, outside the chain. */
+function deepColumnEstate(
+    levels: number,
+    opts: { hopFrom?: number; partner?: boolean } = {},
+): LensSubgraph<LensWalkNode> {
+    const chain = Array.from({ length: levels }, (_, i) => `A${i}`)
+    const nodes = [
+        ...chain.map((u, i) => wnode(u, i === 0 ? 'dataPlatform' : 'container', u)),
+        wnode('F', 'schemaField', 'channel'),
+    ]
+    const contains: Array<[string, string]> = chain.slice(1).map((u, i) => [chain[i], u])
+    contains.push([chain[chain.length - 1], 'F'])
+    const roll = chain[opts.hopFrom ?? 0]
+    const hops: Array<[string, string, string]> = [[roll, 'F', 'AGGREGATED'], ['F', roll, 'AGGREGATED']]
+    if (opts.partner) {
+        nodes.push(wnode('PT', 'dataset', 'clean_orders'), wnode('P', 'schemaField', 'channel'))
+        contains.push(['PT', 'P'])
+        hops.push(['P', 'F', 'TRANSFORMS'])
+    }
+    return subgraph({ focus: 'F', nodes, hops, contains })
+}
+
+describe('the focus is never missing from its own board', () => {
+    it('draws the focal card however deep the containment estate goes', () => {
+        // Six ancestors is the provenance ribbon's display cap. The
+        // POPULATION was seeded from that same capped walk, so at seven
+        // the model's true root was never admitted, the root was filtered
+        // out of the visible order, and the pass that collects top-level
+        // units — which starts at the model roots — never entered the
+        // focus's own branch at all.
+        for (const levels of [3, 6, 7, 9]) {
+            const g = layout(deepColumnEstate(levels, { partner: true }))
+            expect({ levels, focal: !!cardFor(g, 'F') }).toEqual({ levels, focal: true })
+            expect({ levels, partner: !!cardFor(g, 'P') }).toEqual({ levels, partner: true })
+        }
+    })
+
+    it('never renders an empty board — the reported blank', () => {
+        // The full reported shape: a deep estate where the column's only
+        // lineage is the rollup pair to an ancestor the population had
+        // already admitted. Nothing is reachable outside the chain, so
+        // nothing repairs the chain, and every card on the board — the
+        // focal included — hangs off a root that was never admitted.
+        const g = layout(deepColumnEstate(9, { hopFrom: 3 }))
+        expect(g.cards.length).toBeGreaterThan(0)
+        expect(cardFor(g, 'F')).toBeTruthy()
+    })
+
+    it('recovers the focal card when the picture drops it for any other reason', () => {
+        // The last resort, and deliberately not a fix for one cause: the
+        // focus shut inside a collapsed root is a second, independent way
+        // to lose it (a restored share link can arrive holding exactly
+        // this). Whatever the reason, a board that has a focus in its
+        // model always draws it.
+        const sg = deepColumnEstate(3, { partner: true })
+        const g = layout(sg, shut(initialLensViewState(sg), 'A0'))
+        expect(cardFor(g, 'F')).toBeTruthy()
+        expect(g.focusRecovered).toBe(true)
+    })
+
+    it('says nothing about a recovery when the picture placed the focus itself', () => {
+        expect(layout(deepColumnEstate(3, { partner: true })).focusRecovered).toBe(false)
+    })
+})

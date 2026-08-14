@@ -386,6 +386,11 @@ export interface FocusGraph {
    *  ("+N connect at a coarser grain") rather than dropped in silence,
    *  and it is what explains a partner card with no wire on it. */
   hopsAtCoarserGrain: number
+  /** The layout could not place the focus and drew it as a last resort.
+   *  Always false in a healthy picture; when it is true the board is
+   *  showing the focus alone and has to say so, because everything else
+   *  the walk knows about is missing from it. */
+  focusRecovered: boolean
   /** Every containment level this view state has drawn THROUGH, this
    *  build and every earlier one. The consumer folds it back into
    *  `LensViewState.walkedThrough`; see the note there for why the grain

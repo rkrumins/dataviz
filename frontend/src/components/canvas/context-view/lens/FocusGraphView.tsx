@@ -2346,6 +2346,17 @@ export function FocusGraphView({
         data: { band, sub },
       })
     }
+    // The layout could not place the focus and drew it as a last resort.
+    // Whatever is on this board is a fragment, so say that here rather
+    // than let a lone focal card read as the whole answer.
+    if (graph.focusRecovered) {
+      nodes.push({
+        id: 'blw:recovered', type: 'bandLabel',
+        position: { x: -CARD_W, y: (minYByBand.get(0) ?? 0) - 40 },
+        draggable: false, selectable: false, focusable: false,
+        data: { whisper: 'Showing the focus on its own — the rest of this walk could not be placed.' },
+      })
+    }
     // A COMPLETED fetch with an empty direction is a data-source claim
     // — whisper it where the band would be, instead of blank space.
     // The user's own type chips REMOVE cards, so an empty band can be
@@ -2394,7 +2405,7 @@ export function FocusGraphView({
       }
     }
     return nodes
-  }, [graph.cards, graph.bandTotals, graph.hiddenByChipsIn, graph.hiddenByChipsOut, graph.hopsAtCoarserGrain,
+  }, [graph.cards, graph.bandTotals, graph.hiddenByChipsIn, graph.hiddenByChipsOut, graph.hopsAtCoarserGrain, graph.focusRecovered,
     graph.modelHasUpstream, graph.modelHasDownstream, ctx, focalIn, focalOut, focalFetch, directionFilter])
 
   /**
