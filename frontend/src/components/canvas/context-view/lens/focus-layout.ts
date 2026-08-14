@@ -1740,78 +1740,118 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     }
 }
 
-// ── path-to-focus highlight ─────────────────────────────────────────
+// ── isolation cone ───────────────────────────────────────────────────
+
+/** What one element's visible lineage covers — the answer a hover or a
+ *  click asks for, computed over the DRAWN board and nothing else. */
+export interface LensIsolationCone {
+    /** Every card the cone lights: the anchor, whatever it holds, every
+     *  drawn endpoint reachable from it, and the boxes those sit in. */
+    cardIds: ReadonlySet<string>
+    /** Every drawn wire on the cone. */
+    edgeIds: ReadonlySet<string>
+    /** Drawn hops from the anchor, 0 for the anchor and anything inside
+     *  it. What the view reads to make the near lineage heavier than the
+     *  far — a cone with no hierarchy is just a second kind of dimming. */
+    hops: ReadonlyMap<string, number>
+}
 
 /**
- * Every card and edge on SOME shortest path between `fromId` and
- * `focalId`, computed over the PROJECTED edges (`FocusGraph.edges`) —
- * both orientations, so a wire drawn the other way still counts. Pure
- * and client-side: hovering or selecting a card asks nothing of the
- * server, because the answer is already sitting in the picture.
+ * The lineage cone of one element: everything it FLOWS INTO, everything
+ * that FLOWS INTO IT, and the wires between — over the edges the board is
+ * actually drawing.
  *
- * "Some" rather than "the" on purpose — a diamond (two branches of equal
- * length rejoining before the focus) highlights BOTH branches, not one
- * arbitrarily chosen. Cycle-safe: BFS distance is computed once, and the
- * backtrack only ever walks strictly toward the focus, so a loop in the
- * projected edges cannot make it retrace its steps.
+ * TWO DIRECTED WALKS, never one undirected one. A lens board is one
+ * entity's lineage and is connected by construction, so an undirected
+ * walk lights every card and isolates nothing. Directed, the rule the
+ * reader can state holds: a SIBLING that feeds the same target as the
+ * anchor is not on the anchor's cone — it is a different producer of a
+ * shared consumer, which is exactly the fact worth being able to see.
  *
- * `fromId === focalId` (hovering the focus itself) and a `fromId` with
- * no route to the focus at all (a roster extra — a card shown only in
- * "everything inside" mode, off the lineage) both return empty sets: the
- * caller's contract is that an empty result means "nothing dims".
+ * A card that HOLDS rows speaks for them: hovering a frame — or the
+ * focus, which is one of these since R7 — takes the union of its rows'
+ * cones plus its own bundles, because that is what "this container's
+ * lineage" means when the container is the thing being pointed at.
+ *
+ * Containment ancestors of a lit card are lit too. They are not ON the
+ * cone (no wire of theirs is), but a lit row inside a dimmed box reads as
+ * a rendering fault rather than as an answer, and a box holding something
+ * on the cone is part of what the reader has to see to follow it.
+ *
+ * `null` when the anchor touches no drawn wire at all — a roster extra,
+ * or a board with nothing wired. The caller's contract is that null means
+ * "isolate nothing", never "dim everything".
  */
-export function pathToFocus(
-    edges: ReadonlyArray<FocusEdge>,
-    fromId: string,
-    focalId: string,
-): { edgeKeys: Set<string>; cardIds: Set<string> } {
-    if (fromId === focalId) return { edgeKeys: new Set(), cardIds: new Set() }
+export function isolationCone(
+    graph: Pick<FocusGraph, 'cards' | 'edges'>,
+    anchorId: string,
+): LensIsolationCone | null {
+    const cardById = new Map(graph.cards.map(c => [c.id, c]))
+    if (!cardById.has(anchorId)) return null
 
-    const adjacency = new Map<string, Array<{ to: string; edgeId: string }>>()
-    const link = (a: string, b: string, edgeId: string) => {
-        const list = adjacency.get(a)
-        if (list) list.push({ to: b, edgeId })
-        else adjacency.set(a, [{ to: b, edgeId }])
-    }
-    for (const e of edges) {
-        link(e.source, e.target, e.id)
-        link(e.target, e.source, e.id)
-    }
-
-    // BFS distance FROM THE FOCUS, so every node's distance is measured
-    // the same way regardless of which card is hovered.
-    const dist = new Map<string, number>([[focalId, 0]])
-    const queue = [focalId]
-    for (let i = 0; i < queue.length; i++) {
-        const u = queue[i]
-        const du = dist.get(u)!
-        for (const { to } of adjacency.get(u) ?? []) {
-            if (dist.has(to)) continue
-            dist.set(to, du + 1)
-            queue.push(to)
+    // The anchor SPEAKS FOR what it holds, to whatever depth it nests.
+    const seeds = new Set<string>([anchorId])
+    for (const card of graph.cards) {
+        let host = card.frameId
+        let guard = 0
+        while (host && guard++ < 32) {
+            if (host === anchorId) { seeds.add(card.id); break }
+            host = cardById.get(host)?.frameId ?? null
         }
     }
-    if (!dist.has(fromId)) return { edgeKeys: new Set(), cardIds: new Set() }
 
-    // Backtrack: every edge whose far end is exactly one step closer to
-    // the focus than its near end sits on SOME shortest path — multiple
-    // qualifying edges at one node is exactly the diamond case.
-    const cardIds = new Set<string>([fromId])
-    const edgeKeys = new Set<string>()
-    const seen = new Set<string>([fromId])
-    const stack = [fromId]
-    while (stack.length > 0) {
-        const u = stack.pop()!
-        const du = dist.get(u)!
-        if (du === 0) continue   // reached the focus
-        for (const { to, edgeId } of adjacency.get(u) ?? []) {
-            if (dist.get(to) !== du - 1) continue
-            edgeKeys.add(edgeId)
-            cardIds.add(to)
-            if (!seen.has(to)) { seen.add(to); stack.push(to) }
+    type Step = { to: string; edgeId: string }
+    const downstream = new Map<string, Step[]>()
+    const upstream = new Map<string, Step[]>()
+    const link = (m: Map<string, Step[]>, from: string, step: Step) => {
+        const list = m.get(from)
+        if (list) list.push(step)
+        else m.set(from, [step])
+    }
+    for (const e of graph.edges) {
+        link(downstream, e.source, { to: e.target, edgeId: e.id })
+        link(upstream, e.target, { to: e.source, edgeId: e.id })
+    }
+
+    const hops = new Map<string, number>()
+    for (const seed of seeds) hops.set(seed, 0)
+    const edgeIds = new Set<string>()
+    /** One direction, breadth-first, from every seed at once. */
+    const walk = (adjacency: Map<string, Step[]>) => {
+        const queue = [...seeds]
+        const seen = new Set(seeds)
+        for (let i = 0; i < queue.length; i++) {
+            const at = queue[i]
+            const depth = hops.get(at) ?? 0
+            for (const { to, edgeId } of adjacency.get(at) ?? []) {
+                // The wire is on the cone whether or not its far end is
+                // new — two branches of a diamond rejoining is two lit
+                // wires into one lit card, not one.
+                edgeIds.add(edgeId)
+                const known = hops.get(to)
+                if (known === undefined || depth + 1 < known) hops.set(to, depth + 1)
+                if (seen.has(to)) continue
+                seen.add(to)
+                queue.push(to)
+            }
         }
     }
-    return { edgeKeys, cardIds }
+    walk(downstream)
+    walk(upstream)
+
+    if (edgeIds.size === 0) return null
+
+    const cardIds = new Set(hops.keys())
+    // ...and the boxes the lit cards sit in.
+    for (const id of [...cardIds]) {
+        let host = cardById.get(id)?.frameId ?? null
+        let guard = 0
+        while (host && guard++ < 32) {
+            cardIds.add(host)
+            host = cardById.get(host)?.frameId ?? null
+        }
+    }
+    return { cardIds, edgeIds, hops }
 }
 
 // ── walk export (JSON/CSV) ───────────────────────────────────────────

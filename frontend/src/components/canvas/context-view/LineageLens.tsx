@@ -638,6 +638,22 @@ export function LineageLens({
   }, [editView])
 
   /**
+   * The card whose lineage cone a CLICK stuck on. Lens-local and keyed to
+   * the focal, like the filter and the chips: a new focal is a new
+   * question, and an isolation on a card that is no longer drawn would be
+   * a dimmed board with nothing lit.
+   *
+   * Held here rather than inside the board because Escape is the LENS's
+   * key, in one place, and it has to be able to clear this in order.
+   */
+  const [isolationState, setIsolationState] = useState<{ nodeId: string | null; cardId: string | null }>({ nodeId: null, cardId: null })
+  const isolatedId = isolationState.nodeId === nodeId ? isolationState.cardId : null
+  const setIsolated = useCallback(
+    (cardId: string | null) => setIsolationState({ nodeId, cardId }),
+    [nodeId],
+  )
+
+  /**
    * Lens-local keys: capture phase so the canvas's document-level
    * keyboard handler never sees them while the lens is open.
    *
@@ -649,14 +665,35 @@ export function LineageLens({
    * wins — so the sequence lives here rather than being split.
    */
   const selection = view.selection
+  /**
+   * ONE layer at a time, innermost first: the preview beside a row, then
+   * the isolated lineage, then the selection, then the room itself.
+   *
+   * Each press (and each click on the board behind everything) undoes
+   * exactly the last thing that was opened — closing the whole room out
+   * from under what you just opened is the one behaviour nobody expects,
+   * and it is just as wrong for a click as it is for a key.
+   *
+   * The PEEK is the selection when the selected card is a ROW; a
+   * selection that is not a row has no panel, so it is a layer further
+   * out. That is the only reason these two share a piece of state.
+   */
+  const peekOpen = selection !== null
+    && layout.cards.some(c => c.nodeId === selection && c.frameId !== null)
+  const dismissOne = useCallback(() => {
+    if (peekOpen) { setSelection(null); return }
+    if (isolatedId !== null) { setIsolated(null); return }
+    if (selection !== null) { setSelection(null); return }
+    onClose()
+  }, [peekOpen, isolatedId, selection, setIsolated, setSelection, onClose])
+
   useEffect(() => {
     if (!nodeId) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        if (selection !== null) { setSelection(null); return }
-        onClose()
+        dismissOne()
         return
       }
       // Keyboard walking: ← back one hop, → forward one hop — browser
@@ -693,7 +730,7 @@ export function LineageLens({
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [nodeId, onClose, canBack, canForward, onBack, onForward, selection, setSelection])
+  }, [nodeId, canBack, canForward, onBack, onForward, dismissOne])
 
   // ── Wording ────────────────────────────────────────────────────────
 
@@ -1446,9 +1483,12 @@ export function LineageLens({
                 exportName={focalLabel}
                 directionFilter={directionFilter}
                 selectedId={view.selection}
+                isolatedId={isolatedId}
                 reducedMotion={reducedMotion}
                 edgeTypeInfo={edgeTypeInfo}
                 onSelect={setSelection}
+                onIsolate={setIsolated}
+                onDismiss={dismissOne}
                 onFocus={onRecenter}
                 onToggleFrame={toggleContents}
                 onFrameScroll={setFrameOffset}

@@ -43,6 +43,15 @@ export const FRAME_WINDOW_ALL = 10
 
 export const FRAME_HEADER_H = 46
 export const FRAME_PAD = 10
+/** The strip along the bottom of a SCROLLABLE list: where it says which
+ *  rows are on screen and offers the click that moves the window.
+ *
+ *  Reserved in the GEOMETRY rather than floated over the last row,
+ *  because a control drawn on top of a row is a control the reader has to
+ *  discover by covering something up. Reported: a frame showing 8 of 14
+ *  rows announced it with a hairline scrollbar and 9px of grey text, and
+ *  the reader found the scrolling by accident. */
+export const FRAME_FOOTER_H = 24
 
 /** Placeholder type for an entity the lens could not resolve. Named so
  *  grain comparisons can recognise it instead of silently treating it
@@ -527,13 +536,17 @@ export function layoutBands(cards: FocusCard[]) {
     const kids = childrenByFrame.get(c.id) ?? []
     const inner = kids.reduce((acc, k) => acc + k.h, 0) + CARD_GAP * Math.max(0, kids.length - 1)
     const head = headerHeight(c)
+    // Room for the range chip and the step control, but only where the
+    // list actually windows: a frame showing everything it has needs no
+    // strip saying so.
+    const foot = frameWindow(c).scrollable ? FRAME_FOOTER_H : 0
     c.w = CARD_W + FRAME_PAD * 2
     // A COLLAPSED frame is its header and nothing else. Reserving a
     // body row is for a frame that is open and has none yet — loading,
     // empty, failed — which all need somewhere to say so.
     c.h = kids.length === 0 && !c.childrenOpen
       ? head
-      : head + FRAME_PAD + Math.max(inner, kids.length === 0 ? CARD_H : 0) + FRAME_PAD
+      : head + FRAME_PAD + Math.max(inner, kids.length === 0 ? CARD_H : 0) + FRAME_PAD + foot
   }
   // Children FILL their frame, and a nested frame is wider still (it
   // carries its own padding), so each host widens to hold what it holds.

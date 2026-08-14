@@ -18,7 +18,7 @@ import {
     initialLensViewState,
     revealKey,
     walkStatusKey,
-    pathToFocus,
+    isolationCone,
     buildWalkExport,
     walkExportToCsv,
     REVEAL_PAGE,
@@ -1863,54 +1863,121 @@ describe('focus-layout — direction filter (view-side; presentation, not data)'
     })
 })
 
-// ── path-to-focus highlight ──────────────────────────────────────────
+// ── isolation cone ───────────────────────────────────────────────────
 
-describe('focus-layout — pathToFocus (client-side hover/selection highlight)', () => {
+describe('focus-layout — isolationCone (what one element\'s lineage covers)', () => {
     const edge = (id: string, source: string, target: string): FocusEdge =>
         ({ id, source, target, count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false, labelVisible: false })
+    const card = (id: string, frameId: string | null = null): FocusCard =>
+        ({ ...({} as FocusCard), id, nodeId: id, frameId, kind: 'entity' })
+    const board = (cards: FocusCard[], edges: FocusEdge[]) => ({ cards, edges })
 
-    it('a diamond: both branches to the focus highlight', () => {
-        // H reaches focus F via two EQUAL-length paths: H-A-F and H-B-F.
-        const edges = [edge('e1', 'H', 'A'), edge('e2', 'A', 'F'), edge('e3', 'H', 'B'), edge('e4', 'B', 'F')]
-        const { cardIds, edgeKeys } = pathToFocus(edges, 'H', 'F')
-        expect(cardIds).toEqual(new Set(['H', 'A', 'B', 'F']))
-        expect(edgeKeys).toEqual(new Set(['e1', 'e2', 'e3', 'e4']))
+    it('walks BOTH ways from the anchor, and keeps going where it flows', () => {
+        //  U ─▶ A ─▶ D ─▶ M
+        const cards = ['U', 'A', 'D', 'M'].map(id => card(id))
+        const edges = [edge('e1', 'U', 'A'), edge('e2', 'A', 'D'), edge('e3', 'D', 'M')]
+        const cone = isolationCone(board(cards, edges), 'A')!
+        expect(cone.cardIds).toEqual(new Set(['U', 'A', 'D', 'M']))
+        expect(cone.edgeIds).toEqual(new Set(['e1', 'e2', 'e3']))
+        // Hierarchy: what the anchor touches directly reads heavier than
+        // what it reaches through something else.
+        expect(cone.hops.get('A')).toBe(0)
+        expect(cone.hops.get('U')).toBe(1)
+        expect(cone.hops.get('D')).toBe(1)
+        expect(cone.hops.get('M')).toBe(2)
     })
 
-    it('a single path (no diamond) highlights exactly its own hops, not a longer detour', () => {
-        const edges = [edge('e1', 'A', 'B'), edge('e2', 'B', 'F'), edge('e3', 'A', 'F')]
-        const { cardIds, edgeKeys } = pathToFocus(edges, 'A', 'F')
-        expect(cardIds).toEqual(new Set(['A', 'F']))
-        expect(edgeKeys).toEqual(new Set(['e3']))
+    it('a SIBLING feeding the same target is NOT on the cone', () => {
+        // THE rule that makes isolation mean anything. A lens board is one
+        // entity's lineage and is connected by construction, so an
+        // undirected walk would light B — and with it the whole board.
+        const cards = ['A', 'B', 'T'].map(id => card(id))
+        const edges = [edge('e1', 'A', 'T'), edge('e2', 'B', 'T')]
+        const cone = isolationCone(board(cards, edges), 'A')!
+        expect(cone.cardIds).toEqual(new Set(['A', 'T']))
+        expect(cone.edgeIds).toEqual(new Set(['e1']))
+        expect(cone.cardIds.has('B')).toBe(false)
     })
 
-    it('no path: nothing dims — the shape a roster extra (no projected edge at all) is in', () => {
-        const edges = [edge('e1', 'A', 'F')]
-        const { cardIds, edgeKeys } = pathToFocus(edges, 'X', 'F')
-        expect(cardIds.size).toBe(0)
-        expect(edgeKeys.size).toBe(0)
+    it('a diamond lights BOTH branches, and every wire of them', () => {
+        const cards = ['A', 'L', 'R', 'D'].map(id => card(id))
+        const edges = [
+            edge('e1', 'A', 'L'), edge('e2', 'A', 'R'),
+            edge('e3', 'L', 'D'), edge('e4', 'R', 'D'),
+        ]
+        const cone = isolationCone(board(cards, edges), 'A')!
+        expect(cone.cardIds).toEqual(new Set(['A', 'L', 'R', 'D']))
+        expect(cone.edgeIds).toEqual(new Set(['e1', 'e2', 'e3', 'e4']))
     })
 
-    it('is undirected: a hop drawn TOWARD the hovered card still counts', () => {
-        const edges = [edge('e1', 'F', 'A')]   // F -> A, but we hover A looking for a path to F
-        const { cardIds, edgeKeys } = pathToFocus(edges, 'A', 'F')
-        expect(cardIds).toEqual(new Set(['A', 'F']))
-        expect(edgeKeys).toEqual(new Set(['e1']))
+    it('a FRAME speaks for its rows: its cone is their cones plus its own', () => {
+        // `FR` holds two rows; one feeds X, the other is fed by Y, and the
+        // frame itself carries a rolled-up bundle to Z.
+        const cards = [
+            card('FR'), card('r1', 'FR'), card('r2', 'FR'),
+            card('X'), card('Y'), card('Z'),
+        ]
+        const edges = [
+            edge('e1', 'r1', 'X'), edge('e2', 'Y', 'r2'), edge('e3', 'FR', 'Z'),
+        ]
+        const cone = isolationCone(board(cards, edges), 'FR')!
+        expect(cone.cardIds).toEqual(new Set(['FR', 'r1', 'r2', 'X', 'Y', 'Z']))
+        expect(cone.edgeIds).toEqual(new Set(['e1', 'e2', 'e3']))
+        // Everything the frame holds sits at the anchor's own distance.
+        expect(cone.hops.get('r1')).toBe(0)
+        expect(cone.hops.get('r2')).toBe(0)
     })
 
-    it('hovering the focus itself finds nothing to highlight', () => {
-        const edges = [edge('e1', 'A', 'F')]
-        const { cardIds, edgeKeys } = pathToFocus(edges, 'F', 'F')
-        expect(cardIds.size).toBe(0)
-        expect(edgeKeys.size).toBe(0)
+    it('nests: a row of a nested frame is still spoken for by the outer one', () => {
+        const cards = [card('OUT'), card('IN', 'OUT'), card('leaf', 'IN'), card('X')]
+        const edges = [edge('e1', 'leaf', 'X')]
+        const cone = isolationCone(board(cards, edges), 'OUT')!
+        expect(cone.cardIds.has('leaf')).toBe(true)
+        expect(cone.cardIds.has('X')).toBe(true)
     })
 
-    it('is cycle-safe: a loop among the projected edges terminates and still finds the path', () => {
-        // A cycle A-B-C-A, with the only route to the focus running through A.
-        const edges = [edge('e1', 'A', 'B'), edge('e2', 'B', 'C'), edge('e3', 'C', 'A'), edge('e4', 'A', 'F')]
-        const { cardIds, edgeKeys } = pathToFocus(edges, 'B', 'F')
-        expect(cardIds).toEqual(new Set(['B', 'A', 'F']))
-        expect(edgeKeys).toEqual(new Set(['e1', 'e4']))
+    it('lights the BOX a lit row sits in — never a lit row inside a dimmed frame', () => {
+        const cards = [card('A'), card('FR'), card('r1', 'FR')]
+        const edges = [edge('e1', 'A', 'r1')]
+        const cone = isolationCone(board(cards, edges), 'A')!
+        expect(cone.cardIds.has('r1')).toBe(true)
+        expect(cone.cardIds.has('FR')).toBe(true)
+        // Lit, but not ON the cone: no wire of the frame's own is.
+        expect(cone.hops.has('FR')).toBe(false)
+    })
+
+    it('traverses a ROLLED-UP bundle exactly like any other drawn wire', () => {
+        // Two off-window rows reaching one card are ONE drawn bundle
+        // between the frames — the cone follows what is drawn.
+        const cards = [card('FR1'), card('FR2'), card('T')]
+        const edges = [edge('e1', 'FR1', 'FR2'), edge('e2', 'FR2', 'T')]
+        const cone = isolationCone(board(cards, edges), 'FR1')!
+        expect(cone.cardIds).toEqual(new Set(['FR1', 'FR2', 'T']))
+    })
+
+    it('is cycle-safe: a loop terminates, and the whole loop is on the cone', () => {
+        const cards = ['A', 'B', 'C'].map(id => card(id))
+        const edges = [edge('e1', 'A', 'B'), edge('e2', 'B', 'C'), edge('e3', 'C', 'A')]
+        const cone = isolationCone(board(cards, edges), 'A')!
+        expect(cone.cardIds).toEqual(new Set(['A', 'B', 'C']))
+        expect(cone.edgeIds).toEqual(new Set(['e1', 'e2', 'e3']))
+    })
+
+    it('an element with no drawn wire isolates NOTHING, rather than dimming everything', () => {
+        const cards = [card('A'), card('B'), card('X')]
+        const edges = [edge('e1', 'A', 'B')]
+        expect(isolationCone(board(cards, edges), 'X')).toBeNull()
+        expect(isolationCone(board(cards, edges), 'nope')).toBeNull()
+    })
+
+    it('runs over a REAL board: the focus\'s cone reaches its partners', () => {
+        const g = layout(collateralEstate())
+        const focal = cardFor(g, 'F')!
+        const cone = isolationCone(g, focal.id)!
+        for (const table of ['t0', 't1', 't2']) {
+            expect(cone.cardIds.has(cardFor(g, table)!.id)).toBe(true)
+        }
+        expect(cone.edgeIds.size).toBe(g.edges.length)
     })
 })
 

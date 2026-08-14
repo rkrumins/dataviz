@@ -64,9 +64,13 @@ export interface WalkFixture {
   extendStatus?: Map<string, 'loading' | 'error'>
   /** Header direction preset in effect for the shot. Defaults to 'both'. */
   directionFilter?: LensDirectionFilter
-  /** Pre-selected card, so the shot also shows the path-to-focus
-   *  highlight (hover isn't scriptable in a static screenshot). */
+  /** Pre-selected card, so the shot also shows the detail treatment
+   *  (hover isn't scriptable in a static screenshot). */
   selectedId?: string
+  /** A CARD id whose lineage cone is isolated for the shot — the same
+   *  state a click leaves behind, which is the only way to look at the
+   *  isolation in a still picture. */
+  isolatedId?: string
 }
 
 const scripted = (
@@ -689,8 +693,25 @@ const walkPlatformFocus = (): WalkFixture => ({
   }),
 })
 
+/**
+ * The same estate, mid-ISOLATION: the reader has clicked `dim_customer`,
+ * so the board draws its lineage cone and quiets everything else.
+ *
+ * It is the shape that proves the rule. `dim_customer` feeds two of the
+ * focus's columns and one of its tables, and every one of those lights —
+ * but `INTERMEDIATE_T2`, which feeds a THIRD column of the same table,
+ * does not: a sibling producer of a shared consumer is not on this
+ * lineage, and an isolation that lit it would be lighting the board.
+ */
+const walkIsolatedCone = (): WalkFixture => ({
+  ...walkSharedPlatform(),
+  title: 'One click on dim_customer — its lineage cone, and everything else quiet',
+  isolatedId: 'n:dim_customer',
+})
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkCollaterals: walkCollaterals(),
+  walkIsolatedCone: walkIsolatedCone(),
   walkDiamond: walkDiamond(),
   walkHub: walkHub(),
   walkFrontier: walkFrontier(),

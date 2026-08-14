@@ -73,8 +73,8 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, FRAME_PAD, headerHeight, holdsRows, labelFitsRun, frameWindow, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
-import { REVEAL_PAGE, pathToFocus, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
+import { CARD_W, BAND_GAP, FRAME_FOOTER_H, FRAME_PAD, headerHeight, holdsRows, labelFitsRun, frameWindow, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
+import { REVEAL_PAGE, isolationCone, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 
@@ -101,25 +101,28 @@ const NEUTRAL_ACCENT = '#94a3b8'
 const HoverContext = createContext<string | null>(null)
 const ReachContext = createContext<LensReach | null>(null)
 /**
- * Path-to-focus highlight — every card/edge id on SOME path between the
- * hovered-with-intent (or selected) card and the focus (see
- * `pathToFocus` in focus-layout.ts). `null` = no active highlight,
- * meaning nothing dims — the SAME "no path: don't touch the picture"
- * contract `pathToFocus` itself returns for an unreachable card.
- * Context, not card/edge data: hovering must re-render the affected
- * cards/edges alone, never rebuild the arrays (see the PERF CONTRACT
+ * ISOLATION — the visible lineage cone of whatever the reader is
+ * pointing at (see `isolationCone` in focus-layout.ts), and the one
+ * highlight this board has. `null` = nothing isolated, so nothing dims.
+ *
+ * Context, not card/edge data: isolating must re-render the affected
+ * cards and edges alone, never rebuild the arrays (see the PERF CONTRACT
  * above) — the same reason HoverContext/ReachContext exist.
  *
- * `source` is which gesture asked, and it decides how much the picture
- * is allowed to change. A HOVER only strengthens the path — moving the
- * pointer across the board must never wash the board out. A SELECTION
- * is deliberate, so it may quiet what is off the path, but only to a
- * floor that keeps every label readable.
+ * It replaced a path-to-focus-only highlight, which answered a narrower
+ * question ("how does this reach the focus") with a strictly smaller
+ * answer: the focus lies on the cone whenever it is reachable, so one
+ * mechanism now says both. `sticky` is whether a CLICK put it there,
+ * which is the only difference the treatment makes — a sticky isolation
+ * also names itself in a chip that says how to leave.
  */
-const PathHighlightContext = createContext<{
+const IsolationContext = createContext<{
   cardIds: ReadonlySet<string>
-  edgeKeys: ReadonlySet<string>
-  source: 'hover' | 'select'
+  edgeIds: ReadonlySet<string>
+  /** Drawn hops from the anchor; 0 for the anchor and what it holds. */
+  hops: ReadonlyMap<string, number>
+  anchorId: string
+  sticky: boolean
 } | null>(null)
 
 /**
@@ -135,16 +138,30 @@ const PathHighlightContext = createContext<{
  */
 const RowCursorContext = createContext<{ frameKey: string; urn: string } | null>(null)
 
-/** Off the highlighted path, under a SELECTION. Quiet enough to read as
- *  background, light enough that every name is still legible — the old
- *  30% turned the rest of the board into grey ghosts. */
-const OFF_PATH_CARD = 'opacity-60'
-const OFF_PATH_EDGE = 0.3
+/**
+ * OFF THE CONE. Quiet enough to read as background, light enough that
+ * every name stays legible — the old 30% turned the rest of the board
+ * into grey ghosts, and the context you are reading the cone AGAINST is
+ * half the value of isolating it.
+ *
+ * Dimmed AND desaturated, not dimmed alone: opacity by itself flattens
+ * the board into one grey wash, while pulling the colour out keeps the
+ * shapes and the hierarchy readable and makes the cone's own colour the
+ * only saturated thing on screen. That is what the eye actually follows.
+ */
+const OFF_CONE_CARD = 'opacity-60 saturate-[.35]'
+const OFF_CONE_EDGE = 0.28
 
 /** Above this many labelled bundles on one board, a ×N badge stops being
  *  information and becomes texture — so only the ones the reader is
- *  pointing at (hovered, selected, on the highlighted path) keep theirs. */
+ *  pointing at (hovered, selected, on the isolated cone) keep theirs. */
 const LABEL_DENSITY_CAP = 12
+
+/** How long a pointer has to REST on something before its lineage is
+ *  isolated. Long enough that crossing the board on the way somewhere
+ *  else never strobes it; short enough that resting on a card feels like
+ *  it answered rather than like it thought about it. */
+const HOVER_INTENT_MS = 250
 
 /** Shared empty overlay — a fresh Map would churn the nodes memo. */
 const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
@@ -187,6 +204,11 @@ interface CardCtx {
   onOpenDetails?: (nodeId: string) => void
   /** Move the keyboard cursor inside a frame. `urn` null parks it. */
   onRowCursor: (frameKey: string, urn: string | null) => void
+  /** Isolate this element's lineage cone, and keep it isolated — the
+   *  sticky half of R5. `null` clears. The CARD id, not the urn: the cone
+   *  is a fact about the board, and one entity can be drawn as a frame
+   *  whose rows have card ids of their own. */
+  onIsolate: (cardId: string | null) => void
   // ── Growing the walk ─────────────────────────────────────────────
   // Optional so a caller can render a picture it does not intend to be
   // grown (the visual harness does exactly that); the ⊕ renders only
@@ -216,9 +238,19 @@ interface FocusGraphViewProps {
    *  doing, not a fact about the source). Defaults to 'both'. */
   directionFilter?: LensDirectionFilter
   selectedId: string | null
+  /** The card whose lineage cone is STUCK on, from a click. Hovering
+   *  overrides it for as long as the pointer rests somewhere. */
+  isolatedId?: string | null
   reducedMotion: boolean
   edgeTypeInfo?: EdgeTypeInfoMap
   onSelect: (nodeId: string | null) => void
+  /** Stick the isolation on this card, or clear it with null. */
+  onIsolate?: (cardId: string | null) => void
+  /** Dismiss ONE layer of what is open, innermost first — the pane click
+   *  and Escape are the same gesture in two forms, so the lens owns the
+   *  order and this is how the board asks for it. Falls back to clearing
+   *  the selection where a caller has no layering of its own. */
+  onDismiss?: () => void
   onFocus: (nodeId: string) => void
   onToggleFrame: (expandKey: string) => void
   onFrameScroll: (openKey: string, offset: number) => void
@@ -237,15 +269,51 @@ const iconByName = (name: string): LucideIcons.LucideIcon =>
   (LucideIcons as unknown as Record<string, LucideIcons.LucideIcon>)[name] ?? LucideIcons.Box
 
 /**
- * Where this card stands in the current highlight: ON the path (say so
- * with a ring), off it under a SELECTION (quiet it, to a floor), or
- * untouched — which is every card while the gesture is only a hover.
+ * Where this card stands in the isolation: it IS what the reader is
+ * pointing at, it is on that element's lineage cone, it is off the cone
+ * (quiet it, to a floor), or nothing is isolated and it is untouched.
+ *
+ * `hops` is how far along the cone it sits, and it is what the treatment
+ * grades: the near lineage is drawn heavier than the far, so a cone
+ * reads as a direction of travel rather than as a second kind of dim.
  */
-function usePathState(cardId: string): { onPath: boolean; offPath: boolean } {
-  const highlight = useContext(PathHighlightContext)
-  if (highlight === null) return { onPath: false, offPath: false }
-  const onPath = highlight.cardIds.has(cardId)
-  return { onPath, offPath: !onPath && highlight.source === 'select' }
+function useConeState(cardId: string): {
+  anchor: boolean
+  onCone: boolean
+  offCone: boolean
+  hops: number | null
+} {
+  const iso = useContext(IsolationContext)
+  if (iso === null) return { anchor: false, onCone: false, offCone: false, hops: null }
+  const onCone = iso.cardIds.has(cardId)
+  return {
+    anchor: iso.anchorId === cardId,
+    onCone,
+    offCone: !onCone,
+    hops: iso.hops.get(cardId) ?? null,
+  }
+}
+
+/**
+ * How a card on the cone lifts off the board: a hairline of its own type
+ * colour and a soft shadow in the same hue, strongest on the element
+ * being pointed at and lighter one hop out.
+ *
+ * The accent is the ENTITY TYPE's, not the app's generic selection
+ * purple: on an isolated board the only saturated colour left should be
+ * the lineage's own, and a type-coloured lift says which kind of thing
+ * each lit card is while it says that it is lit.
+ */
+function coneLift(accent: string, anchor: boolean, hops: number | null): CSSProperties {
+  if (anchor) {
+    return { boxShadow: `0 0 0 2px ${accent}, 0 12px 30px -6px ${accent}59, 0 2px 8px ${accent}26` }
+  }
+  const near = hops != null && hops <= 1
+  return {
+    boxShadow: near
+      ? `0 0 0 1.5px ${accent}b3, 0 8px 22px -8px ${accent}4d`
+      : `0 0 0 1px ${accent}80, 0 6px 16px -8px ${accent}33`,
+  }
 }
 
 /** Flat equality over a built card. Every field is a primitive, a frozen
@@ -825,14 +893,14 @@ const WHEEL_PX_PER_ROW = 26
  * it is context, and it must never read as a connection.
  */
 function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; selected: boolean }) {
-  const { onPath, offPath } = usePathState(card.id)
+  const { anchor, onCone, offCone, hops } = useConeState(card.id)
   const cursor = useContext(RowCursorContext)
   // The frame a row sits in is its containment parent — a row is only
   // ever emitted among its own parent's children.
   const hostKey = card.parentId ?? ''
   const onCursor = cursor !== null && cursor.frameKey === hostKey && cursor.urn === card.nodeId
   const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
-  const dim = card.dimmed ? (card.connected ? 'opacity-30' : 'opacity-20') : offPath ? OFF_PATH_CARD : undefined
+  const dim = card.dimmed ? (card.connected ? 'opacity-30' : 'opacity-20') : offCone ? OFF_CONE_CARD : undefined
 
   /**
    * Click a row: preview it, and leave the KEYBOARD where the reader
@@ -849,6 +917,9 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
    */
   const activate = () => {
     ctx.onSelect(card.nodeId)
+    // ...and isolate what it flows through. One click, both: the preview
+    // says what this row IS, the isolation says where it goes.
+    ctx.onIsolate(card.id)
     document.getElementById(listDomId(hostKey))?.focus({ preventScroll: true })
     // AFTER the focus, deliberately: the list parks a fresh cursor on its
     // first visible row when it gains focus, and the row the reader
@@ -883,7 +954,7 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
           // Inside this, but off the lineage: background by default, and
           // it lights up only when you point at it.
           : 'border border-dashed border-black/[0.08] dark:border-white/[0.09] bg-transparent hover:border-accent-lineage/40 hover:bg-black/[0.02] dark:hover:bg-white/[0.03] opacity-60 hover:opacity-100',
-        selected ? 'ring-2 ring-accent-lineage' : onCursor ? 'ring-2 ring-accent-lineage/60' : onPath && 'ring-1 ring-accent-lineage/70',
+        onCursor && 'ring-2 ring-accent-lineage/60',
         dim,
       )}
       style={{
@@ -892,6 +963,11 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
         ...(card.connected ? { borderLeftWidth: 3, borderLeftColor: accent } : {}),
         paddingLeft: gutters.left ? PILL_ZONE : undefined,
         paddingRight: gutters.right ? PILL_ZONE : undefined,
+        // Selected, or lit by an isolation: the ring is the ENTITY TYPE's
+        // colour, so a lit board says what each lit thing is.
+        ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 8px 20px -8px ${accent}59` }
+          : onCone ? coneLift(accent, anchor, hops)
+            : {}),
       }}
       onWheel={(e) => {
         e.stopPropagation()
@@ -997,17 +1073,17 @@ function FocusGraphCard({ data, selected }: NodeProps) {
     card: FocusCard
     ctx: CardCtx
   }
-  // The path-to-focus highlight arrives via context so a hover re-renders
-  // only the cards whose highlight state actually changed.
-  const { onPath, offPath } = usePathState(card.id)
+  // The isolation arrives via context so a hover re-renders only the
+  // cards whose cone state actually changed.
+  const { anchor, onCone, offCone, hops } = useConeState(card.id)
   // One class, decided here: two `opacity-*` utilities on one element
   // are settled by their order in the stylesheet, not in the class list,
-  // so the text filter's own dim and the path floor cannot both be
+  // so the text filter's own dim and the cone floor cannot both be
   // spelled out and left to fight.
-  const dim = card.dimmed ? 'opacity-30' : offPath ? OFF_PATH_CARD : undefined
+  const dim = card.dimmed ? 'opacity-30' : offCone ? OFF_CONE_CARD : undefined
   const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
 
-  const activate = () => ctx.onSelect(card.nodeId)
+  const activate = () => { ctx.onSelect(card.nodeId); ctx.onIsolate(card.id) }
   const keyActivate = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); activate() }
   }
@@ -1024,10 +1100,14 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       onKeyDown={keyActivate}
       onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
       title={`${card.label}${card.description ? ` — ${card.description}` : ''} · click to inspect, double-click to focus`}
-      style={{ width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent }}
+      style={{
+        width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent,
+        ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 8px 20px -8px ${accent}59` }
+          : onCone ? coneLift(accent, anchor, hops)
+            : {}),
+      }}
       className={cn(
         'group relative flex items-center gap-2 rounded-lg border border-black/[0.07] dark:border-white/[0.08] px-2.5 cursor-pointer transition-colors bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-        selected ? 'ring-2 ring-accent-lineage' : onPath && 'ring-1 ring-accent-lineage/70',
         dim,
       )}
     >
@@ -1101,7 +1181,7 @@ function FocusFrameNode({ data, selected }: NodeProps) {
     ctx: CardCtx
     focalStats?: { coarser: number }
   }
-  const { onPath, offPath } = usePathState(card.id)
+  const { anchor, onCone, offCone, hops } = useConeState(card.id)
   // A frame nested inside another frame is also one of ITS rows, so it
   // answers to the host's keyboard cursor like any other row does.
   const rowCursor = useContext(RowCursorContext)
@@ -1184,21 +1264,22 @@ function FocusFrameNode({ data, selected }: NodeProps) {
         height: card.h,
         borderColor: isFocal ? accent : `${accent}55`,
         ...(isFocal
-          ? {
-            background: `linear-gradient(150deg, ${accent}24, ${accent}08 60%)`,
-            boxShadow: selected ? `0 10px 34px ${accent}55` : `0 10px 34px ${accent}33`,
-          }
+          ? { background: `linear-gradient(150deg, ${accent}24, ${accent}08 60%)` }
           : {}),
+        // In priority: what the reader chose, then what the isolation
+        // lights, then the focus's own standing glow.
+        ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 10px 34px -6px ${accent}66` }
+          : onCone ? coneLift(accent, anchor, hops)
+            : isFocal ? { boxShadow: `0 10px 34px ${accent}33` }
+              : {}),
       }}
       className={cn(
         'relative rounded-xl border-2 pointer-events-none',
         // The anchor is SOLID and lit; a partner container is a dashed
         // outline around rows that speak for themselves.
         isFocal ? 'bg-canvas-elevated' : 'border-dashed bg-black/[0.02] dark:bg-white/[0.03]',
-        selected && isFocal ? 'ring-2 ring-accent-lineage ring-offset-1 ring-offset-canvas-elevated'
-          : onCursor ? 'ring-2 ring-accent-lineage/60'
-            : onPath && 'ring-1 ring-accent-lineage/70',
-        offPath && OFF_PATH_CARD,
+        onCursor && 'ring-2 ring-accent-lineage/60',
+        offCone && OFF_CONE_CARD,
       )}
     >
       {card.wired && <PortHandles />}
@@ -1215,19 +1296,20 @@ function FocusFrameNode({ data, selected }: NodeProps) {
         style={{ height: headerHeight(card) }}
         // The focus is inspectable like any other card on the board; a
         // partner frame's header is its controls and nothing else.
-        {...(isFocal
-          ? {
-            role: 'button' as const,
-            tabIndex: 0,
-            onClick: () => ctx.onSelect(card.nodeId),
-            onKeyDown: (e: React.KeyboardEvent) => {
-              if (e.key !== 'Enter' && e.key !== ' ') return
-              e.preventDefault()
-              e.stopPropagation()
-              ctx.onSelect(card.nodeId)
-            },
-          }
-          : {})}
+        {...{
+          role: 'button' as const,
+          tabIndex: isFocal ? 0 : -1,
+          // A container's header is a place to point at it: inspect it,
+          // and isolate what runs through it.
+          onClick: () => { ctx.onSelect(card.nodeId); ctx.onIsolate(card.id) },
+          onKeyDown: (e: React.KeyboardEvent) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return
+            e.preventDefault()
+            e.stopPropagation()
+            ctx.onSelect(card.nodeId)
+            ctx.onIsolate(card.id)
+          },
+        }}
       >
       <div className={cn('flex items-center gap-1.5 min-w-0', isFocal && 'w-full')}>
         {hasContents && (
@@ -1441,14 +1523,18 @@ function FocusFrameNode({ data, selected }: NodeProps) {
         )}
       </div>
 
-      {card.fetch === 'loading' && (
+      {/* Everything below is about what is INSIDE this node, so none of
+          it is drawn on a node with no inside — a focus that holds
+          nothing is a compact card, and a sentence about its contents
+          would spill straight out of the bottom of it. */}
+      {hasContents && card.fetch === 'loading' && (
         <div className="absolute inset-x-2.5 space-y-1.5" style={{ top: bodyTop }}>
           {[0, 1].map(i => (
             <div key={i} className="h-8 rounded-lg bg-black/[0.05] dark:bg-white/[0.06] animate-pulse" />
           ))}
         </div>
       )}
-      {card.fetch === 'error' && (
+      {hasContents && card.fetch === 'error' && (
         <div className="pointer-events-auto absolute inset-x-2.5 flex items-center gap-1.5 text-[10px] text-amber-700 dark:text-amber-400" style={{ top: bodyTop }}>
           <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
           <span className="truncate">Couldn&apos;t look inside.</span>
@@ -1461,7 +1547,7 @@ function FocusFrameNode({ data, selected }: NodeProps) {
           </button>
         </div>
       )}
-      {card.frameEmpty && card.frameLoaded === 0 && card.fetch === null && (
+      {hasContents && card.frameEmpty && card.frameLoaded === 0 && card.fetch === null && (
         <p className="absolute inset-x-2.5 text-[10px] text-ink-muted/70 italic leading-snug" style={{ top: bodyTop }}>
           Nothing inside {card.label} is on this lineage.
           {ctx.onToggleFrameAll && ' Show everything inside to see what it holds.'}
@@ -1506,6 +1592,10 @@ function FrameScrollRegion({ card, ctx, win }: {
 
   const scrollTo = (offset: number) =>
     ctx.onFrameScroll(key, Math.max(0, Math.min(offset, win.maxOffset)))
+  /** Rows past the window that are already in hand — what one click
+   *  down would actually deliver. Never counts what is still on the
+   *  server: a step control has to promise only what it can give. */
+  const below = Math.max(0, win.loaded - win.to)
 
   /** Put the cursor on row `i`, bringing the window to it. */
   const moveCursor = (i: number) => {
@@ -1622,35 +1712,93 @@ function FrameScrollRegion({ card, ctx, win }: {
         // nobody is in points at nothing.
         onBlur={() => ctx.onRowCursor(key, null)}
       />
-      {/* Where in the list you are, both ways: a draggable thumb (so a
-          400-row table is one gesture from end to end) and the numbers
-          under it. At the FOOT of the list rather than in the header,
-          which has ~94px between the name and the Find box and clipped
-          "6 on this lineage · showing 1–10 of 60" halfway through.
-          It is also where the next page ANNOUNCES ITSELF: a shimmer row
-          could not, because the rows are React Flow siblings drawn ABOVE
-          this frame and the page is fetched a windowful EARLY — so it sat
-          under the rows, at a moment the window was never resting on. */}
+      {/* WHERE IN THE LIST YOU ARE, and how to move — announced rather
+          than left to be discovered.
+          Reported: a frame showing 8 of 14 rows said so with a hairline
+          scrollbar and 9px of grey text in a corner, and the reader found
+          the scrolling by accident. So the strip along the foot states
+          the range at a size you can read, offers a CLICK that pages the
+          window (the discoverable alternative to a wheel nobody knew
+          was there), and a soft edge says which way the rest is. */}
       {win.scrollable && (
         <>
           <FrameScrollThumb card={card} win={win} onScroll={scrollTo} />
-          <span
-            className="pointer-events-none absolute bottom-[2px] right-2.5 text-[9px] tabular-nums text-ink-muted/75 leading-none"
-            title={`Rows ${win.from.toLocaleString()}–${win.to.toLocaleString()} of ${
-              win.exact ? win.total.toLocaleString() : `${win.total.toLocaleString()}+`
-            } inside ${card.label}${card.fetch === 'loading' ? ' — fetching the next page' : ''}`}
+          {/* The list continues under this edge. Drawn in the padding
+              and the footer strip — the two bands of the frame no row is
+              ever placed in — so it is never a gradient over a name. */}
+          {win.offset > 0 && (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-1 h-4"
+              style={{
+                top: headerHeight(card),
+                background: 'linear-gradient(to bottom, rgb(0 0 0 / 0.11), transparent)',
+              }}
+            />
+          )}
+          {below > 0 && (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-1 h-4"
+              style={{
+                bottom: FRAME_FOOTER_H,
+                background: 'linear-gradient(to top, rgb(0 0 0 / 0.11), transparent)',
+              }}
+            />
+          )}
+          <div
+            className="nodrag pointer-events-auto absolute inset-x-2 bottom-0 flex items-center gap-1.5"
+            style={{ height: FRAME_FOOTER_H }}
+            onClick={(e) => e.stopPropagation()}
           >
-            {win.from.toLocaleString()}–{win.to.toLocaleString()} of{' '}
-            {win.exact ? win.total.toLocaleString() : `${win.total.toLocaleString()}+`}
+            <span
+              className="flex-shrink-0 px-1.5 py-px rounded-full bg-black/[0.05] dark:bg-white/[0.07] text-[9.5px] font-medium tabular-nums text-ink-secondary leading-none"
+              title={`Rows ${win.from.toLocaleString()}–${win.to.toLocaleString()} of ${
+                win.exact ? win.total.toLocaleString() : `${win.total.toLocaleString()}+`
+              } inside ${card.label}${card.fetch === 'loading' ? ' — fetching the next page' : ''}`}
+            >
+              {win.from.toLocaleString()}–{win.to.toLocaleString()} of{' '}
+              {win.exact ? win.total.toLocaleString() : `${win.total.toLocaleString()}+`}
+            </span>
             {card.fetch === 'loading' && (
-              <span className="text-accent-lineage/80"> · loading…</span>
+              <span className="flex-shrink-0 text-[9.5px] text-accent-lineage/90 leading-none">loading…</span>
             )}
-          </span>
+            <span className="flex-1" />
+            {win.offset > 0 && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); scrollTo(win.offset - win.size) }}
+                aria-label={`Show previous ${Math.min(win.size, win.offset)} rows`}
+                title={`Show previous ${Math.min(win.size, win.offset)} rows`}
+                className={STEP_PILL}
+              >
+                <LucideIcons.ChevronUp className="w-2.5 h-2.5" />
+                {Math.min(win.size, win.offset).toLocaleString()}
+              </button>
+            )}
+            {below > 0 && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); scrollTo(win.offset + win.size) }}
+                aria-label={`Show next ${Math.min(win.size, below)} rows`}
+                title={`Show next ${Math.min(win.size, below)} rows`}
+                className={STEP_PILL}
+              >
+                <LucideIcons.ChevronDown className="w-2.5 h-2.5" />
+                {Math.min(win.size, below).toLocaleString()} more
+              </button>
+            )}
+          </div>
         </>
       )}
     </>
   )
 }
+
+/** The two step controls at the foot of a scrolling list. Quiet at rest,
+ *  and it is the accent they take on hover — a control the reader has to
+ *  find is worth a colour once they are on it. */
+const STEP_PILL = 'nodrag flex-shrink-0 flex items-center gap-0.5 px-1.5 py-px rounded-full border border-black/10 dark:border-white/15 bg-canvas-elevated text-[9.5px] font-medium tabular-nums text-ink-muted leading-none transition-colors hover:text-accent-lineage hover:border-accent-lineage/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
 
 /** The scroll thumb: size says how much of the list is on screen,
  *  position says where. Dragging it moves the window. */
@@ -1659,14 +1807,17 @@ function FrameScrollThumb({ card, win, onScroll }: {
   win: ReturnType<typeof frameWindow>
   onScroll: (offset: number) => void
 }) {
-  const trackH = Math.max(0, card.h - headerHeight(card) - FRAME_PAD * 2)
+  const trackH = Math.max(0, card.h - headerHeight(card) - FRAME_PAD * 2 - FRAME_FOOTER_H)
   const span = Math.max(1, win.loaded)
   const thumbH = Math.max(18, Math.round(trackH * Math.min(1, win.size / span)))
   const travel = Math.max(0, trackH - thumbH)
   const thumbY = win.maxOffset === 0 ? 0 : Math.round(travel * (win.offset / win.maxOffset))
   return (
     <div
-      className="nodrag pointer-events-auto absolute w-1.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07]"
+      // AT REST, not on hover: a scrollbar that only appears once you are
+      // already over the list cannot tell you the list scrolls. It widens
+      // under the pointer, which is the affordance for grabbing it.
+      className="nodrag group/thumb pointer-events-auto absolute w-2 hover:w-3 transition-[width] rounded-full bg-black/[0.06] dark:bg-white/[0.08]"
       style={{ top: headerHeight(card) + FRAME_PAD, right: 3, height: trackH }}
       aria-hidden
       onPointerDown={(e) => {
@@ -1687,7 +1838,7 @@ function FrameScrollThumb({ card, win, onScroll }: {
       }}
     >
       <div
-        className="absolute inset-x-0 rounded-full bg-black/25 dark:bg-white/30"
+        className="absolute inset-x-0 rounded-full bg-black/30 dark:bg-white/35 group-hover/thumb:bg-accent-lineage/70 transition-colors"
         style={{ top: thumbY, height: thumbH }}
       />
     </div>
@@ -1718,7 +1869,13 @@ const MemoFocusGraphCard = memo(FocusGraphCard, (prev, next) => {
 /** Non-interactive header floating above each hop band ("Data Sources
  *  · 30 of 45"), or an italic whisper for an empty direction. */
 function BandLabelNode({ data }: NodeProps) {
-  const d = data as unknown as { band?: number; sub?: string; whisper?: string }
+  const d = data as unknown as { band?: number; sub?: string; whisper?: string; cardIds?: string[] }
+  // HOP CONTEXT while a cone is isolated: how much of THIS column the
+  // reader's lineage runs through. Counted here, from the ids the band
+  // already knows and the cone already in context — so the numbers cost
+  // nothing and the nodes array never rebuilds on a hover.
+  const iso = useContext(IsolationContext)
+  const onPath = iso === null ? 0 : (d.cardIds ?? []).filter(id => iso.cardIds.has(id)).length
   if (d.whisper) {
     return (
       <div style={{ width: CARD_W }} className="pointer-events-none text-[10.5px] italic text-ink-muted/60 leading-snug">
@@ -1732,14 +1889,25 @@ function BandLabelNode({ data }: NodeProps) {
   return (
     <div style={{ width: CARD_W }} className="pointer-events-none flex items-baseline gap-1.5 whitespace-nowrap">
       {isUp
-        ? <LucideIcons.ArrowDownLeft className="w-3 h-3 self-center text-sky-500" />
-        : <LucideIcons.ArrowUpRight className="w-3 h-3 self-center text-amber-500" />}
-      <span className="text-[9.5px] font-bold uppercase tracking-[0.12em] text-ink-muted/70">
+        ? <LucideIcons.ArrowDownLeft className={cn('w-3 h-3 self-center text-sky-500', iso !== null && onPath === 0 && 'opacity-40')} />
+        : <LucideIcons.ArrowUpRight className={cn('w-3 h-3 self-center text-amber-500', iso !== null && onPath === 0 && 'opacity-40')} />}
+      <span className={cn(
+        'text-[9.5px] font-bold uppercase tracking-[0.12em]',
+        iso !== null && onPath === 0 ? 'text-ink-muted/40' : 'text-ink-muted/70',
+      )}>
         {isUp
           ? hop === 1 ? 'Data Sources' : `Sources · hop ${hop}`
           : hop === 1 ? 'Data Consumers' : `Consumers · hop ${hop}`}
       </span>
       {d.sub && <span className="text-[9px] tabular-nums text-ink-muted/50">{d.sub}</span>}
+      {onPath > 0 && (
+        <span
+          className="text-[9px] tabular-nums font-semibold text-accent-lineage"
+          title="Cards in this column that the isolated lineage runs through"
+        >
+          · {onPath.toLocaleString()} on this path
+        </span>
+      )}
     </div>
   )
 }
@@ -1779,20 +1947,28 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // makes React Flow reconcile every edge).
   const hoveredId = useContext(HoverContext)
   const emphasized = hoveredId != null && (source === hoveredId || target === hoveredId)
-  // Path-to-focus highlight — same context-routing reason as above.
-  const pathHighlight = useContext(PathHighlightContext)
-  const onPath = pathHighlight != null && pathHighlight.edgeKeys.has(id)
-  const offPath = pathHighlight != null && !onPath && pathHighlight.source === 'select'
+  // The isolation — same context-routing reason as above.
+  const iso = useContext(IsolationContext)
+  const onCone = iso != null && iso.edgeIds.has(id)
+  const offCone = iso != null && !onCone
   const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
-  const strong = emphasized || onPath
-  // Highlighting STRENGTHENS what it points at; it does not wash out
-  // everything else. Hovering used to push every other wire to 20% and
-  // a path highlight to 12%, which turned reading one connection into
-  // losing the picture around it. Only a deliberate SELECTION quiets the
-  // rest now, and only to a floor that stays legible.
+  const strong = emphasized || onCone
+  /**
+   * HOW FAR ALONG the cone this wire runs — the near lineage reads
+   * heavier than the far, so an isolated cone has a direction of travel
+   * instead of being one flat band of highlight. Measured at the nearer
+   * of its two ends, because a wire is as close as its closest card.
+   */
+  const coneHops = onCone
+    ? Math.min(iso!.hops.get(source) ?? 99, iso!.hops.get(target) ?? 99)
+    : null
+  const adjacent = coneHops !== null && coneHops <= 1
+  // Highlighting STRENGTHENS what it points at, and quiets the rest only
+  // to a floor that stays legible — a highlight that turns the board into
+  // grey ghosts costs the reader the context they are reading against.
   const opacity = d.dimmed ? 0.12
     : strong ? 1
-      : offPath ? OFF_PATH_EDGE
+      : offCone ? OFF_CONE_EDGE
         : d.containment ? 0.45 : 0.7
   // A ×N survives density only where the reader is actually looking. A
   // CYCLE badge ignores density — "this lineage loops back" is a fact
@@ -1818,18 +1994,31 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
         id={id}
         path={path}
         markerEnd={markerEnd}
+        // A slow drift ALONG the cone, in the direction the data flows —
+        // the one piece of motion on this board, and only ever on the
+        // wires the reader asked about. A class rather than an inline
+        // animation so the app's own reduced-motion rules reach it, both
+        // the OS setting and the in-app preference.
+        className={cn(onCone && !d.reducedMotion && 'lens-cone-flow')}
         style={{
           stroke: d.tint,
-          strokeWidth: strong ? (d.aggregated ? 3 : 2.5) : d.aggregated ? 2 : 1.5,
+          // Three steps, no more: the wire the reader is pointing at and
+          // its first hop, the rest of the cone, and the background.
+          strokeWidth: onCone
+            ? (adjacent ? 3 : 2.25)
+            : strong ? (d.aggregated ? 3 : 2.5) : d.aggregated ? 2 : 1.5,
           strokeDasharray: d.containment ? '4 4' : undefined,
           opacity,
-          transition: d.reducedMotion ? undefined : 'opacity 120ms, stroke-width 120ms',
+          // Colour is what the eye follows, so the background gives its
+          // up. Dimming alone flattens the board into one grey wash.
+          filter: offCone ? 'saturate(.35)' : undefined,
+          transition: d.reducedMotion ? undefined : 'opacity 140ms ease-out, stroke-width 140ms ease-out',
         }}
       />
       {showLabel && (
         <EdgeLabelRenderer>
           <div
-            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`, opacity: offPath ? OFF_PATH_EDGE : 1 }}
+            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`, opacity: offCone ? OFF_CONE_EDGE : 1 }}
             className={cn(
               'absolute pointer-events-none px-1 py-px rounded-full bg-canvas-elevated border border-black/10 dark:border-white/10 text-[8.5px] font-semibold tabular-nums text-ink-muted shadow-sm',
               // Only a cycle badge needs to sit beside a count; a bare
@@ -1866,6 +2055,18 @@ const EDGE_TYPES = { focusEdge: FocusGraphEdgeComp }
  *  keep it inside the pane. */
 const PEEK_W = 236
 const PEEK_MAX_H = 280
+
+/** The key that does the same thing this button does — stated on the
+ *  button, so the keyboard is discoverable from the mouse. Honest: these
+ *  are T16's own row keys, and a click on a row leaves the keyboard in
+ *  that row's list, which is where they work. */
+function Kbd({ children }: { children: string }) {
+  return (
+    <kbd className="ml-auto flex-shrink-0 px-1 py-px rounded border border-black/10 dark:border-white/15 bg-black/[0.03] dark:bg-white/[0.06] text-[9px] font-sans font-medium text-ink-muted">
+      {children}
+    </kbd>
+  )
+}
 
 /**
  * The PEEK — one click on a row, and what that row IS, beside it.
@@ -1923,11 +2124,19 @@ function LensPeek({ card, host, ctx, onDismiss }: {
     <div
       role="dialog"
       aria-label={`Preview of ${card.label}`}
-      className="nowheel nodrag absolute z-50 -translate-y-1/2 rounded-xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-xl shadow-black/20 p-2.5"
+      className="nowheel nodrag absolute z-50 -translate-y-1/2 rounded-xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-xl shadow-black/25 overflow-hidden"
       style={{ left: x, top: y, width: PEEK_W }}
       onClick={(e) => e.stopPropagation()}
       onWheel={(e) => e.stopPropagation()}
     >
+      {/* The panel wears the ENTITY TYPE's colour, not the app's generic
+          accent: it is a card about one thing, and which KIND of thing it
+          is is the first question it answers. A wash rather than a block
+          — the name has to stay the loudest thing in here. */}
+      <div
+        className="px-2.5 pt-2.5 pb-2 border-b border-black/[0.07] dark:border-white/[0.08]"
+        style={{ background: `linear-gradient(180deg, ${accent}1a, transparent)` }}
+      >
       <div className="flex items-start gap-1.5">
         <div
           className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
@@ -1963,9 +2172,10 @@ function LensPeek({ card, host, ctx, onDismiss }: {
       {card.description && (
         <p className="mt-1.5 text-[10px] text-ink-secondary leading-snug line-clamp-3">{card.description}</p>
       )}
+      </div>
       {/* What the walk knows about it, in words rather than a badge —
           and a floor is marked as a floor, never rounded into a total. */}
-      <div className="mt-2 pt-1.5 border-t border-black/[0.07] dark:border-white/[0.08] space-y-0.5 text-[10px] tabular-nums">
+      <div className="px-2.5 py-2 space-y-0.5 text-[10px] tabular-nums">
         <p className="flex items-center gap-2.5">
           <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
             <LucideIcons.ArrowDownLeft className="w-3 h-3" />
@@ -1999,7 +2209,7 @@ function LensPeek({ card, host, ctx, onDismiss }: {
           </p>
         )}
       </div>
-      <div className="mt-2 space-y-1">
+      <div className="px-2.5 pb-2.5 space-y-1">
         {/* Only the moves this row can actually make. A "walk from here"
             over a drained direction would be a button that does nothing,
             which is the whole complaint the ⊕ states honestly — and the
@@ -2049,6 +2259,7 @@ function LensPeek({ card, host, ctx, onDismiss }: {
           >
             <LucideIcons.Focus className="w-3 h-3" />
             Focus here
+            <Kbd>⇧ ↵</Kbd>
           </button>
         )}
         {card.canOpenChildren && card.expandKey && (
@@ -2059,6 +2270,7 @@ function LensPeek({ card, host, ctx, onDismiss }: {
           >
             <LucideIcons.ChevronRight className="w-3 h-3" />
             {card.childrenOpen ? 'Close what is inside' : 'Open what is inside'}
+            <Kbd>→</Kbd>
           </button>
         )}
         {(ctx.onRevealOnCanvas || ctx.onOpenDetails) && card.nodeId && (
@@ -2263,9 +2475,12 @@ export function FocusGraphView({
   exportName,
   directionFilter = 'both',
   selectedId,
+  isolatedId = null,
   reducedMotion,
   edgeTypeInfo,
   onSelect,
+  onIsolate: onIsolateProp,
+  onDismiss: onDismissProp,
   onFocus,
   onToggleFrame,
   onFrameScroll,
@@ -2306,6 +2521,16 @@ export function FocusGraphView({
   // cursor is not part of the exploration a share link replays — and it
   // reaches the rows by CONTEXT, so arrowing down a 400-row table
   // re-renders the two rows whose ring changed, not the board.
+  // Isolation is the LENS's state, so it survives everything on this
+  // board that rebuilds — and so Escape, which the lens owns in one
+  // place, can clear it in the right order. A caller that does not want
+  // it (the visual harness) simply never hands one down.
+  const onIsolate = useCallback((cardId: string | null) => onIsolateProp?.(cardId), [onIsolateProp])
+  const onDismiss = useCallback(() => {
+    if (onDismissProp) onDismissProp()
+    else onSelect(null)
+  }, [onDismissProp, onSelect])
+
   const [rowCursor, setRowCursor] = useState<{ frameKey: string; urn: string } | null>(null)
   const onRowCursor = useCallback((frameKey: string, urn: string | null) => {
     setRowCursor(urn === null ? null : { frameKey, urn })
@@ -2356,10 +2581,11 @@ export function FocusGraphView({
     onRevealOnCanvas,
     onOpenDetails,
     onRowCursor,
+    onIsolate,
     onRevealMore,
     onExtend,
     onPage,
-  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onRevealMore, onExtend, onPage])
+  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onRevealMore, onExtend, onPage])
 
   const baseNodes = useMemo((): Node[] => {
     const minYByBand = new Map<number, number>()
@@ -2419,6 +2645,11 @@ export function FocusGraphView({
       const sub = totals && cards && totals.connections > totals.total
         ? `${cards} · ${totals.connections.toLocaleString()} connections`
         : cards
+      // Which cards this column holds — so the header can say how much of
+      // itself an isolated cone runs through WITHOUT this array ever
+      // being rebuilt by a hover. It changes when the board does, and a
+      // hover changes the context alone.
+      const bandCardIds = graph.cards.filter(c => !c.frameId && c.band === band).map(c => c.id)
       nodes.push({
         id: `bl:${band}`,
         type: 'bandLabel',
@@ -2426,7 +2657,7 @@ export function FocusGraphView({
         draggable: false,
         selectable: false,
         focusable: false,
-        data: { band, sub },
+        data: { band, sub, cardIds: bandCardIds },
       })
     }
     // The layout could not place the focus and drew it as a last resort.
@@ -2562,37 +2793,30 @@ export function FocusGraphView({
     [focalReach],
   )
 
-  // ── Path-to-focus highlight ──────────────────────────────────────
+  // ── Isolation ────────────────────────────────────────────────────
   //
-  // Trigger is hover-WITH-INTENT (150ms, so a sweeping pointer doesn't
-  // strobe the board) OR selection — hover wins while it is active, so
-  // the two can never fight over what is drawn; releasing the hover
-  // falls back to whatever is selected, never to nothing.
-  const [pathHoverId, setPathHoverId] = useState<string | null>(null)
-  const pathHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => () => { if (pathHoverTimer.current) clearTimeout(pathHoverTimer.current) }, [])
+  // Hover-WITH-INTENT, so a pointer crossing the board on its way
+  // somewhere else never strobes it; a CLICK makes the same treatment
+  // stick. Hover wins while it is active — the two can never fight over
+  // what is drawn — and releasing it falls back to whatever was clicked,
+  // never to nothing.
+  const [hoverConeId, setHoverConeId] = useState<string | null>(null)
+  const coneHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (coneHoverTimer.current) clearTimeout(coneHoverTimer.current) }, [])
 
-  const focalCardId = useMemo(
-    () => graph.cards.find(c => c.nodeId === focalId)?.id ?? null,
-    [graph.cards, focalId],
+  const anchorId = hoverConeId ?? isolatedId ?? null
+  const isolationValue = useMemo(() => {
+    if (!anchorId) return null
+    const cone = isolationCone(graph, anchorId)
+    // Null means the element touches no drawn wire (a roster extra, an
+    // unwired board). The contract here and in `isolationCone` is that
+    // this isolates NOTHING rather than dimming everything for no reason.
+    return cone && { ...cone, anchorId, sticky: hoverConeId === null }
+  }, [anchorId, hoverConeId, graph])
+  const anchorCard = useMemo(
+    () => (isolationValue ? graph.cards.find(c => c.id === isolationValue.anchorId) ?? null : null),
+    [graph.cards, isolationValue],
   )
-  const selectedCardId = useMemo(
-    () => (selectedId ? graph.cards.find(c => c.nodeId === selectedId)?.id ?? null : null),
-    [graph.cards, selectedId],
-  )
-  const pathSourceId = pathHoverId ?? selectedCardId
-  // WHICH gesture is asking, carried through so the cards and edges can
-  // tell "show me this path" (hover: strengthen only) from "I have
-  // chosen this one" (selection: may quiet the rest, to a floor).
-  const pathSource: 'hover' | 'select' = pathHoverId ? 'hover' : 'select'
-  const pathHighlightValue = useMemo(() => {
-    if (!pathSourceId || !focalCardId) return null
-    const found = pathToFocus(graph.edges, pathSourceId, focalCardId)
-    // Empty means "no path" (a roster extra, or the focus itself) —
-    // the contract both here and in pathToFocus is that this dims
-    // nothing rather than dimming the whole board for no reason.
-    return found.cardIds.size > 0 ? { ...found, source: pathSource } : null
-  }, [pathSourceId, pathSource, focalCardId, graph.edges])
 
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
   useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion)
@@ -2625,7 +2849,7 @@ export function FocusGraphView({
     >
       <ReachContext.Provider value={reachValue}>
       <HoverContext.Provider value={hoveredId}>
-      <PathHighlightContext.Provider value={pathHighlightValue}>
+      <IsolationContext.Provider value={isolationValue}>
       <RowCursorContext.Provider value={rowCursor}>
       <ReactFlowProvider>
         <ReactFlow
@@ -2652,17 +2876,22 @@ export function FocusGraphView({
           elementsSelectable={false}
           edgesFocusable={false}
           onNodeDragStop={commitDrag}
-          onPaneClick={() => onSelect(null)}
+          // Clicking the board behind everything DISMISSES, innermost
+          // first — the same order Escape uses, so the two gestures
+          // cannot disagree about what one of them means.
+          onPaneClick={onDismiss}
           onNodeMouseEnter={(_, n) => {
             if (n.type === 'focusCard') setHoveredId(n.id)
             if (n.type !== 'focusCard' && n.type !== 'focusFrame') return
-            if (pathHoverTimer.current) clearTimeout(pathHoverTimer.current)
-            pathHoverTimer.current = setTimeout(() => setPathHoverId(n.id), 150)
+            if (coneHoverTimer.current) clearTimeout(coneHoverTimer.current)
+            coneHoverTimer.current = setTimeout(() => setHoverConeId(n.id), HOVER_INTENT_MS)
           }}
           onNodeMouseLeave={() => {
             setHoveredId(null)
-            if (pathHoverTimer.current) { clearTimeout(pathHoverTimer.current); pathHoverTimer.current = null }
-            setPathHoverId(null)
+            // Instantly: a cone that lingers after the pointer has left
+            // is the board answering a question nobody is asking.
+            if (coneHoverTimer.current) { clearTimeout(coneHoverTimer.current); coneHoverTimer.current = null }
+            setHoverConeId(null)
           }}
           proOptions={{ hideAttribution: true }}
           style={{ background: 'transparent' }}
@@ -2684,10 +2913,32 @@ export function FocusGraphView({
               onDismiss={() => onSelect(null)}
             />
           )}
+          {/* What is isolated, and how to leave — only while it STICKS.
+              A hover needs no chip: letting go of it is the exit. */}
+          {isolationValue?.sticky && anchorCard && (
+            <Panel position="bottom-center" className="!mb-4 pointer-events-auto">
+              <div className="flex items-center gap-2 pl-3 pr-1.5 py-1.5 rounded-full bg-canvas-elevated/95 border border-black/10 dark:border-white/12 shadow-lg shadow-black/10 backdrop-blur-sm">
+                <LucideIcons.Spline className="w-3.5 h-3.5 flex-shrink-0 text-accent-lineage" />
+                <span className="text-[11px] text-ink">
+                  Isolating <span className="font-semibold">{anchorCard.label}</span>
+                </span>
+                <span className="text-[10px] text-ink-muted">Esc to clear</span>
+                <button
+                  type="button"
+                  onClick={() => onIsolate(null)}
+                  aria-label="Clear isolation"
+                  title="Clear isolation"
+                  className="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08] transition-colors"
+                >
+                  <LucideIcons.X className="w-3 h-3" />
+                </button>
+              </div>
+            </Panel>
+          )}
         </ReactFlow>
       </ReactFlowProvider>
       </RowCursorContext.Provider>
-      </PathHighlightContext.Provider>
+      </IsolationContext.Provider>
       </HoverContext.Provider>
       </ReachContext.Provider>
     </div>

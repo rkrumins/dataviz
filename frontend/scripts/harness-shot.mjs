@@ -33,9 +33,13 @@ const FIXTURES = process.argv.slice(2).length
   // ...and whether a sixty-child container reads as a BROWSABLE list —
   // one row language, connected first, a divider before the rest, honest
   // counts in the header and a peek beside the row you clicked.
+  //
+  // ...and whether ISOLATING one element's lineage reads as an answer:
+  // the cone lit and graded, a sibling producer of the same consumer
+  // quieted, and the chip that says what is isolated and how to leave.
   : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall', 'walkDirectionAndHighlight',
     'walkSharedPlatform', 'walkSharedPlatformLeaf', 'walkSharedPlatformOneColumn', 'walkDensePills',
-    'walkChildrenRich', 'walkColumnFocus', 'walkPlatformFocus']
+    'walkChildrenRich', 'walkColumnFocus', 'walkPlatformFocus', 'walkIsolatedCone']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH

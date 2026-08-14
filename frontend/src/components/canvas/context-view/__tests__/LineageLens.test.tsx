@@ -784,72 +784,151 @@ describe('the shell around the picture', () => {
   })
 })
 
-// ── PATH-TO-FOCUS HIGHLIGHT ──────────────────────────────────────────
+// ── ISOLATION ────────────────────────────────────────────────────────
 
-describe('hovering or selecting a card highlights its path to the focus', () => {
+describe('pointing at an element isolates its lineage cone', () => {
   beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
 
-  const simple = () => doneWalk(walkModel('b', {
-    nodes: [wnode('a', 'dataset', 'label-a'), wnode('b', 'dataset', 'label-b'), wnode('c', 'dataset', 'label-c')],
-    lineageEdges: [hop('a', 'b'), hop('b', 'c')],
-    upstreamUrns: new Set(['a']),
+  /**
+   *   a ─▶ b(focus) ─▶ c
+   *   d ─▶ b
+   *
+   * `d` is the whole test: a SIBLING producer of the focus. It is one
+   * hop from `a` in an undirected reading of this board and NOT on `a`'s
+   * cone in a directed one — which is the difference between isolation
+   * meaning something and lighting the whole picture.
+   */
+  const siblings = () => doneWalk(walkModel('b', {
+    nodes: [
+      wnode('a', 'dataset', 'label-a'), wnode('b', 'dataset', 'label-b'),
+      wnode('c', 'dataset', 'label-c'), wnode('d', 'dataset', 'label-d'),
+    ],
+    lineageEdges: [hop('a', 'b'), hop('b', 'c'), hop('d', 'b')],
+    upstreamUrns: new Set(['a', 'd']),
     downstreamUrns: new Set(['c']),
   }))
-  // The card's OWN root (role="button") carries the dimmed opacity class;
+
+  // The card's OWN root (role="button") carries the treatment;
   // `.react-flow__node` is React Flow's wrapper one level further out.
   // A SELECTED card's label is also echoed in the detail strip below the
   // board, so disambiguate by picking the match that lives on the board.
   const nodeFor = (label: string) => {
     const onCanvas = screen.getAllByText(label).find(el => el.closest('.react-flow__node'))!
-    return onCanvas.closest('[role="button"]')!
+    return onCanvas.closest('[role="button"]')! as HTMLElement
   }
 
-  /** The off-path floor a SELECTION quiets to. Deliberately not the old
-   *  30%: a highlight that turns the rest of the board into grey ghosts
-   *  costs the reader the context they were reading the path against. */
+  /** The off-cone floor. Deliberately not the old 30%: a highlight that
+   *  turns the rest of the board into grey ghosts costs the reader the
+   *  context they were reading the cone against. Desaturated as well as
+   *  dimmed, because opacity alone flattens the board. */
   const QUIET = 'opacity-60'
-  /** What being ON the path looks like. */
-  const LIT = 'ring-1 ring-accent-lineage/70'
+  const FLAT = 'saturate-[.35]'
+  /** On the cone: lifted with its own type colour. */
+  const lit = (el: HTMLElement) => el.style.boxShadow !== ''
 
-  it('selecting a card quiets what is off its path — to a floor that is still readable', () => {
-    renderLens(['b'], simple())
+  it('clicking an element lights its cone and quiets a sibling producer', () => {
+    renderLens(['b'], siblings())
     fireEvent.click(screen.getByText('label-a'))
-    // 'a' is one direct hop from the focus 'b' — 'c' is not on that path.
-    expect(nodeFor('label-c').className).toContain(QUIET)
-    expect(nodeFor('label-c').className).not.toContain('opacity-30')
+
+    // Downstream all the way through the focus...
+    expect(lit(nodeFor('label-a'))).toBe(true)
+    expect(lit(nodeFor('label-c'))).toBe(true)
+    // ...and NOT the other producer of the same target.
+    expect(nodeFor('label-d').className).toContain(QUIET)
+    expect(nodeFor('label-d').className).toContain(FLAT)
+    // Quiet, never invisible: the floor holds.
+    expect(nodeFor('label-d').className).not.toContain('opacity-30')
     expect(nodeFor('label-a').className).not.toContain(QUIET)
   })
 
-  it('deselecting (pane click) clears the highlight — nothing stays quieted', () => {
-    renderLens(['b'], simple())
+  it('says what is isolated, and offers the way out', () => {
+    renderLens(['b'], siblings())
     fireEvent.click(screen.getByText('label-a'))
-    expect(nodeFor('label-c').className).toContain(QUIET)
-    fireEvent.click(document.querySelector('.react-flow__pane')!)
-    expect(nodeFor('label-c').className).not.toContain(QUIET)
+    expect(screen.getByText(/Isolating/)).toBeTruthy()
+    expect(screen.getByText('Esc to clear')).toBeTruthy()
+
+    fireEvent.click(screen.getByLabelText('Clear isolation'))
+    expect(screen.queryByText(/Isolating/)).toBeNull()
+    expect(nodeFor('label-d').className).not.toContain(QUIET)
   })
 
-  it('hovering (past the 150ms intent delay) LIGHTS the path and dims nothing, and clears on mouse leave', () => {
+  it('clicking the board behind everything clears it', () => {
+    renderLens(['b'], siblings())
+    fireEvent.click(screen.getByText('label-a'))
+    expect(nodeFor('label-d').className).toContain(QUIET)
+    // One layer per click, innermost first: the selection this click also
+    // made goes first, then the isolation.
+    fireEvent.click(document.querySelector('.react-flow__pane')!)
+    fireEvent.click(document.querySelector('.react-flow__pane')!)
+    expect(nodeFor('label-d').className).not.toContain(QUIET)
+  })
+
+  it('hovering isolates after 250ms of intent, and mouse-leave restores instantly', () => {
     vi.useFakeTimers()
     try {
-      renderLens(['b'], simple())
+      renderLens(['b'], siblings())
       fireEvent.mouseEnter(nodeFor('label-a'))
-      act(() => { vi.advanceTimersByTime(149) })
-      expect(nodeFor('label-a').className).not.toContain(LIT)
+      act(() => { vi.advanceTimersByTime(249) })
+      // A pointer crossing the board never strobes it.
+      expect(nodeFor('label-d').className).not.toContain(QUIET)
       act(() => { vi.advanceTimersByTime(1) })
-      // The path is stated by lighting it up...
-      expect(nodeFor('label-a').className).toContain(LIT)
-      // ...and a pointer sweeping the board never washes the board out.
-      expect(nodeFor('label-c').className).not.toContain(QUIET)
-      expect(nodeFor('label-c').className).not.toContain('opacity-30')
+      expect(nodeFor('label-d').className).toContain(QUIET)
+      expect(lit(nodeFor('label-a'))).toBe(true)
+      // No chip while it is only a hover — letting go IS the exit.
+      expect(screen.queryByText(/Isolating/)).toBeNull()
+
       fireEvent.mouseLeave(nodeFor('label-a'))
-      expect(nodeFor('label-a').className).not.toContain(LIT)
+      expect(nodeFor('label-d').className).not.toContain(QUIET)
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('a diamond highlights both branches', () => {
+  it('a hover outranks the stuck isolation, and releasing it falls back', () => {
+    vi.useFakeTimers()
+    try {
+      renderLens(['b'], siblings())
+      // Stick on `a`: `d` is off the cone.
+      fireEvent.click(screen.getByText('label-a'))
+      expect(nodeFor('label-d').className).toContain(QUIET)
+
+      // Now rest the pointer on `d`: ITS cone is what is drawn, so `a`
+      // is the one that quiets.
+      fireEvent.mouseEnter(nodeFor('label-d'))
+      act(() => { vi.advanceTimersByTime(250) })
+      expect(nodeFor('label-d').className).not.toContain(QUIET)
+      expect(nodeFor('label-a').className).toContain(QUIET)
+
+      // Let go, and the click's own isolation is back — never nothing.
+      fireEvent.mouseLeave(nodeFor('label-d'))
+      expect(nodeFor('label-d').className).toContain(QUIET)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('isolates just the same under reduced motion — only the drift goes', () => {
+    // The wires' own drift is not assertable here: React Flow draws no
+    // edges at all until its nodes have been MEASURED, and jsdom measures
+    // nothing. It is gated twice over — the class is not applied when the
+    // preference is set, and the app's own reduced-motion rules switch
+    // `.lens-cone-flow` off besides — and the harness screenshot is where
+    // it is actually looked at.
+    usePreferencesStore.setState({ lensViewMode: 'graph', reducedMotion: true })
+    try {
+      renderLens(['b'], siblings())
+      fireEvent.click(screen.getByText('label-a'))
+      expect(document.querySelectorAll('.lens-cone-flow')).toHaveLength(0)
+      // ...and the cone is still isolated, motion or not.
+      expect(nodeFor('label-d').className).toContain(QUIET)
+      expect(lit(nodeFor('label-a'))).toBe(true)
+    } finally {
+      usePreferencesStore.setState({ reducedMotion: false })
+    }
+  })
+
+  it('a diamond lights both branches', () => {
     // H is two hops from the focus, so it needs A's and B's own pages
     // revealed too — a seed is the simplest way to land it on the board
     // without a click standing in for the thing under test.
@@ -864,8 +943,19 @@ describe('hovering or selecting a card highlights its path to the focus', () => 
       upstreamUrns: new Set(['H', 'A', 'B']),
     })), { walkSeed })
     fireEvent.click(screen.getByText('hub'))
-    expect(nodeFor('branch_a').className).not.toContain('opacity-30')
-    expect(nodeFor('branch_b').className).not.toContain('opacity-30')
+    expect(lit(nodeFor('branch_a'))).toBe(true)
+    expect(lit(nodeFor('branch_b'))).toBe(true)
+    expect(nodeFor('branch_a').className).not.toContain(QUIET)
+    expect(nodeFor('branch_b').className).not.toContain(QUIET)
+  })
+
+  it('the band headers say how much of each column the cone runs through', () => {
+    renderLens(['b'], siblings())
+    expect(screen.queryByText(/on this path/)).toBeNull()
+    fireEvent.click(screen.getByText('label-a'))
+    // One of the two upstream cards is on it; the downstream column's
+    // only card is too.
+    expect(screen.getAllByText(/· 1 on this path/).length).toBe(2)
   })
 })
 
@@ -1173,6 +1263,42 @@ describe('what is really inside a container', () => {
     expect(screen.getByText(/93–102 of/)).toBeTruthy()
   })
 
+  /**
+   * R5.2 — a list that windows has to SAY so.
+   *
+   * Reported: a frame showing 8 of 14 rows announced it with a hairline
+   * scrollbar and 9px of grey text in a corner, and the reader found the
+   * scrolling by accident.
+   */
+  it('a windowing list offers a click that pages it, and says what that click delivers', () => {
+    const onLoadAllChildren: LoadRoster = vi.fn()
+    openWideTable(onLoadAllChildren)
+    // Ten rows on screen, ninety-two more in hand: one click takes the
+    // next windowful, and the control promises exactly that many.
+    const next = screen.getByLabelText('Show next 10 rows')
+    expect(next.tagName).toBe('BUTTON')
+    // Nothing to go back to yet, so nothing offers to.
+    expect(screen.queryByLabelText(/^Show previous/)).toBeNull()
+
+    fireEvent.click(next)
+    expect(screen.getByText(/11–20 of/)).toBeTruthy()
+    expect(screen.getByLabelText('Show previous 10 rows')).toBeTruthy()
+    // ...and paging the window costs no round trip, exactly as scrolling
+    // it inside the loaded set does not.
+    expect(onLoadAllChildren).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByLabelText('Show previous 10 rows'))
+    expect(screen.getByText(/1–10 of/)).toBeTruthy()
+  })
+
+  it('offers none of it where there is nothing hidden', () => {
+    // Two connected columns, both on screen: no window, no chip, no step.
+    renderLens(['F'], tableWithColumns())
+    expect(screen.queryByLabelText(/^Show next/)).toBeNull()
+    expect(screen.queryByLabelText(/^Show previous/)).toBeNull()
+    expect(screen.queryByText(/1–2 of/)).toBeNull()
+  })
+
   it('asks a focal that HOLDS things for its own roster, once', () => {
     const onLoadChildrenOf = vi.fn()
     renderLens(['T'], doneWalk(walkModel('T', {
@@ -1325,15 +1451,26 @@ describe('browsing what is inside — the peek and the keyboard', () => {
     expect(onRecenter).toHaveBeenCalledWith('c1')
   })
 
-  it('Escape closes the peek — and does NOT close the lens under it', () => {
+  it('Escape peels ONE layer at a time — peek, isolation, then the lens', () => {
     const onClose = vi.fn()
     renderLens(['F'], table(), { onClose })
+    // One click on a row does two things: it previews the row, and it
+    // isolates what runs through it.
     fireEvent.click(row('order_id'))
     expect(peek()).toBeTruthy()
+    expect(screen.getByText(/Isolating/)).toBeTruthy()
+
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(peek()).toBeNull()
+    // ...and the isolation is still there, because it was opened first.
+    expect(screen.getByText(/Isolating/)).toBeTruthy()
     expect(onClose).not.toHaveBeenCalled()
-    // With nothing to dismiss, Escape means what it always meant.
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByText(/Isolating/)).toBeNull()
+    expect(onClose).not.toHaveBeenCalled()
+
+    // With nothing left to dismiss, Escape means what it always meant.
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(onClose).toHaveBeenCalled()
   })

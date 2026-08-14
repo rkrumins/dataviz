@@ -49,6 +49,7 @@ function buildWalk(fixture: WalkFixture) {
     focalId: sg.focusUrn,
     directionFilter: fixture.directionFilter,
     selectedId: fixture.selectedId ?? null,
+    isolatedId: fixture.isolatedId ?? null,
     // THE SAME derivation the app uses, imported rather than restated:
     // a "+" means the data source has more of THIS SIDE, and a frontier
     // entry on a node inside the focus whose lineage never leaves it says
@@ -87,7 +88,12 @@ export function Harness() {
           focalReach={built.reach}
           directionFilter={built.directionFilter}
           selectedId={built.selectedId}
-          reducedMotion
+          isolatedId={built.isolatedId}
+          // Shots are taken with motion OFF, so a screenshot is never a
+          // frame of an animation — except where the motion is the thing
+          // being looked at. The drift along an isolated cone is drawn
+          // with dashes, and a still of it is exactly readable.
+          reducedMotion={built.isolatedId === null}
           onSelect={noop}
           onFocus={noop}
           onToggleFrame={noop}

@@ -160,6 +160,28 @@
     }
   }
 
+  /* A wire on an ISOLATED lineage cone (Lineage Lens): a slow drift in
+     the direction the data flows, so a cone reads as a route rather than
+     as a colour. The offset is exactly two dash periods (9 + 7), which is
+     what makes the loop seamless — the app's older `flow` runs 40 over a
+     12px period and visibly jumps every third second.
+     Deliberately the only motion on that board; it is switched off both
+     ways under reduced motion, dashes included, because a static dashed
+     wire beside a solid one states a difference the picture doesn't mean. */
+  .lens-cone-flow {
+    stroke-dasharray: 9 7;
+    animation: lens-flow 1.6s linear infinite;
+  }
+
+  @keyframes lens-flow {
+    from {
+      stroke-dashoffset: 32;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
   /* === Cinematic Trace Mode ===
      When `data-trace-active="true"` is set on a canvas root, the focus
      node pulses with an accent-lineage halo and trace-incident edges get
@@ -713,6 +735,7 @@
 @media (prefers-reduced-motion: reduce) {
   .nx-edge-animated,
   .nx-edge-expanding,
+  .lens-cone-flow,
   .skeleton,
   .lineage-pulse,
   .lineage-pulse::after,
@@ -726,6 +749,7 @@
 }
 :root.reduce-motion .nx-edge-animated,
 :root.reduce-motion .nx-edge-expanding,
+:root.reduce-motion .lens-cone-flow,
 :root.reduce-motion .skeleton,
 :root.reduce-motion .lineage-pulse,
 :root.reduce-motion .lineage-pulse::after,
@@ -736,3 +760,10 @@
 :root.reduce-motion [data-trace-active="true"] [data-trace-focus="true"]::after {
   animation: none !important;
 }
+
+/* A frozen dashed wire says "different kind of connection", which is not
+   what the isolation means — so the dashes go with the motion. */
+@media (prefers-reduced-motion: reduce) {
+  .lens-cone-flow { stroke-dasharray: none !important; }
+}
+:root.reduce-motion .lens-cone-flow { stroke-dasharray: none !important; }
