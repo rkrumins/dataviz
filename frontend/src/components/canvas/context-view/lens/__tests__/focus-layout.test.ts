@@ -2715,55 +2715,6 @@ describe('R1: a table is a node; a column is one of its rows', () => {
         expect(cardFor(g, 'only')!.ancestry).toEqual(['GOLD'])
     })
 
-    it('THE GRAIN CAP: a hop-carrying container that holds tables is ONE card until drilled', () => {
-        // Reported live mid-flight: opening every level by default drew
-        // the estate as one narrow vertical strip — a container that
-        // declares lineage of its own AND holds seven tables put eight
-        // cards in one column, and the columns stopped being a skeleton.
-        // Deleting the frames must not delete the cap on how much grain
-        // arrives at once.
-        const sg = subgraph({
-            focus: 'F',
-            nodes: [
-                wnode('F', 'dataset', 'focus', { childCount: 3 }),
-                wnode('LAYER', 'container', 'INTERMEDIATE_T2', { childCount: 7 }),
-                ...['a', 'b', 'c'].map(n => wnode(`t_${n}`, 'dataset', `table_${n}`, { childCount: 9 })),
-            ],
-            contains: [['LAYER', 't_a'], ['LAYER', 't_b'], ['LAYER', 't_c']],
-            // The container carries a hop of its own, so it is a UNIT, not
-            // a rollup — and it still stands for what it holds.
-            hops: [['LAYER', 'F'], ['t_a', 'F'], ['t_b', 'F'], ['t_c', 'F']],
-        })
-        const shut = layout(sg)
-        expect(cardFor(shut, 'LAYER')!.frameId).toBeNull()
-        expect(cardFor(shut, 'LAYER')!.contents).toEqual({ onLineage: 3, total: 7 })
-        for (const t of ['t_a', 't_b', 't_c']) expect(cardFor(shut, t)).toBeUndefined()
-        // ...and one click puts them on the board, in their own column.
-        const base = initialLensViewState(sg)
-        const open = layout(sg, {
-            ...base,
-            expandedContainment: new Set([...base.expandedContainment, 'LAYER']),
-        })
-        for (const t of ['t_a', 't_b', 't_c']) expect(cardFor(open, t)!.frameId).toBeNull()
-    })
-
-    it('...but a table DOES open onto its own connected columns, as it always has', () => {
-        const sg = subgraph({
-            focus: 'F',
-            nodes: [
-                wnode('F', 'dataset', 'focus', { childCount: 3 }),
-                wnode('T', 'dataset', 'clean_charges', { childCount: 11 }),
-                wnode('c1', 'schemaField', 'charge_id'),
-                wnode('c2', 'schemaField', 'amount'),
-            ],
-            contains: [['T', 'c1'], ['T', 'c2']],
-            hops: [['c1', 'F'], ['c2', 'F']],
-        })
-        const g = layout(sg)
-        expect(cardFor(g, 'c1')!.frameId).toBe(cardFor(g, 'T')!.id)
-        expect(cardFor(g, 'c2')!.frameId).toBe(cardFor(g, 'T')!.id)
-    })
-
     it('a level once walked THROUGH stays chrome — a second table never swallows the first', () => {
         // The never-vanish rule, at container grain: GOLD held one table
         // when the board was drawn, so it was chrome. A reveal brings a

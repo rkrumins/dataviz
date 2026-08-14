@@ -645,30 +645,21 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
     // ── 3. VISIBILITY ────────────────────────────────────────────────
 
-    // WHAT IS OPEN — and nothing else is. THE CAP ON GRAIN, which
-    // deleting the frames must not delete with them.
+    // OPEN BY DEFAULT, which is what flat means: nothing stands in for
+    // anything unless it says so. Three exceptions — a ROLLUP (it stands
+    // for its members, by definition), whatever the reader shut by hand,
+    // and the CONTAINS-STACK.
     //
-    //   • CHROME and DRILLED containers, because they draw nothing: shut,
-    //     they would take the members they stand between off the board.
-    //   • A TABLE onto its OWN CONNECTED COLUMNS — the landed answer-grain
-    //     rule. Those columns ARE the answer at that grain, and they are
-    //     rows of one card rather than cards of their own.
-    //   • Whatever the reader opened by hand.
-    //
-    // Everything else stands for what it holds until it is asked. A
-    // container that carries a hop of its own AND holds seven tables is
-    // ONE card until it is drilled.
-    //
-    // Reported live, mid-flight (2026-08-14 12.15): opening every level by
-    // default drew the whole estate as a single narrow vertical strip —
-    // every table at column grain and every container's members promoted
-    // beside it, dozens of cards stacked at one or two x positions with
-    // the focal buried among them. The columns are the skeleton of this
-    // picture; a board with no x-spread is not a flatter version of the
-    // old one, it is a list.
-    const expanded = new Set<string>([...chrome, ...drilled, sg.focusUrn])
-    for (const urn of units) {
-        if (childrenInPopulation(urn).some(isLeafHopCarrier)) expanded.add(urn)
+    // The stack is the focus's own contents, BROWSED: a list you open a
+    // level of when you want it, not a picture laid out for you. Opening
+    // it by itself all the way down turned a platform focus's three
+    // containers into three nested boxes on sight — which is the chrome
+    // this whole task deleted, arriving through the one door R1 says to
+    // leave exactly as it was.
+    const expanded = new Set<string>()
+    for (const urn of population) {
+        if (urn !== sg.focusUrn && focusSubtree.has(urn)) continue
+        expanded.add(urn)
     }
     for (const urn of view.expandedContainment) expanded.add(urn)
     for (const urn of rollups) expanded.delete(urn)
