@@ -628,9 +628,15 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      * rollup target for a hop whose finer end is NOT drawn. `nearestVisible`
      * decides that per hop, so shutting the stack turns eight column
      * wires back into one bundle with no other machinery involved.
+     *
+     * What is NOT drawn: a hop with both ends inside the focus. That is
+     * the contents talking among themselves — it feeds their ×N counts
+     * and the drill, and as a wire it leaves the contains-stack and comes
+     * straight back into it, which is the tower in miniature. The same
+     * boundary rule the ⊕ and Reach obey, in geometry.
      */
     const wired = new Set(visibleOrder)
-    const projected = projectLensEdges(sg, population, wired)
+    const projected = projectLensEdges(sg, population, wired, subtreeOf(sg.focusUrn))
 
     /**
      * What each wired card VISUALLY STANDS FOR: itself, plus every

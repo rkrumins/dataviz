@@ -452,6 +452,13 @@ export function projectLensEdges<N extends LensNodeLike>(
     sg: LensSubgraph<N>,
     population: ReadonlySet<string>,
     visible: ReadonlySet<string>,
+    /** A subtree whose INTERNAL hops are not board geometry — the focus's
+     *  own, in practice. A hop with both ends inside it is the contents
+     *  talking to each other: it feeds their ×N counts and the drill, and
+     *  drawing it would run a wire out of the contains-stack and back in
+     *  (reported live as the tower). Hops that CROSS the boundary are
+     *  drawn at the finest visible grain on both ends, as always. */
+    internalTo?: ReadonlySet<string>,
 ): ProjectedLensEdge[] {
     const nearestVisible = (urn: string): string | null => {
         let cursor: string | null = urn
@@ -467,6 +474,7 @@ export function projectLensEdges<N extends LensNodeLike>(
     const bundles = new Map<string, ProjectedLensEdge>()
     for (const hop of sg.lineageEdges) {
         if (!population.has(hop.sourceUrn) || !population.has(hop.targetUrn)) continue
+        if (internalTo?.has(hop.sourceUrn) && internalTo.has(hop.targetUrn)) continue
         const s = nearestVisible(hop.sourceUrn)
         const t = nearestVisible(hop.targetUrn)
         if (!s || !t || s === t) continue   // internal to a collapsed container

@@ -567,6 +567,117 @@ const walkChildrenRich = (): WalkFixture => {
   }
 }
 
+/**
+ * THE BLANK BOARD (user, 2026-08-14 09.13–09.21), from the live dev
+ * graph: focusing the SCHEMAFIELD `channel` drew nothing at all.
+ *
+ *   Snowflake ⊃ INTERMEDIATE_T1 ⊃ int_clean_orders_t1 ⊃ channel  ← focus
+ *   Snowflake ⊃ SILVER ⊃ clean_orders ⊃ channel                  → upstream
+ *   Snowflake ⊃ INTERMEDIATE_T2 ⊃ int_clean_orders_t2 ⊃ channel  → downstream
+ *
+ * That source's ontology lists AGGREGATED as a LINEAGE edge type, so the
+ * aggregation worker's rollups are real hops: the column is wired to its
+ * upstream partner's TABLE and CONTAINER, and — both ways — to its own
+ * containment root, the platform. Those two are what the focal's
+ * "+2 connect at a coarser grain" counts.
+ *
+ * EXPECTED: a compact `channel` focal reading `Snowflake ›
+ * INTERMEDIATE_T1 › int_clean_orders_t1`, its two partner containers as
+ * cards either side, and NO ⊕ on the focal — the platform's own frontier
+ * of 321 is 321 pieces of the platform's inside, and the focal's extend
+ * (seeded from the focus's own leaves) could never have fetched it.
+ */
+const walkColumnFocus = (): WalkFixture => ({
+  title: 'A column whose platform is also its lineage — the board that came back empty',
+  model: walkModel('f:channel', {
+    nodes: [
+      wnode('SNOW', 'dataPlatform', 'Snowflake', { childCount: 14 }),
+      wnode('INT_T1', 'container', 'INTERMEDIATE_T1', { childCount: 6 }),
+      wnode('T1', 'dataset', 'int_clean_orders_t1', { childCount: 14 }),
+      wnode('f:channel', 'schemaField', 'channel'),
+      wnode('SILVER', 'container', 'SILVER', { childCount: 12 }),
+      wnode('src_t', 'dataset', 'clean_orders', { childCount: 14 }),
+      wnode('s:channel', 'schemaField', 'channel'),
+      wnode('INT_T2', 'container', 'INTERMEDIATE_T2', { childCount: 7 }),
+      wnode('dst_t', 'dataset', 'int_clean_orders_t2', { childCount: 14 }),
+      wnode('d:channel', 'schemaField', 'channel'),
+    ],
+    containmentEdges: [
+      holds('SNOW', 'INT_T1'), holds('SNOW', 'SILVER'), holds('SNOW', 'INT_T2'),
+      holds('INT_T1', 'T1'), holds('T1', 'f:channel'),
+      holds('SILVER', 'src_t'), holds('src_t', 's:channel'),
+      holds('INT_T2', 'dst_t'), holds('dst_t', 'd:channel'),
+    ],
+    lineageEdges: [
+      hop('s:channel', 'f:channel', 'TRANSFORMS'),
+      hop('s:channel', 'f:channel', 'AGGREGATED'),
+      hop('src_t', 'f:channel', 'AGGREGATED'),
+      hop('SILVER', 'f:channel', 'AGGREGATED'),
+      // The focus's OWN root, both ways — no card can carry these.
+      hop('SNOW', 'f:channel', 'AGGREGATED'),
+      hop('f:channel', 'SNOW', 'AGGREGATED'),
+      hop('f:channel', 'd:channel', 'TRANSFORMS'),
+      hop('f:channel', 'd:channel', 'AGGREGATED'),
+      hop('f:channel', 'dst_t', 'AGGREGATED'),
+      hop('f:channel', 'INT_T2', 'AGGREGATED'),
+    ],
+    upstreamUrns: new Set(['SILVER', 'src_t', 's:channel', 'SNOW']),
+    downstreamUrns: new Set(['INT_T2', 'dst_t', 'd:channel']),
+    frontierUp: [frontier('SNOW', 321)],
+    frontierDown: [frontier('d:channel', 5), frontier('INT_T2', 57), frontier('dst_t', 15)],
+  }),
+})
+
+/**
+ * THE CONTAINER BOUNDARY (user, 2026-08-14 09.13): focusing the platform
+ * Snowflake offered "+211" upstream; the click fetched, drew nothing, and
+ * the badge grew to +384 while the rows re-ordered under it.
+ *
+ * The live closure for that focus: 567 nodes, 2,426 hops, `upstreamUrns`
+ * EMPTY — every hop interior — and 51 frontier entries, every one on a
+ * node inside the platform. This is that estate in miniature, including
+ * the rollup hop from an interior table to the platform itself.
+ *
+ * EXPECTED: no upstream ⊕ on the focal and no "+" on its upstream Reach
+ * — the platform's own inside is not its lineage — while the genuine
+ * downstream consumer outside it keeps both.
+ */
+const walkPlatformFocus = (): WalkFixture => ({
+  title: 'A platform focus — its own inside is not its lineage',
+  model: walkModel('SNOW', {
+    nodes: [
+      wnode('SNOW', 'dataPlatform', 'Snowflake', { childCount: 14 }),
+      wnode('BRONZE', 'container', 'BRONZE', { childCount: 5 }),
+      wnode('SILVER', 'container', 'SILVER', { childCount: 12 }),
+      wnode('INT_T2', 'container', 'INTERMEDIATE_T2', { childCount: 7 }),
+      wnode('raw_t', 'dataset', 'raw_orders', { childCount: 9 }),
+      wnode('src_t', 'dataset', 'clean_orders', { childCount: 14 }),
+      wnode('dst_t', 'dataset', 'int_clean_orders_t2', { childCount: 14 }),
+      wnode('BI', 'dataPlatform', 'Tableau', { childCount: 4 }),
+      wnode('dash', 'dataset', 'revenue_by_channel'),
+    ],
+    containmentEdges: [
+      holds('SNOW', 'BRONZE'), holds('SNOW', 'SILVER'), holds('SNOW', 'INT_T2'),
+      holds('BRONZE', 'raw_t'), holds('SILVER', 'src_t'), holds('INT_T2', 'dst_t'),
+      holds('BI', 'dash'),
+    ],
+    lineageEdges: [
+      hop('raw_t', 'src_t', 'TRANSFORMS'),
+      hop('BRONZE', 'SILVER', 'AGGREGATED'),
+      hop('src_t', 'dst_t', 'TRANSFORMS'),
+      hop('SILVER', 'dst_t', 'AGGREGATED'),
+      // The worker's rollup onto the platform itself — 321 of these are
+      // what "+211" was counting.
+      hop('src_t', 'SNOW', 'AGGREGATED'),
+      hop('dst_t', 'dash', 'TRANSFORMS'),
+    ],
+    upstreamUrns: new Set(),
+    downstreamUrns: new Set(['BI', 'dash']),
+    frontierUp: [frontier('SNOW', 321), frontier('src_t', 96), frontier('dst_t', 115), frontier('SILVER', 57)],
+    frontierDown: [frontier('dash', 4)],
+  }),
+})
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkCollaterals: walkCollaterals(),
   walkDiamond: walkDiamond(),
@@ -580,4 +691,6 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkSharedPlatformOneColumn: walkSharedPlatformOneColumn(),
   walkDensePills: walkDensePills(),
   walkChildrenRich: walkChildrenRich(),
+  walkColumnFocus: walkColumnFocus(),
+  walkPlatformFocus: walkPlatformFocus(),
 }

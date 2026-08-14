@@ -43,7 +43,7 @@
  * The viewport re-frames on FOCAL change only: expanding grows the
  * picture in place instead of yanking it away from what you opened.
  */
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -518,6 +518,21 @@ const gutterPos = (inFrame: boolean, upstream: boolean): string =>
     ? (upstream ? 'left-1' : 'right-1')
     : (upstream ? 'right-full mr-1.5' : 'left-full ml-1.5')
 
+/** ...and where it sits VERTICALLY.
+ *
+ *  A FRAME hangs its own ⊕ on its HEADER line, beside the name it acts
+ *  for. Anything else centres on itself.
+ *
+ *  Reported live: two pills stacked on one row of `int_clean_orders_t1`.
+ *  A frame's ⊕ centred on the frame lands on whichever row happens to
+ *  occupy its middle — and a NESTED frame tucks its pill inside, ten
+ *  pixels from that row's own, so two different controls acting on two
+ *  different things came out as one smudge. The header is the frame's
+ *  own line and no row is ever on it, so the collision cannot happen at
+ *  any nesting depth. */
+const pillAnchor = (card: FocusCard): CSSProperties =>
+  card.kind === 'frame' ? { top: FRAME_HEADER_H / 2 } : { top: '50%' }
+
 /** Which ends of this card have something in the gutter. Its content
  *  keeps out of those — an absolutely-positioned pill over a truncating
  *  label is a name you cannot read and a control you cannot see. */
@@ -647,7 +662,8 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
   // z-20 puts the ⊕ above the hover toolbar (z-10) wherever the two ever
   // meet again: the pill is the affordance, so it wins by rule rather
   // than by DOM order.
-  const base = 'nodrag pointer-events-auto z-20 absolute top-1/2 -translate-y-1/2 flex items-center justify-center gap-0.5 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors'
+  const base = 'nodrag pointer-events-auto z-20 absolute -translate-y-1/2 flex items-center justify-center gap-0.5 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors'
+  const anchor = pillAnchor(card)
   const side = upstream ? 'upstream' : 'downstream'
   const act = () => {
     if (pill.kind === 'reveal') ctx.onRevealMore?.(pill.key)
@@ -657,7 +673,7 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
 
   if (pill.status === 'loading') {
     return (
-      <span className={cn(base, 'w-5 bg-canvas-elevated border-accent-lineage/40', pos)}>
+      <span style={anchor} className={cn(base, 'w-5 bg-canvas-elevated border-accent-lineage/40', pos)}>
         <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage" aria-label={`Fetching ${side} lineage`} />
       </span>
     )
@@ -671,6 +687,7 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
         onClick={(e) => { e.stopPropagation(); act() }}
         title={`Couldn't fetch what's ${side} of ${card.label} — click to try again`}
         aria-label={`Retry fetching ${side} of ${card.label}`}
+        style={anchor}
         className={cn(base, 'w-5 bg-canvas-elevated border-amber-500/60 text-amber-600 dark:text-amber-400 hover:bg-amber-500/10', pos)}
       >
         <LucideIcons.AlertTriangle className="w-3 h-3" />
@@ -699,6 +716,7 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
       onClick={(e) => { e.stopPropagation(); act() }}
       title={title}
       aria-label={title}
+      style={anchor}
       className={cn(
         base,
         n != null ? 'px-1.5' : 'w-5',
@@ -730,8 +748,9 @@ function WalkPills({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
       <span
         title={`No further ${upstream ? 'upstream' : 'downstream'} lineage in the data source — the walk ends here`}
         aria-label={`End of ${upstream ? 'upstream' : 'downstream'} lineage`}
+        style={pillAnchor(card)}
         className={cn(
-          'pointer-events-none z-20 absolute top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded-full bg-canvas-elevated border border-black/10 dark:border-white/15 text-ink-muted/50',
+          'pointer-events-none z-20 absolute -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded-full bg-canvas-elevated border border-black/10 dark:border-white/15 text-ink-muted/50',
           gutterPos(card.frameId != null, upstream),
         )}
       >

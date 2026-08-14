@@ -25,12 +25,17 @@ const FIXTURES = process.argv.slice(2).length
   // the focus and its partners still lays out as hop COLUMNS rather than
   // collapsing into one tower. None of those can be checked any other
   // way.
+  // ...and the two the user reported on 2026-08-14: a column whose own
+  // platform is part of its lineage (the board that came back empty), and
+  // a platform focus whose inside is not its lineage (the ⊕ that grew
+  // and delivered nothing).
+  //
   // ...and whether a sixty-child container reads as a BROWSABLE list —
   // one row language, connected first, a divider before the rest, honest
   // counts in the header and a peek beside the row you clicked.
   : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall', 'walkDirectionAndHighlight',
     'walkSharedPlatform', 'walkSharedPlatformLeaf', 'walkSharedPlatformOneColumn', 'walkDensePills',
-    'walkChildrenRich']
+    'walkChildrenRich', 'walkColumnFocus', 'walkPlatformFocus']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH
