@@ -21,8 +21,12 @@ const FIXTURES = process.argv.slice(2).length
   // Every walk shape by default: whether a deep estate genuinely NESTS,
   // whether a diamond stays one card, whether every ⊕ state is legible
   // side by side, whether the direction preset + path highlight actually
-  // draw. None of those can be checked any other way.
-  : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall', 'walkDirectionAndHighlight']
+  // draw, and — the two reported live — whether a platform holding both
+  // the focus and its partners still lays out as hop COLUMNS rather than
+  // collapsing into one tower. None of those can be checked any other
+  // way.
+  : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall', 'walkDirectionAndHighlight',
+    'walkSharedPlatform', 'walkSharedPlatformLeaf']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH

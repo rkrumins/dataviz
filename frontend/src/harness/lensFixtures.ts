@@ -240,9 +240,11 @@ const walkDeep = (): WalkFixture => {
   }
 }
 
-/** The tiny answer that used to float in an ocean of dots. */
+/** The tiny answer that used to float in an ocean of dots. The partners
+ *  sit in their tables; the focus names its own table instead of being
+ *  boxed inside it. */
 const walkSmall = (): WalkFixture => ({
-  title: 'Three cards, nested in their tables',
+  title: 'One column between two tables — the focus names where it lives',
   model: walkModel('F', {
     nodes: [
       wnode('T', 'dataset', 'int_clean_products_t2', { childCount: 18 }),
@@ -280,6 +282,115 @@ const walkDirectionAndHighlight = (): WalkFixture => ({
   selectedId: 'SRC',
 })
 
+/**
+ * THE REPORTED TOWER, from the live dev stack: the focus and its sources
+ * all live in the SAME platform.
+ *
+ *   Snowflake ⊃ REPORTING (the focus) ⊃ {rpt_revenue ⊃ 4 columns, rpt_churn}
+ *   Snowflake ⊃ GOLD ⊃ dim_customer          → upstream
+ *   Snowflake ⊃ INTERMEDIATE_T2              → upstream
+ *   BI ⊃ exec_dashboard                      → downstream, outside it
+ *
+ * Drawn with Snowflake as a frame, this was one vertical tower: focus
+ * and both sources stacked inside a single box, no hop columns, wires
+ * arcing back through it, and an empty upstream band whispering "no
+ * upstream sources in the data source" beside the sources it was
+ * drawing. The shot must show columns, not a box.
+ */
+const walkSharedPlatform = (): WalkFixture => ({
+  title: 'The focus and its sources share a platform — columns, not a tower',
+  model: walkModel('REPORTING', {
+    nodes: [
+      wnode('SNOW', 'PLATFORM', 'Snowflake', { childCount: 14 }),
+      wnode('REPORTING', 'CONTAINER', 'REPORTING', { childCount: 9, description: 'Curated reporting layer' }),
+      wnode('rpt_revenue', 'dataset', 'rpt_revenue_daily', { childCount: 12 }),
+      wnode('rv_order', 'schemaField', 'order_id'),
+      wnode('rv_customer', 'schemaField', 'customer_id'),
+      wnode('rv_net', 'schemaField', 'net_amount'),
+      wnode('rv_booked', 'schemaField', 'booked_at'),
+      wnode('rpt_churn', 'dataset', 'rpt_churn_weekly', { childCount: 7 }),
+      wnode('GOLD', 'CONTAINER', 'GOLD', { childCount: 6 }),
+      wnode('dim_customer', 'dataset', 'dim_customer', { childCount: 22 }),
+      wnode('INT_T2', 'CONTAINER', 'INTERMEDIATE_T2', { childCount: 4 }),
+      wnode('BI', 'PLATFORM', 'BI', { childCount: 3 }),
+      wnode('dash', 'dataset', 'exec_dashboard'),
+    ],
+    containmentEdges: [
+      holds('SNOW', 'REPORTING'), holds('SNOW', 'GOLD'), holds('SNOW', 'INT_T2'),
+      holds('REPORTING', 'rpt_revenue'), holds('REPORTING', 'rpt_churn'),
+      holds('rpt_revenue', 'rv_order'), holds('rpt_revenue', 'rv_customer'),
+      holds('rpt_revenue', 'rv_net'), holds('rpt_revenue', 'rv_booked'),
+      holds('GOLD', 'dim_customer'),
+      holds('BI', 'dash'),
+    ],
+    lineageEdges: [
+      hop('dim_customer', 'rv_customer'), hop('dim_customer', 'rv_order'),
+      hop('dim_customer', 'rpt_churn'),
+      // Two relationships between the same pair — one line, weight 2, and
+      // a run long enough to carry the badge that says so.
+      hop('INT_T2', 'rv_net'), hop('INT_T2', 'rv_net', 'JOINS'),
+      hop('rv_booked', 'dash'), hop('rpt_churn', 'dash'),
+    ],
+    upstreamUrns: new Set(['GOLD', 'dim_customer', 'INT_T2']),
+    downstreamUrns: new Set(['BI', 'dash']),
+    frontierUp: [frontier('dim_customer', 5), frontier('INT_T2', null)],
+    frontierDown: [frontier('dash', 3)],
+  }),
+  // The drill the rebuild got right: a table opened onto the columns
+  // that actually carry the lineage.
+  script: base => scripted(base, { expand: ['rpt_revenue'] }),
+})
+
+/**
+ * The same shape one grain down — the reported SPAGHETTI: two tables of
+ * the same eight columns, in two containers of one platform, wired
+ * column to column.
+ *
+ *   Snowflake ⊃ BRONZE ⊃ clean_charges_t2 (the focus) ⊃ 8 columns
+ *   Snowflake ⊃ SILVER ⊃ clean_charges    ⊃ the same 8 columns
+ *
+ * Sixteen cards inside one platform frame drew sixteen crossing arcs.
+ * The shot must show the partner LEFT, the focus RIGHT, and eight tidy
+ * near-parallel wires between them.
+ */
+const walkSharedPlatformLeaf = (): WalkFixture => {
+  const columns = [
+    'charge_id', 'account_id', 'amount', 'currency',
+    'booked_at', 'posted_at', 'status', 'source_system',
+  ]
+  const nodes = [
+    wnode('SNOW', 'PLATFORM', 'Snowflake', { childCount: 14 }),
+    wnode('BRONZE', 'CONTAINER', 'BRONZE', { childCount: 5 }),
+    wnode('SILVER', 'CONTAINER', 'SILVER', { childCount: 9 }),
+    wnode('F', 'dataset', 'clean_charges_t2', { childCount: 11 }),
+    wnode('SRC', 'dataset', 'clean_charges', { childCount: 11 }),
+  ]
+  const containmentEdges = [
+    holds('SNOW', 'BRONZE'), holds('SNOW', 'SILVER'),
+    holds('BRONZE', 'F'), holds('SILVER', 'SRC'),
+  ]
+  const lineageEdges: ReturnType<typeof hop>[] = []
+  for (const name of columns) {
+    nodes.push(wnode(`f:${name}`, 'schemaField', name))
+    nodes.push(wnode(`s:${name}`, 'schemaField', name))
+    containmentEdges.push(holds('F', `f:${name}`), holds('SRC', `s:${name}`))
+    lineageEdges.push(hop(`s:${name}`, `f:${name}`))
+  }
+  return {
+    title: 'Column to column across one platform — eight parallel wires, no tower',
+    model: walkModel('F', {
+      nodes,
+      containmentEdges,
+      lineageEdges,
+      upstreamUrns: new Set(['SILVER', 'SRC', ...columns.map(c => `s:${c}`)]),
+      frontierUp: [frontier('s:charge_id', 2)],
+    }),
+    // The partner table opened to the columns that carry the lineage —
+    // the picture the report was about.
+    script: base => scripted(base, { expand: ['SRC'] }),
+  }
+}
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkCollaterals: walkCollaterals(),
   walkDiamond: walkDiamond(),
@@ -288,4 +399,6 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkDeep: walkDeep(),
   walkSmall: walkSmall(),
   walkDirectionAndHighlight: walkDirectionAndHighlight(),
+  walkSharedPlatform: walkSharedPlatform(),
+  walkSharedPlatformLeaf: walkSharedPlatformLeaf(),
 }
