@@ -12,7 +12,7 @@
  * that module calls `createRoot(...).render(...)` at import time, which
  * has no `#root` element in a vitest/jsdom environment.
  */
-import { boundaryFrontierFilter, buildLensSubgraph } from '@/components/canvas/context-view/lens/lens-subgraph'
+import { boundaryFrontierFilter, buildLensSubgraph, distinctSystemCount } from '@/components/canvas/context-view/lens/lens-subgraph'
 import { buildFocusLayout, initialLensViewState } from '@/components/canvas/context-view/lens/focus-layout'
 import type { WalkFixture } from './lensFixtures'
 
@@ -50,6 +50,8 @@ export function buildWalk(fixture: WalkFixture) {
         f => boundaryFrontierFilter(sg, sg.focusUrn, 'in')(f.urn)),
       moreDown: fixture.model.frontierDown.some(
         f => boundaryFrontierFilter(sg, sg.focusUrn, 'out')(f.urn)),
+      upSystems: distinctSystemCount(sg, fixture.model.upstreamUrns),
+      downSystems: distinctSystemCount(sg, fixture.model.downstreamUrns),
     },
   }
 }

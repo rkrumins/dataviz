@@ -276,6 +276,9 @@ const HOVER_INTENT_MS = 250
 
 /** Shared empty overlay — a fresh Map would churn the nodes memo. */
 const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
+/** Shared empty trail sets — a caller with no history (the visual
+ *  harness) marks nothing, without a fresh Set churning memos. */
+const EMPTY_TRAIL: ReadonlySet<string> = new Set()
 
 interface CardCtx {
   edgeTypeInfo?: EdgeTypeInfoMap
@@ -324,6 +327,10 @@ interface CardCtx {
    *  version of the pane click, for the parts of a frame that are
    *  background but sit above the pane. */
   onDismiss: () => void
+  /** THE TRAIL: entities the reader explicitly walked through this
+   *  session — focus history plus extend/page anchors. A subtle,
+   *  persistent mark, never the isolation's own loud treatment. */
+  trailUrns: ReadonlySet<string>
   // ── Growing the walk ─────────────────────────────────────────────
   // Optional so a caller can render a picture it does not intend to be
   // grown (the visual harness does exactly that); the ⊕ renders only
@@ -366,6 +373,13 @@ interface FocusGraphViewProps {
    *  order and this is how the board asks for it. Falls back to clearing
    *  the selection where a caller has no layering of its own. */
   onDismiss?: () => void
+  /** See `CardCtx.trailUrns`. Defaults to empty — the visual harness and
+   *  any caller with no history simply marks nothing. */
+  trailUrns?: ReadonlySet<string>
+  /** Wires ON the trail: unordered `${urnA}|${urnB}` keys (urns sorted)
+   *  for consecutive hops in the walked path — the ones that get the
+   *  slightly firmer stroke. */
+  trailAdjacent?: ReadonlySet<string>
   onFocus: (nodeId: string) => void
   onToggleFrame: (expandKey: string) => void
   onFrameScroll: (openKey: string, offset: number) => void
@@ -430,6 +444,23 @@ function coneLift(accent: string, anchor: boolean, hops: number | null): CSSProp
       ? `0 0 0 1.5px ${accent}b3, 0 8px 22px -8px ${accent}4d`
       : `0 0 0 1px ${accent}80, 0 6px 16px -8px ${accent}33`,
   }
+}
+
+/**
+ * THE TRAIL — a subtle, persistent mark on a card the reader explicitly
+ * walked through this session (re-anchored on it, or grew the board FROM
+ * it with a ⊕ click). Minimal, per the rule: a small filled dot, nothing
+ * that competes with the isolation's own loud highlight, and no new
+ * machinery beyond the history this lens already keeps.
+ */
+function TrailMark() {
+  return (
+    <span
+      aria-hidden
+      title="Part of the path you've walked"
+      className="pointer-events-none absolute -top-1 -right-1 w-1.5 h-1.5 rounded-full bg-ink-muted/70 dark:bg-white/50 ring-2 ring-canvas-elevated"
+    />
+  )
 }
 
 /** Flat equality over a built card. Every field is a primitive, a frozen
@@ -878,15 +909,67 @@ function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
  *  the column underneath it). */
 const pillTarget = (key: string): string => key.slice(key.indexOf(':') + 1)
 
+/** THE ONE PLACE a pill's three kinds resolve to a walk-hook call —
+ *  shared by the on-card control, the focal's inline follow, and the
+ *  spotlight chip's bridge button, so none of the three can ever
+ *  disagree about what one click does. */
+function actOnPill(ctx: CardCtx, pill: FocusPill, dir: 'in' | 'out') {
+  if (pill.kind === 'reveal') ctx.onRevealMore?.(pill.key)
+  else if (pill.kind === 'page' && pill.cursor) ctx.onPage?.(pillTarget(pill.key), dir, pill.cursor)
+  else ctx.onExtend?.(pill.key, pillTarget(pill.key), dir)
+}
+
 /**
- * The ⊕, in one of three states — and the state is the
- * whole point, because they cost different things and promise different
- * things:
+ * The verb-first label a follow control SPEAKS (R1 — kills T16's raw
+ * "+N" pill unit: "+408" told a reader nothing they could act on, and
+ * read as a bug, not an answer). 'reveal' is the one kind allowed a
+ * number, and it counts CARDS — what will actually arrive on the board,
+ * the one thing a reveal can promise exactly. Never a fabricated number:
+ * 'extend'/'page' speak in verbs alone until the fetch lands.
+ */
+function pillVerb(pill: FocusPill, dir: 'in' | 'out'): string {
+  const side = dir === 'in' ? 'upstream' : 'downstream'
+  if (pill.kind === 'reveal') {
+    const n = pill.groups ?? 1
+    const noun = dir === 'in' ? 'source' : 'consumer'
+    return `Show ${n.toLocaleString()} more ${noun}${n === 1 ? '' : 's'}`
+  }
+  return pill.kind === 'page' ? `Load more ${side}` : `Load ${side}`
+}
+
+/** The hover explanation — where a raw connection count is allowed to
+ *  live (T17-E's one-number-system: verbs on the control's own face,
+ *  flow counts in hover/peek/wires, never both in one place). */
+function pillHoverTitle(card: FocusCard, pill: FocusPill, dir: 'in' | 'out'): string {
+  const side = dir === 'in' ? 'upstream' : 'downstream'
+  const flows = pill.count != null
+    ? ` · ${pill.count.toLocaleString()} data flow${pill.count === 1 ? '' : 's'} recorded`
+    : ''
+  const cap = pill.kind === 'reveal' && pill.groups != null && pill.groups > REVEAL_PAGE
+    ? ` — this click brings the first ${REVEAL_PAGE} of ${pill.groups.toLocaleString()} cards`
+    : ''
+  const verb = pill.kind === 'reveal' ? 'Shows' : 'Loads'
+  return `${verb} the next hop ${side} of ${card.label}${flows}${cap}`
+}
+
+/**
+ * The ⊕, in one of three states — and the state is the whole point,
+ * because they cost different things and promise different things:
  *
  *   reveal — show more of what is ALREADY downloaded. Instant, exact.
  *   page   — ask the server for the rest of THIS node's connections,
  *            with its own cursor.
  *   extend — walk one hop further out from here.
+ *
+ * QUIET AT REST, GENEROUS ON HOVER (R1). What used to be the SOLE
+ * affordance — a small pill spelling out a raw connection count — is now
+ * what it collapses BACK to: a compact icon (plus a card-count for a
+ * reveal, the one number that means "visible arrivals"). Hovering the
+ * element it belongs to (the card/row/frame's own `group` — FrameRow and
+ * FocusGraphCard already carried it; FocusFrameNode gained it for this)
+ * expands it into a DataHub-style zone with the verb spelled out, at the
+ * SAME anchor `gutterPos`/`pillAnchor` always used — the placement
+ * contract is unchanged; only what the reader sees at rest and on hover.
  *
  * A drained direction gets no pill at all rather than a control that
  * would do nothing; `WalkPills` stamps the end of the walk instead.
@@ -899,14 +982,10 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
   // z-20 puts the ⊕ above the hover toolbar (z-10) wherever the two ever
   // meet again: the pill is the affordance, so it wins by rule rather
   // than by DOM order.
-  const base = 'nodrag pointer-events-auto z-20 absolute -translate-y-1/2 flex items-center justify-center gap-0.5 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors'
+  const base = 'nodrag pointer-events-auto z-20 absolute -translate-y-1/2 flex items-center justify-center gap-1 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors'
   const anchor = pillAnchor(card)
   const side = upstream ? 'upstream' : 'downstream'
-  const act = () => {
-    if (pill.kind === 'reveal') ctx.onRevealMore?.(pill.key)
-    else if (pill.kind === 'page' && pill.cursor) ctx.onPage?.(pillTarget(pill.key), dir, pill.cursor)
-    else ctx.onExtend?.(pill.key, pillTarget(pill.key), dir)
-  }
+  const act = () => actOnPill(ctx, pill, dir)
 
   if (pill.status === 'loading') {
     return (
@@ -932,21 +1011,14 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
     )
   }
 
-  const n = pill.count
-  // The badge is the remainder in CONNECTIONS, whatever the pill's kind —
-  // one number, one meaning, in the unit the rest of the board already
-  // counts in. The wording carries what the badge cannot: a reveal
-  // delivers a page of GROUPS, so where the remainder needs more than one
-  // click, say so rather than promising all of it at once.
-  const more = (v: number) => `${v.toLocaleString()} more connection${v === 1 ? '' : 's'}`
-  const title = pill.kind === 'reveal'
-    ? `Show ${n != null ? `${n.toLocaleString()} more ${side} connection${n === 1 ? '' : 's'}` : `more ${side}`} — already loaded, nothing to fetch${
-      pill.groups != null && pill.groups > REVEAL_PAGE
-        ? ` (this click brings the first ${REVEAL_PAGE} of ${pill.groups.toLocaleString()} cards)`
-        : ''}`
-    : pill.kind === 'page'
-      ? `Load the rest of what is ${side} of ${card.label}${n != null ? ` (${more(n)})` : ''}`
-      : `Walk one hop further ${side} of ${card.label}${n != null ? ` (${more(n)})` : ''}`
+  const verb = pillVerb(pill, dir)
+  const title = pillHoverTitle(card, pill, dir)
+  // The one number a follow control's REST state may show: a reveal's
+  // card count — a visible arrival, not a flow. Everything else is
+  // icon-only at rest: the shape that let eight stacked "+5" pills happen
+  // is now impossible — there is nothing left to stack but dots.
+  const restCount = pill.kind === 'reveal' ? (pill.groups ?? 1) : null
+
   return (
     <button
       type="button"
@@ -956,23 +1028,86 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
       style={anchor}
       className={cn(
         base,
-        n != null ? 'px-1.5' : 'w-5',
-        // Free (already in hand) reads as the lens's own accent; a fetch
-        // is quieter, because it costs a round trip. Both backgrounds are
-        // OPAQUE: a pill sits exactly where a hub's wires converge, and a
-        // tinted-transparent one had thirteen edges running through it.
+        restCount != null ? 'px-1.5' : 'w-5 px-0',
+        // ON HOVER of whichever ancestor `group` this sits inside.
+        'group-hover:w-auto group-hover:px-2',
         pill.kind === 'reveal'
           ? 'bg-canvas-elevated border-accent-lineage/60 text-accent-lineage hover:border-accent-lineage hover:bg-accent-lineage/10'
           : 'bg-canvas-elevated border-black/15 dark:border-white/20 text-ink-muted hover:text-accent-lineage hover:border-accent-lineage/50',
         pos,
       )}
     >
-      {upstream && <LucideIcons.Plus className="w-2.5 h-2.5" />}
-      {/* A count only ever renders when the model actually knows one. */}
-      {n != null && n.toLocaleString()}
-      {!upstream && <LucideIcons.Plus className="w-2.5 h-2.5" />}
+      {upstream && <LucideIcons.Plus className="w-2.5 h-2.5 flex-shrink-0" />}
+      {restCount != null && <span className="group-hover:hidden">{restCount.toLocaleString()}</span>}
+      <span className="hidden group-hover:inline whitespace-nowrap">{verb}</span>
+      {!upstream && <LucideIcons.Plus className="w-2.5 h-2.5 flex-shrink-0" />}
     </button>
   )
+}
+
+/** The focal's ORIENTATION SENTENCE (R1) carries its own follow control
+ *  per direction, inline — a compact icon rather than the gutter pill's
+ *  full ghost zone (that one already sits at the card's edge; this is
+ *  the SAME action — `actOnPill` — reachable without hunting for it). */
+function InlineFollow({ pill, dir, ctx }: { pill: FocusPill; dir: 'in' | 'out'; ctx: CardCtx }) {
+  if (!ctx.onRevealMore && !ctx.onExtend && !ctx.onPage) return null
+  const verb = pillVerb(pill, dir)
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); actOnPill(ctx, pill, dir) }}
+      title={verb}
+      aria-label={verb}
+      disabled={pill.status === 'loading'}
+      className="nodrag flex-shrink-0 w-3.5 h-3.5 rounded-full flex items-center justify-center text-accent-lineage bg-accent-lineage/12 hover:bg-accent-lineage/20 disabled:opacity-50 transition-colors"
+    >
+      {pill.status === 'loading'
+        ? <LucideIcons.Loader2 className="w-2 h-2 animate-spin" />
+        : <LucideIcons.Plus className="w-2 h-2" />}
+    </button>
+  )
+}
+
+/**
+ * THE SPOTLIGHT CHIP's honest scope (R0) — which direction it leads
+ * with, and drawn-vs-known in that direction, for one isolated anchor.
+ *
+ * DRAWN vs. KNOWN — see `pillFor`'s own contract (focus-layout.ts): a
+ * REVEAL's count is a subset already in hand (drawn = known − remaining);
+ * an EXTEND/PAGE's is a remainder BEYOND the model (drawn = everything
+ * already fetched; known = that plus the remainder). No pill at all: the
+ * walk is drained this way, and drawn IS known. `flowsIn`/`flowsOut` are
+ * the anchor's own model degree — exact for a leaf (its subtree is
+ * itself); for a container anchor whose hops attach to its rows, this
+ * floors rather than overstates "drawn" (clamped), which is why the
+ * chip states a count, never a percentage.
+ */
+function spotlightScope(card: FocusCard): { pill: FocusPill | null; dir: 'in' | 'out'; dirWord: string; countsText: string } {
+  // The SAME tie-break LensPeek uses: which side of the board the anchor
+  // sits on decides which direction leads when both have something left.
+  const pill = card.band < 0 ? card.pillUp ?? card.pillDown : card.pillDown ?? card.pillUp
+  const dir: 'in' | 'out' = pill != null && pill === card.pillUp ? 'in' : 'out'
+  const dirWord = dir === 'in' ? 'upstream' : 'downstream'
+  const known0 = dir === 'in' ? card.flowsIn : card.flowsOut
+  const drawn = Math.max(0, pill?.kind === 'reveal' ? known0 - (pill.count ?? 0) : known0)
+  const known = pill?.kind === 'reveal' ? known0 : known0 + (pill?.count ?? 0)
+  const countsText = !pill
+    ? `${known.toLocaleString()} known ${dirWord} flow${known === 1 ? '' : 's'} — every one on this board`
+    : pill.count == null
+      ? `${drawn.toLocaleString()} known ${dirWord} flow${drawn === 1 ? '' : 's'} on this board — the data source may have more`
+      : `${drawn.toLocaleString()} of ${known.toLocaleString()} known ${dirWord} flows on this board`
+  return { pill, dir, dirWord, countsText }
+}
+
+/** One half of the focal's orientation sentence — plain language, an
+ *  honest floor (+), and "across N systems" only where it says something
+ *  a raw count does not (one system alone is not worth naming). */
+function orientationHalf(
+  verb: string, noun: string, count: number, floor: boolean, systems: number, zero: string,
+): string {
+  if (count === 0) return zero
+  const sys = systems > 1 ? ` across ${systems} systems` : ''
+  return `${verb} ${count.toLocaleString()}${floor ? '+' : ''} ${noun}${count === 1 ? '' : 's'}${sys}`
 }
 
 /** Both sides of a card, or — when neither side has anything left to
@@ -1154,10 +1289,11 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
       {card.wired && <PortHandles />}
       <ContentsChevron card={card} ctx={ctx} />
       <div
-        className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
+        className="relative w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
         style={{ backgroundColor: card.connected ? `${displayAccent}1f` : 'transparent' }}
       >
         <TypeIcon ctx={ctx} typeId={card.type} color={displayAccent} className={cn('w-3.5 h-3.5', !card.connected && 'opacity-60')} />
+        {card.nodeId && ctx.trailUrns.has(card.nodeId) && <TrailMark />}
       </div>
       <div className="flex-1 min-w-0">
         <p className={cn('truncate text-[12px] leading-snug', card.connected ? 'font-medium text-ink' : 'text-ink-secondary')}>
@@ -1295,10 +1431,11 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       <ContentsChevron card={card} ctx={ctx} />
       {(
         <div
-          className="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0"
+          className="relative w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0"
           style={{ backgroundColor: `${displayAccent}1f` }}
         >
           <TypeIcon ctx={ctx} typeId={card.type} color={displayAccent} className="w-3.5 h-3.5" />
+          {card.nodeId && ctx.trailUrns.has(card.nodeId) && <TrailMark />}
         </div>
       )}
       <div className="flex-1 min-w-0">
@@ -1460,7 +1597,10 @@ function FocusFrameNode({ data, selected }: NodeProps) {
               : {}),
       }}
       className={cn(
-        'relative rounded-xl border-2 pointer-events-none',
+        // `group`: what a hover ghost-zone follow control (WalkPill)
+        // expands against — the frame/focal root did not carry it before
+        // R1, so the pill's own hover had nothing to answer to here.
+        'group relative rounded-xl border-2 pointer-events-none',
         // The anchor is SOLID and lit; a partner container is a dashed
         // outline around rows that speak for themselves.
         isFocal ? 'bg-canvas-elevated' : 'border-dashed bg-black/[0.02] dark:bg-white/[0.03]',
@@ -1469,6 +1609,7 @@ function FocusFrameNode({ data, selected }: NodeProps) {
       )}
     >
       {card.wired && <PortHandles />}
+      {card.nodeId && ctx.trailUrns.has(card.nodeId) && <TrailMark />}
       {/* An open container keeps its own lineage question: looking
           inside something must never end the walk. */}
       <WalkPills card={card} ctx={ctx} />
@@ -1700,22 +1841,35 @@ function FocusFrameNode({ data, selected }: NodeProps) {
                 +{focalStats.coarser.toLocaleString()} connect at a coarser grain
               </p>
             )}
-            {/* How far the walk has reached — the question Focus mode
-                gets opened to answer, counted off the model the board
-                draws rather than measured separately. An open frontier
-                makes these floors, and says so. */}
+            {/* THE ORIENTATION SENTENCE (R1) — replaces "Reach: N
+                upstream · M downstream" with what the walk actually
+                knows in plain language, "across N systems" where that
+                says something a raw count does not, and the SAME two
+                follow controls the gutter carries — inline, so growing
+                the board from here never means hunting for the card's
+                own edge. An open frontier still makes these floors, and
+                still says so. */}
             {focalReach && (
               <p
-                className="flex items-center gap-1 text-[9px] text-ink-muted tabular-nums truncate"
+                className="flex items-center gap-1 min-w-0 text-[9px] text-ink-muted"
                 title={focalReach.moreUp || focalReach.moreDown
-                  ? 'Entities this walk has reached so far. A + marks a floor rather than a total — more exists that way. Use ⊕ on a card to walk further.'
-                  : 'Every entity connected to this one, upstream and downstream, as far as the data source goes.'}
+                  ? 'What this walk has reached so far. A + marks a floor rather than a total — more exists that way. The buttons here, or the ⊕ on any card, reach further.'
+                  : 'Everything connected to this entity, upstream and downstream, as far as the data source goes.'}
               >
                 <LucideIcons.Radar className="w-2.5 h-2.5 flex-shrink-0 text-accent-lineage/70" />
-                <span className="truncate">
-                  Reach: {focalReach.up.toLocaleString()}{focalReach.moreUp ? '+' : ''} upstream
-                  {' · '}{focalReach.down.toLocaleString()}{focalReach.moreDown ? '+' : ''} downstream
+                {/* ONE span, ONE ellipsis. Two independently-truncating
+                    spans (tried first) cut mid-word on each half at once
+                    on a narrow focal — "Fed by 20+ sources across 20 …"
+                    beside "feeds nothing down…", neither readable. The
+                    follow controls sit OUTSIDE the truncating run, fixed
+                    size, so they never fight the sentence for room. */}
+                <span className="truncate min-w-0 flex-1 tabular-nums">
+                  {orientationHalf('Fed by', 'source', focalReach.up, focalReach.moreUp, focalReach.upSystems, 'No upstream sources')}
+                  {' · '}
+                  {orientationHalf('feeds', 'consumer', focalReach.down, focalReach.moreDown, focalReach.downSystems, 'feeds nothing downstream')}
                 </span>
+                {card.pillUp && <InlineFollow pill={card.pillUp} dir="in" ctx={ctx} />}
+                {card.pillDown && <InlineFollow pill={card.pillDown} dir="out" ctx={ctx} />}
               </p>
             )}
           </>
@@ -2162,6 +2316,10 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     labelVisible?: boolean
     /** Too many badges on this board for all of them to be read. */
     labelDense?: boolean
+    /** THE TRAIL: this bundle connects two consecutive stops on the
+     *  walked path. Minimal treatment — a slightly firmer line, nothing
+     *  that competes with the cone's own highlight. */
+    trail?: boolean
   }
   // Hover emphasis is derived here from context: the edges ARRAY stays
   // identity-stable, so sweeping the pointer never rebuilds it (nor
@@ -2245,7 +2403,12 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
           // its first hop, the rest of the cone, and the background.
           strokeWidth: onCone
             ? (adjacent ? 3 : 2.25)
-            : strong ? (d.aggregated ? 3 : 2.5) : d.aggregated ? 2 : 1.5,
+            : strong ? (d.aggregated ? 3 : 2.5)
+              // THE TRAIL: slightly firmer than the plain background —
+              // never louder than the cone or a hover, which still say
+              // more (what runs through THIS point, right now).
+              : d.trail ? (d.aggregated ? 2.5 : 2)
+                : d.aggregated ? 2 : 1.5,
           strokeDasharray: d.containment ? '4 4' : undefined,
           opacity,
           transition: d.reducedMotion ? undefined : 'opacity 140ms ease-out, stroke-width 140ms ease-out',
@@ -2764,6 +2927,8 @@ export function FocusGraphView({
   directionFilter = 'both',
   selectedId,
   isolatedId = null,
+  trailUrns = EMPTY_TRAIL,
+  trailAdjacent = EMPTY_TRAIL,
   reducedMotion,
   edgeTypeInfo,
   onSelect,
@@ -2871,10 +3036,11 @@ export function FocusGraphView({
     onRowCursor,
     onIsolate,
     onDismiss,
+    trailUrns,
     onRevealMore,
     onExtend,
     onPage,
-  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onDismiss, onRevealMore, onExtend, onPage])
+  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onDismiss, trailUrns, onRevealMore, onExtend, onPage])
 
   const baseNodes = useMemo((): Node[] => {
     const minYByBand = new Map<number, number>()
@@ -3051,6 +3217,10 @@ export function FocusGraphView({
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const edges = useMemo((): Edge[] => {
     const bandById = new Map(graph.cards.map(c => [c.id, c.band]))
+    // For THE TRAIL: which urn each card id backs, so a bundle between
+    // two consecutive walked hops can be found regardless of which end
+    // the picture happened to draw the wire from.
+    const urnById = new Map(graph.cards.map(c => [c.id, c.nodeId]))
     // Whether the board as a whole is too busy for every badge it could
     // draw — a property of the picture, so it is decided once here
     // rather than re-counted inside every edge. EVERY badge counts
@@ -3068,6 +3238,9 @@ export function FocusGraphView({
       // on, exactly like `tint` itself, so this costs nothing extra on a
       // rebuild and nothing at all on a hover.
       const mutedTint = up ? MUTED_TINT_UP : MUTED_TINT_DOWN
+      const sUrn = urnById.get(e.source)
+      const tUrn = urnById.get(e.target)
+      const trail = !!sUrn && !!tUrn && trailAdjacent.has([sUrn, tUrn].sort().join('|'))
       return {
         id: e.id,
         source: e.source,
@@ -3078,11 +3251,11 @@ export function FocusGraphView({
         markerEnd: { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
         data: {
           count: e.count, dimmed: e.dimmed, tint, mutedTint, cycleBack: e.cycleBack, reducedMotion,
-          cycleAnchor: e.cycleAnchor, labelVisible: e.labelVisible, labelDense,
+          cycleAnchor: e.cycleAnchor, labelVisible: e.labelVisible, labelDense, trail,
         },
       }
     })
-  }, [graph.cards, graph.edges, reducedMotion])
+  }, [graph.cards, graph.edges, reducedMotion, trailAdjacent])
 
   const reachValue = useMemo(
     () => focalReach ?? null,
@@ -3112,6 +3285,14 @@ export function FocusGraphView({
   const anchorCard = useMemo(
     () => (isolationValue ? graph.cards.find(c => c.id === isolationValue.anchorId) ?? null : null),
     [graph.cards, isolationValue],
+  )
+  // THE SPOTLIGHT CHIP's honest scope — computed once per anchor change,
+  // not per render, and OUTSIDE the JSX so `react-hooks/refs` has a
+  // stable, analyzable value to close over rather than an IIFE inline in
+  // the return.
+  const spotlight = useMemo(
+    () => (anchorCard ? spotlightScope(anchorCard) : null),
+    [anchorCard],
   )
 
   // One ConeStore per mount (Task 20, P1) — `isolationValue` stays the
@@ -3244,25 +3425,61 @@ export function FocusGraphView({
           {extendGhosts.map(g => (
             <ExtendGhost key={g.key} card={g.card} dir={g.dir} />
           ))}
-          {/* What is isolated, and how to leave — only while it STICKS.
-              A hover needs no chip: letting go of it is the exit. */}
-          {isolationValue?.sticky && anchorCard && (
+          {/* THE SPOTLIGHT CHIP (R0) — states its scope HONESTLY (drawn
+              vs. known, never "everything" by omission) and carries the
+              two bridge controls: follow the anchor's remaining lineage
+              (element-precise, grows THIS board) or re-anchor on it.
+              Only while it STICKS — a hover needs no chip, letting go
+              of it is the exit. */}
+          {isolationValue?.sticky && anchorCard && spotlight && (
             <Panel position="bottom-center" className="!mb-4 pointer-events-auto">
-              <div className="flex items-center gap-2 pl-3 pr-1.5 py-1.5 rounded-full bg-canvas-elevated/95 border border-black/10 dark:border-white/12 shadow-lg shadow-black/10 backdrop-blur-sm">
-                <LucideIcons.Spline className="w-3.5 h-3.5 flex-shrink-0 text-accent-lineage" />
-                <span className="text-[11px] text-ink">
-                  Isolating <span className="font-semibold">{anchorCard.label}</span>
-                </span>
-                <span className="text-[10px] text-ink-muted">Esc to clear</span>
-                <button
-                  type="button"
-                  onClick={() => onIsolate(null)}
-                  aria-label="Clear isolation"
-                  title="Clear isolation"
-                  className="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08] transition-colors"
-                >
-                  <LucideIcons.X className="w-3 h-3" />
-                </button>
+              <div className="flex flex-col gap-1 px-3 py-2 rounded-2xl bg-canvas-elevated/95 border border-black/10 dark:border-white/12 shadow-lg shadow-black/10 backdrop-blur-sm max-w-[440px]">
+                <div className="flex items-center gap-2">
+                  <LucideIcons.Spline className="w-3.5 h-3.5 flex-shrink-0 text-accent-lineage" />
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-ink">
+                    <span className="font-semibold">{anchorCard.label}</span>
+                    {' · its lineage within this walk'}
+                  </span>
+                  <span className="flex-shrink-0 text-[9.5px] text-ink-muted/70">Esc to clear</span>
+                  <button
+                    type="button"
+                    onClick={() => onIsolate(null)}
+                    aria-label="Clear isolation"
+                    title="Clear isolation"
+                    className="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08] transition-colors"
+                  >
+                    <LucideIcons.X className="w-3 h-3" />
+                  </button>
+                </div>
+                {/* The honest counts get their OWN full-width line — they
+                    are the reason this chip exists, and the two bridge
+                    buttons below already claim most of a shared row. */}
+                <p className="pl-6 truncate text-[10px] text-ink-muted tabular-nums">{spotlight.countsText}</p>
+                <div className="flex items-center gap-2 pl-6">
+                  {spotlight.pill && (
+                    <button
+                      type="button"
+                      onClick={() => actOnPill(ctx, spotlight.pill!, spotlight.dir)}
+                      disabled={spotlight.pill.status === 'loading'}
+                      className="nodrag flex-shrink-0 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-accent-lineage bg-accent-lineage/12 hover:bg-accent-lineage/20 disabled:opacity-50 transition-colors"
+                    >
+                      {spotlight.pill.status === 'loading'
+                        ? <LucideIcons.Loader2 className="w-2.5 h-2.5 animate-spin" />
+                        : <LucideIcons.Plus className="w-2.5 h-2.5" />}
+                      Load its remaining {spotlight.dirWord}{spotlight.pill.count != null ? ` (${spotlight.pill.count.toLocaleString()})` : ''}
+                    </button>
+                  )}
+                  {anchorCard.nodeId && (
+                    <button
+                      type="button"
+                      onClick={() => onFocus(anchorCard.nodeId!)}
+                      className="nodrag flex-shrink-0 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                    >
+                      <LucideIcons.Focus className="w-2.5 h-2.5" />
+                      Focus here
+                    </button>
+                  )}
+                </div>
               </div>
             </Panel>
           )}

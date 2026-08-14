@@ -416,6 +416,41 @@ export function boundaryFrontierFilter<N extends LensNodeLike>(
         : !subtree.has(urn) || crossing.has(urn)
 }
 
+/**
+ * How many distinct top-level SYSTEMS a set of entities spans — the
+ * structural containment root each one sits under.
+ *
+ * The orientation sentence's "across N systems" reads this: that a table
+ * has 3 upstream sources is one fact, that they come from 2 different
+ * platforms is another, and conflating the two is how a hub fed by 100
+ * tables in ONE warehouse reads the same as one fed from 100 different
+ * ones. Memoized per call — the walk this counts over is typically the
+ * whole upstream/downstream set, so a root is worth caching across it.
+ */
+export function distinctSystemCount<N extends LensNodeLike>(
+    sg: LensSubgraph<N>,
+    urns: Iterable<string>,
+): number {
+    const rootCache = new Map<string, string>()
+    const rootOf = (start: string): string => {
+        const hit = rootCache.get(start)
+        if (hit) return hit
+        let cursor = start
+        const seen = new Set<string>([start])
+        for (;;) {
+            const parent = sg.nodes.get(cursor)?.parent ?? null
+            if (!parent || seen.has(parent)) break
+            seen.add(parent)
+            cursor = parent
+        }
+        rootCache.set(start, cursor)
+        return cursor
+    }
+    const roots = new Set<string>()
+    for (const urn of urns) roots.add(rootOf(urn))
+    return roots.size
+}
+
 /** A lineage hop as actually drawn: between two VISIBLE nodes. */
 export interface ProjectedLensEdge {
     /** A currently-visible node. Direction is verbatim from the underlying

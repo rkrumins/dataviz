@@ -278,6 +278,12 @@ export interface LensReach {
    *  right beside the whisper saying so. */
   moreUp: boolean
   moreDown: boolean
+  /** Distinct top-level systems `up`/`down` are spread across — what the
+   *  focal's orientation sentence reads for "across N systems". Absent
+   *  from a plain hop count: 12 upstream sources in one warehouse and 12
+   *  spread across a dozen platforms are a different picture entirely. */
+  upSystems: number
+  downSystems: number
 }
 
 export interface FocusCard {

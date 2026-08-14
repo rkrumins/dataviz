@@ -209,7 +209,7 @@ describe('the business journey — a table\'s lineage through a seven-level esta
     const { api } = renderLens(['F'], doneWalk(collateralsEstate()))
     // "6 more upstream of loan_positions" — the remainder the data
     // source reported, minus what is already in hand.
-    fireEvent.click(screen.getByTitle(/Walk one hop further upstream of loan_positions \(6 more connections\)/))
+    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of loan_positions · 6 data flows recorded/))
     expect(api.extend).toHaveBeenCalledWith('t0', 'up', ['t0'])
   })
 
@@ -399,7 +399,7 @@ describe('the ⊕ tells the truth about what it costs', () => {
     const { api } = renderLens(['F'], doneWalk(crowdedFanIn()))
     // Twelve of fourteen fit on the first page.
     expect(onBoard('source_12')).toBe(false)
-    fireEvent.click(screen.getByTitle(/Show 2 more upstream connections — already loaded, nothing to fetch/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer · 2 data flows recorded/))
     expect(onBoard('source_12')).toBe(true)
     expect(onBoard('source_13')).toBe(true)
     expect(api.extend).not.toHaveBeenCalled()
@@ -408,19 +408,21 @@ describe('the ⊕ tells the truth about what it costs', () => {
 
   it('a page carries the server\'s own cursor back verbatim', () => {
     const { api } = renderLens(['F'], doneWalk(pillCatalogue()))
-    fireEvent.click(screen.getByTitle(/Load the rest of what is upstream of partially_loaded/))
+    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of partially_loaded/))
     expect(api.page).toHaveBeenCalledWith('PAGED', 'up', 'eyJvZmZzZXQiOjMwfQ==')
     expect(api.extend).not.toHaveBeenCalled()
   })
 
   it('an exact remainder is stated; an unknown one is never invented', () => {
     renderLens(['F'], doneWalk(pillCatalogue()))
-    const exact = screen.getByTitle(/Walk one hop further upstream of has_48_more \(48 more connections\)/)
-    expect(exact.textContent).toContain('48')
-    // The server did not report a total. A countless chevron, not a
-    // fabricated number.
-    const countless = screen.getByTitle('Walk one hop further upstream of count_unknown')
-    expect(countless.textContent?.trim()).toBe('')
+    // The exact remainder lives in the hover (R1: the control's own face
+    // speaks in verbs, never a raw connection count).
+    const exact = screen.getByTitle(/Loads the next hop upstream of has_48_more · 48 data flows recorded/)
+    expect(exact.title).toContain('48')
+    // The server did not report a total — no flow count in the hover at
+    // all, and never a fabricated number anywhere on the control.
+    const countless = screen.getByTitle('Loads the next hop upstream of count_unknown')
+    expect(countless.textContent).not.toMatch(/\d/)
   })
 
   it('an in-flight extend spins on its own pill; a failed one offers the same click again', () => {
@@ -472,7 +474,7 @@ describe('the ⊕ tells the truth about what it costs', () => {
     const { rerender } = renderLens(['F'], extendChain(false), {}, api)
     expect(onBoard('mart_tickets_daily')).toBe(false)
 
-    fireEvent.click(screen.getByTitle(/Walk one hop further downstream of GOLD/))
+    fireEvent.click(screen.getByTitle(/Loads the next hop downstream of GOLD/))
     expect(api.extend).toHaveBeenCalledTimes(1)
     expect(api.extend).toHaveBeenCalledWith('GOLD', 'down', ['GOLD'])
 
@@ -497,30 +499,32 @@ describe('the ⊕ tells the truth about what it costs', () => {
     // The residual pill is honest and in the SAME unit it started in —
     // one of the 246 connections is now drawn, so 245 remain. It does not
     // flip to a card count and read as changing its mind.
-    expect(screen.getByTitle(/Walk one hop further downstream of GOLD \(245 more connections\)/)).toBeTruthy()
+    expect(screen.getByTitle(/Loads the next hop downstream of GOLD · 245 data flows recorded/)).toBeTruthy()
   })
 
-  it('the ⊕ badge counts CONNECTIONS in every state — one pill, one unit', () => {
+  it('the ⊕ speaks in verbs at rest; the hover states connections consistently, whatever the kind', () => {
     // The defect's other half: "+246" (unfetched connections) became "+1"
     // (groups in hand) in the same place on the same card, so the number
     // appeared to change its mind about the size of what was out there.
-    // Every state now counts the thing the rest of the board counts — the
-    // band headers, the card ×N, the focal's in/out are all connections.
+    // T21 moves the raw count OFF the control's own face for a fetch
+    // (extend/page) entirely — it now lives, honestly and consistently,
+    // in the hover; the face speaks a verb, with a card-count for a
+    // reveal only (a visible arrival, not a flow).
     renderLens(['F'], extendChain(false))
-    // 247 the server knows about, one already drawn.
-    const extend = screen.getByTitle(/Walk one hop further downstream of GOLD \(246 more connections\)/)
-    expect(extend.textContent).toContain('246')
+    const extend = screen.getByTitle(/Loads the next hop downstream of GOLD · 246 data flows recorded/)
+    expect(extend.textContent).not.toMatch(/\d/)
 
     cleanup()
-    // A reveal: fourteen sources, twelve drawn, two waiting — and those two
-    // carry one connection each, which is what the badge says.
+    // A reveal: fourteen sources, twelve drawn, two waiting — and those
+    // two carry one connection each. The FACE shows the card count (2,
+    // a visible arrival); the hover states the same two as flows.
     renderLens(['F'], doneWalk(crowdedFanIn()))
-    const reveal = screen.getByTitle(/Show 2 more upstream connections — already loaded, nothing to fetch/)
+    const reveal = screen.getByTitle(/Shows the next hop upstream of dim_customer · 2 data flows recorded/)
     expect(reveal.textContent).toContain('2')
 
     cleanup()
     renderLens(['F'], doneWalk(pillCatalogue()))
-    expect(screen.getByTitle(/Load the rest of what is upstream of partially_loaded \(96 more connections\)/)).toBeTruthy()
+    expect(screen.getByTitle(/Loads the next hop upstream of partially_loaded · 96 data flows recorded/)).toBeTruthy()
   })
 
   it('offers no ⊕ at all until the focal\'s own model has landed', () => {
@@ -528,8 +532,8 @@ describe('the ⊕ tells the truth about what it costs', () => {
     // ignores an extend before the focal is 'done' — so there is
     // nothing to hang a pill on, and no dead click to make.
     renderLens(['F'], { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map() })
-    expect(screen.queryByTitle(/Walk one hop further/)).toBeNull()
-    expect(screen.queryByTitle(/Show .* more upstream/)).toBeNull()
+    expect(screen.queryByTitle(/Loads the next hop/)).toBeNull()
+    expect(screen.queryByTitle(/Shows the next hop/)).toBeNull()
   })
 })
 
@@ -590,20 +594,23 @@ describe('reach — how far the walk got, and whether that is all of it', () => 
     usePreferencesStore.setState({ lensViewMode: 'list' })
     renderLens(['F'], doneWalk(reachModel(true)))
     // Upstream has an open frontier; downstream is drained, and must
-    // NOT be marked as a floor just because the other side is.
-    expect(screen.getByText(/Reach: 2\+ upstream · 1 downstream/)).toBeTruthy()
+    // NOT be marked as a floor just because the other side is. u1/u2
+    // carry no containment of their own, so each is its own system.
+    expect(screen.getByText(/Fed by 2\+ sources across 2 systems/)).toBeTruthy()
+    expect(screen.getByText(/feeds 1 consumer$/)).toBeTruthy()
   })
 
   it('drops the floor mark once nothing is left to walk', () => {
     usePreferencesStore.setState({ lensViewMode: 'list' })
     renderLens(['F'], doneWalk(reachModel(false)))
-    expect(screen.getByText(/Reach: 2 upstream · 1 downstream$/)).toBeTruthy()
+    expect(screen.getByText(/Fed by 2 sources across 2 systems/)).toBeTruthy()
+    expect(screen.getByText(/feeds 1 consumer$/)).toBeTruthy()
   })
 
   it('claims no reach at all while the walk is still running', () => {
     usePreferencesStore.setState({ lensViewMode: 'list' })
     renderLens(['F'], { model: reachModel(true), status: 'loading', error: null, extendStatus: new Map() })
-    expect(screen.queryByText(/Reach:/)).toBeNull()
+    expect(screen.queryByText(/Fed by|feeds/)).toBeNull()
     expect(screen.getByText(/Walking the lineage…/)).toBeTruthy()
   })
 })
@@ -633,9 +640,10 @@ describe('the list body and the graph body are two renderings of one model', () 
     // The focal card, in the graph. Its number is REACH — what the data
     // source named around this entity — not the walk's own loaded degree:
     // "2 in / 1 out" used to sit here and grew every time the user
-    // clicked, which is what E deleted it for.
-    expect(screen.getByText(/Reach: 2 upstream/)).toBeTruthy()
-    expect(screen.getByText(/1 downstream/)).toBeTruthy()
+    // clicked, which is what E deleted it for. c1/c2 both live inside T,
+    // one system; OUT has no parent, its own system.
+    expect(screen.getByText(/Fed by 2 sources/)).toBeTruthy()
+    expect(screen.getByText(/feeds 1 consumer/)).toBeTruthy()
     unmount()
 
     usePreferencesStore.setState({ lensViewMode: 'list' })
@@ -904,11 +912,11 @@ describe('pointing at an element isolates its lineage cone', () => {
   it('says what is isolated, and offers the way out', () => {
     renderLens(['b'], siblings())
     fireEvent.click(screen.getByText('label-a'))
-    expect(screen.getByText(/Isolating/)).toBeTruthy()
+    expect(screen.getByText(/its lineage within this walk/)).toBeTruthy()
     expect(screen.getByText('Esc to clear')).toBeTruthy()
 
     fireEvent.click(screen.getByLabelText('Clear isolation'))
-    expect(screen.queryByText(/Isolating/)).toBeNull()
+    expect(screen.queryByText(/its lineage within this walk/)).toBeNull()
     expect(nodeFor('label-d').className).not.toContain(QUIET)
   })
 
@@ -935,7 +943,7 @@ describe('pointing at an element isolates its lineage cone', () => {
       expect(nodeFor('label-d').className).toContain(QUIET)
       expect(lit(nodeFor('label-a'))).toBe(true)
       // No chip while it is only a hover — letting go IS the exit.
-      expect(screen.queryByText(/Isolating/)).toBeNull()
+      expect(screen.queryByText(/its lineage within this walk/)).toBeNull()
 
       fireEvent.mouseLeave(nodeFor('label-a'))
       expect(nodeFor('label-d').className).not.toContain(QUIET)
@@ -1216,10 +1224,11 @@ describe('what is really inside a container', () => {
     expect(el.children.length).toBe(1) // the bdi alone, no head/tail spans
   })
 
-  it('R7: the one node still carries the focal chrome — Reach, kind, contents', () => {
+  it('R7: the one node still carries the focal chrome — the orientation sentence, kind, contents', () => {
     renderLens(['F'], focusWithColumns())
-    // Reach is the focus's macro number, and it stays on the focus.
-    expect(screen.getByText(/Reach:/)).toBeTruthy()
+    // The orientation sentence is the focus's macro number, and it stays
+    // on the focus.
+    expect(screen.getByText(/Fed by|No upstream sources/)).toBeTruthy()
     // What it is, and what is in it — both on the one node.
     expect(screen.getAllByText('dataset').length).toBeGreaterThan(0)
     expect(screen.getByText(/1 on this lineage · of 3/)).toBeTruthy()
@@ -1431,7 +1440,7 @@ describe('what is really inside a container', () => {
     expect(screen.getByLabelText('Show what\'s inside raw_orders')).toBeTruthy()
     expect(screen.queryByLabelText('Collapse raw_orders')).toBeNull()
     // ...and not the header's, which is what used to swallow it.
-    expect(screen.queryByText(/Isolating/)).toBeNull()
+    expect(screen.queryByText(/its lineage within this walk/)).toBeNull()
   })
 
   it('Enter on the focus\'s own name isolates the lineage through it', async () => {
@@ -1443,7 +1452,7 @@ describe('what is really inside a container', () => {
     expect(hit.tagName).toBe('BUTTON')
     hit.focus()
     await user.keyboard('{Enter}')
-    expect(screen.getByText(/Isolating/)).toBeTruthy()
+    expect(screen.getByText(/its lineage within this walk/)).toBeTruthy()
     expect(screen.getByText('stg_orders', { selector: 'bdi' })).toBeTruthy()
   })
 
@@ -1606,16 +1615,16 @@ describe('browsing what is inside — the peek and the keyboard', () => {
     // isolates what runs through it.
     fireEvent.click(row('order_id'))
     expect(peek()).toBeTruthy()
-    expect(screen.getByText(/Isolating/)).toBeTruthy()
+    expect(screen.getByText(/its lineage within this walk/)).toBeTruthy()
 
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(peek()).toBeNull()
     // ...and the isolation is still there, because it was opened first.
-    expect(screen.getByText(/Isolating/)).toBeTruthy()
+    expect(screen.getByText(/its lineage within this walk/)).toBeTruthy()
     expect(onClose).not.toHaveBeenCalled()
 
     fireEvent.keyDown(window, { key: 'Escape' })
-    expect(screen.queryByText(/Isolating/)).toBeNull()
+    expect(screen.queryByText(/its lineage within this walk/)).toBeNull()
     expect(onClose).not.toHaveBeenCalled()
 
     // With nothing left to dismiss, Escape means what it always meant.

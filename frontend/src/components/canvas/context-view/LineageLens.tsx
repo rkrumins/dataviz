@@ -42,6 +42,7 @@ import { emptyWalkModel, type LensWalkNode } from './lens/closure-adapter'
 import {
   boundaryFrontierFilter,
   buildLensSubgraph,
+  distinctSystemCount,
   type LensSubgraph,
 } from './lens/lens-subgraph'
 import {
@@ -482,17 +483,33 @@ export function LineageLens({
    * A cohort larger than one page still leaves an honest remainder behind;
    * what it can never do again is deliver nothing.
    */
+  /**
+   * THE TRAIL's other half. `entries` (focus history) is the walked
+   * PATH; a card the reader grew the board FROM without re-anchoring on
+   * it — an extend or page click — is just as deliberately "walked
+   * through" but never becomes a focal, so it would otherwise leave no
+   * mark. Grown, never reset for the lens's whole open session (like
+   * `entries` itself) — a mark is a record of what happened, not of
+   * what the current focal is.
+   */
+  const [extendAnchors, setExtendAnchors] = useState<ReadonlySet<string>>(new Set())
+  const markAnchor = useCallback((urn: string) => {
+    setExtendAnchors(prev => (prev.has(urn) ? prev : new Set(prev).add(urn)))
+  }, [])
+
   const extendWalk = useCallback((_key: string, urn: string, dir: 'in' | 'out') => {
     revealMore(revealKey(dir, urn))
     walkApi.extend(urn, toWalkDir(dir), seedLeavesFor(sg, urn, dir))
-  }, [walkApi, sg, revealMore])
+    markAnchor(urn)
+  }, [walkApi, sg, revealMore, markAnchor])
 
   /** The rest of THIS node's adjacency, with the server's own cursor —
    *  and, for the same reason as `extendWalk`, room to draw what arrives. */
   const pageWalk = useCallback((urn: string, dir: 'in' | 'out', cursor: string) => {
     revealMore(revealKey(dir, urn))
     walkApi.page(urn, toWalkDir(dir), cursor)
-  }, [walkApi, revealMore])
+    markAnchor(urn)
+  }, [walkApi, revealMore, markAnchor])
 
   /** Which cards the LAYOUT opened by itself, so a click on one can
    *  close it. Read from the built cards rather than re-deriving the
@@ -646,6 +663,31 @@ export function LineageLens({
    * Held here rather than inside the board because Escape is the LENS's
    * key, in one place, and it has to be able to clear this in order.
    */
+  /**
+   * THE TRAIL — cards the reader explicitly walked through: every focal
+   * this session has visited (`entries`) plus every card an extend/page
+   * click grew the board from (`extendAnchors`). Minimal treatment (a
+   * marker + firmer wire), so it costs one Set union and one pass over
+   * consecutive history pairs — no new tracking beyond the history this
+   * lens already keeps and the anchors just above.
+   */
+  const trailUrns = useMemo(
+    () => new Set([...entries, ...extendAnchors]),
+    [entries, extendAnchors],
+  )
+  /** Wires ON the trail: between two CONSECUTIVE focal history entries —
+   *  the hop actually walked, not merely two cards that both happen to
+   *  carry a mark. Keyed unordered (a bundle's drawn direction need not
+   *  match the walk's). */
+  const trailAdjacent = useMemo(() => {
+    const pairs = new Set<string>()
+    for (let i = 1; i < entries.length; i++) {
+      const [a, b] = [entries[i - 1], entries[i]].sort()
+      pairs.add(`${a}|${b}`)
+    }
+    return pairs
+  }, [entries])
+
   const [isolationState, setIsolationState] = useState<{ nodeId: string | null; cardId: string | null }>({ nodeId: null, cardId: null })
   const isolatedId = isolationState.nodeId === nodeId ? isolationState.cardId : null
   const setIsolated = useCallback(
@@ -927,6 +969,8 @@ export function LineageLens({
       down: model.downstreamUrns.size,
       moreUp: capped || more('in'),
       moreDown: capped || more('out'),
+      upSystems: distinctSystemCount(sg, model.upstreamUrns),
+      downSystems: distinctSystemCount(sg, model.downstreamUrns),
     }
   }, [model, nodeId, sg, walkStatus, capped])
 
@@ -1484,6 +1528,8 @@ export function LineageLens({
                 directionFilter={directionFilter}
                 selectedId={view.selection}
                 isolatedId={isolatedId}
+                trailUrns={trailUrns}
+                trailAdjacent={trailAdjacent}
                 reducedMotion={reducedMotion}
                 edgeTypeInfo={edgeTypeInfo}
                 onSelect={setSelection}
@@ -1861,6 +1907,21 @@ export function LineageLens({
  * bounded transitive trace of its own, which counted different things
  * from everything beside it and could not be reconciled with them.
  */
+/** One half of the orientation sentence — plain language, an honest
+ *  floor (+), and "across N systems" only where it says something a raw
+ *  count does not (one system alone is not worth naming). The same
+ *  wording the graph body's focal card carries (FocusGraphView's own
+ *  `orientationHalf`) — kept as a small sibling here rather than a
+ *  cross-module export, since the two bodies otherwise share no view
+ *  code and this is three lines of formatting. */
+function orientationHalf(
+  verb: string, noun: string, count: number, floor: boolean, systems: number, zero: string,
+): string {
+  if (count === 0) return zero
+  const sys = systems > 1 ? ` across ${systems} systems` : ''
+  return `${verb} ${count.toLocaleString()}${floor ? '+' : ''} ${noun}${count === 1 ? '' : 's'}${sys}`
+}
+
 function ReachLine({ reach, loading }: { reach: LensReach | null; loading: boolean }) {
   if (loading) {
     return (
@@ -1873,15 +1934,19 @@ function ReachLine({ reach, loading }: { reach: LensReach | null; loading: boole
   if (!reach) return null
   return (
     <p
-      className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted tabular-nums"
+      className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted"
       title={reach.moreUp || reach.moreDown
-        ? 'Entities this walk has reached so far. A + marks a floor rather than a total — more exists that way. Use ⊕ on a card to walk further.'
-        : 'Every entity connected to this one, upstream and downstream, as far as the data source goes.'}
+        ? 'What this walk has reached so far. A + marks a floor rather than a total — more exists that way. Use ⊕ on a card to walk further.'
+        : 'Everything connected to this entity, upstream and downstream, as far as the data source goes.'}
     >
-      <LucideIcons.Radar className="w-3 h-3 text-accent-lineage/70" />
-      <span>
-        Reach: {reach.up.toLocaleString()}{reach.moreUp ? '+' : ''} upstream
-        {' · '}{reach.down.toLocaleString()}{reach.moreDown ? '+' : ''} downstream
+      <LucideIcons.Radar className="w-3 h-3 flex-shrink-0 text-accent-lineage/70" />
+      {/* ONE span, ONE ellipsis — two independently-truncating spans cut
+          mid-word on each half at once on a narrow card (see the graph
+          body's own `orientationHalf` note for the reported shape). */}
+      <span className="truncate min-w-0 tabular-nums">
+        {orientationHalf('Fed by', 'source', reach.up, reach.moreUp, reach.upSystems, 'No upstream sources')}
+        {' · '}
+        {orientationHalf('feeds', 'consumer', reach.down, reach.moreDown, reach.downSystems, 'feeds nothing downstream')}
       </span>
     </p>
   )
