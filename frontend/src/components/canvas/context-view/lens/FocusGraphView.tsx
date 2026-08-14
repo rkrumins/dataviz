@@ -73,7 +73,7 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, FRAME_HEADER_H, FRAME_PAD, labelFitsRun, frameWindow, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
+import { CARD_W, BAND_GAP, FRAME_PAD, headerHeight, holdsRows, labelFitsRun, frameWindow, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
 import { REVEAL_PAGE, pathToFocus, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
@@ -536,7 +536,7 @@ const gutterPos = (inFrame: boolean, upstream: boolean): string =>
  *  own line and no row is ever on it, so the collision cannot happen at
  *  any nesting depth. */
 const pillAnchor = (card: FocusCard): CSSProperties =>
-  card.kind === 'frame' ? { top: FRAME_HEADER_H / 2 } : { top: '50%' }
+  holdsRows(card) ? { top: headerHeight(card) / 2 } : { top: '50%' }
 
 /** Which ends of this card have something in the gutter. Its content
  *  keeps out of those — an absolutely-positioned pill over a truncating
@@ -993,16 +993,12 @@ function FrameDividerNode({ data }: NodeProps) {
 }
 
 function FocusGraphCard({ data, selected }: NodeProps) {
-  const { card, ctx, focalStats } = data as unknown as {
+  const { card, ctx } = data as unknown as {
     card: FocusCard
     ctx: CardCtx
-    focalStats?: { coarser: number }
   }
-  // Reach arrives via context so a growing walk re-renders ONLY this
-  // card — it used to invalidate every node in the graph.
-  const focalReach = useContext(ReachContext)
-  // Same reasoning for the path-to-focus highlight: a hover must re-
-  // render only the cards whose highlight state actually changed.
+  // The path-to-focus highlight arrives via context so a hover re-renders
+  // only the cards whose highlight state actually changed.
   const { onPath, offPath } = usePathState(card.id)
   // One class, decided here: two `opacity-*` utilities on one element
   // are settled by their order in the stylesheet, not in the class list,
@@ -1014,91 +1010,6 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   const activate = () => ctx.onSelect(card.nodeId)
   const keyActivate = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); activate() }
-  }
-
-  // ── Focal: the anchor card — bigger, gradient, in/out tally ──
-  if (card.kind === 'focal') {
-    return (
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={activate}
-        onKeyDown={keyActivate}
-        style={{
-          width: card.w,
-          height: card.h,
-          borderColor: accent,
-          background: `linear-gradient(150deg, ${accent}24, ${accent}08 60%)`,
-          boxShadow: selected ? `0 10px 34px ${accent}55` : `0 10px 34px ${accent}33`,
-        }}
-        className={cn(
-          'group relative rounded-xl border-2 px-3.5 py-2.5 bg-canvas-elevated cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-          selected
-            ? 'ring-2 ring-accent-lineage ring-offset-1 ring-offset-canvas-elevated'
-            : onPath && 'ring-1 ring-accent-lineage/70',
-          dim,
-        )}
-      >
-        {card.wired && <PortHandles />}
-        {/* The focus is where a walk starts, so both of its ⊕ live here
-            — upstream on the left edge, downstream on the right. */}
-        <WalkPills card={card} ctx={ctx} />
-        <div className="flex items-center gap-1.5">
-          <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5" />
-          <p className="text-[9.5px] font-bold uppercase tracking-[0.12em] truncate" style={{ color: accent }}>
-            {card.type}
-          </p>
-          {card.fetch === 'loading' && (
-            <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
-          )}
-        </div>
-        <p
-          className="text-[13.5px] font-semibold text-ink truncate leading-snug"
-          title={`${card.label}${card.description ? ` — ${card.description}` : ''}`}
-        >
-          {card.label}
-        </p>
-        {card.parentId && (
-          <FocalBreadcrumb card={card} ctx={ctx} />
-        )}
-        {/* Hops the data source attached to a level ABOVE the focus.
-            Nothing above the focus is drawn, so there is no card for
-            them to land on — but they are facts, and a partner sitting
-            there with no wire on it needs the explanation. */}
-        {focalStats && focalStats.coarser > 0 && (
-          <p
-            className="text-[9px] italic text-ink-muted/70 truncate"
-            title={`${focalStats.coarser.toLocaleString()} connection${focalStats.coarser === 1 ? '' : 's'} the data source records against a level above ${card.label}. They are drawn nowhere: this picture never boxes the levels above the focus. Focus a breadcrumb above to see them.`}
-          >
-            +{focalStats.coarser.toLocaleString()} connect at a coarser grain
-          </p>
-        )}
-        {/* "N in / N out" was the same accumulator one grain up: the
-            walk's own loaded degree, which grows with every click and
-            answers a question about the FETCH rather than about the
-            entity. Reach below is the macro number that survives — it
-            counts what the data source NAMED, states its floors, and
-            only ever grows because more genuinely exists. */}
-        {/* How far the walk has reached — the question Focus mode gets
-            opened to answer, counted off the model the board draws
-            rather than measured separately. An open frontier makes
-            these floors, and says so. */}
-        {focalReach && (
-          <p
-            className="flex items-center gap-1 mt-0.5 text-[9px] text-ink-muted tabular-nums truncate"
-            title={focalReach.moreUp || focalReach.moreDown
-              ? 'Entities this walk has reached so far. A + marks a floor rather than a total — more exists that way. Use ⊕ on a card to walk further.'
-              : 'Every entity connected to this one, upstream and downstream, as far as the data source goes.'}
-          >
-            <LucideIcons.Radar className="w-2.5 h-2.5 flex-shrink-0 text-accent-lineage/70" />
-            <span className="truncate">
-              Reach: {focalReach.up.toLocaleString()}{focalReach.moreUp ? '+' : ''} upstream
-              {' · '}{focalReach.down.toLocaleString()}{focalReach.moreDown ? '+' : ''} downstream
-            </span>
-          </p>
-        )}
-      </div>
-    )
   }
 
   // ── Inside a frame: ONE row language, whatever the row is ──
@@ -1185,7 +1096,11 @@ function FocusGraphCard({ data, selected }: NodeProps) {
  * the child cards sitting on top.
  */
 function FocusFrameNode({ data, selected }: NodeProps) {
-  const { card, ctx } = data as unknown as { card: FocusCard; ctx: CardCtx }
+  const { card, ctx, focalStats } = data as unknown as {
+    card: FocusCard
+    ctx: CardCtx
+    focalStats?: { coarser: number }
+  }
   const { onPath, offPath } = usePathState(card.id)
   // A frame nested inside another frame is also one of ITS rows, so it
   // answers to the host's keyboard cursor like any other row does.
@@ -1195,17 +1110,39 @@ function FocusFrameNode({ data, selected }: NodeProps) {
   // The Find box is asked for rather than always sitting there — see the
   // header, where 64px of permanent input clipped the honest counts.
   const [findOpen, setFindOpen] = useState(false)
-  // The CONTAINS-STACK: the focus's own contents, not an entity of its
-  // own (no urn, nowhere to re-center to, no wires). It is chrome, so it
-  // borrows none of the focal's identity — wearing the focus's type
-  // colour and icon made it read as a second copy of the focus.
-  const isStack = card.nodeId === null
-  const accent = isStack ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
+  /**
+   * THE FOCUS, in the same node language as everything else it is drawn
+   * beside (R7). It used to be a compact card with a separate "Inside X"
+   * panel floating below it — two boxes for one entity, with the wires
+   * landing on the panel's rows, so the thing the reader asked about read
+   * as an orphan above its own contents.
+   *
+   * What it keeps that a partner frame does not have: the accent border
+   * and glow (it is the anchor, and must read as one), the full clickable
+   * breadcrumb, the coarser-grain whisper, and the Reach line. Everything
+   * else — the rows, the scroll region, Find, Connected|All, the peek,
+   * the keyboard — is the SAME machinery, unchanged.
+   */
+  const isFocal = card.kind === 'focal'
+  // Where this node's BODY starts — under whichever header it carries.
+  // The focus's is taller (it says what it is, where it lives and how
+  // far the walk reached), so every message that sits at the top of the
+  // body follows the header rather than a hard-coded offset.
+  const bodyTop = headerHeight(card) + 6
+  // Does this node hold anything at all? A partner frame only exists
+  // BECAUSE it has rows, so this is only ever false for a FOCUS that
+  // holds nothing — and a chevron, a Connected|All pair and a Find box
+  // over an entity with no inside are three controls that do nothing.
+  const hasContents = !isFocal || card.contents !== null
+  // Reach arrives via context so a growing walk re-renders ONLY this
+  // node — it used to invalidate every node in the graph.
+  const focalReach = useContext(ReachContext)
+  const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
   // Whether anything will sit beside the name — see the name's width.
-  const hasAncestryChip = card.frameId === null && (card.ancestry.length > 0 || card.parentLabel !== null)
-  // The thing you asked about, when it happens to hold things. It reads
-  // as the anchor — solid border, the accent glow the focal card has —
-  // rather than as one more container that drifted into the picture.
+  // Never on the focal: its provenance is the breadcrumb below the name,
+  // where the whole chain is clickable.
+  const hasAncestryChip = !isFocal && card.frameId === null
+    && (card.ancestry.length > 0 || card.parentLabel !== null)
   const q = ctx.frameQueryFor?.(card.expandKey ?? '') ?? ''
   // A total is a claim: state it only when the last page has landed (or
   // the container reported its own count). Otherwise say "at least".
@@ -1245,23 +1182,55 @@ function FocusFrameNode({ data, selected }: NodeProps) {
       style={{
         width: card.w,
         height: card.h,
-        borderColor: `${accent}55`,
+        borderColor: isFocal ? accent : `${accent}55`,
+        ...(isFocal
+          ? {
+            background: `linear-gradient(150deg, ${accent}24, ${accent}08 60%)`,
+            boxShadow: selected ? `0 10px 34px ${accent}55` : `0 10px 34px ${accent}33`,
+          }
+          : {}),
       }}
       className={cn(
-        'relative rounded-xl border-2 border-dashed pointer-events-none bg-black/[0.02] dark:bg-white/[0.03]',
-        onCursor ? 'ring-2 ring-accent-lineage/60' : onPath && 'ring-1 ring-accent-lineage/70',
+        'relative rounded-xl border-2 pointer-events-none',
+        // The anchor is SOLID and lit; a partner container is a dashed
+        // outline around rows that speak for themselves.
+        isFocal ? 'bg-canvas-elevated' : 'border-dashed bg-black/[0.02] dark:bg-white/[0.03]',
+        selected && isFocal ? 'ring-2 ring-accent-lineage ring-offset-1 ring-offset-canvas-elevated'
+          : onCursor ? 'ring-2 ring-accent-lineage/60'
+            : onPath && 'ring-1 ring-accent-lineage/70',
         offPath && OFF_PATH_CARD,
       )}
     >
-      {/* The stack is the focal's own contents, and no wire ever lands on
-          it — its rows' lineage is drawn at the focal card above. */}
       {card.wired && <PortHandles />}
       {/* An open container keeps its own lineage question: looking
           inside something must never end the walk. */}
       <WalkPills card={card} ctx={ctx} />
       {/* Header — the only interactive part; the body is click-through
           so the child cards above stay reachable. */}
-      <div className="pointer-events-auto absolute inset-x-0 top-0 h-[46px] px-2.5 flex items-center gap-1.5">
+      <div
+        className={cn(
+          'pointer-events-auto absolute inset-x-0 top-0 px-2.5 flex gap-1.5',
+          isFocal ? 'flex-col pt-2' : 'items-center',
+        )}
+        style={{ height: headerHeight(card) }}
+        // The focus is inspectable like any other card on the board; a
+        // partner frame's header is its controls and nothing else.
+        {...(isFocal
+          ? {
+            role: 'button' as const,
+            tabIndex: 0,
+            onClick: () => ctx.onSelect(card.nodeId),
+            onKeyDown: (e: React.KeyboardEvent) => {
+              if (e.key !== 'Enter' && e.key !== ' ') return
+              e.preventDefault()
+              e.stopPropagation()
+              ctx.onSelect(card.nodeId)
+            },
+          }
+          : {})}
+      >
+      <div className={cn('flex items-center gap-1.5 min-w-0', isFocal && 'w-full')}>
+        {hasContents && (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); ctx.onToggleFrame(card.expandKey!) }}
@@ -1274,9 +1243,24 @@ function FocusFrameNode({ data, selected }: NodeProps) {
             ? <LucideIcons.ChevronDown className="w-3.5 h-3.5" />
             : <LucideIcons.ChevronRight className="w-3.5 h-3.5" />}
         </button>
-        {isStack
-          ? <LucideIcons.Boxes className="w-3.5 h-3.5 flex-shrink-0" style={{ color: accent }} />
-          : <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5 flex-shrink-0" />}
+        )}
+        <TypeIcon ctx={ctx} typeId={card.type} color={accent} className="w-3.5 h-3.5 flex-shrink-0" />
+        {/* The focus states its KIND on the control line and its NAME on
+            a line of its own below — it is the thing the whole board is
+            about, and a name sharing a row with four controls is the
+            thing most likely to truncate. */}
+        {isFocal && (
+          <>
+            <p className="text-[9.5px] font-bold uppercase tracking-[0.12em] truncate" style={{ color: accent }}>
+              {card.type}
+            </p>
+            {card.fetch === 'loading' && (
+              <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
+            )}
+            <span className="flex-1" />
+          </>
+        )}
+        {!isFocal && (
         <div className="min-w-0 flex-1">
           {/* Name, then where it lives — the levels above it are text,
               never boxes, so the chip is how they are stated at all. */}
@@ -1287,10 +1271,6 @@ function FocusFrameNode({ data, selected }: NodeProps) {
                 what is left, and truncates there. With no chip beside
                 it the name keeps the whole line: capping it anyway
                 clipped `int_clean_products_t1` for no one's benefit. */}
-            {/* The contains-stack is the FOCUS'S contents, so it says
-                whose: "Inside fact_orders", never a bare "Contains" that
-                names a box rather than a thing. */}
-            {isStack && <span className="flex-shrink-0 text-[9.5px] text-ink-muted/70">Inside</span>}
             <TailName className={cn(
               'block text-[11.5px] font-semibold text-ink leading-tight',
               hasAncestryChip && 'max-w-[62%] flex-shrink-0',
@@ -1316,13 +1296,14 @@ function FocusFrameNode({ data, selected }: NodeProps) {
                 : <span className="truncate">{inside}</span>}
           </p>
         </div>
+        )}
         {/* Connected ⇄ All. The default answers "what in here is on this
             lineage"; All answers "what else is in here", with lineage
             still marked wherever it exists.
             The walk model IS the roster for what connects — but only the
             children endpoint knows what ELSE is in there, so this is the
             one control on a frame that can cost a fetch. */}
-        {ctx.onToggleFrameAll && (
+        {hasContents && ctx.onToggleFrameAll && (
           <div
             role="group"
             aria-label={`What to show inside ${card.label}`}
@@ -1390,10 +1371,10 @@ function FocusFrameNode({ data, selected }: NodeProps) {
             </button>
           )
         )}
-        {/* The contains-stack is the focus's own contents — there is
-            nowhere to re-center TO, and the focal card is already the
-            centre. Only a frame that IS an entity offers this. */}
-        {card.nodeId && (
+        {/* Re-center on this container. The FOCUS is already the centre,
+            so it offers no such control — a button that walks you to
+            where you are standing is a dead click. */}
+        {card.nodeId && !isFocal && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.nodeId!) }}
@@ -1403,17 +1384,72 @@ function FocusFrameNode({ data, selected }: NodeProps) {
             <LucideIcons.Focus className="w-3 h-3" />
           </button>
         )}
+        </div>
+        {/* ── The focus's own identity, under its control line ── */}
+        {isFocal && (
+          <>
+            <TailName
+              className="block text-[13px] font-semibold text-ink leading-tight"
+              title={`${card.label}${card.description ? ` — ${card.description}` : ''}`}
+            >
+              {card.label}
+            </TailName>
+            {/* What is in here, on this lineage and altogether — the same
+                sentence, decided the same way, that a partner frame's
+                header carries. */}
+            {hasContents && (
+              <p className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate">
+                {card.fetch === 'loading'
+                  ? 'Looking inside…'
+                  : card.contents && !fellBack
+                    ? <ContentsCount card={card} />
+                    : <span className="truncate">{inside}</span>}
+              </p>
+            )}
+            {card.parentId && <FocalBreadcrumb card={card} ctx={ctx} />}
+            {/* Hops the data source attached to a level ABOVE the focus.
+                Nothing above the focus is drawn, so there is no card for
+                them to land on — but they are facts, and a partner
+                sitting there with no wire on it needs the explanation. */}
+            {focalStats && focalStats.coarser > 0 && (
+              <p
+                className="text-[9px] italic text-ink-muted/70 truncate"
+                title={`${focalStats.coarser.toLocaleString()} connection${focalStats.coarser === 1 ? '' : 's'} the data source records against a level above ${card.label}. They are drawn nowhere: this picture never boxes the levels above the focus. Focus a breadcrumb above to see them.`}
+              >
+                +{focalStats.coarser.toLocaleString()} connect at a coarser grain
+              </p>
+            )}
+            {/* How far the walk has reached — the question Focus mode
+                gets opened to answer, counted off the model the board
+                draws rather than measured separately. An open frontier
+                makes these floors, and says so. */}
+            {focalReach && (
+              <p
+                className="flex items-center gap-1 text-[9px] text-ink-muted tabular-nums truncate"
+                title={focalReach.moreUp || focalReach.moreDown
+                  ? 'Entities this walk has reached so far. A + marks a floor rather than a total — more exists that way. Use ⊕ on a card to walk further.'
+                  : 'Every entity connected to this one, upstream and downstream, as far as the data source goes.'}
+              >
+                <LucideIcons.Radar className="w-2.5 h-2.5 flex-shrink-0 text-accent-lineage/70" />
+                <span className="truncate">
+                  Reach: {focalReach.up.toLocaleString()}{focalReach.moreUp ? '+' : ''} upstream
+                  {' · '}{focalReach.down.toLocaleString()}{focalReach.moreDown ? '+' : ''} downstream
+                </span>
+              </p>
+            )}
+          </>
+        )}
       </div>
 
       {card.fetch === 'loading' && (
-        <div className="absolute inset-x-2.5 top-[52px] space-y-1.5">
+        <div className="absolute inset-x-2.5 space-y-1.5" style={{ top: bodyTop }}>
           {[0, 1].map(i => (
             <div key={i} className="h-8 rounded-lg bg-black/[0.05] dark:bg-white/[0.06] animate-pulse" />
           ))}
         </div>
       )}
       {card.fetch === 'error' && (
-        <div className="pointer-events-auto absolute inset-x-2.5 top-[52px] flex items-center gap-1.5 text-[10px] text-amber-700 dark:text-amber-400">
+        <div className="pointer-events-auto absolute inset-x-2.5 flex items-center gap-1.5 text-[10px] text-amber-700 dark:text-amber-400" style={{ top: bodyTop }}>
           <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
           <span className="truncate">Couldn&apos;t look inside.</span>
           <button
@@ -1426,7 +1462,7 @@ function FocusFrameNode({ data, selected }: NodeProps) {
         </div>
       )}
       {card.frameEmpty && card.frameLoaded === 0 && card.fetch === null && (
-        <p className="absolute inset-x-2.5 top-[52px] text-[10px] text-ink-muted/70 italic leading-snug">
+        <p className="absolute inset-x-2.5 text-[10px] text-ink-muted/70 italic leading-snug" style={{ top: bodyTop }}>
           Nothing inside {card.label} is on this lineage.
           {ctx.onToggleFrameAll && ' Show everything inside to see what it holds.'}
         </p>
@@ -1558,7 +1594,7 @@ function FrameScrollRegion({ card, ctx, win }: {
         // also swallow is the pane's other job — dismissing what is open
         // — so it does that itself, below.
         className="nowheel nodrag pointer-events-auto absolute inset-x-0 bottom-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded-b-xl"
-        style={{ top: FRAME_HEADER_H }}
+        style={{ top: headerHeight(card) }}
         // Addressable, so a click on one of the rows it owns can hand
         // the keyboard back to it — see `FrameRow`'s activate.
         id={listDomId(key)}
@@ -1623,7 +1659,7 @@ function FrameScrollThumb({ card, win, onScroll }: {
   win: ReturnType<typeof frameWindow>
   onScroll: (offset: number) => void
 }) {
-  const trackH = Math.max(0, card.h - FRAME_HEADER_H - FRAME_PAD * 2)
+  const trackH = Math.max(0, card.h - headerHeight(card) - FRAME_PAD * 2)
   const span = Math.max(1, win.loaded)
   const thumbH = Math.max(18, Math.round(trackH * Math.min(1, win.size / span)))
   const travel = Math.max(0, trackH - thumbH)
@@ -1631,7 +1667,7 @@ function FrameScrollThumb({ card, win, onScroll }: {
   return (
     <div
       className="nodrag pointer-events-auto absolute w-1.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07]"
-      style={{ top: FRAME_HEADER_H + FRAME_PAD, right: 3, height: trackH }}
+      style={{ top: headerHeight(card) + FRAME_PAD, right: 3, height: trackH }}
       aria-hidden
       onPointerDown={(e) => {
         e.stopPropagation()
@@ -1662,18 +1698,19 @@ const MemoFocusFrameNode = memo(FocusFrameNode, (prev, next) => {
   // `selected` is read now (a nested frame is one of its host's rows and
   // says so), so a memo that ignored it would freeze that state.
   if (prev.selected !== next.selected) return false
-  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx }
-  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx }
-  return a.ctx === b.ctx && sameCard(a.card, b.card)
+  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { coarser: number } }
+  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { coarser: number } }
+  return a.ctx === b.ctx
+    // Carried by the focus, which is one of these nodes now.
+    && a.focalStats?.coarser === b.focalStats?.coarser
+    && sameCard(a.card, b.card)
 })
 
 const MemoFocusGraphCard = memo(FocusGraphCard, (prev, next) => {
   if (prev.selected !== next.selected) return false
-  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { coarser: number } }
-  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { coarser: number } }
-  return a.ctx === b.ctx
-    && a.focalStats?.coarser === b.focalStats?.coarser
-    && sameCard(a.card, b.card)
+  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx }
+  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx }
+  return a.ctx === b.ctx && sameCard(a.card, b.card)
 })
 
 // ── Band labels ──────────────────────────────────────────────────────
@@ -2287,7 +2324,7 @@ export function FocusGraphView({
   const wheelDebt = useRef(new Map<string, number>())
   const cardByKey = useMemo(() => {
     const m = new Map<string, FocusCard>()
-    for (const c of graph.cards) if (c.kind === 'frame' && c.expandKey) m.set(c.expandKey, c)
+    for (const c of graph.cards) if (holdsRows(c) && c.expandKey) m.set(c.expandKey, c)
     return m
   }, [graph.cards])
   const onFrameWheel = useCallback((key: string, deltaPx: number) => {
@@ -2333,7 +2370,10 @@ export function FocusGraphView({
     // A frame's children ride along as React Flow child nodes, so
     // dragging the frame carries its whole contents — positions become
     // relative to it, and their edges re-route themselves.
-    const frameById = new Map(graph.cards.filter(c => c.kind === 'frame').map(c => [c.id, c]))
+    // Row HOSTS, which since R7 includes the focus: its contents are its
+    // own rows, so they ride along as its React Flow children exactly as
+    // a partner frame's do — one node that moves as one piece.
+    const frameById = new Map(graph.cards.filter(holdsRows).map(c => [c.id, c]))
     // Frames nest, so a fixed frame-behind-cards pair of z-indices is not
     // enough: an inner frame has to sit ABOVE its host's backdrop while
     // still sitting below its own children.
@@ -2347,8 +2387,10 @@ export function FocusGraphView({
       const parent = card.frameId ? frameById.get(card.frameId) : undefined
       return {
         id: card.id,
-        type: card.kind === 'frame' ? 'focusFrame' : card.kind === 'divider' ? 'focusDivider' : 'focusCard',
-        zIndex: depthOf(card) * 2 + (card.kind === 'frame' ? 0 : 1),
+        // The focus is drawn by the same node as a container frame — one
+        // language for anything that holds rows (R7).
+        type: holdsRows(card) ? 'focusFrame' : card.kind === 'divider' ? 'focusDivider' : 'focusCard',
+        zIndex: depthOf(card) * 2 + (holdsRows(card) ? 0 : 1),
         ...(parent ? { parentId: parent.id } : {}),
         position: parent
           ? { x: card.x - parent.x, y: card.y - parent.y }

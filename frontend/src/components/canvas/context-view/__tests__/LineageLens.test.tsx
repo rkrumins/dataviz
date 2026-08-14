@@ -930,9 +930,9 @@ describe('what is really inside a container', () => {
 
   it('says a roster is not an answer when nothing inside is on the lineage', () => {
     // The focus connects at TABLE grain — none of its own columns carries
-    // this lineage. Opening "everything inside" then fills the stack with
-    // rows that connect to nothing, and a list of columns under a lineage
-    // picture reads as the answer unless the frame says it is not one.
+    // this lineage. Opening "everything inside" then fills it with rows
+    // that connect to nothing, and a list of columns inside a lineage
+    // picture reads as the answer unless the node says it is not one.
     const onLoadAllChildren = vi.fn()
     const walk = doneWalk(walkModel('F', {
       nodes: [
@@ -943,12 +943,12 @@ describe('what is really inside a container', () => {
       upstreamUrns: new Set(['U']),
     }))
     const { rerender, api } = renderLens(['F'], walk, { onLoadAllChildren })
-    // Before the roster: the stack is open and says the answer is nothing,
-    // rather than not being there at all.
-    // And it names the entity it is about — the stack heads itself
-    // "Inside orders", never a bare "Contains" that names a box.
+    // Before the roster: the focus is open and says the answer is
+    // nothing, rather than not being there at all. It needs no "Inside X"
+    // label to say whose contents these are — since R7 they are ITS OWN
+    // rows, inside the node that carries its name.
     expect(screen.getByText(/Nothing inside orders is on this lineage/)).toBeTruthy()
-    expect(screen.getByText('Inside')).toBeTruthy()
+    expect(screen.queryByText('Inside')).toBeNull()
     expect(screen.getByText(/0 on this lineage · of 2/)).toBeTruthy()
 
     fireEvent.click(screen.getByLabelText('Everything inside, lineage marked'))
@@ -978,6 +978,60 @@ describe('what is really inside a container', () => {
 
     expect(screen.getByText('order_total')).toBeTruthy()
     expect(screen.getByText(/nothing here is on this lineage · showing everything inside/)).toBeTruthy()
+  })
+
+  /**
+   * R7 — the focus is ONE node, in the same language as its partners.
+   *
+   * Reported (user screenshot, circled): a compact focal card floating
+   * above a detached "Inside int_clean_products_t2" panel, while the
+   * partners either side of it were each a single frame with rows in it.
+   * The wires landed on the panel's rows, so the thing the whole picture
+   * is about read as an orphan sitting above its own contents.
+   */
+  const focusWithColumns = () => doneWalk(walkModel('F', {
+    nodes: [
+      wnode('F', 'dataset', 'int_clean_products_t2', { childCount: 3 }),
+      wnode('fc', 'schemaField', 'product_id'),
+      wnode('T', 'dataset', 'raw_products', { childCount: 4 }),
+      wnode('c1', 'schemaField', 'id'),
+    ],
+    containmentEdges: [holds('F', 'fc'), holds('T', 'c1')],
+    lineageEdges: [hop('c1', 'fc')],
+    upstreamUrns: new Set(['T', 'c1']),
+  }))
+
+  it('R7: the focus is one node with its contents as rows inside it', () => {
+    renderLens(['F'], focusWithColumns())
+
+    // Same node type as the partner frame beside it — one language.
+    const focal = screen.getAllByText('int_clean_products_t2')
+      .find(el => el.closest('.react-flow__node'))!
+      .closest('.react-flow__node')!
+    expect(focal.className).toContain('react-flow__node-focusFrame')
+
+    // Its column is a ROW of it: an option of the focus's own list, not
+    // a row of some panel underneath.
+    const row = screen.getAllByText('product_id')
+      .find(el => el.closest('[role="option"]'))!
+      .closest('[role="option"]')!
+    expect(document.getElementById('lens-rows-F')?.getAttribute('aria-owns'))
+      .toContain(row.id)
+
+    // And no second box speaking for the focus's contents.
+    expect(screen.queryByText('Inside')).toBeNull()
+    // The focus never offers to re-center on itself.
+    expect(screen.queryByTitle('Focus int_clean_products_t2')).toBeNull()
+    expect(screen.getByTitle('Focus raw_products')).toBeTruthy()
+  })
+
+  it('R7: the one node still carries the focal chrome — Reach, kind, contents', () => {
+    renderLens(['F'], focusWithColumns())
+    // Reach is the focus's macro number, and it stays on the focus.
+    expect(screen.getByText(/Reach:/)).toBeTruthy()
+    // What it is, and what is in it — both on the one node.
+    expect(screen.getAllByText('dataset').length).toBeGreaterThan(0)
+    expect(screen.getByText(/1 on this lineage · of 3/)).toBeTruthy()
   })
 
   /**

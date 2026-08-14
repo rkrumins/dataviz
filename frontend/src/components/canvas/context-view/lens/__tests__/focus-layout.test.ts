@@ -324,26 +324,30 @@ describe('focus-layout — frames only where they clarify', () => {
         expect(focus.ancestryIds).toEqual(['SNOW'])
     })
 
-    it('R1: the focus is a COMPACT CARD, and what it holds is the contains-stack below it', () => {
+    it('R7: the focus is ONE node, and what it holds are its own rows', () => {
         const g = layout(sharedPlatform())
         const focus = cardFor(g, 'REPORTING')!
-        // Never a frame: the thing you asked about does not become a box
-        // the rest of the board sits beside.
+        // The same node language as the partners it is drawn beside: one
+        // box, holding its contents. It used to be a compact card with a
+        // separate "Inside REPORTING" panel floating underneath — two
+        // boxes for one entity, with the wires landing on the panel.
         expect(focus.kind).toBe('focal')
-        expect(focus.h).toBe(FOCAL_H)
-        expect(g.cards.some(c => c.frameId === focus.id)).toBe(false)
-
-        // Its contents hang below it, in its own band, as one stack.
-        const stack = g.cards.find(c => c.id === `co:REPORTING`)!
-        expect(stack).toBeDefined()
-        expect(stack.nodeId).toBeNull()
-        expect(stack.band).toBe(0)
-        expect(stack.frameId).toBeNull()
-        expect(stack.expandKey).toBe('REPORTING')
-        expect(stack.contents).toEqual({ onLineage: 2, total: 9 })
-        expect(stack.y).toBeGreaterThan(focus.y + focus.h - 1)
+        expect(focus.frameId).toBeNull()
+        expect(focus.band).toBe(0)
+        expect(focus.childrenOpen).toBe(true)
+        expect(focus.expandKey).toBe('REPORTING')
+        expect(focus.contents).toEqual({ onLineage: 2, total: 9 })
+        // Nothing else stands for the focus's contents any more.
+        expect(g.cards.some(c => c.id.startsWith('co:'))).toBe(false)
+        // Its rows are INSIDE it, and it is tall enough to hold them.
         for (const table of ['rep_a', 'rep_b']) {
-            expect(cardFor(g, table)!.frameId).toBe(stack.id)
+            expect(cardFor(g, table)!.frameId).toBe(focus.id)
+        }
+        expect(focus.h).toBeGreaterThan(FOCAL_H)
+        for (const table of ['rep_a', 'rep_b']) {
+            const row = cardFor(g, table)!
+            expect(row.y).toBeGreaterThanOrEqual(focus.y + FOCAL_H)
+            expect(row.y + row.h).toBeLessThanOrEqual(focus.y + focus.h)
         }
     })
 
@@ -353,7 +357,7 @@ describe('focus-layout — frames only where they clarify', () => {
         // populated child and ships no hop itself, so every pass-through
         // test in the walk says "see through me" — and seeing through the
         // FOCUS demoted it out of the picture, taking the focal card, the
-        // contains-stack and (because every hop reprojects onto the focus)
+        // its rows and (because every hop reprojects onto the focus)
         // every wire with it.
         const sg = subgraph({
             focus: 'F',
@@ -378,10 +382,8 @@ describe('focus-layout — frames only where they clarify', () => {
         expect(focal.kind).toBe('focal')
         expect(focal.frameId).toBeNull()
         expect(focal.band).toBe(0)
-        // Its one column is in the stack, not loose on the board.
-        const stack = g.cards.find(c => c.id === 'co:F')!
-        expect(stack).toBeDefined()
-        expect(cardFor(g, 'fc')!.frameId).toBe(stack.id)
+        // Its one column is a row INSIDE it, not loose on the board.
+        expect(cardFor(g, 'fc')!.frameId).toBe(focal.id)
         // And the wire is drawn column to column: both ends are on
         // screen, so it lands at the finest grain either of them has.
         // (It landed on the FOCAL until column-grain wiring; the focal's
@@ -391,21 +393,25 @@ describe('focus-layout — frames only where they clarify', () => {
         expect(g.edges[0].target).toBe(cardFor(g, 'fc')!.id)
     })
 
-    it('R1: a focus that holds nothing has no stack under it', () => {
+    it('R7: a focus that holds nothing stays the compact node it always was', () => {
         const g = layout(collateralEstate())
-        expect(cardFor(g, 'F')!.kind).toBe('focal')
-        expect(g.cards.some(c => c.id.startsWith('co:'))).toBe(false)
+        const focus = cardFor(g, 'F')!
+        expect(focus.kind).toBe('focal')
+        expect(focus.childrenOpen).toBe(false)
+        expect(focus.h).toBe(FOCAL_H)
+        expect(g.cards.some(c => c.frameId === focus.id)).toBe(false)
     })
 
-    it('R1: the contains-stack closes to one card, and the rows go with it', () => {
+    it('R7: the focus closes to its header, and its rows go with it', () => {
         const sg = sharedPlatform()
         const base = initialLensViewState(sg)
         const g = layout(sg, { ...base, collapsedContainment: new Set(['REPORTING']) })
-        const stack = g.cards.find(c => c.id === 'co:REPORTING')!
-        expect(stack.childrenOpen).toBe(false)
-        expect(g.cards.some(c => c.frameId === stack.id)).toBe(false)
+        const focus = cardFor(g, 'REPORTING')!
+        expect(focus.childrenOpen).toBe(false)
+        expect(focus.h).toBe(FOCAL_H)
+        expect(g.cards.some(c => c.frameId === focus.id)).toBe(false)
         // Still says what is in there, so it can be opened again.
-        expect(stack.contents).toEqual({ onLineage: 2, total: 9 })
+        expect(focus.contents).toEqual({ onLineage: 2, total: 9 })
     })
 
     it('R1b: a hop into the focus lands on the ROW that carries it, not on the focal', () => {
@@ -1715,9 +1721,9 @@ describe('focus-layout — frames scroll instead of growing', () => {
     it('says so when nothing inside is on the lineage, instead of a roster that reads like an answer', () => {
         // The focus connects at TABLE grain: its columns are in the
         // container, and not one of them is on this lineage. Opening
-        // "everything inside" then fills the stack with rows that connect
-        // to nothing — which reads as an answer unless the frame says
-        // plainly that it isn't one.
+        // "everything inside" then fills it with rows that connect to
+        // nothing — which reads as an answer unless the node says plainly
+        // that it isn't one.
         const sg = subgraph({
             focus: 'F',
             nodes: [wnode('F', 'dataset', 'orders'), wnode('U', 'dataset', 'raw_orders')],
@@ -1733,10 +1739,10 @@ describe('focus-layout — frames scroll instead of growing', () => {
             }]]),
             childrenAllStatus: new Map([['F', 'done']]),
         })
-        const stack = g.cards.find(c => c.id === 'co:F')!
-        expect(stack.frameEmpty).toBe(true)
-        expect(stack.frameConnectedCount).toBe(0)
-        expect(stack.frameLoaded).toBe(2)
+        const focus = cardFor(g, 'F')!
+        expect(focus.frameEmpty).toBe(true)
+        expect(focus.frameConnectedCount).toBe(0)
+        expect(focus.frameLoaded).toBe(2)
         // The claim is about the MODEL, so a partner that DOES hold
         // lineage children never makes it.
         expect(cardFor(g, 'U')!.frameEmpty).toBe(false)

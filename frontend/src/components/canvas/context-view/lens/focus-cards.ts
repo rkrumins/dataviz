@@ -58,15 +58,17 @@ export const CARD_W = 240
  *  two levels of nesting still fit inside one band slot
  *  (CARD_W + BAND_GAP). */
 export const FRAME_CONTENT_W = CARD_W + 50
-/** The focal card's height.
+/** The focal node's HEADER height — and the whole of it when the focus
+ *  holds nothing.
  *
- *  Sized to what it SAYS: a type chip and a name, the breadcrumb of where
- *  it lives, the "connect at a coarser grain" whisper when there is one,
- *  and the Reach line. It was 120 while it also carried a "N in / N out"
- *  row; that row was the walk's own loaded degree — a number that grew
- *  every time the reader clicked — and taking it out left a card two
- *  thirds full, which reads as something failing to render. */
-export const FOCAL_H = 100
+ *  Sized to what it SAYS: the type and the controls every row-holding
+ *  node carries, a name, the breadcrumb of where it lives, the "connect
+ *  at a coarser grain" whisper when there is one, and the Reach line. It
+ *  was 120 while it also carried a "N in / N out" row; that row was the
+ *  walk's own loaded degree — a number that grew every time the reader
+ *  clicked — and taking it out left a card two thirds full, which reads
+ *  as something failing to render. */
+export const FOCAL_H = 116
 export const CARD_H = 64
 /** A frame row with nothing to say beneath its name — its relationship
  *  is stated once on the frame, and it stands for no coarser grain.
@@ -119,7 +121,9 @@ export const BAND_GAP = 130
 export const CARD_GAP = 10
 /** Indent for cards hanging below the focal in its own band. */
 export const NEST_INDENT = 16
-/** Vertical gap between the focal card and anything stacked under it. */
+/** Vertical gap between the focal node and anything stacked under it in
+ *  its own band. Wider than CARD_GAP: what sits under the focus is not
+ *  another row of it. */
 export const CONTAINS_STACK_GAP = 18
 
 /**
@@ -177,6 +181,25 @@ export function frameWindow(card: FocusCard) {
 }
 
 export type FocusCardKind = 'focal' | 'entity' | 'frame' | 'divider'
+
+/**
+ * Cards that HOLD ROWS: a container someone opened, and the FOCUS, which
+ * is drawn in the same node language as its partners (R7) rather than as
+ * a card with a detached panel of its own contents underneath it.
+ *
+ * One predicate, because "does this card host rows" decides three
+ * different things that must agree: how tall it is, where its rows are
+ * placed inside it, and whether the view renders it as a frame at all.
+ */
+export const holdsRows = (card: FocusCard): boolean =>
+  card.kind === 'frame' || card.kind === 'focal'
+
+/** How tall the header of a row-holding card is. A frame states a
+ *  container; the FOCUS states the thing you asked about — its name,
+ *  where it lives, and how far the walk has reached — so it carries the
+ *  taller one. */
+export const headerHeight = (card: FocusCard): number =>
+  card.kind === 'focal' ? FOCAL_H : FRAME_HEADER_H
 
 /** One row a frame holds, in order — enough for the view to run a
  *  type-ahead and move a keyboard cursor over rows the window has
@@ -490,7 +513,7 @@ export function layoutBands(cards: FocusCard[]) {
   // run DEEPEST-FIRST: an outer frame's height sums its children's, so
   // a child frame whose own height had not been computed yet would size
   // its parent short and the two would overlap.
-  const frameById = new Map(cards.filter(c => c.kind === 'frame').map(c => [c.id, c]))
+  const frameById = new Map(cards.filter(holdsRows).map(c => [c.id, c]))
   const depthOf = (frame: FocusCard): number => {
     let d = 0
     let host = frame.frameId
@@ -503,13 +526,14 @@ export function layoutBands(cards: FocusCard[]) {
   for (const { f: c } of frames) {
     const kids = childrenByFrame.get(c.id) ?? []
     const inner = kids.reduce((acc, k) => acc + k.h, 0) + CARD_GAP * Math.max(0, kids.length - 1)
+    const head = headerHeight(c)
     c.w = CARD_W + FRAME_PAD * 2
     // A COLLAPSED frame is its header and nothing else. Reserving a
     // body row is for a frame that is open and has none yet — loading,
     // empty, failed — which all need somewhere to say so.
     c.h = kids.length === 0 && !c.childrenOpen
-      ? FRAME_HEADER_H
-      : FRAME_HEADER_H + FRAME_PAD + Math.max(inner, kids.length === 0 ? CARD_H : 0) + FRAME_PAD
+      ? head
+      : head + FRAME_PAD + Math.max(inner, kids.length === 0 ? CARD_H : 0) + FRAME_PAD
   }
   // Children FILL their frame, and a nested frame is wider still (it
   // carries its own padding), so each host widens to hold what it holds.
@@ -531,12 +555,12 @@ export function layoutBands(cards: FocusCard[]) {
   for (const [band, list] of byBand) {
     const x = band * (CARD_W + BAND_GAP)
     if (band === 0) {
-      // The FOCAL card centers on the midline and owns the column's own
-      // x; its contains-stack and anything else in this band hang below
-      // it, indented. Keyed on the KIND rather than on position: the
-      // focal is what the midline is for, and "whatever happens to be
-      // first" decorated a different card entirely the one time the
-      // focus went missing from its own band.
+      // The FOCAL node centers on the midline and owns the column's own
+      // x; anything else that lands in this band hangs below it,
+      // indented. Keyed on the KIND rather than on position: the focal
+      // is what the midline is for, and "whatever happens to be first"
+      // decorated a different card entirely the one time the focus went
+      // missing from its own band.
       const focal = list.find(c => c.kind === 'focal')
       let y = -(focal?.h ?? FOCAL_H) / 2
       for (const c of list) {
@@ -561,7 +585,7 @@ export function layoutBands(cards: FocusCard[]) {
   // already has its own absolute position before its children read it.
   for (const { f: frame } of [...frames].reverse()) {
     const kids = childrenByFrame.get(frame.id) ?? []
-    let y = frame.y + FRAME_HEADER_H
+    let y = frame.y + headerHeight(frame)
     for (const k of kids) {
       k.x = frame.x + FRAME_PAD
       k.y = y

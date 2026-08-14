@@ -1214,15 +1214,34 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // keyboard cursor that can land on nothing.
         const connectedRows = kids.filter(child => !cardIdByUrn.has(child))
         const rows = [...connectedRows, ...rosterExtras]
-        // The FOCUS is always a compact card. What it holds is stated by
-        // the contains-stack attached below it (further down), never by
-        // swelling the thing you asked about into a frame the rest of the
-        // board sits beside.
-        const isFrame = rows.length > 0 && !isFocus
-        // A row of the contains-stack is CONTENTS. Its lineage is the
-        // focus's lineage — drawn at the focal, offered by the focal's ⊕
-        // — so a row neither carries a pill of its own nor gets to claim
-        // that the walk ended at it.
+        /**
+         * ONE NODE FOR THE FOCUS (R7).
+         *
+         * The focus holds its contents the way every other container on
+         * this board does: as ROWS INSIDE IT. It used to be a compact card
+         * with a separate "Inside X" panel floating underneath — two boxes
+         * for one entity, while its partners were each a single frame, and
+         * the wires landed on the panel's rows rather than on the card, so
+         * the thing the reader asked about read as an orphan above its own
+         * contents.
+         *
+         * The test is what it HOLDS, not what happens to be drawn: a focus
+         * whose contents are all off this lineage still opens, because
+         * that is where "0 on this lineage · of 9" and "nothing inside is
+         * on this lineage" get said. Dropping the node there would leave
+         * the reader no way to ask what is in there.
+         */
+        const isFrame = isFocus
+            ? (nodeOf(urn)?.children.length ?? 0) > 0 || rosterExtras.length > 0 || (heldTotal(urn) ?? 0) > 0
+            : rows.length > 0
+        // ...and it is SHOWING them: a focus the reader has shut is its
+        // header and nothing else, exactly like a shut partner frame. A
+        // focus that holds things and has no rows to show stays open —
+        // that is where "nothing inside is on this lineage" gets said.
+        const contentsOpen = isFocus ? isFrame && expanded.has(urn) : isFrame
+        // A row INSIDE THE FOCUS is CONTENTS. Its lineage is the focus's
+        // lineage — offered by the focal's ⊕ — so a row neither carries a
+        // pill of its own nor gets to claim that the walk ended at it.
         const { pillUp, pillDown, deadEnd } = focusContents.has(urn)
             ? { pillUp: null, pillDown: null, deadEnd: false }
             : walkStateOf(urn, isFrame, band)
@@ -1238,11 +1257,17 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
         const card: FocusCard = {
             ...baseCard(),
-            id: isFrame ? `fr:${urn}` : isFocus ? 'f' : `n:${urn}`,
-            kind: isFrame ? 'frame' : isFocus ? 'focal' : 'entity',
+            // The focus keeps its own id and kind whether or not it holds
+            // anything: it is the thing you asked about, which is what
+            // centres it on the midline and what the accent is for. What
+            // R7 changed is how it PRESENTS what it holds, not what it is.
+            id: isFocus ? 'f' : isFrame ? `fr:${urn}` : `n:${urn}`,
+            kind: isFocus ? 'focal' : isFrame ? 'frame' : 'entity',
             nodeId: urn,
             band,
-            h: isFrame ? CARD_H : isFocus ? FOCAL_H : CARD_H,
+            // A row host is sized from its contents by `layoutBands`; this
+            // is the height a card that holds nothing keeps.
+            h: isFocus ? FOCAL_H : CARD_H,
             depth,
             label,
             description: (dataOf(urn).description as string | undefined) ?? null,
@@ -1257,11 +1282,16 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             flowsIn: nodeOf(urn)?.degreeUp ?? 0,
             flowsOut: nodeOf(urn)?.degreeDown ?? 0,
             canOpenChildren: (nodeOf(urn)?.children.length ?? 0) > 0,
-            childrenOpen: isFrame,
+            childrenOpen: contentsOpen,
             expandKey: urn,
-            expanded: isFrame,
+            expanded: contentsOpen,
             wired: drawnIn.has(urn) || drawnOut.has(urn),
-            contents: contentsOf(urn),
+            // A focus that holds things always states both numbers, even
+            // when NONE of what it holds is on this lineage — "0 on this
+            // lineage · of 9" is the sentence that makes an open node with
+            // no connected rows readable instead of alarming.
+            contents: contentsOf(urn)
+                ?? (isFocus && isFrame ? { onLineage: 0, total: heldTotal(urn) } : null),
             pillUp,
             pillDown,
             deadEnd,
@@ -1275,8 +1305,8 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             // lineage attaches at TABLE grain opens onto its columns with
             // "nothing here is on this lineage · showing everything
             // inside", instead of a roster that reads like an answer to a
-            // question nobody asked. Carried by the focus too, because
-            // its contains-stack is the same frame at a different address.
+            // question nobody asked. Carried by the focus too, which is
+            // the same kind of node at the centre of the board.
             frameEmpty: (isFrame || isFocus) && (nodeOf(urn)?.children.length ?? 0) === 0,
             frameConnectedCount: connectedRows.length,
             frameLoaded: showAll ? rows.length : connectedRows.length,
@@ -1304,61 +1334,11 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const id = pushCard(card)
         if (id !== card.id) return
 
-        // Rows go inside this card — except the FOCUS's, which go in the
-        // CONTAINS-STACK: a card of its own, attached below the focal,
-        // saying what is in there and opening to show it. It reuses the
-        // frame's internals verbatim (rows, Connected|All, Find, pager),
-        // because it is the same question at a different address; what it
-        // must not do is enclose the focal.
-        let host = card
-        if (isFocus) {
-            // A table whose lineage attaches at TABLE grain holds plenty
-            // and carries none of it on this walk. The stack still opens
-            // — that is where "0 on this lineage · of 9" and "nothing
-            // inside is on this lineage" get said. Dropping it left the
-            // reader with no way to ask what is in there and no statement
-            // that the answer is nothing.
-            const declared = heldTotal(urn) ?? 0
-            const holds = (nodeOf(urn)?.children.length ?? 0) > 0 || rosterExtras.length > 0 || declared > 0
-            if (!holds) return
-            host = {
-                ...card,
-                contents: contentsOf(urn) ?? { onLineage: 0, total: heldTotal(urn) },
-                id: `co:${urn}`,
-                kind: 'frame',
-                // No urn of its own: it is the focus's contents, and the
-                // focus already has a card. A second card for one entity
-                // is exactly what `pushCard` refuses.
-                nodeId: null,
-                // It keeps the FOCUS'S NAME rather than a bare "Contains":
-                // the view heads it "Inside fact_orders", and every count
-                // and empty-state sentence built from `label` then names
-                // the thing the reader asked about instead of naming a box.
-                label,
-                description: null,
-                h: CARD_H,
-                frameId: null,
-                // The focal above states where the focus lives; the stack
-                // repeating it would be the noise breadcrumbs replaced.
-                ancestry: EMPTY_STRINGS,
-                ancestryIds: EMPTY_STRINGS,
-                parentId: null,
-                parentLabel: null,
-                childrenOpen: rows.length > 0,
-                expanded: rows.length > 0,
-                // The walk's own ⊕ belongs to the focal card, once — and
-                // so does every wire, so the stack has no ports either.
-                pillUp: null,
-                pillDown: null,
-                wired: false,
-                deadEnd: false,
-                dimmed: false,
-                fetch: showAll && childrenAllStatus.get(urn) === 'loading' ? 'loading'
-                    : showAll && childrenAllStatus.get(urn) === 'error' ? 'error'
-                        : null,
-            }
-            pushCard(host)
-        } else if (!isFrame) return
+        // Rows go INSIDE this card — the focus's included. There is no
+        // second card for the focus's contents any more: one entity, one
+        // node, whether it is the thing you asked about or one of its
+        // partners.
+        if (!isFrame) return
 
         // ONE fixed window of rows, so a 500-column table and a 5-column
         // one occupy the same room and scrolling MOVES the window rather
@@ -1381,13 +1361,13 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                     depth: depth + 1,
                     label: 'everything else inside',
                     type: UNRESOLVED_TYPE,
-                    frameId: host.id,
+                    frameId: card.id,
                     count: rosterExtras.length,
                     canOpenChildren: false,
                 })
             }
             if (visible.has(child)) {
-                emit(child, host.id, depth + 1, band, frameQuery)
+                emit(child, card.id, depth + 1, band, frameQuery)
                 continue
             }
             // Inside this, but off the lineage. Only ever shown in "All",
@@ -1409,7 +1389,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                 // is read the same way the walk model's own payload is.
                 freshness: ((node?.data as Record<string, unknown> | undefined)?.lastSyncedAt as string | undefined) ?? null,
                 type: (node?.data?.type as string) ?? UNRESOLVED_TYPE,
-                frameId: host.id,
+                frameId: card.id,
                 parentId: urn,
                 parentLabel: label,
                 connected: false,
