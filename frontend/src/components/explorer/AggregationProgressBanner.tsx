@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService';
+import { DEFAULT_TIMEOUT_SECS } from '@/components/admin/shared/AggregationOverridesForm';
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage';
 import { SkipAggregationDialog } from './SkipAggregationDialog';
 
@@ -80,7 +81,10 @@ export function AggregationProgressBanner({
             className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors"
             onClick={() => {
               if (dataSourceId) {
-                aggregationService.triggerAggregation(dataSourceId, { projectionMode: 'in_source', batchSize: 500 }, 'manual');
+                // No ``tuning``: the control plane resolves the admin's
+                // configured defaults. ``timeoutSecs`` is sent because a
+                // null column falls back to the 15-minute stall window.
+                aggregationService.triggerAggregation(dataSourceId, { projectionMode: 'in_source', batchSize: 500, timeoutSecs: DEFAULT_TIMEOUT_SECS }, 'manual');
                 setReadiness(prev => prev ? { ...prev, driftDetected: false, aggregationStatus: 'pending' } : null);
                 setPollEpoch(e => e + 1);
               }

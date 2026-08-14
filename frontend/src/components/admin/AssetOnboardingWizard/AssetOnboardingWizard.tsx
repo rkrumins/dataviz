@@ -27,6 +27,7 @@ import { SemanticStep } from './steps/SemanticStep'
 import { SchemaReviewStep, type SchemaReviewStatusMap } from './steps/SchemaReviewStep'
 import { ReviewStep, type NavigationDestination } from './steps/ReviewStep'
 import { aggregationService, type AggregationTuning } from '@/services/aggregationService'
+import { PRESET_TIMEOUT_MINUTES } from '@/components/admin/shared/AggregationOverridesForm'
 import { useWizardKeyboard } from './hooks/useWizardKeyboard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -474,9 +475,8 @@ export function AssetOnboardingWizard({
                                     projectionMode: formData.projectionMode,
                                     batchSize: formData.advancedConfig.batchSize,
                                     maxRetries: formData.advancedConfig.maxRetries,
-                                    timeoutSecs: formData.advancedConfig.timeoutMinutes
-                                        ? formData.advancedConfig.timeoutMinutes * 60
-                                        : undefined,
+                                    timeoutSecs: (formData.advancedConfig.timeoutMinutes ?? PRESET_TIMEOUT_MINUTES) * 60,
+                                    tuning: formData.advancedConfig.tuning,
                                 }, 'onboarding')
                             }
                         }

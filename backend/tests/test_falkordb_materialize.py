@@ -1561,7 +1561,7 @@ def test_auto_mode_materializes_full_cube_within_budget():
     # fallback must never be a silent log line.
     assert result["run_stats"]["regime"] == "cube"
     assert result["run_stats"]["cube_estimate"] >= len(agg)
-    assert result["run_stats"]["materialize_budget"] == 2_000_000
+    assert result["run_stats"]["materialize_budget"] == 50_000_000
     assert fake.meta["edgeCount"] == len(agg)
     assert fake.meta["maxDepth"] == 2
     # Depth stamps on every row, structural on the self-nesting shape.
@@ -1616,3 +1616,50 @@ def test_auto_mode_falls_back_to_boundary_above_budget():
     finally:
         m._max_materialized_edges = orig
     assert result2["errors"] == 0
+
+
+def test_auto_mode_cube_ceiling_is_independent_of_write_budget():
+    """The auto cube/boundary decision keys off AGGREGATION_MAX_CUBE_EDGES,
+    NOT the write budget.
+
+    These were one constant. The write budget is a runaway backstop sized
+    far above any real result, so sharing it meant raising the backstop
+    silently flipped auto into full-cube for nearly every graph — turning
+    "Auto" into "Always full detail", the mode that OOMs multi-million-edge
+    instances. A huge write budget must still leave the cube decision alone.
+    """
+    import backend.app.providers.falkordb_materialize as m
+
+    fake = _FakeFalkor()
+    levels = _seed_self_nesting_graph(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    # Cube estimate for this graph is 18 cells. A 50M write budget clears
+    # it by six orders of magnitude, but the cube ceiling sits below it.
+    orig = m._max_cube_edges
+    m._max_cube_edges = lambda: 10
+    try:
+        result = _run(_materialize(p, tuning={
+            "materialize_fine_pairs": "auto",
+            "max_materialized_edges": 50_000_000,
+        }))
+    finally:
+        m._max_cube_edges = orig
+
+    assert result["errors"] == 0
+    # Estimate (18) exceeds the ceiling (10) → boundary, despite the
+    # write budget being effectively unlimited.
+    assert result["run_stats"]["regime"] == "boundary"
+    assert result["run_stats"]["materialize_budget"] == 50_000_000
+    assert fake.meta is not None and fake.meta["regime"] == "boundary"
+
+    # Same graph, same 50M write budget, ceiling back above the estimate
+    # → cube. Only the ceiling moved.
+    fake2 = _FakeFalkor()
+    levels2 = _seed_self_nesting_graph(fake2, depth=3)
+    p2 = _make_provider(fake2, levels2)
+    result2 = _run(_materialize(p2, tuning={
+        "materialize_fine_pairs": "auto",
+        "max_materialized_edges": 50_000_000,
+    }))
+    assert result2["run_stats"]["regime"] == "cube"

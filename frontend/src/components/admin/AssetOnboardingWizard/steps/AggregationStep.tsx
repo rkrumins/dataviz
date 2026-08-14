@@ -25,6 +25,7 @@ import type { OnboardingFormData } from '../AssetOnboardingWizard'
 import type { CatalogItemResponse } from '@/services/catalogService'
 import {
     AggregationOverridesForm,
+    PRESET_TIMEOUT_MINUTES,
     type AggregationOverridesValue,
 } from '../../shared/AggregationOverridesForm'
 
@@ -97,12 +98,12 @@ const OPTIONS: OptionDef[] = [
 // ============================================
 
 /**
- * The wizard's `advancedConfig.timeoutMinutes` is `number | null` (null = 2hr
- * default). The shared form requires a concrete `number`. We materialise null
- * as 120 (the documented 2hr default) when handing to the form, and pass the
- * form's number straight back into `formData` (no longer null).
+ * The wizard's `advancedConfig.timeoutMinutes` is `number | null` (null =
+ * use the default). The shared form requires a concrete `number`. We
+ * materialise null as the shared default when handing to the form, and pass
+ * the form's number straight back into `formData` (no longer null).
  */
-const TIMEOUT_DEFAULT_MINUTES = 120
+const TIMEOUT_DEFAULT_MINUTES = PRESET_TIMEOUT_MINUTES
 
 // ============================================
 // Component
@@ -131,6 +132,7 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
         maxRetries: formData.advancedConfig.maxRetries,
         timeoutMinutes: formData.advancedConfig.timeoutMinutes ?? TIMEOUT_DEFAULT_MINUTES,
         projectionMode: selected === 'dedicated' ? 'dedicated' : 'in_source',
+        tuning: formData.advancedConfig.tuning,
     }
 
     const handleOverridesChange = (next: AggregationOverridesValue) => {
@@ -139,6 +141,7 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
                 batchSize: next.batchSize,
                 maxRetries: next.maxRetries,
                 timeoutMinutes: next.timeoutMinutes,
+                tuning: next.tuning,
             },
         })
     }
