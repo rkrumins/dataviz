@@ -194,7 +194,16 @@ export function useLensWalk(
         const session = sessionRef.current
         const baseModel = startEntry.model
 
-        setState(prev => setEntry(prev, cacheKey, withExtendStatus(startEntry, statusKey, 'loading')))
+        // Seeded from `prev`, NEVER from the entry read out of the ref
+        // above: that mirror is a render behind, so a second pill clicked
+        // in the same tick wrote the pre-click entry back — wiping the
+        // first pill's spinner (and any hop that had landed between the
+        // two) and leaving a click that visibly did nothing. `startEntry`
+        // is the fallback only for the impossible case of the entry
+        // vanishing between the guard and here.
+        setState(prev => setEntry(
+            prev, cacheKey, withExtendStatus(prev.get(cacheKey) ?? startEntry, statusKey, 'loading'),
+        ))
 
         try {
             const res = await provider.traceClosure(buildRequest(baseModel))

@@ -221,6 +221,54 @@ describe('useLensWalk — extend (integration with the real closure-adapter)', (
   })
 })
 
+describe('useLensWalk — the click is acknowledged, once, per pill', () => {
+  /** A provider that answers the initial fetch and then hangs, so the
+   *  in-flight state is what the assertions can look at. */
+  function hangingProvider() {
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      if (req.urn === FOCUS_URN) return toResponse(fixture.initial)
+      return new Promise<never>(() => {})   // never settles
+    })
+    return { provider: { traceClosure } as unknown as GraphDataProvider, traceClosure }
+  }
+
+  it('two pills clicked in one tick BOTH keep their spinner', async () => {
+    // The reported "the + needs three clicks", at its source. The
+    // in-flight marker used to be written onto the entry read from a
+    // ref that updates in an effect — a render behind — so the second
+    // click of a tick wrote the PRE-CLICK entry back and erased the
+    // first pill's spinner. The click had fired; nothing on screen
+    // said so, so the user clicked again.
+    const { provider } = hangingProvider()
+    const { result } = renderHook(() => useLensWalk(FOCUS_URN, provider))
+    await waitFor(() => expect(result.current.walkFor(FOCUS_URN)?.status).toBe('done'))
+
+    act(() => {
+      result.current.extend('urn:li:table:t_raw', 'up', [])
+      result.current.page('urn:li:table:t_report', 'down', 'e:0')
+    })
+
+    const status = result.current.walkFor(FOCUS_URN)!.extendStatus
+    expect(status.get('up:urn:li:table:t_raw')).toBe('loading')
+    expect(status.get('down:urn:li:table:t_report')).toBe('loading')
+  })
+
+  it('acknowledges the click in the same tick, and a second click on an in-flight pill queues nothing', async () => {
+    const { provider, traceClosure } = hangingProvider()
+    const { result } = renderHook(() => useLensWalk(FOCUS_URN, provider))
+    await waitFor(() => expect(result.current.walkFor(FOCUS_URN)?.status).toBe('done'))
+
+    // No awaiting: the spinner is state set BEFORE the request goes out,
+    // so a pill acknowledges the press without waiting for the server.
+    act(() => result.current.extend('urn:li:table:t_raw', 'up', []))
+    expect(result.current.walkFor(FOCUS_URN)!.extendStatus.get('up:urn:li:table:t_raw')).toBe('loading')
+
+    act(() => result.current.extend('urn:li:table:t_raw', 'up', []))
+    act(() => result.current.extend('urn:li:table:t_raw', 'up', []))
+    expect(traceClosure).toHaveBeenCalledTimes(2)   // the initial fetch + ONE extend
+  })
+})
+
 describe('useLensWalk — page (integration with the real closure-adapter)', () => {
   it('forwards afterCursor; a fresh nextCursor replaces the old', async () => {
     const traceClosure = vi.fn(async (req: Record<string, unknown>) => {

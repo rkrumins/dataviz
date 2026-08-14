@@ -344,7 +344,7 @@ function FocalBreadcrumb({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
             type="button"
             onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.ancestryIds[0] ?? '') }}
             title={`${elided} level${elided === 1 ? '' : 's'} above: ${chain.slice(0, elided).join(' › ')}`}
-            className="flex-shrink-0 text-ink-muted/50 hover:text-accent-lineage transition-colors"
+            className="nodrag flex-shrink-0 text-ink-muted/50 hover:text-accent-lineage transition-colors"
           >
             ⋯
           </button>
@@ -371,7 +371,7 @@ function FocalBreadcrumb({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
               type="button"
               onClick={(e) => { e.stopPropagation(); ctx.onFocus(idOf(i)) }}
               className={cn(
-                'hover:text-accent-lineage transition-colors',
+                'nodrag hover:text-accent-lineage transition-colors',
                 deepest ? 'whitespace-nowrap text-ink-muted' : 'truncate min-w-0 text-ink-muted/60',
               )}
             >
@@ -458,13 +458,51 @@ function ProvenanceRibbon({ card }: { card: FocusCard }) {
   )
 }
 
+/**
+ * Room a ⊕ owns at each end of a card, in px. Nothing else may be
+ * positioned inside it.
+ *
+ * The hover toolbar used to sit at `right-1.5`, which is where a row's
+ * downstream ⊕ is — and it appears on HOVER, i.e. exactly when the
+ * pointer is on its way to that pill. One click landed on the toolbar's
+ * own padding (a span with no handler), did nothing, and the user
+ * clicked again: the reported "the + needs three clicks".
+ */
+const PILL_ZONE = 44
+
+/** Where a card's ⊕ — or the mark that the walk ends — sits.
+ *
+ *  A top-level card hangs it OUTSIDE, in the band gap. Inside a frame
+ *  there is no outside: the row's own edges are all the room there is,
+ *  so it tucks IN. Straddling the row edge (what this used to do) put it
+ *  on the frame's dashed border and 4px from the frame's own pill —
+ *  two different controls reading as one smudge. */
+const gutterPos = (inFrame: boolean, upstream: boolean): string =>
+  inFrame
+    ? (upstream ? 'left-1' : 'right-1')
+    : (upstream ? 'right-full mr-1.5' : 'left-full ml-1.5')
+
+/** Which ends of this card have something in the gutter. Its content
+ *  keeps out of those — an absolutely-positioned pill over a truncating
+ *  label is a name you cannot read and a control you cannot see. */
+const gutterEnds = (card: FocusCard) => ({
+  left: card.pillUp != null || (card.deadEnd && card.band < 0),
+  right: card.pillDown != null || (card.deadEnd && card.band >= 0),
+})
+
 /** Hover action cluster shared by entity-ish cards. */
 function CardActions({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   if (!card.nodeId) return null
   const id = card.nodeId
-  const btn = 'w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
+  const btn = 'pointer-events-auto w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
   return (
-    <span className="nodrag absolute -top-2.5 right-1.5 hidden group-hover:flex items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5 z-10">
+    // pointer-events-none on the cluster, auto on the buttons: the gaps
+    // between three 20px icons are not a hit target for anything, and
+    // they used to swallow whatever click found them.
+    <span
+      style={{ right: PILL_ZONE }}
+      className="nodrag pointer-events-none absolute -top-2.5 hidden group-hover:flex items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5 z-10"
+    >
       <button
         type="button"
         title="Focus here — re-center the lens on this entity"
@@ -552,10 +590,11 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
   const upstream = dir === 'in'
   // Upstream hangs off the left edge, downstream off the right: the pill
   // points the way the data flows, so a card carrying both is readable.
-  const pos = card.frameId
-    ? (upstream ? 'left-1 -translate-x-1/2' : 'right-1 translate-x-1/2')
-    : (upstream ? 'right-full mr-1.5' : 'left-full ml-1.5')
-  const base = 'nodrag pointer-events-auto absolute top-1/2 -translate-y-1/2 flex items-center justify-center gap-0.5 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors'
+  const pos = gutterPos(card.frameId != null, upstream)
+  // z-20 puts the ⊕ above the hover toolbar (z-10) wherever the two ever
+  // meet again: the pill is the affordance, so it wins by rule rather
+  // than by DOM order.
+  const base = 'nodrag pointer-events-auto z-20 absolute top-1/2 -translate-y-1/2 flex items-center justify-center gap-0.5 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors'
   const side = upstream ? 'upstream' : 'downstream'
   const act = () => {
     if (pill.kind === 'reveal') ctx.onRevealMore?.(pill.key)
@@ -634,10 +673,8 @@ function WalkPills({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
         title={`No further ${upstream ? 'upstream' : 'downstream'} lineage in the data source — the walk ends here`}
         aria-label={`End of ${upstream ? 'upstream' : 'downstream'} lineage`}
         className={cn(
-          'pointer-events-none absolute top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded-full bg-canvas-elevated border border-black/10 dark:border-white/15 text-ink-muted/50',
-          card.frameId
-            ? (upstream ? 'left-1 -translate-x-1/2' : 'right-1 translate-x-1/2')
-            : (upstream ? 'right-full mr-1.5' : 'left-full ml-1.5'),
+          'pointer-events-none z-20 absolute top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded-full bg-canvas-elevated border border-black/10 dark:border-white/15 text-ink-muted/50',
+          gutterPos(card.frameId != null, upstream),
         )}
       >
         <LucideIcons.CircleSlash className="w-3 h-3" />
@@ -818,6 +855,13 @@ function FocusGraphCard({ data, selected }: NodeProps) {
 
   // ── Entity: the rich neighbor card ──
 
+  // Inside a frame the ⊕ sits IN the card, so the content yields the
+  // room it needs. A top-level card's pills hang outside and take none.
+  const gutters = gutterEnds(card)
+  const gutter = card.frameId
+    ? { paddingLeft: gutters.left ? PILL_ZONE : undefined, paddingRight: gutters.right ? PILL_ZONE : undefined }
+    : undefined
+
   return (
     <div
       role="button"
@@ -826,7 +870,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       onKeyDown={keyActivate}
       onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
       title={`${card.label}${card.description ? ` — ${card.description}` : ''} · click to inspect, double-click to focus`}
-      style={{ width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent }}
+      style={{ width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent, ...gutter }}
       className={cn(
         'group relative flex items-center gap-2 rounded-lg border border-black/[0.07] dark:border-white/[0.08] px-2.5 cursor-pointer transition-colors bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
         selected ? 'ring-2 ring-accent-lineage' : onPath && 'ring-1 ring-accent-lineage/70',
@@ -1001,7 +1045,11 @@ function FocusFrameNode({ data }: NodeProps) {
           <p className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate">
             {card.fetch === 'loading'
               ? 'Looking inside…'
-              : card.contents
+              // When the roster is standing in for an empty lineage
+              // answer, WHY these rows are here outranks counting them —
+              // otherwise a full list of columns under "0 on this
+              // lineage" reads as the answer to a question nobody asked.
+              : card.contents && !fellBack
                 // Both numbers, exactly: what is in here on this
                 // lineage, and what is in here altogether.
                 ? <ContentsCount card={card} />
@@ -1092,7 +1140,7 @@ function FocusFrameNode({ data }: NodeProps) {
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); ctx.onRetryFrameAll?.(card.expandKey ?? '') }}
-            className="font-semibold hover:underline"
+            className="nodrag font-semibold hover:underline"
           >
             Retry
           </button>
@@ -1100,7 +1148,10 @@ function FocusFrameNode({ data }: NodeProps) {
       )}
       {card.frameEmpty && card.frameLoaded === 0 && card.fetch === null && (
         <p className="absolute inset-x-2.5 top-[52px] text-[10px] text-ink-muted/70 italic leading-snug">
-          Nothing inside {card.label} is on this lineage.
+          {/* The contains-stack is not an entity, so it has no name to
+              put here — "nothing inside Contains" names a box, not a
+              thing. The focal card sits directly above it. */}
+          Nothing {card.nodeId ? `inside ${card.label}` : 'in here'} is on this lineage.
           {ctx.onToggleFrameAll && ' Show everything inside to see what it holds.'}
         </p>
       )}
@@ -1369,7 +1420,10 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
   }
 
   return (
-    <Panel position="bottom-right" className="!m-3">
+    // `nopan`: React Flow stamps it on every draggable NODE itself, so
+    // controls inside a card are covered — a Panel is not a node, and
+    // without it a press on Zoom that drifts a pixel pans the board.
+    <Panel position="bottom-right" className="!m-3 nopan">
       <div className="flex flex-col rounded-lg border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-md overflow-hidden divide-y divide-black/[0.06] dark:divide-white/[0.06]">
         <button type="button" title="Zoom in" onClick={() => void rf.zoomIn({ duration: dur })} className={btn}>
           <LucideIcons.Plus className="w-3.5 h-3.5" />
