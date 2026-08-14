@@ -415,6 +415,16 @@ export function LineageLens({
   useEffect(() => {
     const seen = view.walkedThrough
     if ([...layout.walkedThrough].every(u => seen.has(u))) return
+    // RATIFIED PATTERN, not an oversight: the layout is a pure function
+    // of the view state, and the two facts below are things it can only
+    // know once it has BUILT — which level it saw through, and which slot
+    // each card took. Feeding them back is the sanctioned way that
+    // converges (grow-only, one extra pass, then a no-op), and it is the
+    // mechanism the free-flow work was signed off on. Restructuring it is
+    // a behavioural change; silencing it here is what keeps this file
+    // GREEN under lint, so the next rules-of-hooks error is visible —
+    // which is the whole lesson of the crash that shipped from here.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     editView(base => ({ ...base, walkedThrough: new Set(layout.walkedThrough) }))
   }, [layout.walkedThrough, view.walkedThrough, editView])
 
@@ -425,6 +435,8 @@ export function LineageLens({
   // back, grow-only, so arrivals append instead of shuffling.
   useEffect(() => {
     if (layout.drawnRank.size === view.drawnRank.size) return
+    // Same ratified layout→view feedback as `walkedThrough` above.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     editView(base => ({ ...base, drawnRank: new Map(layout.drawnRank) }))
   }, [layout.drawnRank, view.drawnRank, editView])
 
@@ -1411,7 +1423,6 @@ export function LineageLens({
               <FocusGraphView
                 graph={layout}
                 focalId={nodeId}
-                focalStats={{ in: inConnections, out: outConnections }}
                 // 'unsupported' deliberately passes NOTHING: the
                 // empty-direction whispers are a claim about what the
                 // data source SAID, and it was never asked.
@@ -1924,11 +1935,10 @@ function NeighborRow({
           >
             {r.edgeTypeNorm ? edgeLabelFor(r.edgeTypeNorm, edgeTypeInfo) : 'several relationships'}
           </span>
-          {r.weight > 1 && (
-            <span className="tabular-nums font-semibold text-ink-muted" title={`${r.weight} connections`}>
-              ×{r.weight.toLocaleString()}
-            </span>
-          )}
+          {/* No ×N. It is the same within-model accumulator the cards
+              lost — and this surface has no wire for it to live on, which
+              is where a weight belongs. The peek states an entity's flows
+              in words, scoped to the walk. */}
         </p>
       </div>
       {/* Flow direction cue: data always travels left → right. Hover

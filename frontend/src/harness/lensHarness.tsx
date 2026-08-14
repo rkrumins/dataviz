@@ -18,7 +18,7 @@ import { createRoot } from 'react-dom/client'
 import { ReactFlowProvider } from '@xyflow/react'
 import '../styles/globals.css'
 import { FocusGraphView } from '../components/canvas/context-view/lens/FocusGraphView'
-import { buildLensSubgraph } from '../components/canvas/context-view/lens/lens-subgraph'
+import { boundaryFrontierFilter, buildLensSubgraph } from '../components/canvas/context-view/lens/lens-subgraph'
 import { buildFocusLayout, initialLensViewState } from '../components/canvas/context-view/lens/focus-layout'
 import { WALK_FIXTURES, type WalkFixture } from './lensFixtures'
 
@@ -49,15 +49,19 @@ function buildWalk(fixture: WalkFixture) {
     focalId: sg.focusUrn,
     directionFilter: fixture.directionFilter,
     selectedId: fixture.selectedId ?? null,
-    stats: {
-      in: graph.bandTotals.get('band:in:1')?.connections ?? 0,
-      out: graph.bandTotals.get('band:out:1')?.connections ?? 0,
-    },
+    // THE SAME derivation the app uses, imported rather than restated:
+    // a "+" means the data source has more of THIS SIDE, and a frontier
+    // entry on a node inside the focus whose lineage never leaves it says
+    // no such thing. Restating it here as `frontier.length > 0` made the
+    // harness contradict the app — walkPlatformFocus's own docstring says
+    // "no + on upstream Reach" and the shot showed one.
     reach: {
       up: fixture.model.upstreamUrns.size,
       down: fixture.model.downstreamUrns.size,
-      moreUp: fixture.model.frontierUp.length > 0,
-      moreDown: fixture.model.frontierDown.length > 0,
+      moreUp: fixture.model.frontierUp.some(
+        f => boundaryFrontierFilter(sg, sg.focusUrn, 'in')(f.urn)),
+      moreDown: fixture.model.frontierDown.some(
+        f => boundaryFrontierFilter(sg, sg.focusUrn, 'out')(f.urn)),
     },
   }
 }
@@ -79,7 +83,6 @@ export function Harness() {
         <FocusGraphView
           graph={built.graph}
           focalId={built.focalId}
-          focalStats={built.stats}
           focalFetch="done"
           focalReach={built.reach}
           directionFilter={built.directionFilter}

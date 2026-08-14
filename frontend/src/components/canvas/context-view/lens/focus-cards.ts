@@ -98,6 +98,23 @@ export function rowHeight(sharedEdgeType: string, ownEdgeType: string): number {
  *  a frame with no arrow under any of them. */
 export const LABEL_MIN_RUN = 90
 
+/**
+ * Can the wire between these two points hold a badge?
+ *
+ * THE one predicate, called by both sides so they cannot drift: the
+ * LAYOUT asks it of the geometry it has just computed (deciding
+ * `FocusEdge.labelVisible`), and the VIEW asks it again of the
+ * coordinates React Flow is actually drawing between. Those disagree for
+ * a render whenever a node has not been measured yet — every reveal, and
+ * every drag — and a badge decided by the first and drawn against the
+ * second is a chip floating over a wire that has collapsed to a point.
+ */
+export function labelFitsRun(
+  sourceX: number, sourceY: number, targetX: number, targetY: number,
+): boolean {
+  return Math.hypot(targetX - sourceX, targetY - sourceY) >= LABEL_MIN_RUN
+}
+
 export const BAND_GAP = 130
 export const CARD_GAP = 10
 /** Indent for cards hanging below the focal in its own band. */

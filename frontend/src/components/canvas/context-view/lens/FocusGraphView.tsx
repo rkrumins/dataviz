@@ -73,7 +73,7 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, FRAME_HEADER_H, FRAME_PAD, LABEL_MIN_RUN, frameWindow, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
+import { CARD_W, BAND_GAP, FRAME_HEADER_H, FRAME_PAD, labelFitsRun, frameWindow, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
 import { REVEAL_PAGE, pathToFocus, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
@@ -205,7 +205,6 @@ interface FocusGraphViewProps {
   graph: FocusGraph
   focalId: string
   /** Focal in/out tallies (record counts — groups don't hide them). */
-  focalStats: { in: number; out: number }
   /** Focal fetch state — drives the empty-direction whispers. */
   focalFetch?: 'loading' | 'done' | 'error'
   /** How far the walk has reached; null while it is still walking. */
@@ -973,7 +972,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   const { card, ctx, focalStats } = data as unknown as {
     card: FocusCard
     ctx: CardCtx
-    focalStats?: { in: number; out: number; coarser: number }
+    focalStats?: { coarser: number }
   }
   // Reach arrives via context so a growing walk re-renders ONLY this
   // card — it used to invalidate every node in the graph.
@@ -1643,11 +1642,9 @@ const MemoFocusFrameNode = memo(FocusFrameNode, (prev, next) => {
 
 const MemoFocusGraphCard = memo(FocusGraphCard, (prev, next) => {
   if (prev.selected !== next.selected) return false
-  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { in: number; out: number; coarser: number } }
-  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { in: number; out: number; coarser: number } }
+  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { coarser: number } }
+  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx; focalStats?: { coarser: number } }
   return a.ctx === b.ctx
-    && a.focalStats?.in === b.focalStats?.in
-    && a.focalStats?.out === b.focalStats?.out
     && a.focalStats?.coarser === b.focalStats?.coarser
     && sameCard(a.card, b.card)
 })
@@ -1734,9 +1731,10 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
       : offPath ? OFF_PATH_EDGE
         : d.containment ? 0.45 : 0.7
   // A ×N survives density only where the reader is actually looking. A
-  // CYCLE badge is not a count and is never suppressed: "this lineage
-  // loops back" is a fact about the data, and two wires between one pair
-  // read as a duplicate without it.
+  // CYCLE badge ignores density — "this lineage loops back" is a fact
+  // about the data rather than a count, and two wires between one pair
+  // read as a duplicate without it — but it still needs a wire long
+  // enough to sit on, like any other badge.
   //
   // ...and only where the wire BEING DRAWN can hold one. `labelVisible`
   // is the layout's answer, computed from the geometry it just laid out;
@@ -1746,8 +1744,7 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // had collapsed to a point: the reported ×15 ×14 ×13 ×12 ×11 stacked in
   // mid-air with no arrow under them. A badge is a thing SAID ABOUT a
   // wire, so it is decided by the wire that is there.
-  const drawnRun = Math.hypot(targetX - sourceX, targetY - sourceY)
-  const roomForLabel = drawnRun >= LABEL_MIN_RUN
+  const roomForLabel = labelFitsRun(sourceX, sourceY, targetX, targetY)
   const showCount = (d.labelVisible ?? false) && roomForLabel && !d.dimmed && (!d.labelDense || strong)
   const showCycle = (d.cycleBack ?? false) && roomForLabel && !d.dimmed
   const showLabel = showCount || showCycle
@@ -2197,7 +2194,6 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
 export function FocusGraphView({
   graph,
   focalId,
-  focalStats,
   focalFetch,
   focalReach,
   exportName,
@@ -2301,10 +2297,6 @@ export function FocusGraphView({
     onPage,
   }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onRevealMore, onExtend, onPage])
 
-  const focalIn = focalStats.in
-  const focalOut = focalStats.out
-
-
   const baseNodes = useMemo((): Node[] => {
     const minYByBand = new Map<number, number>()
     for (const c of graph.cards) {
@@ -2340,7 +2332,7 @@ export function FocusGraphView({
         selectable: false,
         focusable: false,
         data: card.kind === 'focal'
-          ? { card, ctx, focalStats: { in: focalIn, out: focalOut, coarser: graph.hopsAtCoarserGrain } }
+          ? { card, ctx, focalStats: { coarser: graph.hopsAtCoarserGrain } }
           : { card, ctx },
       }
     })
@@ -2428,7 +2420,7 @@ export function FocusGraphView({
     }
     return nodes
   }, [graph.cards, graph.bandTotals, graph.hiddenByChipsIn, graph.hiddenByChipsOut, graph.hopsAtCoarserGrain, graph.focusRecovered,
-    graph.modelHasUpstream, graph.modelHasDownstream, ctx, focalIn, focalOut, focalFetch, directionFilter])
+    graph.modelHasUpstream, graph.modelHasDownstream, ctx, focalFetch, directionFilter])
 
   /**
    * Cards the user has dragged, by card id. The builder keeps producing

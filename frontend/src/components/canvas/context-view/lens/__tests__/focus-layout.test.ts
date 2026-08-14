@@ -25,7 +25,10 @@ import {
     type LensViewState,
     type FocusLayoutInput,
 } from '../focus-layout'
-import { FOCAL_H, FRAME_WINDOW, frameWindow, type FocusCard, type FocusEdge } from '../focus-cards'
+import {
+    FOCAL_H, FRAME_WINDOW, LABEL_MIN_RUN, frameWindow, labelFitsRun,
+    type FocusCard, type FocusEdge,
+} from '../focus-cards'
 
 // ── fixtures ─────────────────────────────────────────────────────────
 
@@ -2269,10 +2272,82 @@ describe('every edge and every label has both its ends on the board', () => {
         }
     })
 
+    it('lands an off-window row\'s hop on the frame, never drops it', () => {
+        // A frame draws only its scroll window, so with 14 columns and an
+        // 8-row window six hops reach rows that have no card. They used to
+        // be counted as connecting "at a coarser grain" and dropped — a
+        // claim that is both specific and FALSE (an off-window column is
+        // the same grain, just scrolled past), and six wires simply
+        // vanished. They roll up to the card that IS drawn instead.
+        const sg = wideEstate()
+        const base = initialLensViewState(sg)
+        for (const offset of [0, 3, 6, 9]) {
+            const g = layout(sg, { ...base, frameOffsets: new Map([['T1', offset], ['F', offset]]) })
+            const carried = g.edges.reduce((n, e) => n + e.count, 0)
+            // All 14 raw hops are on the board, every time.
+            expect({ offset, carried, coarser: g.hopsAtCoarserGrain })
+                .toEqual({ offset, carried: 14, coarser: 0 })
+            // ...and rolled-up hops MERGE rather than colliding on one id.
+            expect(new Set(g.edges.map(e => e.id)).size).toBe(g.edges.length)
+        }
+    })
+
+    it('still says "coarser grain" when there is genuinely no card to land on', () => {
+        // The whisper's real case: a hop onto a containment ancestor of
+        // the focus, which this picture never boxes. Nothing above it has
+        // a card either, so there is nowhere for it to roll up to.
+        const g = layout(deepColumnEstate(3, { partner: true }))
+        expect(g.hopsAtCoarserGrain).toBe(2)
+    })
+
     it('holds for every fixture shape this suite builds', () => {
         for (const sg of [sharedPlatform(), collateralEstate(), platformEstate(), columnGrainEstate()]) {
             check(layout(sg))
             check(layout(sg, shut(initialLensViewState(sg), sg.focusUrn)))
         }
+    })
+})
+
+// ── one rule for "is there room for a badge" ─────────────────────────
+//
+// REPORTED (user): ×15 ×14 ×13 ×12 ×11 stacked in mid-air beside a frame
+// with no arrow under any of them. The LAYOUT decided those badges from
+// the geometry it had just computed; the VIEW drew the wires between
+// React Flow's own coordinates, and the two disagree for a render
+// whenever a node has not been measured — every reveal, every drag. Both
+// sides call this now, so the answer cannot differ by caller.
+
+describe('labelFitsRun — the badge and the wire agree', () => {
+    it('refuses a run shorter than a badge, in any direction', () => {
+        expect(labelFitsRun(0, 0, LABEL_MIN_RUN - 1, 0)).toBe(false)
+        expect(labelFitsRun(0, 0, 0, LABEL_MIN_RUN - 1)).toBe(false)
+        // The degenerate case the report is about: an unmeasured node puts
+        // both ends in the same place.
+        expect(labelFitsRun(120, 40, 120, 40)).toBe(false)
+    })
+
+    it('allows a run exactly long enough, and measures diagonally', () => {
+        expect(labelFitsRun(0, 0, LABEL_MIN_RUN, 0)).toBe(true)
+        // 3-4-5: a diagonal run counts its true length, not its dx.
+        expect(labelFitsRun(0, 0, LABEL_MIN_RUN * 0.6, LABEL_MIN_RUN * 0.8)).toBe(true)
+        expect(labelFitsRun(0, 0, LABEL_MIN_RUN * 0.6, LABEL_MIN_RUN * 0.6)).toBe(false)
+    })
+
+    it('is what the LAYOUT gates its own badges on', () => {
+        // Two cards a whole band apart carry a badge; the same pair, with
+        // the wire collapsed, cannot — and the layout reaches that verdict
+        // through this same call.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F'), wnode('U')],
+            hops: [['U', 'F'], ['U', 'F', 'JOINS']],
+            contains: [],
+        })
+        const g = layout(sg)
+        const bundle = g.edges.find(e => e.count === 2)!
+        const s = g.cards.find(c => c.id === bundle.source)!
+        const t = g.cards.find(c => c.id === bundle.target)!
+        expect(bundle.labelVisible).toBe(labelFitsRun(s.x + s.w, s.y + s.h / 2, t.x, t.y + t.h / 2))
+        expect(bundle.labelVisible).toBe(true)
     })
 })

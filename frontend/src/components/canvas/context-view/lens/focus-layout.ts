@@ -50,7 +50,7 @@ import {
     layoutBands,
     rowHeight,
     ANCESTRY_CAP,
-    LABEL_MIN_RUN,
+    labelFitsRun,
     CARD_H,
     CARD_W,
     CHILD_ROW_H,
@@ -1451,23 +1451,71 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         return false
     }
 
-    const edges: FocusEdge[] = []
-    // Hops whose nearest drawn end is a level this picture does not draw
-    // — a containment ancestor of the FOCUS that the data source also
-    // put on a hop. There is no card to land them on, so they are said
-    // out loud on the focal instead of vanishing, and the partner at the
-    // far end keeps a card with no wire that the whisper explains.
+    /**
+     * The card a hop can actually LAND on: this entity's own, or — when
+     * it has none — the nearest containment ancestor that does.
+     *
+     * `projectLensEdges` resolves an endpoint against what is VISIBLE,
+     * which is a statement about the model. Having a CARD is a statement
+     * about the board, and the two differ: a frame draws only the rows in
+     * its scroll window, so a hop into row 9 of an 8-row window resolves
+     * to a visible node with no card anywhere.
+     *
+     * Those hops used to be counted as connecting "at a coarser grain"
+     * and dropped. That was specific and false — an off-window column is
+     * the SAME grain, just scrolled past — and on a 14-column estate it
+     * silently deleted six wires while the focal claimed six connections
+     * at a grain it does not draw. Rolling up to the frame is what the
+     * picture already does for everything else it cannot show finely, and
+     * it keeps the promise the whole builder rests on: a hop in the model
+     * is a wire on the board.
+     */
+    const landingUrn = (urn: string): string | null => {
+        let cursor: string | null = urn
+        const guard = new Set<string>()
+        while (cursor && !guard.has(cursor)) {
+            if (cardIdByUrn.has(cursor)) return cursor
+            guard.add(cursor)
+            cursor = model.get(cursor)?.parent ?? null
+        }
+        return null
+    }
+
+    // Hops with no drawn card at either end — a containment ancestor of
+    // the FOCUS that the data source also put on a hop, which this
+    // picture never boxes. Said out loud on the focal instead of
+    // vanishing, and it is what explains a partner card with no wire.
     let hopsAtCoarserGrain = 0
+    // Rolling up MERGES: two off-window rows of one frame reaching the
+    // same card are one wire saying two, not two wires with one id.
+    const byPair = new Map<string, FocusEdge>()
     for (const bundle of projected) {
-        const source = cardIdByUrn.get(bundle.sourceUrn)
-        const target = cardIdByUrn.get(bundle.targetUrn)
-        if (!source || !target) { hopsAtCoarserGrain += bundle.weight; continue }
-        edges.push({
-            id: `e:${source}>${target}`,
+        const sUrn = landingUrn(bundle.sourceUrn)
+        const tUrn = landingUrn(bundle.targetUrn)
+        if (!sUrn || !tUrn) { hopsAtCoarserGrain += bundle.weight; continue }
+        // Both ends rolled into one card, or into a card and something it
+        // CONTAINS: the wire would leave a card and come straight back
+        // into it. That is the contents talking among themselves — their
+        // rows' counts and the drill say it — and as geometry it is the
+        // stub arc that reads as a broken arrow.
+        if (sUrn === tUrn || subtreeOf(sUrn).has(tUrn) || subtreeOf(tUrn).has(sUrn)) continue
+        const source = cardIdByUrn.get(sUrn)!
+        const target = cardIdByUrn.get(tUrn)!
+        const id = `e:${source}>${target}`
+        const existing = byPair.get(id)
+        const norm = (bundle.edgeTypeNorm || '').toUpperCase()
+        if (existing) {
+            existing.count += bundle.weight
+            if (existing.edgeTypeNorm !== norm) existing.edgeTypeNorm = ''
+            existing.cycleBack = existing.cycleBack || closesCycle(bundle)
+            continue
+        }
+        byPair.set(id, {
+            id,
             source,
             target,
             count: bundle.weight,
-            edgeTypeNorm: (bundle.edgeTypeNorm || '').toUpperCase(),
+            edgeTypeNorm: norm,
             // A wire between two misses is background; one touching a
             // match stays lit, or the filter would hide the answer's own
             // connections.
@@ -1477,6 +1525,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             labelVisible: false,
         })
     }
+    const edges: FocusEdge[] = [...byPair.values()]
 
     // ── 5. GEOMETRY ──────────────────────────────────────────────────
 
@@ -1492,8 +1541,9 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // right edge, target's left) and at the straight-line midpoint, which
     // is where a shallow bezier puts its label to within a few pixels.
     // A cycle badge is not decided here: it says the lineage LOOPS, which
-    // is a fact about the data rather than a count, so it renders on its
-    // wire whatever the density (see the view).
+    // is a fact about the data rather than a count, so density never
+    // suppresses it (see the view — which does still require a wire long
+    // enough to hold it, by the same `labelFitsRun` this uses).
     const placed: Array<{ x: number; y: number }> = []
     for (const edge of edges) {
         if (edge.count <= 1) continue
@@ -1504,7 +1554,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const sy = s.y + s.h / 2
         const tx = t.x
         const ty = t.y + t.h / 2
-        if (Math.hypot(tx - sx, ty - sy) < LABEL_MIN_RUN) continue
+        if (!labelFitsRun(sx, sy, tx, ty)) continue
         const x = (sx + tx) / 2
         const y = (sy + ty) / 2
         if (placed.some(p => Math.abs(p.x - x) < LABEL_W && Math.abs(p.y - y) < LABEL_H)) continue
