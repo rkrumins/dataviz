@@ -103,8 +103,29 @@ const ReachContext = createContext<LensReach | null>(null)
  * Context, not card/edge data: hovering must re-render the affected
  * cards/edges alone, never rebuild the arrays (see the PERF CONTRACT
  * above) — the same reason HoverContext/ReachContext exist.
+ *
+ * `source` is which gesture asked, and it decides how much the picture
+ * is allowed to change. A HOVER only strengthens the path — moving the
+ * pointer across the board must never wash the board out. A SELECTION
+ * is deliberate, so it may quiet what is off the path, but only to a
+ * floor that keeps every label readable.
  */
-const PathHighlightContext = createContext<{ cardIds: ReadonlySet<string>; edgeKeys: ReadonlySet<string> } | null>(null)
+const PathHighlightContext = createContext<{
+  cardIds: ReadonlySet<string>
+  edgeKeys: ReadonlySet<string>
+  source: 'hover' | 'select'
+} | null>(null)
+
+/** Off the highlighted path, under a SELECTION. Quiet enough to read as
+ *  background, light enough that every name is still legible — the old
+ *  30% turned the rest of the board into grey ghosts. */
+const OFF_PATH_CARD = 'opacity-60'
+const OFF_PATH_EDGE = 0.3
+
+/** Above this many labelled bundles on one board, a ×N badge stops being
+ *  information and becomes texture — so only the ones the reader is
+ *  pointing at (hovered, selected, on the highlighted path) keep theirs. */
+const LABEL_DENSITY_CAP = 12
 
 /** Shared empty overlay — a fresh Map would churn the nodes memo. */
 const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
@@ -186,6 +207,18 @@ interface FocusGraphViewProps {
 
 const iconByName = (name: string): LucideIcons.LucideIcon =>
   (LucideIcons as unknown as Record<string, LucideIcons.LucideIcon>)[name] ?? LucideIcons.Box
+
+/**
+ * Where this card stands in the current highlight: ON the path (say so
+ * with a ring), off it under a SELECTION (quiet it, to a floor), or
+ * untouched — which is every card while the gesture is only a hover.
+ */
+function usePathState(cardId: string): { onPath: boolean; offPath: boolean } {
+  const highlight = useContext(PathHighlightContext)
+  if (highlight === null) return { onPath: false, offPath: false }
+  const onPath = highlight.cardIds.has(cardId)
+  return { onPath, offPath: !onPath && highlight.source === 'select' }
+}
 
 /** Flat equality over a built card. Every field is a primitive, a frozen
  *  string array, or one of the walk builder's small records, so this is
@@ -344,6 +377,58 @@ function FocalBreadcrumb({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
         )
       })}
     </p>
+  )
+}
+
+/**
+ * The containment above a TOP-LEVEL frame, as one line of text.
+ *
+ * This is the other half of "frames only where they clarify": a level
+ * the layout refused to draw as geometry — because it spanned the board,
+ * or because it sat above the focus — still has to be SAID, or a frame
+ * called `GOLD` in the upstream column has lost the fact that it lives
+ * in Snowflake. Twelve pixels of breadcrumb instead of ~90px of nesting
+ * chrome per level, and every crumb is somewhere you can go.
+ *
+ * Only ever on a top-level frame: nested inside its parent, the level
+ * above is the header two pixels up.
+ */
+function FrameAncestry({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
+  const chain = card.ancestry.length > 0 ? card.ancestry : card.parentLabel ? [card.parentLabel] : []
+  if (card.frameId !== null || chain.length === 0) return null
+  // ONE name — the owner — and a mark for whatever is above it. A frame
+  // header has ~200px of subtitle to share with its counts, which two
+  // names do not fit into: `Snowflake › BRONZE` shrank to `Sn… › B…`,
+  // naming neither, and then to a bare `› BRONZE`. The whole chain
+  // stays in the tooltip, and the ⋯ is itself somewhere you can go.
+  const owner = chain[chain.length - 1]
+  const above = chain.slice(0, -1)
+  const title = `in ${chain.join(' › ')}`
+  return (
+    <>
+      <span className="flex items-center gap-0.5 flex-shrink-0" title={title}>
+        <LucideIcons.CornerLeftUp className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/60" />
+        {above.length > 0 && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.ancestryIds[0] ?? '') }}
+            title={`${above.length} level${above.length === 1 ? '' : 's'} above: ${above.join(' › ')}`}
+            className="nodrag flex-shrink-0 text-ink-muted/50 hover:text-accent-lineage transition-colors"
+          >
+            ⋯›
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.ancestryIds[chain.length - 1] ?? card.parentId ?? '') }}
+          title={title}
+          className="nodrag whitespace-nowrap hover:text-accent-lineage transition-colors"
+        >
+          {owner}
+        </button>
+      </span>
+      <span className="flex-shrink-0 text-ink-muted/40" aria-hidden>·</span>
+    </>
   )
 }
 
@@ -588,9 +673,13 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   // card — it used to invalidate every node in the graph.
   const focalReach = useContext(ReachContext)
   // Same reasoning for the path-to-focus highlight: a hover must re-
-  // render only the cards whose dim state actually changed.
-  const pathHighlight = useContext(PathHighlightContext)
-  const pathDimmed = pathHighlight != null && !pathHighlight.cardIds.has(card.id)
+  // render only the cards whose highlight state actually changed.
+  const { onPath, offPath } = usePathState(card.id)
+  // One class, decided here: two `opacity-*` utilities on one element
+  // are settled by their order in the stylesheet, not in the class list,
+  // so the text filter's own dim and the path floor cannot both be
+  // spelled out and left to fight.
+  const dim = card.dimmed ? 'opacity-30' : offPath ? OFF_PATH_CARD : undefined
   const accent = card.type === 'not loaded' ? '#94a3b8' : ctx.visualFor(card.type).color
 
   const activate = () => ctx.onSelect(card.nodeId)
@@ -615,8 +704,10 @@ function FocusGraphCard({ data, selected }: NodeProps) {
         }}
         className={cn(
           'group relative rounded-xl border-2 px-3.5 py-2.5 bg-canvas-elevated cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-          selected && 'ring-2 ring-accent-lineage ring-offset-1 ring-offset-canvas-elevated',
-          (card.dimmed || pathDimmed) && 'opacity-30',
+          selected
+            ? 'ring-2 ring-accent-lineage ring-offset-1 ring-offset-canvas-elevated'
+            : onPath && 'ring-1 ring-accent-lineage/70',
+          dim,
         )}
       >
         <PortHandles />
@@ -691,7 +782,9 @@ function FocusGraphCard({ data, selected }: NodeProps) {
         className={cn(
           'group relative flex items-center gap-1.5 rounded-lg border border-dashed border-black/[0.08] dark:border-white/[0.09] bg-transparent px-2.5 cursor-pointer transition-colors hover:border-accent-lineage/40 hover:bg-black/[0.02] dark:hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
           selected && 'ring-2 ring-accent-lineage',
-          card.dimmed || pathDimmed ? 'opacity-20' : 'opacity-60 hover:opacity-100',
+          // Already background: something off the lineage sits at the
+          // off-path floor whether or not a path is highlighted.
+          card.dimmed ? 'opacity-20' : 'opacity-60 hover:opacity-100',
         )}
       >
         <PortHandles />
@@ -716,8 +809,8 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       style={{ width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent }}
       className={cn(
         'group relative flex items-center gap-2 rounded-lg border border-black/[0.07] dark:border-white/[0.08] px-2.5 cursor-pointer transition-colors bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-        selected && 'ring-2 ring-accent-lineage',
-        (card.dimmed || pathDimmed) && 'opacity-30',
+        selected ? 'ring-2 ring-accent-lineage' : onPath && 'ring-1 ring-accent-lineage/70',
+        dim,
       )}
     >
       <PortHandles />
@@ -794,8 +887,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
  */
 function FocusFrameNode({ data }: NodeProps) {
   const { card, ctx } = data as unknown as { card: FocusCard; ctx: CardCtx }
-  const pathHighlight = useContext(PathHighlightContext)
-  const pathDimmed = pathHighlight != null && !pathHighlight.cardIds.has(card.id)
+  const { onPath, offPath } = usePathState(card.id)
   const accent = ctx.visualFor(card.type).color
   // The thing you asked about, when it happens to hold things. It reads
   // as the anchor — solid border, the accent glow the focal card has —
@@ -838,7 +930,8 @@ function FocusFrameNode({ data }: NodeProps) {
         isFocus
           ? 'bg-black/[0.03] dark:bg-white/[0.04]'
           : 'border-dashed bg-black/[0.02] dark:bg-white/[0.03]',
-        pathDimmed && 'opacity-30',
+        onPath && !isFocus && 'ring-1 ring-accent-lineage/70',
+        offPath && OFF_PATH_CARD,
       )}
     >
       <PortHandles />
@@ -866,6 +959,9 @@ function FocusFrameNode({ data }: NodeProps) {
             {card.label}
           </TailName>
           <p className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate">
+            {/* Where this frame lives, when the levels above it are
+                breadcrumbs rather than boxes. */}
+            <FrameAncestry card={card} ctx={ctx} />
             {card.fetch === 'loading'
               ? 'Looking inside…'
               : card.contents
@@ -1066,23 +1162,35 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     tint: string
     cycleBack?: boolean
     reducedMotion?: boolean
+    /** The layout says this bundle's badge has something to say and room
+     *  to say it (see `FocusEdge.labelVisible`). */
+    labelVisible?: boolean
+    /** Too many badges on this board for all of them to be read. */
+    labelDense?: boolean
   }
   // Hover emphasis is derived here from context: the edges ARRAY stays
   // identity-stable, so sweeping the pointer never rebuilds it (nor
   // makes React Flow reconcile every edge).
   const hoveredId = useContext(HoverContext)
-  const hoverActive = hoveredId != null
-  const emphasized = hoverActive && (source === hoveredId || target === hoveredId)
+  const emphasized = hoveredId != null && (source === hoveredId || target === hoveredId)
   // Path-to-focus highlight — same context-routing reason as above.
   const pathHighlight = useContext(PathHighlightContext)
-  const pathDimmed = pathHighlight != null && !pathHighlight.edgeKeys.has(id)
+  const onPath = pathHighlight != null && pathHighlight.edgeKeys.has(id)
+  const offPath = pathHighlight != null && !onPath && pathHighlight.source === 'select'
   const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
-  // Hovering a card lights up ITS connections and quiets the rest —
-  // the read-your-neighborhood gesture.
-  const opacity = d.dimmed || pathDimmed ? 0.12
-    : emphasized ? 1
-      : hoverActive ? 0.2
+  const strong = emphasized || onPath
+  // Highlighting STRENGTHENS what it points at; it does not wash out
+  // everything else. Hovering used to push every other wire to 20% and
+  // a path highlight to 12%, which turned reading one connection into
+  // losing the picture around it. Only a deliberate SELECTION quiets the
+  // rest now, and only to a floor that stays legible.
+  const opacity = d.dimmed ? 0.12
+    : strong ? 1
+      : offPath ? OFF_PATH_EDGE
         : d.containment ? 0.45 : 0.7
+  // A badge survives density only where the reader is actually looking.
+  const showLabel = (d.labelVisible ?? false) && !d.dimmed
+    && (!d.labelDense || strong)
   return (
     <>
       <BaseEdge
@@ -1091,16 +1199,16 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
         markerEnd={markerEnd}
         style={{
           stroke: d.tint,
-          strokeWidth: emphasized ? (d.aggregated ? 3 : 2.5) : d.aggregated ? 2 : 1.5,
+          strokeWidth: strong ? (d.aggregated ? 3 : 2.5) : d.aggregated ? 2 : 1.5,
           strokeDasharray: d.containment ? '4 4' : undefined,
           opacity,
           transition: d.reducedMotion ? undefined : 'opacity 120ms, stroke-width 120ms',
         }}
       />
-      {(d.count > 1 || d.cycleBack) && !d.dimmed && (
+      {showLabel && (
         <EdgeLabelRenderer>
           <div
-            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`, opacity: hoverActive && !emphasized ? 0.3 : 1 }}
+            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`, opacity: offPath ? OFF_PATH_EDGE : 1 }}
             className={cn(
               'absolute pointer-events-none px-1 py-px rounded-full bg-canvas-elevated border border-black/10 dark:border-white/10 text-[8.5px] font-semibold tabular-nums text-ink-muted shadow-sm',
               // Only a cycle badge needs to sit beside a count; a bare
@@ -1430,8 +1538,16 @@ export function FocusGraphView({
     // only upstream type and the graph asserted the table has no
     // producers. The builder's own honesty rule already said chips are
     // reported, not silent.
+    //
+    // And an empty BAND is not an empty SIDE: geometry decides which
+    // column a card lands in, and when a shared ancestor pulled every
+    // hop column into band 0 this whispered "no upstream sources in the
+    // data source" over the sources it was drawing. So the claim is
+    // gated on the MODEL (`modelHasUpstream`/`modelHasDownstream`), and
+    // a side the model knows about but the picture placed elsewhere gets
+    // silence rather than a lie.
     if (focalFetch === 'done') {
-      if (!minYByBand.has(-1)) {
+      if (!minYByBand.has(-1) && (!graph.modelHasUpstream || directionFilter === 'out' || graph.hiddenByChipsIn > 0)) {
         nodes.push({
           id: 'blw:in', type: 'bandLabel', position: { x: -(CARD_W + BAND_GAP), y: -10 },
           draggable: false, selectable: false, focusable: false,
@@ -1447,7 +1563,7 @@ export function FocusGraphView({
           },
         })
       }
-      if (!minYByBand.has(1)) {
+      if (!minYByBand.has(1) && (!graph.modelHasDownstream || directionFilter === 'in' || graph.hiddenByChipsOut > 0)) {
         nodes.push({
           id: 'blw:out', type: 'bandLabel', position: { x: CARD_W + BAND_GAP, y: -10 },
           draggable: false, selectable: false, focusable: false,
@@ -1462,7 +1578,8 @@ export function FocusGraphView({
       }
     }
     return nodes
-  }, [graph.cards, graph.bandTotals, graph.hiddenByChipsIn, graph.hiddenByChipsOut, ctx, focalIn, focalOut, focalFetch, directionFilter])
+  }, [graph.cards, graph.bandTotals, graph.hiddenByChipsIn, graph.hiddenByChipsOut,
+    graph.modelHasUpstream, graph.modelHasDownstream, ctx, focalIn, focalOut, focalFetch, directionFilter])
 
   /**
    * Cards the user has dragged, by card id. The builder keeps producing
@@ -1504,6 +1621,10 @@ export function FocusGraphView({
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const edges = useMemo((): Edge[] => {
     const bandById = new Map(graph.cards.map(c => [c.id, c.band]))
+    // Whether the board as a whole is too busy for every badge it could
+    // draw — a property of the picture, so it is decided once here
+    // rather than re-counted inside every edge.
+    const labelDense = graph.edges.filter(e => e.labelVisible).length > LABEL_DENSITY_CAP
     return graph.edges.map((e) => {
       // Containment is never drawn as a wire — it NESTS. Every edge on
       // the board is a lineage hop, tinted by the side it lands on.
@@ -1518,7 +1639,10 @@ export function FocusGraphView({
         // Business users shouldn't infer direction from layout
         // convention alone — every hop carries an explicit arrowhead.
         markerEnd: { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
-        data: { count: e.count, dimmed: e.dimmed, tint, cycleBack: e.cycleBack, reducedMotion },
+        data: {
+          count: e.count, dimmed: e.dimmed, tint, cycleBack: e.cycleBack, reducedMotion,
+          labelVisible: e.labelVisible, labelDense,
+        },
       }
     })
   }, [graph.cards, graph.edges, reducedMotion])
@@ -1547,14 +1671,18 @@ export function FocusGraphView({
     [graph.cards, selectedId],
   )
   const pathSourceId = pathHoverId ?? selectedCardId
+  // WHICH gesture is asking, carried through so the cards and edges can
+  // tell "show me this path" (hover: strengthen only) from "I have
+  // chosen this one" (selection: may quiet the rest, to a floor).
+  const pathSource: 'hover' | 'select' = pathHoverId ? 'hover' : 'select'
   const pathHighlightValue = useMemo(() => {
     if (!pathSourceId || !focalCardId) return null
     const found = pathToFocus(graph.edges, pathSourceId, focalCardId)
     // Empty means "no path" (a roster extra, or the focus itself) —
     // the contract both here and in pathToFocus is that this dims
     // nothing rather than dimming the whole board for no reason.
-    return found.cardIds.size > 0 ? found : null
-  }, [pathSourceId, focalCardId, graph.edges])
+    return found.cardIds.size > 0 ? { ...found, source: pathSource } : null
+  }, [pathSourceId, pathSource, focalCardId, graph.edges])
 
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
   useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion)

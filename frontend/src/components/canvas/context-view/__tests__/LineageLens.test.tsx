@@ -711,33 +711,45 @@ describe('hovering or selecting a card highlights its path to the focus', () => 
     return onCanvas.closest('[role="button"]')!
   }
 
-  it('selecting a card dims everything not on its path to the focus', () => {
+  /** The off-path floor a SELECTION quiets to. Deliberately not the old
+   *  30%: a highlight that turns the rest of the board into grey ghosts
+   *  costs the reader the context they were reading the path against. */
+  const QUIET = 'opacity-60'
+  /** What being ON the path looks like. */
+  const LIT = 'ring-1 ring-accent-lineage/70'
+
+  it('selecting a card quiets what is off its path — to a floor that is still readable', () => {
     renderLens(['b'], simple())
     fireEvent.click(screen.getByText('label-a'))
     // 'a' is one direct hop from the focus 'b' — 'c' is not on that path.
-    expect(nodeFor('label-c').className).toContain('opacity-30')
-    expect(nodeFor('label-a').className).not.toContain('opacity-30')
+    expect(nodeFor('label-c').className).toContain(QUIET)
+    expect(nodeFor('label-c').className).not.toContain('opacity-30')
+    expect(nodeFor('label-a').className).not.toContain(QUIET)
   })
 
-  it('deselecting (pane click) clears the highlight — nothing stays dimmed', () => {
+  it('deselecting (pane click) clears the highlight — nothing stays quieted', () => {
     renderLens(['b'], simple())
     fireEvent.click(screen.getByText('label-a'))
-    expect(nodeFor('label-c').className).toContain('opacity-30')
+    expect(nodeFor('label-c').className).toContain(QUIET)
     fireEvent.click(document.querySelector('.react-flow__pane')!)
-    expect(nodeFor('label-c').className).not.toContain('opacity-30')
+    expect(nodeFor('label-c').className).not.toContain(QUIET)
   })
 
-  it('hovering (past the 150ms intent delay) also highlights the path, and clears on mouse leave', () => {
+  it('hovering (past the 150ms intent delay) LIGHTS the path and dims nothing, and clears on mouse leave', () => {
     vi.useFakeTimers()
     try {
       renderLens(['b'], simple())
       fireEvent.mouseEnter(nodeFor('label-a'))
       act(() => { vi.advanceTimersByTime(149) })
-      expect(nodeFor('label-c').className).not.toContain('opacity-30')
+      expect(nodeFor('label-a').className).not.toContain(LIT)
       act(() => { vi.advanceTimersByTime(1) })
-      expect(nodeFor('label-c').className).toContain('opacity-30')
-      fireEvent.mouseLeave(nodeFor('label-a'))
+      // The path is stated by lighting it up...
+      expect(nodeFor('label-a').className).toContain(LIT)
+      // ...and a pointer sweeping the board never washes the board out.
+      expect(nodeFor('label-c').className).not.toContain(QUIET)
       expect(nodeFor('label-c').className).not.toContain('opacity-30')
+      fireEvent.mouseLeave(nodeFor('label-a'))
+      expect(nodeFor('label-a').className).not.toContain(LIT)
     } finally {
       vi.useRealTimers()
     }
