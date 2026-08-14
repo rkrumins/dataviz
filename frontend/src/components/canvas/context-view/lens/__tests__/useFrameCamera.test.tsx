@@ -41,19 +41,26 @@ function Harness({ rf, focalId, cards, edges = [], paneW = 0, paneH = 0 }: {
 describe('useFrameCamera', () => {
   let fitView: ReturnType<typeof vi.fn<CameraTarget['fitView']>>
   let getViewport: ReturnType<typeof vi.fn<CameraTarget['getViewport']>>
+  let setViewport: ReturnType<typeof vi.fn<CameraTarget['setViewport']>>
   let rf: CameraTarget
 
   beforeEach(() => {
     vi.useFakeTimers()
     fitView = vi.fn<CameraTarget['fitView']>()
     getViewport = vi.fn<CameraTarget['getViewport']>(() => ({ x: 0, y: 0, zoom: 1 }))
-    rf = { fitView, getViewport }
+    setViewport = vi.fn<CameraTarget['setViewport']>()
+    rf = { fitView, getViewport, setViewport }
   })
   afterEach(() => {
     vi.useRealTimers()
   })
 
   const flush = () => act(() => { vi.advanceTimersByTime(60) })
+  // The ghost-nudge effect defers to 350ms, past the arrival effect's
+  // own delay+animation, whenever a pill starts loading on the SAME
+  // render as a new-focal fit or a real arrival — see its own comment
+  // ("racingMainMove") in useFrameCamera.ts.
+  const flushPastGhostRace = () => act(() => { vi.advanceTimersByTime(400) })
 
   it('frames the whole picture when the focal is new', () => {
     render(<Harness rf={rf} focalId="a" cards={[card('f'), card('n:x')]} />)
@@ -167,6 +174,161 @@ describe('useFrameCamera', () => {
     // Both n:x and n:new arrived together here (neither is a pre-existing
     // anchor the other attached to), in the order `cards` lists them.
     expect(fitView.mock.calls[1][0].nodes).toEqual([{ id: 'n:x' }, { id: 'n:new' }, { id: 'f' }])
+  })
+
+  /**
+   * Fix round 1 — reviewer finding: the extend-ghost (`ExtendGhost`,
+   * FocusGraphView.tsx) draws the instant a pill starts loading, but
+   * nothing told the camera, so a click near the pane's edge
+   * acknowledged with a shimmer the reader could not see.
+   */
+  it('nudges the camera when a just-started extend ghost would land off-pane', () => {
+    const withPos = (id: string, x: number, y: number, band: number): FocusCard =>
+      ({ ...card(id), x, y, w: 200, h: 80, band }) as unknown as FocusCard
+    const { rerender } = render(
+      <Harness rf={rf} focalId="a" cards={[withPos('f', 0, 0, 0), withPos('n:x', 800, 0, 2)]} paneW={1200} paneH={800} />,
+    )
+    flush()
+    setViewport.mockClear()
+    // n:x's downstream pill starts loading. Its ghost sits one band
+    // further out (band 3, x 1110–1350 at CARD_W=240/BAND_GAP=130),
+    // which runs past the right edge of a 1200-wide pane.
+    rerender(
+      <Harness
+        rf={rf}
+        focalId="a"
+        cards={[
+          withPos('f', 0, 0, 0),
+          { ...withPos('n:x', 800, 0, 2), pillDown: { status: 'loading' } } as unknown as FocusCard,
+        ]}
+        paneW={1200}
+        paneH={800}
+      />,
+    )
+    flush()
+    expect(setViewport).toHaveBeenCalledTimes(1)
+    // A pan only — zoom stays put, moving LEFT (negative dx) to bring
+    // the ghost's right edge back inside the pane.
+    const [viewport] = setViewport.mock.calls[0]
+    expect(viewport.zoom).toBe(1)
+    expect(viewport.x).toBeLessThan(0)
+  })
+
+  /**
+   * The exact `walkFrontier.png` shape, and the reviewer's own repro: a
+   * pill is ALREADY loading on the very first render, the SAME moment
+   * the new-focal fit runs. Nudging synchronously (the first attempt at
+   * this fix) got silently overwritten the instant the main effect's
+   * own `fitView` landed 30ms later, and the fixture's ghost stayed
+   * invisible in the shot despite existing in the DOM. This is the test
+   * that shape needed: `fitView` lands first, `setViewport` lands after.
+   */
+  it('defers the ghost nudge past a competing new-focal fit, then still applies it', () => {
+    const withPos = (id: string, x: number, y: number, band: number): FocusCard =>
+      ({ ...card(id), x, y, w: 200, h: 80, band }) as unknown as FocusCard
+    render(
+      <Harness
+        rf={rf}
+        focalId="a"
+        cards={[
+          withPos('f', 0, 0, 0),
+          { ...withPos('n:x', 800, 0, 2), pillDown: { status: 'loading' } } as unknown as FocusCard,
+        ]}
+        paneW={1200}
+        paneH={800}
+      />,
+    )
+    // The main effect's own 30ms delay has landed; its fitView has run.
+    act(() => { vi.advanceTimersByTime(30) })
+    expect(fitView).toHaveBeenCalledTimes(1)
+    // The ghost nudge has NOT — it is deliberately waiting out the race.
+    expect(setViewport).not.toHaveBeenCalled()
+    // Past the deferral: the nudge lands, reading whatever viewport the
+    // fitView above left behind, not a stale pre-fit one.
+    act(() => { vi.advanceTimersByTime(320) })
+    expect(setViewport).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * This file's own StrictMode lesson, repeated once for the ghost
+   * effect and caught the same way: the DEFERRED branch's first draft
+   * stamped `loadingGhostsRef` before scheduling the nudge, not once it
+   * actually applied. Under StrictMode's mount → cleanup → mount, run 1
+   * stamped it and scheduled a timeout; cleanup cancelled that timeout;
+   * run 2 saw "already seen" and scheduled nothing — the nudge that was
+   * supposed to fire never did, silently. Real against `walkFrontier.png`
+   * (StrictMode is on in the harness): the ghost stayed invisible in the
+   * shot even after the deferred-timing fix above, until this was found.
+   */
+  it('still nudges when the deferred branch\'s first effect run is cancelled (StrictMode)', () => {
+    const withPos = (id: string, x: number, y: number, band: number): FocusCard =>
+      ({ ...card(id), x, y, w: 200, h: 80, band }) as unknown as FocusCard
+    render(
+      <StrictMode>
+        <Harness
+          rf={rf}
+          focalId="a"
+          cards={[
+            withPos('f', 0, 0, 0),
+            { ...withPos('n:x', 800, 0, 2), pillDown: { status: 'loading' } } as unknown as FocusCard,
+          ]}
+          paneW={1200}
+          paneH={800}
+        />
+      </StrictMode>,
+    )
+    flushPastGhostRace()
+    expect(setViewport).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not nudge for a ghost that already fits on screen', () => {
+    const withPos = (id: string, x: number, y: number, band: number): FocusCard =>
+      ({ ...card(id), x, y, w: 200, h: 80, band }) as unknown as FocusCard
+    const { rerender } = render(
+      <Harness rf={rf} focalId="a" cards={[withPos('f', 0, 0, 0)]} paneW={1200} paneH={800} />,
+    )
+    flush()
+    setViewport.mockClear()
+    rerender(
+      <Harness
+        rf={rf}
+        focalId="a"
+        cards={[
+          withPos('f', 0, 0, 0),
+          // y=100, not 0 — the nudge's own landing target wants genuine
+          // clearance (`GHOST_LANDING_PADDING_PX`), not merely the more
+          // lenient "already visible" tolerance `flush against the edge`
+          // would allow.
+          { ...withPos('n:x', 0, 100, 0), pillDown: { status: 'loading' } } as unknown as FocusCard,
+        ]}
+        paneW={1200}
+        paneH={800}
+      />,
+    )
+    flush()
+    expect(setViewport).not.toHaveBeenCalled()
+  })
+
+  it('does not re-nudge for a pill that was already loading last render', () => {
+    const withPos = (id: string, x: number, y: number, band: number): FocusCard =>
+      ({ ...card(id), x, y, w: 200, h: 80, band }) as unknown as FocusCard
+    const loading = (id: string, x: number, y: number, band: number): FocusCard =>
+      ({ ...withPos(id, x, y, band), pillDown: { status: 'loading' } }) as unknown as FocusCard
+    const { rerender } = render(
+      <Harness rf={rf} focalId="a" cards={[withPos('f', 0, 0, 0), loading('n:x', 800, 0, 2)]} paneW={1200} paneH={800} />,
+    )
+    // The pill is ALREADY loading on the very first (new-focal) render
+    // here, so the nudge defers past the race guard.
+    flushPastGhostRace()
+    expect(setViewport).toHaveBeenCalledTimes(1) // the initial nudge
+    setViewport.mockClear()
+    // Same pill, still loading (a re-render with no NEW loading pill) —
+    // re-nudging here would fight a reader who panned away on purpose.
+    rerender(
+      <Harness rf={rf} focalId="a" cards={[withPos('f', 0, 0, 0), loading('n:x', 800, 0, 2)]} paneW={1200} paneH={800} />,
+    )
+    flush()
+    expect(setViewport).not.toHaveBeenCalled()
   })
 
   it('holds still while a frame churns its rows', () => {

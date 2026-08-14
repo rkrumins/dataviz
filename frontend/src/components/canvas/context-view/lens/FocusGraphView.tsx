@@ -2233,8 +2233,8 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
         // the OS setting and the in-app preference.
         className={cn(onCone && !d.reducedMotion && 'lens-cone-flow')}
         style={{
-          // Colour is what the eye follows, so the background gives its
-          // up. Dimming alone flattens the board into one grey wash — but
+          // Colour is what the eye follows, so the background gives up
+          // its saturation. Dimming alone flattens the board into one grey wash — but
           // a `filter: saturate()` forces its own compositor layer per
           // wire, and a wide board can carry hundreds of them off-cone at
           // once. `mutedTint` is the SAME desaturation, pre-computed once
@@ -2291,6 +2291,33 @@ const EDGE_TYPES = { focusEdge: FocusGraphEdgeComp }
  *  keep it inside the pane. */
 const PEEK_W = 236
 const PEEK_MAX_H = 280
+
+/**
+ * Vertically centred on the row, but never hanging off the top or
+ * bottom of the pane — a panel you have to pan to read is not a peek.
+ * Extracted as its own pure function (Task 20, P6/fix round 1) so the
+ * clamp is unit-testable directly: jsdom does no real layout, so a
+ * component-level render always reads `paneH` as 0, which can never
+ * exercise "pane too short to fit the panel" — the exact case this
+ * clamp exists for.
+ *
+ * Unconditional: an earlier version only clamped when
+ * `paneH > PEEK_MAX_H + 16`; below that threshold it returned the raw
+ * row position — genuinely UNCLAMPED, not merely less padded, so a row
+ * near the top or bottom edge of a short window opened a peek running
+ * off it. Degrades to "pinned near the top, 8px in" when the pane is
+ * too short to fit the panel at all — a defined position rather than
+ * none.
+ */
+// Fast Refresh prefers a component-only file; this stays here rather
+// than its own module because it is one line of arithmetic coupled to
+// `PEEK_MAX_H`, a constant `LensPeek` itself owns — exported only so
+// its own test file can reach it directly.
+// eslint-disable-next-line react-refresh/only-export-components
+export function clampPeekY(rowY: number, paneH: number): number {
+  const half = PEEK_MAX_H / 2
+  return Math.max(half + 8, Math.min(rowY, paneH - half - 8))
+}
 
 /**
  * Extend-click acknowledgment (Task 20, P5). The ⊕ pill's own spinner
@@ -2373,17 +2400,9 @@ function LensPeek({ card, host, ctx, onDismiss }: {
   const other = preferLeft ? right : left
   const x = fits(wanted) ? wanted : fits(other) ? other : Math.max(8, Math.min(wanted, paneW - PEEK_W - 8))
   // Vertically centred on the row, but never hanging off the top or
-  // bottom of the pane — a panel you have to pan to read is not a peek.
-  // Unconditional (Task 20, P6): the exemption below `PEEK_MAX_H + 16`
-  // left `y` at the raw row position on a short pane — genuinely
-  // unclamped, not merely "less padded" — so a row near the top or
-  // bottom edge of a short window opened a peek running off it. The
-  // clamp degrades to "pinned near the top, 8px in" when the pane is
-  // too short to fit the panel at all, which is a defined position
-  // rather than none.
-  const half = PEEK_MAX_H / 2
+  // bottom of the pane — see `clampPeekY`'s own doc comment.
   const rowY = (card.y + card.h / 2) * zoom + ty
-  const y = Math.max(half + 8, Math.min(rowY, paneH - half - 8))
+  const y = clampPeekY(rowY, paneH)
   const flows = card.flowsIn + card.flowsOut
   const pill = card.band < 0 ? card.pillUp ?? card.pillDown : card.pillDown ?? card.pillUp
   const pillDir: 'in' | 'out' = pill != null && pill === card.pillUp ? 'in' : 'out'

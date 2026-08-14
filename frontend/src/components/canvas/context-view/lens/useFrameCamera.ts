@@ -1,5 +1,5 @@
 import { useEffect, useRef, type RefObject } from 'react'
-import type { FocusCard, FocusEdge } from './focus-cards'
+import { CARD_W, BAND_GAP, type FocusCard, type FocusEdge } from './focus-cards'
 
 /**
  * How far `fitView` may zoom IN.
@@ -24,6 +24,9 @@ export type CameraTarget = {
   /** Current pan/zoom — read-only, so checking "is this already in view"
    *  costs nothing the instance was not already tracking. */
   getViewport: () => { x: number; y: number; zoom: number }
+  /** A plain translate/zoom set — used ONLY for the extend-ghost nudge
+   *  below, which has no real node id to hand `fitView`. */
+  setViewport: (viewport: { x: number; y: number; zoom: number }, opts?: { duration?: number }) => unknown
 }
 
 /** How close to the pane's own edge counts as "already in view" — a
@@ -136,13 +139,121 @@ export function useFrameCamera(
     // change alone (cards unchanged) re-runs the effect but hits the
     // "nothing arrived" early return, which only stamps the bookkeeping.
   }, [rf, focalId, cards, edges, reducedMotion, containerRef])
+
+  // ── The extend-ghost nudge (fix round 1) ──────────────────────────
+  //
+  // Reported against the FIRST version of this hook: `ExtendGhost`
+  // (FocusGraphView.tsx) draws the instant a pill's own fetch starts —
+  // proven by its own test — but nothing told the CAMERA about it, so a
+  // click near the pane's edge acknowledged with a shimmer the reader
+  // could not see. This is a SEPARATE effect from the one above because
+  // its trigger is different (a pill's `status` flipping to 'loading',
+  // not a card arriving) and a `setViewport` translate rather than
+  // `fitView`, because a ghost has no real node id to hand it.
+  //
+  // Deliberately NOT the same "already visible → do nothing" branch as
+  // above: a ghost that IS already visible needs no nudge (the check
+  // below finds nothing to correct and no-ops), so one function serves
+  // both without a redundant up-front check.
+  const loadingGhostsRef = useRef<Map<string, { card: FocusCard; dir: 'in' | 'out' }>>(new Map())
+  useEffect(() => {
+    if (!rf) return
+    const current = new Map<string, { card: FocusCard; dir: 'in' | 'out' }>()
+    for (const c of cards) {
+      if (c.pillUp?.status === 'loading') current.set(`${c.id}:in`, { card: c, dir: 'in' })
+      if (c.pillDown?.status === 'loading') current.set(`${c.id}:out`, { card: c, dir: 'out' })
+    }
+    const prev = loadingGhostsRef.current
+    // Only NEWLY-loading pills — a pill that was already spinning last
+    // render already got its chance to nudge the camera; re-nudging on
+    // every subsequent render (while the fetch is still in flight) would
+    // fight a reader who panned away from it on purpose.
+    const justStarted = [...current.entries()].filter(([key]) => !prev.has(key)).map(([, v]) => v)
+    if (justStarted.length === 0) {
+      // Nothing new, so nothing that could be CANCELLED: safe to stamp
+      // now, same as the arrival effect's own early return above.
+      loadingGhostsRef.current = current
+      return
+    }
+
+    // THE SAME invariant the arrival effect above is built around: stamp
+    // only once the check has actually RUN, never when it is merely
+    // scheduled. Stamping here (before the possibly-deferred branch
+    // below) hit the exact bug that comment already documents — under
+    // StrictMode's mount → cleanup → mount, run 1 stamps and schedules,
+    // cleanup cancels the schedule, and run 2 sees "already seen" and
+    // does nothing, so the nudge that was supposed to fire never does.
+    const applyNudge = () => {
+      loadingGhostsRef.current = current
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (!rect || !rf) return
+      // One union box, the same pattern the arrival effect above uses
+      // for multiple simultaneous arrivals — summing separate per-ghost
+      // nudges could overshoot when more than one starts at once.
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const { card, dir } of justStarted) {
+        const g = ghostRect(card, dir)
+        minX = Math.min(minX, g.x); maxX = Math.max(maxX, g.x + g.w)
+        minY = Math.min(minY, g.y); maxY = Math.max(maxY, g.y + g.h)
+      }
+      if (!Number.isFinite(minX)) return
+      const viewport = rf.getViewport()
+      const nudge = minimalNudge({ x: minX, y: minY, w: maxX - minX, h: maxY - minY }, viewport, rect.width, rect.height)
+      if (!nudge) return
+      void rf.setViewport(
+        { x: viewport.x + nudge.dx, y: viewport.y + nudge.dy, zoom: viewport.zoom },
+        { duration: reducedMotion ? 0 : 240 },
+      )
+    }
+
+    // Read-only peek at the SAME bookkeeping the effect above owns, to
+    // answer one question: is a new-focal fit or an arrival ease ALSO
+    // about to run this render? If so, `getViewport()` above would read
+    // a viewport that is mid-flight to somewhere else, and applying the
+    // nudge now would just be overwritten when that other move lands a
+    // moment later — reproduced exactly this way on `walkFrontier.png`
+    // (its BUSY pill starts loading on the SAME render as the initial
+    // new-focal fit) before this guard existed. Wait past both that
+    // effect's own delay (30ms) and its longest animation (320ms) before
+    // reading the viewport for real; nothing to wait for in the — far
+    // more common — case of a click on an already-settled board, so
+    // that path stays immediate.
+    const bookkeeping = framedRef.current
+    const racingMainMove = !bookkeeping || bookkeeping.focal !== focalId
+      || cards.some(c => !bookkeeping.ids.has(c.id) && !c.frameId)
+    if (racingMainMove) {
+      const t = window.setTimeout(applyNudge, 350)
+      return () => window.clearTimeout(t)
+    }
+    applyNudge()
+  }, [rf, focalId, cards, reducedMotion, containerRef])
+}
+
+interface Rect { x: number; y: number; w: number; h: number }
+
+/** Flow-space → screen-space, the same transform `LensPeek` already
+ *  uses (`x * zoom + tx`). */
+function toScreen(r: Rect, viewport: { x: number; y: number; zoom: number }) {
+  return {
+    left: r.x * viewport.zoom + viewport.x,
+    top: r.y * viewport.zoom + viewport.y,
+    right: (r.x + r.w) * viewport.zoom + viewport.x,
+    bottom: (r.y + r.h) * viewport.zoom + viewport.y,
+  }
+}
+
+/** Where an extend/page pill's ghost lands (Task 20, P5/fix round 1) —
+ *  identical to `ExtendGhost`'s own geometry in FocusGraphView.tsx: one
+ *  band further in the pill's own direction, at the card's own height. */
+function ghostRect(card: FocusCard, dir: 'in' | 'out'): Rect {
+  const band = card.band + (dir === 'in' ? -1 : 1)
+  return { x: band * (CARD_W + BAND_GAP), y: card.y, w: CARD_W, h: card.h }
 }
 
 /**
  * Are every one of `ids` (by their FocusCard geometry) already inside
- * the pane, at the CURRENT pan/zoom? Flow-space → screen-space is the
- * same transform `LensPeek` already uses (`x * zoom + tx`); a card is
- * "visible" with `VISIBLE_MARGIN_PX` of slack on every edge.
+ * the pane, at the CURRENT pan/zoom? A card is "visible" with
+ * `VISIBLE_MARGIN_PX` of slack on every edge.
  */
 function cardsAlreadyVisible(
   ids: string[],
@@ -155,10 +266,7 @@ function cardsAlreadyVisible(
   for (const id of ids) {
     const c = byId.get(id)
     if (!c) continue // e.g. 'f' when the focal isn't drawn as a card
-    const left = c.x * viewport.zoom + viewport.x
-    const top = c.y * viewport.zoom + viewport.y
-    const right = (c.x + c.w) * viewport.zoom + viewport.x
-    const bottom = (c.y + c.h) * viewport.zoom + viewport.y
+    const { left, top, right, bottom } = toScreen({ x: c.x, y: c.y, w: c.w, h: c.h }, viewport)
     // An unknown position (NaN, from a card with no geometry) must NOT
     // read as "visible" — every one of the comparisons below is false
     // for NaN, which would otherwise silently skip the camera move.
@@ -169,4 +277,37 @@ function cardsAlreadyVisible(
     ) return false
   }
   return true
+}
+
+/** How much CLEARANCE a nudge's own landing spot aims for — deliberately
+ *  more than `VISIBLE_MARGIN_PX`'s tolerance. `VISIBLE_MARGIN_PX` decides
+ *  "is this already close enough that the camera should not move at
+ *  all," which is right to be lenient (an existing card sitting flush
+ *  against an edge the reader put it at is not a bug). Landing a NUDGE
+ *  exactly on that same lenient boundary produces a ghost sitting flush
+ *  against the edge it was just moved to reveal — visually still mostly
+ *  cut off, reproduced on `walkFrontier.png` before this constant existed
+ *  as its own thing. A nudge should leave the reader something legible. */
+const GHOST_LANDING_PADDING_PX = 40
+
+/** The smallest translate (screen px) that brings `r` to a comfortably
+ *  clear position inside the pane (`GHOST_LANDING_PADDING_PX`), or
+ *  `null` if it already is, or its geometry is unknown. Pan only — never
+ *  a zoom change, which is what makes this a NUDGE rather than the
+ *  fuller re-fit the arrival effect above still falls back to. */
+function minimalNudge(
+  r: Rect,
+  viewport: { x: number; y: number; zoom: number },
+  paneW: number,
+  paneH: number,
+): { dx: number; dy: number } | null {
+  const { left, top, right, bottom } = toScreen(r, viewport)
+  if (![left, top, right, bottom].every(Number.isFinite)) return null
+  let dx = 0
+  if (left < GHOST_LANDING_PADDING_PX) dx = GHOST_LANDING_PADDING_PX - left
+  else if (right > paneW - GHOST_LANDING_PADDING_PX) dx = (paneW - GHOST_LANDING_PADDING_PX) - right
+  let dy = 0
+  if (top < GHOST_LANDING_PADDING_PX) dy = GHOST_LANDING_PADDING_PX - top
+  else if (bottom > paneH - GHOST_LANDING_PADDING_PX) dy = (paneH - GHOST_LANDING_PADDING_PX) - bottom
+  return dx === 0 && dy === 0 ? null : { dx, dy }
 }
