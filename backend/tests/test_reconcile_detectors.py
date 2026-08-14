@@ -20,6 +20,9 @@ from backend.app.services.aggregation.fingerprint import (
     raw_fingerprint_from_counts,
 )
 from backend.app.services.aggregation.reconcile import (
+    DRIFT_STATES,
+    REASONS,
+    SKIP_REASONS,
     Observation,
     Policy,
     evaluate,
@@ -332,6 +335,45 @@ def test_raw_fingerprint_is_a_separate_namespace_from_the_schema_digest():
 
     raw, _, _ = raw_fingerprint_from_counts({"Table": 10}, {"FLOWS_TO": 5})
     assert raw != fingerprint_from_stats(_S())
+
+
+# ── The vocabularies the UI mirrors ─────────────────────────────────────
+
+
+@pytest.mark.parametrize("over", [
+    {},                                                   # in sync
+    {"observed_aggregated": 0},                           # overlay_missing
+    {"observed_aggregated": 440},                         # overlay_shrunk
+    {"observed_raw_fingerprint": "fp_new"},               # raw_drift
+    {"deleted": True},
+    {"ontology_id": None},
+    {"has_stats": False},
+    {"stats_age_secs": 99_999},
+    {"job_in_flight": True},
+    {"stale_marker": True},
+    {"in_cooldown": True},
+    {"recently_failed": True},
+    {"reconcile_enabled": False},
+    {"consecutive_actions": 5},
+    {"overlay_observable": False, "observed_aggregated": 0},
+    {"stored_raw_fingerprint": None},                     # seeded
+])
+def test_every_verdict_uses_the_published_vocabulary(over):
+    """``REASONS``, ``SKIP_REASONS`` and ``DRIFT_STATES`` are what the frontend
+    mirrors — its labels, its facet predicate and its badge specs are all keyed
+    off them. A verdict outside those sets would render as a blank badge or an
+    uncounted row, so nothing may invent a value."""
+    v = evaluate(_obs(**over), POLICY)
+    assert v.reason is None or v.reason in REASONS
+    assert v.skip is None or v.skip in SKIP_REASONS
+    assert v.drift_state in DRIFT_STATES
+
+
+def test_a_verdict_is_either_a_finding_or_a_skip_never_both():
+    for over in ({}, {"observed_aggregated": 0}, {"deleted": True}):
+        v = evaluate(_obs(**over), POLICY)
+        assert (v.reason is None) != (v.skip is None)
+        assert v.should_act == (v.reason is not None)
 
 
 def test_unparseable_counts_degrade_to_zero_rather_than_raising():

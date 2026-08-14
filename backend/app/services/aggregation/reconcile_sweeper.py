@@ -280,7 +280,7 @@ class ReconciliationSweeper:
                 state.last_reconcile_checked_at = _now_iso()
                 state.drift_state = verdict.drift_state
 
-                if verdict.skip:
+                if not verdict.should_act:
                     result.skipped += 1
                     result.by_skip[verdict.skip] = (
                         result.by_skip.get(verdict.skip, 0) + 1
