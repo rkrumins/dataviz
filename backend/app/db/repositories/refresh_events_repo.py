@@ -44,6 +44,7 @@ async def emit_refresh_event(
     detail: Optional[str] = None,
     reason: Optional[str] = None,
     evidence: Optional[dict] = None,
+    job_id: Optional[str] = None,
 ) -> Optional[str]:
     """Record one refresh/audit event. Returns the new event id, or
     ``None`` on any failure (broken factory, DB error, etc.) — never
@@ -53,7 +54,11 @@ async def emit_refresh_event(
     detector code plus the counts behind it. They are deliberately separate
     from ``actions``, which is contractually "what the signal DID" and is
     surfaced as a ``List[str]`` on the wire — overloading it would break both
-    readers."""
+    readers.
+
+    ``job_id`` names the aggregation job this event produced, when it produced
+    one. It is what lets a reader cross from "why we rebuilt" to "what the
+    rebuild did" and back; without it the two audit trails never meet."""
     factory = session_factory_or_none or get_async_session
     try:
         async with factory() as session:
@@ -71,6 +76,7 @@ async def emit_refresh_event(
                 detail=detail,
                 reason=reason,
                 evidence=json.dumps(evidence) if evidence else None,
+                job_id=job_id,
             )
             session.add(row)
             await session.commit()

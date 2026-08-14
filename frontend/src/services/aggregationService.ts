@@ -41,6 +41,11 @@ export interface AggregationJobResponse {
   dataSourceId: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   triggerSource: string;
+  /** Set only when ``triggerSource === 'reconcile'``: the detector that fired
+   *  and the counts behind it, read from the audit event naming this job.
+   *  "Automatic" alone just relocates the question — this answers it. */
+  reconcileReason?: string | null;
+  reconcileEvidence?: Record<string, unknown> | null;
   progress: number;
   totalEdges: number;
   processedEdges: number;

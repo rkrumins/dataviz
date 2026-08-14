@@ -191,6 +191,7 @@ async def _seed(
             id=ds_id, workspace_id="ws_1", provider_id="prov_1",
             graph_name=f"g_{ds_id}", ontology_id=ontology_id,
             projection_mode=projection_mode,
+            label=f"Label for {ds_id}",
         ))
         s.add(DataSourceStatsORM(
             data_source_id=ds_id,
@@ -289,6 +290,10 @@ async def test_wiped_overlay_is_detected_and_signalled(session_factory):
     ds_id, kw = svc.signals[0]
     assert ds_id == "ds_1"
     assert kw["origin"] == "reconcile-sweep"
+    # The job this queues must be identifiable as automatic in Job History.
+    # signal_source_changed hardcoded "api", so without this an hourly
+    # automatic rebuild looked exactly like a person clicking Rebuild.
+    assert kw["trigger_source"] == "reconcile"
     assert kw["audit_reason"] == "overlay_missing"
     assert kw["evidence"]["expectedAggregatedEdges"] == 500
     assert kw["evidence"]["observedAggregatedEdges"] == 0
@@ -330,7 +335,10 @@ async def test_never_built_source_gets_a_first_build_via_trigger(session_factory
     assert result.by_reason == {"never_aggregated": 1}
     assert svc.signals == []
     ds_id, trigger_source, idem = svc.triggers[0]
-    assert (ds_id, trigger_source) == ("ds_1", "schedule")
+    # 'reconcile', NOT 'schedule': the latter means the cron-driven
+    # AggregationScheduler, and Job History filters on this value — a first
+    # build queued here belongs with the other three detectors.
+    assert (ds_id, trigger_source) == ("ds_1", "reconcile")
     assert idem.startswith("reconcile:first:ds_1:")
 
     async with session_factory() as s:
@@ -338,6 +346,9 @@ async def test_never_built_source_gets_a_first_build_via_trigger(session_factory
     assert len(events) == 1
     assert events[0].origin == "reconcile-sweep"
     assert events[0].reason == "never_aggregated"
+    # The audit event names the job it produced, so a reader can cross from
+    # "why we rebuilt" to "what the rebuild did".
+    assert events[0].job_id == "agg_fake"
 
 
 @pytest.mark.asyncio
@@ -633,6 +644,9 @@ async def test_preview_finds_without_acting(session_factory):
     assert result.actions == 0
     assert svc.signals == [] and svc.triggers == []
     assert [p.reason for p in result.pending] == ["overlay_missing"]
+    # The preview is what someone reads before switching automation on across
+    # a fleet. A list of raw ds_ ids does not answer "should I do this".
+    assert [p.name for p in result.pending] == ["Label for ds_1"]
 
 
 # ── Run records ─────────────────────────────────────────────────────────

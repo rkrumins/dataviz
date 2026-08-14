@@ -13,8 +13,13 @@
  */
 import { useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { ChevronRight, History, Loader2, RefreshCw, ShieldCheck } from 'lucide-react'
+import {
+    AlertTriangle, ArrowUpRight, ChevronRight, CircleDashed, Eye, History,
+    Loader2, RefreshCw, ShieldCheck,
+} from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
+import { jobHistoryPath } from '../job-history/shared'
 import { MOTION } from '@/lib/motion'
 import { usePermission } from '@/store/auth'
 import { useToast } from '@/components/ui/toast'
@@ -22,6 +27,7 @@ import { TimeStamp } from '@/components/ui/TimeStamp'
 import { Sparkline } from '@/components/ui/Sparkline'
 import type { ReconcileRun } from '@/services/freshnessService'
 import { REASON_LABEL } from './DriftStateBadge'
+import { ReconcilePreviewDialog } from './ReconcilePreviewDialog'
 import { useReconcileNow, useReconciliation } from './useFreshness'
 
 /** Plain-language names for the sweep's skip codes. Mirrors
@@ -153,11 +159,71 @@ function RunRow({ run }: { run: ReconcileRun }) {
                                     ))}
                                 </div>
                             )}
+                            {/* The findings are tallied here; the rebuilds
+                                they caused live in Job History. Filtering by
+                                trigger + this run's day is the closest join
+                                available without a per-source run detail
+                                table, and it lands on exactly the jobs a
+                                reader is looking for. */}
+                            {run.actions > 0 && run.startedAt && (
+                                <div className="sm:col-span-2 pt-1">
+                                    <Link
+                                        to={jobHistoryPath({
+                                            triggerSource: 'reconcile',
+                                            dateFrom: run.startedAt.slice(0, 10),
+                                        })}
+                                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                                    >
+                                        View the {run.actions.toLocaleString()} rebuild
+                                        {run.actions === 1 ? '' : 's'} this run started
+                                        <ArrowUpRight className="w-3 h-3" />
+                                    </Link>
+                                </div>
+                            )}
                         </div>
                     </motion.div>
                 )}
             </AnimatePresence>
         </li>
+    )
+}
+
+/**
+ * Is the sweep actually running?
+ *
+ * The failure mode this exists for is silent: the control plane goes down, no
+ * sweep runs, no source is ever checked again — and every drift verdict in the
+ * cockpit quietly freezes at whatever it last said. Nothing else in the UI
+ * would show that, because a stale verdict looks exactly like a fresh one.
+ *
+ * Threshold is 3× the resolved check interval, matching the stats service's
+ * own staleness rule (``AGGREGATION_RECONCILE_STATS_MAX_AGE_SECS`` is 3× the
+ * poll interval) — one missed sweep is a hiccup, three is an outage.
+ */
+function SweepHealth({ lastStartedAt, intervalSecs }: {
+    lastStartedAt?: string | null
+    intervalSecs?: number | null
+}) {
+    const interval = intervalSecs && intervalSecs > 0 ? intervalSecs : 3600
+    if (!lastStartedAt) {
+        return (
+            <span
+                title="No reconciliation sweep has been recorded yet. On a fresh deployment this clears within one check interval; if it persists, the control plane may not be running the sweeper."
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20"
+            >
+                <CircleDashed className="w-3 h-3 shrink-0" /> Not yet run
+            </span>
+        )
+    }
+    const ageSecs = (Date.now() - new Date(lastStartedAt).getTime()) / 1000
+    if (!Number.isFinite(ageSecs) || ageSecs < interval * 3) return null
+    return (
+        <span
+            title={`The last sweep started ${Math.round(ageSecs / 3600)}h ago, more than three check intervals. Drift verdicts shown here are frozen at that point. Check that the aggregation control plane is running.`}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30"
+        >
+            <AlertTriangle className="w-3 h-3 shrink-0" /> Sweeps have stopped
+        </span>
     )
 }
 
@@ -175,6 +241,7 @@ export function ReconciliationRunsPanel({ onOpenSettings }: {
     onOpenSettings?: () => void
 }) {
     const [open, setOpen] = useState(false)
+    const [previewOpen, setPreviewOpen] = useState(false)
     const isAdmin = usePermission('system:admin')
     const { showToast } = useToast()
     const { data, isLoading, isError } = useReconciliation()
@@ -233,6 +300,15 @@ export function ReconciliationRunsPanel({ onOpenSettings }: {
                 </button>
 
                 <div className="ml-auto flex items-center gap-2 shrink-0">
+                    {/* Only renders when something is wrong. A frozen sweep is
+                        invisible otherwise: every verdict in the cockpit keeps
+                        showing its last value and looks perfectly current. */}
+                    {enabled && (
+                        <SweepHealth
+                            lastStartedAt={latest?.startedAt}
+                            intervalSecs={policy?.checkIntervalSecs ?? policy?.envCheckIntervalSecs}
+                        />
+                    )}
                     {trend.length >= 3 && (
                         <Sparkline
                             points={trend} tone="amber" width={72} height={20}
@@ -250,6 +326,18 @@ export function ReconciliationRunsPanel({ onOpenSettings }: {
                                     ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                                     : <RefreshCw className="w-3.5 h-3.5" />}
                                 Check now
+                            </button>
+                            {/* The blast radius, before committing to it. This
+                                is what makes turning automation on across an
+                                established fleet a decision rather than a
+                                gamble — it evaluates everything and queues
+                                nothing. */}
+                            <button
+                                onClick={() => setPreviewOpen(true)}
+                                className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-semibold text-ink-muted border border-glass-border hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
+                            >
+                                <Eye className="w-3.5 h-3.5" />
+                                Preview
                             </button>
                             {onOpenSettings && (
                                 <button
@@ -293,6 +381,11 @@ export function ReconciliationRunsPanel({ onOpenSettings }: {
                     </motion.div>
                 )}
             </AnimatePresence>
+
+            <ReconcilePreviewDialog
+                open={previewOpen}
+                onClose={() => setPreviewOpen(false)}
+            />
         </section>
     )
 }

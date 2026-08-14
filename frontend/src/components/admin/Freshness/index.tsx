@@ -106,8 +106,18 @@ export function Freshness() {
         }
     }, [fq])
 
+    // The open drawer lives in the URL, not local state, so a link from
+    // elsewhere in the app — a reconciliation job in Job History, a data
+    // source profile — can land directly on one source's detail instead of
+    // dropping the reader on an unfiltered fleet table to find it again.
+    // Back/forward and a copied link both work as a result.
+    const drawerDsId = searchParams.get('fds')
+    const setDrawerDsId = useCallback(
+        (id: string | null) => patchParams({ fds: id }),
+        [patchParams],
+    )
+
     // ── Local (non-URL) UI state ──────────────────────────────────────
-    const [drawerDsId, setDrawerDsId] = useState<string | null>(null)
     const [confirm, setConfirm] = useState<{ dsId: string; scope: RefreshScope; firstBuild?: boolean } | null>(null)
     const [providerDialog, setProviderDialog] = useState<{ id: string; name: string } | null>(null)
     const [fleetDialogOpen, setFleetDialogOpen] = useState(false)

@@ -30,6 +30,9 @@ export type FailureCategory =
 export type DriftStateValue =
     | 'inSync' | 'drifting' | 'overlayMissing' | 'neverBuilt'
     | 'blocked' | 'unobservable' | 'suspended'
+    // Versioned graph: version control owns its rollups, so the sweep observes
+    // and labels it but never acts. Mirrors ``reconcile.DRIFT_STATES``.
+    | 'managed'
 
 /** Why the sweep acted. Mirrors ``reconcile.REASONS``. */
 export type ReconcileReason =
@@ -48,6 +51,9 @@ export interface RefreshEventSummary {
     /** Derived server-side from origin, so the UI never decodes the origin
      *  vocabulary itself. */
     mode?: 'automatic' | 'manual' | null
+    /** The aggregation job this event produced, when it produced one — the
+     *  bridge from "why we rebuilt" to "what the rebuild did". */
+    jobId?: string | null
 }
 
 export interface FreshnessRow {

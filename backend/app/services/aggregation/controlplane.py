@@ -698,6 +698,9 @@ async def run_reconcile(body: ReconcileRunInternal):
             ReconcileFinding(
                 data_source_id=a.data_source_id,
                 workspace_id=a.workspace_id,
+                # The preview is read by a person deciding whether to switch
+                # automation on; a list of raw ``ds_`` ids does not answer that.
+                name=a.name,
                 reason=a.reason,
                 evidence=a.evidence,
             )

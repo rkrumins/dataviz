@@ -30,6 +30,12 @@ def _now() -> str:
 TRIGGER_SOURCES = (
     "onboarding", "manual", "schedule", "drift", "api",
     "purge", "post_purge", "auto",
+    # ``reconcile`` is the automatic reconciliation sweep. It needs its own
+    # value because the job it queues went through signal_source_changed,
+    # which hardcoded "api" — so an hourly automatic rebuild was
+    # indistinguishable in Job History from a person clicking Rebuild, which
+    # is exactly the question the audit trail exists to answer.
+    "reconcile",
 )
 API_TRIGGER_SOURCES = tuple(s for s in TRIGGER_SOURCES if s != "purge")
 

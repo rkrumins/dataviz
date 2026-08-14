@@ -92,6 +92,9 @@ class _Action:
     reason: str
     evidence: Dict
     first_build: bool
+    # Display name, carried only so the dry-run preview can list findings a
+    # person recognises. Never used for a decision.
+    name: Optional[str] = None
 
 
 @dataclass
@@ -348,6 +351,7 @@ class ReconciliationSweeper:
                             reason=verdict.reason,
                             evidence=verdict.evidence,
                             first_build=verdict.reason == "never_aggregated",
+                            name=ctx.get(state.data_source_id, {}).get("name"),
                         ))
                     continue
 
@@ -363,6 +367,7 @@ class ReconciliationSweeper:
                     reason=verdict.reason,
                     evidence=verdict.evidence,
                     first_build=first_build,
+                    name=ctx.get(state.data_source_id, {}).get("name"),
                 ))
                 # Advance the baseline AT ACTION TIME so this finding cannot
                 # re-fire every sweep while the rebuild is in flight. If the
@@ -447,15 +452,20 @@ class ReconciliationSweeper:
                 WorkspaceDataSourceORM.ontology_id,
                 WorkspaceDataSourceORM.provider_id,
                 WorkspaceDataSourceORM.projection_mode,
+                # Only for the preview's finding list. A blast-radius screen
+                # showing raw ``ds_`` ids cannot be read by the person deciding
+                # whether to switch automation on.
+                WorkspaceDataSourceORM.label,
             ).where(WorkspaceDataSourceORM.id.in_(ds_ids))
         )).all()
         seen = set()
-        for ds_id, deleted_at, is_active, ontology_id, provider_id, proj in rows:
+        for ds_id, deleted_at, is_active, ontology_id, provider_id, proj, label in rows:
             seen.add(ds_id)
             out[ds_id].update(
                 deleted=bool(deleted_at) or is_active is False,
                 ontology_id=ontology_id,
                 provider_id=provider_id,
+                name=label,
                 # Versioned: Postgres masters the graph and FalkorDB is a
                 # rebuildable read cache, so every count-based signal here is
                 # measuring the wrong backend half the time. See
@@ -680,6 +690,10 @@ class ReconciliationSweeper:
                             actor=actor or "internal",
                             audit_reason=action.reason,
                             evidence=action.evidence,
+                            # Without this the job it queues is stamped "api"
+                            # and reads in Job History as a person clicking
+                            # Rebuild — indistinguishable from a manual one.
+                            trigger_source="reconcile",
                         )
                 result.actions += 1
             except asyncio.CancelledError:
@@ -713,7 +727,11 @@ class ReconciliationSweeper:
                     f"reconcile:first:{action.data_source_id}:{fp}"
                 ),
             ),
-            "schedule",
+            # "reconcile", not "schedule": the latter means the cron-driven
+            # AggregationScheduler, and a first build queued here is the same
+            # subsystem as the other three detectors. All four report as one
+            # thing in Job History.
+            "reconcile",
             session,
         )
         await emit_refresh_event(
@@ -728,6 +746,7 @@ class ReconciliationSweeper:
             outcome="accepted",
             reason=action.reason,
             evidence=action.evidence,
+            job_id=job.id,
         )
 
     async def _nudge_stats(self, ds_id, workspace_id) -> None:

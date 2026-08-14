@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -883,8 +883,12 @@ class AggregationService:
         result = await session.execute(rows_q)
         jobs = result.scalars().all()
 
+        why = await _reconcile_reason_map(session, jobs)
         items = [
-            self._to_global_response(job, job.workspace_id, None, job.data_source_label)
+            self._to_global_response(
+                job, job.workspace_id, None, job.data_source_label,
+                why=why.get(job.id),
+            )
             for job in jobs
         ]
 
@@ -896,6 +900,7 @@ class AggregationService:
         workspace_id: str,
         workspace_name: str,
         data_source_label: Optional[str],
+        why: Optional[dict] = None,
     ) -> AggregationJobResponse:
         """Convert ORM to enriched response for the global listing."""
         # Compute duration
@@ -944,6 +949,8 @@ class AggregationService:
             projection_mode=job.projection_mode,
             duration_seconds=duration,
             edge_coverage_pct=coverage,
+            reconcile_reason=(why or {}).get("reason"),
+            reconcile_evidence=(why or {}).get("evidence"),
             last_cursor=job.last_cursor,
             max_retries=job.max_retries,
             timeout_secs=job.timeout_secs,
@@ -1529,6 +1536,7 @@ class AggregationService:
         origin: str = "api", actor: str = "internal",
         audit_reason: Optional[str] = None,
         evidence: Optional[dict] = None,
+        trigger_source: str = "api",
     ) -> SourceChangedResponse:
         """Convergence entry point after a DIRECT write to a source's graph.
 
@@ -1713,7 +1721,11 @@ class AggregationService:
                         AggregationTriggerRequest(
                             idempotency_key=f"source-changed:{current_fp or uuid4().hex}",
                         ),
-                        "api",
+                        # Defaults to "api" so every existing caller (connector
+                        # webhooks, seed scripts, the refresh endpoints) is
+                        # unchanged; the reconciliation sweep passes its own so
+                        # its rebuilds are identifiable in Job History.
+                        trigger_source,
                         session,
                     )
                     job_id = job.id
@@ -1769,7 +1781,7 @@ class AggregationService:
             workspace_id=workspace_id, ds_id=ds_id, origin=origin,
             actor=actor, gate=("forced" if force else "changed"),
             actions=actions, outcome=outcome, detail=trigger_detail,
-            audit_reason=audit_reason, evidence=evidence,
+            audit_reason=audit_reason, evidence=evidence, job_id=job_id,
         )
 
         return SourceChangedResponse(
@@ -1784,7 +1796,7 @@ class AggregationService:
 
     async def _emit_signal_event(
         self, *, workspace_id, ds_id, origin, actor, gate, actions, outcome,
-        detail=None, audit_reason=None, evidence=None,
+        detail=None, audit_reason=None, evidence=None, job_id=None,
     ) -> Optional[str]:
         """Best-effort audit emit for one ``signal_source_changed`` outcome.
 
@@ -1808,6 +1820,7 @@ class AggregationService:
                 detail=detail,
                 reason=audit_reason,
                 evidence=evidence,
+                job_id=job_id,
             )
         except Exception as exc:
             logger.warning(
@@ -2676,6 +2689,7 @@ def _event_summary(row) -> Optional[RefreshEventSummary]:
         reason=getattr(row, "reason", None),
         evidence=evidence,
         mode="automatic" if row.origin in _AUTOMATIC_ORIGINS else "manual",
+        job_id=getattr(row, "job_id", None),
     )
 
 
@@ -2850,6 +2864,51 @@ async def _running_job_map(
     out: dict[str, str] = {}
     for ds_id, job_id in rows:
         out.setdefault(ds_id, job_id)  # first per ds = newest (ordered)
+    return out
+
+
+async def _reconcile_reason_map(session, jobs) -> Dict[str, Dict]:
+    """``{job_id: {"reason", "evidence"}}`` for the reconciliation-driven jobs
+    in one page — the "why" behind an automatic rebuild.
+
+    Job History knows what a rebuild DID; ``refresh_events`` knows why it was
+    decided on. This is the join between them, and it is what lets the UI say
+    "Rollups were missing — 1,204,318 → 0" on a job row instead of just
+    "Automatic".
+
+    Batched and joined in memory rather than a JOIN: ``refresh_events`` is a
+    ``public`` table and ``aggregation.jobs`` is not, so they are different
+    domains (``DOMAIN_OWNERSHIP.md``) — the same shape ``_state_map`` uses.
+
+    Filtered to ``trigger_source == 'reconcile'`` first, so a page with no
+    automatic rebuilds issues no query at all.
+    """
+    job_ids = [j.id for j in jobs if j.trigger_source == "reconcile"]
+    if not job_ids:
+        return {}
+
+    from backend.app.db.models import RefreshEventORM
+
+    rows = (await session.execute(
+        select(
+            RefreshEventORM.job_id,
+            RefreshEventORM.reason,
+            RefreshEventORM.evidence,
+        ).where(RefreshEventORM.job_id.in_(job_ids))
+        # Newest first so the first row per job wins if a job were ever
+        # recorded twice (a retry emitting a second event).
+        .order_by(RefreshEventORM.ts.desc())
+    )).all()
+
+    out: Dict[str, Dict] = {}
+    for job_id, reason, evidence in rows:
+        if job_id in out:
+            continue
+        try:
+            parsed = json.loads(evidence) if evidence else None
+        except (TypeError, ValueError):
+            parsed = None
+        out[job_id] = {"reason": reason, "evidence": parsed}
     return out
 
 

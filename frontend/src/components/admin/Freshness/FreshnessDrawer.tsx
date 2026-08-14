@@ -27,6 +27,7 @@ import {
 } from './useFreshness'
 import { DRIFT_SPEC, DriftStateBadge, REASON_LABEL, type DriftState } from './DriftStateBadge'
 import { OverlayIntegrityMeter } from './OverlayIntegrityMeter'
+import { EvidencePair, reconcileEvidenceRows } from './reconcileEvidence'
 import { useActiveJobs } from './useActiveJobs'
 import { AggStatusPill, FreshnessBadges, timeUntil } from './FreshnessRow'
 import type {
@@ -416,22 +417,9 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
     const reasonLabel = event.reason ? REASON_LABEL[event.reason] ?? event.reason : null
     const automatic = event.mode === 'automatic'
 
-    const rows: [string, string][] = []
-    if (evidence) {
-        const num = (k: string) => {
-            const v = evidence[k]
-            return typeof v === 'number' ? v.toLocaleString() : null
-        }
-        const before = num('expectedAggregatedEdges')
-        const after = num('observedAggregatedEdges')
-        if (before && after !== null) rows.push(['Rolled-up edges', `${before} → ${after}`])
-        const nb = num('rawNodeCountBefore')
-        const na = num('rawNodeCountAfter')
-        if (nb && na && nb !== na) rows.push(['Nodes', `${nb} → ${na}`])
-        const eb = num('rawEdgeCountBefore')
-        const ea = num('rawEdgeCountAfter')
-        if (eb && ea && eb !== ea) rows.push(['Edges', `${eb} → ${ea}`])
-    }
+    // Shared with Job History's ReconcileWhy — the two surfaces reach the same
+    // fact from opposite ends and must never disagree about what it says.
+    const rows = reconcileEvidenceRows(evidence)
 
     return (
         <li className="text-xs">
@@ -466,12 +454,25 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
             </button>
             {open && rows.length > 0 && (
                 <dl className="mt-0.5 mb-1.5 ml-1 pl-2 border-l border-glass-border space-y-0.5">
-                    {rows.map(([label, value]) => (
-                        <div key={label} className="flex items-baseline justify-between gap-3">
-                            <dt className="text-[10px] uppercase tracking-wide text-ink-muted">{label}</dt>
-                            <dd className="text-[11px] tabular-nums text-ink-secondary">{value}</dd>
+                    {rows.map(r => (
+                        <div key={r.label} className="flex items-baseline justify-between gap-3">
+                            <dt className="text-[10px] uppercase tracking-wide text-ink-muted">{r.label}</dt>
+                            <dd><EvidencePair before={r.before} after={r.after} /></dd>
                         </div>
                     ))}
+                    {/* The other half of the trail: this event decided on a
+                        rebuild, and that rebuild is a job someone can inspect. */}
+                    {event.jobId && (
+                        <div className="pt-0.5">
+                            <Link
+                                to={jobHistoryPath({ search: event.jobId })}
+                                className="inline-flex items-center gap-1 text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                            >
+                                View the rebuild it started
+                                <ArrowUpRight className="w-2.5 h-2.5" />
+                            </Link>
+                        </div>
+                    )}
                 </dl>
             )}
         </li>

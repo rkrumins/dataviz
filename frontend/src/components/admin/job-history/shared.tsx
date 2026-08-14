@@ -8,7 +8,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
     CheckCircle2, AlertCircle, Loader2, Clock, XCircle,
     Search, X, ChevronDown, Check,
-    Settings, Zap, Calendar, Activity, Trash2,
+    Settings, Zap, Calendar, Activity, Trash2, ShieldCheck,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WorkspaceResponse } from '@/services/workspaceService'
@@ -115,6 +115,7 @@ export const TRIGGER_SOURCES = [
     { key: 'manual', label: 'Manual', icon: Settings },
     { key: 'onboarding', label: 'Onboarding', icon: Zap },
     { key: 'schedule', label: 'Schedule', icon: Calendar },
+    { key: 'reconcile', label: 'Reconciliation', icon: ShieldCheck },
     { key: 'drift', label: 'Drift', icon: Activity },
     { key: 'purge', label: 'Purge', icon: Trash2 },
     { key: 'post_purge', label: 'Post-purge', icon: Zap },
@@ -128,6 +129,10 @@ const TRIGGER_LABELS: Record<string, string> = {
     api: 'API',
     onboarding: 'Onboarding',
     schedule: 'Scheduled',
+    // The automatic reconciliation sweep. Distinct from 'schedule' (the cron
+    // scheduler) and from 'api' (a person or an external caller) — the whole
+    // point is that an automatic rebuild is identifiable as one.
+    reconcile: 'Reconciliation',
     drift: 'Drift',
     purge: 'Purge',
     post_purge: 'Post-purge',
@@ -554,10 +559,22 @@ export function PhaseStepper({ currentPhase, runStats, status }: {
  * cannot drift. No new routing: IngestionPage already drives tabs off
  * ``?tab=``.
  */
-export function jobHistoryPath(opts: { dataSourceId?: string; status?: string[] } = {}): string {
+export function jobHistoryPath(opts: {
+    dataSourceId?: string
+    status?: string[]
+    triggerSource?: string
+    search?: string
+    dateFrom?: string
+} = {}): string {
     const p = new URLSearchParams()
     p.set('tab', 'jobs')
     if (opts.dataSourceId) p.append('dataSourceId', opts.dataSourceId)
     for (const s of opts.status ?? []) p.append('status', s)
+    // These round-trip through paramsToFilters, so a link built here lands on
+    // exactly the filter state the user could have set by hand — same key
+    // names, no second vocabulary to keep in sync.
+    if (opts.triggerSource) p.set('triggerSource', opts.triggerSource)
+    if (opts.search) p.set('search', opts.search)
+    if (opts.dateFrom) p.set('dateFrom', opts.dateFrom)
     return `/ingestion?${p.toString()}`
 }

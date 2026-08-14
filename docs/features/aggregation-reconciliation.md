@@ -184,11 +184,35 @@ same chain `rebuild_min_interval_secs` uses.
 ## Audit
 
 Per-source actions extend `refresh_events` with `reason` (the typed detector
-code) and `evidence` (JSON: observed vs expected rollups, raw counts before →
-after, both fingerprints, how old the statistics were). `origin` is
+code), `evidence` (JSON: observed vs expected rollups, raw counts before →
+after, both fingerprints, how old the statistics were) and `job_id`. `origin` is
 **`reconcile-sweep`**, deliberately distinct from the pre-existing `reconcile`,
 which means the stale-marker reconciler. Automatic vs manual is *derived* from
 origin, not stored.
+
+### The trail joins up with Job History
+
+`refresh_events` knows **why** a rebuild was decided on; `aggregation.jobs`
+knows **what** the rebuild did. Two changes connect them, in both directions:
+
+- **`trigger_source = 'reconcile'`.** Every rebuild the sweep queues goes
+  through `signal_source_changed`, which hardcoded `"api"` — so an hourly
+  automatic reconciliation was indistinguishable in Job History from a person
+  clicking Rebuild. The signal now takes a `trigger_source` (defaulting to
+  `"api"`, so no existing caller changes) and the sweep passes its own. The
+  first-build path moved off `"schedule"` for the same reason: that value means
+  the cron-driven `AggregationScheduler`, and all four detectors should report
+  as one thing.
+- **`refresh_events.job_id`.** The audit event names the job it produced.
+  `_reconcile_reason_map` reads it back for a page of jobs — batched and joined
+  in memory, since `refresh_events` is `public` and `aggregation.jobs` is not —
+  and only for jobs whose trigger is `reconcile`, so an ordinary page issues no
+  extra query.
+
+The result: Job History's Trigger column reads **"Rollups were missing"** rather
+than "API", filters by **Reconciliation**, and its expanded row carries the
+counts that justified the rebuild plus a link into the cockpit. The drawer's
+activity trail links the other way, to the rebuild each finding started.
 
 Sweep-level passes get one `aggregation.reconcile_runs` row each — not one per
 source per hour — with tallies by reason and by skip code, trimmed to 30 days.
@@ -221,6 +245,20 @@ never act on it. Its tone is `sky`, not `indigo`: measured against the six tones
 already in `DRIFT_SPEC`, indigo-600 sits ΔE 7.5 from violet-600 ("Blocked") to
 normal vision — worse than the red/amber pair below — and 1.3 apart under
 protanopia. sky-600 is the only candidate that adds no new collision.
+
+**Preview before committing.** The runs panel's *Preview* opens a dry sweep —
+every source evaluated exactly as a real pass would, nothing queued — grouped by
+reason with the evidence behind each finding. This is what makes enabling
+automation on an established fleet a decision rather than a gamble.
+
+**The sweep's own health.** A stopped control plane is a silent failure: no
+source is ever re-checked and every drift verdict freezes at its last value,
+looking perfectly current. The panel shows *Sweeps have stopped* once the last
+run is older than three check intervals, and *Not yet run* before the first.
+
+The drawer's open source lives in the URL (`?tab=freshness&fds=<id>`), so a link
+from a reconciliation job, a data-source profile, or a copied address lands on
+that source's detail instead of an unfiltered fleet table.
 
 Ingestion → Freshness: a "Drifting" stat tile and filter facet, a per-row
 verdict badge with its reason, a Reconciliation panel in the source drawer

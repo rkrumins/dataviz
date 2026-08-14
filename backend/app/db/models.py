@@ -2543,6 +2543,11 @@ class RefreshEventORM(Base):
     # stats row was. Kept OUT of ``actions``, which is contractually "what the
     # signal DID" and is a List[str] on the wire.
     evidence = Column(Text, nullable=True)
+    # The aggregation job this event produced, when it produced one. Without
+    # it the two halves of the audit trail never meet: this table knows WHY a
+    # rebuild was decided on and Job History knows WHAT the rebuild did, and
+    # nothing joined them. Logical reference (no FK — different domain).
+    job_id = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("idx_refresh_events_ds_ts", "data_source_id", "ts"),

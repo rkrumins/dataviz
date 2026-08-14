@@ -322,6 +322,14 @@ class AggregationJobResponse(BaseModel):
     duration_seconds: Optional[float] = Field(None, alias="durationSeconds")
     edge_coverage_pct: Optional[float] = Field(None, alias="edgeCoveragePct")
 
+    # WHY an automatic reconciliation queued this job — the typed detector
+    # code plus the counts behind it, read from the ``refresh_events`` row
+    # that names this job. Only populated for ``triggerSource='reconcile'``,
+    # so a page with no reconciliation jobs costs no extra query. Without
+    # these, Job History can say a rebuild was automatic but never why.
+    reconcile_reason: Optional[str] = Field(None, alias="reconcileReason")
+    reconcile_evidence: Optional[Dict] = Field(None, alias="reconcileEvidence")
+
     # UI phase visibility. Short ID identifying which phase of the
     # materialization pipeline is currently running — 'extracting' /
     # 'computing' / 'reconciling' / 'applying' (see
@@ -515,6 +523,9 @@ class RefreshEventSummary(BaseModel):
     # "automatic" | "manual", derived from origin — the UI shows this rather
     # than making the reader decode an origin vocabulary.
     mode: Optional[str] = None
+    # The aggregation job this event produced, so the activity trail can hand
+    # the reader straight to what the rebuild actually did.
+    job_id: Optional[str] = Field(None, alias="jobId")
 
     class Config:
         populate_by_name = True
