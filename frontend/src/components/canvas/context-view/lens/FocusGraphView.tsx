@@ -529,6 +529,50 @@ function TailName({ children, className, title }: { children: string; className?
 }
 
 /**
+ * A name clipped in the MIDDLE, keeping both ends (Task 20, P6).
+ *
+ * `TailName` clips the front on purpose — it exists for names that
+ * differ at the END (`int_clean_orders_t1` vs `_t2`). A frame's own
+ * name is not always that shape: this codebase's own tables differ at
+ * the FRONT just as often (`stg_`/`int_`/`fct_`/`dim_`), and clipping
+ * that away unconditionally produced the reported
+ * `…TERMEDIATE_T1` — the front-clip rule answering a question this
+ * name was never asking, and reading as a broken word rather than a
+ * shortened one. Splitting the string and giving the tail span
+ * `flex-shrink-0` means the tail NEVER gives up room and the head
+ * truncates into whatever is left — both identifying ends stay
+ * readable, whichever end a name's schema-prefix or table-suffix
+ * convention actually differs at.
+ */
+/** Below this many characters, a name fits comfortably at every width
+ *  this header renders at — rendering it as a single untouched run
+ *  rather than paying the two-span split for nothing. Set from the
+ *  reported defect itself: `INTERMEDIATE_T1` (15) is exactly the
+ *  length that needed the fix, so the floor sits just under it. */
+const MIDDLE_TRUNCATE_FLOOR = 13
+
+function MiddleTruncateName({ children, className, title }: { children: string; className?: string; title?: string }) {
+  if (children.length <= MIDDLE_TRUNCATE_FLOOR) {
+    // Short enough that the head/tail split buys nothing — one text
+    // node, same shape `TailName` renders, so a short name's own
+    // discoverability (accessibility tree, copy-paste, this file's own
+    // tests) is unchanged from before this task.
+    return (
+      <span dir="rtl" className={cn('truncate min-w-0 text-left', className)} title={title ?? children}>
+        <bdi>{children}</bdi>
+      </span>
+    )
+  }
+  const mid = Math.ceil(children.length / 2)
+  return (
+    <span className={cn('flex min-w-0', className)} title={title ?? children}>
+      <span className="truncate min-w-0"><bdi>{children.slice(0, mid)}</bdi></span>
+      <span className="flex-shrink-0 whitespace-nowrap"><bdi>{children.slice(mid)}</bdi></span>
+    </span>
+  )
+}
+
+/**
  * Where the FOCAL lives — the whole chain, each level clickable.
  *
  * `Sales › Snowflake › OrderApp › PROD › fact_orders` is the six-level
@@ -1096,9 +1140,16 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
       }}
       onClick={activate}
       onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
+      // The click/double-click instruction used to ride along on every
+      // row's native tooltip and, being the browser's own, could wedge
+      // over the board rather than dismiss (Task 20, P6, two reported
+      // screenshots). Dropped rather than moved to a design-system
+      // tooltip: the peek that a click opens states "Focus here ⇧↵"
+      // itself, so the instruction is not lost, only said once, where a
+      // reader who has already clicked can actually use it.
       title={`${card.label}${card.description ? ` — ${card.description}` : ''}${
         card.connected ? '' : ' — inside this, but no lineage with the focused entity'
-      } · click for a preview, double-click to focus`}
+      }`}
     >
       {card.wired && <PortHandles />}
       <ContentsChevron card={card} ctx={ctx} />
@@ -1226,7 +1277,9 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       onClick={activate}
       onKeyDown={keyActivate}
       onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
-      title={`${card.label}${card.description ? ` — ${card.description}` : ''} · click to inspect, double-click to focus`}
+      // Dropped the click/double-click instruction (Task 20, P6) — same
+      // reasoning as FrameRow's own title, just above.
+      title={`${card.label}${card.description ? ` — ${card.description}` : ''}`}
       style={{
         width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: displayAccent,
         ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 8px 20px -8px ${accent}59` }
@@ -1486,12 +1539,12 @@ function FocusFrameNode({ data, selected }: NodeProps) {
                 what is left, and truncates there. With no chip beside
                 it the name keeps the whole line: capping it anyway
                 clipped `int_clean_products_t1` for no one's benefit. */}
-            <TailName className={cn(
-              'block text-[11.5px] font-semibold text-ink leading-tight',
+            <MiddleTruncateName className={cn(
+              'text-[11.5px] font-semibold text-ink leading-tight',
               hasAncestryChip && 'max-w-[62%] flex-shrink-0',
             )}>
               {card.label}
-            </TailName>
+            </MiddleTruncateName>
             <FrameAncestry card={card} ctx={ctx} />
           </div>
           <p
@@ -1615,12 +1668,12 @@ function FocusFrameNode({ data, selected }: NodeProps) {
               aria-label={`${card.label} — isolate the lineage running through it`}
               className="nodrag block w-full min-w-0 text-left rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
             >
-              <TailName
-                className="block text-[13px] font-semibold text-ink leading-tight"
+              <MiddleTruncateName
+                className="text-[13px] font-semibold text-ink leading-tight"
                 title={`${card.label}${card.description ? ` — ${card.description}` : ''}`}
               >
                 {card.label}
-              </TailName>
+              </MiddleTruncateName>
             </button>
             {/* What is in here, on this lineage and altogether — the same
                 sentence, decided the same way, that a partner frame's
@@ -2321,11 +2374,16 @@ function LensPeek({ card, host, ctx, onDismiss }: {
   const x = fits(wanted) ? wanted : fits(other) ? other : Math.max(8, Math.min(wanted, paneW - PEEK_W - 8))
   // Vertically centred on the row, but never hanging off the top or
   // bottom of the pane — a panel you have to pan to read is not a peek.
+  // Unconditional (Task 20, P6): the exemption below `PEEK_MAX_H + 16`
+  // left `y` at the raw row position on a short pane — genuinely
+  // unclamped, not merely "less padded" — so a row near the top or
+  // bottom edge of a short window opened a peek running off it. The
+  // clamp degrades to "pinned near the top, 8px in" when the pane is
+  // too short to fit the panel at all, which is a defined position
+  // rather than none.
   const half = PEEK_MAX_H / 2
   const rowY = (card.y + card.h / 2) * zoom + ty
-  const y = paneH > PEEK_MAX_H + 16
-    ? Math.max(half + 8, Math.min(rowY, paneH - half - 8))
-    : rowY
+  const y = Math.max(half + 8, Math.min(rowY, paneH - half - 8))
   const flows = card.flowsIn + card.flowsOut
   const pill = card.band < 0 ? card.pillUp ?? card.pillDown : card.pillDown ?? card.pillUp
   const pillDir: 'in' | 'out' = pill != null && pill === card.pillUp ? 'in' : 'out'

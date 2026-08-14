@@ -1154,8 +1154,12 @@ describe('what is really inside a container', () => {
     renderLens(['F'], focusWithColumns())
 
     // Same node type as the partner frame beside it — one language.
-    const focal = screen.getAllByText('int_clean_products_t2')
-      .find(el => el.closest('.react-flow__node'))!
+    // Found by `title` rather than `getByText`: at 22 characters this
+    // name crosses `MiddleTruncateName`'s split floor (Task 20, P6), so
+    // its text is two adjacent spans — invisible to a plain text query,
+    // which only reads an element's own direct text children. The title
+    // always carries the whole name regardless of how it renders.
+    const focal = document.querySelector('[title="int_clean_products_t2"]')!
       .closest('.react-flow__node')!
     expect(focal.className).toContain('react-flow__node-focusFrame')
 
@@ -1172,6 +1176,44 @@ describe('what is really inside a container', () => {
     // The focus never offers to re-center on itself.
     expect(screen.queryByTitle('Focus int_clean_products_t2')).toBeNull()
     expect(screen.getByTitle('Focus raw_products')).toBeTruthy()
+  })
+
+  /**
+   * Task 20, P6 — reported: a frame named `INTERMEDIATE_T1` rendered
+   * as `…TERMEDIATE_T1`, its identifying "IN" prefix silently gone.
+   * `TailName`'s front-clip is right for a name that differs at the
+   * END (`_t1` vs `_t2`, the case it was built for) but wrong for one
+   * that differs at the START — this codebase's own naming has both.
+   */
+  it('a frame name past the middle-truncate floor keeps both identifying ends', () => {
+    const longName = doneWalk(walkModel('F', {
+      nodes: [
+        wnode('F', 'dataset', 'focal_table'),
+        wnode('LONG', 'dataset', 'INTERMEDIATE_T1', { childCount: 1 }),
+        wnode('col', 'schemaField', 'a_column'),
+      ],
+      containmentEdges: [holds('LONG', 'col')],
+      lineageEdges: [hop('col', 'F')],
+      upstreamUrns: new Set(['LONG', 'col']),
+    }))
+    renderLens(['F'], longName)
+    // Found by title, not getByText — see the R7 test just above for why.
+    const el = document.querySelector('[title="INTERMEDIATE_T1"]')!
+    // Two spans (a shrinkable head, a tail that never gives up room) —
+    // the structural half of "middle, not front-only" that jsdom (no
+    // real layout) can actually observe; the visual half is the
+    // harness screenshot.
+    expect(el.children.length).toBe(2)
+    // Nothing lost either way: the reported defect was never about
+    // missing TEXT, only about which END read as missing.
+    expect(el.textContent).toBe('INTERMEDIATE_T1')
+  })
+
+  it('a short frame name is untouched by the split — one run, same as before this task', () => {
+    renderLens(['F'], doneWalk(collateralsEstate()))
+    const el = document.querySelector('[title="RISK_DB"]')!
+    expect(el.querySelector('bdi')).toBeTruthy()
+    expect(el.children.length).toBe(1) // the bdi alone, no head/tail spans
   })
 
   it('R7: the one node still carries the focal chrome — Reach, kind, contents', () => {
