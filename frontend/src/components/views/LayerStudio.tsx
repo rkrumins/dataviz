@@ -38,7 +38,6 @@ import {
     Wand2,
     Eye,
     EyeOff,
-    AlertCircle,
     Check,
     X,
     ChevronRight,
@@ -402,24 +401,6 @@ export function LayerStudio({
         return map
     }, [storeEffectiveAssignments, formData.layers, formData.assignments])
 
-    // ── Containment inheritance enforcement ──────────────────────────────────────
-    const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
-    const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-    const showAssignmentWarning = useCallback((message: string) => {
-        setAssignmentWarning(message)
-        if (warningTimerRef.current) clearTimeout(warningTimerRef.current)
-        warningTimerRef.current = setTimeout(() => setAssignmentWarning(null), 5000)
-    }, [])
-
-    /** Check if an entity is a containment child whose parent is in a different layer */
-    const isContainmentLocked = useCallback((entityId: string, targetLayerId: string): boolean => {
-        const parentId = parentMap.get(entityId)
-        if (!parentId) return false
-        const parentLayerId = layerAssignmentMap.get(parentId)
-        return !!parentLayerId && parentLayerId !== targetLayerId
-    }, [parentMap, layerAssignmentMap])
-
     /** Build reverse child map from parentMap */
     const childMap = useMemo(() => {
         const map = new Map<string, string[]>()
@@ -493,24 +474,20 @@ export function LayerStudio({
         const roots = rawIds.filter(id => !hasAncestorIn(id, batch))
         const inheritedFromBatch = rawIds.length - roots.length
 
-        const allowed = roots.filter(id => !isContainmentLocked(id, layerId))
-        const blocked = roots.length - allowed.length
-
         const movedFromOtherLayers: string[] = []
         const redundant: string[] = []
-        allowed.forEach(id => {
+        roots.forEach(id => {
             movedFromOtherLayers.push(...getDescendantsInDifferentLayer(id, layerId))
             redundant.push(...getRedundantDescendants(id, layerId))
         })
 
         return {
-            allowed,
-            blocked,
+            allowed: roots,
             inheritedFromBatch,
             movedFromOtherLayers: [...new Set(movedFromOtherLayers)],
             redundant: [...new Set(redundant)],
         }
-    }, [hasAncestorIn, isContainmentLocked, getDescendantsInDifferentLayer, getRedundantDescendants])
+    }, [hasAncestorIn, getDescendantsInDifferentLayer, getRedundantDescendants])
 
     // ── Entity identity (names + children) ──────────────────────────────────────
     // The wizard has NO canvas, so identity comes from the entity browser's own
@@ -720,34 +697,24 @@ export function LayerStudio({
                 return
             }
 
-            // HARD RULE: Block containment children from being assigned to a different layer
-            if (isContainmentLocked(entityId, layerId)) {
-                showAssignmentWarning('A child can’t sit in a different layer from its parent — children always follow their parent. Move the parent, or place the parent here and let this one follow.')
-                return
-            }
-
             const plan = planPlacement([entityId], layerId)
             if (plan.allowed.length === 0) return
             const targetNodeId = layerId === activeTarget?.layerId ? activeTarget?.nodeId : undefined
 
             confirmOrCommit(plan.allowed, plan.movedFromOtherLayers, plan.redundant, layerId, targetNodeId)
         },
-        [activeTarget, layers, assignments, commitLayout, isContainmentLocked, planPlacement, showAssignmentWarning, confirmOrCommit]
+        [activeTarget, layers, assignments, commitLayout, planPlacement, confirmOrCommit]
     )
 
     const handleBulkAssignment = useCallback(
         (layerId: string, entityIds: string[]) => {
             const plan = planPlacement(entityIds, layerId)
-
-            if (plan.blocked > 0) {
-                showAssignmentWarning(`${plan.blocked} ${plan.blocked === 1 ? 'entity' : 'entities'} skipped — a child can’t sit in a different layer from its parent.`)
-            }
             if (plan.allowed.length === 0) return
 
             const targetNodeId = layerId === activeTarget?.layerId ? activeTarget?.nodeId : undefined
             confirmOrCommit(plan.allowed, plan.movedFromOtherLayers, plan.redundant, layerId, targetNodeId)
         },
-        [activeTarget, planPlacement, showAssignmentWarning, confirmOrCommit]
+        [activeTarget, planPlacement, confirmOrCommit]
     )
 
     // ── Direct drop onto hierarchy panel layer/node ─────────────────────────────
@@ -762,9 +729,6 @@ export function LayerStudio({
             if (rawIds.length === 0) return
 
             const plan = planPlacement(rawIds, layerId)
-            if (plan.blocked > 0) {
-                showAssignmentWarning(`${plan.blocked} ${plan.blocked === 1 ? 'entity' : 'entities'} skipped — a child can’t sit in a different layer from its parent.`)
-            }
             if (plan.allowed.length === 0) return
 
             confirmOrCommit(plan.allowed, plan.movedFromOtherLayers, plan.redundant, layerId, nodeId)
@@ -782,7 +746,7 @@ export function LayerStudio({
                 })
             }
         },
-        [layers, logicalNodes, isContainmentLocked, getDescendantsInDifferentLayer, showAssignmentWarning, confirmOrCommit]
+        [layers, logicalNodes, getDescendantsInDifferentLayer, confirmOrCommit]
     )
 
     // ── Layer CRUD (in-step) ────────────────────────────────────────────────────
@@ -1012,15 +976,6 @@ export function LayerStudio({
                     </button>
                 </div>
             </div>
-
-            {/* Containment inheritance warning */}
-            {assignmentWarning && (
-                <div className="mx-1 mb-2 px-3 py-2 rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-xs flex items-center gap-2">
-                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                    <span className="flex-1"><span className="font-medium">Assignment blocked.</span> {assignmentWarning}</span>
-                    <button onClick={() => setAssignmentWarning(null)} className="text-red-400 hover:text-red-600">&times;</button>
-                </div>
-            )}
 
             {/* Three-panel layout. The Layers rail is user-resizable: nested
                 hierarchies with long entity names need room, and a fixed 240px
