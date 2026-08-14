@@ -1130,6 +1130,44 @@ describe('pointing at an element isolates its lineage cone', () => {
     // server either) and says so too — never dropped from the chip.
     expect(within(chip).getByText(/0 known downstream flows? — every one on this board/)).toBeTruthy()
   })
+
+  // ── THE GRAIN SEAM's own honesty (Task 22, R1 rule 3) ────────────────
+
+  it('R1 rule 3 — the chip states what is drawn is at table grain, matching the seam it paints on the wire', () => {
+    // The focus's own downstream (its NATURAL side, always shown) lands
+    // on MID — a table that HOLDS THINGS (childCount), so the wire is
+    // coarse (see `holdsThings`, focus-layout.ts). The chip's count line
+    // must say so, in the same words the wire is painted with, not just
+    // "known".
+    renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [
+        wnode('F', 'dataset', 'focus_entity'),
+        wnode('MID', 'dataset', 'gold_table', { childCount: 5 }),
+      ],
+      lineageEdges: [hop('F', 'MID')],
+      downstreamUrns: new Set(['MID']),
+    })))
+    fireEvent.click(screen.getByLabelText('focus_entity — isolate the lineage running through it'))
+    const chip = spotlightChip()
+    expect(within(chip).getByText('1 known downstream flow — every one on this board (1 at table grain)')).toBeTruthy()
+  })
+
+  it('R1 rule 3 — a genuinely column-certain side never gains the clause', () => {
+    // The mirror: MID declares nothing — a leaf — so the wire is
+    // column-certain and the chip says only what it always said.
+    renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [
+        wnode('F', 'dataset', 'focus_entity'),
+        wnode('MID', 'dataset', 'plain_sink'),
+      ],
+      lineageEdges: [hop('F', 'MID')],
+      downstreamUrns: new Set(['MID']),
+    })))
+    fireEvent.click(screen.getByLabelText('focus_entity — isolate the lineage running through it'))
+    const chip = spotlightChip()
+    expect(within(chip).getByText('1 known downstream flow — every one on this board')).toBeTruthy()
+    expect(within(chip).queryByText(/at table grain/)).toBeNull()
+  })
 })
 
 // ── THE TRAIL ────────────────────────────────────────────────────────
