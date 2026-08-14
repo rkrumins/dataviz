@@ -1970,6 +1970,41 @@ describe('focus-layout — isolationCone (what one element\'s lineage covers)', 
         expect(isolationCone(board(cards, edges), 'nope')).toBeNull()
     })
 
+    it('runs THROUGH the focus\'s own rows: column to column, across the board', () => {
+        // The shape the finest-grain wiring exists for: a partner's
+        // column feeds a column INSIDE the focus, which feeds a consumer.
+        // Isolating the partner's column has to follow that chain through
+        // the focus's rows — the rows are the endpoints, and the cone is
+        // computed over the wires the board draws between them.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [
+                wnode('SRC', 'dataset', 'raw_orders', { childCount: 4 }),
+                wnode('sc', 'schemaField', 'order_id'),
+                wnode('F', 'dataset', 'stg_orders', { childCount: 3 }),
+                wnode('fc', 'schemaField', 'order_id'),
+                wnode('OUT', 'dataset', 'fct_orders', { childCount: 5 }),
+                wnode('oc', 'schemaField', 'order_id'),
+                wnode('OTHER', 'dataset', 'refunds', { childCount: 2 }),
+                wnode('rc', 'schemaField', 'refund_id'),
+            ],
+            contains: [['SRC', 'sc'], ['F', 'fc'], ['OUT', 'oc'], ['OTHER', 'rc']],
+            hops: [['sc', 'fc'], ['fc', 'oc'], ['rc', 'oc']],
+        })
+        // The other producer only lands once the consumer's own page is
+        // revealed — which is exactly when it becomes worth NOT lighting.
+        const g = layout(sg, withReveal(initialLensViewState(sg), 'in:OUT', 1))
+        const id = (u: string) => cardFor(g, u)!.id
+        const cone = isolationCone(g, id('sc'))!
+        // Through the focus's own row and out the other side.
+        expect(cone.cardIds.has(id('fc'))).toBe(true)
+        expect(cone.cardIds.has(id('oc'))).toBe(true)
+        // ...and the focus itself is lit, because it holds a lit row.
+        expect(cone.cardIds.has(id('F'))).toBe(true)
+        // The OTHER producer of the same consumer is not on this lineage.
+        expect(cone.cardIds.has(id('rc'))).toBe(false)
+    })
+
     it('runs over a REAL board: the focus\'s cone reaches its partners', () => {
         const g = layout(collateralEstate())
         const focal = cardFor(g, 'F')!
