@@ -43,10 +43,14 @@ const FIXTURES = process.argv.slice(2).length
   // ...and the half of a windowed list a shot at rest cannot show: the
   // fade under the header and the step back, which exist only once the
   // window has left the top.
+  //
+  // ...and the SCALE MANDATE (user, 2026-08-14): a 20-hop chain, and a
+  // hub of 100 upstream across twelve systems plus 40 downstream — so a
+  // performance fix that only looks fast on a five-card board is caught.
   : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall', 'walkDirectionAndHighlight',
     'walkSharedPlatform', 'walkSharedPlatformLeaf', 'walkSharedPlatformOneColumn', 'walkDensePills',
     'walkChildrenRich', 'walkChildrenScrolled', 'walkColumnFocus', 'walkPlatformFocus',
-    'walkIsolatedCone', 'walkIsolatedLeafCone']
+    'walkIsolatedCone', 'walkIsolatedLeafCone', 'walkLongChain', 'walkWideHub']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH
@@ -98,14 +102,22 @@ const ready = new Promise((resolve, reject) => {
 try {
   await ready
   for (const fixture of FIXTURES) {
-    const out = join(OUT, `${fixture}.png`)
+    // Perf measurement runs (Task 20, P0) pass a raw query string, e.g.
+    // `fixture=walkWideHub&perf=1`, to reach the harness's rAF sampler —
+    // everyone else passes a bare fixture name. `perf=1` also needs more
+    // wall-clock than a static shot: the sampler runs for ~1.5s before it
+    // has anything to report.
+    const query = fixture.includes('=') ? fixture : `fixture=${fixture}`
+    const budget = fixture.includes('perf=1') ? 8000 : 4000
+    const safeName = fixture.replace(/[^a-zA-Z0-9_-]+/g, '-')
+    const out = join(OUT, `${safeName}.png`)
     await run(chromium, [
       '--headless', '--no-sandbox', '--disable-gpu', '--hide-scrollbars',
       '--force-device-scale-factor=2',
       '--window-size=1600,900',
-      '--virtual-time-budget=4000',
+      `--virtual-time-budget=${budget}`,
       `--screenshot=${out}`,
-      `http://localhost:${PORT}/lens-harness.html?fixture=${fixture}`,
+      `http://localhost:${PORT}/lens-harness.html?${query}`,
     ], { maxBuffer: 32 * 1024 * 1024 })
     console.log(`  → ${out}`)
   }

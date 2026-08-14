@@ -77,6 +77,7 @@ import { CARD_W, BAND_GAP, FRAME_FOOTER_H, FRAME_PAD, headerHeight, holdsRows, l
 import { REVEAL_PAGE, isolationCone, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
+import { bumpRenderCount } from './renderProbe'
 
 /** Direction tints — the house semantics: upstream = sky, downstream
  *  = amber (matches the list columns and the canvas). */
@@ -1073,6 +1074,7 @@ function FrameDividerNode({ data }: NodeProps) {
 }
 
 function FocusGraphCard({ data, selected }: NodeProps) {
+  bumpRenderCount('FocusGraphCard')
   const { card, ctx } = data as unknown as {
     card: FocusCard
     ctx: CardCtx
@@ -1180,6 +1182,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
  * the child cards sitting on top.
  */
 function FocusFrameNode({ data, selected }: NodeProps) {
+  bumpRenderCount('FocusFrameNode')
   const { card, ctx, focalStats } = data as unknown as {
     card: FocusCard
     ctx: CardCtx
@@ -1888,6 +1891,7 @@ const MemoFocusGraphCard = memo(FocusGraphCard, (prev, next) => {
 /** Non-interactive header floating above each hop band ("Data Sources
  *  · 30 of 45"), or an italic whisper for an empty direction. */
 function BandLabelNode({ data }: NodeProps) {
+  bumpRenderCount('BandLabelNode')
   const d = data as unknown as { band?: number; sub?: string; whisper?: string; cardIds?: string[] }
   // HOP CONTEXT while a cone is isolated: how much of THIS column the
   // reader's lineage runs through. Counted here, from the ids the band
@@ -1947,6 +1951,7 @@ const NODE_TYPES = {
 // ── Edge ─────────────────────────────────────────────────────────────
 
 function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd, data }: EdgeProps) {
+  bumpRenderCount('FocusGraphEdgeComp')
   const d = data as unknown as {
     count: number
     aggregated: boolean

@@ -766,6 +766,146 @@ const walkIsolatedCone = (): WalkFixture => ({
   isolatedId: 'n:dim_customer',
 })
 
+/**
+ * THE SCALE MANDATE, first half (user, 2026-08-14): "really long lineage
+ * that has like 20 hops". Twenty hops, degree-one pass-through the whole
+ * way — no containment, nothing to auto-open — except two branch points
+ * that keep it from being a single line the layout could special-case.
+ *
+ *   up09 → up08 → … → up00 → F → dn00 → … → dn09     (20 hops, 21 nodes)
+ *   up05 also feeds branchA · dn04 also feeds dn05 from branchB
+ *
+ * REVEAL_PAGE (12) governs how many SIBLING groups one page admits, not
+ * how many HOPS deep a walk sees — a chain has exactly one neighbour per
+ * node, so each hop needs its OWN reveal (`revealKey('in'|'out', urn)`
+ * keyed on the CHAIN NODE, not the focus) before the next one is even in
+ * the population. Confirmed against a screenshot before trusting it: the
+ * unscripted default drew one hop each side and a "+1" pill, not twenty
+ * hops — so the script below walks the whole chain into view, one reveal
+ * per link, which is the picture a 20-hop walk actually looks like.
+ * Exists for the P3 layout-rebuild budget (chain depth, not fan-out) and
+ * reused by Task 21.
+ */
+const walkLongChain = (): WalkFixture => {
+  const nodes: LensWalkNode[] = [wnode('F', 'dataset', 'ledger_snapshot')]
+  const lineageEdges: ReturnType<typeof hop>[] = []
+  const upstreamUrns = new Set<string>()
+  const downstreamUrns = new Set<string>()
+  const CHAIN = 10
+  let prev = 'F'
+  for (let i = CHAIN - 1; i >= 0; i--) {
+    const urn = `up${String(i).padStart(2, '0')}`
+    nodes.push(wnode(urn, 'dataset', `stage_up_${String(i).padStart(2, '0')}`))
+    lineageEdges.push(hop(urn, prev))
+    upstreamUrns.add(urn)
+    prev = urn
+  }
+  prev = 'F'
+  for (let i = 0; i < CHAIN; i++) {
+    const urn = `dn${String(i).padStart(2, '0')}`
+    nodes.push(wnode(urn, 'dataset', `stage_dn_${String(i).padStart(2, '0')}`))
+    lineageEdges.push(hop(prev, urn))
+    downstreamUrns.add(urn)
+    prev = urn
+  }
+  // Branch point 1 — FAN IN: a second producer merges into the upstream
+  // chain alongside the main line. Reachable the same way the chain is
+  // (upstream BFS walks target←source, so a card FEEDING up05 is on it;
+  // a card up05 fed would not be — the two are not interchangeable).
+  nodes.push(wnode('branchA', 'dataset', 'branch_reconciliation'))
+  lineageEdges.push(hop('branchA', 'up05'))
+  upstreamUrns.add('branchA')
+  // Branch point 2 — FAN OUT, the downstream mirror: one chain card feeds
+  // a second consumer besides the next link in the line.
+  nodes.push(wnode('branchB', 'dataset', 'branch_adjustment'))
+  lineageEdges.push(hop('dn05', 'branchB'))
+  downstreamUrns.add('branchB')
+  // One reveal per link: `up09`'s own upstream neighbour is `up08`, so
+  // `up08` is not IN THE POPULATION until `in:up09` is revealed, and so
+  // on down to `up00`. `frontierUp`/`frontierDown` sit at the far end of
+  // what is actually loaded (`up00`/`dn09`) — the near end (`up09`/`dn00`)
+  // is fully surrounded by loaded chain on both sides and has nothing
+  // left to fetch.
+  const revealChain: Array<[string, number]> = []
+  for (let i = CHAIN - 1; i >= 1; i--) revealChain.push([`in:up${String(i).padStart(2, '0')}`, 1])
+  for (let i = 0; i < CHAIN - 1; i++) revealChain.push([`out:dn${String(i).padStart(2, '0')}`, 1])
+  return {
+    title: 'Twenty hops, degree-one the whole way, two branch points',
+    model: walkModel('F', {
+      nodes,
+      lineageEdges,
+      upstreamUrns,
+      downstreamUrns,
+      frontierUp: [frontier('up00', null)],
+      frontierDown: [frontier('dn09', null)],
+    }),
+    script: base => scripted(base, { reveal: revealChain }),
+  }
+}
+
+/**
+ * THE SCALE MANDATE, second half (user, 2026-08-14): "sources with 100
+ * incoming items". One hundred upstream tables spread across twelve
+ * systems (so the fan-in is realistic rather than one container with a
+ * hundred rows), forty flat downstream consumers.
+ *
+ * Twelve systems is exactly REVEAL_PAGE (12), so every system — and the
+ * ~100 tables inside them — draws on the default view state with no
+ * script; the forty downstream are forty SEPARATE top-level groups (no
+ * container of their own), so only the first page shows by default and
+ * `script` reveals the rest, which is also the realistic shape: a fan-out
+ * this wide is exactly what the reveal-page pill exists for.
+ *
+ * Exists for the P3 rebuild budget (fan-out, not chain depth) and the P1
+ * isolation/hover-toggle scripting-cost budget at hub scale; reused by
+ * Task 21.
+ */
+const walkWideHub = (): WalkFixture => {
+  const SYSTEMS = 12
+  const UPSTREAM = 100
+  const DOWNSTREAM = 40
+  const nodes: LensWalkNode[] = [
+    wnode('F', 'dataset', 'core_ledger', { description: 'Consolidated across every source system', childCount: 6 }),
+  ]
+  const containmentEdges: ReturnType<typeof holds>[] = []
+  const lineageEdges: ReturnType<typeof hop>[] = []
+  const upstreamUrns = new Set<string>()
+  const downstreamUrns = new Set<string>()
+  for (let s = 0; s < SYSTEMS; s++) {
+    const sysUrn = `sys${String(s).padStart(2, '0')}`
+    nodes.push(wnode(sysUrn, 'system', `source_system_${String(s).padStart(2, '0')}`))
+    upstreamUrns.add(sysUrn)
+  }
+  for (let i = 0; i < UPSTREAM; i++) {
+    const sysUrn = `sys${String(i % SYSTEMS).padStart(2, '0')}`
+    const urn = `up${String(i).padStart(3, '0')}`
+    nodes.push(wnode(urn, 'dataset', `feed_${String(i).padStart(3, '0')}`))
+    containmentEdges.push(holds(sysUrn, urn))
+    lineageEdges.push(hop(urn, 'F'))
+    upstreamUrns.add(urn)
+  }
+  for (let i = 0; i < DOWNSTREAM; i++) {
+    const urn = `dn${String(i).padStart(3, '0')}`
+    nodes.push(wnode(urn, 'dataset', `report_${String(i).padStart(3, '0')}`))
+    lineageEdges.push(hop('F', urn))
+    downstreamUrns.add(urn)
+  }
+  return {
+    title: 'One hundred upstream across twelve systems, forty downstream',
+    model: walkModel('F', {
+      nodes,
+      containmentEdges,
+      lineageEdges,
+      upstreamUrns,
+      downstreamUrns,
+    }),
+    // Forty ungrouped groups is more than one REVEAL_PAGE (12) — reveal
+    // four pages so the shot shows every downstream card the fixture
+    // promises, not the first twelve behind a "+28" pill.
+    script: base => scripted(base, { reveal: [['out:F', 4]] }),
+  }
+}
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkCollaterals: walkCollaterals(),
   walkIsolatedCone: walkIsolatedCone(),
@@ -784,4 +924,6 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkChildrenScrolled: walkChildrenScrolled(),
   walkColumnFocus: walkColumnFocus(),
   walkPlatformFocus: walkPlatformFocus(),
+  walkLongChain: walkLongChain(),
+  walkWideHub: walkWideHub(),
 }

@@ -12,65 +12,75 @@
  *
  * `npm run harness:shot` drives Chromium over every fixture and writes
  * PNGs to .harness/.
+ *
+ * `&perf=1` (Task 20, P0) additionally runs a real-Chromium rAF sampler —
+ * see `usePaintSampler` below — for the paint-side numbers jsdom cannot
+ * produce at all (jsdom does no layout or compositing). `&isolate=<cardId>`
+ * overrides the fixture's own isolation, so any fixture can be sampled
+ * with its off-cone treatment active at full board scale.
  */
-import { StrictMode } from 'react'
+import { StrictMode, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ReactFlowProvider } from '@xyflow/react'
 import '../styles/globals.css'
 import { FocusGraphView } from '../components/canvas/context-view/lens/FocusGraphView'
-import { boundaryFrontierFilter, buildLensSubgraph } from '../components/canvas/context-view/lens/lens-subgraph'
-import { buildFocusLayout, initialLensViewState } from '../components/canvas/context-view/lens/focus-layout'
-import { WALK_FIXTURES, type WalkFixture } from './lensFixtures'
+import { WALK_FIXTURES } from './lensFixtures'
+import { buildWalk } from './buildWalk'
 
 /**
- * End to end through the REAL modules: a merged walk model →
- * `buildLensSubgraph` → `initialLensViewState` (+ the fixture's scripted
- * clicks) → `buildFocusLayout` → the same view the app renders. Nothing
- * is mocked but the callbacks, so a screenshot is evidence about the
- * code that ships rather than about the harness.
+ * Steady-state PAINT cost, sampled the only place it is real: a browser
+ * that actually composites. Settles past the initial mount (so first
+ * layout never dominates the numbers), then averages `requestAnimationFrame`
+ * deltas over a fixed window — the direct comparison P2 needs for "does
+ * removing `filter` in favour of opacity + a precomputed muted colour
+ * measurably help", before vs after, same fixture, same machine, same
+ * session. Reported as text ON the page so the existing screenshot-only
+ * harness captures it — no new Chromium-driving script needed.
  */
-function buildWalk(fixture: WalkFixture) {
-  const sg = buildLensSubgraph(fixture.model)
-  const base = initialLensViewState(sg)
-  const view = fixture.script ? fixture.script(base) : base
-  const graph = buildFocusLayout({
-    sg,
-    view,
-    query: '',
-    hiddenTypes: new Set(),
-    extendStatus: fixture.extendStatus ?? new Map(),
-    childrenAll: fixture.childrenAll ?? new Map(),
-    childrenAllStatus: new Map(),
-    walkStatus: 'done',
-    directionFilter: fixture.directionFilter,
-  })
-  return {
-    graph,
-    focalId: sg.focusUrn,
-    directionFilter: fixture.directionFilter,
-    selectedId: fixture.selectedId ?? null,
-    isolatedId: fixture.isolatedId ?? null,
-    // THE SAME derivation the app uses, imported rather than restated:
-    // a "+" means the data source has more of THIS SIDE, and a frontier
-    // entry on a node inside the focus whose lineage never leaves it says
-    // no such thing. Restating it here as `frontier.length > 0` made the
-    // harness contradict the app — walkPlatformFocus's own docstring says
-    // "no + on upstream Reach" and the shot showed one.
-    reach: {
-      up: fixture.model.upstreamUrns.size,
-      down: fixture.model.downstreamUrns.size,
-      moreUp: fixture.model.frontierUp.some(
-        f => boundaryFrontierFilter(sg, sg.focusUrn, 'in')(f.urn)),
-      moreDown: fixture.model.frontierDown.some(
-        f => boundaryFrontierFilter(sg, sg.focusUrn, 'out')(f.urn)),
-    },
-  }
+function usePaintSampler(enabled: boolean): string | null {
+  const [report, setReport] = useState<string | null>(null)
+  useEffect(() => {
+    if (!enabled) return
+    let cancelled = false
+    const settle = window.setTimeout(() => {
+      const deltas: number[] = []
+      let last = performance.now()
+      const windowStart = last
+      const SAMPLE_MS = 1200
+      const tick = (t: number) => {
+        if (cancelled) return
+        deltas.push(t - last)
+        last = t
+        if (t - windowStart < SAMPLE_MS) {
+          requestAnimationFrame(tick)
+          return
+        }
+        const sorted = [...deltas].sort((a, b) => a - b)
+        const avg = deltas.reduce((a, b) => a + b, 0) / (deltas.length || 1)
+        const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? 0
+        const max = sorted[sorted.length - 1] ?? 0
+        const over16 = deltas.filter(d => d > 16.7).length
+        const text = `frames=${deltas.length} avgMs=${avg.toFixed(2)} p95Ms=${p95.toFixed(2)} maxMs=${max.toFixed(2)} over16ms=${over16}`
+        setReport(text)
+        document.title = text
+      }
+      requestAnimationFrame(tick)
+    }, 500)
+    return () => { cancelled = true; window.clearTimeout(settle) }
+  }, [enabled])
+  return report
 }
 
 const noop = () => {}
 
 export function Harness() {
-  const name = new URLSearchParams(window.location.search).get('fixture') ?? 'walkCollaterals'
+  const params = new URLSearchParams(window.location.search)
+  // Read and the hook called BEFORE the "unknown fixture" early return —
+  // a hook after a conditional return is called on some renders and not
+  // others, which is the one thing React's rules forbid.
+  const perfMode = params.get('perf') === '1'
+  const perfReport = usePaintSampler(perfMode)
+  const name = params.get('fixture') ?? 'walkCollaterals'
   const fixture = WALK_FIXTURES[name]
   if (!fixture) {
     return <p style={{ font: '14px system-ui', padding: 24 }}>
@@ -78,6 +88,12 @@ export function Harness() {
     </p>
   }
   const built = buildWalk(fixture)
+  // `&isolate=<cardId>` overrides the fixture's own isolation — see
+  // usePaintSampler's doc comment. `card id` is `n:${urn}` for a plain
+  // node (focus-layout.ts:1264), the same scheme every isolatedId in
+  // lensFixtures.ts already uses.
+  const isolateOverride = params.get('isolate')
+  const isolatedId = isolateOverride ?? built.isolatedId
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'var(--surface, #fff)' }}>
       <ReactFlowProvider>
@@ -88,12 +104,13 @@ export function Harness() {
           focalReach={built.reach}
           directionFilter={built.directionFilter}
           selectedId={built.selectedId}
-          isolatedId={built.isolatedId}
+          isolatedId={isolatedId}
           // Shots are taken with motion OFF, so a screenshot is never a
           // frame of an animation — except where the motion is the thing
           // being looked at. The drift along an isolated cone is drawn
-          // with dashes, and a still of it is exactly readable.
-          reducedMotion={built.isolatedId === null}
+          // with dashes, and a still of it is exactly readable. A perf
+          // sample wants the REAL steady-state cost, animation included.
+          reducedMotion={isolatedId === null && !perfMode}
           onSelect={noop}
           onFocus={noop}
           onToggleFrame={noop}
@@ -105,6 +122,17 @@ export function Harness() {
           onPage={noop}
         />
       </ReactFlowProvider>
+      {perfReport && (
+        <pre
+          style={{
+            position: 'fixed', top: 8, left: 8, margin: 0, padding: '6px 10px',
+            background: '#000', color: '#0f0', font: '12px/1.4 monospace',
+            borderRadius: 6, zIndex: 9999,
+          }}
+        >
+          {perfReport}
+        </pre>
+      )}
     </div>
   )
 }
