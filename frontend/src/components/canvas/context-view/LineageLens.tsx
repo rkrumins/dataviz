@@ -863,19 +863,22 @@ export function LineageLens({
   // read through the same boundary rule the ⊕ and its seeds use.
   // Reported live: the platform Snowflake, whose 51 interior frontier
   // entries put a "+" on a side its own closure reports as empty.
-  const moreThisWay = (dir: 'in' | 'out'): boolean => {
-    if (!model || !nodeId) return false
-    const offers = boundaryFrontierFilter(sg, nodeId, dir)
-    return (dir === 'in' ? model.frontierUp : model.frontierDown).some(f => offers(f.urn))
-  }
-  const reach: LensReach | null = model && walkStatus === 'done'
-    ? {
-        up: model.upstreamUrns.size,
-        down: model.downstreamUrns.size,
-        moreUp: capped || moreThisWay('in'),
-        moreDown: capped || moreThisWay('out'),
-      }
-    : null
+  //
+  // Memoized because reading it walks the model twice, and this sits in
+  // a component that re-renders on every keystroke in the filter box.
+  const reach: LensReach | null = useMemo(() => {
+    if (!model || !nodeId || walkStatus !== 'done') return null
+    const more = (dir: 'in' | 'out'): boolean => {
+      const offers = boundaryFrontierFilter(sg, nodeId, dir)
+      return (dir === 'in' ? model.frontierUp : model.frontierDown).some(f => offers(f.urn))
+    }
+    return {
+      up: model.upstreamUrns.size,
+      down: model.downstreamUrns.size,
+      moreUp: capped || more('in'),
+      moreDown: capped || more('out'),
+    }
+  }, [model, nodeId, sg, walkStatus, capped])
 
   // The header counts what the header's own preset is showing. Under
   // "Root cause" the board draws no consumers, no downstream pill and no

@@ -258,7 +258,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      * nothing else outside the chain, the board came out EMPTY.
      *
      * The cap still applies where it was always meant to: `emit` slices
-     * the ribbon it prints (see `ribbon`).
+     * the ribbon it prints.
      */
     const ancestorsOf = (urn: string): string[] => {
         const hit = ancestorCache.get(urn)
@@ -582,8 +582,9 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
     /**
      * What the focus can honestly offer to walk, per direction — see
-     * `boundaryHops`, which is also what seeds the extend the ⊕ fires
-     * (`seedLeavesFor`), so the badge and the fetch can never disagree.
+     * `boundaryFrontierFilter`, which is also what seeds the extend the ⊕
+     * fires (`seedLeavesFor`), so the badge and the fetch can never
+     * disagree about what one click can go and get.
      *
      * The focus's OWN frontier is offered unless the picture has proven
      * it interior — it has hops this way and every one of them stays
@@ -639,24 +640,24 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const projected = projectLensEdges(sg, population, wired, subtreeOf(sg.focusUrn))
 
     /**
-     * What each wired card VISUALLY STANDS FOR: itself, plus every
-     * population member whose nearest wired ancestor it is.
+     * What each card SPEAKS FOR: itself, plus every population member
+     * whose nearest speaking ancestor it is.
      *
-     * This is the same rule `projectLensEdges` uses to decide where a
-     * hop lands, applied to the ⊕ — and it has to be, or a frontier gets
+     * This is `projectLensEdges`'s own nearest-ancestor rule applied to
+     * the ⊕ — and it has to be, or a frontier gets
      * reported once per containment level above it. Five nested frames
      * each grew their own copy of one column's "+2", four of which could
      * not be acted on separately and which piled up on top of each other
      * in the gutter. A card offers exactly what it stands for — and the
      * focal, standing for its whole subtree, offers the table's frontier
      * once rather than once per column.
+     *
+     * WIRING and SPEAKING are two different questions, and the
+     * contains-stack is where they come apart: its rows carry wires but
+     * never a ⊕ of their own (one offer per element — the focal speaks
+     * for everything inside it), so they are endpoints and not speakers.
+     * Everything else on the board is both.
      */
-    //
-    // WIRING and SPEAKING are two different questions, and the
-    // contains-stack is where they come apart: its rows carry wires but
-    // never a ⊕ of their own (one offer per element — the focal speaks
-    // for everything inside it), so they are endpoints here and not
-    // speakers. Everything else on the board is both.
     const speakers = new Set([...visibleOrder].filter(u => !focusContents.has(u)))
     const standsFor = new Map<string, Set<string>>()
     for (const urn of speakers) standsFor.set(urn, new Set([urn]))
@@ -959,7 +960,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // set exists to prevent.
         //
         // Never a remainder the picture's own evidence says is INTERIOR
-        // to the focus — see `interiorOnly`. That is the whole of the
+        // to the focus — see `offerable` above. That is the whole of the
         // reported "+211 that grew to +384 and drew nothing".
         const entries = [...ownedBy(urn), ...(foldedFrontiers.get(urn) ?? [])]
             .filter(u => offerable[dir](u))
