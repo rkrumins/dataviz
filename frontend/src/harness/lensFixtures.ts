@@ -295,7 +295,15 @@ const walkDirectionAndHighlight = (): WalkFixture => ({
  * and both sources stacked inside a single box, no hop columns, wires
  * arcing back through it, and an empty upstream band whispering "no
  * upstream sources in the data source" beside the sources it was
- * drawing. The shot must show columns, not a box.
+ * drawing.
+ *
+ * EXPECTED: no boxes above anything — not Snowflake, not GOLD, not BI.
+ * A compact REPORTING focal card reading `in Snowflake`, its two tables
+ * in the contains-stack below it (one opened onto four columns), the two
+ * sources as free-standing cards in the upstream column carrying `GOLD`
+ * and `Snowflake`, the consumer in the downstream column carrying `BI`,
+ * band headers on both sides, and every wire arriving at ONE port on the
+ * focal (×3, ×2) and leaving from one (×2).
  */
 const walkSharedPlatform = (): WalkFixture => ({
   title: 'The focus and its sources share a platform — columns, not a tower',
@@ -350,8 +358,14 @@ const walkSharedPlatform = (): WalkFixture => ({
  *   Snowflake ⊃ SILVER ⊃ clean_charges    ⊃ the same 8 columns
  *
  * Sixteen cards inside one platform frame drew sixteen crossing arcs.
- * The shot must show the partner LEFT, the focus RIGHT, and eight tidy
- * near-parallel wires between them.
+ *
+ * EXPECTED: no platform box and no container box. The partner TABLE is
+ * the free-standing frame on the left — the grain the answer is
+ * presented at — with its eight columns as rows and `in SILVER ·
+ * Snowflake` beside its name. The focus is a compact card reading
+ * `Snowflake › BRONZE`, its own eight columns in the contains-stack
+ * below it, and the eight wires converge into the one port on its left
+ * edge rather than crossing the board column by column.
  */
 const walkSharedPlatformLeaf = (): WalkFixture => {
   const columns = [
