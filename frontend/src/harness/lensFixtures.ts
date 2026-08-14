@@ -405,6 +405,43 @@ const walkSharedPlatformLeaf = (): WalkFixture => {
   }
 }
 
+/**
+ * The same estate as `walkSharedPlatformLeaf` with SEVEN columns taken
+ * away — one connected column each side.
+ *
+ * The focus then has exactly one populated child and ships no hop of its
+ * own, which is every pass-through test the answer walk has. Seeing
+ * through the FOCUS demoted it out of the picture and took the focal
+ * card, the contains-stack and — because every hop reprojects onto the
+ * focus — every wire with it: a board with nothing on it.
+ *
+ * EXPECTED: the partner table on the left as a frame with its one column
+ * as a row, the compact focal reading `Snowflake › BRONZE` with its own
+ * column in the contains-stack, and one wire between them.
+ */
+const walkSharedPlatformOneColumn = (): WalkFixture => ({
+  title: 'One column each side — the focus is never chrome',
+  model: walkModel('F', {
+    nodes: [
+      wnode('SNOW', 'PLATFORM', 'Snowflake', { childCount: 14 }),
+      wnode('BRONZE', 'CONTAINER', 'BRONZE', { childCount: 5 }),
+      wnode('SILVER', 'CONTAINER', 'SILVER', { childCount: 9 }),
+      wnode('F', 'dataset', 'clean_charges_t2', { childCount: 11 }),
+      wnode('f:charge_id', 'schemaField', 'charge_id'),
+      wnode('SRC', 'dataset', 'clean_charges', { childCount: 11 }),
+      wnode('s:charge_id', 'schemaField', 'charge_id'),
+    ],
+    containmentEdges: [
+      holds('SNOW', 'BRONZE'), holds('SNOW', 'SILVER'),
+      holds('BRONZE', 'F'), holds('F', 'f:charge_id'),
+      holds('SILVER', 'SRC'), holds('SRC', 's:charge_id'),
+    ],
+    lineageEdges: [hop('s:charge_id', 'f:charge_id')],
+    upstreamUrns: new Set(['SILVER', 'SRC', 's:charge_id']),
+    frontierUp: [frontier('s:charge_id', 2)],
+  }),
+})
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkCollaterals: walkCollaterals(),
   walkDiamond: walkDiamond(),
@@ -415,4 +452,5 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkDirectionAndHighlight: walkDirectionAndHighlight(),
   walkSharedPlatform: walkSharedPlatform(),
   walkSharedPlatformLeaf: walkSharedPlatformLeaf(),
+  walkSharedPlatformOneColumn: walkSharedPlatformOneColumn(),
 }
