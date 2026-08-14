@@ -1446,3 +1446,73 @@ describe('relationship wording comes from the ontology', () => {
     expect(screen.getByText('Derives from')).toBeTruthy()
   })
 })
+
+// ── the hook count never depends on what is on the board ─────────────
+//
+// REPORTED LIVE (P0): the lens error boundary showing "This view
+// encountered an error — Rendered more hooks than during the previous
+// render." React throws that when a component calls a different NUMBER
+// of hooks than it did last time, and the shape here is the classic one:
+// `LineageLens` returns early when it has no focal, so any hook written
+// below that return exists only on the renders that have one.
+//
+// These tests drive the transition in both directions. They are about
+// the component's hook DISCIPLINE rather than about anything it draws,
+// which is why they assert on the absence of a throw and on the focal
+// still being there afterwards.
+
+describe('the lens survives gaining and losing its focal', () => {
+  const estate = () => doneWalk(walkModel('F', {
+    nodes: [wnode('F', 'dataset', 'orders_enriched'), wnode('u', 'dataset', 'upstream_table')],
+    lineageEdges: [hop('u', 'F')],
+    upstreamUrns: new Set(['u']),
+  }))
+
+  const lens = (entries: string[], cursor: number, walk: WalkEntry | null) => (
+    <LineageLens
+      history={{ entries, cursor }}
+      walk={walk}
+      walkApi={makeApi()}
+      onRecenter={vi.fn()}
+      onBack={vi.fn()}
+      onForward={vi.fn()}
+      onClose={vi.fn()}
+    />
+  )
+
+  it('renders when a focal ARRIVES after a render without one', () => {
+    // No focal: `lensFocalOf` is null and the component returns early.
+    const { rerender } = render(lens([], -1, null))
+    // ...and then the walk lands on one. This threw before every hook
+    // sat above that early return.
+    expect(() => rerender(lens(['F'], 0, estate()))).not.toThrow()
+    expect(screen.getAllByText('orders_enriched').length).toBeGreaterThan(0)
+  })
+
+  it('renders when the focal GOES AWAY again', () => {
+    const { rerender } = render(lens(['F'], 0, estate()))
+    expect(() => rerender(lens([], -1, null))).not.toThrow()
+    // And once more, so the count has to match a third time.
+    expect(() => rerender(lens(['F'], 0, estate()))).not.toThrow()
+  })
+
+  it('renders through a merge that changes what every card IS', () => {
+    // A walk growing flips card kinds under React Flow: a plain upstream
+    // card becomes a FRAME when its first column arrives, and that column
+    // becomes a ROW inside it. Same board, same node ids, different
+    // branches through the card components.
+    const { rerender } = render(lens(['F'], 0, estate()))
+    const grown = doneWalk(walkModel('F', {
+      nodes: [
+        wnode('F', 'dataset', 'orders_enriched'),
+        wnode('u', 'dataset', 'upstream_table', { childCount: 4 }),
+        wnode('u:col', 'schemaField', 'order_id'),
+      ],
+      containmentEdges: [holds('u', 'u:col')],
+      lineageEdges: [hop('u', 'F'), hop('u:col', 'F')],
+      upstreamUrns: new Set(['u', 'u:col']),
+    }))
+    expect(() => rerender(lens(['F'], 0, grown))).not.toThrow()
+    expect(screen.getAllByText('order_id').length).toBeGreaterThan(0)
+  })
+})

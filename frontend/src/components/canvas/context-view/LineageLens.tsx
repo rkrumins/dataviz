@@ -829,6 +829,43 @@ export function LineageLens({
     onLoadChildrenOf(nodeId)
   }, [nodeId, onLoadChildrenOf, walkStatus, focalHolds])
 
+  /**
+   * How far the walk has actually reached, and whether that is the
+   * whole story. Not a measurement of its own: these are the entities
+   * the server has NAMED as upstream / downstream of the focus, which
+   * is the number every other surface here is derived from.
+   *
+   * A "+" says the data source has MORE OF THIS SIDE. A frontier entry
+   * on a node inside the focus whose lineage never leaves it says no
+   * such thing — it is the inside having more inside — so the floor is
+   * read through the same boundary rule the ⊕ and its seeds use.
+   * Reported live: the platform Snowflake, whose 51 interior frontier
+   * entries put a "+" on a side its own closure reports as empty.
+   *
+   * Memoized because reading it walks the model twice, and this sits in
+   * a component that re-renders on every keystroke in the filter box.
+   *
+   * ABOVE the `!nodeId` return, with every other hook, and it has to be:
+   * memoizing it BELOW made the hook count depend on whether the lens had
+   * a focal, and React threw "Rendered more hooks than during the
+   * previous render" the moment one arrived. A cap applies to the whole
+   * fetch, so it makes BOTH sides floors; a frontier only makes its own.
+   */
+  const capped = (model?.truncated ?? false) || (model?.seedTruncated ?? false)
+  const reach: LensReach | null = useMemo(() => {
+    if (!model || !nodeId || walkStatus !== 'done') return null
+    const more = (dir: 'in' | 'out'): boolean => {
+      const offers = boundaryFrontierFilter(sg, nodeId, dir)
+      return (dir === 'in' ? model.frontierUp : model.frontierDown).some(f => offers(f.urn))
+    }
+    return {
+      up: model.upstreamUrns.size,
+      down: model.downstreamUrns.size,
+      moreUp: capped || more('in'),
+      moreDown: capped || more('out'),
+    }
+  }, [model, nodeId, sg, walkStatus, capped])
+
   if (!nodeId) return null
 
   const focalNode = sg.nodes.get(nodeId)?.node
@@ -847,38 +884,6 @@ export function LineageLens({
     focalChildren.length,
     (focalNode?.data?.childCount as number | undefined) ?? 0,
   )
-
-  /**
-   * How far the walk has actually reached, and whether that is the
-   * whole story. Not a measurement of its own: these are the entities
-   * the server has NAMED as upstream / downstream of the focus, which
-   * is the number every other surface here is derived from.
-   */
-  // A cap applies to the whole fetch, so it makes BOTH sides floors; a
-  // frontier only makes its own side one.
-  const capped = (model?.truncated ?? false) || (model?.seedTruncated ?? false)
-  // A "+" says the data source has MORE OF THIS SIDE. A frontier entry
-  // on a node inside the focus whose lineage never leaves it says no
-  // such thing — it is the inside having more inside — so the floor is
-  // read through the same boundary rule the ⊕ and its seeds use.
-  // Reported live: the platform Snowflake, whose 51 interior frontier
-  // entries put a "+" on a side its own closure reports as empty.
-  //
-  // Memoized because reading it walks the model twice, and this sits in
-  // a component that re-renders on every keystroke in the filter box.
-  const reach: LensReach | null = useMemo(() => {
-    if (!model || !nodeId || walkStatus !== 'done') return null
-    const more = (dir: 'in' | 'out'): boolean => {
-      const offers = boundaryFrontierFilter(sg, nodeId, dir)
-      return (dir === 'in' ? model.frontierUp : model.frontierDown).some(f => offers(f.urn))
-    }
-    return {
-      up: model.upstreamUrns.size,
-      down: model.downstreamUrns.size,
-      moreUp: capped || more('in'),
-      moreDown: capped || more('out'),
-    }
-  }, [model, nodeId, sg, walkStatus, capped])
 
   // The header counts what the header's own preset is showing. Under
   // "Root cause" the board draws no consumers, no downstream pill and no
