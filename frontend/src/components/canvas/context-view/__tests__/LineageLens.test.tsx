@@ -1042,21 +1042,24 @@ describe('pointing at an element isolates its lineage cone', () => {
    *  the chip) at once. */
   const spotlightChip = () => screen.getByText(/its lineage within this walk/).closest('.rounded-2xl')! as HTMLElement
 
-  it('states its scope honestly — drawn vs. known, never "everything" by omission', () => {
+  it('R1b — THE EMPTY SIDE MUST SPEAK: a wholly unfetched side states its frontier, never silent darkness', () => {
+    // The exact repro shape: U's upstream has NOTHING drawn (0 fetched)
+    // but the server recorded 6 flows. The old chip either fell silent
+    // about this side entirely, or (before that) claimed it honestly as
+    // "0 of 6" — R1b's own wording is more direct: name the zero as
+    // UNFETCHED, not drained, with the load action right there.
     renderLens(['F'], spotlightEstate())
     fireEvent.click(screen.getByText('upstream_one'))
     const chip = spotlightChip()
     expect(within(chip).getByText(/upstream_one/)).toBeTruthy()
-    // Nothing of U's own upstream is drawn yet; six are known from the
-    // server's frontier — 0 of 6, not "6" and not "everything".
-    expect(within(chip).getByText('0 of 6 known upstream flows on this board')).toBeTruthy()
+    expect(within(chip).getByText('nothing loaded upstream yet · 6 flows recorded')).toBeTruthy()
   })
 
   it('the bridge control follows the anchor\'s remaining lineage, element-precise', () => {
     const api = makeApi()
     renderLens(['F'], spotlightEstate(), {}, api)
     fireEvent.click(screen.getByText('upstream_one'))
-    fireEvent.click(within(spotlightChip()).getByText('Load its remaining upstream (6)'))
+    fireEvent.click(within(spotlightChip()).getByText('Load upstream'))
     // Seeded from U alone — the same call U's own ⊕ would make, not the
     // focus's.
     expect(api.extend).toHaveBeenCalledWith('U', 'up', ['U'])
@@ -1078,7 +1081,29 @@ describe('pointing at an element isolates its lineage cone', () => {
     // configured) — the honest floor states every one is already on the
     // board, and there is nothing left to promise a fetch for.
     expect(within(chip).getByText(/known upstream flows? — every one on this board/)).toBeTruthy()
-    expect(within(chip).queryByText(/Load its remaining/)).toBeNull()
+    expect(within(chip).queryByText(/^Load /)).toBeNull()
+  })
+
+  it('R1b — the chip still speaks when the CONE finds no drawn wire at all, not just when one side is empty', () => {
+    // A focal utterly alone on the board (zero lineage edges anywhere)
+    // but with its own recorded, unfetched frontier — `isolationCone`
+    // returns null for an anchor touching no drawn wire (nothing to
+    // isolate), which used to take the chip down with it: the reader
+    // clicked the focus's own name and got total silence, exactly the
+    // "no lineage" misread the user reported. The focus's isolate
+    // control is real (its own name is a button) — this is a genuine
+    // click path, not a synthetic one.
+    renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [wnode('F', 'dataset', 'lonely_focus')],
+      frontierUp: [frontier('F', 66)],
+    })))
+    fireEvent.click(screen.getByLabelText('lonely_focus — isolate the lineage running through it'))
+    const chip = spotlightChip()
+    expect(within(chip).getByText('nothing loaded upstream yet · 66 flows recorded')).toBeTruthy()
+    expect(within(chip).getByText('Load upstream')).toBeTruthy()
+    // The other side is drained (never fetched, never reported by the
+    // server either) and says so too — never dropped from the chip.
+    expect(within(chip).getByText(/0 known downstream flows? — every one on this board/)).toBeTruthy()
   })
 })
 

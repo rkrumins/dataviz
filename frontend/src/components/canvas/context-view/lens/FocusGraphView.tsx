@@ -1074,8 +1074,8 @@ function InlineFollow({ pill, dir, ctx }: { pill: FocusPill; dir: 'in' | 'out'; 
 }
 
 /**
- * THE SPOTLIGHT CHIP's honest scope (R0) — which direction it leads
- * with, and drawn-vs-known in that direction, for one isolated anchor.
+ * One direction's line in the spotlight chip — its honest drawn-vs-known
+ * text, and the pill (if any) a bridge button can act on.
  *
  * DRAWN vs. KNOWN — see `pillFor`'s own contract (focus-layout.ts): a
  * REVEAL's count is a subset already in hand (drawn = known − remaining);
@@ -1086,28 +1086,60 @@ function InlineFollow({ pill, dir, ctx }: { pill: FocusPill; dir: 'in' | 'out'; 
  * itself); for a container anchor whose hops attach to its rows, this
  * floors rather than overstates "drawn" (clamped), which is why the
  * chip states a count, never a percentage.
+ *
+ * R1b — THE EMPTY SIDE MUST SPEAK: zero DRAWN is not zero KNOWN. A side
+ * with nothing drawn yet a real pill (an unfetched frontier) is exactly
+ * the reported "Orders (IoT) has no lineage to Marketing" misread — 0 of
+ * 66 upstream flows were FETCHED, not zero recorded — so that shape gets
+ * its own honest sentence rather than falling into the "drained" wording.
  */
-function spotlightScope(card: FocusCard): { pill: FocusPill | null; dir: 'in' | 'out'; dirWord: string; countsText: string } {
-  // The SAME tie-break LensPeek uses: which side of the board the anchor
-  // sits on decides which direction leads when both have something left.
-  const preferUp = card.band < 0
-  const pill = preferUp ? card.pillUp ?? card.pillDown : card.pillDown ?? card.pillUp
-  // Which side the chip actually describes: whichever pill it found, or
-  // — when NEITHER side has one — the anchor's own natural side. Without
-  // this a card with no pill anywhere fell through to a hard-coded
-  // 'out': an UPSTREAM card with nothing left to fetch stated its
-  // (unrelated) downstream degree instead of its own drained upstream.
-  const dir: 'in' | 'out' = pill ? (pill === card.pillUp ? 'in' : 'out') : (preferUp ? 'in' : 'out')
+function spotlightSide(card: FocusCard, dir: 'in' | 'out'): { pill: FocusPill | null; text: string } {
+  const pill = dir === 'in' ? card.pillUp : card.pillDown
   const dirWord = dir === 'in' ? 'upstream' : 'downstream'
   const known0 = dir === 'in' ? card.flowsIn : card.flowsOut
   const drawn = Math.max(0, pill?.kind === 'reveal' ? known0 - (pill.count ?? 0) : known0)
-  const known = pill?.kind === 'reveal' ? known0 : known0 + (pill?.count ?? 0)
-  const countsText = !pill
-    ? `${known.toLocaleString()} known ${dirWord} flow${known === 1 ? '' : 's'} — every one on this board`
-    : pill.count == null
-      ? `${drawn.toLocaleString()} known ${dirWord} flow${drawn === 1 ? '' : 's'} on this board — the data source may have more`
-      : `${drawn.toLocaleString()} of ${known.toLocaleString()} known ${dirWord} flows on this board`
-  return { pill, dir, dirWord, countsText }
+  if (!pill) {
+    return { pill: null, text: `${known0.toLocaleString()} known ${dirWord} flow${known0 === 1 ? '' : 's'} — every one on this board` }
+  }
+  if (drawn === 0) {
+    return {
+      pill,
+      text: pill.count != null
+        ? `nothing loaded ${dirWord} yet · ${pill.count.toLocaleString()} flow${pill.count === 1 ? '' : 's'} recorded`
+        : `nothing loaded ${dirWord} yet — the data source may have more`,
+    }
+  }
+  const known = pill.count != null ? drawn + pill.count : null
+  return {
+    pill,
+    text: known != null
+      ? `${drawn.toLocaleString()} of ${known.toLocaleString()} known ${dirWord} flows on this board`
+      : `${drawn.toLocaleString()} known ${dirWord} flow${drawn === 1 ? '' : 's'} on this board — the data source may have more`,
+  }
+}
+
+/**
+ * THE SPOTLIGHT CHIP's honest scope (R0 + R1b) — BOTH directions, so an
+ * unfetched side can never go silent. The anchor's own NATURAL side (the
+ * one its band puts it on — the same side `LensPeek` prefers) always
+ * speaks, drained or not, matching the chip's original one-line shape;
+ * the OTHER side speaks only when it has something concrete to say (a
+ * real pill — the layout asked and got an answer, offered or drained-
+ * with-frontier). Staying silent when NEITHER side has a pill nor is the
+ * natural one is the pre-existing, honest "this card was never asked"
+ * gap — not the reported defect, which is a KNOWN frontier going unsaid.
+ */
+function spotlightScope(card: FocusCard): {
+  up: { pill: FocusPill | null; text: string } | null
+  down: { pill: FocusPill | null; text: string } | null
+} {
+  const natural: 'in' | 'out' = card.band < 0 ? 'in' : 'out'
+  const up = spotlightSide(card, 'in')
+  const down = spotlightSide(card, 'out')
+  return {
+    up: natural === 'in' || up.pill ? up : null,
+    down: natural === 'out' || down.pill ? down : null,
+  }
 }
 
 /** One half of the focal's orientation sentence — plain language, an
@@ -3293,9 +3325,19 @@ export function FocusGraphView({
     // this isolates NOTHING rather than dimming everything for no reason.
     return cone && { ...cone, anchorId, sticky: hoverConeId === null }
   }, [anchorId, hoverConeId, graph])
+  // THE CHIP's own anchor — independent of whether the CONE found a
+  // drawn wire to light (R1b). `isolationCone` returns null the moment
+  // an anchor touches no drawn edge at all — a card whose whole upstream
+  // is genuinely UNFETCHED is exactly that shape — and the chip used to
+  // inherit that null, going silent right where the reported defect
+  // lives ("Orders (IoT) has no lineage to Marketing" was actually "0 of
+  // 66 upstream flows fetched"). Sticky only (`isolatedId`, not
+  // `hoverConeId`): a hover still needs no chip, and while hovering a
+  // DIFFERENT card the sticky one's chip still hides — both unchanged
+  // from before, just no longer gated on the cone's own success.
   const anchorCard = useMemo(
-    () => (isolationValue ? graph.cards.find(c => c.id === isolationValue.anchorId) ?? null : null),
-    [graph.cards, isolationValue],
+    () => (hoverConeId === null && isolatedId ? graph.cards.find(c => c.id === isolatedId) ?? null : null),
+    [graph.cards, isolatedId, hoverConeId],
   )
   // THE SPOTLIGHT CHIP's honest scope — computed once per anchor change,
   // not per render, and OUTSIDE the JSX so `react-hooks/refs` has a
@@ -3436,13 +3478,17 @@ export function FocusGraphView({
           {extendGhosts.map(g => (
             <ExtendGhost key={g.key} card={g.card} dir={g.dir} />
           ))}
-          {/* THE SPOTLIGHT CHIP (R0) — states its scope HONESTLY (drawn
-              vs. known, never "everything" by omission) and carries the
-              two bridge controls: follow the anchor's remaining lineage
-              (element-precise, grows THIS board) or re-anchor on it.
-              Only while it STICKS — a hover needs no chip, letting go
-              of it is the exit. */}
-          {isolationValue?.sticky && anchorCard && spotlight && (
+          {/* THE SPOTLIGHT CHIP (R0 + R1b) — states its scope HONESTLY
+              (drawn vs. known, never "everything" by omission, and never
+              silent about a side that is simply unfetched) and carries
+              its bridge controls: follow either direction's remaining
+              lineage (element-precise, grows THIS board), or re-anchor
+              on the whole element. Only while it STICKS — a hover needs
+              no chip, letting go of it is the exit. Independent of
+              whether the CONE lit anything (`anchorCard` above) — an
+              anchor touching no drawn wire still gets its chip, which is
+              the whole fix for R1b's "said nothing" defect. */}
+          {anchorCard && spotlight && (spotlight.up || spotlight.down) && (
             <Panel position="bottom-center" className="!mb-4 pointer-events-auto">
               <div className="flex flex-col gap-1 px-3 py-2 rounded-2xl bg-canvas-elevated/95 border border-black/10 dark:border-white/12 shadow-lg shadow-black/10 backdrop-blur-sm max-w-[440px]">
                 <div className="flex items-center gap-2">
@@ -3451,6 +3497,16 @@ export function FocusGraphView({
                     <span className="font-semibold">{anchorCard.label}</span>
                     {' · its lineage within this walk'}
                   </span>
+                  {anchorCard.nodeId && (
+                    <button
+                      type="button"
+                      onClick={() => onFocus(anchorCard.nodeId!)}
+                      className="nodrag flex-shrink-0 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                    >
+                      <LucideIcons.Focus className="w-2.5 h-2.5" />
+                      Focus here
+                    </button>
+                  )}
                   <span className="flex-shrink-0 text-[9.5px] text-ink-muted/70">Esc to clear</span>
                   <button
                     type="button"
@@ -3462,35 +3518,28 @@ export function FocusGraphView({
                     <LucideIcons.X className="w-3 h-3" />
                   </button>
                 </div>
-                {/* The honest counts get their OWN full-width line — they
-                    are the reason this chip exists, and the two bridge
-                    buttons below already claim most of a shared row. */}
-                <p className="pl-6 truncate text-[10px] text-ink-muted tabular-nums">{spotlight.countsText}</p>
-                <div className="flex items-center gap-2 pl-6">
-                  {spotlight.pill && (
-                    <button
-                      type="button"
-                      onClick={() => actOnPill(ctx, spotlight.pill!, spotlight.dir)}
-                      disabled={spotlight.pill.status === 'loading'}
-                      className="nodrag flex-shrink-0 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-accent-lineage bg-accent-lineage/12 hover:bg-accent-lineage/20 disabled:opacity-50 transition-colors"
-                    >
-                      {spotlight.pill.status === 'loading'
-                        ? <LucideIcons.Loader2 className="w-2.5 h-2.5 animate-spin" />
-                        : <LucideIcons.Plus className="w-2.5 h-2.5" />}
-                      Load its remaining {spotlight.dirWord}{spotlight.pill.count != null ? ` (${spotlight.pill.count.toLocaleString()})` : ''}
-                    </button>
-                  )}
-                  {anchorCard.nodeId && (
-                    <button
-                      type="button"
-                      onClick={() => onFocus(anchorCard.nodeId!)}
-                      className="nodrag flex-shrink-0 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
-                    >
-                      <LucideIcons.Focus className="w-2.5 h-2.5" />
-                      Focus here
-                    </button>
-                  )}
-                </div>
+                {/* Both directions, each on its own full-width line — R1b
+                    means a side cannot be dropped just because it isn't
+                    the "interesting" one, so there is no shared row left
+                    to omit it from. */}
+                {([['up', spotlight.up, 'in'], ['down', spotlight.down, 'out']] as const).map(([key, side, dir]) => side && (
+                  <div key={key} className="flex items-center gap-2 pl-6">
+                    <span className="min-w-0 flex-1 truncate text-[10px] text-ink-muted tabular-nums">{side.text}</span>
+                    {side.pill && (
+                      <button
+                        type="button"
+                        onClick={() => actOnPill(ctx, side.pill!, dir)}
+                        disabled={side.pill.status === 'loading'}
+                        className="nodrag flex-shrink-0 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-accent-lineage bg-accent-lineage/12 hover:bg-accent-lineage/20 disabled:opacity-50 transition-colors"
+                      >
+                        {side.pill.status === 'loading'
+                          ? <LucideIcons.Loader2 className="w-2.5 h-2.5 animate-spin" />
+                          : <LucideIcons.Plus className="w-2.5 h-2.5" />}
+                        {pillVerb(side.pill, dir)}
+                      </button>
+                    )}
+                  </div>
+                ))}
               </div>
             </Panel>
           )}

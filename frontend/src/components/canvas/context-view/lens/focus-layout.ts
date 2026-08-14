@@ -1147,7 +1147,16 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const contentsOf = (urn: string): { onLineage: number; total: number | null } | null => {
         const children = nodeOf(urn)?.children ?? []
         if (children.length === 0) return null
-        return { onLineage: children.length, total: heldTotal(urn) }
+        const total = heldTotal(urn)
+        // R1c — COUNT HONESTY: "k on this lineage · of N" must never
+        // render with N < k. `heldTotal` trusts a DECLARED childCount at
+        // face value, and a declared count that is stale or simply wrong
+        // (the payload said 0 while the walk has since found 8 children
+        // on this lineage) produced exactly that — "8 on this lineage ·
+        // of 0" shipped this way. A total smaller than what the walk has
+        // already found is not a total; the honest statement is
+        // "unknown", never a number smaller than what is already drawn.
+        return { onLineage: children.length, total: total != null && total >= children.length ? total : null }
     }
 
     /** The type of the one hop this card carries, when it carries exactly

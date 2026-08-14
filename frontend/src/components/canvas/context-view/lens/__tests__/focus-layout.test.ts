@@ -205,6 +205,53 @@ describe('focus-layout — the answer grain', () => {
     })
 })
 
+// ── count honesty (R1c) ─────────────────────────────────────────────
+
+/** `collateralEstate()`'s own shape, with DB's declared childCount as
+ *  the one thing that varies — the field this rule is about. */
+const collateralEstateWithDbChildCount = (childCount?: number): LensSubgraph<LensWalkNode> => subgraph({
+    focus: 'F',
+    nodes: [
+        wnode('DOM', 'DATADOMAIN', 'Finance'),
+        wnode('APP', 'APPLICATION', 'RiskApp'),
+        wnode('CTR1', 'CONTAINER', 'PROD'),
+        wnode('CTR2', 'CONTAINER', 'CURATED'),
+        wnode('DB', 'DATABASE', 'RISK_DB', childCount != null ? { childCount } : {}),
+        wnode('FT', 'dataset', 'fin_marts'),
+        wnode('F', 'dataset', 'collaterals'),
+        wnode('t0', 'dataset', 'loan_positions'),
+        wnode('t1', 'dataset', 'collateral_valuations'),
+        wnode('t2', 'dataset', 'fx_rates'),
+    ],
+    contains: [
+        ['DOM', 'APP'], ['APP', 'CTR1'], ['CTR1', 'CTR2'], ['CTR2', 'DB'],
+        ['DB', 't0'], ['DB', 't1'], ['DB', 't2'],
+        ['FT', 'F'],
+    ],
+    hops: [['t0', 'F'], ['t1', 'F'], ['t2', 'F']],
+})
+
+describe('focus-layout — count honesty (R1c)', () => {
+    it('a declared total LESS than what the walk has found is never rendered — "8 on this lineage · of 0" made honest', () => {
+        // DB's own declared childCount is stale/wrong (0) — the walk has
+        // already found three of its tables on this lineage. A "total"
+        // smaller than that is not a total; the honest statement is
+        // "unknown".
+        const db = cardFor(layout(collateralEstateWithDbChildCount(0)), 'DB')!
+        expect(db.contents).toEqual({ onLineage: 3, total: null })
+    })
+
+    it('a MISSING declared count renders "k on this lineage" alone, never a fabricated total', () => {
+        const db = cardFor(layout(collateralEstateWithDbChildCount(undefined)), 'DB')!
+        expect(db.contents).toEqual({ onLineage: 3, total: null })
+    })
+
+    it('a declared total that is honestly ≥ what was found is still trusted (unchanged)', () => {
+        const db = cardFor(layout(collateralEstateWithDbChildCount(12)), 'DB')!
+        expect(db.contents).toEqual({ onLineage: 3, total: 12 })
+    })
+})
+
 // ── N-level nesting ──────────────────────────────────────────────────
 
 describe('focus-layout — nesting', () => {
