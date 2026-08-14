@@ -1449,11 +1449,11 @@ function FrameScrollRegion({ card, ctx, win }: {
       ctx.onToggleFrame(rows[at].urn)
       return
     }
-    if (e.key === 'ArrowLeft' || e.key === 'Escape') {
-      // Step OUT: drop the preview and the cursor, and leave the frame
-      // header focused. Escape must not reach the lens's own handler
-      // and close the whole dialog while a row is being read.
-      if (at < 0 && e.key === 'Escape') return
+    if (e.key === 'ArrowLeft') {
+      // Step OUT of the rows: drop the preview and park the cursor. The
+      // list keeps focus, so Down starts again from the top rather than
+      // stranding a keyboard reader with nothing focused at all.
+      // (Escape is the LENS's key, in one place — see its own handler.)
       e.preventDefault()
       e.stopPropagation()
       ctx.onSelect(null)
@@ -1463,7 +1463,9 @@ function FrameScrollRegion({ card, ctx, win }: {
     // Type-ahead — the way anyone finds `posted_at` in a 400-column
     // table without reaching for the mouse. Client-side over the rows in
     // hand; a miss hands the letters to the frame's own Find, which asks
-    // the server about the rows that have NOT loaded.
+    // the server about the rows that have NOT loaded — but only where
+    // that box is actually offered, or the letters would dim every row
+    // of a short list against a query with nowhere to be seen or cleared.
     if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey && e.key !== ' ') {
       e.stopPropagation()
       const now = Date.now()
@@ -1474,7 +1476,7 @@ function FrameScrollRegion({ card, ctx, win }: {
       const hit = order.find(r => r.label.toLowerCase().startsWith(text))
         ?? order.find(r => r.label.toLowerCase().includes(text))
       if (hit) moveCursor(rows.findIndex(r => r.urn === hit.urn))
-      else ctx.onFrameQuery(key, text)
+      else if (win.scrollable || card.frameShowingAll) ctx.onFrameQuery(key, text)
     }
   }
 
@@ -1500,6 +1502,9 @@ function FrameScrollRegion({ card, ctx, win }: {
         onKeyDown={onKeyDown}
         onWheel={(e) => { e.stopPropagation(); ctx.onFrameWheel(key, e.deltaY) }}
         onFocus={() => { if (cursorIndex < 0 && rows.length > 0) ctx.onRowCursor(key, rows[win.offset]?.urn ?? rows[0].urn) }}
+        // The cursor is a FOCUS affordance: a ring left behind on a list
+        // nobody is in points at nothing.
+        onBlur={() => ctx.onRowCursor(key, null)}
       />
       {/* Where in the list you are. A thumb rather than a page number,
           because the list has no pages any more — and it is draggable,
@@ -2397,20 +2402,10 @@ export function FocusGraphView({
     () => (peekCard ? graph.cards.find(c => c.id === peekCard.frameId) ?? null : null),
     [graph.cards, peekCard],
   )
-  // Esc closes the preview before anything else sees the key — the lens
-  // itself closes on Esc, and dismissing a panel must not close the room
-  // it is sitting in.
-  useEffect(() => {
-    if (!peekCard) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
-      e.preventDefault()
-      e.stopPropagation()
-      onSelect(null)
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [peekCard, onSelect])
+  // Esc is deliberately NOT handled here. The lens owns it, in one
+  // place, and dismisses progressively: a preview first, then the lens
+  // itself. Two window-level capture handlers for one key is how the
+  // outer one wins by mount order and the inner one silently never runs.
 
   return (
     <div

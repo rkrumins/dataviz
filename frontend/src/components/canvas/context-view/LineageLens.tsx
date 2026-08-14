@@ -296,32 +296,6 @@ export function LineageLens({
   const query = queryState.nodeId === nodeId ? queryState.q : ''
   const setQuery = (q: string) => setQueryState({ nodeId, q })
 
-  // Lens-local ESC: capture phase so the canvas's document-level keyboard
-  // handler never sees it while the lens is open.
-  useEffect(() => {
-    if (!nodeId) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        e.stopPropagation()
-        onClose()
-        return
-      }
-      // Keyboard walking: ← back one hop, → forward one hop — browser
-      // history semantics (never while typing in the filter input).
-      if ((e.key === 'ArrowLeft' && canBack) || (e.key === 'ArrowRight' && canForward)) {
-        const t = e.target as HTMLElement | null
-        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
-        e.preventDefault()
-        e.stopPropagation()
-        if (e.key === 'ArrowLeft') onBack()
-        else onForward()
-      }
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [nodeId, onClose, canBack, canForward, onBack, onForward])
-
   const walkStatus: LensFetchStatus = walk?.status ?? 'loading'
   const model = walk?.model ?? null
 
@@ -599,6 +573,49 @@ export function LineageLens({
     editView(base => ({ ...base, selection }))
   }, [editView])
 
+  /**
+   * Lens-local keys: capture phase so the canvas's document-level
+   * keyboard handler never sees them while the lens is open.
+   *
+   * It is the ONE owner of Escape, and it dismisses innermost-first: a
+   * row's preview is a panel inside the lens, and closing the whole room
+   * out from under what you just opened is the one behaviour nobody
+   * expects. A second capture handler further in could not do this —
+   * mount order decides which of two runs, and the outer one always
+   * wins — so the sequence lives here rather than being split.
+   */
+  const selection = view.selection
+  useEffect(() => {
+    if (!nodeId) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        if (selection !== null) { setSelection(null); return }
+        onClose()
+        return
+      }
+      // Keyboard walking: ← back one hop, → forward one hop — browser
+      // history semantics. Never while typing in a filter box, and never
+      // while browsing a frame's rows: inside a row list the arrows walk
+      // the list, and a lens that stepped a hop back instead would take
+      // the list away mid-read.
+      if ((e.key === 'ArrowLeft' && canBack) || (e.key === 'ArrowRight' && canForward)) {
+        // `closest` only exists on Elements — a key dispatched straight
+        // at the window has no element to ask.
+        const t = e.target as HTMLElement | null
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'
+          || (typeof t.closest === 'function' && t.closest('[role="listbox"]')))) return
+        e.preventDefault()
+        e.stopPropagation()
+        if (e.key === 'ArrowLeft') onBack()
+        else onForward()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [nodeId, onClose, canBack, canForward, onBack, onForward, selection, setSelection])
+
   // ── Wording ────────────────────────────────────────────────────────
 
   const relationshipTypes = useRelationshipTypes()
@@ -673,10 +690,15 @@ export function LineageLens({
 
   // Detail strip for the selected card — its own tallies, from the same
   // model everything else reads.
+  //
+  // Never for a ROW: a row's click opens the PEEK, anchored beside it,
+  // which says the same things and offers the moves that make sense from
+  // there. Two panels describing one click is one panel too many.
   const selectedInfo = useMemo(() => {
     const sel = view.selection
     const node = sel ? sg.nodes.get(sel) : undefined
     if (!sel || !node) return null
+    if (layout.cards.some(c => c.nodeId === sel && c.frameId !== null)) return null
     return {
       id: sel,
       label: labelOf(sel, node.node),
@@ -686,7 +708,7 @@ export function LineageLens({
       inCount: node.degreeUp,
       outCount: node.degreeDown,
     }
-  }, [view.selection, sg])
+  }, [view.selection, sg, layout.cards])
 
   // ── Share this exploration — the walked path AND the current focal's
   // exploration (revealed/opened/searched, the direction preset, the
@@ -903,11 +925,15 @@ export function LineageLens({
                     <p className="font-semibold text-ink">Exploring lineage</p>
                     {lensViewMode === 'graph' ? (
                       <ul className="space-y-0.5 text-ink-muted">
-                        <li><span className="font-medium text-ink">Click</span> a card — inspect it</li>
+                        <li><span className="font-medium text-ink">Click</span> a card — inspect it; a row shows a preview</li>
                         <li><span className="font-medium text-ink">Double-click</span> — focus there</li>
                         <li><span className="font-medium text-ink">⊕</span> on a card&apos;s outer edge — reveal or fetch its next hop</li>
                         <li><span className="font-medium text-ink">▸</span> beside a name — what is inside it</li>
-                        <li><span className="font-medium text-ink">← / →</span> — step back / forward</li>
+                        <li><span className="font-medium text-ink">Scroll</span> inside an open container — browse its rows</li>
+                        <li><span className="font-medium text-ink">Tab</span> into a container, then <span className="font-medium text-ink">↑ ↓</span> — walk its rows</li>
+                        <li><span className="font-medium text-ink">Enter</span> — preview · <span className="font-medium text-ink">Shift+Enter</span> — focus there</li>
+                        <li><span className="font-medium text-ink">→</span> open a row · <span className="font-medium text-ink">←</span> step back out · <span className="font-medium text-ink">type</span> to find</li>
+                        <li><span className="font-medium text-ink">← / →</span> outside a container — step back / forward</li>
                         <li><span className="font-medium text-ink">Drag a card</span> — move it; connections follow</li>
                         <li><span className="font-medium text-ink">Drag · scroll</span> the background — pan and zoom</li>
                       </ul>
@@ -1652,7 +1678,7 @@ export function LineageLens({
           <div className="flex items-center gap-2 px-4 py-2.5 border-t border-black/[0.08] dark:border-white/[0.08]">
             <p className="text-[10.5px] text-ink-muted/80">
               {lensViewMode === 'graph'
-                ? 'Click a card to inspect · ⊕ to walk a hop · ▸ to open what is inside · Double-click to focus · Esc to close'
+                ? 'Click a card to inspect · ⊕ to walk a hop · ▸ to open what is inside · Scroll or ↑↓ inside it · Enter to preview, Shift+Enter to focus · Esc to close'
                 : 'Click a connection to re-center · Esc to close'}
             </p>
             <div className="ml-auto flex items-center gap-2">

@@ -1064,6 +1064,228 @@ const toResponse = (doc: RawClosureDoc) => ({
   downstreamUrns: new Set(doc.downstreamUrns),
 }) as unknown as TraceV2Result & LensClosureExtras
 
+// ── BROWSING WHAT IS INSIDE: PEEK AND KEYBOARD ───────────────────────
+
+/**
+ * One click on a row now has ONE meaning — show me this — and the panel
+ * that answers is not sitting in the way of the ⊕ beside it, which is
+ * what the retired hover toolbar was.
+ *
+ * The frame's rows are React Flow siblings of their frame, so the list is
+ * addressed here the way it is addressed by assistive tech: one labelled
+ * region that OWNS its rows and names the cursor with
+ * `aria-activedescendant`. Queried by label rather than by role — React
+ * Flow leaves an unmeasured node `visibility: hidden` and jsdom measures
+ * nothing, so the board is invisible to `getByRole`.
+ */
+describe('browsing what is inside — the peek and the keyboard', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
+  afterEach(() => cleanup())
+
+  /** A table of four columns, two of them on this lineage — the shape a
+   *  reader opens a frame to browse. */
+  const table = () => doneWalk(walkModel('F', {
+    nodes: [
+      wnode('F', 'dataset', 'stg_orders'),
+      wnode('T', 'dataset', 'raw_orders', { childCount: 4 }),
+      wnode('c1', 'schemaField', 'order_id', {
+        description: 'Natural key from the source system',
+        lastSyncedAt: new Date(Date.now() - 3 * 3600 * 1000).toISOString(),
+      }),
+      wnode('c2', 'schemaField', 'placed_at'),
+    ],
+    containmentEdges: [holds('T', 'c1'), holds('T', 'c2')],
+    lineageEdges: [hop('c1', 'F'), hop('c2', 'F')],
+    upstreamUrns: new Set(['c1', 'c2']),
+    frontierUp: [frontier('c1', 9)],
+  }))
+
+  /** The same table with more columns than one window holds — the only
+   *  shape that offers a Find box at all. */
+  const manyColumns = () => {
+    const nodes = [wnode('F', 'dataset', 'stg_orders'), wnode('T', 'dataset', 'raw_orders', { childCount: 40 })]
+    const containmentEdges: ReturnType<typeof holds>[] = []
+    const lineageEdges: ReturnType<typeof hop>[] = []
+    for (let i = 0; i < 14; i++) {
+      nodes.push(wnode(`k${i}`, 'schemaField', `column_${i}`))
+      containmentEdges.push(holds('T', `k${i}`))
+      lineageEdges.push(hop(`k${i}`, 'F'))
+    }
+    return doneWalk(walkModel('F', {
+      nodes, containmentEdges, lineageEdges,
+      upstreamUrns: new Set(nodes.slice(2).map(n => n.urn)),
+    }))
+  }
+
+  const rowsRegion = () => screen.getByLabelText(/^Rows inside raw_orders\./)
+  const row = (label: string) => screen.getByText(label).closest('[role="option"]')!
+  const peek = () => screen.queryByRole('dialog', { name: /^Preview of/ })
+    ?? document.querySelector('[aria-label^="Preview of"]')
+
+  it('a click on a row opens a peek that states what the row IS', () => {
+    renderLens(['F'], table())
+    expect(peek()).toBeNull()
+    fireEvent.click(row('order_id'))
+    const panel = peek()!
+    expect(panel).toBeTruthy()
+    expect(panel.getAttribute('aria-label')).toBe('Preview of order_id')
+    // Identity, where it lives, what it says about itself.
+    expect(within(panel as HTMLElement).getByText('schemaField')).toBeTruthy()
+    expect(within(panel as HTMLElement).getByText(/in raw_orders/)).toBeTruthy()
+    expect(within(panel as HTMLElement).getByText(/Natural key from the source system/)).toBeTruthy()
+    // Lineage, counted off the walk model rather than measured again.
+    expect(within(panel as HTMLElement).getByText(/1 flow in this walk/)).toBeTruthy()
+    expect(within(panel as HTMLElement).getByText(/9 more upstream not fetched yet/)).toBeTruthy()
+    expect(within(panel as HTMLElement).getByText(/Last synced 3h ago/)).toBeTruthy()
+  })
+
+  it('the peek walks from the row it is about, with the row as the seed', () => {
+    const api = makeApi()
+    renderLens(['F'], table(), {}, api)
+    fireEvent.click(row('order_id'))
+    fireEvent.click(within(peek() as HTMLElement).getByText(/Walk further upstream/))
+    // Card-anchored, seeded by what is underneath it — the same contract
+    // the ⊕ on the row itself obeys.
+    expect(api.extend).toHaveBeenCalledWith('c1', 'up', ['c1'])
+    // And it gets out of the way once it has done its job.
+    expect(peek()).toBeNull()
+  })
+
+  it('the peek focuses where it is, and opens what it holds', () => {
+    const onRecenter = vi.fn()
+    renderLens(['F'], table(), { onRecenter })
+    fireEvent.click(row('order_id'))
+    // A leaf holds nothing, so it is never offered an "open inside" that
+    // would do nothing.
+    expect(within(peek() as HTMLElement).queryByText(/what is inside/)).toBeNull()
+    fireEvent.click(within(peek() as HTMLElement).getByText('Focus here'))
+    expect(onRecenter).toHaveBeenCalledWith('c1')
+  })
+
+  it('Escape closes the peek — and does NOT close the lens under it', () => {
+    const onClose = vi.fn()
+    renderLens(['F'], table(), { onClose })
+    fireEvent.click(row('order_id'))
+    expect(peek()).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(peek()).toBeNull()
+    expect(onClose).not.toHaveBeenCalled()
+    // With nothing to dismiss, Escape means what it always meant.
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('the row list is one tab stop that owns its rows and names the cursor', () => {
+    renderLens(['F'], table())
+    const region = rowsRegion()
+    expect(region.getAttribute('role')).toBe('listbox')
+    expect(region.getAttribute('tabindex')).toBe('0')
+    // Owned rather than contained: React Flow renders the rows as the
+    // frame's SIBLINGS, so the relationship has to be stated.
+    const owned = (region.getAttribute('aria-owns') ?? '').split(' ')
+    expect(owned).toHaveLength(2)
+    for (const id of owned) expect(document.getElementById(id)).toBeTruthy()
+    expect(region.getAttribute('aria-activedescendant')).toBeNull()
+
+    fireEvent.focus(region)
+    expect(region.getAttribute('aria-activedescendant')).toBe(owned[0])
+    expect(row('order_id').getAttribute('id')).toBe(owned[0])
+  })
+
+  it('up and down walk the rows, and stop at the ends', () => {
+    renderLens(['F'], table())
+    const region = rowsRegion()
+    fireEvent.focus(region)
+    const first = region.getAttribute('aria-activedescendant')
+    fireEvent.keyDown(region, { key: 'ArrowDown' })
+    const second = region.getAttribute('aria-activedescendant')
+    expect(second).not.toBe(first)
+    expect(row('placed_at').getAttribute('id')).toBe(second)
+    // The last row is the last row — no wrap, so a held key never
+    // silently teleports the reader back to the top.
+    fireEvent.keyDown(region, { key: 'ArrowDown' })
+    expect(region.getAttribute('aria-activedescendant')).toBe(second)
+    fireEvent.keyDown(region, { key: 'ArrowUp' })
+    fireEvent.keyDown(region, { key: 'ArrowUp' })
+    expect(region.getAttribute('aria-activedescendant')).toBe(first)
+  })
+
+  it('Enter previews, Shift+Enter walks there, left arrow steps back out', () => {
+    const onRecenter = vi.fn()
+    const onBack = vi.fn()
+    renderLens(['F', 'G'], table(), { onRecenter, onBack, history: { entries: ['F', 'G'], cursor: 1 } })
+    const region = rowsRegion()
+    fireEvent.focus(region)
+    fireEvent.keyDown(region, { key: 'Enter' })
+    expect(peek()).toBeTruthy()
+    fireEvent.keyDown(region, { key: 'ArrowLeft', bubbles: true })
+    expect(peek()).toBeNull()
+    expect(region.getAttribute('aria-activedescendant')).toBeNull()
+    // And it did NOT step the lens back a hop: inside a row list the
+    // arrows belong to the list.
+    expect(onBack).not.toHaveBeenCalled()
+
+    fireEvent.focus(region)
+    fireEvent.keyDown(region, { key: 'Enter', shiftKey: true })
+    expect(onRecenter).toHaveBeenCalledWith('c1')
+  })
+
+  it('leaving the list takes its cursor with it', () => {
+    renderLens(['F'], table())
+    const region = rowsRegion()
+    fireEvent.focus(region)
+    expect(region.getAttribute('aria-activedescendant')).toBeTruthy()
+    fireEvent.blur(region)
+    expect(region.getAttribute('aria-activedescendant')).toBeNull()
+  })
+
+  it('typing jumps to the next name that matches, without touching the mouse', () => {
+    renderLens(['F'], table())
+    const region = rowsRegion()
+    fireEvent.focus(region)
+    fireEvent.keyDown(region, { key: 'p' })
+    expect(region.getAttribute('aria-activedescendant')).toBe(row('placed_at').getAttribute('id'))
+    // Consecutive letters compose one search rather than restarting it.
+    fireEvent.keyDown(region, { key: 'l' })
+    expect(region.getAttribute('aria-activedescendant')).toBe(row('placed_at').getAttribute('id'))
+  })
+
+  it('a name no loaded row has hands the letters to the frame\'s own Find', () => {
+    // Client-side over the rows in hand; a miss is exactly the case the
+    // SERVER search exists for, so the typing becomes the query rather
+    // than being swallowed — but only on a frame that offers a Find box,
+    // or the letters would dim every row against a query with nowhere to
+    // be seen or cleared.
+    renderLens(['F'], manyColumns())
+    const region = screen.getByLabelText(/^Rows inside raw_orders\./)
+    fireEvent.focus(region)
+    fireEvent.keyDown(region, { key: 'z' })
+    expect((screen.getByLabelText('Filter what is inside raw_orders') as HTMLInputElement).value).toBe('z')
+  })
+
+  it('a short list swallows a miss rather than filtering itself to nothing', () => {
+    renderLens(['F'], table())
+    const region = rowsRegion()
+    fireEvent.focus(region)
+    fireEvent.keyDown(region, { key: 'z' })
+    // Both rows still readable, and no Find box was conjured to explain
+    // a query the reader never typed into one.
+    expect(screen.getByText('order_id')).toBeTruthy()
+    expect(screen.getByText('placed_at')).toBeTruthy()
+  })
+
+  it('right arrow opens a row that holds things, and is inert on one that does not', () => {
+    // `T` is a table of columns: the columns hold nothing, so the key
+    // that opens has nothing to open and says so by doing nothing.
+    renderLens(['F'], table())
+    const region = rowsRegion()
+    fireEvent.focus(region)
+    fireEvent.keyDown(region, { key: 'ArrowRight' })
+    expect(screen.getByText('order_id')).toBeTruthy()
+    expect(peek()).toBeNull()
+  })
+})
+
 describe('the real wire shape reaches the board', () => {
   beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())

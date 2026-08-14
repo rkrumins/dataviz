@@ -386,6 +386,13 @@ TOURS.push({
       body: 'Opening a table or platform shows just the parts that **connect** to your focus. Switch to **All** to see everything it holds — every column stays listed, with the ones carrying lineage highlighted in place.',
     },
     {
+      target: '[data-tour="lens-graph"]',
+      placement: 'top',
+      padding: -8,
+      title: 'Browse what a container holds',
+      body: 'An open container is a **scrollable list**: spin the wheel over it and a 400-column table moves under a fixed frame, fetching more as you reach the end — the header keeps saying which rows you are on. **Click** any row for a preview beside it, with what it is, what flows through it, and where you can go next. Prefer the keyboard? **Tab** into the list, then **↑ ↓** to walk it, **Enter** to preview, **Shift+Enter** to focus there, **→** to open a row, **←** to step back out — and just **start typing** to jump to a name.',
+    },
+    {
       target: '[data-tour="lens-depth"]',
       placement: 'bottom',
       title: 'Set how far you reach',
