@@ -230,6 +230,16 @@ describe('P0 — perf harness (Task 20)', () => {
   })
 
   describe('(d) buildFocusLayout rebuild wall-time', () => {
+    /**
+     * P3's budget, this task's own words: "≤ ~50ms per rebuild in jsdom
+     * at those fixtures." A ≥4× multiplier (the brief's own floor) so
+     * ordinary CI variance cannot flake this — it is a REGRESSION guard
+     * against buildFocusLayout getting an order of magnitude slower, not
+     * a tight budget assertion; the tight number is the one printed to
+     * the console and carried into the report.
+     */
+    const REBUILD_BUDGET_MS = 50
+    const REGRESSION_CEILING_MS = REBUILD_BUDGET_MS * 4
     for (const fixtureName of ['walkLongChain', 'walkWideHub']) {
       it(`${fixtureName}: repeated rebuild, same view state`, () => {
         const fixture = WALK_FIXTURES[fixtureName]
@@ -258,6 +268,8 @@ describe('P0 — perf harness (Task 20)', () => {
         const max = Math.max(...samples)
         console.log(`[P0-d] ${fixtureName} cards=${warm.cards.length} edges=${warm.edges.length} avgMs=${avg.toFixed(3)} maxMs=${max.toFixed(3)}`)
         expect(avg).toBeGreaterThan(0)
+        // THE P3 regression guard — a generous ceiling, not the target.
+        expect(avg).toBeLessThan(REGRESSION_CEILING_MS)
       })
     }
   })
