@@ -1198,7 +1198,18 @@ export function buildWalkExport(
     const cardById = new Map(graph.cards.map(c => [c.id, c]))
     const nodes: WalkExportNode[] = graph.cards
         .filter(c => c.nodeId !== null)
-        .map(c => ({ urn: c.nodeId!, name: c.label, type: c.type, parentUrn: c.parentId, depth: c.depth }))
+        .map(c => ({
+            urn: c.nodeId!,
+            name: c.label,
+            type: c.type,
+            // The parent IN THIS PICTURE, which is what the rest of the
+            // export describes. A card whose container was demoted to a
+            // breadcrumb is top-level here, and naming a parent that has
+            // no row would leave anyone rebuilding the tree with a
+            // dangling id — and contradict `depth`, which already says 0.
+            parentUrn: c.frameId === null ? null : c.parentId,
+            depth: c.depth,
+        }))
     const edges: WalkExportEdge[] = graph.edges.map(e => ({
         sourceUrn: cardById.get(e.source)?.nodeId ?? e.source,
         targetUrn: cardById.get(e.target)?.nodeId ?? e.target,

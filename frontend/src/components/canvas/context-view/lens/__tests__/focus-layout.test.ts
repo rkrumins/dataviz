@@ -423,6 +423,19 @@ describe('focus-layout — frames only where they clarify', () => {
         expect(drawn).toEqual(['INT_T2>rep_a', 'gold_t>rep_a', 'gold_t>rep_b', 'rep_a>dash'])
     })
 
+    it('the export names a parent only when the picture has one — no dangling ids', () => {
+        const g = layout(sharedPlatform())
+        const payload = buildWalkExport(g, 'REPORTING', () => 'now')
+        const urns = new Set(payload.nodes.map(n => n.urn))
+        for (const node of payload.nodes) {
+            if (node.parentUrn !== null) expect(urns.has(node.parentUrn)).toBe(true)
+            expect(node.parentUrn === null).toBe(node.depth === 0)
+        }
+        // GOLD really is inside Snowflake, and really is top-level here.
+        expect(payload.nodes.find(n => n.urn === 'GOLD')?.parentUrn).toBeNull()
+        expect(payload.nodes.find(n => n.urn === 'gold_t')?.parentUrn).toBe('GOLD')
+    })
+
     it('R6: an empty SIDE is the model\'s answer, and an empty band is not', () => {
         // The shared platform has upstream AND downstream in the model —
         // whatever geometry does with them.
