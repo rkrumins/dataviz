@@ -31,6 +31,7 @@ import {
   type LensWalkNode,
 } from '../lens/closure-adapter'
 import type { LensFrontierEntry } from '../lens/lens-subgraph'
+import { walkStatusKey } from '../lens/focus-layout'
 import type { GraphNode, GraphEdge, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
 
 // ── Walk-model fixture kit ───────────────────────────────────────────
@@ -249,6 +250,59 @@ describe('the business journey — a table\'s lineage through a seven-level esta
     )
     expect(screen.queryByText(/Walking the lineage from the data source/)).toBeNull()
     expect(onBoard('its_source')).toBe(true)
+    // Task 20, P5: a cache hit renders synchronously — ZERO loading-UI
+    // frames, not merely no fetch. Nothing was ever loading here, so
+    // neither the extend-ghost nor a spinner has any business appearing.
+    expect(document.querySelectorAll('.ghost-shimmer').length).toBe(0)
+    expect(document.querySelectorAll('.animate-spin').length).toBe(0)
+  })
+
+  it('an extend click acknowledges immediately — a ghost card, not silence, where the arrival lands', () => {
+    // BEFORE: nothing in flight, nothing ghosted.
+    const { rerender, api } = renderLens(['F'], doneWalk(collateralsEstate()))
+    expect(document.querySelectorAll('.ghost-shimmer').length).toBe(0)
+
+    // The click itself (`onExtend` → `api.extend('t0', 'up', ['t0'])`) is
+    // pinned elsewhere ("the ⊕ extend asks the server..."); this is the
+    // state right after — the SAME `extendStatus` the walk hook sets
+    // synchronously with the request, before any response has landed.
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={doneWalk(collateralsEstate(), new Map([[walkStatusKey('in', 't0'), 'loading']]))}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    // AFTER: the delivery zone says something, not nothing — while the
+    // pill's own spinner (pinned elsewhere) is unchanged.
+    expect(document.querySelectorAll('.ghost-shimmer').length).toBeGreaterThan(0)
+
+    // On merge — the fetch landed, extendStatus clears and the model
+    // carries the new upstream table — the ghost is gone and the real
+    // card is up, with no separate "swap" step the reader has to wait
+    // through.
+    const merged = collateralsEstate()
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={doneWalk(walkModel('F', {
+          ...merged,
+          nodes: [...merged.nodes, wnode('t0up', 'dataset', 'its_own_source')],
+          lineageEdges: [...merged.lineageEdges, hop('t0up', 't0')],
+          upstreamUrns: new Set([...merged.upstreamUrns, 't0up']),
+        }))}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(document.querySelectorAll('.ghost-shimmer').length).toBe(0)
   })
 
   it('a mid-walk share restores the same picture — revealed, opened, preset, depth 2 — with no fetch beyond the initial', () => {

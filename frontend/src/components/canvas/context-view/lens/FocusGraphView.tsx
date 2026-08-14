@@ -2239,6 +2239,34 @@ const EDGE_TYPES = { focusEdge: FocusGraphEdgeComp }
 const PEEK_W = 236
 const PEEK_MAX_H = 280
 
+/**
+ * Extend-click acknowledgment (Task 20, P5). The ⊕ pill's own spinner
+ * already fires the instant the click lands — this is the OTHER half
+ * of "within one frame": the delivery zone, which said nothing at all
+ * until the fetch resolved. A plausible landing spot, not a prediction
+ * — one band further in the pill's own direction, at the triggering
+ * card's own height — gone the moment the real cards land, which is
+ * when `buildFocusLayout` places them for real.
+ *
+ * Reuses the app's own shimmer language (`.ghost-shimmer`, globals.css
+ * — the same silhouette-plus-sweep the sidebar's loading tree items use)
+ * rather than inventing a second one. Positioned in SCREEN space off
+ * the board's transform, same as `LensPeek` beside it.
+ */
+function ExtendGhost({ card, dir }: { card: FocusCard; dir: 'in' | 'out' }) {
+  const [tx, ty, zoom] = useStore(s => s.transform)
+  const band = card.band + (dir === 'in' ? -1 : 1)
+  const x = band * (CARD_W + BAND_GAP) * zoom + tx
+  const y = card.y * zoom + ty
+  return (
+    <div
+      className="nodrag nowheel pointer-events-none absolute rounded-lg ghost-shimmer border border-black/[0.07] dark:border-white/[0.09]"
+      style={{ left: x, top: y, width: CARD_W * zoom, height: card.h * zoom }}
+      aria-hidden
+    />
+  )
+}
+
 /** The key that does the same thing this button does — stated on the
  *  button, so the keyboard is discoverable from the mouse. Honest: these
  *  are T16's own row keys, and a click on a row leaves the keyboard in
@@ -3022,7 +3050,14 @@ export function FocusGraphView({
   useLayoutEffect(() => { isolationStore.set(isolationValue) }, [isolationStore, isolationValue])
 
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
-  useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion)
+  // The pane's own pixel size (Task 20, P5), read off the DOM directly
+  // rather than React Flow's `useStore` — that hook needs a
+  // `ReactFlowProvider` ANCESTOR, and this component's own body runs
+  // OUTSIDE the provider it renders below for its children (`LensPeek`
+  // can read it because IT is one of those children; this can't be).
+  // A ref costs nothing until the effect that uses it actually runs.
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion, containerRef)
 
   // The PEEK belongs to a ROW: a click on one asks "what is this", and
   // this is the answer, beside it. Top-level cards keep the lens's own
@@ -3035,6 +3070,18 @@ export function FocusGraphView({
     () => (peekCard ? graph.cards.find(c => c.id === peekCard.frameId) ?? null : null),
     [graph.cards, peekCard],
   )
+  // Every card with an EXTEND in flight (P5) — 'reveal' never sets
+  // `status` (it is instant, no fetch), so this only ever matches an
+  // extend or a page, which is what "the delivery zone acknowledges"
+  // is about.
+  const extendGhosts = useMemo(() => {
+    const out: { key: string; card: FocusCard; dir: 'in' | 'out' }[] = []
+    for (const c of graph.cards) {
+      if (c.pillUp?.status === 'loading') out.push({ key: `${c.id}:in`, card: c, dir: 'in' })
+      if (c.pillDown?.status === 'loading') out.push({ key: `${c.id}:out`, card: c, dir: 'out' })
+    }
+    return out
+  }, [graph.cards])
   // Esc is deliberately NOT handled here. The lens owns it, in one
   // place, and dismisses progressively: a preview first, then the lens
   // itself. Two window-level capture handlers for one key is how the
@@ -3042,6 +3089,7 @@ export function FocusGraphView({
 
   return (
     <div
+      ref={containerRef}
       className={cn(
         'relative h-full w-full min-h-0 text-black/[0.16] dark:text-white/[0.14]',
         // Baked positions + stable card ids: a CSS transform transition
@@ -3116,6 +3164,9 @@ export function FocusGraphView({
               onDismiss={() => onSelect(null)}
             />
           )}
+          {extendGhosts.map(g => (
+            <ExtendGhost key={g.key} card={g.card} dir={g.dir} />
+          ))}
           {/* What is isolated, and how to leave — only while it STICKS.
               A hover needs no chip: letting go of it is the exit. */}
           {isolationValue?.sticky && anchorCard && (

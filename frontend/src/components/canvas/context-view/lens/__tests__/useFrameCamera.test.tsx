@@ -1,4 +1,4 @@
-import { StrictMode } from 'react'
+import { StrictMode, useRef } from 'react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, act } from '@testing-library/react'
 import { FIT_MAX_ZOOM, useFrameCamera, type CameraTarget } from '../useFrameCamera'
@@ -10,24 +10,44 @@ const card = (id: string): FocusCard =>
 const wire = (source: string, target: string): FocusEdge =>
   ({ id: `e:${source}>${target}`, source, target }) as unknown as FocusEdge
 
-function Harness({ rf, focalId, cards, edges = [] }: {
+function Harness({ rf, focalId, cards, edges = [], paneW = 0, paneH = 0 }: {
   rf: CameraTarget
   focalId: string
   cards: FocusCard[]
   edges?: FocusEdge[]
+  /** Defaults to 0 — jsdom's own default `getBoundingClientRect` (no
+   *  real layout), which every test in this file predates (P5) and does
+   *  not care about: at 0×0 nothing ever measures as "already visible",
+   *  so `fitView` always runs exactly as it did before. The two P5 tests
+   *  below opt in with real numbers, stamped onto the ref's rect. */
+  paneW?: number
+  paneH?: number
 }) {
-  useFrameCamera(rf, focalId, cards, edges, true)
-  return null
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  useFrameCamera(rf, focalId, cards, edges, true, containerRef)
+  return (
+    <div
+      ref={(el) => {
+        containerRef.current = el
+        if (el && (paneW || paneH)) {
+          el.getBoundingClientRect = () =>
+            ({ width: paneW, height: paneH, x: 0, y: 0, top: 0, left: 0, right: paneW, bottom: paneH, toJSON() { return this } }) as DOMRect
+        }
+      }}
+    />
+  )
 }
 
 describe('useFrameCamera', () => {
   let fitView: ReturnType<typeof vi.fn<CameraTarget['fitView']>>
+  let getViewport: ReturnType<typeof vi.fn<CameraTarget['getViewport']>>
   let rf: CameraTarget
 
   beforeEach(() => {
     vi.useFakeTimers()
     fitView = vi.fn<CameraTarget['fitView']>()
-    rf = { fitView }
+    getViewport = vi.fn<CameraTarget['getViewport']>(() => ({ x: 0, y: 0, zoom: 1 }))
+    rf = { fitView, getViewport }
   })
   afterEach(() => {
     vi.useRealTimers()
@@ -93,6 +113,60 @@ describe('useFrameCamera', () => {
     // focal. An async answer panning the viewport to itself is how
     // "the actual focus node has disappeared" happened.
     expect(fitView.mock.calls[1][0].nodes).toEqual([{ id: 'n:new' }, { id: 'n:x' }, { id: 'f' }])
+  })
+
+  /**
+   * Task 20, P5: "the camera nudges only if arrivals land off-viewport."
+   * Before this, EVERY expansion eased the camera — even one that landed
+   * squarely inside the pane the reader was already looking at.
+   */
+  it('does not move the camera when the arrival already fits on screen', () => {
+    const withPos = (id: string, x: number, y: number): FocusCard =>
+      ({ ...card(id), x, y, w: 200, h: 80 }) as unknown as FocusCard
+    const { rerender } = render(
+      <Harness rf={rf} focalId="a" cards={[withPos('f', 0, 0)]} paneW={1200} paneH={800} />,
+    )
+    flush()
+    expect(fitView).toHaveBeenCalledTimes(1) // the new-focal fit
+    rerender(
+      <Harness
+        rf={rf}
+        focalId="a"
+        cards={[withPos('f', 0, 0), withPos('n:x', 250, 0), withPos('n:new', 500, 0)]}
+        edges={[wire('n:new', 'n:x')]}
+        paneW={1200}
+        paneH={800}
+      />,
+    )
+    flush()
+    // Every card in the frame (n:new, n:x, f) sits well inside a
+    // 1200×800 pane at the identity viewport — no second fitView.
+    expect(fitView).toHaveBeenCalledTimes(1)
+  })
+
+  it('still eases when the arrival would land off-pane', () => {
+    const withPos = (id: string, x: number, y: number): FocusCard =>
+      ({ ...card(id), x, y, w: 200, h: 80 }) as unknown as FocusCard
+    const { rerender } = render(
+      <Harness rf={rf} focalId="a" cards={[withPos('f', 0, 0)]} paneW={1200} paneH={800} />,
+    )
+    flush()
+    rerender(
+      <Harness
+        rf={rf}
+        focalId="a"
+        // Far outside a 1200×800 pane at the identity viewport.
+        cards={[withPos('f', 0, 0), withPos('n:x', 4000, 0), withPos('n:new', 4300, 0)]}
+        edges={[wire('n:new', 'n:x')]}
+        paneW={1200}
+        paneH={800}
+      />,
+    )
+    flush()
+    expect(fitView).toHaveBeenCalledTimes(2)
+    // Both n:x and n:new arrived together here (neither is a pre-existing
+    // anchor the other attached to), in the order `cards` lists them.
+    expect(fitView.mock.calls[1][0].nodes).toEqual([{ id: 'n:x' }, { id: 'n:new' }, { id: 'f' }])
   })
 
   it('holds still while a frame churns its rows', () => {

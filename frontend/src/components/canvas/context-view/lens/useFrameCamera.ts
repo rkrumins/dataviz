@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type RefObject } from 'react'
 import type { FocusCard, FocusEdge } from './focus-cards'
 
 /**
@@ -21,7 +21,15 @@ export type CameraTarget = {
     duration?: number
     maxZoom?: number
   }) => unknown
+  /** Current pan/zoom — read-only, so checking "is this already in view"
+   *  costs nothing the instance was not already tracking. */
+  getViewport: () => { x: number; y: number; zoom: number }
 }
+
+/** How close to the pane's own edge counts as "already in view" — a
+ *  card sitting flush against the edge still reads as visible, so the
+ *  margin is generous rather than pixel-exact. */
+const VISIBLE_MARGIN_PX = 24
 
 /**
  * Keep the camera honest about what just happened.
@@ -56,6 +64,13 @@ export function useFrameCamera(
   cards: FocusCard[],
   edges: FocusEdge[],
   reducedMotion: boolean,
+  /** The pane's own DOM element (Task 20, P5) — measured at the moment
+   *  the visibility check runs, rather than a reactive width/height:
+   *  this hook's own body executes OUTSIDE any `ReactFlowProvider`
+   *  (`FocusGraphView` renders one below itself, for its children), so
+   *  the store hook `LensPeek` uses for the same question is not
+   *  reachable here. A plain ref costs nothing until it is read. */
+  containerRef: RefObject<HTMLElement | null>,
 ) {
   const framedRef = useRef<{ focal: string; ids: Set<string> } | null>(null)
   useEffect(() => {
@@ -90,7 +105,7 @@ export function useFrameCamera(
         if (arrivedIds.has(e.source) && !arrivedIds.has(e.target)) anchors.add(e.target)
         if (arrivedIds.has(e.target) && !arrivedIds.has(e.source)) anchors.add(e.source)
       }
-      const frame = [
+      const frameIds = [
         ...arrived.map(c => c.id),
         ...cards.filter(c => anchors.has(c.id)).map(c => c.id),
         // THE one unbreakable rule: the focal is in every frame this
@@ -101,13 +116,57 @@ export function useFrameCamera(
         // focal is the question; no answer is allowed to displace it.
         'f',
       ]
+      // Already fully on screen? Then don't move the camera AT ALL — a
+      // fitView here is a jump the reader did not ask for; they clicked
+      // a control in view and the answer landed beside it, in view.
+      // Only when the arrival would land off-pane does the existing
+      // (already once-fixed) ease below still run.
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (rect && cardsAlreadyVisible(frameIds, cards, rf.getViewport(), rect.width, rect.height)) return
       void rf.fitView({
-        nodes: frame.map(id => ({ id })),
+        nodes: frameIds.map(id => ({ id })),
         padding: 0.25,
         duration: reducedMotion ? 0 : 320,
         maxZoom: FIT_MAX_ZOOM,
       })
     }, 30)
     return () => window.clearTimeout(t)
-  }, [rf, focalId, cards, reducedMotion])
+    // `edges` was missing here before this task (pre-existing) — added
+    // now that touching this file put it under lint. Safe: an `edges`
+    // change alone (cards unchanged) re-runs the effect but hits the
+    // "nothing arrived" early return, which only stamps the bookkeeping.
+  }, [rf, focalId, cards, edges, reducedMotion, containerRef])
+}
+
+/**
+ * Are every one of `ids` (by their FocusCard geometry) already inside
+ * the pane, at the CURRENT pan/zoom? Flow-space → screen-space is the
+ * same transform `LensPeek` already uses (`x * zoom + tx`); a card is
+ * "visible" with `VISIBLE_MARGIN_PX` of slack on every edge.
+ */
+function cardsAlreadyVisible(
+  ids: string[],
+  cards: FocusCard[],
+  viewport: { x: number; y: number; zoom: number },
+  paneW: number,
+  paneH: number,
+): boolean {
+  const byId = new Map(cards.map(c => [c.id, c]))
+  for (const id of ids) {
+    const c = byId.get(id)
+    if (!c) continue // e.g. 'f' when the focal isn't drawn as a card
+    const left = c.x * viewport.zoom + viewport.x
+    const top = c.y * viewport.zoom + viewport.y
+    const right = (c.x + c.w) * viewport.zoom + viewport.x
+    const bottom = (c.y + c.h) * viewport.zoom + viewport.y
+    // An unknown position (NaN, from a card with no geometry) must NOT
+    // read as "visible" — every one of the comparisons below is false
+    // for NaN, which would otherwise silently skip the camera move.
+    if (![left, top, right, bottom].every(Number.isFinite)) return false
+    if (
+      left < -VISIBLE_MARGIN_PX || top < -VISIBLE_MARGIN_PX
+      || right > paneW + VISIBLE_MARGIN_PX || bottom > paneH + VISIBLE_MARGIN_PX
+    ) return false
+  }
+  return true
 }
