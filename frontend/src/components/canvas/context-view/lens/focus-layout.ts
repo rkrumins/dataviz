@@ -1338,7 +1338,16 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // second card for the focus's contents any more: one entity, one
         // node, whether it is the thing you asked about or one of its
         // partners.
-        if (!isFrame) return
+        //
+        // OPEN, not merely holding: a shut node draws no rows, and the
+        // view renders no list region around them (see `childrenOpen`).
+        // The two came apart for a SHUT FOCUS showing "everything inside"
+        // — shutting it takes its children out of `visible`, which is
+        // exactly what makes every one of them a roster extra — and the
+        // rows came out as loose cards under a node whose chevron said
+        // there was nothing to see. For every other card the two are the
+        // same test.
+        if (!contentsOpen) return
 
         // ONE fixed window of rows, so a 500-column table and a 5-column
         // one occupy the same room and scrolling MOVES the window rather
@@ -1593,7 +1602,9 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             // connections.
             dimmed: (byId.get(source)?.dimmed ?? false) && (byId.get(target)?.dimmed ?? false),
             cycleBack: runsBackwards(bundle),
-            // Decided from the geometry, below — there is none yet.
+            // Both decided below: one from the loops, one from the
+            // geometry — and there is no geometry yet.
+            cycleAnchor: false,
             labelVisible: false,
         })
     }
@@ -1618,6 +1629,40 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         if (c !== undefined && c === component.get(edge.target)) edge.cycleBack = true
     }
 
+    // ...and ONE badge per loop that density may not take away. Badging
+    // every wire of a cycle is right — but a cyclic estate is then a
+    // board where every wire carries a glyph, which is the confetti the
+    // density cap exists to stop. So each loop nominates a single wire
+    // whose badge always draws: the lowest edge id among its own, which
+    // is a choice of the SET rather than of the arrival order, so it
+    // does not move when the reader reveals a card. A marked wire whose
+    // two ends are in different components is its own loop of one — the
+    // hop numbering found it, and one wire is all it has.
+    const anchors = new Map<string, FocusEdge>()
+    for (const edge of edges) {
+        if (!edge.cycleBack) continue
+        const c = component.get(edge.source)
+        const key = c !== undefined && c === component.get(edge.target) ? `c:${c}` : edge.id
+        const held = anchors.get(key)
+        if (!held || edge.id < held.id) anchors.set(key, edge)
+    }
+    for (const edge of anchors.values()) edge.cycleAnchor = true
+
+    // PORTS FOLLOW THE WIRES THAT WERE ACTUALLY DRAWN, not the hops the
+    // model happens to name. A card only renders the handles a wire
+    // anchors to when it is `wired`, and that was read off the walk's own
+    // hops by urn: true for the row a hop names, false for the FRAME that
+    // hop rolls up to when the row is scrolled past — no hop in the model
+    // ever names the frame. React Flow then refuses a wire whose handle
+    // does not exist, so the board drew two boxes, the frame's header
+    // said "6 on this lineage", and no line ran between them.
+    for (const edge of edges) {
+        const s = byId.get(edge.source)
+        const t = byId.get(edge.target)
+        if (s) s.wired = true
+        if (t) t.wired = true
+    }
+
     // ── 5. GEOMETRY ──────────────────────────────────────────────────
 
     layoutBands(cards)
@@ -1631,10 +1676,9 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // Measured between the ports the view actually anchors to (source's
     // right edge, target's left) and at the straight-line midpoint, which
     // is where a shallow bezier puts its label to within a few pixels.
-    // A cycle badge is not decided here: it says the lineage LOOPS, which
-    // is a fact about the data rather than a count, so density never
-    // suppresses it (see the view — which does still require a wire long
-    // enough to hold it, by the same `labelFitsRun` this uses).
+    // A cycle badge is not decided here — it is decided by `cycleBack`
+    // and `cycleAnchor` above, and gated in the view by the same
+    // `labelFitsRun` this uses.
     const placed: Array<{ x: number; y: number }> = []
     for (const edge of edges) {
         if (edge.count <= 1) continue
@@ -1813,31 +1857,48 @@ export function isolationCone(
         link(upstream, e.target, { to: e.source, edgeId: e.id })
     }
 
-    const hops = new Map<string, number>()
-    for (const seed of seeds) hops.set(seed, 0)
     const edgeIds = new Set<string>()
-    /** One direction, breadth-first, from every seed at once. */
-    const walk = (adjacency: Map<string, Step[]>) => {
+    /**
+     * One direction, breadth-first, from every seed at once — with its
+     * OWN depths.
+     *
+     * Per direction, deliberately: the two walks share a board but not a
+     * route. A card the anchor flows INTO is not a step on the way to
+     * something that flows into the anchor, so letting the second walk
+     * read the first one's numbers measured a path that runs downstream
+     * and then turns around — which is the mixed route two directed
+     * walks exist to exclude. Merged below, nearest wins, so a card on
+     * both sides keeps the shorter of two real distances.
+     *
+     * Breadth-first from all seeds at once means the first arrival at a
+     * card IS its shortest distance; a second one can only be longer.
+     */
+    const walk = (adjacency: Map<string, Step[]>): Map<string, number> => {
+        const depths = new Map<string, number>()
+        for (const seed of seeds) depths.set(seed, 0)
         const queue = [...seeds]
-        const seen = new Set(seeds)
         for (let i = 0; i < queue.length; i++) {
             const at = queue[i]
-            const depth = hops.get(at) ?? 0
+            const depth = depths.get(at)!
             for (const { to, edgeId } of adjacency.get(at) ?? []) {
                 // The wire is on the cone whether or not its far end is
                 // new — two branches of a diamond rejoining is two lit
                 // wires into one lit card, not one.
                 edgeIds.add(edgeId)
-                const known = hops.get(to)
-                if (known === undefined || depth + 1 < known) hops.set(to, depth + 1)
-                if (seen.has(to)) continue
-                seen.add(to)
+                if (depths.has(to)) continue
+                depths.set(to, depth + 1)
                 queue.push(to)
             }
         }
+        return depths
     }
-    walk(downstream)
-    walk(upstream)
+    const hops = new Map<string, number>()
+    for (const depths of [walk(downstream), walk(upstream)]) {
+        for (const [id, depth] of depths) {
+            const known = hops.get(id)
+            if (known === undefined || depth < known) hops.set(id, depth)
+        }
+    }
 
     if (edgeIds.size === 0) return null
 

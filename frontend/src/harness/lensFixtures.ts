@@ -75,12 +75,22 @@ export interface WalkFixture {
 
 const scripted = (
   base: LensViewState,
-  over: { reveal?: Array<[string, number]>; expand?: string[]; showAll?: string[] },
+  over: {
+    reveal?: Array<[string, number]>
+    expand?: string[]
+    showAll?: string[]
+    /** Where a frame's scroll window is RESTING, by first row index. The
+     *  only way to photograph a mid-window list: the top fade and the
+     *  "show previous" step exist exactly when the window is not at 0,
+     *  and a still picture cannot scroll. */
+    offsets?: Array<[string, number]>
+  },
 ): LensViewState => ({
   ...base,
   revealed: new Map([...base.revealed, ...(over.reveal ?? [])]),
   expandedContainment: new Set([...base.expandedContainment, ...(over.expand ?? [])]),
   frameShowAll: new Set([...base.frameShowAll, ...(over.showAll ?? [])]),
+  frameOffsets: new Map([...base.frameOffsets, ...(over.offsets ?? [])]),
 })
 
 /**
@@ -694,6 +704,53 @@ const walkPlatformFocus = (): WalkFixture => ({
 })
 
 /**
+ * The same sixty-child container, MID-WINDOW — the state R5.2 is about.
+ *
+ * A still picture cannot scroll, so the discoverability cues that exist
+ * only when the window has left the top (the fade under the header and
+ * the "Show previous 10 rows" step) are unphotographable at offset 0.
+ * Resting the window on row 11 is the shot that shows them, and it shows
+ * the other end honestly too: hidden content BOTH ways, a fade at each
+ * edge and a step control on either side of the range chip.
+ *
+ * It is a second fixture rather than a scroll of the first, because at
+ * offset 10 the connected rows, the divider and the peeked row are all
+ * above the window — and those are what `walkChildrenRich` is the
+ * photograph of. Both states matter; neither can be the same picture.
+ *
+ * EXPECTED: `11–20 of 60` at the foot between `Show previous 10 rows`
+ * and `Show next 10 rows`, ten roster rows (`legacy_/raw_/audit_/ext_`),
+ * a soft edge top and bottom, and the thumb resting mid-track.
+ */
+const walkChildrenScrolled = (): WalkFixture => {
+  const base = walkChildrenRich()
+  return {
+    ...base,
+    title: 'The same list, scrolled off the top — the cues that only exist mid-window',
+    script: b => scripted(b, { expand: ['T'], showAll: ['T'], offsets: [['T', 10]] }),
+    // No selection: the peeked row is above this window, and a peek
+    // pointing at a row that is not on screen is a panel about nothing.
+    selectedId: undefined,
+  }
+}
+
+/**
+ * The user's column-grain estate, mid-ISOLATION: one of the eight
+ * parallel column wires clicked.
+ *
+ * The isolation rule is hardest to believe exactly here — eight wires
+ * running side by side between two tables, every one of them the same
+ * shape — and this is the picture that settles it: `amount` to `amount`
+ * lit and graded, the seven columns either side of it quiet, and both
+ * boxes lit because each holds a lit row.
+ */
+const walkIsolatedLeafCone = (): WalkFixture => ({
+  ...walkSharedPlatformLeaf(),
+  title: 'One column of eight — the cone at column grain',
+  isolatedId: 'n:s:amount',
+})
+
+/**
  * The same estate, mid-ISOLATION: the reader has clicked `dim_customer`,
  * so the board draws its lineage cone and quiets everything else.
  *
@@ -720,9 +777,11 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkDirectionAndHighlight: walkDirectionAndHighlight(),
   walkSharedPlatform: walkSharedPlatform(),
   walkSharedPlatformLeaf: walkSharedPlatformLeaf(),
+  walkIsolatedLeafCone: walkIsolatedLeafCone(),
   walkSharedPlatformOneColumn: walkSharedPlatformOneColumn(),
   walkDensePills: walkDensePills(),
   walkChildrenRich: walkChildrenRich(),
+  walkChildrenScrolled: walkChildrenScrolled(),
   walkColumnFocus: walkColumnFocus(),
   walkPlatformFocus: walkPlatformFocus(),
 }

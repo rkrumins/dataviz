@@ -17,6 +17,7 @@ import type { ComponentProps } from 'react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { render, screen, fireEvent, cleanup, within, act } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest'
 import { LineageLens, type LensWalkSeed } from '../LineageLens'
 import { usePreferencesStore } from '@/store/preferences'
@@ -1297,6 +1298,53 @@ describe('what is really inside a container', () => {
     expect(screen.queryByLabelText(/^Show next/)).toBeNull()
     expect(screen.queryByLabelText(/^Show previous/)).toBeNull()
     expect(screen.queryByText(/1–2 of/)).toBeNull()
+  })
+
+  /**
+   * A HEADER LISTENS ONLY TO ITSELF.
+   *
+   * A frame header is a place to point at the container — and for one
+   * release it was also a `role="button"` with an Enter/Space handler on
+   * it. Its controls stop a CLICK, but a keydown bubbles regardless, and
+   * the ancestor's `preventDefault` suppressed the default action of
+   * whatever was actually focused: a space could not be typed into Find,
+   * and Enter on the chevron selected and isolated the frame instead of
+   * opening it. These three are that class, from the reader's side.
+   */
+  it('a space typed into a frame\'s Find reaches the Find', async () => {
+    const user = userEvent.setup()
+    openWideTable(vi.fn())
+    await user.click(screen.getByLabelText('Search inside raw_orders'))
+    const find = screen.getByLabelText('Search inside raw_orders') as HTMLInputElement
+    expect(find.tagName).toBe('INPUT')
+    await user.type(find, 'a b')
+    expect(find.value).toBe('a b')
+  })
+
+  it('Enter on the chevron shuts the frame — it does not isolate it', async () => {
+    const user = userEvent.setup()
+    renderLens(['F'], tableWithColumns())
+    screen.getByLabelText('Collapse raw_orders').focus()
+    await user.keyboard('{Enter}')
+    // The key did the CONTROL's job — the frame is shut, and offers to
+    // open again...
+    expect(screen.getByLabelText('Show what\'s inside raw_orders')).toBeTruthy()
+    expect(screen.queryByLabelText('Collapse raw_orders')).toBeNull()
+    // ...and not the header's, which is what used to swallow it.
+    expect(screen.queryByText(/Isolating/)).toBeNull()
+  })
+
+  it('Enter on the focus\'s own name isolates the lineage through it', async () => {
+    const user = userEvent.setup()
+    openWideTable(vi.fn())
+    // The focus keeps a keyboard way in — a real button carrying its
+    // name, rather than a header pretending to be one.
+    const hit = screen.getByLabelText('stg_orders — isolate the lineage running through it')
+    expect(hit.tagName).toBe('BUTTON')
+    hit.focus()
+    await user.keyboard('{Enter}')
+    expect(screen.getByText(/Isolating/)).toBeTruthy()
+    expect(screen.getByText('stg_orders', { selector: 'bdi' })).toBeTruthy()
   })
 
   it('asks a focal that HOLDS things for its own roster, once', () => {

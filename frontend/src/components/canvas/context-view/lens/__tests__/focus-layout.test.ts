@@ -402,6 +402,60 @@ describe('focus-layout — frames only where they clarify', () => {
         expect(g.cards.some(c => c.frameId === focus.id)).toBe(false)
     })
 
+    it('R7: a SHUT focus showing "everything inside" draws no rows either', () => {
+        // The one shape where "holds things" and "is showing them" came
+        // apart. Shutting the focus takes its children out of the visible
+        // set — which is exactly what makes every one of them a ROSTER
+        // extra — so the rows the reader had just closed came straight
+        // back as loose cards under a chevron saying there was nothing
+        // to see, with no list region around them.
+        const sg = sharedPlatform()
+        const base = initialLensViewState(sg)
+        const roster = {
+            children: [
+                wnode('rep_a', 'dataset', 'rpt_revenue'),
+                wnode('rep_b', 'dataset', 'rpt_churn'),
+                wnode('rep_c', 'dataset', 'rpt_margin'),
+            ],
+            hasMore: false,
+            total: 9,
+        }
+        const g = layout(
+            sg,
+            {
+                ...base,
+                frameShowAll: new Set(['REPORTING']),
+                collapsedContainment: new Set(['REPORTING']),
+            },
+            { childrenAll: new Map([['REPORTING', roster]]) },
+        )
+        const focus = cardFor(g, 'REPORTING')!
+        // The chevron is honest, and nothing is drawn behind it.
+        expect(focus.childrenOpen).toBe(false)
+        expect(g.cards.filter(c => c.frameId === focus.id)).toHaveLength(0)
+        expect(focus.h).toBe(FOCAL_H)
+    })
+
+    it('R7: a compact focus still says the walk ended at it; one holding rows leaves that to the bands', () => {
+        // A frame never claims a dead end — its rows carry the lineage,
+        // and "ends here" over an open estate full of live connections is
+        // false. The focus became one of those in R7, so the claim now
+        // depends on whether it HOLDS anything: the band whispers make
+        // the data-source claim for the ones that do.
+        const drained = (holds: boolean) => subgraph({
+            focus: 'F',
+            nodes: [
+                wnode('U', 'dataset', 'upstream'),
+                wnode('F', 'dataset', 'the_focus', holds ? { childCount: 2 } : {}),
+                ...(holds ? [wnode('fc1', 'schemaField', 'a'), wnode('fc2', 'schemaField', 'b')] : []),
+            ],
+            contains: holds ? [['F', 'fc1'], ['F', 'fc2']] : [],
+            hops: [['U', 'F']],
+        })
+        expect(cardFor(layout(drained(false)), 'F')!.deadEnd).toBe(true)
+        expect(cardFor(layout(drained(true)), 'F')!.deadEnd).toBe(false)
+    })
+
     it('R7: the focus closes to its header, and its rows go with it', () => {
         const sg = sharedPlatform()
         const base = initialLensViewState(sg)
@@ -1282,6 +1336,40 @@ describe('focus-layout — cycle badge', () => {
         expect(g.edges.some(e => e.cycleBack)).toBe(false)
     })
 
+    it('nominates ONE badge per loop that density may not take away', () => {
+        // Every wire of a loop is marked — which of them "closes" it is
+        // an artefact of the walk order — and on a cyclic estate that is
+        // a glyph on every wire on the board, which is the confetti the
+        // density cap exists to stop. So each loop nominates a single
+        // wire whose badge always draws. TWO separate loops here, because
+        // "one per board" and "one per loop" are only distinguishable
+        // when there is more than one.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F'), wnode('A'), wnode('B'), wnode('X'), wnode('Y')],
+            contains: [],
+            hops: [['F', 'A'], ['A', 'B'], ['B', 'A'], ['F', 'X'], ['X', 'Y'], ['Y', 'X']],
+        })
+        const g = layout(sg, withReveal(
+            withReveal(initialLensViewState(sg), 'out:A', 1), 'out:X', 1))
+        const wire = wires(g)
+        // Every wire of both loops is marked...
+        for (const [s, t] of [['A', 'B'], ['B', 'A'], ['X', 'Y'], ['Y', 'X']]) {
+            expect(wire(s, t)!.cycleBack).toBe(true)
+        }
+        // ...and exactly one of EACH is the one density cannot silence,
+        // picked by the lowest edge id so it is the same wire on every
+        // render rather than whichever the walk reached first.
+        expect(g.edges.filter(e => e.cycleAnchor)).toHaveLength(2)
+        expect(wire('A', 'B')!.cycleAnchor).toBe(true)
+        expect(wire('B', 'A')!.cycleAnchor).toBe(false)
+        expect(wire('X', 'Y')!.cycleAnchor).toBe(true)
+        expect(wire('Y', 'X')!.cycleAnchor).toBe(false)
+        // The ways IN are not part of either loop, badge or nomination.
+        expect(wire('F', 'A')!.cycleBack).toBe(false)
+        expect(wire('F', 'A')!.cycleAnchor).toBe(false)
+    })
+
     it('does not stamp a diamond — two paths to one node is not a cycle', () => {
         const sg = subgraph({
             focus: 'F',
@@ -1867,7 +1955,7 @@ describe('focus-layout — direction filter (view-side; presentation, not data)'
 
 describe('focus-layout — isolationCone (what one element\'s lineage covers)', () => {
     const edge = (id: string, source: string, target: string): FocusEdge =>
-        ({ id, source, target, count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false, labelVisible: false })
+        ({ id, source, target, count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false, cycleAnchor: false, labelVisible: false })
     const card = (id: string, frameId: string | null = null): FocusCard =>
         ({ ...({} as FocusCard), id, nodeId: id, frameId, kind: 'entity' })
     const board = (cards: FocusCard[], edges: FocusEdge[]) => ({ cards, edges })
@@ -1955,6 +2043,28 @@ describe('focus-layout — isolationCone (what one element\'s lineage covers)', 
         expect(cone.cardIds).toEqual(new Set(['FR1', 'FR2', 'T']))
     })
 
+    it('measures each direction on its OWN route — a card the anchor feeds is not a step towards its producers', () => {
+        //   A ─▶ N ─▶ Z ─▶ A        and        W ─▶ N
+        //
+        // `N` is one hop DOWNSTREAM of A. It is also on the way up to A —
+        // three hops up, through Z — and `W` hangs off it there and
+        // nowhere else. Reading the downstream walk's "1" for N while
+        // walking upstream numbered W as 2: a distance along a route that
+        // runs downstream and then turns around, which is the mixed path
+        // two directed walks exist to exclude.
+        const cards = ['A', 'N', 'Z', 'W'].map(id => card(id))
+        const edges = [
+            edge('e1', 'A', 'N'), edge('e2', 'N', 'Z'), edge('e3', 'Z', 'A'),
+            edge('e4', 'W', 'N'),
+        ]
+        const cone = isolationCone(board(cards, edges), 'A')!
+        // Each of these is on both sides, and keeps the shorter REAL one.
+        expect(cone.hops.get('N')).toBe(1)
+        expect(cone.hops.get('Z')).toBe(1)
+        // W is reached only by walking up: W → N → Z → A.
+        expect(cone.hops.get('W')).toBe(3)
+    })
+
     it('is cycle-safe: a loop terminates, and the whole loop is on the cone', () => {
         const cards = ['A', 'B', 'C'].map(id => card(id))
         const edges = [edge('e1', 'A', 'B'), edge('e2', 'B', 'C'), edge('e3', 'C', 'A')]
@@ -2003,6 +2113,29 @@ describe('focus-layout — isolationCone (what one element\'s lineage covers)', 
         expect(cone.cardIds.has(id('F'))).toBe(true)
         // The OTHER producer of the same consumer is not on this lineage.
         expect(cone.cardIds.has(id('rc'))).toBe(false)
+    })
+
+    it('the WIRE decision, exactly: which drawn edges the treatment is painted from', () => {
+        // The cone's paint on a wire — its weight, its drift, and the
+        // saturation the rest of the board gives up — is screenshot-only:
+        // React Flow draws no edges at all until its nodes have been
+        // measured, and jsdom measures nothing. So the DECISION those are
+        // painted from is pinned here, on a real built board: a producer,
+        // the focus it feeds, the consumer beyond it, and a second
+        // producer of the same focus that must stay dark.
+        const sg = subgraph({
+            focus: 'b',
+            nodes: [wnode('a'), wnode('b'), wnode('c'), wnode('d')],
+            contains: [],
+            hops: [['a', 'b'], ['b', 'c'], ['d', 'b']],
+        })
+        const g = layout(sg)
+        const id = (u: string) => cardFor(g, u)!.id
+        const wire = (s: string, t: string) =>
+            g.edges.find(e => e.source === id(s) && e.target === id(t))!.id
+        const cone = isolationCone(g, id('a'))!
+        expect([...cone.edgeIds].sort()).toEqual([wire('a', 'b'), wire('b', 'c')].sort())
+        expect(cone.edgeIds.has(wire('d', 'b'))).toBe(false)
     })
 
     it('runs over a REAL board: the focus\'s cone reaches its partners', () => {
@@ -2441,6 +2574,34 @@ describe('every edge and every label has both its ends on the board', () => {
             // ...and rolled-up hops MERGE rather than colliding on one id.
             expect(new Set(g.edges.map(e => e.id)).size).toBe(g.edges.length)
         }
+    })
+
+    it('a card a rolled-up wire lands on offers the ports to ANCHOR it', () => {
+        // The other half of "both ends on the board". A wire attaches to
+        // a card's HANDLES, and a card only draws handles when it is
+        // `wired` — which was read off the model's own hops by urn. True
+        // for the row a hop names; FALSE for the frame that hop rolls up
+        // to when the row is scrolled past, because no hop in the model
+        // names the frame. The renderer then refused the wire outright
+        // ("Couldn't create edge for source handle id: null"), and the
+        // board showed two boxes, six connections between them by the
+        // frame's own count, and no line at all.
+        //
+        // Found by the R5.2 mid-window screenshot, which is the first
+        // picture in this suite where EVERY connected row is off-window.
+        const sg = wideEstate()
+        const base = initialLensViewState(sg)
+        const g = layout(sg, { ...base, frameOffsets: new Map([['T1', 9], ['F', 9]]) })
+        const byId = new Map(g.cards.map(c => [c.id, c]))
+        for (const e of g.edges) {
+            expect({ id: e.id, source: byId.get(e.source)!.wired })
+                .toEqual({ id: e.id, source: true })
+            expect({ id: e.id, target: byId.get(e.target)!.wired })
+                .toEqual({ id: e.id, target: true })
+        }
+        // The frame itself is one of them — nine of its fourteen hops
+        // rolled up onto it.
+        expect(cardFor(g, 'T1')!.wired).toBe(true)
     })
 
     it('still says "coarser grain" when there is genuinely no card to land on', () => {

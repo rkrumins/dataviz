@@ -36,10 +36,17 @@ const FIXTURES = process.argv.slice(2).length
   //
   // ...and whether ISOLATING one element's lineage reads as an answer:
   // the cone lit and graded, a sibling producer of the same consumer
-  // quieted, and the chip that says what is isolated and how to leave.
+  // quieted, and the chip that says what is isolated and how to leave —
+  // at table grain, and again at COLUMN grain, where eight wires run
+  // side by side and only one of them is the answer.
+  //
+  // ...and the half of a windowed list a shot at rest cannot show: the
+  // fade under the header and the step back, which exist only once the
+  // window has left the top.
   : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall', 'walkDirectionAndHighlight',
     'walkSharedPlatform', 'walkSharedPlatformLeaf', 'walkSharedPlatformOneColumn', 'walkDensePills',
-    'walkChildrenRich', 'walkColumnFocus', 'walkPlatformFocus', 'walkIsolatedCone']
+    'walkChildrenRich', 'walkChildrenScrolled', 'walkColumnFocus', 'walkPlatformFocus',
+    'walkIsolatedCone', 'walkIsolatedLeafCone']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH

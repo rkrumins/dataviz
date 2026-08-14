@@ -417,6 +417,15 @@ export interface FocusEdge {
    *  closes a loop. Drawn with a cycle badge rather than silently
    *  overlapping a forward wire. */
   cycleBack: boolean
+  /** The ONE wire of this loop whose badge outranks the density cap.
+   *
+   *  Every wire of a loop is marked (which of them "closes" it is an
+   *  artefact of the walk order), and on a cyclic estate that is a badge
+   *  on every wire on the board. So the rest of them answer to density
+   *  like any other badge, and exactly one — the lowest edge id in the
+   *  loop, so the choice is the same on every render — is guaranteed:
+   *  a loop is never invisible, and never carpets the board. */
+  cycleAnchor: boolean
   /** This bundle's ×N badge has something to say AND somewhere to sit:
    *  more than one raw hop (or a cycle to mark), a drawn line long
    *  enough to hold a pill, and no other badge already occupying that

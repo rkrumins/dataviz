@@ -209,6 +209,10 @@ interface CardCtx {
    *  is a fact about the board, and one entity can be drawn as a frame
    *  whose rows have card ids of their own. */
   onIsolate: (cardId: string | null) => void
+  /** Peel ONE layer of what is open, innermost first — the board's own
+   *  version of the pane click, for the parts of a frame that are
+   *  background but sit above the pane. */
+  onDismiss: () => void
   // ── Growing the walk ─────────────────────────────────────────────
   // Optional so a caller can render a picture it does not intend to be
   // grown (the visual harness does exactly that); the ⊕ renders only
@@ -1294,22 +1298,22 @@ function FocusFrameNode({ data, selected }: NodeProps) {
           isFocal ? 'flex-col pt-2' : 'items-center',
         )}
         style={{ height: headerHeight(card) }}
-        // The focus is inspectable like any other card on the board; a
-        // partner frame's header is its controls and nothing else.
-        {...{
-          role: 'button' as const,
-          tabIndex: isFocal ? 0 : -1,
-          // A container's header is a place to point at it: inspect it,
-          // and isolate what runs through it.
-          onClick: () => { ctx.onSelect(card.nodeId); ctx.onIsolate(card.id) },
-          onKeyDown: (e: React.KeyboardEvent) => {
-            if (e.key !== 'Enter' && e.key !== ' ') return
-            e.preventDefault()
-            e.stopPropagation()
-            ctx.onSelect(card.nodeId)
-            ctx.onIsolate(card.id)
-          },
-        }}
+        // A container's header is a place to POINT at it: inspect it, and
+        // isolate what runs through it. Its own controls stop the click
+        // before it arrives here.
+        //
+        // A pointer gesture and NOTHING ELSE. This element is not a
+        // button and must never become one: it holds a chevron, a
+        // Connected|All pair, a Find box and a Focus control, and a
+        // button containing buttons and a text input is not a button at
+        // all. It had a `role="button"` with an Enter/Space handler for
+        // one release, and because a keydown bubbles where a click was
+        // stopped, that handler ate the keyboard from every control
+        // underneath it — a space could not be typed into Find, and
+        // Enter on the chevron selected the frame instead of opening it.
+        // Where the FOCUS needs a keyboard way in, it has a real button
+        // of its own (its name, below).
+        onClick={() => { ctx.onSelect(card.nodeId); ctx.onIsolate(card.id) }}
       >
       <div className={cn('flex items-center gap-1.5 min-w-0', isFocal && 'w-full')}>
         {hasContents && (
@@ -1470,12 +1474,25 @@ function FocusFrameNode({ data, selected }: NodeProps) {
         {/* ── The focus's own identity, under its control line ── */}
         {isFocal && (
           <>
-            <TailName
-              className="block text-[13px] font-semibold text-ink leading-tight"
-              title={`${card.label}${card.description ? ` — ${card.description}` : ''}`}
+            {/* The focus's name IS its hit area — a real button, so the
+                keyboard reaches the same isolation the pointer does
+                without the header having to claim to be one. (A partner
+                frame needs no such control: its own Focus button walks
+                you there, which is the coarser thing a keyboard reader
+                wants from a card that is not the subject.) */}
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); ctx.onSelect(card.nodeId); ctx.onIsolate(card.id) }}
+              aria-label={`${card.label} — isolate the lineage running through it`}
+              className="nodrag block w-full min-w-0 text-left rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
             >
-              {card.label}
-            </TailName>
+              <TailName
+                className="block text-[13px] font-semibold text-ink leading-tight"
+                title={`${card.label}${card.description ? ` — ${card.description}` : ''}`}
+              >
+                {card.label}
+              </TailName>
+            </button>
             {/* What is in here, on this lineage and altogether — the same
                 sentence, decided the same way, that a partner frame's
                 header carries. */}
@@ -1702,10 +1719,12 @@ function FrameScrollRegion({ card, ctx, win }: {
         aria-owns={rows.slice(win.offset, win.offset + win.size).map(r => rowDomId(key, r.urn)).join(' ') || undefined}
         onKeyDown={onKeyDown}
         // Empty space inside a frame is still background: clicking it
-        // drops the preview and the selection, exactly as clicking the
-        // board around it does. Without this the region silently ate the
-        // pane's dismiss over every open container.
-        onClick={() => ctx.onSelect(null)}
+        // drops one layer of what is open, exactly as clicking the board
+        // around it does. Without this the region silently ate the pane's
+        // dismiss over every open container — and it must be the SAME
+        // dismiss, or a click on one side of a frame's border would clear
+        // the peek while a click on the other cleared the isolation.
+        onClick={() => ctx.onDismiss()}
         onWheel={(e) => { e.stopPropagation(); ctx.onFrameWheel(key, e.deltaY) }}
         onFocus={() => { if (cursorIndex < 0 && rows.length > 0) ctx.onRowCursor(key, rows[win.offset]?.urn ?? rows[0].urn) }}
         // The cursor is a FOCUS affordance: a ring left behind on a list
@@ -1935,6 +1954,8 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     dimmed: boolean
     tint: string
     cycleBack?: boolean
+    /** The one wire of this loop whose badge outranks the density cap. */
+    cycleAnchor?: boolean
     reducedMotion?: boolean
     /** The layout says this bundle's badge has something to say and room
      *  to say it (see `FocusEdge.labelVisible`). */
@@ -1970,11 +1991,16 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     : strong ? 1
       : offCone ? OFF_CONE_EDGE
         : d.containment ? 0.45 : 0.7
-  // A ×N survives density only where the reader is actually looking. A
-  // CYCLE badge ignores density — "this lineage loops back" is a fact
-  // about the data rather than a count, and two wires between one pair
-  // read as a duplicate without it — but it still needs a wire long
-  // enough to sit on, like any other badge.
+  // A ×N survives density only where the reader is actually looking.
+  //
+  // So does a CYCLE badge, with one exception per loop: "this lineage
+  // loops back" is a fact about the data rather than a count, and two
+  // wires between one pair read as a duplicate without it — but every
+  // wire of a loop is marked, so on a cyclic estate obeying nothing
+  // would put a glyph on every wire on the board. The loop's own
+  // nominated wire (`cycleAnchor`) always draws; its partners answer to
+  // density like any other badge. A loop is never invisible, and never
+  // carpets the board.
   //
   // ...and only where the wire BEING DRAWN can hold one. `labelVisible`
   // is the layout's answer, computed from the geometry it just laid out;
@@ -1987,6 +2013,7 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   const roomForLabel = labelFitsRun(sourceX, sourceY, targetX, targetY)
   const showCount = (d.labelVisible ?? false) && roomForLabel && !d.dimmed && (!d.labelDense || strong)
   const showCycle = (d.cycleBack ?? false) && roomForLabel && !d.dimmed
+    && (!d.labelDense || strong || (d.cycleAnchor ?? false))
   const showLabel = showCount || showCycle
   return (
     <>
@@ -2582,10 +2609,11 @@ export function FocusGraphView({
     onOpenDetails,
     onRowCursor,
     onIsolate,
+    onDismiss,
     onRevealMore,
     onExtend,
     onPage,
-  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onRevealMore, onExtend, onPage])
+  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onDismiss, onRevealMore, onExtend, onPage])
 
   const baseNodes = useMemo((): Node[] => {
     const minYByBand = new Map<number, number>()
@@ -2764,8 +2792,11 @@ export function FocusGraphView({
     const bandById = new Map(graph.cards.map(c => [c.id, c.band]))
     // Whether the board as a whole is too busy for every badge it could
     // draw — a property of the picture, so it is decided once here
-    // rather than re-counted inside every edge.
-    const labelDense = graph.edges.filter(e => e.labelVisible).length > LABEL_DENSITY_CAP
+    // rather than re-counted inside every edge. EVERY badge counts
+    // towards it: a cyclic estate wants a glyph on every wire it draws,
+    // and a cap that only measured the ×N counts would read that board
+    // as empty and let all of them through.
+    const labelDense = graph.edges.filter(e => e.labelVisible || e.cycleBack).length > LABEL_DENSITY_CAP
     return graph.edges.map((e) => {
       // Containment is never drawn as a wire — it NESTS. Every edge on
       // the board is a lineage hop, tinted by the side it lands on.
@@ -2782,7 +2813,7 @@ export function FocusGraphView({
         markerEnd: { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
         data: {
           count: e.count, dimmed: e.dimmed, tint, cycleBack: e.cycleBack, reducedMotion,
-          labelVisible: e.labelVisible, labelDense,
+          cycleAnchor: e.cycleAnchor, labelVisible: e.labelVisible, labelDense,
         },
       }
     })
