@@ -313,6 +313,17 @@ export interface FocusGraph {
    *  the three upstream frames sitting right beside it. */
   modelHasUpstream: boolean
   modelHasDownstream: boolean
+  /** Raw hops the picture could not draw because their nearest drawn end
+   *  is a level it does not draw — a containment ancestor of the FOCUS
+   *  that the data source also put on a hop. Said out loud on the focal
+   *  ("+N connect at a coarser grain") rather than dropped in silence,
+   *  and it is what explains a partner card with no wire on it. */
+  hopsAtCoarserGrain: number
+  /** Every containment level this view state has drawn THROUGH, this
+   *  build and every earlier one. The consumer folds it back into
+   *  `LensViewState.walkedThrough`; see the note there for why the grain
+   *  has to be sticky. */
+  walkedThrough: ReadonlySet<string>
   /** Per band key `${dir}:${band}`: cards shown vs total available. */
   bandTotals: Map<string, {
     shown: number
@@ -408,22 +419,20 @@ export function layoutBands(cards: FocusCard[]) {
   for (const [band, list] of byBand) {
     const x = band * (CARD_W + BAND_GAP)
     if (band === 0) {
-      // Focal first (the builder inserts it first), anything else below.
-      // Centered on ITS OWN height, whatever it is: a focal card is
-      // FOCAL_H, but a focus that holds things is a frame as tall as its
-      // contents, and hanging that from -FOCAL_H/2 pushed the thing the
-      // picture is about below the midline every other band centers on —
-      // which fanned every wire diagonally out of it.
-      let y = -(list[0]?.h ?? FOCAL_H) / 2
-      list.forEach((c, i) => {
-        // The focus leads this band and owns the column's own x —
-        // whether it is a focal card or a frame full of its contents.
-        // Indenting a frame focus by a nesting step pushed the anchor
-        // 16px out of its own column and bent every wire into it.
-        c.x = i === 0 ? x : x + NEST_INDENT * (c.depth + 1)
+      // The FOCAL card centers on the midline and owns the column's own
+      // x; its contains-stack and anything else in this band hang below
+      // it, indented. Keyed on the KIND rather than on position: the
+      // focal is what the midline is for, and "whatever happens to be
+      // first" decorated a different card entirely the one time the
+      // focus went missing from its own band.
+      const focal = list.find(c => c.kind === 'focal')
+      let y = -(focal?.h ?? FOCAL_H) / 2
+      for (const c of list) {
+        const isFocal = c === focal
+        c.x = isFocal ? x : x + NEST_INDENT * (c.depth + 1)
         c.y = y
-        y += c.h + (i === 0 ? CONTAINS_STACK_GAP : CARD_GAP)
-      })
+        y += c.h + (isFocal ? CONTAINS_STACK_GAP : CARD_GAP)
+      }
       continue
     }
     const total = list.reduce((acc, c) => acc + c.h, 0) + CARD_GAP * Math.max(0, list.length - 1)

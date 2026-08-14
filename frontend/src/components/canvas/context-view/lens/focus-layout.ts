@@ -116,6 +116,17 @@ export interface LensViewState {
     collapsedContainment: ReadonlySet<string>
     /** Frames flipped from "only what connects" to "everything inside". */
     frameShowAll: ReadonlySet<string>
+    /** Containment levels this view has already drawn THROUGH — chrome
+     *  over the answer rather than geometry.
+     *
+     *  Grow-only, and fed back from `FocusGraph.walkedThrough`, because
+     *  the grain test reads the population and the population only ever
+     *  grows: a table walked through while it had one connected column
+     *  would become a card of its own the moment a second arrived, and
+     *  the column card already on the board would vanish inside it.
+     *  Nothing already drawn may be taken away by a walk growing. Reset
+     *  with the rest of this state when the focus changes. */
+    walkedThrough: ReadonlySet<string>
     frameQueries: ReadonlyMap<string, string>
     framePages: ReadonlyMap<string, number>
 }
@@ -175,6 +186,7 @@ export function initialLensViewState(sg: LensSubgraph<LensWalkNode>): LensViewSt
         expandedContainment: new Set([...focusAncestorChain(sg), sg.focusUrn]),
         collapsedContainment: new Set(),
         frameShowAll: new Set(),
+        walkedThrough: new Set(),
         frameQueries: new Map(),
         framePages: new Map(),
     }
@@ -455,27 +467,52 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         carriesHop.add(hop.targetUrn)
     }
 
+    /** A hop that ends on a LEAF: the data source named it, and there is
+     *  nothing inside it to open. It belongs in its owner's frame as a
+     *  ROW — that is what a table full of connected columns looks like —
+     *  rather than as a card of its own. A hop-carrier that HOLDS things
+     *  is its own card, because it has an inside to show. */
+    const isLeafHopCarrier = (urn: string): boolean =>
+        carriesHop.has(urn) && (nodeOf(urn)?.children.length ?? 0) === 0
+
+    /** Levels the layout opens by itself, and — of those — the ones it
+     *  opens WITHOUT drawing, because they are chrome the answer sits
+     *  under. Separate sets: a container holding rows is opened AND
+     *  drawn; a level walked past is opened and not. */
     const spine = new Set<string>()
+    const walkedThrough = new Set<string>()
     const spineSeen = new Set<string>()
     const openThrough = (urn: string) => {
         if (spineSeen.has(urn) || !population.has(urn)) return
         spineSeen.add(urn)
         const kids = childrenInPopulation(urn)
         if (kids.length === 0) return
-        // A level ABOVE THE FOCUS is context — it is not drawn at all, so
-        // it cannot be where the walk stops, and the grain question moves
-        // to each of the groups it holds instead. Below that, a level is
-        // seen through only while it is a PASS-THROUGH that the data
-        // source has not itself named as a lineage end: one child, no hop
-        // of its own. That is the difference between
-        // `Snowflake ⊃ {REPORTING, GOLD, INTERMEDIATE_T2}`, where GOLD is
-        // chrome over the source you asked for, and
-        // `Sales ⊃ {orders_raw, refunds_raw}`, which genuinely branches
-        // and stays one card speaking for both.
-        const transparent = focusAncestors.has(urn) || (kids.length === 1 && !carriesHop.has(urn))
-        if (!transparent) return
-        spine.add(urn)
-        for (const kid of kids) openThrough(kid)
+        // THE FOCUS IS NEVER CHROME. It is the thing you asked about: it
+        // always gets its card and its contains-stack, whatever its shape
+        // happens to be. (A focus with exactly one connected child and no
+        // hop of its own used to satisfy the pass-through test below,
+        // join the spine, and be demoted out of the picture — leaving a
+        // board with no focal card and, because every hop reprojects onto
+        // it, no wires at all.)
+        if (urn === sg.focusUrn) return
+        const above = focusAncestors.has(urn)
+        // The grain the answer is PRESENTED at: a container holding hops
+        // that end in it is what the picture is of. Open it so its rows
+        // show — `int_clean_orders_t1` with its connected columns in it,
+        // counted, searchable and paged in place — and draw it. Never
+        // above the focus, where nothing is drawn at all (R1).
+        if (!above && kids.some(isLeafHopCarrier)) { spine.add(urn); return }
+        // Otherwise chrome, and seen through: a level above the focus, or
+        // a PASS-THROUGH the data source has not itself named as a
+        // lineage end. Sticky, because the population only grows: a level
+        // once drawn through stays drawn through for this view state, or
+        // the arrival of a second child would turn it into a card and
+        // swallow the one already on the board.
+        if (above || view.walkedThrough.has(urn) || (kids.length === 1 && !carriesHop.has(urn))) {
+            spine.add(urn)
+            walkedThrough.add(urn)
+            for (const kid of kids) openThrough(kid)
+        }
     }
     for (const group of admittedGroups) openThrough(group.root)
 
@@ -567,20 +604,22 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     //     and is never enclosed by anything; what is above it is the
     //     focal breadcrumb. (Its own contents are stated by the
     //     contains-stack attached below the focal — see `emit`.)
-    //   • SKIPPED BY THE ANSWER GRAIN. `spine` is exactly the levels the
-    //     grain walk saw through to reach the answer, so they are chrome
-    //     by construction; the presented entity itself is never in it.
+    //   • WALKED THROUGH by the answer grain. `walkedThrough` is exactly
+    //     the levels the walk saw past on its way to the answer, so they
+    //     are chrome by construction; the level the answer is presented
+    //     at is opened but never in it.
     //
     // Both cases are ancestor-closed (every ancestor of a focus-ancestor
-    // is one; every ancestor of a spine level was walked through to get
-    // there), so the demoted set is a prefix from the roots: nothing
-    // nested inside a surviving frame is ever demoted, and the cascade
-    // is just "keep walking down until something survives".
+    // is one; every ancestor of a walked-through level was walked through
+    // to get there), so the demoted set is a prefix from the roots:
+    // nothing nested inside a surviving frame is ever demoted, and the
+    // cascade is just "keep walking down until something survives".
     //
     // A demoted level can never be carrying a wire: the grain walk stops
     // at any entity the data source put on a hop (`carriesHop`), so a
-    // spine level has none — and a hop that ends on a focus ancestor is
-    // the one shape this rule cannot draw (see the report).
+    // walked-through level has none — and a hop that ends on a focus
+    // ancestor is the one shape this rule cannot draw, which the focal
+    // says out loud rather than dropping in silence (see below).
     const visibleChildrenOf = (urn: string): string[] =>
         (nodeOf(urn)?.children ?? []).filter(c => visible.has(c))
 
@@ -588,9 +627,41 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     for (const urn of visibleOrder) {
         // Nothing is enclosed, so there is no wrapper to remove: a card
         // with its contents shut stands for what is inside it, which is
-        // its job.
-        if (visibleChildrenOf(urn).length === 0) continue
-        if (focusAncestors.has(urn) || spine.has(urn)) demoted.add(urn)
+        // its job. And never the focus, whatever its shape.
+        if (urn === sg.focusUrn || visibleChildrenOf(urn).length === 0) continue
+        if (focusAncestors.has(urn) || walkedThrough.has(urn)) demoted.add(urn)
+    }
+
+    // A demoted level is off the board, but what the DATA SOURCE said
+    // about it — an unfetched frontier of its own — still has to be
+    // offerable somewhere, or the ⊕ it earned is simply gone. Fold it
+    // into the card its group is presented as: above the focus that is
+    // the focal (where you are standing), and below it a walked-through
+    // level has exactly one unit under it by construction.
+    //
+    // FRONTIERS ONLY, deliberately kept out of `standsFor`: what a card
+    // stands for also decides what its REVEAL offers, and the admission
+    // loop admits a page from the card's own SUBTREE. Folding a level
+    // from above into that would count neighbours no click could reach —
+    // the one thing a pill must never do.
+    const foldedFrontiers = new Map<string, Set<string>>()
+    const unitUnder = (urn: string): string | null => {
+        let cursor: string | null = urn
+        const guard = new Set<string>()
+        while (cursor && demoted.has(cursor) && !guard.has(cursor)) {
+            guard.add(cursor)
+            cursor = visibleChildrenOf(cursor)[0] ?? null
+        }
+        return cursor
+    }
+    for (const urn of demoted) {
+        const node = model.get(urn)
+        if (!node?.frontierUp && !node?.frontierDown) continue
+        const host = focusAncestors.has(urn) ? sg.focusUrn : unitUnder(urn)
+        if (!host || host === urn) continue
+        const folded = foldedFrontiers.get(host) ?? new Set<string>()
+        folded.add(urn)
+        foldedFrontiers.set(host, folded)
     }
 
     /** The cards that get a hop column of their own: every model root,
@@ -699,8 +770,9 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             }
         }
         // The card speaks for what it stands for — its own frontier, plus
-        // that of anything collapsed inside it.
-        const entries = [...owned]
+        // that of anything collapsed inside it, plus that of any level
+        // the picture walked THROUGH to present this card.
+        const entries = [...owned, ...(foldedFrontiers.get(urn) ?? [])]
             .sort()
             .map(u => ({ urn: u, node: model.get(u)! }))
             .map(({ urn: u, node }) => ({
@@ -1035,10 +1107,16 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     }
 
     const edges: FocusEdge[] = []
+    // Hops whose nearest drawn end is a level this picture does not draw
+    // — a containment ancestor of the FOCUS that the data source also
+    // put on a hop. There is no card to land them on, so they are said
+    // out loud on the focal instead of vanishing, and the partner at the
+    // far end keeps a card with no wire that the whisper explains.
+    let hopsAtCoarserGrain = 0
     for (const bundle of projected) {
         const source = cardIdByUrn.get(bundle.sourceUrn)
         const target = cardIdByUrn.get(bundle.targetUrn)
-        if (!source || !target) continue
+        if (!source || !target) { hopsAtCoarserGrain += bundle.weight; continue }
         edges.push({
             id: `e:${source}>${target}`,
             source,
@@ -1068,9 +1146,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // Measured between the ports the view actually anchors to (source's
     // right edge, target's left) and at the straight-line midpoint, which
     // is where a shallow bezier puts its label to within a few pixels.
+    // A cycle badge is not decided here: it says the lineage LOOPS, which
+    // is a fact about the data rather than a count, so it renders on its
+    // wire whatever the density (see the view).
     const placed: Array<{ x: number; y: number }> = []
     for (const edge of edges) {
-        if (!(edge.count > 1 || edge.cycleBack)) continue
+        if (edge.count <= 1) continue
         const s = byId.get(edge.source)
         const t = byId.get(edge.target)
         if (!s || !t) continue
@@ -1151,6 +1232,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         hiddenByChipsOut,
         modelHasUpstream: modelHasSide('in'),
         modelHasDownstream: modelHasSide('out'),
+        hopsAtCoarserGrain,
+        // Grow-only: what this build walked through, PLUS what earlier
+        // builds of the same view state did. The consumer folds it back
+        // in (see `LensViewState.walkedThrough`) so a level once seen
+        // through stays seen through while the walk grows.
+        walkedThrough: new Set([...view.walkedThrough, ...walkedThrough]),
         bandTotals,
     }
 }
