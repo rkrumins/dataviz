@@ -138,11 +138,14 @@ The Lens is built for exploring, not just reading:
   from the data source. Click ⊕ and the Lens shows more of that entity's
   lineage: instantly, if an earlier hop already brought back more than fit on
   the board, or with a quick fetch for *that one entity's* next hop once
-  there's nothing left in hand. Either way it adds exactly what comes back,
-  never more, and never a guess. When the data source has told the Lens
-  precisely how many more connections are waiting, the pill says so
-  (**+12**); when it hasn't, the pill still offers the click with no number
-  attached — there may be more, the Lens simply hasn't asked yet. A hub with
+  there's nothing left in hand. Either way **one click puts something on the
+  board** — what comes back is drawn where it lands, in its own hop column,
+  the moment it arrives — and it adds exactly that, never more, and never a
+  guess. The pill's number is always the same thing: **how many more
+  connections there are that way**, the same unit the column headers, a
+  card's **×N** and the focal's in/out all count in. When the data source
+  hasn't told the Lens how many, the pill still offers the click with no
+  number attached — there may be more, the Lens simply hasn't asked yet. A hub with
   more connections than fit in one response hands back a bookmark, and the
   same ⊕ keeps pulling from where it left off, unnoticed, until the hub is
   drained. A **⊘** where a pill would be is a genuine dead end: the data
