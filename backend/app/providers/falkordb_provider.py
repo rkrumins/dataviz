@@ -7415,7 +7415,9 @@ class FalkorDBProvider(GraphDataProvider):
                 # anchor goes first; everything else keeps candidate order.
                 if paged_anchor is not None and paged_anchor in candidates:
                     rest = [u for u in candidates if u != paged_anchor]
-                    return [paged_anchor, *rest[:CLOSURE_FRONTIER_PROBE_CAP - 1]]
+                    # max(0, …): a cap of 0 means "do not probe", and a bare
+                    # `cap - 1` would slice [:-1] — probing all but one.
+                    return [paged_anchor, *rest[:max(0, CLOSURE_FRONTIER_PROBE_CAP - 1)]]
                 return candidates[:CLOSURE_FRONTIER_PROBE_CAP]
 
             probe_up = _probe_slice(candidates_up)
