@@ -40,7 +40,7 @@ Neighbors that belong to the same parent — say, six fields of one dataset —
 are drawn **inside a frame named for that dataset**, one row each, with their
 own counts and their own wires. A column is never a peer of its own table:
 where it comes from is the box it sits in, not a caption you have to squint
-at. Wide tables page a **fixed window** through the frame ("page 3 of 12")
+at. Wide tables **scroll** inside a fixed window
 rather than growing it, so a 500-column source sits on the board like any
 other card. Coarser partners connected **directly to your focal** — a domain,
 a platform — resolve on their own: the Lens walks down through the levels
@@ -118,13 +118,15 @@ inside it changes your data — it reads connections, it doesn't rewrite them.
 The Lens is built for exploring, not just reading:
 
 - **Click a card** to inspect it — a detail strip slides up with the entity's
-  identity, its own in/out counts, and actions. Nothing jumps: focusing is
-  always a deliberate second gesture.
+  identity, its own in/out counts, and actions. Clicking a *row* inside an
+  open container opens the same answer as a **preview** beside its frame
+  instead. Nothing jumps: focusing is always a deliberate second gesture.
 - **Double-click a card** (or use **Focus here** in the strip) to re-center
   the Lens on that entity. The Lens fetches that entity's own neighbours from
   the data source — instantly, if you've already visited it earlier in this
   session — and the step is recorded in your **path**.
-- **Back and Forward** — buttons in the header, or the **←/→** keys — retrace
+- **Back and Forward** — buttons in the header, or the **←/→** keys (outside
+  an open container, where those keys browse its rows instead) — retrace
   your walk in either direction, exactly like browser history: stepping back
   never loses where you'd been, and the hops ahead of you stay visible
   (dimmed) in the **Path** trail. Click any chip in the trail to jump straight
@@ -179,16 +181,33 @@ The Lens is built for exploring, not just reading:
   Frames open **Connected** by default — the header's own **Connected | All**
   control changes which mode the *next* frame you open starts in, and it's
   remembered between sessions.
-- **Page a wide table** with the frame's own footer (**‹ Prev · page 2 of 22 ·
-  Next ›**). One page shows at a time at a fixed size, so a 500-column table
-  takes no more room on the board than a five-column one, and the header says
-  which rows you are looking at ("3 connected · showing 21–40 of 428"). A
-  count still being paged in from the source appears as a floor ("of 3+"),
-  never as a guess.
-- **Find a column you haven't paged to.** The **Find** box in a frame's header
-  searches the *whole* container in the data source, not just the page on
-  screen, so a column on page 7 is one keystroke away. A new search starts
-  the list again at page 1, and the counts say what they're scoped to.
+- **Browse a wide table by scrolling it.** Spin the wheel over an open
+  frame and its rows move under a fixed window, so a 500-column table takes
+  no more room on the board than a five-column one. A thumb on the frame's
+  right edge shows where in the list you are (drag it to travel), and the
+  numbers under it say which rows you're on ("21–40 of 428"). Reaching the
+  end fetches the next page from the source before you get there, so the
+  list keeps moving; a count still being paged in appears as a floor ("of
+  428+"), never as a guess. In **All** mode the rows on this lineage come
+  first, then a quiet divider — *everything else inside — 388 items* —
+  before the ones that merely live there.
+- **Read a row without leaving the picture.** Clicking any row opens a
+  **preview** beside the frame: what it is, where it lives, its description,
+  how much lineage flows through it and how much the source says it hasn't
+  shipped yet, when it last synced — and only the moves that row can
+  actually make (walk further, focus here, open what's inside, reveal on
+  canvas, details). **Esc** closes it. Double-click still focuses there.
+- **Browse from the keyboard.** **Tab** into an open frame and its rows
+  become a list you can walk: **↑ ↓** move a cursor (scrolling the window
+  along with it), **Enter** previews, **Shift+Enter** focuses there, **→**
+  opens a row that holds things, **←** steps back out, **Home / End** jump to
+  the ends — and simply **typing** jumps to the next name that matches.
+- **Find a column you haven't scrolled to.** The **Find** icon in a frame's
+  header opens a box that searches the *whole* container in the data source,
+  not just the rows on screen, so a column 300 rows down is one keystroke
+  away. A new search starts the list again at the top, and the counts say
+  what they're scoped to. Typing a name no loaded row has, while browsing
+  from the keyboard, hands your letters straight to it.
 - **Choose how far a new focus reaches** with the depth control in the header
   (**1 / 2 / 3** hops each way). This only governs what happens the *next*
   time you focus somewhere new — an entity already on the board keeps
@@ -220,7 +239,8 @@ The Lens is built for exploring, not just reading:
 - **Share the exploration** with the link button in the header: it copies a
   URL that reopens this exact picture — the walked path, the focused entity,
   every hop you've revealed or expanded, which containers you opened and how
-  you left them (Connected or All, and which page or search each one was on),
+  you left them (Connected or All, and where each one was scrolled or
+  searched to),
   plus your depth and direction settings — for a colleague. An older link
   someone sends you still opens on the right entity and the right walked
   path; it just won't carry the newer extras a link copied today does. The
@@ -244,7 +264,8 @@ At the bottom, two controls escalate beyond looking:
   to follow a chain across many hops. See [Reading Lineage](/guide/reading-lineage)
   for how tracing works.
 
-Press **Esc** or click the backdrop to close.
+Press **Esc** to close — a row preview first if one is open, then the Lens
+itself. Clicking the backdrop closes it outright.
 
 ## When to reach for it
 

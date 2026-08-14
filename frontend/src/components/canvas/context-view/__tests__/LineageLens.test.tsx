@@ -980,7 +980,7 @@ describe('what is really inside a container', () => {
     // scrolling — asking per row would spend a round trip on a list the
     // frame is already holding.
     wheelRows('raw_orders', 10)
-    expect(screen.getByText(/showing 39–48 of/)).toBeTruthy()
+    expect(screen.getByText(/39–48 of/)).toBeTruthy()
     expect(onLoadAllChildren).not.toHaveBeenCalled()
   })
 
@@ -1007,7 +1007,7 @@ describe('what is really inside a container', () => {
     // 102 rows in hand (a hundred roster + the two connected columns) —
     // so the last window is 93–102 and no amount of spinning banks an
     // offset the frame would have to scroll back through.
-    expect(screen.getByText(/showing 93–102 of/)).toBeTruthy()
+    expect(screen.getByText(/93–102 of/)).toBeTruthy()
   })
 
   it('asks a focal that HOLDS things for its own roster, once', () => {

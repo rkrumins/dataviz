@@ -1151,6 +1151,9 @@ function FocusFrameNode({ data }: NodeProps) {
   const rowCursor = useContext(RowCursorContext)
   const hostKey = card.frameId ? card.parentId ?? '' : null
   const onCursor = hostKey !== null && rowCursor?.frameKey === hostKey && rowCursor.urn === card.nodeId
+  // The Find box is asked for rather than always sitting there — see the
+  // header, where 64px of permanent input clipped the honest counts.
+  const [findOpen, setFindOpen] = useState(false)
   // The CONTAINS-STACK: the focus's own contents, not an entity of its
   // own (no urn, nowhere to re-center to, no wires). It is chrome, so it
   // borrows none of the focal's identity — wearing the focus's type
@@ -1167,9 +1170,13 @@ function FocusFrameNode({ data }: NodeProps) {
   // the container reported its own count). Otherwise say "at least".
   const win = frameWindow(card)
   const total = win.exact ? win.total.toLocaleString() : `${win.total.toLocaleString()}+`
-  // Say which rows are on screen, not just how many exist — "showing
-  // 21–40 of 428" is the sentence a 428-column table needs.
-  const range = win.scrollable ? `showing ${win.from.toLocaleString()}–${win.to.toLocaleString()} of ${total}` : null
+  // Which rows are on screen. NOT in the header: between the chevron,
+  // the name, the ancestry chip, the Connected|All pair, the Find box
+  // and the focus control, that line has about 94px, and "6 on this
+  // lineage · showing 1–10 of 60" truncated halfway through the first
+  // half of it. It goes where a reader looks when scrolling instead —
+  // at the foot of the list, beside the thumb (see `FrameScrollRegion`).
+  const range = win.scrollable ? `${win.from.toLocaleString()}–${win.to.toLocaleString()} of ${total}` : null
   // In "everything inside" the search runs on the SERVER, so the counts
   // describe the matches, not the container — say which.
   const searching = card.frameShowingAll && q.trim().length > 0
@@ -1183,9 +1190,9 @@ function FocusFrameNode({ data }: NodeProps) {
   const fellBack = card.frameShowingAll && card.frameEmpty && card.frameConnectedCount === 0
   const inside = card.frameShowingAll
     ? fellBack
-      ? `nothing here is on this lineage · showing everything inside${range ? ` · ${range}` : ''}`
-      : `${card.frameConnectedCount.toLocaleString()} on this lineage · ${range ?? `${card.frameLoaded.toLocaleString()} of ${total} shown`}${searching ? ` matching "${q.trim()}"` : ''}`
-    : `${card.count.toLocaleString()} connected inside${via}${range ? ` · ${range}` : ''}`
+      ? 'nothing here is on this lineage · showing everything inside'
+      : `${card.frameConnectedCount.toLocaleString()} on this lineage · of ${total}${searching ? ` matching "${q.trim()}"` : ''}`
+    : `${card.count.toLocaleString()} connected inside${via}`
   return (
     <div
       {...(hostKey !== null && card.nodeId
@@ -1248,30 +1255,21 @@ function FocusFrameNode({ data }: NodeProps) {
             </TailName>
             <FrameAncestry card={card} ctx={ctx} />
           </div>
-          <p className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate">
-            {card.fetch === 'loading' ? 'Looking inside…' : (
-              <>
-                {/* When the roster is standing in for an empty lineage
-                    answer, WHY these rows are here outranks counting them
-                    — otherwise a full list of columns under "0 on this
-                    lineage" reads as the answer to a question nobody
-                    asked. */}
-                {card.contents && !fellBack
-                  // Both numbers, exactly: what is in here on this
-                  // lineage, and what is in here altogether.
-                  ? <ContentsCount card={card} />
-                  : <span className="truncate">{inside}</span>}
-                {/* And where in the list the reader currently is — a
-                    scroll that never says "21–40 of 428" is a list with
-                    no bottom. */}
-                {range && card.contents && !fellBack && (
-                  <>
-                    <span className="text-ink-muted/40">·</span>
-                    <span className="flex-shrink-0 tabular-nums">{range}</span>
-                  </>
-                )}
-              </>
-            )}
+          <p
+            className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate"
+            title={range ? `Rows ${range} — scroll inside ${card.label} to read the rest` : undefined}
+          >
+            {card.fetch === 'loading'
+              ? 'Looking inside…'
+              // When the roster is standing in for an empty lineage
+              // answer, WHY these rows are here outranks counting them —
+              // otherwise a full list of columns under "0 on this
+              // lineage" reads as the answer to a question nobody asked.
+              : card.contents && !fellBack
+                // Both numbers, exactly: what is in here on this
+                // lineage, and what is in here altogether.
+                ? <ContentsCount card={card} />
+                : <span className="truncate">{inside}</span>}
           </p>
         </div>
         {/* Connected ⇄ All. The default answers "what in here is on this
@@ -1315,19 +1313,38 @@ function FocusFrameNode({ data }: NodeProps) {
         )}
         {/* Find one by name without reading everything — offered only
             when there IS more than one screenful, because reserving the
-            room truncated the frame's own name on every frame. */}
+            room truncated the frame's own name on every frame.
+            Collapsed to its icon until asked for: a permanent 64px box
+            left this header's count line about 94px, which clipped
+            "6 on this lineage · of 60" halfway through. */}
         {(win.scrollable || card.frameShowingAll) && (
-          <input
-            value={q}
-            onChange={(e) => ctx.onFrameQuery(card.expandKey ?? '', e.target.value)}
-            onClick={(e) => e.stopPropagation()}
-            placeholder="Find…"
-            aria-label={card.frameShowingAll ? `Search inside ${card.label}` : `Filter what is inside ${card.label}`}
-            title={card.frameShowingAll
-              ? `Search every entity inside ${card.label}, not only the rows on screen`
-              : 'Filter what is inside'}
-            className="nodrag flex-shrink-0 w-16 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
-          />
+          findOpen || q !== '' ? (
+            <input
+              autoFocus
+              value={q}
+              onChange={(e) => ctx.onFrameQuery(card.expandKey ?? '', e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              onBlur={() => setFindOpen(false)}
+              placeholder="Find…"
+              aria-label={card.frameShowingAll ? `Search inside ${card.label}` : `Filter what is inside ${card.label}`}
+              title={card.frameShowingAll
+                ? `Search every entity inside ${card.label}, not only the rows on screen`
+                : 'Filter what is inside'}
+              className="nodrag flex-shrink-0 w-16 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setFindOpen(true) }}
+              aria-label={card.frameShowingAll ? `Search inside ${card.label}` : `Filter what is inside ${card.label}`}
+              title={card.frameShowingAll
+                ? `Search every entity inside ${card.label}, not only the rows on screen`
+                : 'Filter what is inside'}
+              className="nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+            >
+              <LucideIcons.Search className="w-3 h-3" />
+            </button>
+          )
         )}
         {/* The contains-stack is the focus's own contents — there is
             nowhere to re-center TO, and the focal card is already the
@@ -1506,11 +1523,24 @@ function FrameScrollRegion({ card, ctx, win }: {
         // nobody is in points at nothing.
         onBlur={() => ctx.onRowCursor(key, null)}
       />
-      {/* Where in the list you are. A thumb rather than a page number,
-          because the list has no pages any more — and it is draggable,
-          so a 400-row table is one gesture from end to end. */}
+      {/* Where in the list you are, both ways: a draggable thumb (so a
+          400-row table is one gesture from end to end) and the numbers
+          under it. At the FOOT of the list rather than in the header,
+          which has ~94px between the name and the Find box and clipped
+          "6 on this lineage · showing 1–10 of 60" halfway through. */}
       {win.scrollable && (
-        <FrameScrollThumb card={card} win={win} onScroll={scrollTo} />
+        <>
+          <FrameScrollThumb card={card} win={win} onScroll={scrollTo} />
+          <span
+            className="pointer-events-none absolute bottom-[2px] right-2.5 text-[9px] tabular-nums text-ink-muted/75 leading-none"
+            title={`Rows ${win.from.toLocaleString()}–${win.to.toLocaleString()} of ${
+              win.exact ? win.total.toLocaleString() : `${win.total.toLocaleString()}+`
+            } inside ${card.label}`}
+          >
+            {win.from.toLocaleString()}–{win.to.toLocaleString()} of{' '}
+            {win.exact ? win.total.toLocaleString() : `${win.total.toLocaleString()}+`}
+          </span>
+        </>
       )}
       {/* The next page, on its way in. A shimmer where the rows will be
           is the honest statement: they are coming, and this is how many. */}
@@ -1715,6 +1745,14 @@ const EDGE_TYPES = { focusEdge: FocusGraphEdgeComp }
 
 // ── Peek ─────────────────────────────────────────────────────────────
 
+/** The panel's own box, in screen px. Fixed because it is chrome rather
+ *  than board geometry: it must stay readable at 0.25× zoom, so it is
+ *  positioned rather than scaled — which means the docking maths needs
+ *  its size up front. `PEEK_MAX_H` is a generous ceiling used only to
+ *  keep it inside the pane. */
+const PEEK_W = 236
+const PEEK_MAX_H = 280
+
 /**
  * The PEEK — one click on a row, and what that row IS, beside it.
  *
@@ -1734,16 +1772,34 @@ const EDGE_TYPES = { focusEdge: FocusGraphEdgeComp }
 function LensPeek({ card, host, ctx, onDismiss }: {
   card: FocusCard
   /** The frame the row sits in, when it sits in one — the panel docks to
-   *  its right edge so it never covers the rows either side. */
+   *  the frame's edge so it never covers the rows either side. */
   host: FocusCard | null
   ctx: CardCtx
   onDismiss: () => void
 }) {
   const [tx, ty, zoom] = useStore(s => s.transform)
+  const paneW = useStore(s => s.width)
+  const paneH = useStore(s => s.height)
   const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
   const anchor = host ?? card
-  const x = (anchor.x + anchor.w) * zoom + tx + 10
-  const y = (card.y + card.h / 2) * zoom + ty
+  // AWAY from the focus. An upstream frame has the focal card sitting
+  // immediately to its right — docking there covered the entity the
+  // whole picture is about with a panel about one of its columns.
+  // Flipped back only when the preferred side would leave the pane.
+  const left = anchor.x * zoom + tx - PEEK_W - 10
+  const right = (anchor.x + anchor.w) * zoom + tx + 10
+  const preferLeft = card.band < 0
+  const fits = (v: number) => v >= 8 && v + PEEK_W <= paneW - 8
+  const wanted = preferLeft ? left : right
+  const other = preferLeft ? right : left
+  const x = fits(wanted) ? wanted : fits(other) ? other : Math.max(8, Math.min(wanted, paneW - PEEK_W - 8))
+  // Vertically centred on the row, but never hanging off the top or
+  // bottom of the pane — a panel you have to pan to read is not a peek.
+  const half = PEEK_MAX_H / 2
+  const rowY = (card.y + card.h / 2) * zoom + ty
+  const y = paneH > PEEK_MAX_H + 16
+    ? Math.max(half + 8, Math.min(rowY, paneH - half - 8))
+    : rowY
   const flows = card.flowsIn + card.flowsOut
   const pill = card.band < 0 ? card.pillUp ?? card.pillDown : card.pillDown ?? card.pillUp
   const pillDir: 'in' | 'out' = pill != null && pill === card.pillUp ? 'in' : 'out'
@@ -1753,8 +1809,8 @@ function LensPeek({ card, host, ctx, onDismiss }: {
     <div
       role="dialog"
       aria-label={`Preview of ${card.label}`}
-      className="nowheel nodrag absolute z-50 w-[236px] -translate-y-1/2 rounded-xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-xl shadow-black/20 p-2.5"
-      style={{ left: x, top: y }}
+      className="nowheel nodrag absolute z-50 -translate-y-1/2 rounded-xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-xl shadow-black/20 p-2.5"
+      style={{ left: x, top: y, width: PEEK_W }}
       onClick={(e) => e.stopPropagation()}
       onWheel={(e) => e.stopPropagation()}
     >

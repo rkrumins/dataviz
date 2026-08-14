@@ -490,6 +490,83 @@ const walkDensePills = (): WalkFixture => {
   }
 }
 
+/**
+ * THE RICH CHILDREN SHAPE — a sixty-child container browsed rather than
+ * paged, with every row cue on one board.
+ *
+ *   fct_orders (the focus)
+ *   billing_events ⊃ 6 columns on this lineage + 54 more inside it
+ *
+ * The partner frame is in "everything inside": its six connected columns
+ * come first, then the quiet divider ("everything else inside — 54
+ * items") and the roster rows that merely live there. It MIXES kinds
+ * (columns and a view), so every row states its type; two columns carry
+ * a relationship their siblings do not; two carry descriptions; one is a
+ * container of its own, so it can be opened from the keyboard.
+ *
+ * EXPECTED: one row language throughout — the connected rows and the
+ * roster rows differ in weight, not in shape. No pager anywhere: the
+ * header says "showing 1–10 of 60" and a thumb sits on the frame's right
+ * edge. The selected row shows the peek panel beside the frame, with its
+ * flows, its unfetched remainder, and the three moves it can make.
+ */
+const walkChildrenRich = (): WalkFixture => {
+  const connected = [
+    { urn: 'b:order_id', label: 'order_id', type: 'schemaField', edge: 'DERIVES_FROM',
+      extra: { description: 'Natural key from the billing system' } },
+    { urn: 'b:customer_id', label: 'customer_id', type: 'schemaField', edge: 'DERIVES_FROM', extra: {} },
+    { urn: 'b:net_amount', label: 'net_amount', type: 'schemaField', edge: 'JOINS',
+      extra: { description: 'Charge net of refunds, in reporting currency' } },
+    { urn: 'b:currency', label: 'currency', type: 'schemaField', edge: 'DERIVES_FROM', extra: {} },
+    { urn: 'b:booked_at', label: 'booked_at', type: 'schemaField', edge: 'JOINS', extra: {} },
+    { urn: 'b:daily_totals', label: 'daily_totals_v', type: 'view', edge: 'DERIVES_FROM',
+      extra: { childCount: 3 } },
+  ]
+  const nodes = [
+    wnode('F', 'dataset', 'fct_orders', { childCount: 24, description: 'Order grain fact table' }),
+    wnode('T', 'dataset', 'billing_events', { childCount: 60 }),
+    // The view row holds things, so the keyboard's "open inside" means
+    // something on at least one row of this list.
+    wnode('b:dt_gross', 'schemaField', 'gross_amount'),
+  ]
+  const containmentEdges = [holds('T', 'b:daily_totals'), holds('b:daily_totals', 'b:dt_gross')]
+  const lineageEdges: ReturnType<typeof hop>[] = []
+  for (const c of connected) {
+    nodes.push(wnode(c.urn, c.type, c.label, c.extra))
+    if (c.urn !== 'b:daily_totals') containmentEdges.push(holds('T', c.urn))
+    lineageEdges.push(hop(c.urn, 'F', c.edge))
+  }
+  // The roster: everything else the container holds, straight off the
+  // children endpoint — the half of "what is in here" lineage cannot
+  // answer.
+  const roster: LensRoster = {
+    children: [
+      ...connected.map(c => wnode(c.urn, c.type, c.label, c.extra)),
+      ...Array.from({ length: 54 }, (_, i) => wnode(
+        `b:other_${i}`,
+        i % 9 === 0 ? 'view' : 'schemaField',
+        `${['legacy', 'raw', 'audit', 'ext'][i % 4]}_field_${String(i).padStart(2, '0')}`,
+        i % 7 === 0 ? { description: 'Retired with the 2024 billing migration' } : {},
+      )),
+    ],
+    hasMore: false,
+    total: 60,
+  }
+  return {
+    title: 'Sixty children, browsed — one row language, a divider, and a peek',
+    model: walkModel('F', {
+      nodes,
+      containmentEdges,
+      lineageEdges,
+      upstreamUrns: new Set(connected.map(c => c.urn)),
+      frontierUp: [frontier('b:order_id', 9), frontier('b:net_amount', null)],
+    }),
+    script: base => scripted(base, { expand: ['T'], showAll: ['T'] }),
+    childrenAll: new Map([['T', roster]]),
+    selectedId: 'b:order_id',
+  }
+}
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkCollaterals: walkCollaterals(),
   walkDiamond: walkDiamond(),
@@ -502,4 +579,5 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkSharedPlatformLeaf: walkSharedPlatformLeaf(),
   walkSharedPlatformOneColumn: walkSharedPlatformOneColumn(),
   walkDensePills: walkDensePills(),
+  walkChildrenRich: walkChildrenRich(),
 }

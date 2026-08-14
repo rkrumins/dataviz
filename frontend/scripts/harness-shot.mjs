@@ -25,8 +25,12 @@ const FIXTURES = process.argv.slice(2).length
   // the focus and its partners still lays out as hop COLUMNS rather than
   // collapsing into one tower. None of those can be checked any other
   // way.
+  // ...and whether a sixty-child container reads as a BROWSABLE list —
+  // one row language, connected first, a divider before the rest, honest
+  // counts in the header and a peek beside the row you clicked.
   : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall', 'walkDirectionAndHighlight',
-    'walkSharedPlatform', 'walkSharedPlatformLeaf', 'walkSharedPlatformOneColumn', 'walkDensePills']
+    'walkSharedPlatform', 'walkSharedPlatformLeaf', 'walkSharedPlatformOneColumn', 'walkDensePills',
+    'walkChildrenRich']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH
