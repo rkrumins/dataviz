@@ -121,18 +121,24 @@ def _env_float(name: str, default: float, lo: float, hi: float) -> float:
 
 def _scan_range_width() -> int:
     """Fixed ID-range width for edge scans. Wider = fewer queries but
-    larger result payloads; 250k rows of 2-3 ints is a few MB."""
-    return _env_int("AGGREGATION_SCAN_RANGE_WIDTH", 250_000, 10_000, 5_000_000)
+    larger result payloads; 200k rows of 2-3 ints is a few MB."""
+    return _env_int("AGGREGATION_SCAN_RANGE_WIDTH", 200_000, 10_000, 5_000_000)
 
 
 def _max_pending_pairs() -> int:
     """Memory cap on the in-worker pair accumulator AND the raw-pair base
     map. Crossing it triggers a lattice roll-up (base) or an early flush
     to the graph (accumulator) — memory stays bounded on pathological
-    graphs at the cost of extra writes. Default 5M (~500MB packed) keeps
-    typical multi-million-edge graphs on the flush-free diff path within
-    the worker's 4Gi budget."""
-    return _env_int("AGGREGATION_MAX_PENDING_PAIRS", 5_000_000, 50_000, 50_000_000)
+    graphs at the cost of extra writes.
+
+    Default 50M keeps every graph up to that size on the flush-free diff
+    path: overflow is exact but costs extra write round-trips, and the
+    target scale (1M nodes / 2M edges → ~3-4M boundary pairs) never comes
+    close to the cap. NOTE the cap is what bounds worker RSS — 50M pairs
+    is ~5GB packed, ABOVE the worker's 4Gi budget, so a graph that truly
+    accumulates that many pairs will OOM rather than flush. Lower this
+    (or raise the worker limit) before aggregating beyond ~30M pairs."""
+    return _env_int("AGGREGATION_MAX_PENDING_PAIRS", 50_000_000, 50_000, 50_000_000)
 
 
 def _delete_chunk() -> int:
@@ -145,9 +151,10 @@ def _apply_chunk() -> int:
 
 def _pacing_ratio() -> float:
     """Sleep between write sub-batches for ``last_batch_duration × ratio``
-    — bounds this job's FalkorDB write duty cycle (0.5 → ≤ ~66%), leaving
-    query threads for interactive readers."""
-    return _env_float("AGGREGATION_WRITE_PACING_RATIO", 0.5, 0.0, 10.0)
+    — bounds this job's FalkorDB write duty cycle, leaving query threads
+    for interactive readers. Higher = GENTLER (and slower): 1.0 → ≤ ~50%
+    duty cycle, 0.5 → ≤ ~66%, 0.0 → no sleep at all."""
+    return _env_float("AGGREGATION_WRITE_PACING_RATIO", 1.0, 0.0, 10.0)
 
 
 def _scan_timeout_s() -> float:
@@ -179,8 +186,10 @@ def _node_identity_expr(identity_property: Optional[str]) -> str:
 def _extract_concurrency() -> int:
     """Concurrent read-only range scans (extract/reconcile/node directory).
     Bounded well below the server's THREAD_COUNT so interactive readers
-    always have query threads."""
-    return _env_int("AGGREGATION_EXTRACT_CONCURRENCY", 2, 1, 4)
+    always have query threads. Default 1 (serial) is the gentlest setting
+    — raise it toward the ceiling of 4 to shorten EXTRACT on large graphs
+    at the cost of provider load."""
+    return _env_int("AGGREGATION_EXTRACT_CONCURRENCY", 1, 1, 4)
 
 
 def _scan_shrink_floor() -> int:
@@ -222,8 +231,30 @@ def _max_materialized_edges() -> int:
     guidance) rather than writing more :AGGREGATED edges than this into
     the shared FalkorDB instance. The materialized result lives in
     FalkorDB's RAM at ~0.5KB/edge — exceeding the instance's memory
-    kills it for every graph it hosts."""
-    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 2_000_000, 10_000, 50_000_000)
+    kills it for every graph it hosts.
+
+    Default 50M is a RUNAWAY BACKSTOP, not a sizing guard: it clears the
+    ~3-4M boundary pairs a 1M-node / 2M-edge graph produces with room to
+    spare, so ordinary large graphs complete instead of failing on the
+    budget. At 0.5KB/edge a result that actually reached 50M would be
+    ~25GB, well over the 12GB ``FALKORDB_MAXMEMORY`` default — the
+    instance's own ``maxmemory``/``noeviction`` ceiling is the real
+    protection at that point."""
+    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 50_000_000, 10_000, 50_000_000)
+
+
+def _max_cube_edges() -> int:
+    """Ceiling on the AUTO-mode full-cube estimate — deliberately separate
+    from ``_max_materialized_edges``.
+
+    Auto mode stores the full cube when its estimate fits, and the cube
+    scales as edges × depth² (observed: 1.17M edges → 5.6M pairs → OOM).
+    Sharing the write budget would mean raising that backstop silently
+    flipped auto into full-cube for nearly every real graph — turning
+    "Auto" into "Always full detail". This knob keeps the cube decision
+    pinned to what the instance can actually hold (~8M edges ≈ 4GB at
+    0.5KB/edge) while the write budget stays a runaway backstop."""
+    return _env_int("AGGREGATION_MAX_CUBE_EDGES", 8_000_000, 10_000, 50_000_000)
 
 
 class MaterializationBudgetExceeded(ValueError):
@@ -1535,18 +1566,24 @@ class AggregationPipeline:
                     if sid is None or tid is None:
                         continue
                     estimate += (anc_count(int(sid))) * (anc_count(int(tid)))
-        cap = self._knob_int(
+        # The cube ceiling is deliberately NOT the write budget: the budget
+        # is a runaway backstop sized well above any real result, while the
+        # cube decision must stay pinned to what the instance can hold.
+        # Sharing them would make raising the backstop silently turn "Auto"
+        # into "Always full detail". See _max_cube_edges.
+        cap = _max_cube_edges()
+        write_budget = self._knob_int(
             "max_materialized_edges", _max_materialized_edges, 10_000, 50_000_000,
         )
         self._cube_estimate = estimate
         self._cube_mode = estimate <= cap
         logger.info(
             "aggregation pipeline on %s: auto mode — full-cube estimate "
-            "~%d cells vs budget %d → %s.",
-            self.p._graph_name, estimate, cap,
+            "~%d cells vs cube ceiling %d (write budget %d) → %s.",
+            self.p._graph_name, estimate, cap, write_budget,
             "FULL CUBE (every ancestor combination stored)"
             if self._cube_mode else
-            "structural depth-diagonal (cube exceeds budget; mixed "
+            "structural depth-diagonal (cube exceeds ceiling; mixed "
             "granularities served on demand)",
         )
 

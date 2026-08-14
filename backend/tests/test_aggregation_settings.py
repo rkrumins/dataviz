@@ -128,6 +128,39 @@ def test_pipeline_knobs_prefer_job_tuning_over_env(monkeypatch):
     assert pipeline._knob_int("scan_range_width", mat._scan_range_width, 10_000, 5_000_000) == 10_000
 
 
+def test_pipeline_defaults_clear_the_large_graph_target(monkeypatch):
+    """Out-of-the-box defaults must complete a 1M-node / 2M-edge graph.
+
+    The binding constraint is the write budget: such a graph produces
+    several million canonical rollup pairs, and the old 2M default failed
+    the job terminally on `MaterializationBudgetExceeded`. These are the
+    values a fresh install runs with when nobody touches the UI, so pin
+    them — a silent regression here puts large graphs back to failing.
+    """
+    from backend.app.providers import falkordb_materialize as mat
+
+    for var in (
+        "AGGREGATION_SCAN_RANGE_WIDTH", "AGGREGATION_MAX_PENDING_PAIRS",
+        "AGGREGATION_WRITE_PACING_RATIO", "AGGREGATION_EXTRACT_CONCURRENCY",
+        "AGGREGATION_MAX_MATERIALIZED_EDGES", "AGGREGATION_MAX_CUBE_EDGES",
+        "AGGREGATION_MATERIALIZE_FINE_PAIRS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    assert mat._scan_range_width() == 200_000
+    assert mat._max_pending_pairs() == 50_000_000
+    assert mat._pacing_ratio() == 1.0
+    assert mat._extract_concurrency() == 1
+    assert mat._max_materialized_edges() == 50_000_000
+    # Separate from the write budget on purpose — see
+    # test_auto_mode_cube_ceiling_is_independent_of_write_budget.
+    assert mat._max_cube_edges() == 8_000_000
+    assert mat._max_cube_edges() < mat._max_materialized_edges()
+    # Rollup storage stays on AUTO: forcing the full cube is what OOMs a
+    # multi-million-edge instance.
+    assert mat._materialize_fine_pairs_mode() == "auto"
+
+
 # ── control-plane resume endpoint regression ────────────────────────────
 
 

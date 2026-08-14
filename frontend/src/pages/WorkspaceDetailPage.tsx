@@ -21,6 +21,7 @@ import {
 } from '@/components/admin/workspace/useDataSourceDeletion'
 import { DeletedDataSources } from '@/components/admin/workspace/DeletedDataSources'
 import { aggregationService } from '@/services/aggregationService'
+import { DEFAULT_TIMEOUT_SECS } from '@/components/admin/shared/AggregationOverridesForm'
 import { useToast } from '@/components/ui/toast'
 import { usePermission, usePermissionClaims } from '@/store/auth'
 import { useFeature } from '@/store/features'
@@ -258,6 +259,12 @@ export function WorkspaceDetailPage() {
             await aggregationService.triggerAggregation(ds.id, {
                 projectionMode: ds.projectionMode || 'in_source',
                 batchSize: 1000,
+                // Omit ``tuning`` on purpose: the control plane then resolves
+                // the admin's configured defaults, so this button always runs
+                // the current settings rather than a frozen client-side copy.
+                // ``timeoutSecs`` is NOT resolved that way — a null column
+                // falls back to the 15-minute stall window — so it is sent.
+                timeoutSecs: DEFAULT_TIMEOUT_SECS,
             }, 'manual')
             showToast('success', `Aggregation triggered for "${ds.label || 'data source'}"`)
             reload()
@@ -287,6 +294,9 @@ export function WorkspaceDetailPage() {
             targets.map(ds => aggregationService.triggerAggregation(ds.id, {
                 projectionMode: ds.projectionMode || 'in_source',
                 batchSize: 1000,
+                // Same as handleReaggregate: tuning resolves server-side,
+                // the stall timeout does not.
+                timeoutSecs: DEFAULT_TIMEOUT_SECS,
             }, 'manual')),
         )
         const triggered = results.filter(r => r.status === 'fulfilled').length
