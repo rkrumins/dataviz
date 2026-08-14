@@ -369,6 +369,13 @@ class DataSourceReadinessResponse(BaseModel):
     # should be rebuilt. Drives the per-source "rebuild to fix nested
     # hierarchies" warning in the UI.
     needs_rebuild: bool = Field(False, alias="needsRebuild")
+    # Reconciliation, so the data-source profile can answer "is this still in
+    # step with its graph" without fetching the whole freshness doc. Read off
+    # the state row this endpoint already loads — no extra query.
+    drift_state: Optional[str] = Field(None, alias="driftState")
+    last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
+    last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
+    auto_reconcile: Optional[bool] = Field(None, alias="autoReconcile")
     message: str
 
     class Config:

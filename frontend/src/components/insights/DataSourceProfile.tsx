@@ -16,10 +16,13 @@ import { useQuery } from '@tanstack/react-query'
 import {
     Database, Layers, GitBranch, Compass,
     Boxes, Spline, Tag, Waypoints, Building2, Eye, Clock, ExternalLink,
-    ShieldCheck, Loader2,
+    ShieldCheck, Loader2, ArrowUpRight,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDataSourceProfile } from '@/hooks/useDataSourceProfile'
+import {
+    AutoReconcileOffBadge, DriftStateBadge,
+} from '@/components/admin/Freshness/DriftStateBadge'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
 import { StatusChip } from '@/components/insights/StatusChip'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
@@ -212,10 +215,28 @@ function AggregationStatusCard({ dataSourceId }: { dataSourceId: string; wsId: s
                 <DetailRow label="Status" value={data.aggregationStatus ?? '—'} />
                 <DetailRow label="Rolled-up edges" value={compactNum(data.aggregationEdgeCount ?? 0)} />
                 <DetailRow label="Last aggregated" value={timeAgo(data.lastAggregatedAt)} />
+                {data.lastReconciledAt && (
+                    <DetailRow label="Last reconciled" value={timeAgo(data.lastReconciledAt)} />
+                )}
                 {data.driftDetected && (
                     <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">
                         Source changed since last aggregation — re-aggregate from the workspace to refresh.
                     </p>
+                )}
+                {/* The reconciliation verdict, with a way through to the
+                    cockpit that can explain and fix it. Only shown when there
+                    is something to say — a healthy source stays quiet. */}
+                {(data.driftState && data.driftState !== 'inSync') && (
+                    <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                        <DriftStateBadge state={data.driftState} />
+                        {data.autoReconcile === false && <AutoReconcileOffBadge />}
+                        <Link
+                            to="/ingestion?tab=freshness&fstatus=drifting"
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                        >
+                            Open Freshness <ArrowUpRight className="w-3 h-3" />
+                        </Link>
+                    </div>
                 )}
             </div>
         </Card>

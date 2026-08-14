@@ -727,6 +727,16 @@ class AggregationService:
             # A ready cube stamped below v2 predates depth stamps — rebuild to
             # restore depth-accurate (self-nesting) hierarchy reads.
             needs_rebuild=bool(is_ready and stamp_version is not None and stamp_version < 2),
+            # Reconciliation verdict — already on the state row this method
+            # loaded, so surfacing it here costs nothing and saves the profile
+            # page a second request.
+            drift_state=getattr(state, "drift_state", None),
+            last_reconciled_at=getattr(state, "last_reconciled_at", None),
+            last_reconcile_reason=getattr(state, "last_reconcile_reason", None),
+            auto_reconcile=resolve_reconcile_enabled(
+                getattr(state, "reconcile_enabled", None),
+                (await read_global_cadence(session)).reconcile_enabled,
+            ),
             message=messages.get(status, "Unknown status."),
         )
 

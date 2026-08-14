@@ -131,6 +131,13 @@ export interface DataSourceReadinessResponse {
   /** True when a ready cube predates the depth-stamp contract and should be
    *  rebuilt — drives the per-source "rebuild to fix nested hierarchies" warning. */
   needsRebuild?: boolean;
+  /** Reconciliation verdict from the last drift check, so the profile can say
+   *  whether the rollups still match the graph without a second request. */
+  driftState?: string | null;
+  lastReconciledAt?: string | null;
+  lastReconcileReason?: string | null;
+  /** Resolved per-source → global → env. */
+  autoReconcile?: boolean | null;
   message: string;
 }
 
