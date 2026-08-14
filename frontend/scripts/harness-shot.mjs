@@ -26,7 +26,7 @@ const FIXTURES = process.argv.slice(2).length
   // collapsing into one tower. None of those can be checked any other
   // way.
   : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall', 'walkDirectionAndHighlight',
-    'walkSharedPlatform', 'walkSharedPlatformLeaf', 'walkSharedPlatformOneColumn']
+    'walkSharedPlatform', 'walkSharedPlatformLeaf', 'walkSharedPlatformOneColumn', 'walkDensePills']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH

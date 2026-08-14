@@ -442,6 +442,54 @@ const walkSharedPlatformOneColumn = (): WalkFixture => ({
   }),
 })
 
+/**
+ * THE DENSE-PILL SHAPE — the arrangement the reported "+ needs three
+ * clicks" screenshots caught.
+ *
+ * A downstream table opened onto four columns, every one of them with
+ * more lineage beyond it AND the table itself with more: a ⊕ on each row
+ * at the frame's inner edge, plus the frame's own ⊕ just outside it, plus
+ * a hover toolbar that appears over the row you are pointing at. Those
+ * three used to land on top of each other — a row's pill straddled the
+ * frame's border, four pixels from the frame's pill, under a toolbar that
+ * only shows up once your pointer is already there.
+ *
+ * EXPECTED: every pill fully inside its own row, a clear gutter to the
+ * frame's border, and the frame's own pill separated from all of them.
+ */
+const walkDensePills = (): WalkFixture => {
+  const columns = ['charge_id', 'amount', 'status', 'booked_at']
+  const nodes = [
+    wnode('F', 'dataset', 'clean_charges', { childCount: 4 }),
+    wnode('T', 'dataset', 'billing_facts', { childCount: 96 }),
+  ]
+  const containmentEdges: ReturnType<typeof holds>[] = []
+  const lineageEdges: ReturnType<typeof hop>[] = []
+  for (const name of columns) {
+    nodes.push(wnode(`t:${name}`, 'schemaField', name))
+    containmentEdges.push(holds('T', `t:${name}`))
+    lineageEdges.push(hop('F', `t:${name}`))
+  }
+  return {
+    title: 'Dense pills — a ⊕ on every row, and one on the frame around them',
+    model: walkModel('F', {
+      nodes,
+      containmentEdges,
+      lineageEdges,
+      downstreamUrns: new Set(['T', ...columns.map(c => `t:${c}`)]),
+      // Each column has more beyond it, and the table has a partial
+      // adjacency of its own still to page.
+      frontierDown: [
+        frontier('t:charge_id', 84),
+        frontier('t:amount', 12),
+        frontier('t:status', 7),
+        frontier('t:booked_at', null),
+        frontier('T', 59, 'e:41'),
+      ],
+    }),
+  }
+}
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkCollaterals: walkCollaterals(),
   walkDiamond: walkDiamond(),
@@ -453,4 +501,5 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkSharedPlatform: walkSharedPlatform(),
   walkSharedPlatformLeaf: walkSharedPlatformLeaf(),
   walkSharedPlatformOneColumn: walkSharedPlatformOneColumn(),
+  walkDensePills: walkDensePills(),
 }
