@@ -281,6 +281,14 @@ export interface FocusEdge {
    *  closes a loop. Drawn with a cycle badge rather than silently
    *  overlapping a forward wire. */
   cycleBack: boolean
+  /** This bundle's ×N badge has something to say AND somewhere to sit:
+   *  more than one raw hop (or a cycle to mark), a drawn line long
+   *  enough to hold a pill, and no other badge already occupying that
+   *  spot. Decided here rather than in the view because it is a question
+   *  about GEOMETRY, and the geometry is what this module computes —
+   *  badges on short, overlapping wires read as confetti floating over
+   *  the board rather than as labels belonging to a line. */
+  labelVisible: boolean
 }
 
 export interface FocusGraph {
@@ -294,6 +302,17 @@ export interface FocusGraph {
    *  filter as a fact. */
   hiddenByChipsIn: number
   hiddenByChipsOut: number
+  /** Does the walk MODEL know of anything upstream / downstream at all —
+   *  an urn the data source named, a hop it shipped, or a frontier it
+   *  says is still out there?
+   *
+   *  The empty-direction whisper ("No upstream sources in the data
+   *  source") is a claim about the DATA SOURCE, so this is what may make
+   *  it — never an empty BAND. A band can be empty because the geometry
+   *  put those cards somewhere else, and the whisper then contradicts
+   *  the three upstream frames sitting right beside it. */
+  modelHasUpstream: boolean
+  modelHasDownstream: boolean
   /** Per band key `${dir}:${band}`: cards shown vs total available. */
   bandTotals: Map<string, {
     shown: number
@@ -390,12 +409,21 @@ export function layoutBands(cards: FocusCard[]) {
     const x = band * (CARD_W + BAND_GAP)
     if (band === 0) {
       // Focal first (the builder inserts it first), anything else below.
-      let y = -FOCAL_H / 2
-      for (const c of list) {
-        c.x = c.kind === 'focal' ? x : x + NEST_INDENT * (c.depth + 1)
+      // Centered on ITS OWN height, whatever it is: a focal card is
+      // FOCAL_H, but a focus that holds things is a frame as tall as its
+      // contents, and hanging that from -FOCAL_H/2 pushed the thing the
+      // picture is about below the midline every other band centers on —
+      // which fanned every wire diagonally out of it.
+      let y = -(list[0]?.h ?? FOCAL_H) / 2
+      list.forEach((c, i) => {
+        // The focus leads this band and owns the column's own x —
+        // whether it is a focal card or a frame full of its contents.
+        // Indenting a frame focus by a nesting step pushed the anchor
+        // 16px out of its own column and bent every wire into it.
+        c.x = i === 0 ? x : x + NEST_INDENT * (c.depth + 1)
         c.y = y
-        y += c.h + (c.kind === 'focal' ? CONTAINS_STACK_GAP : CARD_GAP)
-      }
+        y += c.h + (i === 0 ? CONTAINS_STACK_GAP : CARD_GAP)
+      })
       continue
     }
     const total = list.reduce((acc, c) => acc + c.h, 0) + CARD_GAP * Math.max(0, list.length - 1)

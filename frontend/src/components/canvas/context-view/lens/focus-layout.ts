@@ -79,6 +79,13 @@ export const REVEAL_PAGE = 12
  *  for reveal pages, pills and expand keys. */
 export const revealKey = (dir: LensDir, urn: string): string => `${dir}:${urn}`
 
+/** How long a drawn bundle must be before it can carry its ×N badge,
+ *  and the box that badge occupies — two labels closer than this overlap
+ *  into an unreadable smudge, so the second one is not drawn. */
+const LABEL_MIN_RUN = 90
+const LABEL_W = 56
+const LABEL_H = 22
+
 /** The same question in `useLensWalk`'s words, for reading its per-pill
  *  `extendStatus`. The hook keys on up/down; the layout keys on in/out;
  *  this is the ONLY translation between them, so a mismatch is one
@@ -433,20 +440,29 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const childrenInPopulation = (urn: string): string[] =>
         (nodeOf(urn)?.children ?? []).filter(c => population.has(c))
 
+    /** The containment chain above the focus. Never geometry (see the
+     *  frame pass below), so it is never an answer grain either. */
+    const focusAncestors = new Set(ancestorsOf(sg.focusUrn))
+
     const spine = new Set<string>()
-    for (const group of admittedGroups) {
-        let cursor: string | null = group.root
-        const guard = new Set<string>()
-        while (cursor && population.has(cursor) && !guard.has(cursor)) {
-            guard.add(cursor)
-            const kids = childrenInPopulation(cursor)
-            // The first level that BRANCHES is the answer — stop there and
-            // let it speak for what is inside it.
-            if (kids.length !== 1) break
-            spine.add(cursor)
-            cursor = kids[0]
-        }
+    const spineSeen = new Set<string>()
+    const openThrough = (urn: string) => {
+        if (spineSeen.has(urn) || !population.has(urn)) return
+        spineSeen.add(urn)
+        const kids = childrenInPopulation(urn)
+        if (kids.length === 0) return
+        // A level ABOVE THE FOCUS is context — it is not drawn at all, so
+        // it cannot be where the walk stops, and the grain question moves
+        // to each of the groups it holds instead. That is the difference
+        // between `Snowflake ⊃ {REPORTING, GOLD, INTERMEDIATE_T2}`, where
+        // GOLD is a pass-through onto the source you asked for, and
+        // `Sales ⊃ {orders_raw, refunds_raw}`, which genuinely branches
+        // and stays one card speaking for both.
+        if (kids.length !== 1 && !focusAncestors.has(urn)) return
+        spine.add(urn)
+        for (const kid of kids) openThrough(kid)
     }
+    for (const group of admittedGroups) openThrough(group.root)
 
     const expanded = new Set<string>([...view.expandedContainment, ...spine])
     for (const urn of view.collapsedContainment) expanded.delete(urn)
@@ -490,6 +506,85 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // picture says it. One that is empty does.
     const drawnIn = new Set(projected.map(e => e.targetUrn))
     const drawnOut = new Set(projected.map(e => e.sourceUrn))
+
+    // ── 3b. FRAMES ONLY WHERE THEY CLARIFY ───────────────────────────
+    //
+    // A container ABOVE the answer is context. Drawing it as a frame is
+    // right only while everything it would enclose belongs in one place;
+    // the moment it spans the picture it stops being a container and
+    // becomes a box around the whole board.
+    //
+    // Reported live: focusing REPORTING — a container inside the
+    // platform Snowflake — whose sources GOLD and INTERMEDIATE_T2 live
+    // in that SAME platform drew one Snowflake frame holding the focus
+    // and both sources stacked under it. No left-to-right flow, every
+    // wire looping back through the box, and an upstream band so empty
+    // it whispered "no upstream sources" over a picture full of them.
+    //
+    // So a visible container becomes geometry only when both hold:
+    //
+    //   • it is not above the FOCUS. The thing you asked about anchors
+    //     the picture and is never enclosed by anything; what is above
+    //     it is a breadcrumb (`ancestry`, which every card carries).
+    //     Its own contents still nest INSIDE it — that part was right.
+    //   • every visible descendant it would enclose sits in ONE hop
+    //     column. One column is a group worth drawing a box around; two
+    //     is the board, and a card can only be in one column at a time.
+    //
+    // Anything else is DEMOTED: no card at all, and each of its child
+    // groups is promoted to a top-level frame/card in its own column,
+    // carrying the ancestry it came from. Demotion is ancestor-closed by
+    // construction — a node's columns are a superset of any child's, and
+    // every ancestor of a focus-ancestor is one too — so the demoted set
+    // is a prefix from the roots, nothing nested inside a surviving
+    // frame is ever demoted, and the cascade is just "keep walking down
+    // until something survives".
+    const visibleChildrenOf = (urn: string): string[] =>
+        (nodeOf(urn)?.children ?? []).filter(c => visible.has(c))
+
+    // Reverse pre-order = children before parents, and each urn appears
+    // exactly once, so this is one pass and immune to the containment
+    // cycle `buildLensSubgraph` is allowed to hand over.
+    const columnsUnder = new Map<string, Set<number>>()
+    for (let i = visibleOrder.length - 1; i >= 0; i--) {
+        const urn = visibleOrder[i]
+        const cols = new Set<number>()
+        for (const kid of nodeOf(urn)?.children ?? []) {
+            for (const col of columnsUnder.get(kid) ?? []) cols.add(col)
+        }
+        // Nothing visible inside: this card stands for itself, in its own
+        // column.
+        if (cols.size === 0) cols.add(signedHop(urn))
+        columnsUnder.set(urn, cols)
+    }
+
+    const demoted = new Set<string>()
+    for (const urn of visibleOrder) {
+        // Nothing is enclosed, so there is no frame to demote: a card
+        // with its contents shut stands for what is inside it, which is
+        // its job.
+        if (visibleChildrenOf(urn).length === 0) continue
+        // A container carrying lineage of its OWN is a participant, not
+        // scaffolding — demote it and its wire has no card to land on,
+        // and a silently dropped hop is the one thing this builder must
+        // never do.
+        if (drawnIn.has(urn) || drawnOut.has(urn)) continue
+        if (focusAncestors.has(urn) || (columnsUnder.get(urn)?.size ?? 1) > 1) demoted.add(urn)
+    }
+
+    /** The cards that get a hop column of their own: every model root,
+     *  and — through each demoted container — the groups it held. */
+    const topLevelUnits: string[] = []
+    const unitGuard = new Set<string>()
+    const collectUnits = (urn: string) => {
+        if (unitGuard.has(urn)) return
+        unitGuard.add(urn)
+        if (!demoted.has(urn)) { topLevelUnits.push(urn); return }
+        for (const kid of visibleChildrenOf(urn)) collectUnits(kid)
+    }
+    for (const urn of visibleOrder) {
+        if ((nodeOf(urn)?.parent ?? null) === null) collectUnits(urn)
+    }
 
     // ── 4. CARDS ─────────────────────────────────────────────────────
 
@@ -802,17 +897,21 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     }
 
     // Column order, then rank inside the column: the heaviest source sits
-    // at the top of its band.
-    const roots = rankCards(visibleOrder.filter(u => (nodeOf(u)?.parent ?? null) === null))
-    for (const root of [...roots].sort((a, b) => signedHop(a) - signedHop(b))) {
-        const band = signedHop(root)
+    // at the top of its band — except in band 0, which the focus always
+    // leads, because `layoutBands` centers that band's first card on the
+    // midline and the thing you asked about is what the midline is for.
+    const units = rankCards(topLevelUnits).sort((a, b) =>
+        signedHop(a) - signedHop(b)
+        || Number(b === sg.focusUrn) - Number(a === sg.focusUrn))
+    for (const unit of units) {
+        const band = signedHop(unit)
         // The whole band a direction filter hides — never emitted, so its
         // cards, pills AND edges (an edge needs both endpoints' card ids)
         // are all absent at once. Band 0 (the focus's own subtree) is
         // never a "side" and is never skipped.
         if (directionFilter === 'in' && band > 0) continue
         if (directionFilter === 'out' && band < 0) continue
-        emit(root, null, 0, band)
+        emit(unit, null, 0, band)
     }
 
     // A frame states its rows' one shared relationship, and that decides
@@ -831,13 +930,20 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const host = byId.get(card.frameId)
         if (!host) continue
         card.edgeTypeNorm = edgeTypeOf(card.id)
-        card.frameSharedEdgeType = host.frameSharedEdgeType
         // Rows get a row's height — but a FRAME is sized from its own
         // contents by layoutBands, and the FOCUS card carries the rich
         // focal chrome (name, provenance, in/out, reach) that does not
         // fit in 64px. Squashing it there spilled its own text out
         // through the bottom of the container holding it.
+        //
+        // A nested frame also KEEPS the shared type it just computed
+        // from its own rows. Overwriting it with its host's said that
+        // `SILVER ⊃ clean_charges ⊃ 8 columns` shared nothing, so all
+        // eight columns re-stated `DERIVES FROM` and grew to 64px while
+        // the identical table one column over stayed at 36px — and the
+        // eight wires between them fanned instead of running parallel.
         if (card.kind === 'frame' || card.kind === 'focal') continue
+        card.frameSharedEdgeType = host.frameSharedEdgeType
         card.h = rowHeight(host.frameSharedEdgeType, card.edgeTypeNorm)
     }
 
@@ -871,12 +977,41 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             // connections.
             dimmed: (byId.get(source)?.dimmed ?? false) && (byId.get(target)?.dimmed ?? false),
             cycleBack: closesCycle(bundle),
+            // Decided from the geometry, below — there is none yet.
+            labelVisible: false,
         })
     }
 
     // ── 5. GEOMETRY ──────────────────────────────────────────────────
 
     layoutBands(cards)
+
+    // A ×N badge belongs to a wire, so it may only render where the wire
+    // can hold one: long enough for a pill, and with nothing already
+    // sitting there. Column-to-column lineage draws dozens of short
+    // near-parallel hops through one screen, and a badge per hop came out
+    // as a drift of pills with no visible owner.
+    //
+    // Measured between the ports the view actually anchors to (source's
+    // right edge, target's left) and at the straight-line midpoint, which
+    // is where a shallow bezier puts its label to within a few pixels.
+    const placed: Array<{ x: number; y: number }> = []
+    for (const edge of edges) {
+        if (!(edge.count > 1 || edge.cycleBack)) continue
+        const s = byId.get(edge.source)
+        const t = byId.get(edge.target)
+        if (!s || !t) continue
+        const sx = s.x + s.w
+        const sy = s.y + s.h / 2
+        const tx = t.x
+        const ty = t.y + t.h / 2
+        if (Math.hypot(tx - sx, ty - sy) < LABEL_MIN_RUN) continue
+        const x = (sx + tx) / 2
+        const y = (sy + ty) / 2
+        if (placed.some(p => Math.abs(p.x - x) < LABEL_W && Math.abs(p.y - y) < LABEL_H)) continue
+        placed.push({ x, y })
+        edge.labelVisible = true
+    }
 
     // Band headers: how many cards a column holds, and how many raw hops
     // those cards stand for — a frame is one card and eight connections,
@@ -905,12 +1040,44 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         if (entry) entry.connections += edge.count
     }
 
+    /**
+     * Does the MODEL know of anything at all on this side — an urn the
+     * data source named, a hop it shipped, or a frontier it says is
+     * still out there?
+     *
+     * This, and never an empty BAND, is what may make the "no upstream
+     * sources in the data source" claim. The two came apart the moment
+     * geometry started moving cards between columns: a shared ancestor
+     * swallowed every hop column into band 0, the upstream band came out
+     * empty, and the lens whispered that the table had no producers
+     * directly above the three producers it was drawing.
+     */
+    const modelHasSide = (dir: LensDir): boolean => {
+        for (const n of model.values()) {
+            if (dir === 'in' ? n.up : n.down) return true
+            // The focus's own subtree is SEEDED at hop 0, so a hop that
+            // genuinely goes somewhere is 1 or more.
+            const hop = dir === 'in' ? n.hopUp : n.hopDown
+            if (hop != null && hop > 0) return true
+        }
+        // Nothing in hand — but the data source may still have said there
+        // is more that way. The FOCUS's own frontier only: another card's
+        // frontier is a statement about that card's side, not this one's.
+        for (const urn of subtreeOf(sg.focusUrn)) {
+            const entry = dir === 'in' ? model.get(urn)?.frontierUp : model.get(urn)?.frontierDown
+            if (entry && (entry.totalCount == null || entry.totalCount > 0 || entry.nextCursor != null)) return true
+        }
+        return false
+    }
+
     return {
         cards,
         edges,
         hiddenByChips,
         hiddenByChipsIn,
         hiddenByChipsOut,
+        modelHasUpstream: modelHasSide('in'),
+        modelHasDownstream: modelHasSide('out'),
         bandTotals,
     }
 }
