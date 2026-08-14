@@ -25,7 +25,7 @@ import {
     type LensViewState,
     type FocusLayoutInput,
 } from '../focus-layout'
-import { FRAME_CHILD_CAP, type FocusCard, type FocusEdge } from '../focus-cards'
+import { FOCAL_H, FRAME_CHILD_CAP, type FocusCard, type FocusEdge } from '../focus-cards'
 
 // ── fixtures ─────────────────────────────────────────────────────────
 
@@ -149,18 +149,24 @@ describe('focus-layout — initial view state', () => {
 // ── population and the answer grain ──────────────────────────────────
 
 describe('focus-layout — the answer grain', () => {
-    it('auto-opens a pass-through spine and stops at the first branch', () => {
+    it('walks through the pass-through levels to the first branch, and draws none of them', () => {
         const g = layout(collateralEstate())
         // Every single-child level between the group root and the branch
-        // is a frame you can see through...
-        for (const spine of ['DOM', 'APP', 'CTR1', 'CTR2']) {
-            expect(cardFor(g, spine)!.kind).toBe('frame')
+        // is chrome the walk saw through — and chrome is not geometry.
+        for (const skipped of ['DOM', 'APP', 'CTR1', 'CTR2']) {
+            expect(cardFor(g, skipped)).toBeUndefined()
         }
-        // ...and the branch itself is the answer grain: one card standing
-        // for its three tables, not three loose cards.
-        expect(cardFor(g, 'DB')!.kind).toBe('entity')
+        // The branch itself is the answer grain: one free-standing card
+        // standing for its three tables, not three loose cards, and not
+        // wrapped in four boxes either.
+        const db = cardFor(g, 'DB')!
+        expect(db.kind).toBe('entity')
+        expect(db.frameId).toBeNull()
+        expect(db.band).toBe(-1)
         expect(cardFor(g, 't0')).toBeUndefined()
-        expect(cardFor(g, 'DB')!.contents).toEqual({ onLineage: 3, total: 12 })
+        expect(db.contents).toEqual({ onLineage: 3, total: 12 })
+        // The levels it was walked through are its breadcrumb.
+        expect(db.ancestry).toEqual(['Finance', 'RiskApp', 'PROD', 'CURATED'])
     })
 
     it('opens the branch when the user asks, and the tables become cards', () => {
@@ -194,16 +200,23 @@ describe('focus-layout — the answer grain', () => {
 
 describe('focus-layout — nesting', () => {
     /** Node ⊃ Node ⊃ Node ⊃ Node: one entity type at every level, which
-     *  no type→level map can describe. */
+     *  no type→level map can describe.
+     *
+     *  R BRANCHES (a leaf of its own beside the chain), so R is the
+     *  presented grain — and everything below it is nesting the user
+     *  asks for, one open at a time. */
     function recursiveEstate(): LensSubgraph<LensWalkNode> {
         const nodes = [wnode('F', 'Node', 'focus'), wnode('FP', 'Node', 'focus_parent')]
         const contains: Array<[string, string]> = [['FP', 'F']]
-        const hops: Array<[string, string]> = []
-        // R ⊃ R1 ⊃ R2 ⊃ {leafA, leafB} — a spine of Nodes, then a branch.
+        const hops: Array<[string, string]> = [['leafC', 'F']]
         for (const [parent, child] of [['R', 'R1'], ['R1', 'R2']] as Array<[string, string]>) {
             contains.push([parent, child])
         }
-        nodes.push(wnode('R', 'Node', 'estate'), wnode('R1', 'Node', 'estate_1'), wnode('R2', 'Node', 'estate_2'))
+        nodes.push(
+            wnode('R', 'Node', 'estate'), wnode('R1', 'Node', 'estate_1'), wnode('R2', 'Node', 'estate_2'),
+            wnode('leafC', 'Node', 'leafC'),
+        )
+        contains.push(['R', 'leafC'])
         for (const leaf of ['leafA', 'leafB']) {
             nodes.push(wnode(leaf, 'Node', leaf))
             contains.push(['R2', leaf])
@@ -215,7 +228,10 @@ describe('focus-layout — nesting', () => {
     it('nests to N levels — the outer rect encloses the inner, three deep', () => {
         const sg = recursiveEstate()
         const base = initialLensViewState(sg)
-        const g = layout(sg, { ...base, expandedContainment: new Set([...base.expandedContainment, 'R2']) })
+        const g = layout(sg, {
+            ...base,
+            expandedContainment: new Set([...base.expandedContainment, 'R', 'R1', 'R2']),
+        })
         const byId = new Map(g.cards.map(c => [c.id, c]))
         const chain = ['R', 'R1', 'R2'].map(u => cardFor(g, u)!)
         expect(chain.every(c => c.kind === 'frame')).toBe(true)
@@ -236,8 +252,9 @@ describe('focus-layout — nesting', () => {
             return d
         }
         expect(depthOf(cardFor(g, 'leafA')!)).toBe(3)
-        // R, R1, R2 — but NOT the focus's own parent FP, which is above
-        // the focus and therefore a breadcrumb (R1), not a box.
+        // R, R1, R2 — every one of them opened by hand. NOT the focus's
+        // own parent FP, which is above the focus and therefore a
+        // breadcrumb (R1), not a box.
         expect(g.cards.filter(c => c.kind === 'frame')).toHaveLength(3)
         expect(cardFor(g, 'FP')).toBeUndefined()
     })
@@ -298,108 +315,153 @@ describe('focus-layout — frames only where they clarify', () => {
         expect(focus.ancestryIds).toEqual(['SNOW'])
     })
 
-    it('R1: what the focus HOLDS still nests inside it', () => {
+    it('R1: the focus is a COMPACT CARD, and what it holds is the contains-stack below it', () => {
         const g = layout(sharedPlatform())
         const focus = cardFor(g, 'REPORTING')!
-        expect(focus.kind).toBe('frame')
+        // Never a frame: the thing you asked about does not become a box
+        // the rest of the board sits beside.
+        expect(focus.kind).toBe('focal')
+        expect(focus.h).toBe(FOCAL_H)
+        expect(g.cards.some(c => c.frameId === focus.id)).toBe(false)
+
+        // Its contents hang below it, in its own band, as one stack.
+        const stack = g.cards.find(c => c.id === `co:REPORTING`)!
+        expect(stack).toBeDefined()
+        expect(stack.nodeId).toBeNull()
+        expect(stack.band).toBe(0)
+        expect(stack.frameId).toBeNull()
+        expect(stack.expandKey).toBe('REPORTING')
+        expect(stack.contents).toEqual({ onLineage: 2, total: 9 })
+        expect(stack.y).toBeGreaterThan(focus.y + focus.h - 1)
         for (const table of ['rep_a', 'rep_b']) {
-            expect(cardFor(g, table)!.frameId).toBe(focus.id)
+            expect(cardFor(g, table)!.frameId).toBe(stack.id)
         }
     })
 
-    it('R2: an ancestor holding ONE hop column stays a frame', () => {
-        const g = layout(sharedPlatform())
-        // GOLD holds one upstream table and nothing else — a box around
-        // it says something true and useful.
-        const gold = cardFor(g, 'GOLD')!
-        expect(gold.kind).toBe('frame')
-        expect(gold.frameId).toBeNull()
-        expect(cardFor(g, 'gold_t')!.frameId).toBe(gold.id)
+    it('R1: a focus that holds nothing has no stack under it', () => {
+        const g = layout(collateralEstate())
+        expect(cardFor(g, 'F')!.kind).toBe('focal')
+        expect(g.cards.some(c => c.id.startsWith('co:'))).toBe(false)
     })
 
-    it('R2: an ancestor spanning more than one column is demoted, its groups promoted into their own columns', () => {
+    it('R1: the contains-stack closes to one card, and the rows go with it', () => {
+        const sg = sharedPlatform()
+        const base = initialLensViewState(sg)
+        const g = layout(sg, { ...base, collapsedContainment: new Set(['REPORTING']) })
+        const stack = g.cards.find(c => c.id === 'co:REPORTING')!
+        expect(stack.childrenOpen).toBe(false)
+        expect(g.cards.some(c => c.frameId === stack.id)).toBe(false)
+        // Still says what is in there, so it can be opened again.
+        expect(stack.contents).toEqual({ onLineage: 2, total: 9 })
+    })
+
+    it('R1b: every hop into the focus lands on the FOCAL card, whatever grain it was drawn at', () => {
         const g = layout(sharedPlatform())
-        // No card at all for the platform — not a collapsed one, not an
-        // empty one: none.
-        expect(urns(g)).not.toContain('SNOW')
-        // Each group it held is now a top-level card in its own column.
-        for (const urn of ['REPORTING', 'GOLD', 'INT_T2']) {
-            expect(cardFor(g, urn)!.frameId).toBeNull()
+        const focal = cardFor(g, 'REPORTING')!
+        // Four raw hops reach two different tables INSIDE the focus, and
+        // one leaves it — they arrive at, and leave from, the focal's own
+        // ports as bundles, so the contains-stack rows carry no wires.
+        for (const table of ['rep_a', 'rep_b']) {
+            const row = cardFor(g, table)!
+            expect(g.edges.some(e => e.source === row.id || e.target === row.id)).toBe(false)
         }
-        expect(cardFor(g, 'GOLD')!.band).toBe(-1)
+        const into = g.edges.filter(e => e.target === focal.id)
+        expect(into).toHaveLength(2)
+        // dim_customer reaches TWO of the focus's tables: one wire, and it
+        // says two rather than pretending to be one hop.
+        expect(into.find(e => e.source === cardFor(g, 'gold_t')!.id)!.count).toBe(2)
+        expect(into.find(e => e.source === cardFor(g, 'INT_T2')!.id)!.count).toBe(1)
+        expect(g.edges.filter(e => e.source === focal.id)).toHaveLength(1)
+    })
+
+    it('R1b: the focal speaks for its whole subtree — one ⊕, not one per row', () => {
+        const sg = subgraph({
+            focus: 'FT',
+            nodes: [wnode('FT', 'dataset', 'orders'), wnode('c0'), wnode('c1'), wnode('U')],
+            contains: [['FT', 'c0'], ['FT', 'c1']],
+            hops: [['U', 'c0']],
+            frontierUp: [{ urn: 'c0', totalCount: 7, nextCursor: null }],
+        })
+        const g = layout(sg)
+        expect(cardFor(g, 'FT')!.pillUp).toMatchObject({ kind: 'extend', count: 6 })
+        for (const row of ['c0', 'c1']) {
+            expect(cardFor(g, row)!.pillUp).toBeNull()
+            expect(cardFor(g, row)!.deadEnd).toBe(false)
+        }
+    })
+
+    it('R2: an ancestor is NEVER a passive wrapper — not even around a single group', () => {
+        const g = layout(sharedPlatform())
+        // The platform, and every container the walk saw through on its
+        // way to an answer: no card at all — not a collapsed one, not an
+        // empty one, none.
+        for (const skipped of ['SNOW', 'GOLD', 'BI']) {
+            expect(urns(g)).not.toContain(skipped)
+        }
+        // What each group presented instead is free-standing, in its own
+        // hop column, carrying the levels it was walked through.
+        const source = cardFor(g, 'gold_t')!
+        expect(source.frameId).toBeNull()
+        expect(source.band).toBe(-1)
+        expect(source.ancestry).toEqual(['Snowflake', 'GOLD'])
+        const consumer = cardFor(g, 'dash')!
+        expect(consumer.frameId).toBeNull()
+        expect(consumer.band).toBe(1)
+        expect(consumer.ancestry).toEqual(['BI'])
+        // A container with nothing inside it on this lineage is its own
+        // presented grain, and stands in its column as a card.
         expect(cardFor(g, 'INT_T2')!.band).toBe(-1)
-        expect(cardFor(g, 'REPORTING')!.band).toBe(0)
-        expect(cardFor(g, 'BI')!.band).toBe(1)
-        // ...carrying where it came from, so nothing is lost by not
-        // drawing the box.
-        expect(cardFor(g, 'GOLD')!.ancestry).toEqual(['Snowflake'])
         expect(cardFor(g, 'INT_T2')!.ancestry).toEqual(['Snowflake'])
     })
 
-    it('R2: demotion cascades — a demoted level does not strand the level below it', () => {
-        // Snowflake ⊃ SILVER ⊃ {an upstream table, a downstream table},
-        // with SILVER opened by the user. Snowflake goes because it is
-        // above the focus; SILVER then goes on its own account, because
-        // opened it spans both sides of the board — and the two tables
-        // end up in their own columns, two levels up.
-        const sg = subgraph({
-            focus: 'F',
-            nodes: [
-                wnode('SNOW', 'PLATFORM', 'Snowflake'),
-                wnode('SILVER', 'CONTAINER', 'SILVER'),
-                wnode('up', 'dataset', 'raw_charges'),
-                wnode('down', 'dataset', 'mart_charges'),
-                wnode('F', 'dataset', 'clean_charges'),
-            ],
-            contains: [['SNOW', 'SILVER'], ['SILVER', 'up'], ['SILVER', 'down'], ['SNOW', 'F']],
-            hops: [['up', 'F'], ['F', 'down']],
-        })
-        const base = initialLensViewState(sg)
-        const g = layout(sg, { ...base, expandedContainment: new Set([...base.expandedContainment, 'SILVER']) })
-        expect(cardFor(g, 'SNOW')).toBeUndefined()
-        expect(cardFor(g, 'SILVER')).toBeUndefined()
-        expect(cardFor(g, 'up')!.frameId).toBeNull()
-        expect(cardFor(g, 'up')!.band).toBe(-1)
-        expect(cardFor(g, 'down')!.frameId).toBeNull()
-        expect(cardFor(g, 'down')!.band).toBe(1)
-        // Both levels it was demoted through, in order, for the crumb.
-        expect(cardFor(g, 'up')!.ancestry).toEqual(['Snowflake', 'SILVER'])
-    })
-
-    it('R2: a container holding SEVERAL partners in one column keeps its frame', () => {
-        // The shape the estate spine is made of — three sources, one
-        // column, one box. Demoting this would be the predicate being
-        // too aggressive, and would scatter every grouped estate.
+    it('R2: the whole estate spine is breadcrumb, however many levels deep', () => {
+        // Five levels of containment over one answer. Not one of them is
+        // a box; all five are text on the card that IS the answer.
         const g = layout(collateralEstate())
-        for (const spine of ['DOM', 'APP', 'CTR1', 'CTR2']) {
-            expect(cardFor(g, spine)!.kind).toBe('frame')
+        for (const skipped of ['DOM', 'APP', 'CTR1', 'CTR2']) {
+            expect(urns(g)).not.toContain(skipped)
         }
-        expect(cardFor(g, 'DOM')!.frameId).toBeNull()
-        expect(cardFor(g, 'APP')!.frameId).toBe(cardFor(g, 'DOM')!.id)
+        expect(g.cards.filter(c => c.kind === 'frame')).toHaveLength(0)
+        expect(cardFor(g, 'DB')!.ancestry).toEqual(['Finance', 'RiskApp', 'PROD', 'CURATED'])
     })
 
-    it('R2: a container that carries a hop of its OWN keeps its card — a wire must have somewhere to land', () => {
-        // `LAKE` holds one table on each side, so by columns alone it
-        // would be demoted — but it is itself a source of the focus, and
-        // demoting it would leave that wire with no card to start from.
-        // A silently dropped hop is worse than a box.
+    it('R2: a frame comes from being OPENED — the presented entity, and containers inside it', () => {
+        const sg = collateralEstate()
+        const base = initialLensViewState(sg)
+        // The user opens the presented entity: NOW it is a frame, and its
+        // lineage-relevant contents are its rows.
+        const g = layout(sg, { ...base, expandedContainment: new Set([...base.expandedContainment, 'DB']) })
+        const db = cardFor(g, 'DB')!
+        expect(db.kind).toBe('frame')
+        expect(db.frameId).toBeNull()
+        for (const t of ['t0', 't1', 't2']) expect(cardFor(g, t)!.frameId).toBe(db.id)
+        // Still no wrappers above it.
+        for (const skipped of ['DOM', 'APP', 'CTR1', 'CTR2']) {
+            expect(urns(g)).not.toContain(skipped)
+        }
+    })
+
+    it('R2: the answer grain never sees through an entity the data source put on a hop', () => {
+        // `LAKE` has one child, so by shape alone it would be walked
+        // through — but it is itself a source of the focus. It IS the
+        // answer at its grain, so it is presented, and its wire has a
+        // card to land on.
         const sg = subgraph({
             focus: 'F',
             nodes: [
                 wnode('LAKE', 'PLATFORM', 'Lakehouse'),
-                wnode('up', 'dataset', 'raw_charges'),
-                wnode('down', 'dataset', 'mart_charges'),
+                wnode('inner', 'dataset', 'raw_charges'),
                 wnode('F', 'dataset', 'clean_charges'),
             ],
-            contains: [['LAKE', 'up'], ['LAKE', 'down']],
-            hops: [['up', 'F'], ['F', 'down'], ['LAKE', 'F']],
+            contains: [['LAKE', 'inner']],
+            hops: [['LAKE', 'F'], ['inner', 'F']],
         })
-        const base = initialLensViewState(sg)
-        const g = layout(sg, { ...base, expandedContainment: new Set([...base.expandedContainment, 'LAKE']) })
-        const lake = cardFor(g, 'LAKE')
+        const g = layout(sg)
+        const lake = cardFor(g, 'LAKE')!
         expect(lake).toBeDefined()
-        expect(lake!.kind).toBe('frame')
-        expect(g.edges.some(e => e.source === lake!.id && e.target === cardFor(g, 'F')!.id)).toBe(true)
+        expect(lake.frameId).toBeNull()
+        expect(lake.kind).toBe('entity')          // presented, not opened
+        expect(g.edges.some(e => e.source === lake.id && e.target === cardFor(g, 'F')!.id)).toBe(true)
     })
 
     it('R3: the hop columns and their band headers come back', () => {
@@ -407,8 +469,8 @@ describe('focus-layout — frames only where they clarify', () => {
         // Left of the focus, right of the focus — the skeleton the tower
         // ate. Columns are x-ordered, and both directions have a header
         // with something in it.
-        expect(cardFor(g, 'GOLD')!.x).toBeLessThan(cardFor(g, 'REPORTING')!.x)
-        expect(cardFor(g, 'BI')!.x).toBeGreaterThan(cardFor(g, 'REPORTING')!.x)
+        expect(cardFor(g, 'gold_t')!.x).toBeLessThan(cardFor(g, 'REPORTING')!.x)
+        expect(cardFor(g, 'dash')!.x).toBeGreaterThan(cardFor(g, 'REPORTING')!.x)
         expect(g.bandTotals.get('band:in:1')?.shown).toBe(2)
         expect(g.bandTotals.get('band:out:1')?.shown).toBe(1)
         // Three raw hops arrive from the upstream column, and its header
@@ -416,11 +478,14 @@ describe('focus-layout — frames only where they clarify', () => {
         expect(g.bandTotals.get('band:in:1')?.connections).toBe(3)
     })
 
-    it('R3: every wire still lands — demotion moves cards, it never drops a hop', () => {
+    it('R3: every wire still lands — skipping a level moves cards, it never drops a hop', () => {
         const g = layout(sharedPlatform())
         const byId = new Map(g.cards.map(c => [c.id, c.nodeId]))
         const drawn = g.edges.map(e => `${byId.get(e.source)}>${byId.get(e.target)}`).sort()
-        expect(drawn).toEqual(['INT_T2>rep_a', 'gold_t>rep_a', 'gold_t>rep_b', 'rep_a>dash'])
+        // Four raw hops, three drawn wires — every one of them between
+        // cards that are on the board, converging on the focal.
+        expect(drawn).toEqual(['INT_T2>REPORTING', 'REPORTING>dash', 'gold_t>REPORTING'])
+        expect(g.edges.reduce((n, e) => n + e.count, 0)).toBe(4)
     })
 
     it('the export names a parent only when the picture has one — no dangling ids', () => {
@@ -431,9 +496,11 @@ describe('focus-layout — frames only where they clarify', () => {
             if (node.parentUrn !== null) expect(urns.has(node.parentUrn)).toBe(true)
             expect(node.parentUrn === null).toBe(node.depth === 0)
         }
-        // GOLD really is inside Snowflake, and really is top-level here.
-        expect(payload.nodes.find(n => n.urn === 'GOLD')?.parentUrn).toBeNull()
-        expect(payload.nodes.find(n => n.urn === 'gold_t')?.parentUrn).toBe('GOLD')
+        // dim_customer really is inside GOLD, and really is top-level here.
+        expect(payload.nodes.find(n => n.urn === 'gold_t')?.parentUrn).toBeNull()
+        // ...while the focus's own contents keep the parent they are
+        // drawn inside — the contains-stack is the focus's card.
+        expect(payload.nodes.find(n => n.urn === 'rep_a')?.parentUrn).toBe('REPORTING')
     })
 
     it('R6: an empty SIDE is the model\'s answer, and an empty band is not', () => {
@@ -469,21 +536,22 @@ describe('focus-layout — frames only where they clarify', () => {
     })
 
     it('R5: a bundle whose drawn line is too short to hold a badge does not get one', () => {
-        // Column to column between two adjacent frames: the wire is a
-        // ~80px stub between two rows, and a pill on it floats free of
-        // both. This is the shape that produced badge confetti.
+        // A row inside an opened frame, one column over: the wire is a
+        // ~70px stub, and a pill on it floats free of both ends. This is
+        // the shape that produced badge confetti.
         const sg = subgraph({
-            focus: 'FT',
+            focus: 'F',
             nodes: [
-                wnode('UT', 'dataset', 'int_clean_charges_t1', { childCount: 8 }),
+                wnode('F', 'dataset', 'clean_charges'),
+                wnode('UT', 'dataset', 'raw_charges', { childCount: 8 }),
                 wnode('u1', 'schemaField', 'charge_id'),
-                wnode('FT', 'dataset', 'int_clean_charges_t2', { childCount: 8 }),
-                wnode('fc', 'schemaField', 'charge_id'),
+                wnode('u2', 'schemaField', 'amount'),
             ],
-            contains: [['UT', 'u1'], ['FT', 'fc']],
-            hops: [['u1', 'fc'], ['u1', 'fc', 'JOINS']],
+            contains: [['UT', 'u1'], ['UT', 'u2']],
+            hops: [['u1', 'F'], ['u1', 'F', 'JOINS'], ['u2', 'F']],
         })
-        const g = layout(sg)
+        const base = initialLensViewState(sg)
+        const g = layout(sg, { ...base, expandedContainment: new Set([...base.expandedContainment, 'UT']) })
         const wire = g.edges.find(e => e.source === cardFor(g, 'u1')!.id)!
         expect(wire.count).toBe(2)
         expect(wire.labelVisible).toBe(false)
@@ -716,7 +784,8 @@ describe('focus-layout — the ⊕ pill tells one of three truths', () => {
         // Five containment levels above a column with more upstream. Only
         // the column's own card may carry that ⊕ — an ancestor repeating
         // it is four controls that cannot be told apart, stacked in the
-        // gutter on top of each other.
+        // gutter on top of each other. Those ancestors are now breadcrumb
+        // rather than geometry, so there is nowhere for a copy to go.
         const sg = subgraph({
             focus: 'F',
             nodes: [
@@ -729,10 +798,11 @@ describe('focus-layout — the ⊕ pill tells one of three truths', () => {
         })
         const g = layout(sg)
         expect(cardFor(g, 'leaf')!.pillUp).toMatchObject({ kind: 'extend', count: 9 })
+        expect(g.cards.filter(c => c.pillUp !== null)).toHaveLength(1)
         for (const level of ['L0', 'L1', 'L2']) {
-            expect(cardFor(g, level)!.pillUp).toBeNull()
-            expect(cardFor(g, level)!.deadEnd).toBe(false)
+            expect(cardFor(g, level)).toBeUndefined()
         }
+        expect(cardFor(g, 'leaf')!.ancestry).toEqual(['estate', 'zone', 'db'])
     })
 
     it('a COLLAPSED container still speaks for the frontier it hides', () => {
@@ -887,7 +957,7 @@ describe('focus-layout — filters', () => {
         const filtered = layout(sg, initialLensViewState(sg), { query: 'RISK_DB' })
         expect(filtered.cards).toHaveLength(all.cards.length)
         expect(cardFor(filtered, 'DB')!.dimmed).toBe(false)
-        expect(cardFor(filtered, 'DOM')!.dimmed).toBe(true)
+        expect(cardFor(filtered, 'F')!.dimmed).toBe(true)
     })
 
     it('the type chips REMOVE, and the removed count is reported per direction', () => {
@@ -952,11 +1022,17 @@ describe('focus-layout — frames page instead of growing', () => {
     })
 
     it('the All roster shows what is inside but off the lineage, marked', () => {
+        // `T` carries TWO columns on this lineage, so it is the presented
+        // grain rather than a level walked through, and it is what the
+        // user opens to ask what else is in there.
         const sg = subgraph({
             focus: 'F',
-            nodes: [wnode('F'), wnode('T', 'dataset', 'src'), wnode('c0', 'schemaField', 'amount')],
-            contains: [['T', 'c0']],
-            hops: [['c0', 'F']],
+            nodes: [
+                wnode('F'), wnode('T', 'dataset', 'src'),
+                wnode('c0', 'schemaField', 'amount'), wnode('c1', 'schemaField', 'currency'),
+            ],
+            contains: [['T', 'c0'], ['T', 'c1']],
+            hops: [['c0', 'F'], ['c1', 'F']],
         })
         const base = initialLensViewState(sg)
         const g = layout(sg, {
@@ -965,16 +1041,20 @@ describe('focus-layout — frames page instead of growing', () => {
             frameShowAll: new Set(['T']),
         }, {
             childrenAll: new Map([['T', {
-                children: [wnode('c0', 'schemaField', 'amount'), wnode('c9', 'schemaField', 'unused_col')],
+                children: [
+                    wnode('c0', 'schemaField', 'amount'),
+                    wnode('c1', 'schemaField', 'currency'),
+                    wnode('c9', 'schemaField', 'unused_col'),
+                ],
                 hasMore: false,
-                total: 2,
+                total: 3,
             }]]),
             childrenAllStatus: new Map([['T', 'done']]),
         })
         expect(cardFor(g, 'c0')!.connected).toBe(true)
         expect(cardFor(g, 'c9')!.connected).toBe(false)
         expect(cardFor(g, 'T')!.frameShowingAll).toBe(true)
-        expect(cardFor(g, 'T')!.frameTotal).toBe(2)
+        expect(cardFor(g, 'T')!.frameTotal).toBe(3)
     })
 })
 
@@ -1152,11 +1232,11 @@ describe('focus-layout — walk export, pure and server-free', () => {
         const payload = buildWalkExport(g, sg.focusUrn, () => '2026-08-13T00:00:00.000Z')
         expect(payload.focus).toBe('F')
         expect(payload.generatedAt).toBe('2026-08-13T00:00:00.000Z')
-        const dom = payload.nodes.find(n => n.urn === 'DOM')!
-        expect(dom).toMatchObject({ name: 'Finance', type: 'DATADOMAIN', parentUrn: null, depth: 0 })
-        // DB sits four containment levels down (DOM > APP > CTR1 > CTR2 > DB).
+        // The estate above the answer is breadcrumb, not geometry, so it
+        // is not in the picture and not in the export of the picture.
+        expect(payload.nodes.some(n => n.urn === 'DOM')).toBe(false)
         const db = payload.nodes.find(n => n.urn === 'DB')!
-        expect(db).toMatchObject({ parentUrn: 'CTR2', depth: 4 })
+        expect(db).toMatchObject({ name: 'RISK_DB', type: 'DATABASE', parentUrn: null, depth: 0 })
         // Edges are addressed by URN, not the layout's internal card ids —
         // and the three raw hops into DB bundle into one weighted edge.
         expect(payload.edges).toContainEqual({ sourceUrn: 'DB', targetUrn: 'F', type: 'DERIVES_FROM', weight: 3 })
@@ -1182,9 +1262,9 @@ describe('focus-layout — walk export, pure and server-free', () => {
         // A name that itself contains a comma is quoted, not corrupted.
         const withComma = { ...payload, nodes: [{ urn: 'x', name: 'Revenue, Q1', type: 't', parentUrn: null, depth: 0 }] }
         expect(walkExportToCsv(withComma)).toContain('"Revenue, Q1"')
-        // A urn with no containment parent renders as an EMPTY field, not
-        // the literal string "null".
-        expect(lines.some(l => l.startsWith('"DOM"') || l.startsWith('DOM'))).toBe(true)
+        // A urn with no parent IN THE PICTURE renders as an EMPTY field,
+        // not the literal string "null".
+        expect(lines.some(l => l.startsWith('DB,RISK_DB,DATABASE,,0'))).toBe(true)
         expect(csv).not.toContain('null')
     })
 })
