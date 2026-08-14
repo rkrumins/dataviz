@@ -1767,6 +1767,135 @@ describe('what is really inside a container', () => {
     )
     expect(onLoadChildrenOf).not.toHaveBeenCalled()
   })
+
+  // ── F2 — FIND FILTERS AND FETCHES, IN BOTH MODES ─────────────────────
+
+  /** Twelve connected columns — more than either window (Connected
+   *  FRAME_WINDOW=8, All FRAME_WINDOW_ALL=10) — none of them a match for
+   *  the queries below, so a hit can only be seen if the fix actually
+   *  filters (or fetches) rather than merely dimming whatever the fixed
+   *  window already had on screen. */
+  const wideConnectedTable = () => doneWalk(walkModel('F', {
+    nodes: [
+      wnode('F', 'dataset', 'stg_orders'),
+      wnode('T', 'dataset', 'raw_orders', { childCount: 400 }),
+      ...Array.from({ length: 12 }, (_, i) => wnode(`c${i}`, 'schemaField', `column_${i}`)),
+    ],
+    containmentEdges: Array.from({ length: 12 }, (_, i) => holds('T', `c${i}`)),
+    lineageEdges: Array.from({ length: 12 }, (_, i) => hop(`c${i}`, 'F')),
+    upstreamUrns: new Set(Array.from({ length: 12 }, (_, i) => `c${i}`)),
+  }))
+
+  /** A row's name, not by its own exact text (an unconnected row's own
+   *  title carries extra trailing words — "X — inside this, but no
+   *  lineage…" — so an EXACT text/title match on the name alone can
+   *  miss it) but by which option row CONTAINS it. */
+  const rowNamed = (name: string) =>
+    [...document.querySelectorAll('[role="option"]')].find(el => el.textContent?.includes(name))
+
+  it('a match on a page the walk never fetched surfaces in Connected mode (T24 F2)', () => {
+    vi.useFakeTimers()
+    try {
+      const onLoadAllChildren: LoadRoster = vi.fn()
+      const walkSeed: LensWalkSeed = {
+        // `opened: ['T']` — a seed REPLACES the view wholesale rather
+        // than layering onto `initialLensViewState`'s own spine
+        // auto-open, so a seed that leaves it out closes a frame that
+        // would otherwise be open by default.
+        nodeId: 'F', direction: 'both', revealed: [['in:F', 1]], opened: ['T'], collapsed: [],
+        frameAll: [], framePages: [], frameQueries: [['T', 'ship']],
+      }
+      const { rerender, api } = renderLens(['F'], wideConnectedTable(), { onLoadAllChildren, walkSeed })
+      act(() => { vi.advanceTimersByTime(300) })
+      // Connected mode used to never ask the server at all — the walk
+      // model is all it consulted, and this entity is not in it.
+      expect(onLoadAllChildren).toHaveBeenCalledWith('T', 'ship')
+
+      // The server answers with an entity the walk never carried.
+      rerender(
+        <LineageLens
+          history={{ entries: ['F'], cursor: 0 }}
+          walk={wideConnectedTable()}
+          walkApi={api}
+          walkSeed={walkSeed}
+          childrenAll={new Map([['T', {
+            children: [{ id: 'shipping_zone', data: { label: 'shipping_zone', type: 'schemaField' } }],
+            hasMore: false, total: 1, query: 'ship',
+          }]]) as never}
+          childrenAllStatus={new Map([['T', 'done' as const]])}
+          onLoadAllChildren={onLoadAllChildren}
+          onRecenter={vi.fn()}
+          onBack={vi.fn()}
+          onForward={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      )
+      // A full citizen: it renders on the board, not merely in a count.
+      expect(rowNamed('shipping_zone')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a server hit renders in All mode instead of being buried past the window (T24 F2)', () => {
+    // Reported: server hits landed in rosterExtras AFTER the unfiltered
+    // connected rows — twelve connected non-matches filled the ten-row
+    // All-mode window before the one real hit ever got a turn.
+    const walkSeed: LensWalkSeed = {
+      nodeId: 'F', direction: 'both', revealed: [['in:F', 1]], opened: ['T'], collapsed: [],
+      frameAll: ['T'], framePages: [], frameQueries: [['T', 'ship']],
+    }
+    renderLens(['F'], wideConnectedTable(), {
+      walkSeed,
+      childrenAll: new Map([['T', {
+        children: [
+          ...Array.from({ length: 12 }, (_, i) => ({ id: `c${i}`, data: { label: `column_${i}`, type: 'schemaField' } })),
+          { id: 'shipping_zone', data: { label: 'shipping_zone', type: 'schemaField' } },
+        ],
+        hasMore: false, total: 13, query: 'ship',
+      }]]) as never,
+      childrenAllStatus: new Map([['T', 'done' as const]]),
+    })
+    expect(rowNamed('shipping_zone')).toBeTruthy()
+    // And the twelve non-matches are gone, not dimmed beside it — this
+    // IS the filtering, not a lucky window position.
+    expect(screen.queryByText('column_0')).toBeNull()
+  })
+
+  it('clearing the query restores the normal list (T24 F2)', () => {
+    const walkSeed: LensWalkSeed = {
+      nodeId: 'F', direction: 'both', revealed: [['in:F', 1]], opened: ['T'], collapsed: [],
+      frameAll: [], framePages: [], frameQueries: [['T', 'zzz']],
+    }
+    renderLens(['F'], wideConnectedTable(), { walkSeed })
+    // Nothing among the twelve columns contains "zzz".
+    expect(screen.queryByText('column_0')).toBeNull()
+    fireEvent.change(screen.getByLabelText('Find inside raw_orders'), { target: { value: '' } })
+    expect(screen.getByText('column_0')).toBeTruthy()
+  })
+
+  it('the match-count line never claims fewer searched than the server already returned (R1c)', () => {
+    const walkSeed: LensWalkSeed = {
+      nodeId: 'F', direction: 'both', revealed: [['in:F', 1]], opened: ['T'], collapsed: [],
+      frameAll: [], framePages: [], frameQueries: [['T', 'ship']],
+    }
+    renderLens(['F'], wideConnectedTable(), {
+      walkSeed,
+      childrenAll: new Map([['T', {
+        children: [{ id: 'shipping_zone', data: { label: 'shipping_zone', type: 'schemaField' } }],
+        hasMore: false,
+        // A stale/wrong declared total SMALLER than what the server
+        // already handed back — the honest floor is the returned count,
+        // never this.
+        total: 0,
+        query: 'ship',
+      }]]) as never,
+      childrenAllStatus: new Map([['T', 'done' as const]]),
+    })
+    // Twelve connected (none matching) + the one server hit = 13
+    // searched — never "0" (the stale declared total).
+    expect(screen.getByText(/1 match · 13 searched/)).toBeTruthy()
+  })
 })
 
 // ── THE WIRE, END TO END ─────────────────────────────────────────────
@@ -1988,13 +2117,13 @@ describe('browsing what is inside — the peek and the keyboard', () => {
     // Client-side over the rows in hand; a miss is exactly the case the
     // SERVER search exists for, so the typing becomes the query rather
     // than being swallowed — but only on a frame that offers a Find box,
-    // or the letters would dim every row against a query with nowhere to
-    // be seen or cleared.
+    // or the letters would filter every row against a query with nowhere
+    // to be seen or cleared.
     renderLens(['F'], manyColumns())
     const region = screen.getByLabelText(/^Rows inside raw_orders\./)
     fireEvent.focus(region)
     fireEvent.keyDown(region, { key: 'z' })
-    expect((screen.getByLabelText('Filter what is inside raw_orders') as HTMLInputElement).value).toBe('z')
+    expect((screen.getByLabelText('Find inside raw_orders') as HTMLInputElement).value).toBe('z')
   })
 
   it('a short list swallows a miss rather than filtering itself to nothing', () => {

@@ -1092,6 +1092,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         frameEmpty: false,
         connected: true, frameShowingAll: false, frameConnectedCount: 0,
         frameLoaded: 0, frameTotal: -1, frameHasMore: false,
+        frameSearchedCount: 0, frameSearchedExact: true,
         frameSharedEdgeType: '',
         frameOffset: 0, frameWindowSize: FRAME_WINDOW, frameRows: NO_FRAME_ROWS,
         canOpenChildren: false, childrenOpen: false,
@@ -1223,7 +1224,28 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
         const roster = childrenAll.get(urn)
         const rosterNodes = new Map((roster?.children ?? []).map(n => [n.id, n]))
-        const rosterExtras = showAll
+        // F2 — FIND FILTERS, IT DOES NOT MERELY DIM. `frameQuery` used to
+        // only tag rows already inside the fixed scroll WINDOW below, so
+        // a match sitting past row 20 of a 96-row table never appeared —
+        // the window never moved to it, and the reader saw ten dimmed
+        // strangers and nothing else. Filtering (and reordering matches
+        // first) BEFORE the window is cut is what makes the window land
+        // on an actual hit, in EITHER Connected or All mode.
+        const frameQuery = (view.frameQueries.get(urn) ?? '').trim().toLowerCase()
+        // A roster answers THIS Find only when it was fetched FOR this
+        // exact question — a stale roster from the query before would
+        // otherwise flash yesterday's hits as this one's answer.
+        const rosterAnswers = frameQuery !== '' && (roster?.query ?? '') === frameQuery
+        const rosterExtras = showAll && frameQuery === ''
+            ? (roster?.children ?? [])
+                .map(n => n.id)
+                .filter(id => !visible.has(id) && !cardIdByUrn.has(id))
+            : []
+        // The server's own matches beyond what the walk already carries —
+        // an entity Find can surface that a lineage answer never would,
+        // in EITHER display mode (previously only fetched, and only
+        // shown, in "everything inside").
+        const searchHits = rosterAnswers
             ? (roster?.children ?? [])
                 .map(n => n.id)
                 .filter(id => !visible.has(id) && !cardIdByUrn.has(id))
@@ -1239,8 +1261,13 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // region OWNS its rows by id for assistive tech — an
         // `aria-owns` naming an element that does not exist and a
         // keyboard cursor that can land on nothing.
-        const connectedRows = kids.filter(child => !cardIdByUrn.has(child))
-        const rows = [...connectedRows, ...rosterExtras]
+        const connectedRowsAll = kids.filter(child => !cardIdByUrn.has(child))
+        // Connected participants search LOCALLY — the model is already
+        // in hand, so filtering it costs nothing and needs no fetch.
+        const connectedRows = frameQuery === ''
+            ? connectedRowsAll
+            : connectedRowsAll.filter(child => labelFor(child).toLowerCase().includes(frameQuery))
+        const rows = frameQuery === '' ? [...connectedRows, ...rosterExtras] : [...connectedRows, ...searchHits]
         /**
          * ONE NODE FOR THE FOCUS (R7).
          *
@@ -1258,9 +1285,16 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
          * on this lineage" get said. Dropping the node there would leave
          * the reader no way to ask what is in there.
          */
+        // F2 — a Find matching NOTHING must still say so, not vanish: a
+        // frame's existence is whether it HOLDS anything, never whether
+        // the CURRENT search happens to match some of it. Reading this
+        // off `rows.length` (the FILTERED list) made a query with zero
+        // hits collapse the frame back to a bare entity — Find box,
+        // roster region and all — with no way left to see or clear it.
+        const holdsAnything = connectedRowsAll.length > 0 || rosterExtras.length > 0 || searchHits.length > 0
         const isFrame = isFocus
-            ? (nodeOf(urn)?.children.length ?? 0) > 0 || rosterExtras.length > 0 || (heldTotal(urn) ?? 0) > 0
-            : rows.length > 0
+            ? (nodeOf(urn)?.children.length ?? 0) > 0 || rosterExtras.length > 0 || searchHits.length > 0 || (heldTotal(urn) ?? 0) > 0
+            : holdsAnything
         // ...and it is SHOWING them: a focus the reader has shut is its
         // header and nothing else, exactly like a shut partner frame. A
         // focus that holds things and has no rows to show stays open —
@@ -1280,7 +1314,6 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             Math.max(0, view.frameOffsets.get(urn) ?? 0),
             Math.max(0, rows.length - windowSize),
         )
-        const frameQuery = (view.frameQueries.get(urn) ?? '').trim().toLowerCase()
 
         const card: FocusCard = {
             ...baseCard(),
@@ -1336,9 +1369,23 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             // the same kind of node at the centre of the board.
             frameEmpty: (isFrame || isFocus) && (nodeOf(urn)?.children.length ?? 0) === 0,
             frameConnectedCount: connectedRows.length,
-            frameLoaded: showAll ? rows.length : connectedRows.length,
+            // `rows.length` always — pre-F2 this equalled
+            // `connectedRows.length` whenever `!showAll` anyway
+            // (`rosterExtras` was empty outside "all"), but a Connected-
+            // mode Find now ALSO appends `searchHits`, which the window
+            // (built straight off `rows.length`) already accounts for.
+            frameLoaded: rows.length,
             frameTotal: showAll ? (roster?.total ?? -1) : (contentsOf(urn)?.total ?? -1),
             frameHasMore: showAll ? (roster?.hasMore ?? false) : false,
+            // F2 — the size of the space Find actually searched: every
+            // connected participant (exact, nothing here pages) plus,
+            // once the server has answered, its own reported extent.
+            // R1c: a total smaller than what the server already RETURNED
+            // is never rendered — floor to the returned count instead.
+            frameSearchedCount: connectedRowsAll.length + (rosterAnswers
+                ? Math.max(roster?.total ?? 0, roster?.children.length ?? 0)
+                : 0),
+            frameSearchedExact: !rosterAnswers || (roster?.hasMore !== true && roster?.total != null),
             frameOffset: offset,
             frameWindowSize: windowSize,
             // Every row, not only the windowed ones: the keyboard cursor
@@ -1431,7 +1478,13 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                 connected: false,
                 count: 0,
                 canOpenChildren: false,
-                dimmed: !matches(rosterLabel) || (frameQuery !== '' && !rosterLabel.toLowerCase().includes(frameQuery)),
+                // F2 — a server hit is a full citizen: it answered THIS
+                // Find (the server matches displayName/urn, which is not
+                // always the same substring test as the label below), so
+                // it is never re-dimmed against `frameQuery` locally —
+                // only the board-wide filter still applies, same as any
+                // other row.
+                dimmed: !matches(rosterLabel),
             })
         }
     }

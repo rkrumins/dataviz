@@ -1636,6 +1636,16 @@ function FocusGraphCard({ data, selected }: NodeProps) {
  * reads exactly `data` and `selected`; React Flow applies position
  * itself, so nothing else can affect the output.
  */
+/** Find's tooltip (F2) — true in BOTH modes now that a query reaches the
+ *  server either way: Connected mode used to promise only a LOCAL
+ *  filter ("Filter what is inside"), which undersold what it now does,
+ *  and All mode's own wording already said the honest thing. */
+function findTitle(card: FocusCard): string {
+  return card.frameShowingAll
+    ? `Search every entity inside ${card.label}, not only the rows on screen`
+    : `Find what connects inside ${card.label}, and search the rest of it too`
+}
+
 /**
  * A container opened into what's inside it that connects to the focal.
  * Rendered BEHIND its children (see zIndex where nodes are built), with
@@ -1708,22 +1718,33 @@ function FocusFrameNode({ data, selected }: NodeProps) {
   // half of it. It goes where a reader looks when scrolling instead —
   // at the foot of the list, beside the thumb (see `FrameScrollRegion`).
   const range = win.scrollable ? `${win.from.toLocaleString()}–${win.to.toLocaleString()} of ${total}` : null
-  // In "everything inside" the search runs on the SERVER, so the counts
-  // describe the matches, not the container — say which.
-  const searching = card.frameShowingAll && q.trim().length > 0
+  // F2 — Find now filters and fetches in BOTH modes (previously only
+  // "everything inside" reached the server at all), so the count line
+  // is search-aware in both: the row list already IS the match list
+  // (`frameLoaded`), against the honest size of what was actually
+  // searched (`frameSearchedCount` — R1c: a floor, never a guess, once
+  // the roster hasn't finished paging).
+  const searching = q.trim().length > 0
+  const searched = card.frameSearchedExact
+    ? card.frameSearchedCount.toLocaleString()
+    : `${card.frameSearchedCount.toLocaleString()}+`
   // Every row shares one relationship type → the frame says it once
   // instead of the rows each repeating it.
   const via = card.frameSharedEdgeType
     ? ` · ${edgeLabelFor(card.frameSharedEdgeType, ctx.edgeTypeInfo)}`
     : ''
   // Showing everything BECAUSE the lineage answer was empty — say so,
-  // or the roster reads as an answer to a question nobody asked.
-  const fellBack = card.frameShowingAll && card.frameEmpty && card.frameConnectedCount === 0
-  const inside = card.frameShowingAll
-    ? fellBack
-      ? 'nothing here is on this lineage · showing everything inside'
-      : `${card.frameConnectedCount.toLocaleString()} on this lineage · of ${total}${searching ? ` matching "${q.trim()}"` : ''}`
-    : `${card.count.toLocaleString()} connected inside${via}`
+  // or the roster reads as an answer to a question nobody asked. Not
+  // while actively searching: "0 matches · N searched" already says
+  // the honest thing, and the two messages would talk over each other.
+  const fellBack = card.frameShowingAll && !searching && card.frameEmpty && card.frameConnectedCount === 0
+  const inside = searching
+    ? `${card.frameLoaded.toLocaleString()} match${card.frameLoaded === 1 ? '' : 'es'} · ${searched} searched`
+    : card.frameShowingAll
+      ? fellBack
+        ? 'nothing here is on this lineage · showing everything inside'
+        : `${card.frameConnectedCount.toLocaleString()} on this lineage · of ${total}`
+      : `${card.count.toLocaleString()} connected inside${via}`
   return (
     <div
       // A nested frame is one of its host's rows, so it answers to the
@@ -1849,7 +1870,10 @@ function FocusFrameNode({ data, selected }: NodeProps) {
               // answer, WHY these rows are here outranks counting them —
               // otherwise a full list of columns under "0 on this
               // lineage" reads as the answer to a question nobody asked.
-              : card.contents && !fellBack
+              // F2 — while actively searching, `inside` IS the match
+              // line ("N matches · M searched"); `ContentsCount` knows
+              // nothing about the query, so it stays out of the way.
+              : card.contents && !fellBack && !searching
                 // Both numbers, exactly: what is in here on this
                 // lineage, and what is in here altogether.
                 ? <ContentsCount card={card} />
@@ -1901,8 +1925,13 @@ function FocusFrameNode({ data, selected }: NodeProps) {
             room truncated the frame's own name on every frame.
             Collapsed to its icon until asked for: a permanent 64px box
             left this header's count line about 94px, which clipped
-            "6 on this lineage · of 60" halfway through. */}
-        {(win.scrollable || card.frameShowingAll) && (
+            "6 on this lineage · of 60" halfway through.
+            `q !== ''` keeps it offered once a query is ACTIVE regardless
+            of `win.scrollable`: Find now filters the row list (F2), so a
+            query matching down to a handful of rows would otherwise
+            shrink the window below the "more than a screenful" floor and
+            hide the very box that could clear it. */}
+        {(win.scrollable || card.frameShowingAll || findOpen || q !== '') && (
           findOpen || q !== '' ? (
             <input
               autoFocus
@@ -1911,20 +1940,16 @@ function FocusFrameNode({ data, selected }: NodeProps) {
               onClick={(e) => e.stopPropagation()}
               onBlur={() => setFindOpen(false)}
               placeholder="Find…"
-              aria-label={card.frameShowingAll ? `Search inside ${card.label}` : `Filter what is inside ${card.label}`}
-              title={card.frameShowingAll
-                ? `Search every entity inside ${card.label}, not only the rows on screen`
-                : 'Filter what is inside'}
+              aria-label={card.frameShowingAll ? `Search inside ${card.label}` : `Find inside ${card.label}`}
+              title={findTitle(card)}
               className="nodrag flex-shrink-0 w-16 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
             />
           ) : (
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); setFindOpen(true) }}
-              aria-label={card.frameShowingAll ? `Search inside ${card.label}` : `Filter what is inside ${card.label}`}
-              title={card.frameShowingAll
-                ? `Search every entity inside ${card.label}, not only the rows on screen`
-                : 'Filter what is inside'}
+              aria-label={card.frameShowingAll ? `Search inside ${card.label}` : `Find inside ${card.label}`}
+              title={findTitle(card)}
               className="nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
             >
               <LucideIcons.Search className="w-3 h-3" />
@@ -1974,7 +1999,10 @@ function FocusFrameNode({ data, selected }: NodeProps) {
               <p className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate">
                 {card.fetch === 'loading'
                   ? 'Looking inside…'
-                  : card.contents && !fellBack
+                  // F2 — while actively searching, `inside` IS the match
+              // line ("N matches · M searched"); `ContentsCount` knows
+              // nothing about the query, so it stays out of the way.
+              : card.contents && !fellBack && !searching
                     ? <ContentsCount card={card} />
                     : <span className="truncate">{inside}</span>}
               </p>

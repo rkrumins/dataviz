@@ -376,6 +376,14 @@ export interface FocusCard {
   frameTotal: number
   /** Frame cards only — more children exist on the server than loaded. */
   frameHasMore: boolean
+  /** Frame cards only, Find active (F2) — the size of the space actually
+   *  searched: every connected participant (always exact — nothing here
+   *  is paginated) plus, once the server has answered THIS query, its
+   *  own reported extent. A floor (`frameSearchedExact: false`) rather
+   *  than a guess whenever the roster hasn't finished paging or never
+   *  declared a total — the same honesty `frameTotal` already keeps. */
+  frameSearchedCount: number
+  frameSearchedExact: boolean
   /** Frame cards only — the one relationship type ALL its rows carry,
    *  or '' when they differ.
    *

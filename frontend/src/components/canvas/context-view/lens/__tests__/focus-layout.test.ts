@@ -1826,10 +1826,13 @@ describe('focus-layout — frames scroll instead of growing', () => {
         })
     })
 
-    it('a frame\'s Find reaches the rows the frame was opened to show', () => {
-        // The box searched only the UNCONNECTED extras — i.e. everything
-        // except the rows a reader opened the frame for. Typing a column
-        // name did nothing to the columns.
+    it('a frame\'s Find FILTERS to matches, not merely dims what the window already shows (T24 F2)', () => {
+        // Reported: the box searched only the UNCONNECTED extras — i.e.
+        // everything except the rows a reader opened the frame for — and
+        // even there only DIMMED whatever the fixed-size window already
+        // had on screen, so a match sitting past row 20 of a 96-row
+        // table never appeared: the window never moved to it. Typing a
+        // column name did nothing to the columns.
         const sg = subgraph({
             focus: 'F',
             nodes: [
@@ -1845,9 +1848,10 @@ describe('focus-layout — frames scroll instead of growing', () => {
             expandedContainment: new Set([...base.expandedContainment, 'T']),
             frameQueries: new Map([['T', 'curr']]),
         })
-        // Dimmed, never removed — a row a search hid is a row you cannot
-        // see is there, which is the same lie as a filter that deletes.
-        expect(cardFor(g, 'c0')!.dimmed).toBe(true)
+        // Filtered OUT, not merely dimmed — a non-match is not drawn at
+        // all, so the window (and the row list a screen reader owns) can
+        // never land on an entity the reader is not looking for.
+        expect(cardFor(g, 'c0')).toBeUndefined()
         expect(cardFor(g, 'c1')!.dimmed).toBe(false)
         // The frame itself is not its own row: it stays lit.
         expect(cardFor(g, 'T')!.dimmed).toBe(false)

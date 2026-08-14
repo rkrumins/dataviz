@@ -587,21 +587,37 @@ export function LineageLens({
    * Find, debounced into the server.
    *
    * `getChildrenWithEdges` matches displayName/urn server-side, so Find
-   * reaches a column on page 7 of a wide table without paging to it.
-   * Connected mode needs none of this: its set is the model already in
-   * hand, and the layout filters it locally.
+   * reaches a column on page 7 of a wide table without paging to it —
+   * an entity the walk never carried at all, not only one paged past.
+   * Connected mode's OWN set is the model already in hand, and the
+   * layout filters it locally for free; but what the walk has NOT
+   * reached is exactly what a Connected-mode Find used to go silent
+   * on (T24 F2), so this reaches the server in BOTH modes once there
+   * is something to ask it.
    */
   const frameQueriesNow = view.frameQueries
   const frameShowAllNow = view.frameShowAll
   useEffect(() => {
-    if (!onLoadAllChildren || frameShowAllNow.size === 0) return
+    if (!onLoadAllChildren) return
+    const urns = new Set([...frameShowAllNow, ...frameQueriesNow.keys()])
+    if (urns.size === 0) return
     const t = setTimeout(() => {
-      for (const urn of frameShowAllNow) {
+      for (const urn of urns) {
+        const showingAll = frameShowAllNow.has(urn)
         const want = (frameQueriesNow.get(urn) ?? '').trim()
+        // Connected mode has nothing to search until there IS a query —
+        // otherwise its set is the model already in hand, filtered
+        // locally, and asking the server for an unfiltered roster it
+        // will never show is a fetch that answers nothing.
+        if (!showingAll && want === '') continue
         const have = childrenAll.get(urn)
-        // Only when the question CHANGED — otherwise this would race the
-        // frame's own first-page fetch and quietly page past it.
-        if (!have || (have.query ?? '') === want) continue
+        // All mode's own FIRST page arrives via the toggle handler
+        // (`toggleFrameAll`/`toggleContents`) — refetching it here too
+        // would race that fetch and quietly page past it. Connected
+        // mode has no such handler (there is nothing to fetch until a
+        // query exists), so its first fetch has to start here.
+        if (showingAll && !have) continue
+        if (have && (have.query ?? '') === want) continue
         onLoadAllChildren(urn, want)
       }
     }, 300)
