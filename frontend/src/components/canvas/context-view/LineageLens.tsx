@@ -60,7 +60,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useTourStore } from '@/features/tour/tourStore'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { lensFocalOf, type LensHistory } from './lens/lensHistory'
-import { labelOf, edgeLabelFor, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach } from './lens/focus-cards'
+import { labelOf, edgeLabelFor, orientationHalf, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach } from './lens/focus-cards'
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
 
@@ -1907,21 +1907,6 @@ export function LineageLens({
  * bounded transitive trace of its own, which counted different things
  * from everything beside it and could not be reconciled with them.
  */
-/** One half of the orientation sentence — plain language, an honest
- *  floor (+), and "across N systems" only where it says something a raw
- *  count does not (one system alone is not worth naming). The same
- *  wording the graph body's focal card carries (FocusGraphView's own
- *  `orientationHalf`) — kept as a small sibling here rather than a
- *  cross-module export, since the two bodies otherwise share no view
- *  code and this is three lines of formatting. */
-function orientationHalf(
-  verb: string, noun: string, count: number, floor: boolean, systems: number, zero: string,
-): string {
-  if (count === 0) return zero
-  const sys = systems > 1 ? ` across ${systems} systems` : ''
-  return `${verb} ${count.toLocaleString()}${floor ? '+' : ''} ${noun}${count === 1 ? '' : 's'}${sys}`
-}
-
 function ReachLine({ reach, loading }: { reach: LensReach | null; loading: boolean }) {
   if (loading) {
     return (
@@ -1944,9 +1929,9 @@ function ReachLine({ reach, loading }: { reach: LensReach | null; loading: boole
           mid-word on each half at once on a narrow card (see the graph
           body's own `orientationHalf` note for the reported shape). */}
       <span className="truncate min-w-0 tabular-nums">
-        {orientationHalf('Fed by', 'source', reach.up, reach.moreUp, reach.upSystems, 'No upstream sources')}
+        {orientationHalf('Fed by', 'source', 'upstream', reach.up, reach.moreUp, reach.upSystems, 'No upstream sources')}
         {' · '}
-        {orientationHalf('feeds', 'consumer', reach.down, reach.moreDown, reach.downSystems, 'feeds nothing downstream')}
+        {orientationHalf('feeds', 'consumer', 'downstream', reach.down, reach.moreDown, reach.downSystems, 'feeds nothing downstream')}
       </span>
     </p>
   )

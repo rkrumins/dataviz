@@ -26,6 +26,34 @@ export type EdgeTypeInfoMap = Map<string, { label: string; description?: string 
 export const edgeLabelFor = (norm: string, info?: EdgeTypeInfoMap): string =>
   norm ? (info?.get(norm)?.label ?? relationshipLabel(norm)) : 'relationship'
 
+/**
+ * One half of the focal's ORIENTATION SENTENCE — "Fed by 3 sources
+ * across 2 systems" — plain language, an honest floor (+), and "across
+ * N systems" only where it says something a raw count does not (one
+ * system alone is not worth naming). Shared by both lens bodies (the
+ * graph focal and the list-mode focal) so the wording — and its fixes —
+ * can never drift between them; it used to be two independent copies,
+ * which is exactly how the bug below shipped in both at once.
+ *
+ * `count === 0` is NOT always "nothing exists" (`zero`): `floor` means
+ * the data source has told this walk there IS more on this side, just
+ * nothing has been fetched yet. Conflating the two rendered a false
+ * "No upstream sources" beside a "Load upstream" button offering to
+ * fetch exactly what that sentence just denied existed — the R1b defect
+ * (spotlight chip) reached through a different door: the orientation
+ * sentence never routed through the chip's own honest-wording function
+ * at all. Fixed here, once, for both consumers.
+ */
+export function orientationHalf(
+  verb: string, noun: string, dirWord: string, count: number, floor: boolean, systems: number, zero: string,
+): string {
+  if (count === 0) {
+    return floor ? `nothing loaded ${dirWord} yet — the data source may have more` : zero
+  }
+  const sys = systems > 1 ? ` across ${systems} systems` : ''
+  return `${verb} ${count.toLocaleString()}${floor ? '+' : ''} ${noun}${count === 1 ? '' : 's'}${sys}`
+}
+
 /** How far up the containment chain a card's provenance ribbon walks. */
 export const ANCESTRY_CAP = 6
 

@@ -80,7 +80,7 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, FRAME_FOOTER_H, FRAME_PAD, headerHeight, holdsRows, labelFitsRun, frameWindow, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
+import { CARD_W, BAND_GAP, FRAME_FOOTER_H, FRAME_PAD, headerHeight, holdsRows, labelFitsRun, frameWindow, edgeLabelFor, orientationHalf, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
 import { REVEAL_PAGE, isolationCone, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
@@ -210,6 +210,47 @@ class ConeStore {
 const IsolationStoreContext = createContext<ConeStore>(new ConeStore())
 
 /**
+ * THE TRAIL — a subscription store for "is this card on the walked
+ * path", delivered through `useSyncExternalStore` for the exact reason
+ * `ConeStore` above is (fix round 1, a real regression caught by
+ * review): `trailUrns` used to sit inside the shared `CardCtx` object
+ * every card closes over, and it grows a fresh `Set` on every extend/
+ * page click that reaches a urn for the first time
+ * (`LineageLens.tsx`'s `markAnchor`) — so a fresh `ctx` object followed,
+ * and `a.ctx === b.ctx` failed for EVERY card's memo comparator on every
+ * such click, not just the one card that gained the mark. One instance
+ * per `FocusGraphView` mount, same as `ConeStore`.
+ */
+class TrailStore {
+  private urns: ReadonlySet<string> = new Set()
+  private readonly listeners = new Set<() => void>()
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  set(next: ReadonlySet<string>): void {
+    if (this.urns === next) return
+    this.urns = next
+    for (const listener of this.listeners) listener()
+  }
+
+  has = (urn: string): boolean => this.urns.has(urn)
+}
+
+/** Fallback only — `FocusGraphView` always provides its own instance. */
+const TrailStoreContext = createContext<TrailStore>(new TrailStore())
+
+/** Whether `urn` carries THE TRAIL's mark — a primitive boolean read
+ *  through the store, so only the card whose OWN answer flips re-renders
+ *  (the `ConeStore`/`useConeState` pattern, applied to one flag). */
+function useOnTrail(urn: string | null): boolean {
+  const store = useContext(TrailStoreContext)
+  return useSyncExternalStore(store.subscribe, () => (urn ? store.has(urn) : false))
+}
+
+/**
  * Where the KEYBOARD is: which frame is being browsed, and which of its
  * rows the cursor is resting on.
  *
@@ -327,10 +368,6 @@ interface CardCtx {
    *  version of the pane click, for the parts of a frame that are
    *  background but sit above the pane. */
   onDismiss: () => void
-  /** THE TRAIL: entities the reader explicitly walked through this
-   *  session — focus history plus extend/page anchors. A subtle,
-   *  persistent mark, never the isolation's own loud treatment. */
-  trailUrns: ReadonlySet<string>
   // ── Growing the walk ─────────────────────────────────────────────
   // Optional so a caller can render a picture it does not intend to be
   // grown (the visual harness does exactly that); the ⊕ renders only
@@ -373,8 +410,11 @@ interface FocusGraphViewProps {
    *  order and this is how the board asks for it. Falls back to clearing
    *  the selection where a caller has no layering of its own. */
   onDismiss?: () => void
-  /** See `CardCtx.trailUrns`. Defaults to empty — the visual harness and
-   *  any caller with no history simply marks nothing. */
+  /** THE TRAIL: entities the reader explicitly walked through this
+   *  session — focus history plus extend/page anchors. Delivered through
+   *  `TrailStore` (see its own doc comment), not `CardCtx` — defaults to
+   *  empty, so the visual harness and any caller with no history simply
+   *  marks nothing. */
   trailUrns?: ReadonlySet<string>
   /** Wires ON the trail: unordered `${urnA}|${urnB}` keys (urns sorted)
    *  for consecutive hops in the walked path — the ones that get the
@@ -1142,17 +1182,6 @@ function spotlightScope(card: FocusCard): {
   }
 }
 
-/** One half of the focal's orientation sentence — plain language, an
- *  honest floor (+), and "across N systems" only where it says something
- *  a raw count does not (one system alone is not worth naming). */
-function orientationHalf(
-  verb: string, noun: string, count: number, floor: boolean, systems: number, zero: string,
-): string {
-  if (count === 0) return zero
-  const sys = systems > 1 ? ` across ${systems} systems` : ''
-  return `${verb} ${count.toLocaleString()}${floor ? '+' : ''} ${noun}${count === 1 ? '' : 's'}${sys}`
-}
-
 /** Both sides of a card, or — when neither side has anything left to
  *  offer — the mark that the walk genuinely ends here. */
 function WalkPills({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
@@ -1232,6 +1261,7 @@ const WHEEL_PX_PER_ROW = 26
  */
 function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; selected: boolean }) {
   const { anchor, onCone, offCone, hops } = useConeState(card.id)
+  const onTrail = useOnTrail(card.nodeId)
   const cursor = useContext(RowCursorContext)
   // The frame a row sits in is its containment parent — a row is only
   // ever emitted among its own parent's children.
@@ -1336,7 +1366,7 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
         style={{ backgroundColor: card.connected ? `${displayAccent}1f` : 'transparent' }}
       >
         <TypeIcon ctx={ctx} typeId={card.type} color={displayAccent} className={cn('w-3.5 h-3.5', !card.connected && 'opacity-60')} />
-        {card.nodeId && ctx.trailUrns.has(card.nodeId) && <TrailMark />}
+        {onTrail && <TrailMark />}
       </div>
       <div className="flex-1 min-w-0">
         <p className={cn('truncate text-[12px] leading-snug', card.connected ? 'font-medium text-ink' : 'text-ink-secondary')}>
@@ -1429,6 +1459,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   // so a hover re-renders only the cards whose cone state actually
   // changed, not every card on the board.
   const { anchor, onCone, offCone, hops } = useConeState(card.id)
+  const onTrail = useOnTrail(card.nodeId)
   // One class, decided here: two `opacity-*` utilities on one element
   // are settled by their order in the stylesheet, not in the class list,
   // so the text filter's own dim and the cone floor cannot both be
@@ -1478,7 +1509,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
           style={{ backgroundColor: `${displayAccent}1f` }}
         >
           <TypeIcon ctx={ctx} typeId={card.type} color={displayAccent} className="w-3.5 h-3.5" />
-          {card.nodeId && ctx.trailUrns.has(card.nodeId) && <TrailMark />}
+          {onTrail && <TrailMark />}
         </div>
       )}
       <div className="flex-1 min-w-0">
@@ -1543,6 +1574,7 @@ function FocusFrameNode({ data, selected }: NodeProps) {
     focalStats?: { coarser: number }
   }
   const { anchor, onCone, offCone, hops } = useConeState(card.id)
+  const onTrail = useOnTrail(card.nodeId)
   // A frame nested inside another frame is also one of ITS rows, so it
   // answers to the host's keyboard cursor like any other row does.
   const rowCursor = useContext(RowCursorContext)
@@ -1652,7 +1684,7 @@ function FocusFrameNode({ data, selected }: NodeProps) {
       )}
     >
       {card.wired && <PortHandles />}
-      {card.nodeId && ctx.trailUrns.has(card.nodeId) && <TrailMark />}
+      {onTrail && <TrailMark />}
       {/* An open container keeps its own lineage question: looking
           inside something must never end the walk. */}
       <WalkPills card={card} ctx={ctx} />
@@ -1907,9 +1939,9 @@ function FocusFrameNode({ data, selected }: NodeProps) {
                     follow controls sit OUTSIDE the truncating run, fixed
                     size, so they never fight the sentence for room. */}
                 <span className="truncate min-w-0 flex-1 tabular-nums">
-                  {orientationHalf('Fed by', 'source', focalReach.up, focalReach.moreUp, focalReach.upSystems, 'No upstream sources')}
+                  {orientationHalf('Fed by', 'source', 'upstream', focalReach.up, focalReach.moreUp, focalReach.upSystems, 'No upstream sources')}
                   {' · '}
-                  {orientationHalf('feeds', 'consumer', focalReach.down, focalReach.moreDown, focalReach.downSystems, 'feeds nothing downstream')}
+                  {orientationHalf('feeds', 'consumer', 'downstream', focalReach.down, focalReach.moreDown, focalReach.downSystems, 'feeds nothing downstream')}
                 </span>
                 {card.pillUp && <InlineFollow pill={card.pillUp} dir="in" ctx={ctx} />}
                 {card.pillDown && <InlineFollow pill={card.pillDown} dir="out" ctx={ctx} />}
@@ -3079,11 +3111,10 @@ export function FocusGraphView({
     onRowCursor,
     onIsolate,
     onDismiss,
-    trailUrns,
     onRevealMore,
     onExtend,
     onPage,
-  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onDismiss, trailUrns, onRevealMore, onExtend, onPage])
+  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onDismiss, onRevealMore, onExtend, onPage])
 
   const baseNodes = useMemo((): Node[] => {
     const minYByBand = new Map<number, number>()
@@ -3360,6 +3391,13 @@ export function FocusGraphView({
   const [isolationStore] = useState(() => new ConeStore())
   useLayoutEffect(() => { isolationStore.set(isolationValue) }, [isolationStore, isolationValue])
 
+  // Same pattern, for THE TRAIL (fix round 1) — `trailUrns` grows on
+  // every extend/page click that reaches a new urn, and a store keeps
+  // that growth from touching the shared `CardCtx` object every card's
+  // memo comparator closes over.
+  const [trailStore] = useState(() => new TrailStore())
+  useLayoutEffect(() => { trailStore.set(trailUrns) }, [trailStore, trailUrns])
+
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
   // The pane's own pixel size (Task 20, P5), read off the DOM directly
   // rather than React Flow's `useStore` — that hook needs a
@@ -3412,6 +3450,7 @@ export function FocusGraphView({
       <ReachContext.Provider value={reachValue}>
       <HoverContext.Provider value={hoveredId}>
       <IsolationStoreContext.Provider value={isolationStore}>
+      <TrailStoreContext.Provider value={trailStore}>
       <RowCursorContext.Provider value={rowCursor}>
       <ReactFlowProvider>
         <ReactFlow
@@ -3546,6 +3585,7 @@ export function FocusGraphView({
         </ReactFlow>
       </ReactFlowProvider>
       </RowCursorContext.Provider>
+      </TrailStoreContext.Provider>
       </IsolationStoreContext.Provider>
       </HoverContext.Provider>
       </ReachContext.Provider>

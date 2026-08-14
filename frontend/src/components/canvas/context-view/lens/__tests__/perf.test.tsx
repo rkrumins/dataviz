@@ -359,6 +359,78 @@ describe('P0 — perf harness (Task 20)', () => {
     })
   })
 
+  /**
+   * Fix round 1 (T21) — a real regression review caught: THE TRAIL's
+   * `trailUrns` used to sit inside the shared `CardCtx` object every
+   * card's memo comparator closes over. `markAnchor` (LineageLens.tsx)
+   * makes a fresh `Set` the FIRST time an extend/page click reaches a
+   * new urn, so `ctx` became a fresh object on that click, and
+   * `a.ctx === b.ctx` failed for EVERY card on the board — the exact
+   * P1 regression this suite exists to catch, undisclosed until this
+   * pin. `TrailStore` (the same `useSyncExternalStore` pattern as
+   * `ConeStore`) is the fix; this is its guard.
+   */
+  describe('(fix round 1) THE TRAIL marks a card without touching the board', () => {
+    it('walkWideHub: trailUrns growing by one urn re-renders only the newly-marked card', () => {
+      const profiler = makeProfilerRecorder()
+      const fixture = WALK_FIXTURES.walkWideHub
+      const built = buildWalk(fixture)
+      const boardProps = {
+        graph: built.graph,
+        focalId: built.focalId,
+        focalFetch: 'done' as const,
+        focalReach: built.reach,
+        directionFilter: built.directionFilter,
+        selectedId: null,
+        isolatedId: null,
+        reducedMotion: true,
+        onSelect: noop,
+        onFocus: noop,
+        onToggleFrame: noop,
+        onFrameScroll: noop,
+        onFrameQuery: noop,
+        onToggleFrameAll: noop,
+        onRevealMore: noop,
+        onExtend: noop,
+        onPage: noop,
+      }
+      const { rerender, container } = render(
+        <Profiler id="board" onRender={profiler.onRender}>
+          <ReactFlowProvider>
+            <FocusGraphView {...boardProps} trailUrns={new Set()} />
+          </ReactFlowProvider>
+        </Profiler>,
+      )
+      const board = nodes(container)
+      expect(board.length).toBeGreaterThan(10)
+      // A real, drawn urn — the same shape `markAnchor` grows `trailUrns`
+      // by, one urn at a time, on an extend/page click.
+      const targetUrn = built.graph.cards.find(c => c.nodeId != null)!.nodeId!
+
+      profiler.reset()
+      resetRenderCounts()
+      // The SAME props FocusGraphView would get from a parent whose
+      // `extendAnchors` just grew by one urn — nothing else changes.
+      rerender(
+        <Profiler id="board" onRender={profiler.onRender}>
+          <ReactFlowProvider>
+            <FocusGraphView {...boardProps} trailUrns={new Set([targetUrn])} />
+          </ReactFlowProvider>
+        </Profiler>,
+      )
+      const totalRendered = [...renderCounts.values()].reduce((n, v) => n + v, 0)
+      console.log(
+        `[fix-round-1] walkWideHub trail mark: boardNodes=${board.length} commits=${profiler.commitCount} `
+        + `ms=${profiler.totalMs.toFixed(2)} totalComponentRenders=${totalRendered} `
+        + `(${JSON.stringify(Object.fromEntries(renderCounts))})`,
+      )
+      // Exactly the one card that GAINED the mark — nothing else has a
+      // reason to. A generous ceiling (10, not 1), matching the (P4)
+      // pin beside it; BEFORE the fix this read board.length (151).
+      expect(totalRendered).toBeLessThan(10)
+    })
+  })
+
   describe('(e) initial mount', () => {
     it('walkSharedPlatform: mount-phase actualDuration', () => {
       const profiler = makeProfilerRecorder()

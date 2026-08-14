@@ -613,6 +613,31 @@ describe('reach — how far the walk got, and whether that is all of it', () => 
     expect(screen.queryByText(/Fed by|feeds/)).toBeNull()
     expect(screen.getByText(/Walking the lineage…/)).toBeTruthy()
   })
+
+  /** Nothing has been fetched upstream (reach.up === 0) but the server
+   *  recorded 66 flows on the focus itself — no lineage edge anywhere in
+   *  the model, so the "0 of 66" shape lives entirely in the frontier. */
+  const whollyUnfetchedModel = () => walkModel('F', {
+    nodes: [wnode('F', 'dataset', 'orders_iot')],
+    frontierUp: [frontier('F', 66)],
+  })
+
+  it('fix round 1 — a side with a real frontier but nothing fetched yet never claims "no sources" (list body)', () => {
+    usePreferencesStore.setState({ lensViewMode: 'list' })
+    renderLens(['F'], doneWalk(whollyUnfetchedModel()))
+    // The false negative this pin rules out: "No upstream sources"
+    // rendered right beside a control offering to load exactly what it
+    // just denied existed.
+    expect(screen.queryByText('No upstream sources')).toBeNull()
+    expect(screen.getByText(/nothing loaded upstream yet/)).toBeTruthy()
+  })
+
+  it('fix round 1 — the same honesty in the graph body\'s own orientation sentence', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    renderLens(['F'], doneWalk(whollyUnfetchedModel()))
+    expect(screen.queryByText(/No upstream sources/)).toBeNull()
+    expect(screen.getByText(/nothing loaded upstream yet/)).toBeTruthy()
+  })
 })
 
 // ── ONE MODEL, TWO BODIES ────────────────────────────────────────────
