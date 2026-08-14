@@ -15,13 +15,18 @@ ordinary branch path (reused from :class:`VersionedBranchProvider`).
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypeVar
 
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
     GraphNode, NodeQuery, TopLevelNodesResult, TraceClosureResult, TraceResult,
 )
 from .versioned_branch_provider import VersionedBranchProvider
+
+#: The overlay patches whatever trace shape it is handed and hands the SAME
+#: shape back — a closure in, a closure out. Declaring the base type lost
+#: ``frontierUp``/``frontierDown``/``seedTruncated`` to every static reader.
+_TraceT = TypeVar("_TraceT", bound=TraceResult)
 
 
 class _OverlayDelta:
@@ -384,13 +389,25 @@ class DraftOverlayProvider:
     ) -> TraceClosureResult:
         # Overlay lineage deltas can make frontier totalCount advisory-stale —
         # acceptable (it is a cue, not a ledger).
-        base = await self._base.trace_closure(
+        #
+        # The base is whatever serves main, and not every one of those reads
+        # closures: a draft on a STALE projection is served by
+        # VersionedBranchProvider, which has no trace_closure at all. Calling
+        # through blindly raised AttributeError — a 500 on a read the API
+        # already has an honest answer for, and the answer every sibling read
+        # on that base gives: "this provider cannot do that", i.e. a 501.
+        fn = getattr(self._base, "trace_closure", None)
+        if fn is None:
+            raise NotImplementedError(
+                f"{getattr(self._base, 'name', type(self._base).__name__)} "
+                "does not support trace_closure")
+        base = await fn(
             urn, upstream_depth, downstream_depth, lineage_edge_types, containment_edge_types,
             max_nodes, timeout_ms, seed_urns=seed_urns, exclude_urns=exclude_urns,
             after_cursor=after_cursor)
         return await self._overlay_trace(base)
 
-    async def _overlay_trace(self, base: TraceResult) -> TraceResult:
+    async def _overlay_trace(self, base: _TraceT) -> _TraceT:
         """Patch a base trace with the draft's lineage delta, bounded to the trace's node scope."""
         d = await self._delta_()
         if not d.lineage_changed and not d.node_remove:

@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Set, Union
+from typing import List, Dict, Any, Literal, Optional, Set, Union
 from enum import Enum
 from pydantic import BaseModel, Field, validator
 
@@ -174,7 +174,11 @@ class TraceClosureRequest(BaseModel):
     includeAncestorChain).
     """
     urn: str                                   # focus (initial) or the card being extended (walk)
-    direction: str = "both"                    # upstream | downstream | both
+    # Closed set, not a free string: every reader of this field ELSES into
+    # "downstream" (the endpoint's cursor guard, the engine's depth
+    # zeroing), so a typo did not fail — it quietly paged the opposite
+    # direction and returned 200 with the wrong lineage in it.
+    direction: Literal["upstream", "downstream", "both"] = "both"
     upstream_depth: int = Field(1, alias="upstreamDepth", ge=0, le=25)
     downstream_depth: int = Field(1, alias="downstreamDepth", ge=0, le=25)
     lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")

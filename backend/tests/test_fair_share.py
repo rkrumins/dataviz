@@ -9,7 +9,11 @@ from redis.exceptions import RedisError
 from backend.app.services import fair_share
 from backend.app.services.fair_share import (
     ENDPOINT_CHILDREN,
+    ENDPOINT_TRACE_CLOSURE,
     WorkspaceTokenBucket,
+)
+from backend.app.services.graph_cache import (
+    ENDPOINT_TRACE_CLOSURE as CACHE_ENDPOINT_TRACE_CLOSURE,
 )
 from backend.common.adapters import ProviderBusy
 
@@ -73,6 +77,29 @@ async def test_unknown_endpoint_bypasses_bucket() -> None:
     result = await bucket.take("unknown-endpoint", "ws1")
     assert result.allowed is True
     redis.register_script.return_value.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_trace_closure_is_actually_enrolled() -> None:
+    """The lens's walk endpoint calls `enforce` on every step and its
+    docstring says it is fair-shared. It was not: the endpoint was never
+    listed in `_CONFIGS`, and `take` returns "allowed, no script run" for
+    anything it does not know — so the call was a no-op and one client
+    could drain the walk path for a whole workspace.
+
+    The name has to be the one the ENDPOINT passes, which it imports from
+    `graph_cache`; two spellings of "trace-closure" would put the bucket
+    back to sleep in a way no other test would notice."""
+    assert ENDPOINT_TRACE_CLOSURE == CACHE_ENDPOINT_TRACE_CLOSURE
+
+    redis = _make_redis([0, 2500])
+    bucket = WorkspaceTokenBucket(redis)
+    result = await bucket.take(CACHE_ENDPOINT_TRACE_CLOSURE, "ws1")
+
+    # It consulted a config, ran the script, and can actually say no.
+    redis.register_script.return_value.assert_awaited_once()
+    assert result.allowed is False
+    assert result.retry_after_seconds == 3
 
 
 @pytest.mark.asyncio

@@ -175,6 +175,18 @@ class _NotImplementedClosureProvider(_StubProvider):
         raise NotImplementedError("stub does not support trace_closure")
 
 
+class _BaseWithoutClosure:
+    """A base that does not have the method AT ALL — which is what serves a
+    draft on a stale projection (VersionedBranchProvider). `hasattr` is the
+    whole difference from the stub above, and it is the difference between
+    an honest 501 and an AttributeError 500."""
+
+    name = "base-without-closure"
+
+    def set_containment_edge_types(self, edge_types, from_ontology: bool = False) -> None:
+        pass
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────
 
 @pytest.fixture()
@@ -334,6 +346,19 @@ async def test_trace_closure_after_cursor_with_wrong_active_depth_422(graph_clie
     assert resp.status_code == 422
 
 
+async def test_trace_closure_unknown_direction_422(graph_client):
+    """The wire rejects it too, not just the model — a misspelt direction
+    used to page the OPPOSITE side of the graph and answer 200."""
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "upstrem", "upstreamDepth": 1, "afterCursor": "e:1"},
+    )
+    assert resp.status_code == 422
+
+
 async def test_trace_closure_after_cursor_bad_format_422(graph_client):
     client, engine = graph_client
     urn = _get_sample_urn(engine)
@@ -366,6 +391,40 @@ async def test_trace_closure_provider_not_implemented_returns_501(test_client: A
         resp = await test_client.post(
             "/api/v1/test-ws/graph/trace/closure",
             json={"urn": urn},
+        )
+    finally:
+        app.dependency_overrides.pop(get_context_engine, None)
+
+    assert resp.status_code == 501
+    assert resp.json()["detail"]["code"] == "trace_closure_unsupported"
+
+
+async def test_trace_closure_on_a_draft_whose_base_cannot_do_it_returns_501(test_client: AsyncClient):
+    """A DRAFT read, where the overlay's base has no trace_closure.
+
+    The overlay HAS the method — so the engine's own `getattr` guard passes
+    and hands the call straight through — and the pass-through then reached
+    for a method its base does not have. That is an AttributeError, i.e. a
+    500 on the one read path (a draft on a stale projection) where the
+    answer is simply "this provider cannot do that". Every sibling read on
+    that base already says so with a 501; this one now does too."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints.graph import get_context_engine
+    from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+
+    overlay = DraftOverlayProvider(
+        _BaseWithoutClosure(), svc=None, graph_id="g1", branch_id="draft1",
+    )
+    mock_engine = ContextEngine(provider=overlay)
+
+    async def _override():
+        return mock_engine
+
+    app.dependency_overrides[get_context_engine] = _override
+    try:
+        resp = await test_client.post(
+            "/api/v1/test-ws/graph/trace/closure",
+            json={"urn": "urn:li:dataset:(a,b,c)"},
         )
     finally:
         app.dependency_overrides.pop(get_context_engine, None)

@@ -781,6 +781,29 @@ def _is_empty_result(result: BaseModel) -> bool:
     return False
 
 
+def _has_unprobed_frontier(result: BaseModel) -> bool:
+    """A closure whose degree probe never ran.
+
+    ``trace_closure`` drops the probe wave when the deadline is close, and
+    logs-and-continues when it fails. Both leave the frontier shipped with
+    ``totalCount=None`` on every entry — honest ("unknown", never zero"),
+    but it is the DEGRADED form of the answer: the lens can only draw a
+    countless chevron where it would otherwise say "+8 more". Pinning that
+    for the full TTL makes one slow moment the workspace's answer for five
+    minutes, and writing it to LKG makes it the answer for an outage.
+
+    Only when EVERY entry across a non-empty frontier is countless — a
+    partial probe (cap, or a single failed degree bucket) is a complete
+    enough answer, and the walk itself is unaffected either way.
+    """
+    up = getattr(result, "frontier_up", None)
+    down = getattr(result, "frontier_down", None)
+    if up is None and down is None:
+        return False
+    entries = [*(up or []), *(down or [])]
+    return bool(entries) and all(getattr(e, "total_count", None) is None for e in entries)
+
+
 def _is_incomplete_result(result: BaseModel) -> bool:
     """Truncated/degraded/stale results must not be pinned for the full
     TTL as if they were complete — cache them only for the negative
@@ -794,7 +817,7 @@ def _is_incomplete_result(result: BaseModel) -> bool:
     ):
         if obj is not None and (getattr(obj, "truncated", False) or getattr(obj, "stale", False)):
             return True
-    return False
+    return _has_unprobed_frontier(result)
 
 
 async def invalidate_aggregated_reads(

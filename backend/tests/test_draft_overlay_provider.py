@@ -112,6 +112,13 @@ async def _run() -> None:
     assert {n.urn for n in (await p.trace_at_level("A", 0, 1, 1, ["LINEAGE"], ["CONTAINS"], 100, 1000)).nodes} \
         == {"A", "B", "A.c", "B.c"}
 
+    # ── a base that cannot do closures (StubMain, like VersionedBranchProvider
+    #    on a stale projection) ⇒ the overlay says so the way every sibling
+    #    read does, rather than reaching for a method that is not there and
+    #    turning a 501 into an AttributeError 500. ────────────────────────────
+    with pytest.raises(NotImplementedError):
+        await p.trace_closure("A", 1, 1, ["LINEAGE"], ["CONTAINS"], 100, 1000)
+
     # ── added lineage edge ⇒ that rollup +1, nothing else moves ─────────────────
     p2 = _mk(base, {**_EMPTY, "edgesUpsert": [
         {"id": "lin2", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]},

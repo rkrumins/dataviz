@@ -70,6 +70,20 @@ def test_downstream_depth_rejects_negative():
         TraceClosureRequest.model_validate({"urn": "u", "downstreamDepth": -1})
 
 
+def test_direction_rejects_anything_but_the_three_it_means():
+    """A misspelt direction used to be a 200 with the WRONG lineage in it.
+    Nothing validated the string, and everything that reads it treats
+    "not upstream" as downstream: the endpoint's cursor guard picks the
+    active depth that way, and the engine zeroes the depths that way. So
+    `"upstrem"` paged a hub's consumers while the client asked for its
+    producers, and no error was raised anywhere in between."""
+    for good in ("upstream", "downstream", "both"):
+        assert TraceClosureRequest.model_validate({"urn": "u", "direction": good}).direction == good
+    for bad in ("upstrem", "UPSTREAM", "up", "", "in"):
+        with pytest.raises(ValidationError):
+            TraceClosureRequest.model_validate({"urn": "u", "direction": bad})
+
+
 def test_max_nodes_rejects_zero():
     TraceClosureRequest.model_validate({"urn": "u", "maxNodes": 1})  # boundary itself is valid
     with pytest.raises(ValidationError):
