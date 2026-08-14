@@ -379,10 +379,13 @@ describe('focus-layout — frames only where they clarify', () => {
         const stack = g.cards.find(c => c.id === 'co:F')!
         expect(stack).toBeDefined()
         expect(cardFor(g, 'fc')!.frameId).toBe(stack.id)
-        // And the wire is drawn — at the focal, from the partner's row.
+        // And the wire is drawn column to column: both ends are on
+        // screen, so it lands at the finest grain either of them has.
+        // (It landed on the FOCAL until column-grain wiring; the focal's
+        // ports are the rollup for a hop with nowhere finer to go.)
         expect(g.edges).toHaveLength(1)
         expect(g.edges[0].source).toBe(cardFor(g, 'sc')!.id)
-        expect(g.edges[0].target).toBe(focal.id)
+        expect(g.edges[0].target).toBe(cardFor(g, 'fc')!.id)
     })
 
     it('R1: a focus that holds nothing has no stack under it', () => {
@@ -402,23 +405,27 @@ describe('focus-layout — frames only where they clarify', () => {
         expect(stack.contents).toEqual({ onLineage: 2, total: 9 })
     })
 
-    it('R1b: every hop into the focus lands on the FOCAL card, whatever grain it was drawn at', () => {
+    it('R1b: a hop into the focus lands on the ROW that carries it, not on the focal', () => {
         const g = layout(sharedPlatform())
         const focal = cardFor(g, 'REPORTING')!
         // Four raw hops reach two different tables INSIDE the focus, and
-        // one leaves it — they arrive at, and leave from, the focal's own
-        // ports as bundles, so the contains-stack rows carry no wires.
-        for (const table of ['rep_a', 'rep_b']) {
-            const row = cardFor(g, table)!
-            expect(g.edges.some(e => e.source === row.id || e.target === row.id)).toBe(false)
-        }
-        const into = g.edges.filter(e => e.target === focal.id)
-        expect(into).toHaveLength(2)
-        // dim_customer reaches TWO of the focus's tables: one wire, and it
-        // says two rather than pretending to be one hop.
-        expect(into.find(e => e.source === cardFor(g, 'gold_t')!.id)!.count).toBe(2)
-        expect(into.find(e => e.source === cardFor(g, 'INT_T2')!.id)!.count).toBe(1)
-        expect(g.edges.filter(e => e.source === focal.id)).toHaveLength(1)
+        // one leaves it. Both tables are rows of the contains-stack and
+        // both are on screen, so each hop lands on the row it is really
+        // about — which table dim_customer feeds is the answer here, and
+        // a single port on the focal could not state it.
+        //
+        // (Every one of these used to converge on the focal's two ports.
+        // That is now what the ports are for when the finer end is NOT
+        // drawn — see the column-grain suite.)
+        const rowA = cardFor(g, 'rep_a')!
+        const rowB = cardFor(g, 'rep_b')!
+        const gold = cardFor(g, 'gold_t')!.id
+        expect(g.edges.some(e => e.source === gold && e.target === rowA.id)).toBe(true)
+        expect(g.edges.some(e => e.source === gold && e.target === rowB.id)).toBe(true)
+        expect(g.edges.some(e => e.source === cardFor(g, 'INT_T2')!.id && e.target === rowA.id)).toBe(true)
+        expect(g.edges.some(e => e.source === rowA.id && e.target === cardFor(g, 'dash')!.id)).toBe(true)
+        // Nothing is left for the focal's own ports to carry.
+        expect(g.edges.filter(e => e.source === focal.id || e.target === focal.id)).toHaveLength(0)
     })
 
     it('R1b: the focal speaks for its whole subtree — one ⊕, not one per row', () => {
@@ -527,9 +534,11 @@ describe('focus-layout — frames only where they clarify', () => {
         const g = layout(sharedPlatform())
         const byId = new Map(g.cards.map(c => [c.id, c.nodeId]))
         const drawn = g.edges.map(e => `${byId.get(e.source)}>${byId.get(e.target)}`).sort()
-        // Four raw hops, three drawn wires — every one of them between
-        // cards that are on the board, converging on the focal.
-        expect(drawn).toEqual(['INT_T2>REPORTING', 'REPORTING>dash', 'gold_t>REPORTING'])
+        // Four raw hops, four drawn wires — every one of them between the
+        // two cards that actually carry it, and not one dropped by the
+        // levels the picture skipped. (Three, converging on the focal,
+        // before hops landed at column grain.)
+        expect(drawn).toEqual(['INT_T2>rep_a', 'gold_t>rep_a', 'gold_t>rep_b', 'rep_a>dash'])
         expect(g.edges.reduce((n, e) => n + e.count, 0)).toBe(4)
     })
 
@@ -2113,5 +2122,99 @@ describe('a container focus counts only what crosses its own boundary', () => {
 
         // Everything already drawn keeps its relative order; arrivals append.
         expect(after.filter(u => first.includes(u))).toEqual(first.filter(u => after.includes(u)))
+    })
+})
+
+// ── a hop lands at the finest VISIBLE grain on BOTH ends ─────────────
+//
+// REPORTED (user, Issue A): partner tables opened to their columns wired
+// into the FOCAL CARD's single port while the focus's OWN columns sat
+// un-wired in the contains-stack below it. Which column feeds which was
+// invisible — the one thing a column-grain picture exists to show, and
+// what every catalogue that draws this (DataHub, OpenMetadata) shows.
+//
+// The rule is symmetric: the focus's contains-stack rows are endpoints
+// like any other row the moment they are on screen. The focal's single
+// ports stay exactly what they were for — the rollup target for a hop
+// whose finer end is NOT drawn.
+
+/** The reported estate: `int_clean_orders_t1` feeding the focus
+ *  `int_clean_orders_t2`, both at column grain, with a table-grain hop
+ *  alongside them and one hop from a column that is not on the board. */
+function columnGrainEstate(): LensSubgraph<LensWalkNode> {
+    const cols = ['channel', 'order_id', 'net_revenue']
+    const nodes = [
+        wnode('T1', 'dataset', 'int_clean_orders_t1', { childCount: 14 }),
+        wnode('F', 'dataset', 'int_clean_orders_t2', { childCount: 14 }),
+        wnode('D', 'dataset', 'fact_orders', { childCount: 9 }),
+        // Upstream of the focus at TABLE grain — its finer end is a
+        // column nobody has drawn, so it has nowhere finer to land.
+        wnode('AGG', 'container', 'SILVER'),
+    ]
+    const contains: Array<[string, string]> = []
+    const hops: Array<[string, string, string]> = [['AGG', 'F', 'AGGREGATED']]
+    for (const c of cols) {
+        nodes.push(wnode(`t1:${c}`, 'schemaField', c), wnode(`f:${c}`, 'schemaField', c), wnode(`d:${c}`, 'schemaField', c))
+        contains.push(['T1', `t1:${c}`], ['F', `f:${c}`], ['D', `d:${c}`])
+        hops.push([`t1:${c}`, `f:${c}`, 'TRANSFORMS'], [`f:${c}`, `d:${c}`, 'TRANSFORMS'])
+    }
+    return subgraph({ focus: 'F', nodes, hops, contains })
+}
+
+describe('column-grain wiring', () => {
+    it('wires row to row when both ends are on screen, and not through the focal', () => {
+        const sg = columnGrainEstate()
+        const g = layout(sg)
+        const idOf = (urn: string) => cardFor(g, urn)!.id
+        const focal = cardFor(g, 'F')!
+
+        // The focus's own columns are rows of the contains-stack, and the
+        // partner tables' columns are rows of their frames. Every one of
+        // the six column-grain hops is drawn between the two columns that
+        // actually carry it.
+        for (const c of ['channel', 'order_id', 'net_revenue']) {
+            expect(g.edges.some(e => e.source === idOf(`t1:${c}`) && e.target === idOf(`f:${c}`))).toBe(true)
+            expect(g.edges.some(e => e.source === idOf(`f:${c}`) && e.target === idOf(`d:${c}`))).toBe(true)
+        }
+        // A row-to-row hop at the finest grain is one hop, not a bundle —
+        // no ×N badge on a wire that carries exactly one connection.
+        expect(g.edges.find(e => e.source === idOf('t1:channel'))!.count).toBe(1)
+
+        // And nothing lands on the focal that had somewhere finer to go.
+        // What still does: the table-grain hop, whose finer end is not on
+        // the board at all.
+        const onFocal = g.edges.filter(e => e.source === focal.id || e.target === focal.id)
+        expect(onFocal).toHaveLength(1)
+        expect(onFocal[0]!.source).toBe(idOf('AGG'))
+    })
+
+    it('rolls up to the focal exactly when the finer end is not drawn', () => {
+        // The same estate with both tables' contents shut: no column is on
+        // screen to land on, so the three column hops between them become
+        // ONE bundle saying three, arriving at the focal's single port.
+        const sg = columnGrainEstate()
+        const base = initialLensViewState(sg)
+        const g = layout(sg, shut(shut(base, 'F'), 'T1'))
+        const focal = cardFor(g, 'F')!
+        const into = g.edges.filter(e => e.target === focal.id)
+        expect(into.find(e => e.source === cardFor(g, 'T1')!.id)?.count).toBe(3)
+        // And with only ONE end shut the wires stay at column grain on the
+        // side that is still open — the roll-up is per hop, per endpoint.
+        const half = layout(sg, shut(base, 'F'))
+        const fromColumns = half.edges.filter(e =>
+            e.target === focal.id && (cardFor(half, 't1:channel')!.id === e.source
+                || cardFor(half, 't1:order_id')!.id === e.source
+                || cardFor(half, 't1:net_revenue')!.id === e.source))
+        expect(fromColumns).toHaveLength(3)
+    })
+
+    it('gives a wired stack row a port, and leaves an un-wired one bare', () => {
+        const sg = columnGrainEstate()
+        const g = layout(sg)
+        expect(cardFor(g, 'f:channel')!.wired).toBe(true)
+        // One offer per element: the rows carry wires, never a ⊕ — the
+        // focal speaks for everything inside it.
+        expect(cardFor(g, 'f:channel')!.pillUp).toBeNull()
+        expect(cardFor(g, 'f:channel')!.deadEnd).toBe(false)
     })
 })

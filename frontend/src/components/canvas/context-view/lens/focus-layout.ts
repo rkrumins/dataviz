@@ -576,20 +576,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const visibleOrder = visibleLensNodes(sg, expanded).filter(u => population.has(u))
     const visible = new Set(visibleOrder)
 
-    /**
-     * What is INSIDE the focus is contents, not board geometry.
-     *
-     * The focus is one compact card with one port a side, and the
-     * contains-stack under it says what it holds. So its descendants are
-     * drawn as rows there, but they are not WIRED: every hop into or out
-     * of the focus's subtree is the focus's own lineage and lands on the
-     * focal card, where a reader can follow it. Bundling by the shared
-     * endpoint is what turns eight column-to-column arcs into eight
-     * wires converging on one port, with no edge router involved.
-     *
-     * Everything below reads `wired` where it means "an end a hop can
-     * land on" and `visible` where it means "a card on the board".
-     */
+    /** What is INSIDE the focus: its contains-stack rows. */
     const focusContents = new Set(subtreeOf(sg.focusUrn))
     focusContents.delete(sg.focusUrn)
 
@@ -624,7 +611,25 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         in: boundaryFrontierFilter(sg, sg.focusUrn, 'in'),
         out: boundaryFrontierFilter(sg, sg.focusUrn, 'out'),
     }
-    const wired = new Set([...visibleOrder].filter(u => !focusContents.has(u)))
+    /**
+     * A HOP LANDS AT THE FINEST VISIBLE GRAIN ON BOTH ENDS.
+     *
+     * So every card on the board is an endpoint — the focus's own
+     * contains-stack rows included, the moment they are on screen. Which
+     * column feeds which is the whole reason to open two tables to their
+     * columns, and it is what every catalogue that draws this shows.
+     *
+     * Reported (Issue A): partner tables opened to their columns wired
+     * into the FOCAL's single port while the focus's own columns sat
+     * un-wired underneath it, so the picture drew a table's worth of
+     * lineage as one arrow and answered nothing.
+     *
+     * The focal's single ports keep the job they were built for — the
+     * rollup target for a hop whose finer end is NOT drawn. `nearestVisible`
+     * decides that per hop, so shutting the stack turns eight column
+     * wires back into one bundle with no other machinery involved.
+     */
+    const wired = new Set(visibleOrder)
     const projected = projectLensEdges(sg, population, wired)
 
     /**
@@ -640,14 +645,21 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      * focal, standing for its whole subtree, offers the table's frontier
      * once rather than once per column.
      */
+    //
+    // WIRING and SPEAKING are two different questions, and the
+    // contains-stack is where they come apart: its rows carry wires but
+    // never a ⊕ of their own (one offer per element — the focal speaks
+    // for everything inside it), so they are endpoints here and not
+    // speakers. Everything else on the board is both.
+    const speakers = new Set([...visibleOrder].filter(u => !focusContents.has(u)))
     const standsFor = new Map<string, Set<string>>()
-    for (const urn of wired) standsFor.set(urn, new Set([urn]))
+    for (const urn of speakers) standsFor.set(urn, new Set([urn]))
     for (const urn of population) {
-        if (wired.has(urn)) continue
+        if (speakers.has(urn)) continue
         let cursor: string | null = model.get(urn)?.parent ?? null
         const guard = new Set<string>()
         while (cursor && !guard.has(cursor)) {
-            if (wired.has(cursor)) { standsFor.get(cursor)!.add(urn); break }
+            if (speakers.has(cursor)) { standsFor.get(cursor)!.add(urn); break }
             guard.add(cursor)
             cursor = model.get(cursor)?.parent ?? null
         }
