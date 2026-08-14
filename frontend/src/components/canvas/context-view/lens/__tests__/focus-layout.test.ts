@@ -1941,12 +1941,12 @@ describe('focus-layout — walk export, pure and server-free', () => {
 // column focus in the same estate drew correctly, so the blank needs a
 // SHAPE, and these are the two that produce it.
 //
-// The estate is the live dev graph's own: that source's ontology lists
-// AGGREGATED as a LINEAGE edge type, and the aggregation worker
-// materialises a rollup hop from a column to every coarser grain above
-// it — including the column's own platform. So a column's lineage
-// genuinely includes `Snowflake → channel` and `channel → Snowflake`,
-// where Snowflake is the column's own containment root.
+// The estate is the live dev graph's own, at the grain it was reported
+// at: a column with lineage running to and from its own containment ROOT
+// — `Snowflake → channel` and `channel → Snowflake`. That came from
+// `:AGGREGATED` rollups, which the closure no longer walks; the SHAPE
+// outlives them, because any source declaring lineage at container grain
+// (and plenty do) puts a hop on a level below the focus's own root.
 
 /** `A0 ⊃ A1 ⊃ … ⊃ A{levels-1} ⊃ F`, F a leaf column.
  *
@@ -1968,7 +1968,7 @@ function deepColumnEstate(
     const contains: Array<[string, string]> = chain.slice(1).map((u, i) => [chain[i], u])
     contains.push([chain[chain.length - 1], 'F'])
     const roll = chain[opts.hopFrom ?? 0]
-    const hops: Array<[string, string, string]> = [[roll, 'F', 'AGGREGATED'], ['F', roll, 'AGGREGATED']]
+    const hops: Array<[string, string, string]> = [[roll, 'F', 'DERIVED_FROM'], ['F', roll, 'DERIVED_FROM']]
     if (opts.partner) {
         nodes.push(wnode('PT', 'dataset', 'clean_orders'), wnode('P', 'schemaField', 'channel'))
         contains.push(['PT', 'P'])
@@ -2060,9 +2060,9 @@ function platformEstate(over: { extraInterior?: boolean } = {}): LensSubgraph<Le
     // node — the live estate exactly (2,426 hops, `upstreamUrns` empty).
     const hops: Array<[string, string, string]> = [
         ['r_tbl', 's_tbl', 'TRANSFORMS'],
-        ['BRONZE', 'SILVER', 'AGGREGATED'],
+        ['BRONZE', 'SILVER', 'DERIVED_FROM'],
         ['s_tbl', 't_tbl', 'TRANSFORMS'],
-        ['SILVER', 't_tbl', 'AGGREGATED'],
+        ['SILVER', 't_tbl', 'DERIVED_FROM'],
         ['t_tbl', 'dash', 'TRANSFORMS'],
     ]
     if (over.extraInterior) {
@@ -2152,7 +2152,7 @@ function columnGrainEstate(): LensSubgraph<LensWalkNode> {
         wnode('AGG', 'container', 'SILVER'),
     ]
     const contains: Array<[string, string]> = []
-    const hops: Array<[string, string, string]> = [['AGG', 'F', 'AGGREGATED']]
+    const hops: Array<[string, string, string]> = [['AGG', 'F', 'DERIVED_FROM']]
     for (const c of cols) {
         nodes.push(wnode(`t1:${c}`, 'schemaField', c), wnode(`f:${c}`, 'schemaField', c), wnode(`d:${c}`, 'schemaField', c))
         contains.push(['T1', `t1:${c}`], ['F', `f:${c}`], ['D', `d:${c}`])

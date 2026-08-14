@@ -438,3 +438,69 @@ def test_shared_walk_fixture_round_trips_by_alias():
                 assert set(dumped[key]) == set(expected), f"{name}.{key}"
                 continue
             _assert_subset_equal(expected, dumped[key], f"{name}.{key}")
+
+
+# --------------------------------------------------------------------- #
+# Synthetic edges are not lineage                                        #
+#                                                                        #
+# REPORTED LIVE (2026-08-14): a column's peek read "5 in / 4 out" over    #
+# two real neighbours. The estate's resolved ontology lists AGGREGATED    #
+# among its lineage types — verified on the live source:                  #
+# ['FLOWS_TO','CONSUMES','PRODUCES','DERIVED_FROM','DEPENDS_ON',          #
+#  'AGGREGATED','TRANSFORMS'] — and :AGGREGATED edges are the aggregation #
+# worker's own rollups of a real flow onto every coarser grain above it.  #
+# Walking them counts one flow once per containment level, and it         #
+# contradicts this closure's own design: it is regime-independent         #
+# BECAUSE it depends on no :AGGREGATED cells.                             #
+# --------------------------------------------------------------------- #
+
+
+class _OntologyWithSyntheticTypes(_Ontology):
+    # Exactly what the live source resolves to.
+    lineage_edge_types = [
+        "FLOWS_TO", "CONSUMES", "PRODUCES", "DERIVED_FROM",
+        "DEPENDS_ON", "AGGREGATED", "TRANSFORMS",
+    ]
+
+
+def _engine_with_ontology(provider, ontology):
+    eng = _make_engine(provider)
+
+    async def _resolve_ontology():
+        return ontology
+
+    eng._resolve_ontology = _resolve_ontology
+    return eng
+
+
+def test_resolved_ontology_synthetic_type_never_reaches_the_provider():
+    provider = _CapturingClosureProvider()
+    eng = _engine_with_ontology(provider, _OntologyWithSyntheticTypes())
+    _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate({"urn": "u1"})))
+    sent = provider.calls[0]["lineage_edge_types"]
+    assert "AGGREGATED" not in sent
+    # ...and nothing REAL is lost with it, in the order it was declared.
+    assert sent == [
+        "FLOWS_TO", "CONSUMES", "PRODUCES", "DERIVED_FROM", "DEPENDS_ON", "TRANSFORMS",
+    ]
+
+
+def test_caller_supplied_synthetic_type_is_filtered_too():
+    # A client asking for it explicitly is still asking for a rollup.
+    provider = _CapturingClosureProvider()
+    eng = _make_engine(provider)
+    _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate(
+        {"urn": "u1", "lineageEdgeTypes": ["FLOWS_TO", "AGGREGATED"]},
+    )))
+    assert provider.calls[0]["lineage_edge_types"] == ["FLOWS_TO"]
+
+
+def test_synthetic_type_is_matched_however_the_graph_spells_it():
+    # Per-source graphs carry their own casing (see _alias_rel_types), so
+    # the comparison is case-insensitive and the filter cannot be dodged.
+    provider = _CapturingClosureProvider()
+    eng = _make_engine(provider)
+    _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate(
+        {"urn": "u1", "lineageEdgeTypes": ["Aggregated", "flows_to", "aggregated"]},
+    )))
+    assert provider.calls[0]["lineage_edge_types"] == ["flows_to"]

@@ -732,3 +732,111 @@ async def test_closure_survives_a_cache_outage(estate):
     )
     assert _hops(cont) == [("c1", "c2", "FLOWS_TO")]
     assert cont.truncation_reason != "ancestors_failed"
+
+
+# ── Synthetic edges are not lineage ──────────────────────────────────
+#
+# REPORTED LIVE (2026-08-14): a column's peek read "5 in / 4 out" over two
+# real neighbours. The estate's resolved ontology lists AGGREGATED among
+# its lineage types, and :AGGREGATED edges are the aggregation worker's
+# own rollups — one real flow projected onto every coarser grain above its
+# endpoints. This estate is that shape: ONE real column→column flow, and
+# the four rollups the worker would materialise from it.
+#
+# Driven through the ENGINE rather than the provider, because the engine
+# seam is where the filter lives and the provider does exactly what it is
+# told. That also exercises the part a unit test cannot: the degree PROBE
+# gets the same filtered list, so the frontier's totals agree with the
+# edges that shipped.
+
+AGG_SEED = """
+CREATE
+ (p1:Platform {urn:'p1', displayName:'Snowflake'}),
+ (s1:Schema   {urn:'s1', displayName:'SILVER'}),
+ (s2:Schema   {urn:'s2', displayName:'GOLD'}),
+ (ta:Table    {urn:'ta', displayName:'clean_orders'}),
+ (tb:Table    {urn:'tb', displayName:'fct_orders'}),
+ (ca:Column   {urn:'ca', displayName:'channel_src'}),
+ (cb:Column   {urn:'cb', displayName:'channel'}),
+ (p1)-[:CONTAINS]->(s1), (p1)-[:CONTAINS]->(s2),
+ (s1)-[:CONTAINS]->(ta), (ta)-[:CONTAINS]->(ca),
+ (s2)-[:CONTAINS]->(tb), (tb)-[:CONTAINS]->(cb),
+ (ca)-[:FLOWS_TO]->(cb),
+ (ca)-[:AGGREGATED]->(cb),
+ (ta)-[:AGGREGATED]->(cb),
+ (s1)-[:AGGREGATED]->(cb),
+ (p1)-[:AGGREGATED]->(cb)
+"""
+
+#: What the live source's ontology actually resolves to, synthetic type
+#: and all — the input the engine has to defend against.
+AGG_ONTOLOGY_LINEAGE = ["FLOWS_TO", "AGGREGATED"]
+
+
+def _engine_over(p, lineage_types):
+    """The real `ContextEngine.trace_closure` over a real provider.
+
+    `object.__new__` for the same reason the wire-contract suite uses it:
+    the method touches only `provider`, `_resolve_ontology` and the
+    semaphore (which getattr-degrades on a bare instance).
+    """
+    from backend.app.services.context_engine import ContextEngine
+
+    class _Ont:
+        lineage_edge_types = lineage_types
+        containment_edge_types = CTYPES
+        entity_type_definitions: dict = {}
+
+    eng = object.__new__(ContextEngine)
+    eng.provider = p
+
+    async def _resolve_ontology():
+        return _Ont()
+
+    eng._resolve_ontology = _resolve_ontology
+    return eng
+
+
+async def test_closure_never_walks_the_rollups_it_materialised_itself(estate):
+    from backend.common.models.graph import TraceClosureRequest
+
+    p = await estate("agg", AGG_SEED)
+    eng = _engine_over(p, AGG_ONTOLOGY_LINEAGE)
+
+    r = await eng.trace_closure(TraceClosureRequest.model_validate(
+        {"urn": "cb", "upstreamDepth": 25, "downstreamDepth": 25},
+    ))
+
+    # ONE real flow, at the grain the data source actually stated it.
+    assert _hops(r) == [("ca", "cb", "FLOWS_TO")]
+    assert not any(e.edge_type.upper() == "AGGREGATED" for e in r.edges)
+    # The coarser endpoints of the rollups are only ever here as
+    # containment ancestors — never as lineage partners.
+    assert sorted(r.upstream_urns) == ["ca"]
+    assert sorted(r.downstream_urns) == []
+
+
+async def test_the_frontier_probe_counts_real_edges_only(estate):
+    """The probe's totals come from `get_node_degrees(..., ltypes)` — the
+    SAME list the walk used. Unfiltered, `cb` has five incoming edges and
+    the pill would offer four that do not exist."""
+    from backend.common.models.graph import TraceClosureRequest
+
+    p = await estate("aggprobe", AGG_SEED)
+
+    # Real degree, straight from the engine's own filtered list.
+    real = await p.get_node_degrees(["cb"], ["FLOWS_TO"])
+    unfiltered = await p.get_node_degrees(["cb"], ["FLOWS_TO", "AGGREGATED"])
+    assert real["cb"]["in"] == 1
+    # Falsification: without the filter the same node reads five, which is
+    # the inflation the user saw.
+    assert unfiltered["cb"]["in"] == 5
+
+    # And a closure that stops one hop short reports its frontier from the
+    # filtered degrees, so what it offers is what a click can deliver.
+    eng = _engine_over(p, AGG_ONTOLOGY_LINEAGE)
+    r = await eng.trace_closure(TraceClosureRequest.model_validate(
+        {"urn": "cb", "upstreamDepth": 0, "downstreamDepth": 0},
+    ))
+    for entry in r.frontier_up:
+        assert entry.total_count is None or entry.total_count <= 1

@@ -3,7 +3,7 @@ import hashlib
 import json as _json
 import logging
 import time
-from typing import List, Dict, Any, Set, Optional, Tuple, TYPE_CHECKING
+from typing import Iterable, List, Dict, Any, Set, Optional, Tuple, TYPE_CHECKING
 from ..models.graph import (
     GraphNode, GraphEdge, LineageResult, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
@@ -34,6 +34,36 @@ logger = logging.getLogger(__name__)
 # Granularity is now expressed as an entity type ID string (e.g. "dataset", "term").
 # Coarseness is derived from hierarchy.level in the resolved ontology — level 0 = coarsest.
 # No hardcoded mapping needed.
+
+#: Relationship types this system MATERIALISES itself. They are stored in
+#: the graph like any other edge, and a source's resolved ontology
+#: routinely lists them among its lineage types — but nothing in the data
+#: source ever said them: ``:AGGREGATED`` is the aggregation worker's own
+#: rollup of a real flow, projected onto every coarser grain above its
+#: endpoints. A walk that treats them as lineage counts one real flow once
+#: per level of containment above it.
+#:
+#: Uppercase, and compared uppercase — the graph's own spelling varies per
+#: source (see ``_alias_rel_types``).
+#:
+#: This is the ONE place that names them for the closure. The aggregated
+#: read paths (``trace_at_level``, ``expand_aggregated_edge`` and the
+#: materialiser) read ``:AGGREGATED`` deliberately and carry their own
+#: literals; they are a different question and are left alone.
+SYNTHETIC_LINEAGE_EDGE_TYPES = frozenset({"AGGREGATED"})
+
+
+def _real_lineage_types(edge_types: Iterable[str]) -> List[str]:
+    """`edge_types` minus anything this system materialised itself.
+
+    Order-preserving and duplicate-tolerant, because the provider turns
+    the list straight into a Cypher relationship alternation.
+    """
+    return [
+        t for t in edge_types
+        if t and str(t).upper() not in SYNTHETIC_LINEAGE_EDGE_TYPES
+    ]
+
 
 class ContextEngine:
     _ONTOLOGY_CACHE_TTL = 300  # 5 minutes
@@ -1267,7 +1297,23 @@ class ContextEngine:
         same per-(provider, graph) trace semaphore + engine deadline.
         """
         resolved = await self._resolve_ontology()
-        edge_types = req.lineage_edge_types or list(resolved.lineage_edge_types or [])
+        # SYNTHETIC EDGES ARE NOT LINEAGE. See SYNTHETIC_LINEAGE_EDGE_TYPES:
+        # a source's resolved ontology routinely LISTS ``AGGREGATED`` among
+        # its lineage types, but those relationships are the aggregation
+        # worker's own materialised rollups, not anything a data source
+        # said. Walking them counts one real flow once per coarser grain
+        # above it, which is what put "5 in / 4 out" on a column with two
+        # real neighbours — and it contradicts this closure's whole design,
+        # which is regime-independent precisely because it depends on NO
+        # ``:AGGREGATED`` cells.
+        #
+        # Filtered from BOTH the resolved default and anything a caller
+        # asked for, at this one seam: the provider hands the same list to
+        # its BFS, its cursor page AND its degree probe, so the counts the
+        # frontier reports stay consistent with the edges that shipped.
+        edge_types = _real_lineage_types(
+            req.lineage_edge_types or list(resolved.lineage_edge_types or [])
+        )
         containment_types = list(resolved.containment_edge_types or [])
         max_nodes = min(req.max_nodes or ContextEngine.TRACE_MAX_NODES, ContextEngine.TRACE_MAX_NODES)
         fn = getattr(self.provider, "trace_closure", None)

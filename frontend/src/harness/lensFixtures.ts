@@ -575,11 +575,19 @@ const walkChildrenRich = (): WalkFixture => {
  *   Snowflake ⊃ SILVER ⊃ clean_orders ⊃ channel                  → upstream
  *   Snowflake ⊃ INTERMEDIATE_T2 ⊃ int_clean_orders_t2 ⊃ channel  → downstream
  *
- * That source's ontology lists AGGREGATED as a LINEAGE edge type, so the
- * aggregation worker's rollups are real hops: the column is wired to its
- * upstream partner's TABLE and CONTAINER, and — both ways — to its own
- * containment root, the platform. Those two are what the focal's
+ * The hops shown at CONTAINER and PLATFORM grain are what a source
+ * genuinely declaring coarse-grain lineage produces: a column wired to its
+ * upstream partner's table and container, and — both ways — to its own
+ * containment root. The two that reach the root are what the focal's
  * "+2 connect at a coarser grain" counts.
+ *
+ * This shape came from the live estate's `:AGGREGATED` rollups, which the
+ * engine no longer walks at all (see the closure's synthetic-edge filter).
+ * The FIXTURE is kept because the LAYOUT question it pins is not about
+ * where the hops came from: a hop that lands on a level this picture does
+ * not draw has to be said out loud rather than dropped, and the focal must
+ * never offer a walk it cannot make. Any source declaring container-grain
+ * lineage of its own puts the lens right back here.
  *
  * EXPECTED: a compact `channel` focal reading `Snowflake ›
  * INTERMEDIATE_T1 › int_clean_orders_t1`, its two partner containers as
@@ -610,16 +618,14 @@ const walkColumnFocus = (): WalkFixture => ({
     ],
     lineageEdges: [
       hop('s:channel', 'f:channel', 'TRANSFORMS'),
-      hop('s:channel', 'f:channel', 'AGGREGATED'),
-      hop('src_t', 'f:channel', 'AGGREGATED'),
-      hop('SILVER', 'f:channel', 'AGGREGATED'),
+      hop('src_t', 'f:channel', 'DERIVED_FROM'),
+      hop('SILVER', 'f:channel', 'DERIVED_FROM'),
       // The focus's OWN root, both ways — no card can carry these.
-      hop('SNOW', 'f:channel', 'AGGREGATED'),
-      hop('f:channel', 'SNOW', 'AGGREGATED'),
+      hop('SNOW', 'f:channel', 'DERIVED_FROM'),
+      hop('f:channel', 'SNOW', 'DERIVED_FROM'),
       hop('f:channel', 'd:channel', 'TRANSFORMS'),
-      hop('f:channel', 'd:channel', 'AGGREGATED'),
-      hop('f:channel', 'dst_t', 'AGGREGATED'),
-      hop('f:channel', 'INT_T2', 'AGGREGATED'),
+      hop('f:channel', 'dst_t', 'DERIVED_FROM'),
+      hop('f:channel', 'INT_T2', 'DERIVED_FROM'),
     ],
     upstreamUrns: new Set(['SILVER', 'src_t', 's:channel', 'SNOW']),
     downstreamUrns: new Set(['INT_T2', 'dst_t', 'd:channel']),
@@ -636,7 +642,12 @@ const walkColumnFocus = (): WalkFixture => ({
  * The live closure for that focus: 567 nodes, 2,426 hops, `upstreamUrns`
  * EMPTY — every hop interior — and 51 frontier entries, every one on a
  * node inside the platform. This is that estate in miniature, including
- * the rollup hop from an interior table to the platform itself.
+ * a hop from an interior table to the platform itself.
+ *
+ * Most of that volume was `:AGGREGATED` rollups, which the engine no
+ * longer walks. The boundary question survives them: a container focus
+ * whose members feed each other reads the same way at any volume, and one
+ * interior hop states it as well as two thousand.
  *
  * EXPECTED: no upstream ⊕ on the focal and no "+" on its upstream Reach
  * — the platform's own inside is not its lineage — while the genuine
@@ -663,12 +674,12 @@ const walkPlatformFocus = (): WalkFixture => ({
     ],
     lineageEdges: [
       hop('raw_t', 'src_t', 'TRANSFORMS'),
-      hop('BRONZE', 'SILVER', 'AGGREGATED'),
+      hop('BRONZE', 'SILVER', 'DERIVED_FROM'),
       hop('src_t', 'dst_t', 'TRANSFORMS'),
-      hop('SILVER', 'dst_t', 'AGGREGATED'),
-      // The worker's rollup onto the platform itself — 321 of these are
-      // what "+211" was counting.
-      hop('src_t', 'SNOW', 'AGGREGATED'),
+      hop('SILVER', 'dst_t', 'DERIVED_FROM'),
+      // A hop onto the platform itself — 321 of these are what "+211" was
+      // counting.
+      hop('src_t', 'SNOW', 'DERIVED_FROM'),
       hop('dst_t', 'dash', 'TRANSFORMS'),
     ],
     upstreamUrns: new Set(),
