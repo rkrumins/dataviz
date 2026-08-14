@@ -321,13 +321,7 @@ describe('projectLensEdges — directional projection', () => {
     ])
   })
 
-  it('reports a hop internal to a collapsed container as a SELF bundle, for the caller to count', () => {
-    // It used to be dropped here. That was safe while every container was
-    // a box with its members drawn inside it; flattened (T18) a collapsed
-    // container stands for members that are NOT drawn, so these hops are
-    // the only evidence it feeds itself — and dropping them silently
-    // deleted `GOLD`'s whole internal fabric from the picture. Still never
-    // ROUTED as a wire: the caller renders a badge.
+  it('hides a hop internal to a single collapsed container — never drawn as a self-loop', () => {
     const sg = buildLensSubgraph({
       focusUrn: 'x1',
       nodes: [n('D1'), n('x1'), n('x2')],
@@ -336,9 +330,7 @@ describe('projectLensEdges — directional projection', () => {
     })
     const population = new Set(['D1', 'x1', 'x2'])
     const visible = new Set(['D1'])
-    expect(projectLensEdges(sg, population, visible)).toEqual([
-      { sourceUrn: 'D1', targetUrn: 'D1', weight: 1, isLeafEdge: false, edgeTypeNorm: 'FLOWS' },
-    ])
+    expect(projectLensEdges(sg, population, visible)).toEqual([])
   })
 
   it('a bundle bundling more than one edge type reports edgeTypeNorm as empty', () => {

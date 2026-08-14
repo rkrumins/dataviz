@@ -18,7 +18,7 @@ import {
     initialLensViewState,
     revealKey,
     walkStatusKey,
-    isolationCone,
+    pathToFocus,
     buildWalkExport,
     walkExportToCsv,
     REVEAL_PAGE,
@@ -26,8 +26,7 @@ import {
     type FocusLayoutInput,
 } from '../focus-layout'
 import {
-    CARD_GAP, DENSITY_PORTS, FOCAL_H, FRAME_WINDOW, GROUP_GAP, LABEL_MIN_RUN,
-    frameWindow, labelFitsRun, portFraction,
+    FOCAL_H, FRAME_WINDOW, LABEL_MIN_RUN, frameWindow, labelFitsRun,
     type FocusCard, type FocusEdge,
 } from '../focus-cards'
 
@@ -208,14 +207,13 @@ describe('focus-layout — the answer grain', () => {
 
 // ── N-level nesting ──────────────────────────────────────────────────
 
-describe('focus-layout — deep estates flatten (T18 R3)', () => {
+describe('focus-layout — nesting', () => {
     /** Node ⊃ Node ⊃ Node ⊃ Node: one entity type at every level, which
      *  no type→level map can describe.
      *
-     *  R BRANCHES (a leaf of its own beside the chain), so R is a table
-     *  node with that leaf as its row — and R2, which owns two more
-     *  leaves, is a table node of its OWN rather than a box inside a box
-     *  inside a box. */
+     *  R BRANCHES (a leaf of its own beside the chain), so R is the
+     *  presented grain — and everything below it is nesting the user
+     *  asks for, one open at a time. */
     function recursiveEstate(): LensSubgraph<LensWalkNode> {
         const nodes = [wnode('F', 'Node', 'focus'), wnode('FP', 'Node', 'focus_parent')]
         const contains: Array<[string, string]> = [['FP', 'F']]
@@ -236,7 +234,7 @@ describe('focus-layout — deep estates flatten (T18 R3)', () => {
         return subgraph({ focus: 'F', nodes, contains, hops })
     }
 
-    it('NEVER nests a table inside a table — one level of frame, then out to the top', () => {
+    it('nests to N levels — the outer rect encloses the inner, three deep', () => {
         const sg = recursiveEstate()
         const base = initialLensViewState(sg)
         const g = layout(sg, {
@@ -244,29 +242,9 @@ describe('focus-layout — deep estates flatten (T18 R3)', () => {
             expandedContainment: new Set([...base.expandedContainment, 'R', 'R1', 'R2']),
         })
         const byId = new Map(g.cards.map(c => [c.id, c]))
-        // R owns leafC; R2 owns leafA and leafB. Both are TABLE nodes, at
-        // the top level, side by side — R2 is not inside R, and the
-        // pass-through R1 between them draws nothing at all.
-        expect(cardFor(g, 'R')!.frameId).toBeNull()
-        expect(cardFor(g, 'R2')!.frameId).toBeNull()
-        expect(cardFor(g, 'R1')).toBeUndefined()
-        // ...and the focus's own parent stays a breadcrumb, as ever.
-        expect(cardFor(g, 'FP')).toBeUndefined()
-
-        // ONE level of frame anywhere on the board: a row is inside its
-        // own table and that table is inside nothing.
-        const depthOf = (c: FocusCard) => {
-            let d = 0
-            let host = c.frameId
-            while (host) { d++; host = byId.get(host)!.frameId }
-            return d
-        }
-        expect(Math.max(...g.cards.map(depthOf))).toBe(1)
-        expect(depthOf(cardFor(g, 'leafA')!)).toBe(1)
-        expect(cardFor(g, 'leafA')!.frameId).toBe(cardFor(g, 'R2')!.id)
-        expect(cardFor(g, 'leafC')!.frameId).toBe(cardFor(g, 'R')!.id)
-
-        // Every row still sits geometrically inside the card that holds it.
+        const chain = ['R', 'R1', 'R2'].map(u => cardFor(g, u)!)
+        expect(chain.every(c => c.kind === 'frame')).toBe(true)
+        // Each level is genuinely INSIDE the one above it, geometrically.
         for (const card of g.cards) {
             if (!card.frameId) continue
             const host = byId.get(card.frameId)!
@@ -275,8 +253,19 @@ describe('focus-layout — deep estates flatten (T18 R3)', () => {
             expect(card.x + card.w).toBeLessThanOrEqual(host.x + host.w + 0.001)
             expect(card.y + card.h).toBeLessThanOrEqual(host.y + host.h + 0.001)
         }
-        // Both tables carry the chain they came from as TEXT.
-        expect(cardFor(g, 'R2')!.ancestry).toEqual(['estate', 'estate_1'])
+        // Three levels of hosting, not the old two-level promotion cap.
+        const depthOf = (c: FocusCard) => {
+            let d = 0
+            let host = c.frameId
+            while (host) { d++; host = byId.get(host)!.frameId }
+            return d
+        }
+        expect(depthOf(cardFor(g, 'leafA')!)).toBe(3)
+        // R, R1, R2 — every one of them opened by hand. NOT the focus's
+        // own parent FP, which is above the focus and therefore a
+        // breadcrumb (R1), not a box.
+        expect(g.cards.filter(c => c.kind === 'frame')).toHaveLength(3)
+        expect(cardFor(g, 'FP')).toBeUndefined()
     })
 })
 
@@ -1227,8 +1216,8 @@ describe('focus-layout — the ⊕ pill tells one of three truths', () => {
 
 // ── cycles ───────────────────────────────────────────────────────────
 
-describe('focus-layout — cycle badge (R4: only a real loop)', () => {
-    it('stamps the loop, and not the hop that merely leads into it', () => {
+describe('focus-layout — cycle badge', () => {
+    it('stamps only the hop that closes the loop', () => {
         const sg = subgraph({
             focus: 'F',
             nodes: [wnode('F'), wnode('A'), wnode('B')],
@@ -1239,26 +1228,9 @@ describe('focus-layout — cycle badge (R4: only a real loop)', () => {
         const g = layout(sg, withReveal(initialLensViewState(sg), 'out:A', 1))
         const byPair = new Map(g.edges.map(e => [`${e.source} ${e.target}`, e]))
         const id = (u: string) => cardFor(g, u)!.id
-        // Both halves of `A ⇄ B` are ON the loop, so both say so; two
-        // wires between one pair otherwise read as a duplicate.
         expect(byPair.get(`${id('B')} ${id('A')}`)!.cycleBack).toBe(true)
-        expect(byPair.get(`${id('A')} ${id('B')}`)!.cycleBack).toBe(true)
         expect(byPair.get(`${id('F')} ${id('A')}`)!.cycleBack).toBe(false)
-    })
-
-    it('stamps a hop that runs strictly BACKWARDS towards the focus', () => {
-        // F → A → B, and B feeds A's own producer C which is one hop
-        // NEARER the focus than B: strictly backwards, no directed loop.
-        const sg = subgraph({
-            focus: 'F',
-            nodes: [wnode('F'), wnode('A'), wnode('B')],
-            contains: [],
-            hops: [['F', 'A'], ['A', 'B'], ['B', 'F']],
-        })
-        const g = layout(sg, withReveal(initialLensViewState(sg), 'out:A', 1))
-        const byPair = new Map(g.edges.map(e => [`${e.source} ${e.target}`, e]))
-        const id = (u: string) => cardFor(g, u)!.id
-        expect(byPair.get(`${id('B')} ${id('F')}`)!.cycleBack).toBe(true)
+        expect(byPair.get(`${id('A')} ${id('B')}`)!.cycleBack).toBe(false)
     })
 
     it('does not stamp a diamond — two paths to one node is not a cycle', () => {
@@ -1270,35 +1242,6 @@ describe('focus-layout — cycle badge (R4: only a real loop)', () => {
         })
         const g = layout(sg)
         expect(g.edges.some(e => e.cycleBack)).toBe(false)
-    })
-
-    it('does not stamp a ONE-WAY flow between two peers at the same hop', () => {
-        // THE FALSE POSITIVE the flatten made common (and the old `≤` hop
-        // rule produced): `A → B`, both of them one hop downstream of the
-        // focus, is ordinary forward lineage between two tables of one
-        // warehouse layer. Nothing about it loops.
-        const sg = subgraph({
-            focus: 'F',
-            nodes: [wnode('F'), wnode('A'), wnode('B')],
-            contains: [],
-            hops: [['F', 'A'], ['F', 'B'], ['A', 'B']],
-        })
-        const g = layout(sg)
-        const id = (u: string) => cardFor(g, u)!.id
-        const peer = g.edges.find(e => e.source === id('A') && e.target === id('B'))!
-        expect(peer.cycleBack).toBe(false)
-        expect(g.edges.some(e => e.cycleBack)).toBe(false)
-    })
-
-    it('...and does stamp the same pair once they genuinely feed each other', () => {
-        const sg = subgraph({
-            focus: 'F',
-            nodes: [wnode('F'), wnode('A'), wnode('B')],
-            contains: [],
-            hops: [['F', 'A'], ['F', 'B'], ['A', 'B'], ['B', 'A']],
-        })
-        const g = layout(sg)
-        expect(g.edges.filter(e => e.cycleBack)).toHaveLength(2)
     })
 })
 
@@ -1871,90 +1814,54 @@ describe('focus-layout — direction filter (view-side; presentation, not data)'
     })
 })
 
-// ── R5: isolation — one element's whole visible lineage ──────────────
+// ── path-to-focus highlight ──────────────────────────────────────────
 
-describe('focus-layout — isolationCone (hover / click isolation)', () => {
-    const edge = (id: string, source: string, target: string): FocusEdge => ({
-        id, source, target, count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false,
-        sourcePort: 0, targetPort: 0, bundled: false, trunkCount: null, labelVisible: false,
-    })
+describe('focus-layout — pathToFocus (client-side hover/selection highlight)', () => {
+    const edge = (id: string, source: string, target: string): FocusEdge =>
+        ({ id, source, target, count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false, labelVisible: false })
 
-    it('walks BOTH directions: everything this feeds and everything that feeds it', () => {
-        // UP -> M -> DOWN, plus an unrelated pair that must stay out.
-        const edges = [edge('e1', 'UP', 'M'), edge('e2', 'M', 'DOWN'), edge('e3', 'X', 'Y')]
-        const { cardIds, edgeKeys } = isolationCone(edges, 'M')
-        expect(cardIds).toEqual(new Set(['M', 'UP', 'DOWN']))
-        expect(edgeKeys).toEqual(new Set(['e1', 'e2']))
-    })
-
-    it('a SIBLING feeding the same target is NOT on the cone', () => {
-        // The whole point of two directed walks rather than one
-        // undirected one: `A` and `SIB` both feed `T`, and they have
-        // nothing to do with each other. An undirected walk would light
-        // every card of a connected board, and a lens board is connected
-        // by construction — so isolation would isolate nothing.
-        const edges = [edge('e1', 'A', 'T'), edge('e2', 'SIB', 'T'), edge('e3', 'T', 'OUT')]
-        const { cardIds, edgeKeys } = isolationCone(edges, 'A')
-        expect(cardIds).toEqual(new Set(['A', 'T', 'OUT']))
-        expect(cardIds.has('SIB')).toBe(false)
-        expect(edgeKeys).toEqual(new Set(['e1', 'e3']))
-    })
-
-    it('is transitive — the whole cone, not one hop of it', () => {
-        const edges = [edge('e1', 'A', 'B'), edge('e2', 'B', 'C'), edge('e3', 'C', 'D')]
-        expect(isolationCone(edges, 'B').cardIds).toEqual(new Set(['A', 'B', 'C', 'D']))
-    })
-
-    it('a diamond: both branches are on the cone', () => {
+    it('a diamond: both branches to the focus highlight', () => {
+        // H reaches focus F via two EQUAL-length paths: H-A-F and H-B-F.
         const edges = [edge('e1', 'H', 'A'), edge('e2', 'A', 'F'), edge('e3', 'H', 'B'), edge('e4', 'B', 'F')]
-        const { cardIds, edgeKeys } = isolationCone(edges, 'H')
+        const { cardIds, edgeKeys } = pathToFocus(edges, 'H', 'F')
         expect(cardIds).toEqual(new Set(['H', 'A', 'B', 'F']))
         expect(edgeKeys).toEqual(new Set(['e1', 'e2', 'e3', 'e4']))
     })
 
-    it('folds in the path to the FOCUS — it is on the cone whenever it is reachable', () => {
-        const edges = [edge('e1', 'SRC', 'MID'), edge('e2', 'MID', 'F')]
-        expect(isolationCone(edges, 'SRC').cardIds.has('F')).toBe(true)
+    it('a single path (no diamond) highlights exactly its own hops, not a longer detour', () => {
+        const edges = [edge('e1', 'A', 'B'), edge('e2', 'B', 'F'), edge('e3', 'A', 'F')]
+        const { cardIds, edgeKeys } = pathToFocus(edges, 'A', 'F')
+        expect(cardIds).toEqual(new Set(['A', 'F']))
+        expect(edgeKeys).toEqual(new Set(['e3']))
     })
 
-    it('a card with no drawn wire comes back alone, and the caller dims nothing', () => {
+    it('no path: nothing dims — the shape a roster extra (no projected edge at all) is in', () => {
         const edges = [edge('e1', 'A', 'F')]
-        const { cardIds, edgeKeys } = isolationCone(edges, 'X')
-        expect(cardIds).toEqual(new Set(['X']))
+        const { cardIds, edgeKeys } = pathToFocus(edges, 'X', 'F')
+        expect(cardIds.size).toBe(0)
         expect(edgeKeys.size).toBe(0)
     })
 
-    it('is cycle-safe: a directed loop among the drawn cards terminates', () => {
+    it('is undirected: a hop drawn TOWARD the hovered card still counts', () => {
+        const edges = [edge('e1', 'F', 'A')]   // F -> A, but we hover A looking for a path to F
+        const { cardIds, edgeKeys } = pathToFocus(edges, 'A', 'F')
+        expect(cardIds).toEqual(new Set(['A', 'F']))
+        expect(edgeKeys).toEqual(new Set(['e1']))
+    })
+
+    it('hovering the focus itself finds nothing to highlight', () => {
+        const edges = [edge('e1', 'A', 'F')]
+        const { cardIds, edgeKeys } = pathToFocus(edges, 'F', 'F')
+        expect(cardIds.size).toBe(0)
+        expect(edgeKeys.size).toBe(0)
+    })
+
+    it('is cycle-safe: a loop among the projected edges terminates and still finds the path', () => {
+        // A cycle A-B-C-A, with the only route to the focus running through A.
         const edges = [edge('e1', 'A', 'B'), edge('e2', 'B', 'C'), edge('e3', 'C', 'A'), edge('e4', 'A', 'F')]
-        const { cardIds, edgeKeys } = isolationCone(edges, 'B')
-        expect(cardIds).toEqual(new Set(['A', 'B', 'C', 'F']))
-        expect(edgeKeys).toEqual(new Set(['e1', 'e2', 'e3', 'e4']))
-    })
-
-    it('isolating the FOCUS itself lights its own cone rather than nothing', () => {
-        // The old path-to-focus answered "nothing" here, which left the
-        // one card the whole picture is about with no way to say what it
-        // touches.
-        const edges = [edge('e1', 'A', 'F'), edge('e2', 'F', 'B'), edge('e3', 'X', 'Y')]
-        const { cardIds } = isolationCone(edges, 'F')
-        expect(cardIds).toEqual(new Set(['F', 'A', 'B']))
-    })
-
-    it('reaches a ROW inside a card, not only top-level cards', () => {
-        // Rows are cards with their own ids; nothing about the walk knows
-        // or cares which of them sit inside a frame.
-        const edges = [edge('e1', 'n:col_a', 'n:col_b'), edge('e2', 'n:col_b', 'fr:table')]
-        expect(isolationCone(edges, 'n:col_a').cardIds)
-            .toEqual(new Set(['n:col_a', 'n:col_b', 'fr:table']))
-    })
-
-    it('is bounded by the BOARD: it walks the drawn edges once', () => {
-        // 400 drawn wires in one chain — the cone is computed in a single
-        // pass over them, whatever the model behind them weighs.
-        const edges = Array.from({ length: 400 }, (_, i) => edge(`e${i}`, `c${i}`, `c${i + 1}`))
-        const { cardIds, edgeKeys } = isolationCone(edges, 'c0')
-        expect(cardIds.size).toBe(401)
-        expect(edgeKeys.size).toBe(400)
+        const { cardIds, edgeKeys } = pathToFocus(edges, 'B', 'F')
+        expect(cardIds).toEqual(new Set(['B', 'A', 'F']))
+        expect(edgeKeys).toEqual(new Set(['e1', 'e4']))
     })
 })
 
@@ -2442,435 +2349,5 @@ describe('labelFitsRun — the badge and the wire agree', () => {
         const t = g.cards.find(c => c.id === bundle.target)!
         expect(bundle.labelVisible).toBe(labelFitsRun(s.x + s.w, s.y + s.h / 2, t.x, t.y + t.h / 2))
         expect(bundle.labelVisible).toBe(true)
-    })
-})
-
-// ── T18 R1–R4: THE FLATTEN, on the user's GOLD estate ────────────────
-
-/**
- * The estate the strategy was locked for.
- *
- *   Snowflake ⊃ SILVER ⊃ stg_orders                ← the focus
- *   Snowflake ⊃ GOLD (8 tables, 7 on this lineage):
- *       fact_orders, dim_customer        hop 1
- *       agg_daily, fact_returns,
- *       dim_product, fact_ship           hop 2
- *       dim_date                         hop 3
- *   Tableau ⊃ dash                       hop 3
- *
- * Every GOLD member declares a childCount, which is what makes it a
- * TABLE rather than a column: a hop-carrier that holds things is drawn at
- * its own grain.
- */
-function goldEstate(): LensSubgraph<LensWalkNode> {
-    return subgraph({
-        focus: 'F',
-        nodes: [
-            wnode('SNOW', 'dataPlatform', 'Snowflake', { childCount: 14 }),
-            wnode('SILVER', 'container', 'SILVER', { childCount: 9 }),
-            wnode('F', 'dataset', 'stg_orders', { childCount: 12 }),
-            wnode('GOLD', 'container', 'GOLD', { childCount: 8 }),
-            wnode('fact_orders', 'dataset', 'fact_orders', { childCount: 14 }),
-            wnode('dim_customer', 'dataset', 'dim_customer', { childCount: 22 }),
-            wnode('agg_daily', 'dataset', 'agg_daily_sales', { childCount: 6 }),
-            wnode('fact_returns', 'dataset', 'fact_returns', { childCount: 11 }),
-            wnode('dim_product', 'dataset', 'dim_product', { childCount: 18 }),
-            wnode('fact_ship', 'dataset', 'fact_shipments', { childCount: 9 }),
-            wnode('dim_date', 'dataset', 'dim_date', { childCount: 5 }),
-            wnode('BI', 'dataPlatform', 'Tableau', { childCount: 3 }),
-            wnode('dash', 'dataset', 'exec_dashboard', { childCount: 7 }),
-        ],
-        contains: [
-            ['SNOW', 'SILVER'], ['SNOW', 'GOLD'], ['SILVER', 'F'],
-            ['GOLD', 'fact_orders'], ['GOLD', 'dim_customer'], ['GOLD', 'agg_daily'],
-            ['GOLD', 'fact_returns'], ['GOLD', 'dim_product'], ['GOLD', 'fact_ship'],
-            ['GOLD', 'dim_date'],
-            ['BI', 'dash'],
-        ],
-        hops: [
-            ['F', 'fact_orders'], ['F', 'dim_customer'],
-            ['fact_orders', 'dim_customer', 'JOINS'],   // one-way peer flow, same hop
-            ['fact_orders', 'agg_daily'], ['dim_customer', 'agg_daily'],
-            ['fact_orders', 'fact_returns'], ['fact_orders', 'dim_product'],
-            ['fact_orders', 'fact_ship'],
-            ['agg_daily', 'fact_returns', 'JOINS'],     // a genuine mutual pair
-            ['fact_returns', 'agg_daily', 'JOINS'],
-            ['dim_product', 'dim_date'],
-            ['agg_daily', 'dash'],
-        ],
-        frontierDown: [{ urn: 'dash', totalCount: 4, nextCursor: null }],
-    })
-}
-
-/**
- * The GOLD estate as a READER reaches it: the focus's own page, then the
- * ⊕ on the tables it lands on, hop by hop. Nothing here is a shortcut —
- * these are exactly the keys the pills mint, which is why a rollup that
- * hid its members' pills would fail this at the first click.
- */
-const goldWalk = (
-    sg: LensSubgraph<LensWalkNode>,
-    over: { drill?: boolean; sticky?: string[] } = {},
-): LensViewState => {
-    const base = initialLensViewState(sg)
-    return {
-        ...base,
-        revealed: new Map([
-            ...base.revealed,
-            [revealKey('out', 'fact_orders'), 1],
-            [revealKey('out', 'agg_daily'), 1],
-            [revealKey('out', 'dim_product'), 1],
-        ]),
-        expandedContainment: over.drill
-            ? new Set([...base.expandedContainment, 'GOLD'])
-            : base.expandedContainment,
-        walkedThrough: new Set(over.sticky ?? []),
-    }
-}
-
-describe('R2: a counterpart container is a ROLLUP until it is drilled', () => {
-    it('stands for its members with honest counts, and draws none of them', () => {
-        const g = layout(goldEstate(), goldWalk(goldEstate()))
-        const gold = cardFor(g, 'GOLD')!
-        expect(gold.rollup).toBe(true)
-        expect(gold.frameId).toBeNull()
-        // "GOLD · 7 on this lineage · of 8" — the model's own children,
-        // and the container's own declared total. Never a guess.
-        expect(gold.contents).toEqual({ onLineage: 7, total: 8 })
-        // Not one of the seven is on the board.
-        for (const member of ['fact_orders', 'dim_customer', 'agg_daily', 'dim_date']) {
-            expect(cardFor(g, member)).toBeUndefined()
-        }
-        // ...and it is not a box either: nothing is nested inside it.
-        expect(g.cards.filter(c => c.frameId === gold.id)).toHaveLength(0)
-    })
-
-    it('says out loud that its hidden members feed each other', () => {
-        const g = layout(goldEstate(), goldWalk(goldEstate()))
-        // Nine hops among the seven GOLD tables: they all project onto the
-        // one rollup card, and a wire that leaves a card and comes back
-        // into it is never drawn.
-        expect(cardFor(g, 'GOLD')!.selfFlows).toBe(9)
-        expect(g.edges.some(e => e.source === e.target)).toBe(false)
-    })
-
-    it('drilling REPLACES the rollup with its members, each in its own hop column', () => {
-        const sg = goldEstate()
-        const g = layout(sg, goldWalk(sg, { drill: true }))
-        expect(cardFor(g, 'GOLD')).toBeUndefined()
-        const bandOf = (u: string) => cardFor(g, u)!.band
-        expect(bandOf('fact_orders')).toBe(1)
-        expect(bandOf('dim_customer')).toBe(1)
-        expect(bandOf('agg_daily')).toBe(2)
-        expect(bandOf('fact_returns')).toBe(2)
-        expect(bandOf('dim_product')).toBe(2)
-        expect(bandOf('fact_ship')).toBe(2)
-        expect(bandOf('dim_date')).toBe(3)
-        // ...and every one of them says where it lives, in text.
-        expect(cardFor(g, 'agg_daily')!.ancestry).toEqual(['Snowflake', 'GOLD'])
-    })
-
-    it('collapsing restores the rollup exactly', () => {
-        const sg = goldEstate()
-        const base = initialLensViewState(sg)
-        const open = layout(sg, goldWalk(sg, { drill: true }))
-        const shutAgain = layout(sg, {
-            ...base,
-            expandedContainment: new Set([...base.expandedContainment, 'GOLD']),
-            collapsedContainment: new Set(['GOLD']),
-        })
-        expect(cardFor(open, 'GOLD')).toBeUndefined()
-        expect(cardFor(shutAgain, 'GOLD')!.rollup).toBe(true)
-        expect(cardFor(shutAgain, 'GOLD')!.contents).toEqual({ onLineage: 7, total: 8 })
-    })
-})
-
-describe('R1/R3: no frame ever encloses a table', () => {
-    it('drilled, the estate draws ZERO frames — nine free-standing cards', () => {
-        const sg = goldEstate()
-        const g = layout(sg, goldWalk(sg, { drill: true }))
-        // Not one card on this board holds another.
-        expect(g.cards.filter(c => c.frameId !== null)).toHaveLength(0)
-        // The ONE frame left anywhere is the focus's own contains-stack,
-        // which encloses nothing but the focus's own contents (R1: it is
-        // deliberately unchanged, and it is not a wrapper around anyone
-        // else's tables).
-        const frames = g.cards.filter(c => c.kind === 'frame')
-        expect(frames.map(c => c.id)).toEqual([`co:${sg.focusUrn}`])
-        // The containers are text: neither GOLD, nor SILVER, nor the
-        // platforms above them are geometry.
-        for (const container of ['GOLD', 'SILVER', 'SNOW', 'BI']) {
-            expect(cardFor(g, container)).toBeUndefined()
-        }
-    })
-
-    it('R4: the outside loops die STRUCTURALLY — every peer flow is an ordinary wire', () => {
-        const sg = goldEstate()
-        const g = layout(sg, goldWalk(sg, { drill: true }))
-        const byId = new Map(g.cards.map(c => [c.id, c]))
-        // An "outside loop" is a wire whose two ends are rows of one
-        // frame: it has to leave the box and come back in. With no box
-        // there is no such wire, and this is what makes that structural
-        // rather than a routing tweak.
-        for (const edge of g.edges) {
-            const s = byId.get(edge.source)!
-            const t = byId.get(edge.target)!
-            expect(s.frameId).toBeNull()
-            expect(t.frameId).toBeNull()
-        }
-        // ...and the wires themselves all survived the flattening: nine
-        // inside GOLD, two out of the focus, one into Tableau.
-        expect(g.edges.reduce((acc, e) => acc + e.count, 0)).toBe(12)
-    })
-
-    it('R4: only the TRUE loop is badged', () => {
-        const sg = goldEstate()
-        const g = layout(sg, goldWalk(sg, { drill: true }))
-        const id = (u: string) => cardFor(g, u)!.id
-        const at = (s: string, t: string) => g.edges.find(e => e.source === id(s) && e.target === id(t))!
-        // `agg_daily_sales ⇄ fact_returns` — two tables of one layer that
-        // genuinely feed each other.
-        expect(at('agg_daily', 'fact_returns').cycleBack).toBe(true)
-        expect(at('fact_returns', 'agg_daily').cycleBack).toBe(true)
-        // `fact_orders → dim_customer` — same hop, one way, ordinary
-        // forward lineage. The old `≤` rule called this a loop.
-        expect(at('fact_orders', 'dim_customer').cycleBack).toBe(false)
-        expect(at('F', 'fact_orders').cycleBack).toBe(false)
-        expect(g.edges.filter(e => e.cycleBack)).toHaveLength(2)
-    })
-
-    it('R1: same-container cards are ADJACENT in their column, with the group gap between groups', () => {
-        const sg = goldEstate()
-        const g = layout(sg, goldWalk(sg, { drill: true }))
-        // Band 3 holds dim_date (GOLD) and dash (Tableau) — two
-        // containers, so the pass has both an adjacency and a boundary to
-        // state.
-        const band3 = g.cards.filter(c => c.band === 3 && c.frameId === null)
-            .sort((a, b) => a.y - b.y)
-        expect(band3.map(c => c.nodeId).sort()).toEqual(['dash', 'dim_date'])
-        // Two containers, so the boundary between them costs the wider
-        // gap — the ONE adjacency treatment, said in whitespace.
-        expect(band3[1].y - (band3[0].y + band3[0].h)).toBe(GROUP_GAP)
-        // Band 2 is four cards of ONE container: normal gaps throughout.
-        const band2 = g.cards.filter(c => c.band === 2 && c.frameId === null)
-            .sort((a, b) => a.y - b.y)
-        expect(band2).toHaveLength(4)
-        for (let i = 1; i < band2.length; i++) {
-            expect(band2[i].y - (band2[i - 1].y + band2[i - 1].h)).toBe(CARD_GAP)
-        }
-    })
-})
-
-describe('R1: a table is a node; a column is one of its rows', () => {
-    it('a hop-carrier that HOLDS things is drawn at its own grain, not folded into its container', () => {
-        const g = layout(goldEstate(), goldWalk(goldEstate()))
-        const sg = goldEstate()
-        const open = layout(sg, goldWalk(sg, { drill: true }))
-        // dim_customer declares 22 columns. It is a table.
-        expect(cardFor(open, 'dim_customer')!.nodeId).toBe('dim_customer')
-        // GOLD holds tables. It is a container, and while it is shut it is
-        // the one card standing for all of them.
-        expect(cardFor(g, 'GOLD')!.rollup).toBe(true)
-    })
-
-    it('a hop-carrier that holds NOTHING is a row of the table that owns it', () => {
-        const sg = subgraph({
-            focus: 'F',
-            nodes: [
-                wnode('SILVER', 'container', 'SILVER', { childCount: 9 }),
-                wnode('T', 'dataset', 'clean_charges', { childCount: 11 }),
-                wnode('c1', 'schemaField', 'charge_id'),
-                wnode('c2', 'schemaField', 'amount'),
-                wnode('F', 'dataset', 'clean_charges_t2', { childCount: 11 }),
-            ],
-            contains: [['SILVER', 'T'], ['T', 'c1'], ['T', 'c2']],
-            hops: [['c1', 'F'], ['c2', 'F']],
-        })
-        const g = layout(sg)
-        const table = cardFor(g, 'T')!
-        expect(table.kind).toBe('frame')
-        expect(table.frameId).toBeNull()
-        expect(cardFor(g, 'c1')!.frameId).toBe(table.id)
-        expect(cardFor(g, 'c2')!.frameId).toBe(table.id)
-        // ...and SILVER, holding exactly one table, is chrome: the table
-        // carries it as a breadcrumb instead.
-        expect(cardFor(g, 'SILVER')).toBeUndefined()
-        expect(table.ancestry).toEqual(['SILVER'])
-    })
-
-    it('a container with ONE unit under it is chrome, never a rollup', () => {
-        const sg = subgraph({
-            focus: 'F',
-            nodes: [
-                wnode('F', 'dataset', 'focus', { childCount: 3 }),
-                wnode('GOLD', 'container', 'GOLD', { childCount: 6 }),
-                wnode('only', 'dataset', 'dim_customer', { childCount: 22 }),
-            ],
-            contains: [['GOLD', 'only']],
-            hops: [['only', 'F']],
-        })
-        const g = layout(sg)
-        expect(cardFor(g, 'GOLD')).toBeUndefined()
-        expect(cardFor(g, 'only')!.band).toBe(-1)
-        expect(cardFor(g, 'only')!.ancestry).toEqual(['GOLD'])
-    })
-
-    it('a level once walked THROUGH stays chrome — a second table never swallows the first', () => {
-        // The never-vanish rule, at container grain: GOLD held one table
-        // when the board was drawn, so it was chrome. A reveal brings a
-        // second, which would make it a rollup — and the card already
-        // drawn would disappear inside it.
-        const sg = subgraph({
-            focus: 'F',
-            nodes: [
-                wnode('F', 'dataset', 'focus', { childCount: 3 }),
-                wnode('GOLD', 'container', 'GOLD', { childCount: 6 }),
-                wnode('a', 'dataset', 'dim_customer', { childCount: 22 }),
-                wnode('b', 'dataset', 'dim_product', { childCount: 18 }),
-            ],
-            contains: [['GOLD', 'a'], ['GOLD', 'b']],
-            hops: [['a', 'F'], ['b', 'F']],
-        })
-        const base = initialLensViewState(sg)
-        const sticky = layout(sg, { ...base, walkedThrough: new Set(['GOLD']) })
-        expect(cardFor(sticky, 'GOLD')).toBeUndefined()
-        expect(cardFor(sticky, 'a')).toBeDefined()
-        expect(cardFor(sticky, 'b')).toBeDefined()
-        // Without the stickiness it would be a rollup — which is right for
-        // a container the reader has never seen opened.
-        expect(cardFor(layout(sg, base), 'GOLD')!.rollup).toBe(true)
-    })
-})
-
-// ── T18 R6: routing at density ───────────────────────────────────────
-
-/** One node with `up` sources and `down` consumers, every one of them its
- *  own table. */
-function hub(up: number, down: number): LensSubgraph<LensWalkNode> {
-    const nodes = [wnode('F', 'dataset', 'hub_events', { childCount: 31 })]
-    const hops: Array<[string, string]> = []
-    for (let i = 0; i < up; i++) {
-        const urn = `u${String(i).padStart(2, '0')}`
-        nodes.push(wnode(urn, 'dataset', `src_${urn}`, { childCount: 4 }))
-        hops.push([urn, 'F'])
-    }
-    for (let i = 0; i < down; i++) {
-        const urn = `d${String(i).padStart(2, '0')}`
-        nodes.push(wnode(urn, 'dataset', `mart_${urn}`, { childCount: 6 }))
-        hops.push(['F', urn])
-    }
-    return subgraph({ focus: 'F', nodes, contains: [], hops })
-}
-
-const revealAll = (sg: LensSubgraph<LensWalkNode>): LensViewState => {
-    const base = initialLensViewState(sg)
-    return {
-        ...base,
-        revealed: new Map([[revealKey('in', 'F'), 20], [revealKey('out', 'F'), 20]]),
-    }
-}
-
-describe('R6: port fan discipline', () => {
-    it('spreads a card\'s wires down its edge — one anchor each, never all on one dot', () => {
-        const sg = hub(6, 4)
-        const g = layout(sg, revealAll(sg))
-        const focus = cardFor(g, 'F')!
-        expect(focus.portsIn).toBe(6)
-        expect(focus.portsOut).toBe(4)
-        const ports = g.edges.filter(e => e.target === focus.id).map(e => e.targetPort).sort((a, b) => a - b)
-        expect(ports).toEqual([0, 1, 2, 3, 4, 5])
-    })
-
-    it('orders the anchors by the FAR end\'s height, so parallel flows never cross', () => {
-        const sg = hub(6, 0)
-        const g = layout(sg, revealAll(sg))
-        const byId = new Map(g.cards.map(c => [c.id, c]))
-        const focus = cardFor(g, 'F')!
-        const incoming = g.edges.filter(e => e.target === focus.id)
-            .sort((a, b) => a.targetPort - b.targetPort)
-        // The topmost source takes the topmost anchor, and so on down.
-        const sourceYs = incoming.map(e => byId.get(e.source)!.y)
-        expect([...sourceYs].sort((a, b) => a - b)).toEqual(sourceYs)
-    })
-
-    it('every anchor is inside the card, evenly spaced, never on a corner', () => {
-        expect(portFraction(0, 1)).toBe(0.5)
-        expect(portFraction(0, 3)).toBeCloseTo(0.25)
-        expect(portFraction(1, 3)).toBeCloseTo(0.5)
-        expect(portFraction(2, 3)).toBeCloseTo(0.75)
-    })
-
-    it('a card nothing wires to carries no anchors at all', () => {
-        const sg = hub(1, 0)
-        const g = layout(sg, revealAll(sg))
-        const source = cardFor(g, 'u00')!
-        expect(source.portsIn).toBe(0)
-        expect(source.portsOut).toBe(1)
-    })
-})
-
-describe('R6: density mode', () => {
-    it('bundles a side past the port budget into ONE trunk carrying the summed weight', () => {
-        const sg = hub(DENSITY_PORTS + 5, 3)
-        const g = layout(sg, revealAll(sg))
-        const focus = cardFor(g, 'F')!
-        // One root, because a trunk has one.
-        expect(focus.portsIn).toBe(1)
-        const bundled = g.edges.filter(e => e.target === focus.id)
-        expect(bundled).toHaveLength(DENSITY_PORTS + 5)
-        expect(bundled.every(e => e.bundled)).toBe(true)
-        expect(bundled.every(e => e.targetPort === 0)).toBe(true)
-        // The trunk says what it stands for exactly once, and honestly.
-        const labels = bundled.filter(e => e.trunkCount != null)
-        expect(labels).toHaveLength(1)
-        expect(labels[0].trunkCount).toBe(DENSITY_PORTS + 5)
-    })
-
-    it('leaves the OTHER side alone — density is per side, not per card', () => {
-        const sg = hub(DENSITY_PORTS + 5, 3)
-        const g = layout(sg, revealAll(sg))
-        const focus = cardFor(g, 'F')!
-        expect(focus.portsOut).toBe(3)
-        expect(g.edges.filter(e => e.source === focus.id).every(e => !e.bundled)).toBe(true)
-    })
-
-    it('draws wire by wire right up to the budget', () => {
-        const sg = hub(DENSITY_PORTS, 0)
-        const g = layout(sg, revealAll(sg))
-        expect(cardFor(g, 'F')!.portsIn).toBe(DENSITY_PORTS)
-        expect(g.edges.some(e => e.bundled)).toBe(false)
-    })
-})
-
-describe('R6: stub suppression is absolute', () => {
-    const everyEndOnTheBoard = (g: { cards: FocusCard[]; edges: FocusEdge[] }) => {
-        const byId = new Map(g.cards.map(c => [c.id, c]))
-        for (const edge of g.edges) {
-            const s = byId.get(edge.source)
-            const t = byId.get(edge.target)
-            expect(s).toBeDefined()
-            expect(t).toBeDefined()
-            // ...and the anchor it names actually exists on that card, or
-            // React Flow would draw it from the origin: the stub.
-            expect(edge.sourcePort).toBeLessThan(s!.portsOut)
-            expect(edge.targetPort).toBeLessThan(t!.portsIn)
-        }
-    }
-
-    it('holds on the GOLD estate, rolled up and drilled', () => {
-        const sg = goldEstate()
-        everyEndOnTheBoard(layout(sg, goldWalk(sg)))
-        everyEndOnTheBoard(layout(sg, goldWalk(sg, { drill: true })))
-    })
-
-    it('holds on a bundled hub', () => {
-        const sg = hub(DENSITY_PORTS + 10, DENSITY_PORTS + 4)
-        everyEndOnTheBoard(layout(sg, revealAll(sg)))
-    })
-
-    it('holds when a direction filter has removed half the board', () => {
-        const sg = goldEstate()
-        everyEndOnTheBoard(layout(sg, goldWalk(sg, { drill: true }), { directionFilter: 'in' }))
-        everyEndOnTheBoard(layout(sg, goldWalk(sg, { drill: true }), { directionFilter: 'out' }))
     })
 })

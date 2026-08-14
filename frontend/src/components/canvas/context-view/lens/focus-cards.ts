@@ -115,34 +115,8 @@ export function labelFitsRun(
   return Math.hypot(targetX - sourceX, targetY - sourceY) >= LABEL_MIN_RUN
 }
 
-/** Above this many wires on ONE side of ONE card, spreading them out
- *  stops helping: the card is not tall enough to keep them apart, so they
- *  read as a wedge whichever way they are anchored. That side bundles
- *  into a trunk instead, and the per-wire detail moves to isolation
- *  (hover or click a card and its own cone un-bundles). */
-export const DENSITY_PORTS = 20
-
-/** Where wire `index` of `count` touches a card's edge, as a fraction of
- *  the card's height. ONE formula, so the LAYOUT (which decides where a
- *  ×N badge may sit) and the VIEW (which renders the anchors themselves)
- *  cannot put a badge off its own wire. Evenly spaced, and never on the
- *  card's corners. */
-export const portFraction = (index: number, count: number): number =>
-  (index + 1) / (Math.max(1, count) + 1)
-
 export const BAND_GAP = 130
 export const CARD_GAP = 10
-/** The ONE adjacency treatment: cards that live in the same container sit
- *  a normal gap apart, and a CHANGE of container costs this instead.
- *
- *  The board flattened (T18), so `GOLD`'s seven tables and `SILVER`'s two
- *  are nine free-standing cards in the same columns, and "which of these
- *  live together" stopped being visible the moment the boxes went. It is
- *  said with WHITESPACE rather than another border: a box around a group
- *  is the chrome the flatten deleted, and a second one would be the same
- *  ~90px mistake with a lighter stroke. Every card keeps its own
- *  breadcrumb, so the grouping is a cue, never the only statement. */
-export const GROUP_GAP = 28
 /** Indent for cards hanging below the focal in its own band. */
 export const NEST_INDENT = 16
 /** Vertical gap between the focal card and anything stacked under it. */
@@ -383,26 +357,6 @@ export interface FocusCard {
    *  the focal above it. Two coloured dots that no line ever reaches
    *  read as a connection the reader then goes looking for. */
   wired: boolean
-  /** This card stands for MEMBER UNITS it does not draw — a container
-   *  counterpart, collapsed. Its chevron does not "show what is inside"
-   *  in the frame sense: it REPLACES this card with those members, each
-   *  in the hop column its own hop dictates. `contents` carries the
-   *  honest pair ("7 on this lineage · of 8"). */
-  rollup: boolean
-  /** Hops whose two ends land on THIS ONE card once the picture is
-   *  projected — a collapsed container whose members feed each other, or
-   *  an entity the data source wired to itself. Drawn as a compact badge
-   *  rather than routed: a wire that leaves a card and comes straight
-   *  back into it is the arc that reads as a broken arrow. 0 for almost
-   *  every card. */
-  selfFlows: number
-  /** How many distinct wires land on / leave this card, so the view can
-   *  spread that many anchor points evenly down its edge instead of
-   *  stacking every one of them on a single dot. 0 where nothing does,
-   *  and 1 where the side BUNDLED — a trunk has one root by definition
-   *  (see `FocusEdge.bundled`). */
-  portsIn: number
-  portsOut: number
   /** The walk reached this card and NOTHING further exists beyond it —
    *  a claim about the data source, made only once the walk says so. */
   deadEnd: boolean
@@ -427,36 +381,10 @@ export interface FocusEdge {
   count: number
   edgeTypeNorm: string
   dimmed: boolean
-  /** The lineage genuinely LOOPS through this wire: it runs strictly
-   *  backwards in the picture's own hop numbering, or it sits on a
-   *  directed cycle over the drawn cards. Drawn with a cycle badge
-   *  rather than silently overlapping a forward wire.
-   *
-   *  STRICTLY backwards, since T18: the old `≤` stamped every wire
-   *  between two cards at the SAME hop, which is what an ordinary peer
-   *  flow between two tables of one container is. Flattening the board
-   *  turned that from a rare shape into the common one, and a loop badge
-   *  on `fact_orders → dim_customer` is a claim about the data that is
-   *  simply false. */
+  /** This hop runs BACKWARDS in the picture's own hop numbering, so it
+   *  closes a loop. Drawn with a cycle badge rather than silently
+   *  overlapping a forward wire. */
   cycleBack: boolean
-  /** Where this wire attaches at each end: an index into the source
-   *  card's `portsOut` / the target card's `portsIn`, counted from the
-   *  top. A node with forty incoming wires spreads them down its edge
-   *  instead of converging every one of them on one dot, and the indices
-   *  are assigned in the far endpoint's vertical order so adjacent
-   *  parallel flows never cross each other. */
-  sourcePort: number
-  targetPort: number
-  /** One end of this wire is too busy to draw wire-by-wire, so it is
-   *  rendered as part of a TRUNK: a long shared run out of the dense
-   *  card that splits near the far end. R5 isolation un-bundles whatever
-   *  cone the reader is inspecting. */
-  bundled: boolean
-  /** This wire is the one the TRUNK's label rides on — the raw hops the
-   *  whole bundle stands for, said once where the trunk is thickest.
-   *  Null on every other wire, bundled or not: forty copies of one number
-   *  is not forty facts. */
-  trunkCount: number | null
   /** This bundle's ×N badge has something to say AND somewhere to sit:
    *  more than one raw hop (or a cycle to mark), a drawn line long
    *  enough to hold a pill, and no other badge already occupying that
@@ -619,20 +547,12 @@ export function layoutBands(cards: FocusCard[]) {
       }
       continue
     }
-    // Cards that live in the same container are ADJACENT (the builder
-    // ordered them so) and sit a normal gap apart; a change of container
-    // costs the wider one. That whitespace is the whole grouping cue —
-    // see GROUP_GAP.
-    const gapBefore = (i: number): number =>
-      i === 0 ? 0 : list[i].parentId === list[i - 1].parentId ? CARD_GAP : GROUP_GAP
-    const total = list.reduce((acc, c, i) => acc + c.h + gapBefore(i), 0)
+    const total = list.reduce((acc, c) => acc + c.h, 0) + CARD_GAP * Math.max(0, list.length - 1)
     let y = -total / 2
-    for (let i = 0; i < list.length; i++) {
-      const c = list[i]
-      y += gapBefore(i)
+    for (const c of list) {
       c.x = x
       c.y = y
-      y += c.h
+      y += c.h + CARD_GAP
     }
   }
 

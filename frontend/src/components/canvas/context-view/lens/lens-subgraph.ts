@@ -437,19 +437,11 @@ export interface ProjectedLensEdge {
  * Each raw hop (a -> b) is drawn between the nearest VISIBLE ancestor of `a`
  * and of `b`, so the SAME model renders as `Domain -> Domain` bundles when
  * collapsed and as `column -> column` when fully expanded — the "level"
- * you're looking at is nothing but how far the tree is open. Bundling is
- * keyed by the DIRECTIONAL pair `${s} ${t}` — A->B and B->A are always two
- * bundles, never canonicalized into one.
- *
- * A hop whose two ends roll up to the SAME visible node comes back as a
- * bundle with `sourceUrn === targetUrn`. It used to be dropped here, which
- * was fine while every container was a box — the members were drawn inside
- * it and their wires with them. Flattened (T18), a collapsed container
- * stands for members that are NOT drawn, so the hops among them are the
- * only evidence that it feeds itself, and dropping them silently deleted
- * `GOLD`'s whole internal fabric from the picture. The caller decides what
- * to do with one; it is never ROUTED as a wire (a line that leaves a card
- * and comes straight back into it reads as a broken arrow), it is counted.
+ * you're looking at is nothing but how far the tree is open. Hops internal to
+ * a collapsed container (both endpoints roll up to the same visible node) are
+ * hidden rather than drawn as self-loops. Bundling is keyed by the
+ * DIRECTIONAL pair `${s} ${t}` — A->B and B->A are always two bundles, never
+ * canonicalized into one.
  *
  * `population` is the walk-model's currently-known member set (or a subset
  * of it): only a hop with BOTH endpoints inside it is drawn at all. A hop
@@ -485,7 +477,7 @@ export function projectLensEdges<N extends LensNodeLike>(
         if (internalTo?.has(hop.sourceUrn) && internalTo.has(hop.targetUrn)) continue
         const s = nearestVisible(hop.sourceUrn)
         const t = nearestVisible(hop.targetUrn)
-        if (!s || !t) continue
+        if (!s || !t || s === t) continue   // internal to a collapsed container
         const hopType = hop.edgeType ?? ''
         const key = `${s} ${t}`
         const existing = bundles.get(key)
