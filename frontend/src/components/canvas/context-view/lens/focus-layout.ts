@@ -646,10 +646,22 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // ── 3. VISIBILITY ────────────────────────────────────────────────
 
     // OPEN BY DEFAULT, which is what flat means: nothing stands in for
-    // anything unless it says so. Exactly two things are shut — a ROLLUP
-    // (it stands for its members, by definition) and whatever the reader
-    // shut by hand.
-    const expanded = new Set<string>(population)
+    // anything unless it says so. Three exceptions — a ROLLUP (it stands
+    // for its members, by definition), whatever the reader shut by hand,
+    // and the CONTAINS-STACK.
+    //
+    // The stack is the focus's own contents, BROWSED: a list you open a
+    // level of when you want it, not a picture laid out for you. Opening
+    // it by itself all the way down turned a platform focus's three
+    // containers into three nested boxes on sight — which is the chrome
+    // this whole task deleted, arriving through the one door R1 says to
+    // leave exactly as it was.
+    const expanded = new Set<string>()
+    for (const urn of population) {
+        if (urn !== sg.focusUrn && focusSubtree.has(urn)) continue
+        expanded.add(urn)
+    }
+    for (const urn of view.expandedContainment) expanded.add(urn)
     for (const urn of rollups) expanded.delete(urn)
     for (const urn of view.collapsedContainment) expanded.delete(urn)
 
