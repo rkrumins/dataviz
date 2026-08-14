@@ -919,6 +919,93 @@ const walkWideHub = (): WalkFixture => {
   }
 }
 
+/**
+ * THE GRAIN SEAM (Task 22, R1) — both failure directions in one estate.
+ *
+ *   Snowflake ⊃ REPORTING (chrome, demoted) ⊃ rpt_customer_360 (the focus)
+ *     ⊃ full_name, signup_date
+ *   GOLD ⊃ crm_snapshot_01..06        → six TABLE-grain producers of
+ *                                        full_name (source = the whole
+ *                                        table; which of ITS OWN columns
+ *                                        fed it is unfetched) — the
+ *                                        OVER-claim (15.41.27): isolating
+ *                                        full_name used to light these
+ *                                        with the same certainty as a
+ *                                        column-true wire.
+ *   crm_snapshot_01 also feeds crm_snapshot_02 directly — two rows of
+ *     ONE frame, wired to each other: the R2 in-frame-routing case.
+ *   BILLING ⊃ billing_source ⊃ full_name_src → full_name: a genuine
+ *     COLUMN-to-COLUMN producer, for contrast — the seam must never
+ *     touch this wire.
+ *   full_name → transactions (IoT): fine both ways.
+ *   Marketing → IoT: a PLATFORM-grain hop landing on IoT's own frame,
+ *     nothing to do with any specific row inside it — the UNDER-claim
+ *     (19.01.05/19.02.33): isolating the "transactions" ROW used to go
+ *     dark toward Marketing, because a row's cone never asked what its
+ *     OWN containing frame carries.
+ *
+ * `crm_snapshot_01` offers a real ⊕ (frontierUp) — the seam's "trace
+ * columns" has something to click; `crm_snapshot_02..06` are drained —
+ * the seam states, honestly, that the source cannot answer finer.
+ */
+const walkGrainSeamModel = () => {
+  const nodes = [
+    wnode('SNOW', 'PLATFORM', 'Snowflake', { childCount: 10 }),
+    wnode('REPORTING', 'CONTAINER', 'REPORTING', { childCount: 2 }),
+    wnode('RPT', 'dataset', 'rpt_customer_360', { childCount: 5, description: 'Curated customer profile' }),
+    wnode('FN', 'schemaField', 'full_name'),
+    wnode('SD', 'schemaField', 'signup_date'),
+    wnode('GOLD', 'CONTAINER', 'GOLD', { childCount: 8 }),
+    ...['01', '02', '03', '04', '05', '06'].map(n =>
+      wnode(`G${n}`, 'dataset', `crm_snapshot_${n}`, { childCount: 10 })),
+    wnode('BILL', 'CONTAINER', 'BILLING', { childCount: 3 }),
+    wnode('BSRC', 'dataset', 'billing_source', { childCount: 6 }),
+    wnode('BFN', 'schemaField', 'full_name_src'),
+    wnode('IOT', 'PLATFORM', 'IoT', { childCount: 4 }),
+    wnode('TXN', 'dataset', 'transactions'),
+    wnode('MKT', 'PLATFORM', 'Marketing', { childCount: 12 }),
+  ]
+  return walkModel('RPT', {
+    nodes,
+    containmentEdges: [
+      holds('SNOW', 'REPORTING'), holds('REPORTING', 'RPT'), holds('RPT', 'FN'), holds('RPT', 'SD'),
+      ...['01', '02', '03', '04', '05', '06'].map(n => holds('GOLD', `G${n}`)),
+      holds('BILL', 'BSRC'), holds('BSRC', 'BFN'),
+      holds('IOT', 'TXN'),
+    ],
+    lineageEdges: [
+      hop('G01', 'FN'), hop('G01', 'FN', 'JOINS'),
+      hop('G02', 'FN'), hop('G02', 'FN', 'JOINS'),
+      hop('G03', 'FN'), hop('G04', 'FN'), hop('G05', 'FN'), hop('G06', 'FN'),
+      // R2 — two rows of the SAME frame (GOLD), wired to each other.
+      hop('G01', 'G02', 'FEEDS'),
+      // The genuine column-to-column contrast the seam must never touch.
+      hop('BFN', 'FN'),
+      hop('FN', 'TXN'),
+      // The under-claim: lands on IoT's own frame, not on any row of it.
+      hop('MKT', 'IOT'),
+    ],
+    upstreamUrns: new Set(['GOLD', 'G01', 'G02', 'G03', 'G04', 'G05', 'G06', 'BILL', 'BSRC', 'BFN']),
+    downstreamUrns: new Set(['IOT', 'TXN']),
+    frontierUp: [frontier('G01', 3)],
+  })
+}
+
+/** OVER-claim: isolating the fine column lights six table-grain producers. */
+const walkGrainSeam = (): WalkFixture => ({
+  title: 'The grain seam — table-grain producers land honestly, never as column-true',
+  model: walkGrainSeamModel(),
+  script: base => scripted(base, { reveal: [['in:IOT', 1]] }),
+  isolatedId: 'n:FN',
+})
+
+/** UNDER-claim: isolating the row must not go dark toward Marketing. */
+const walkGrainSeamUnderclaim = (): WalkFixture => ({
+  ...walkGrainSeam(),
+  title: 'The grain seam cuts both ways — the row\'s own frame carries the connection',
+  isolatedId: 'n:TXN',
+})
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkCollaterals: walkCollaterals(),
   walkIsolatedCone: walkIsolatedCone(),
@@ -939,4 +1026,6 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkPlatformFocus: walkPlatformFocus(),
   walkLongChain: walkLongChain(),
   walkWideHub: walkWideHub(),
+  walkGrainSeam: walkGrainSeam(),
+  walkGrainSeamUnderclaim: walkGrainSeamUnderclaim(),
 }

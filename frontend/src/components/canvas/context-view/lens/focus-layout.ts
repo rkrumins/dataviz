@@ -1144,6 +1144,24 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             : childrenAll.get(urn)?.total ?? null
     }
 
+    /**
+     * THE GRAIN TEST (T22, R1) — does this entity hold finer things: known
+     * children in the model, or a declared/roster total promising more?
+     * The same signal R7's `isFrame` reads (`heldTotal`), asked of a hop's
+     * own endpoint rather than of a card's contents.
+     *
+     * A raw hop landing directly ON such an entity — rather than on one of
+     * its own finer children — is coarser than the finest grain the model
+     * could show for it: a table declaring columns it never named in THIS
+     * hop is table-grain regardless of whether the table happens to be
+     * drawn open or compact. Structural, never type-based, on purpose: a
+     * source that never reports anything finer than "table" anywhere in
+     * the walk has nothing coarser to contrast against, and nothing here
+     * lights until it does.
+     */
+    const holdsThings = (urn: string): boolean =>
+        (nodeOf(urn)?.children.length ?? 0) > 0 || (heldTotal(urn) ?? 0) > 0
+
     const contentsOf = (urn: string): { onLineage: number; total: number | null } | null => {
         const children = nodeOf(urn)?.children ?? []
         if (children.length === 0) return null
@@ -1594,10 +1612,17 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const id = `e:${source}>${target}`
         const existing = byPair.get(id)
         const norm = (bundle.edgeTypeNorm || '').toUpperCase()
+        // THE GRAIN TEST, asked of the bundle's OWN (pre-second-rollup)
+        // endpoints — see `holdsThings`. Asked here, not after `landingUrn`,
+        // so an off-window ROW rolled up to its frame (T19: the same
+        // grain, just scrolled past) is judged by what IT holds, never by
+        // what the frame it lands on holds.
+        const bundleCoarse = holdsThings(bundle.sourceUrn) || holdsThings(bundle.targetUrn)
         if (existing) {
             existing.count += bundle.weight
             if (existing.edgeTypeNorm !== norm) existing.edgeTypeNorm = ''
             existing.cycleBack = existing.cycleBack || runsBackwards(bundle)
+            existing.grainCoarse = existing.grainCoarse || bundleCoarse
             continue
         }
         byPair.set(id, {
@@ -1615,9 +1640,39 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             // geometry — and there is no geometry yet.
             cycleAnchor: false,
             labelVisible: false,
+            labelT: 0.5,
+            grainCoarse: bundleCoarse,
+            // Filled in just below, once every card's `frameId` is fixed.
+            sameAncestorFrame: null,
         })
     }
     const edges: FocusEdge[] = [...byPair.values()]
+
+    /**
+     * IN-FRAME ROUTING (T22, R2) — the nearest drawn ancestor frame BOTH
+     * of a wire's cards sit under, so the view can route it INSIDE that
+     * frame's own bounds instead of the ordinary bezier, which has no
+     * notion of the box it is drawn over and can bow past its border —
+     * the reported out-and-back exterior arc with arrowheads piling up at
+     * the frame's edge.
+     *
+     * Nearest-first up EACH card's own `frameId` chain, so two cards two
+     * levels apart still find the SHARED level rather than only a match at
+     * the very top.
+     */
+    const frameChain = (cardId: string): string[] => {
+        const chain: string[] = []
+        let host = byId.get(cardId)?.frameId ?? null
+        let guard = 0
+        while (host && guard++ < 32) { chain.push(host); host = byId.get(host)?.frameId ?? null }
+        return chain
+    }
+    for (const edge of edges) {
+        const targetChain = new Set(frameChain(edge.target))
+        for (const host of frameChain(edge.source)) {
+            if (targetChain.has(host)) { edge.sameAncestorFrame = host; break }
+        }
+    }
 
     // THE OTHER HALF OF R4: a wire whose two ends can reach each other
     // over the DRAWN board is on a directed loop, whatever the hop
@@ -1683,11 +1738,22 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // as a drift of pills with no visible owner.
     //
     // Measured between the ports the view actually anchors to (source's
-    // right edge, target's left) and at the straight-line midpoint, which
-    // is where a shallow bezier puts its label to within a few pixels.
-    // A cycle badge is not decided here — it is decided by `cycleBack`
-    // and `cycleAnchor` above, and gated in the view by the same
-    // `labelFitsRun` this uses.
+    // right edge, target's left) and, first, at the straight-line
+    // midpoint, which is where a shallow bezier puts its label to within a
+    // few pixels. A cycle badge is not decided here — it is decided by
+    // `cycleBack` and `cycleAnchor` above, and gated in the view by the
+    // same `labelFitsRun` this uses.
+    //
+    // COLLISION-AWARE PLACEMENT (T22, R3): the midpoint is not the only
+    // spot a badge may sit. Two adjacent rows of one frame feeding the
+    // same port draw two near-parallel wires whose midpoints land within a
+    // badge's own width of each other — reported live as a ×N stacked
+    // under a crossing with no arrow legible under it. Rather than simply
+    // dropping the second badge (the OLD behaviour: silent, first-come-
+    // first-served), a few more points along the SAME wire are tried
+    // before giving up — still between this wire's own two ports, never
+    // borrowed from another edge's geometry.
+    const LABEL_CANDIDATES = [0.5, 0.35, 0.65, 0.2, 0.8]
     const placed: Array<{ x: number; y: number }> = []
     for (const edge of edges) {
         if (edge.count <= 1) continue
@@ -1699,11 +1765,18 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const tx = t.x
         const ty = t.y + t.h / 2
         if (!labelFitsRun(sx, sy, tx, ty)) continue
-        const x = (sx + tx) / 2
-        const y = (sy + ty) / 2
-        if (placed.some(p => Math.abs(p.x - x) < LABEL_W && Math.abs(p.y - y) < LABEL_H)) continue
-        placed.push({ x, y })
+        let slot: { x: number; y: number; t: number } | null = null
+        for (const frac of LABEL_CANDIDATES) {
+            const x = sx + (tx - sx) * frac
+            const y = sy + (ty - sy) * frac
+            if (placed.some(p => Math.abs(p.x - x) < LABEL_W && Math.abs(p.y - y) < LABEL_H)) continue
+            slot = { x, y, t: frac }
+            break
+        }
+        if (!slot) continue
+        placed.push({ x: slot.x, y: slot.y })
         edge.labelVisible = true
+        edge.labelT = slot.t
     }
 
     // Band headers: how many cards a column holds, and how many raw hops
@@ -1794,6 +1867,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 }
 
 // ── isolation cone ───────────────────────────────────────────────────
+
+/** The graded distance a SEAM entry (T22, R1b) reports — always "further"
+ *  than an adjacent wire (`hops <= 1`), because a hop pulled in from an
+ *  ancestor's own bundle is exactly that: further, and less certain, than
+ *  anything the anchor is a direct endpoint of. */
+const SEAM_HOP_DEPTH = 2
 
 /** What one element's visible lineage covers — the answer a hover or a
  *  click asks for, computed over the DRAWN board and nothing else. */
@@ -1907,6 +1986,30 @@ export function isolationCone(
             const known = hops.get(id)
             if (known === undefined || depth < known) hops.set(id, depth)
         }
+    }
+
+    // THE SEAM CUTS BOTH WAYS (T22, R1b — the under-claim). A ROW's own
+    // walk above can come back with nothing simply because the coarse hop
+    // it participates in was reported against its CONTAINING FRAME rather
+    // than against the row itself — the model cannot say which of a
+    // frame's rows a table-grain hop "really" belongs to, so the honest
+    // answer is to show it, seamed, rather than let the row read as
+    // unconnected. Walks the ANCHOR's OWN ancestor chain only, pulling in
+    // each ancestor's own DIRECT coarse bundles — never what THOSE bundles
+    // connect onward to, which would turn one row's cone into its whole
+    // platform's. A frame anchor needs none of this: its own bundles are
+    // already in `seeds`/`graph.edges` via the ordinary walk above.
+    let seamHost = cardById.get(anchorId)?.frameId ?? null
+    let seamGuard = 0
+    while (seamHost && seamGuard++ < 32) {
+        for (const e of graph.edges) {
+            if (!e.grainCoarse || (e.source !== seamHost && e.target !== seamHost)) continue
+            edgeIds.add(e.id)
+            const far = e.source === seamHost ? e.target : e.source
+            if (!hops.has(seamHost)) hops.set(seamHost, SEAM_HOP_DEPTH)
+            if (!hops.has(far)) hops.set(far, SEAM_HOP_DEPTH)
+        }
+        seamHost = cardById.get(seamHost)?.frameId ?? null
     }
 
     if (edgeIds.size === 0) return null

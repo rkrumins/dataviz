@@ -2002,7 +2002,10 @@ describe('focus-layout — direction filter (view-side; presentation, not data)'
 
 describe('focus-layout — isolationCone (what one element\'s lineage covers)', () => {
     const edge = (id: string, source: string, target: string): FocusEdge =>
-        ({ id, source, target, count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false, cycleAnchor: false, labelVisible: false })
+        ({
+            id, source, target, count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false, cycleAnchor: false, labelVisible: false,
+            grainCoarse: false, sameAncestorFrame: null, labelT: 0.5,
+        })
     const card = (id: string, frameId: string | null = null): FocusCard =>
         ({ ...({} as FocusCard), id, nodeId: id, frameId, kind: 'entity' })
     const board = (cards: FocusCard[], edges: FocusEdge[]) => ({ cards, edges })
@@ -2195,6 +2198,266 @@ describe('focus-layout — isolationCone (what one element\'s lineage covers)', 
         expect(cone.edgeIds.size).toBe(g.edges.length)
     })
 })
+
+// ── the grain seam (Task 22, R1/R2/R3) ───────────────────────────────
+//
+// REPRODUCE-FIRST. Both failure directions the user reported live
+// (2026-08-14): a cone presenting TABLE-grain knowledge as column-grain
+// FACT (over-claim, 15.41.27), and its mirror — a row's cone going DARK
+// through a coarse-landed hop its own entity participates in
+// (under-claim, 19.01.05/19.02.33).
+
+describe('focus-layout — the grain seam (R1)', () => {
+    /** A container T (declares childCount, so it "holds things") feeds a
+     *  leaf column `fc` of the focus directly — table-grain on the
+     *  SOURCE side, column-true on the target. A plain leaf column `sc`
+     *  feeds the SAME target, for contrast. */
+    const overClaimShape = () => subgraph({
+        focus: 'F',
+        nodes: [
+            wnode('T', 'dataset', 'gold_table', { childCount: 12 }),
+            wnode('SRC', 'dataset', 'clean_table', { childCount: 3 }),
+            wnode('sc', 'schemaField', 'clean_col'),
+            wnode('F', 'dataset', 'rpt', { childCount: 2 }),
+            wnode('fc', 'schemaField', 'full_name'),
+        ],
+        contains: [['SRC', 'sc'], ['F', 'fc']],
+        // T's own hop names the WHOLE TABLE, never one of its columns —
+        // that is what makes it coarse; sc's hop names a leaf, same as
+        // the target.
+        hops: [['T', 'fc'], ['sc', 'fc']],
+    })
+
+    it('R1 — a hop whose own endpoint HOLDS THINGS is coarse, never column-certain', () => {
+        const g = layout(overClaimShape())
+        const coarse = g.edges.find(e => e.source === cardFor(g, 'T')!.id)!
+        const fine = g.edges.find(e => e.source === cardFor(g, 'sc')!.id)!
+        expect(coarse.grainCoarse).toBe(true)
+        expect(fine.grainCoarse).toBe(false)
+    })
+
+    it('R1 — an off-window row rolled up to its OWN frame stays column-certain (T19\'s rule, unbroken)', () => {
+        // The exact `wideEstate` shape from "every edge and every label
+        // has both its ends on the board": a row scrolled past rolls up
+        // to the card that IS drawn, and T19 already ruled that this is
+        // the SAME grain, just scrolled past — never coarse.
+        const cols = Array.from({ length: 14 }, (_, i) => `c${String(i).padStart(2, '0')}`)
+        const nodes = [
+            wnode('T1', 'dataset', 'int_clean_orders_t1', { childCount: 40 }),
+            wnode('F', 'dataset', 'int_clean_orders_t2', { childCount: 40 }),
+        ]
+        const contains: Array<[string, string]> = []
+        const hops: Array<[string, string, string]> = []
+        for (const c of cols) {
+            nodes.push(wnode(`t1:${c}`, 'schemaField', c), wnode(`f:${c}`, 'schemaField', c))
+            contains.push(['T1', `t1:${c}`], ['F', `f:${c}`])
+            hops.push([`t1:${c}`, `f:${c}`, 'TRANSFORMS'])
+        }
+        const sg = subgraph({ focus: 'F', nodes, hops, contains })
+        const base = initialLensViewState(sg)
+        const g = layout(sg, { ...base, frameOffsets: new Map([['T1', 9], ['F', 9]]) })
+        expect(g.edges.length).toBeGreaterThan(0)
+        for (const e of g.edges) expect(e.grainCoarse).toBe(false)
+    })
+
+    it('R1b — a ROW\'s cone traverses a coarse hop landed on its OWN containing frame (the under-claim)', () => {
+        const cardX = (id: string, frameId: string | null = null): FocusCard =>
+            ({ ...({} as FocusCard), id, nodeId: id, frameId, kind: frameId ? 'entity' : 'frame' })
+        const edgeX = (id: string, source: string, target: string, grainCoarse = false): FocusEdge =>
+            ({
+                id, source, target, count: 1, edgeTypeNorm: '', dimmed: false,
+                cycleBack: false, cycleAnchor: false, labelVisible: false,
+                grainCoarse, sameAncestorFrame: null, labelT: 0.5,
+            })
+        // MKT → IOT lands on IoT's OWN frame — nothing to do with TXN,
+        // one of IoT's rows, specifically.
+        const cards = [cardX('MKT'), cardX('IOT'), cardX('TXN', 'IOT')]
+        const edges = [edgeX('e1', 'MKT', 'IOT', true)]
+        // BEFORE the fix this is null (TXN carries no edge of its own).
+        const cone = isolationCone({ cards, edges }, 'TXN')
+        expect(cone).not.toBeNull()
+        expect(cone!.cardIds.has('MKT')).toBe(true)
+        expect(cone!.cardIds.has('IOT')).toBe(true)
+        expect(cone!.edgeIds.has('e1')).toBe(true)
+    })
+
+    it('R1b — a row with genuinely nothing (no edge of its own, no coarse ancestor edge) still isolates nothing', () => {
+        const cardX = (id: string, frameId: string | null = null): FocusCard =>
+            ({ ...({} as FocusCard), id, nodeId: id, frameId, kind: frameId ? 'entity' : 'frame' })
+        const cards = [cardX('IOT'), cardX('TXN', 'IOT')]
+        expect(isolationCone({ cards, edges: [] }, 'TXN')).toBeNull()
+    })
+
+    it('R1 — the real built board: isolating the focus\'s own column lights the six coarse producers, seamed, alongside the genuine column producer', () => {
+        const sg = walkGrainSeamPure()
+        const g = layout(sg, withReveal(initialLensViewState(sg), 'in:IOT', 1))
+        const fnId = cardFor(g, 'FN')!.id
+        const cone = isolationCone(g, fnId)!
+        const coarseCount = ['G01', 'G02', 'G03', 'G04', 'G05', 'G06']
+            .map(u => g.edges.find(e => e.source === cardFor(g, u)!.id && e.target === fnId)!)
+        for (const e of coarseCount) expect(e.grainCoarse).toBe(true)
+        const fine = g.edges.find(e => e.source === cardFor(g, 'BFN')!.id)!
+        expect(fine.grainCoarse).toBe(false)
+        for (const e of coarseCount) expect(cone.edgeIds.has(e.id)).toBe(true)
+        expect(cone.edgeIds.has(fine.id)).toBe(true)
+    })
+
+    it('R1 — the real built board: isolating the row goes lit toward Marketing, seamed, not dark', () => {
+        const sg = walkGrainSeamPure()
+        const g = layout(sg, withReveal(initialLensViewState(sg), 'in:IOT', 1))
+        const txnId = cardFor(g, 'TXN')!.id
+        const before = isolationCone({ cards: g.cards, edges: g.edges.map(e => ({ ...e, grainCoarse: false })) }, txnId)
+        // Without the seam data, TXN's own wire (from FN) still lights —
+        // proving the fixture is not simply disconnected — but nothing
+        // toward Marketing.
+        expect(before).not.toBeNull()
+        expect(before!.cardIds.has(cardFor(g, 'MKT')!.id)).toBe(false)
+        const cone = isolationCone(g, txnId)!
+        expect(cone.cardIds.has(cardFor(g, 'MKT')!.id)).toBe(true)
+        expect(cone.cardIds.has(cardFor(g, 'IOT')!.id)).toBe(true)
+    })
+})
+
+describe('focus-layout — in-frame routing (R2)', () => {
+    it('two rows of the SAME frame, wired to each other, share it as their routing ancestor', () => {
+        const sg = walkGrainSeamPure()
+        const g = layout(sg, withReveal(initialLensViewState(sg), 'in:IOT', 1))
+        const g01 = cardFor(g, 'G01')!
+        const g02 = cardFor(g, 'G02')!
+        const wire = g.edges.find(e => e.source === g01.id && e.target === g02.id)!
+        expect(wire.sameAncestorFrame).not.toBeNull()
+        const ancestor = g.cards.find(c => c.id === wire.sameAncestorFrame)!
+        expect(g01.frameId).toBe(ancestor.id)
+        expect(g02.frameId).toBe(ancestor.id)
+        // The bounding-box promise R2 rests on: a straight line between
+        // two points strictly inside a rect never leaves it. Pinned as a
+        // fact about the geometry the layout already computed, not about
+        // whatever curve React Flow draws.
+        const within = (card: FocusCard) =>
+            card.x >= ancestor.x && card.y >= ancestor.y
+            && card.x + card.w <= ancestor.x + ancestor.w
+            && card.y + card.h <= ancestor.y + ancestor.h
+        expect(within(g01)).toBe(true)
+        expect(within(g02)).toBe(true)
+    })
+
+    it('an edge between cards with no shared ancestor frame carries none', () => {
+        const sg = walkGrainSeamPure()
+        const g = layout(sg, withReveal(initialLensViewState(sg), 'in:IOT', 1))
+        const wire = g.edges.find(e =>
+            e.source === cardFor(g, 'MKT')!.id && e.target === cardFor(g, 'IOT')!.id)!
+        expect(wire.sameAncestorFrame).toBeNull()
+    })
+})
+
+describe('focus-layout — badge legibility (R3)', () => {
+    it('two badge-worthy bundles that would collide at the midpoint take DIFFERENT slots along their own wire', () => {
+        // Two crossing wires, engineered to land on the EXACT same
+        // straight-line midpoint: SRC's top row feeds F's bottom row,
+        // SRC's bottom row feeds F's top row, with three more row-pairs
+        // between them (tied weight, so they stay in alphabetical
+        // row order) giving each wire enough run to actually move along.
+        // Each frame's own five rows sit the same distance apart, so the
+        // source-side offset and the target-side offset are equal and
+        // opposite — the two crossing midpoints coincide regardless of
+        // either frame's absolute position. This is the reported shape
+        // itself: two near-parallel wires crossing between the same pair
+        // of tables, badges stacked with no wire legible under either.
+        const rows = ['a', 'b', 'c', 'd', 'e']
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [
+                wnode('SRC', 'dataset', 'source_table', { childCount: 8 }),
+                ...rows.map(r => wnode(`s_${r}`, 'schemaField', `s_${r}`)),
+                wnode('F', 'dataset', 'target_table', { childCount: 8 }),
+                ...rows.map(r => wnode(`t_${r}`, 'schemaField', `t_${r}`)),
+            ],
+            contains: [
+                ...rows.map((r): [string, string] => ['SRC', `s_${r}`]),
+                ...rows.map((r): [string, string] => ['F', `t_${r}`]),
+            ],
+            hops: [
+                ['s_a', 't_e'], ['s_a', 't_e', 'JOINS'],
+                ['s_e', 't_a'], ['s_e', 't_a', 'JOINS'],
+                // The middle rows tie weight with the two crossing ones,
+                // so ranking stays alphabetical and the rows land in
+                // a..e order — the run this wire needs to move along.
+                ['s_b', 't_b'], ['s_b', 't_b', 'JOINS'],
+                ['s_c', 't_c'], ['s_c', 't_c', 'JOINS'],
+                ['s_d', 't_d'], ['s_d', 't_d', 'JOINS'],
+            ],
+        })
+        const base = initialLensViewState(sg)
+        const g = layout(sg, { ...base, expandedContainment: new Set([...base.expandedContainment, 'SRC']) })
+        const wire1 = g.edges.find(e => e.source === cardFor(g, 's_a')!.id && e.target === cardFor(g, 't_e')!.id)!
+        const wire2 = g.edges.find(e => e.source === cardFor(g, 's_e')!.id && e.target === cardFor(g, 't_a')!.id)!
+        expect(wire1.count).toBe(2)
+        expect(wire2.count).toBe(2)
+        expect(wire1.labelVisible).toBe(true)
+        expect(wire2.labelVisible).toBe(true)
+        // Both wires would sit on the exact same spot at the plain
+        // midpoint — the old single-slot placement could show only one.
+        expect(wire1.labelT).not.toBe(wire2.labelT)
+    })
+
+    it('a single bundle with no competitor keeps the plain midpoint (unchanged from before this task)', () => {
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F'), wnode('U')],
+            hops: [['U', 'F'], ['U', 'F', 'JOINS']],
+            contains: [],
+        })
+        const g = layout(sg)
+        const bundle = g.edges.find(e => e.count === 2)!
+        expect(bundle.labelVisible).toBe(true)
+        expect(bundle.labelT).toBe(0.5)
+    })
+})
+
+/** The shared T22 estate, built once per test through the real pipeline —
+ *  the same shape `walkGrainSeam`/`walkGrainSeamUnderclaim` screenshot,
+ *  reconstructed here rather than imported so this file stays free of a
+ *  dependency on `src/harness` (which the perf suite already established
+ *  as the one place that pattern belongs — see `buildWalk.ts`'s own doc
+ *  comment on why a screenshot fixture and a jsdom pin build the props
+ *  the same way without importing each other). */
+function walkGrainSeamPure(): LensSubgraph<LensWalkNode> {
+    const nums = ['01', '02', '03', '04', '05', '06']
+    return subgraph({
+        focus: 'RPT',
+        nodes: [
+            wnode('SNOW', 'PLATFORM', 'Snowflake', { childCount: 10 }),
+            wnode('REPORTING', 'CONTAINER', 'REPORTING', { childCount: 2 }),
+            wnode('RPT', 'dataset', 'rpt_customer_360', { childCount: 5 }),
+            wnode('FN', 'schemaField', 'full_name'),
+            wnode('SD', 'schemaField', 'signup_date'),
+            wnode('GOLD', 'CONTAINER', 'GOLD', { childCount: 8 }),
+            ...nums.map(n => wnode(`G${n}`, 'dataset', `crm_snapshot_${n}`, { childCount: 10 })),
+            wnode('BILL', 'CONTAINER', 'BILLING', { childCount: 3 }),
+            wnode('BSRC', 'dataset', 'billing_source', { childCount: 6 }),
+            wnode('BFN', 'schemaField', 'full_name_src'),
+            wnode('IOT', 'PLATFORM', 'IoT', { childCount: 4 }),
+            wnode('TXN', 'dataset', 'transactions'),
+            wnode('MKT', 'PLATFORM', 'Marketing', { childCount: 12 }),
+        ],
+        contains: [
+            ['SNOW', 'REPORTING'], ['REPORTING', 'RPT'], ['RPT', 'FN'], ['RPT', 'SD'],
+            ...nums.map((n): [string, string] => ['GOLD', `G${n}`]),
+            ['BILL', 'BSRC'], ['BSRC', 'BFN'],
+            ['IOT', 'TXN'],
+        ],
+        hops: [
+            ['G01', 'FN'], ['G01', 'FN', 'JOINS'],
+            ['G02', 'FN'], ['G02', 'FN', 'JOINS'],
+            ['G03', 'FN'], ['G04', 'FN'], ['G05', 'FN'], ['G06', 'FN'],
+            ['G01', 'G02', 'FEEDS'],
+            ['BFN', 'FN'],
+            ['FN', 'TXN'],
+            ['MKT', 'IOT'],
+        ],
+        frontierUp: [{ urn: 'G01', totalCount: 3, nextCursor: null }],
+    })
+}
 
 // ── walk export (JSON/CSV) ───────────────────────────────────────────
 

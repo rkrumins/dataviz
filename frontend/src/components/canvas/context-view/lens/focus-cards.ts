@@ -468,6 +468,27 @@ export interface FocusEdge {
    *  badges on short, overlapping wires read as confetti floating over
    *  the board rather than as labels belonging to a line. */
   labelVisible: boolean
+  /** Where along the straight line between this wire's own ports its
+   *  badge/seam chip sits, 0..1. 0.5 (the plain midpoint) unless another
+   *  label already claimed that spot — see `labelVisible`'s own doc
+   *  comment on the collision this exists to resolve (T22, R3). */
+  labelT: number
+  /** This wire is NOT column-certain: at least one bundled hop's own
+   *  endpoint HOLDS THINGS (known children, or a declared/roster total —
+   *  the same `heldTotal` signal R7's `isFrame` reads), so the data
+   *  source reported it at a grain coarser than the finest the model
+   *  could show — or the endpoint IS a rolled-up ancestor for the same
+   *  reason. Never true for a hop that names two leaves, whatever view
+   *  state it happens to render through — see `holdsThings`. Cone-only
+   *  in the view: the un-isolated board's bundles are unchanged (T22,
+   *  R1 rule 2). */
+  grainCoarse: boolean
+  /** The nearest drawn ancestor FRAME both of this wire's cards sit
+   *  under, or null. When set, the wire routes INSIDE that frame's own
+   *  bounds rather than the ordinary bezier — the geometry is convex, so
+   *  a straight line between two points already inside it can never
+   *  leave it (T22, R2). */
+  sameAncestorFrame: string | null
 }
 
 export interface FocusGraph {
