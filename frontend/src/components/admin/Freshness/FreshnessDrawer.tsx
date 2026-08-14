@@ -11,7 +11,7 @@ import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import {
-    Activity, AlertTriangle, ArrowUpRight, CheckCircle2, ChevronRight, Clock, Database, Eraser,
+    Activity, AlertTriangle, ArrowUpRight, CheckCircle2, ChevronRight, Clock, Database, Eraser, ShieldCheck,
     RefreshCw, Radar, RotateCcw, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -21,10 +21,17 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { jobHistoryPath } from '../job-history/shared'
-import { useRefreshSource, useSetFreshnessSettings, useSourceFreshness } from './useFreshness'
+import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
+import {
+    useReconcileNow, useRefreshSource, useSetFreshnessSettings, useSourceFreshness,
+} from './useFreshness'
+import { DRIFT_SPEC, DriftStateBadge, REASON_LABEL, type DriftState } from './DriftStateBadge'
+import { OverlayIntegrityMeter } from './OverlayIntegrityMeter'
 import { useActiveJobs } from './useActiveJobs'
 import { AggStatusPill, FreshnessBadges, timeUntil } from './FreshnessRow'
-import type { FailureCategory, FreshnessDoc } from '@/services/freshnessService'
+import type {
+    FailureCategory, FreshnessDoc, RefreshEventSummary,
+} from '@/services/freshnessService'
 
 function shortFp(fp?: string | null): string {
     if (!fp) return '—'
@@ -143,6 +150,7 @@ function RebuildCadenceRow({ doc }: { doc: FreshnessDoc }) {
                     <button
                         onClick={onSave}
                         disabled={setSettings.isPending}
+                        aria-label="Save rebuild cadence"
                         className="ml-auto inline-flex items-center h-8 px-2.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50"
                     >
                         Save
@@ -159,6 +167,280 @@ function RebuildCadenceRow({ doc }: { doc: FreshnessDoc }) {
                 </div>
             )}
         </div>
+    )
+}
+
+/**
+ * "Reconciliation" — is this source's rolled-up lineage still in step with
+ * its data, when was that last checked, and what happened last time.
+ *
+ * Sits next to Rebuild cadence because it is the sibling concept: that one
+ * governs how often a rebuild MAY run, this one governs how often we look
+ * for a reason to run one.
+ *
+ * Everything shown here is read off the state row — the sweep stamps it, this
+ * panel never recomputes it, and the freshness read path makes no graph call.
+ */
+function ReconciliationSection({ doc }: { doc: FreshnessDoc }) {
+    const { showToast } = useToast()
+    const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
+    const setSettings = useSetFreshnessSettings()
+    const reconcileNow = useReconcileNow()
+    const isAdmin = usePermission('system:admin')
+
+    const [mins, setMins] = useState(
+        doc.reconcileIntervalOverrideSecs != null
+            ? String(Math.round(doc.reconcileIntervalOverrideSecs / 60))
+            : '',
+    )
+    const source = doc.reconcileIntervalSource ?? 'default'
+    const state = (doc.driftState ?? undefined) as DriftState | undefined
+    const spec = state ? DRIFT_SPEC[state] : undefined
+    // A verdict of drifting/overlayMissing means the panel is reporting a
+    // problem, so the card carries the tone rather than staying neutral.
+    const tone = state === 'overlayMissing'
+        ? 'border-red-500/25 bg-red-500/[0.04]'
+        : state === 'drifting' || state === 'suspended'
+            ? 'border-amber-500/25 bg-amber-500/[0.05]'
+            : 'border-glass-border bg-black/[0.02] dark:bg-white/[0.02]'
+
+    const saveInterval = (value: number | null) => {
+        // Send ONLY this field: an explicit null clears an override, so a
+        // full-object PATCH would wipe the settings we did not mean to touch.
+        setSettings.mutate(
+            { dsId: doc.dataSourceId, reconcileCheckIntervalSecs: value },
+            {
+                onSuccess: () => showToast('success', value == null
+                    ? 'Check frequency reset to the default.'
+                    : 'Check frequency updated.'),
+                onError: (e) => showToast('error', e.message || 'Could not update the check frequency.'),
+            },
+        )
+    }
+
+    const setAuto = (enabled: boolean | null) => {
+        setSettings.mutate(
+            { dsId: doc.dataSourceId, autoReconcileEnabled: enabled },
+            {
+                onSuccess: () => showToast('success',
+                    enabled === null ? 'Now following the global setting.'
+                        : enabled ? 'Automatic reconciliation on for this source.'
+                            : 'Automatic reconciliation off for this source.'),
+                onError: (e) => showToast('error', e.message || 'Could not update the setting.'),
+            },
+        )
+    }
+
+    const onSaveInterval = () => {
+        const n = mins.trim() === '' ? null : Number(mins)
+        if (n != null && (!Number.isFinite(n) || n < 5 || n * 60 > MAX_INTERVAL_SECS)) {
+            showToast('error', 'Enter a whole number of minutes between 5 and 1440.')
+            return
+        }
+        saveInterval(n == null ? null : Math.round(n * 60))
+    }
+
+    const runNow = () => {
+        reconcileNow.mutate(
+            { dataSourceIds: [doc.dataSourceId] },
+            {
+                onSuccess: (res) => showToast(
+                    'success',
+                    res.skipped ? 'A sweep is already running — this source is in it.'
+                        : (res.run?.actions ?? 0) > 0 ? 'Reconciliation started.'
+                            : 'Checked — nothing needed reconciling.',
+                ),
+                onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
+            },
+        )
+    }
+
+    return (
+        <div className={cn('rounded-xl border p-3 space-y-2.5', tone)}>
+            <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-sm font-semibold text-ink">
+                    <ShieldCheck className="w-4 h-4 text-ink-muted" /> Reconciliation
+                </div>
+                <DriftStateBadge state={doc.driftState} />
+            </div>
+
+            {spec && <p className="text-[11px] text-ink-muted leading-relaxed">{spec.title}</p>}
+
+            <OverlayIntegrityMeter
+                observed={doc.observedAggregatedEdges}
+                expected={doc.expectedAggregatedEdges}
+                statsAsOf={doc.statsAsOf}
+                unobservable={doc.driftState === 'unobservable'}
+                className="pt-0.5"
+            />
+
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2 pt-1">
+                <Fact label="Last checked">
+                    {doc.lastCheckedAt
+                        ? <TimeStamp at={doc.lastCheckedAt} icon={null} colorByAge={false} />
+                        : <span className="text-ink-muted">Not yet</span>}
+                </Fact>
+                <Fact label="Next check">
+                    {doc.nextCheckAt
+                        ? (timeUntil(doc.nextCheckAt) ?? 'Due now')
+                        : <span className="text-ink-muted">Due now</span>}
+                </Fact>
+                <Fact label="Last reconciled">
+                    {doc.lastReconciledAt
+                        ? <TimeStamp at={doc.lastReconciledAt} icon={null} colorByAge={false} />
+                        : <span className="text-ink-muted">Never</span>}
+                </Fact>
+                <Fact label="Why">
+                    {doc.lastReconcileReason
+                        ? (
+                            <span>
+                                {REASON_LABEL[doc.lastReconcileReason] ?? doc.lastReconcileReason}
+                                {doc.lastReconcileMode && (
+                                    <span className="text-ink-muted">
+                                        {' · '}{doc.lastReconcileMode === 'auto' ? 'Automatic' : 'Manual'}
+                                    </span>
+                                )}
+                            </span>
+                        )
+                        : <span className="text-ink-muted">—</span>}
+                </Fact>
+            </div>
+
+            {canManage && (
+                <div className="pt-1.5 border-t border-glass-border/60 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                            <p className="text-xs font-semibold text-ink">Automatic reconciliation</p>
+                            <p className="text-[10px] text-ink-muted">
+                                {doc.autoReconcile === false
+                                    ? 'Off — drift is still detected and shown here, but nothing is rebuilt automatically.'
+                                    : 'On — a rebuild is queued when the rollups fall out of step.'}
+                            </p>
+                        </div>
+                        <ToggleSwitch
+                            checked={doc.autoReconcile !== false}
+                            onChange={(next) => setAuto(next)}
+                            disabled={setSettings.isPending}
+                            aria-label="Automatic reconciliation for this source"
+                        />
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-ink-muted shrink-0">Check every</span>
+                        <input
+                            type="number" min={5} max={1440} step={1}
+                            value={mins}
+                            onChange={(e) => setMins(e.target.value)}
+                            placeholder={`Default (${Math.round((doc.resolvedReconcileIntervalSecs ?? 3600) / 60)})`}
+                            aria-label="Drift-check frequency override (minutes)"
+                            className="w-32 h-8 px-2 rounded-lg border border-glass-border bg-canvas text-sm text-ink"
+                        />
+                        <span className="text-[11px] text-ink-muted">min</span>
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
+                            {SOURCE_LABEL[source] ?? source}
+                        </span>
+                        <button
+                            onClick={onSaveInterval}
+                            disabled={setSettings.isPending}
+                            // Distinct from the rebuild-cadence Save above it:
+                            // two controls both announced as "Save" in one
+                            // panel give a screen-reader user no way to tell
+                            // which is which.
+                            aria-label="Save check frequency"
+                            className="ml-auto inline-flex items-center h-8 px-2.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                        >
+                            Save
+                        </button>
+                    </div>
+
+                    {isAdmin && (
+                        <button
+                            onClick={runNow}
+                            disabled={reconcileNow.isPending}
+                            className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-xs font-semibold text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 transition-colors disabled:opacity-50"
+                        >
+                            <RefreshCw className={cn('w-3.5 h-3.5', reconcileNow.isPending && 'animate-spin')} />
+                            {reconcileNow.isPending ? 'Checking…' : 'Check now'}
+                        </button>
+                    )}
+                </div>
+            )}
+        </div>
+    )
+}
+
+/** One row of the refresh history.
+ *
+ *  Was ``origin · outcome``, which asked the reader to decode a vocabulary.
+ *  Now it says whether it was automatic or a person, what set it off, and —
+ *  on click — the counts that justified it, which is the "why did this
+ *  rebuild happen" question the whole audit trail exists to answer. */
+function ActivityRow({ event }: { event: RefreshEventSummary }) {
+    const [open, setOpen] = useState(false)
+    const evidence = event.evidence as Record<string, unknown> | null | undefined
+    const hasEvidence = !!evidence && Object.keys(evidence).length > 0
+    const reasonLabel = event.reason ? REASON_LABEL[event.reason] ?? event.reason : null
+    const automatic = event.mode === 'automatic'
+
+    const rows: [string, string][] = []
+    if (evidence) {
+        const num = (k: string) => {
+            const v = evidence[k]
+            return typeof v === 'number' ? v.toLocaleString() : null
+        }
+        const before = num('expectedAggregatedEdges')
+        const after = num('observedAggregatedEdges')
+        if (before && after !== null) rows.push(['Rolled-up edges', `${before} → ${after}`])
+        const nb = num('rawNodeCountBefore')
+        const na = num('rawNodeCountAfter')
+        if (nb && na && nb !== na) rows.push(['Nodes', `${nb} → ${na}`])
+        const eb = num('rawEdgeCountBefore')
+        const ea = num('rawEdgeCountAfter')
+        if (eb && ea && eb !== ea) rows.push(['Edges', `${eb} → ${ea}`])
+    }
+
+    return (
+        <li className="text-xs">
+            <button
+                type="button"
+                onClick={() => hasEvidence && setOpen(v => !v)}
+                aria-expanded={hasEvidence ? open : undefined}
+                className={cn(
+                    'w-full flex items-center justify-between gap-3 py-1 text-left rounded-lg',
+                    hasEvidence && 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03] px-1 -mx-1',
+                )}
+            >
+                <span className="min-w-0 flex items-center gap-1.5">
+                    {reasonLabel
+                        ? <span className="text-ink truncate">{reasonLabel}</span>
+                        : <span className="text-ink-secondary truncate">{event.outcome}</span>}
+                    <span
+                        title={automatic
+                            ? 'Started by automatic reconciliation'
+                            : `Started by ${event.actor && event.actor !== 'internal' ? event.actor : 'a person'}`}
+                        className={cn(
+                            'shrink-0 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold',
+                            automatic
+                                ? 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20'
+                                : 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
+                        )}
+                    >
+                        {automatic ? 'Auto' : 'Manual'}
+                    </span>
+                </span>
+                <TimeStamp at={event.ts} icon={null} colorByAge={false} />
+            </button>
+            {open && rows.length > 0 && (
+                <dl className="mt-0.5 mb-1.5 ml-1 pl-2 border-l border-glass-border space-y-0.5">
+                    {rows.map(([label, value]) => (
+                        <div key={label} className="flex items-baseline justify-between gap-3">
+                            <dt className="text-[10px] uppercase tracking-wide text-ink-muted">{label}</dt>
+                            <dd className="text-[11px] tabular-nums text-ink-secondary">{value}</dd>
+                        </div>
+                    ))}
+                </dl>
+            )}
+        </li>
     )
 }
 
@@ -492,6 +774,11 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                     {/* Rebuild cadence (resolved + per-source override) */}
                                     <RebuildCadenceRow doc={doc} />
 
+                                    {/* Reconciliation — the sibling of rebuild
+                                        cadence: how often we look for a reason
+                                        to rebuild, and what we last found. */}
+                                    <ReconciliationSection doc={doc} />
+
                                     {/* Live probe */}
                                     <div className="rounded-xl border border-glass-border bg-glass-base/30 p-3">
                                         <div className="flex items-center justify-between gap-2 mb-2">
@@ -541,12 +828,9 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                         {doc.events.length === 0 ? (
                                             <p className="text-[11px] text-ink-muted">No refresh activity recorded yet.</p>
                                         ) : (
-                                            <ul className="space-y-1.5">
+                                            <ul className="space-y-1">
                                                 {doc.events.map((e, i) => (
-                                                    <li key={i} className="flex items-center justify-between gap-3 text-xs">
-                                                        <span className="text-ink-secondary">{e.origin} · {e.outcome}</span>
-                                                        <TimeStamp at={e.ts} icon={null} colorByAge={false} />
-                                                    </li>
+                                                    <ActivityRow key={i} event={e} />
                                                 ))}
                                             </ul>
                                         )}

@@ -15,7 +15,24 @@ import type { FreshnessRow } from '@/services/freshnessService'
 // ── Status facets (tile ⇄ filter) ────────────────────────────────────
 
 /** The status facet carried in the URL (``?fstatus=``). Empty string = all. */
-export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped'
+export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped' | 'drifting'
+
+/** Drift verdicts that mean the rollups no longer match the data. Both count
+ *  toward the ``drifting`` tile; the split is only about which detector saw
+ *  it. Mirrors ``_DRIFTING_STATES`` in service.py. */
+const DRIFTING_STATES = new Set(['drifting', 'overlayMissing'])
+
+/** The last reconciliation check found this source's rollups out of step.
+ *  Mirrors the summary's ``drifting`` count. */
+export function isDrifting(row: FreshnessRow): boolean {
+    return DRIFTING_STATES.has(row.driftState ?? '')
+}
+
+/** Automation gave up on this source after repeated rebuilds that never
+ *  cleared the problem — it needs a person. */
+export function isReconcileSuspended(row: FreshnessRow): boolean {
+    return row.driftState === 'suspended'
+}
 
 /** A source that has never produced an aggregation: no state row, or an
  *  explicit ``none``/``skipped``. Mirrors the summary's ``notBuilt`` count. */
@@ -35,11 +52,15 @@ export function isRebuilding(row: FreshnessRow): boolean {
     return row.runningJobId != null
 }
 
-/** Marker present OR the last run failed. Mirrors ``needsAttention`` — a
- *  per-row OR, so a row that is both counts once. (Fleet rows never carry a
- *  probe verdict, so ``drifted`` is intentionally not part of this.) */
+/** Marker present, the last run failed, OR the rollups are out of step with
+ *  the data. Mirrors ``needsAttention`` — a per-row OR, so a row that is more
+ *  than one of those counts once. (Fleet rows never carry a probe verdict, so
+ *  ``drifted`` is intentionally not part of this; ``driftState`` is the
+ *  stored verdict from the reconciliation sweep, which is.) */
 export function needsAttention(row: FreshnessRow): boolean {
-    return hasStaleMarker(row) || row.aggregationStatus === 'failed'
+    return hasStaleMarker(row)
+        || row.aggregationStatus === 'failed'
+        || isDrifting(row)
 }
 
 /** A cooldown is holding the next rebuild off (``cooldownUntil`` in the future). */
@@ -67,6 +88,8 @@ export function matchesFacet(row: FreshnessRow, facet: StatusFacet): boolean {
             return isNeverBuilt(row)
         case 'cacheStamped':
             return row.cacheAsOf != null
+        case 'drifting':
+            return isDrifting(row)
         case '':
         default:
             return true
@@ -110,16 +133,22 @@ export function freshnessState(row: FreshnessRow): FreshnessState {
  * Where a row sits in the triage queue — lower is more urgent. The cascade
  * is first-match-wins, so a row that is both failed and stale ranks as failed:
  *
- *   0 failed → 1 recomputing (stale marker) → 2 pending (rebuild in flight)
- *   → 3 cooldown-active → 4 ready → 5 not built / other.
+ *   0 failed → 1 drifting → 2 recomputing (stale marker)
+ *   → 3 pending (rebuild in flight) → 4 cooldown-active → 5 ready
+ *   → 6 not built / other.
+ *
+ * Drifting outranks recomputing because a recomputing source is already on
+ * its way to correct, while a drifting one is serving a picture that no
+ * longer matches its data and nothing is yet in flight for it.
  */
 export function severityRank(row: FreshnessRow): number {
     if (row.aggregationStatus === 'failed') return 0
-    if (hasStaleMarker(row)) return 1
-    if (isRebuilding(row)) return 2
-    if (isCooldownActive(row)) return 3
-    if (row.aggregationStatus === 'ready') return 4
-    return 5
+    if (isDrifting(row) || isReconcileSuspended(row)) return 1
+    if (hasStaleMarker(row)) return 2
+    if (isRebuilding(row)) return 3
+    if (isCooldownActive(row)) return 4
+    if (row.aggregationStatus === 'ready') return 5
+    return 6
 }
 
 function lastAggregatedMs(row: FreshnessRow): number {
@@ -140,8 +169,14 @@ export function compareSeverity(a: FreshnessRow, b: FreshnessRow): number {
     return (a.name || a.dataSourceId).localeCompare(b.name || b.dataSourceId)
 }
 
-/** A group wants attention when any of its rows is failed, recomputing, or
- *  rebuilding — the set that forces a provider group to render expanded. */
+/** A group wants attention when any of its rows is failed, drifting,
+ *  recomputing, or rebuilding — the set that forces a provider group to
+ *  render expanded, so a single bad source is never hidden inside a
+ *  collapsed healthy group. */
 export function isGroupAttention(row: FreshnessRow): boolean {
-    return row.aggregationStatus === 'failed' || hasStaleMarker(row) || isRebuilding(row)
+    return row.aggregationStatus === 'failed'
+        || hasStaleMarker(row)
+        || isRebuilding(row)
+        || isDrifting(row)
+        || isReconcileSuspended(row)
 }

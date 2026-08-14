@@ -11,14 +11,31 @@ import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { getSourceDoc, patchFreshnessSettings, getAggregationSettings, putAggregationCadence, listJobsGlobal, permissionFn } = vi.hoisted(() => ({
+const {
+    getSourceDoc, patchFreshnessSettings, getAggregationSettings,
+    putAggregationCadence, listJobsGlobal, permissionFn,
+    getReconciliation, putReconciliation, reconcileNow,
+} = vi.hoisted(() => ({
     getSourceDoc: vi.fn(),
     patchFreshnessSettings: vi.fn(),
     getAggregationSettings: vi.fn(),
     putAggregationCadence: vi.fn(),
     listJobsGlobal: vi.fn(),
     permissionFn: vi.fn(),
+    getReconciliation: vi.fn(),
+    putReconciliation: vi.fn(),
+    reconcileNow: vi.fn(),
 }))
+
+/** The reconciliation policy shares the dialog and the stored record with the
+ *  rebuild cadence, so every cadence test needs it resolvable. */
+const RECON_POLICY = {
+    enabled: true, checkIntervalSecs: null, maxActionsPerRun: null,
+    shrinkTolerancePct: null, detectors: null,
+    envEnabled: true, envCheckIntervalSecs: 3600, envMaxActionsPerRun: 10,
+    envShrinkTolerancePct: 10, envStatsMaxAgeSecs: 2700,
+    allDetectors: ['overlay_missing', 'overlay_shrunk', 'never_aggregated', 'raw_drift'],
+}
 
 vi.mock('@/store/auth', () => ({
     usePermission: (perm: string, workspaceId?: string | null) => permissionFn(perm, workspaceId),
@@ -28,7 +45,11 @@ vi.mock('@/services/freshnessService', async () => {
     const actual = await vi.importActual<typeof import('@/services/freshnessService')>('@/services/freshnessService')
     return {
         ...actual,
-        freshnessService: { ...actual.freshnessService, getSourceDoc, patchFreshnessSettings },
+        freshnessService: {
+            ...actual.freshnessService,
+            getSourceDoc, patchFreshnessSettings,
+            getReconciliation, putReconciliation, reconcileNow,
+        },
     }
 })
 
@@ -67,6 +88,8 @@ beforeEach(() => {
     // FreshnessDrawer joins a live job via useActiveJobs(); without this the
     // real listJobsGlobal would fire an actual network call from this unit test.
     listJobsGlobal.mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 })
+    getReconciliation.mockResolvedValue({ policy: RECON_POLICY, runs: [] })
+    putReconciliation.mockResolvedValue(RECON_POLICY)
 })
 
 describe('drawer rebuild-cadence row', () => {
@@ -90,7 +113,7 @@ describe('drawer rebuild-cadence row', () => {
         const input = await screen.findByLabelText('Rebuild cadence override (minutes)')
         await userEvent.clear(input)
         await userEvent.type(input, '5')
-        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+        await userEvent.click(screen.getByRole('button', { name: 'Save rebuild cadence' }))
 
         await waitFor(() => expect(patchFreshnessSettings).toHaveBeenCalledWith(
             'ds-1', { rebuildMinIntervalSecs: 300 },

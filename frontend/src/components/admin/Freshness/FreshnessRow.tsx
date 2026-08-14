@@ -30,8 +30,11 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { PHASE_LABELS, PhaseStepper, jobHistoryPath, phaseLabel } from '../job-history/shared'
-import { freshnessState } from './freshnessTriage'
+import { freshnessState, isDrifting, isReconcileSuspended } from './freshnessTriage'
 import type { FreshnessState } from './freshnessTriage'
+import {
+    AutoReconcileOffBadge, DriftStateBadge, REASON_LABEL,
+} from './DriftStateBadge'
 
 /** A quiet placeholder for an empty cell — muted enough that a never-built
  *  row's blank cells don't read as three shouting dashes. */
@@ -161,6 +164,27 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
                 title="This source's lineage is out of date and needs a rebuild."
             />,
         )
+    }
+
+    // The reconciliation verdict, stamped by the scheduled sweep. Distinct
+    // from ``drifted`` below, which only ever comes from an explicit probe.
+    if (isDrifting(row) || isReconcileSuspended(row)) {
+        badges.push(
+            <span key="driftState" className="inline-flex items-center gap-1">
+                <DriftStateBadge state={row.driftState} />
+                {row.lastReconcileReason && REASON_LABEL[row.lastReconcileReason] && (
+                    <span className="text-[10px] text-ink-muted">
+                        {REASON_LABEL[row.lastReconcileReason]}
+                    </span>
+                )}
+            </span>,
+        )
+    }
+
+    // Drift detected by automation, but automation is switched off here — so
+    // say why nothing is happening about it.
+    if (row.autoReconcile === false && isDrifting(row)) {
+        badges.push(<AutoReconcileOffBadge key="autoOff" />)
     }
 
     if (row.drifted === true) {

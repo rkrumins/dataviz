@@ -1018,7 +1018,15 @@ class AggregationService:
         are independent columns on the single settings row: each is written
         only when supplied, so the pipeline-tuning editor and the cadence
         editor never clobber each other. Busts the in-process cadence cache
-        so a same-process consumer sees the change immediately."""
+        so a same-process consumer sees the change immediately.
+
+        ``cadence`` is MERGED, not replaced. It carries two unrelated groups
+        of settings — the rebuild cooldown and the reconciliation policy —
+        edited by different callers, and a replace meant whichever saved last
+        silently erased the other's fields. Only keys the caller actually sent
+        are touched; sending one explicitly as ``null`` still clears it, which
+        is how "leave blank to use the default" works.
+        """
         from .models import AggregationSettingsORM
 
         row = await session.get(AggregationSettingsORM, "global")
@@ -1028,7 +1036,19 @@ class AggregationService:
         if tuning is not None:
             row.tuning_json = json.dumps(tuning.model_dump(exclude_none=True))
         if cadence is not None:
-            row.cadence_json = json.dumps(cadence.model_dump(exclude_none=True))
+            merged = {}
+            if row.cadence_json:
+                try:
+                    merged = json.loads(row.cadence_json)
+                except (TypeError, ValueError):
+                    merged = {}
+            sent = cadence.model_dump(by_alias=True, exclude_unset=True)
+            for alias, value in sent.items():
+                if value is None:
+                    merged.pop(alias, None)
+                else:
+                    merged[alias] = value
+            row.cadence_json = json.dumps(merged)
         row.updated_at = _now()
         row.updated_by = updated_by
         await session.commit()

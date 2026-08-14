@@ -227,14 +227,20 @@ describe('Freshness cockpit', () => {
         const ready = mk({ name: 'ready', aggregationStatus: 'ready' })
         const notBuilt = mk({ name: 'notBuilt', aggregationStatus: null })
 
-        expect([
-            severityRank(failed), severityRank(recomputing), severityRank(pending),
-            severityRank(cooldown), severityRank(ready), severityRank(notBuilt),
-        ]).toEqual([0, 1, 2, 3, 4, 5])
+        // Drifting outranks recomputing: a recomputing source is already on
+        // its way to correct, while a drifting one is serving a picture that
+        // no longer matches its data with nothing yet in flight for it.
+        const drifting = mk({ name: 'drifting', aggregationStatus: 'ready', driftState: 'overlayMissing' })
 
-        const shuffled = [ready, notBuilt, failed, cooldown, pending, recomputing]
+        expect([
+            severityRank(failed), severityRank(drifting), severityRank(recomputing),
+            severityRank(pending), severityRank(cooldown), severityRank(ready),
+            severityRank(notBuilt),
+        ]).toEqual([0, 1, 2, 3, 4, 5, 6])
+
+        const shuffled = [ready, notBuilt, failed, cooldown, pending, recomputing, drifting]
         expect(shuffled.slice().sort(compareSeverity).map(r => r.name))
-            .toEqual(['failed', 'recomputing', 'pending', 'cooldown', 'ready', 'notBuilt'])
+            .toEqual(['failed', 'drifting', 'recomputing', 'pending', 'cooldown', 'ready', 'notBuilt'])
 
         // Ties in severity break by most-recent aggregation, then name.
         const older = mk({ name: 'aardvark', aggregationStatus: 'ready', lastAggregatedAt: '2020-01-01T00:00:00Z' })

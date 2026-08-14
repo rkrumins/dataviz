@@ -18,6 +18,7 @@ import type { StatusFacet } from './freshnessTriage'
 const SEGMENTS: { key: StatusFacet; label: string }[] = [
     { key: '', label: 'All' },
     { key: 'needsAttention', label: 'Needs attention' },
+    { key: 'drifting', label: 'Drifting' },
     { key: 'ready', label: 'Ready' },
     { key: 'notBuilt', label: 'Not built' },
 ]
@@ -29,6 +30,7 @@ const FACET_LABEL: Record<Exclude<StatusFacet, ''>, string> = {
     needsAttention: 'Needs attention',
     notBuilt: 'Not built',
     cacheStamped: 'Cache coverage',
+    drifting: 'Drifting',
 }
 
 interface Props {

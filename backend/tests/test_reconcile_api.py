@@ -192,6 +192,62 @@ def test_saving_the_policy_preserves_the_rebuild_cadence():
     assert stored["reconcileEnabled"] is False
 
 
+def test_saving_the_rebuild_cadence_preserves_the_reconciliation_policy():
+    """The mirror of the test above, and the one that actually bit: the
+    cadence dialog sends only its own two fields, so a REPLACE of
+    ``cadence_json`` erased every reconciliation setting. Whichever editor
+    saved last won."""
+    from backend.app.services.aggregation.schemas import AggregationCadence
+    from backend.app.services.aggregation.service import AggregationService
+
+    row = _FakeSettingsRow(json.dumps({
+        "reconcileEnabled": False,
+        "reconcileCheckIntervalSecs": 7200,
+        "reconcileDetectors": ["raw_drift"],
+    }))
+    session = _FakeSession(row)
+    svc = AggregationService.__new__(AggregationService)
+
+    async def _get_settings(_s):
+        return None
+    svc.get_settings = _get_settings
+
+    _run(svc.put_settings(
+        session,
+        cadence=AggregationCadence(
+            rebuildMinIntervalSecs=1800, driftAutoRebuild=True,
+        ),
+    ))
+    stored = json.loads(row.cadence_json)
+    assert stored["reconcileEnabled"] is False
+    assert stored["reconcileCheckIntervalSecs"] == 7200
+    assert stored["reconcileDetectors"] == ["raw_drift"]
+    assert stored["rebuildMinIntervalSecs"] == 1800
+
+
+def test_clearing_the_rebuild_interval_still_works():
+    """Merging must not break "leave blank to use the default" — an
+    explicitly-sent null still removes the key."""
+    from backend.app.services.aggregation.schemas import AggregationCadence
+    from backend.app.services.aggregation.service import AggregationService
+
+    row = _FakeSettingsRow(json.dumps({"rebuildMinIntervalSecs": 1800}))
+    session = _FakeSession(row)
+    svc = AggregationService.__new__(AggregationService)
+
+    async def _get_settings(_s):
+        return None
+    svc.get_settings = _get_settings
+
+    _run(svc.put_settings(
+        session,
+        cadence=AggregationCadence(rebuildMinIntervalSecs=None, driftAutoRebuild=True),
+    ))
+    stored = json.loads(row.cadence_json)
+    assert "rebuildMinIntervalSecs" not in stored
+    assert stored["driftAutoRebuild"] is True
+
+
 def test_an_explicit_null_unsets_a_policy_field_back_to_the_env_default():
     row = _FakeSettingsRow(json.dumps({"reconcileCheckIntervalSecs": 7200}))
     resp, stored = _save(

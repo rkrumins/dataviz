@@ -32,6 +32,7 @@ import { FreshnessStatBand } from './FreshnessStatBand'
 import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
 import { CadenceSettingsDialog } from './CadenceSettingsDialog'
+import { ReconciliationRunsPanel } from './ReconciliationRunsPanel'
 import { useFleetFreshness, useRefreshSource, FRESHNESS_KEYS } from './useFreshness'
 import { useActiveJobs, ACTIVE_JOBS_KEY } from './useActiveJobs'
 import {
@@ -48,7 +49,7 @@ const SCOPE_LABEL: Record<RefreshScope, string> = {
 
 const COLS = 6
 
-const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped']
+const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped', 'drifting']
 
 function parseStatus(raw: string | null): StatusFacet {
     return (raw && (STATUS_FACETS as readonly string[]).includes(raw)) ? (raw as StatusFacet) : ''
@@ -317,6 +318,12 @@ export function Freshness() {
                 summary={summary}
                 activeFacet={fstatus}
                 onToggle={(facet) => patchParams({ fstatus: facet || null })}
+            />
+
+            {/* Automatic reconciliation — one line when collapsed: is it on,
+                when did it last check, and what did it find. */}
+            <ReconciliationRunsPanel
+                onOpenSettings={isSystemAdmin ? () => setCadenceOpen(true) : undefined}
             />
 
             {/* Sticky faceted filter bar */}
