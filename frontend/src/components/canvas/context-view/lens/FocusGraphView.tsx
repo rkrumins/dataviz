@@ -73,8 +73,8 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, FRAME_HEADER_H, FRAME_PAD, labelFitsRun, frameWindow, edgeLabelFor, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
-import { REVEAL_PAGE, pathToFocus, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
+import { CARD_W, BAND_GAP, FRAME_HEADER_H, FRAME_PAD, labelFitsRun, frameWindow, edgeLabelFor, portFraction, type EdgeTypeInfoMap, type FocusCard, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
+import { REVEAL_PAGE, isolationCone, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 
@@ -101,25 +101,25 @@ const NEUTRAL_ACCENT = '#94a3b8'
 const HoverContext = createContext<string | null>(null)
 const ReachContext = createContext<LensReach | null>(null)
 /**
- * Path-to-focus highlight — every card/edge id on SOME path between the
- * hovered-with-intent (or selected) card and the focus (see
- * `pathToFocus` in focus-layout.ts). `null` = no active highlight,
- * meaning nothing dims — the SAME "no path: don't touch the picture"
- * contract `pathToFocus` itself returns for an unreachable card.
- * Context, not card/edge data: hovering must re-render the affected
+ * ISOLATION — every card/edge id on the visible lineage CONE of whatever
+ * the reader is pointing at or has clicked (see `isolationCone` in
+ * focus-layout.ts). `null` = nothing isolated, so nothing dims.
+ *
+ * This is the one highlight mechanism (T18 R5). It replaced a
+ * path-to-focus highlight that strengthened a route and dimmed only
+ * under a selection: at column grain that is not enough, because the
+ * question a board of forty near-parallel wires raises is "which of
+ * these is THIS one", and the only answer that reads is to quiet the
+ * rest. Both gestures dim now, to the same floor — a hover is
+ * instantaneous to undo, so it can afford to say as much as a click.
+ *
+ * Context, not card/edge data: isolating must re-render the affected
  * cards/edges alone, never rebuild the arrays (see the PERF CONTRACT
  * above) — the same reason HoverContext/ReachContext exist.
- *
- * `source` is which gesture asked, and it decides how much the picture
- * is allowed to change. A HOVER only strengthens the path — moving the
- * pointer across the board must never wash the board out. A SELECTION
- * is deliberate, so it may quiet what is off the path, but only to a
- * floor that keeps every label readable.
  */
-const PathHighlightContext = createContext<{
+const IsolationContext = createContext<{
   cardIds: ReadonlySet<string>
   edgeKeys: ReadonlySet<string>
-  source: 'hover' | 'select'
 } | null>(null)
 
 /**
@@ -135,16 +135,23 @@ const PathHighlightContext = createContext<{
  */
 const RowCursorContext = createContext<{ frameKey: string; urn: string } | null>(null)
 
-/** Off the highlighted path, under a SELECTION. Quiet enough to read as
- *  background, light enough that every name is still legible — the old
- *  30% turned the rest of the board into grey ghosts. */
-const OFF_PATH_CARD = 'opacity-60'
-const OFF_PATH_EDGE = 0.3
+/** Off the isolated cone. Quiet enough to read as background, light
+ *  enough that every name is still legible — the old 30% turned the rest
+ *  of the board into grey ghosts, and a reader who has lost the picture
+ *  cannot use the one line they were pointing at. */
+const OFF_CONE_CARD = 'opacity-60'
+const OFF_CONE_EDGE = 0.3
 
 /** Above this many labelled bundles on one board, a ×N badge stops being
  *  information and becomes texture — so only the ones the reader is
- *  pointing at (hovered, selected, on the highlighted path) keep theirs. */
+ *  pointing at (hovered, selected, on the isolated cone) keep theirs. */
 const LABEL_DENSITY_CAP = 12
+
+/** How long the pointer must REST on something before its lineage is
+ *  isolated. Long enough that crossing the board on the way to a control
+ *  never strobes it; short enough to feel like the picture answering
+ *  rather than a menu opening. */
+const HOVER_INTENT_MS = 250
 
 /** Shared empty overlay — a fresh Map would churn the nodes memo. */
 const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
@@ -237,15 +244,15 @@ const iconByName = (name: string): LucideIcons.LucideIcon =>
   (LucideIcons as unknown as Record<string, LucideIcons.LucideIcon>)[name] ?? LucideIcons.Box
 
 /**
- * Where this card stands in the current highlight: ON the path (say so
- * with a ring), off it under a SELECTION (quiet it, to a floor), or
- * untouched — which is every card while the gesture is only a hover.
+ * Where this card stands in the current isolation: ON the cone (say so
+ * with a ring), off it (quiet it, to a floor), or untouched — which is
+ * every card while nothing is isolated at all.
  */
-function usePathState(cardId: string): { onPath: boolean; offPath: boolean } {
-  const highlight = useContext(PathHighlightContext)
-  if (highlight === null) return { onPath: false, offPath: false }
-  const onPath = highlight.cardIds.has(cardId)
-  return { onPath, offPath: !onPath && highlight.source === 'select' }
+function useConeState(cardId: string): { onCone: boolean; offCone: boolean } {
+  const cone = useContext(IsolationContext)
+  if (cone === null) return { onCone: false, offCone: false }
+  const onCone = cone.cardIds.has(cardId)
+  return { onCone, offCone: !onCone }
 }
 
 /** Flat equality over a built card. Every field is a primitive, a frozen
@@ -300,16 +307,72 @@ function TypeIcon({ ctx, typeId, color, className }: { ctx: CardCtx; typeId: str
   return <Icon className={className} style={{ color }} />
 }
 
-/** The tiny colored connection dots edges anchor to: incoming on the
- *  left (sky), outgoing on the right (amber). Two, because lineage is
- *  the only thing drawn as a wire — containment nests instead. */
-function PortHandles() {
+/**
+ * The tiny colored connection dots edges anchor to: incoming on the left
+ * (sky), outgoing on the right (amber) — lineage is the only thing drawn
+ * as a wire, so there are exactly two sides.
+ *
+ * ONE DOT PER WIRE, spread evenly down the card's edge. Every wire used
+ * to land on a single dot in the middle, so a table with forty incoming
+ * flows drew forty lines into one point: a black wedge you could not
+ * read, could not point at, and could not tell one line of from another.
+ * The layout decides how many there are and which wire takes which
+ * (`portsIn`/`portsOut`, ordered by the far end's height so adjacent
+ * parallel flows never cross); this renders them at the same fractions
+ * the layout measured its badges against (`portFraction`).
+ *
+ * A BUNDLED side comes back as one port on purpose — that is the trunk's
+ * root.
+ */
+function PortHandles({ card }: { card: FocusCard }) {
+  if (card.portsIn === 0 && card.portsOut === 0) return null
   const dot = '!w-1.5 !h-1.5 !border-0 !min-w-0 !min-h-0 rounded-full'
+  const at = (i: number, n: number) => ({ top: `${portFraction(i, n) * 100}%` })
   return (
     <>
-      <Handle type="target" position={Position.Left} className={dot} style={{ backgroundColor: `${TINT_UP}99` }} />
-      <Handle type="source" position={Position.Right} className={dot} style={{ backgroundColor: `${TINT_DOWN}99` }} />
+      {Array.from({ length: card.portsIn }, (_, i) => (
+        <Handle
+          key={`in-${i}`}
+          id={`in-${i}`}
+          type="target"
+          position={Position.Left}
+          className={dot}
+          style={{ backgroundColor: `${TINT_UP}99`, ...at(i, card.portsIn) }}
+        />
+      ))}
+      {Array.from({ length: card.portsOut }, (_, i) => (
+        <Handle
+          key={`out-${i}`}
+          id={`out-${i}`}
+          type="source"
+          position={Position.Right}
+          className={dot}
+          style={{ backgroundColor: `${TINT_DOWN}99`, ...at(i, card.portsOut) }}
+        />
+      ))}
     </>
+  )
+}
+
+/** "This feeds itself" — hops whose two ends land on this one card once
+ *  the picture is projected. A collapsed container whose members feed
+ *  each other says it here; drilling it turns the badge into the wires it
+ *  stands for. Never routed as a line: an arc that leaves a card and
+ *  comes straight back into it reads as a broken arrow. */
+function SelfFlowBadge({ card }: { card: FocusCard }) {
+  if (card.selfFlows <= 0) return null
+  const label = `feeds itself ×${card.selfFlows.toLocaleString()}`
+  return (
+    <span
+      title={`${card.label} ${label} — ${card.selfFlows.toLocaleString()} connection${
+        card.selfFlows === 1 ? '' : 's'
+      } inside this card. ${card.rollup ? 'Open it to see them as wires.' : ''}`}
+      aria-label={`${card.label} ${label}`}
+      className="pointer-events-none absolute -top-2 left-2 z-10 flex items-center gap-0.5 px-1 rounded-full bg-canvas-elevated border border-black/10 dark:border-white/15 text-[8.5px] font-semibold tabular-nums text-ink-muted"
+    >
+      <LucideIcons.RotateCw className="w-2 h-2" aria-hidden />
+      ×{card.selfFlows.toLocaleString()}
+    </span>
   )
 }
 
@@ -623,16 +686,22 @@ function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   if (!card.canOpenChildren || !card.nodeId || !card.expandKey) return null
   const Icon = card.fetch === 'loading' ? LucideIcons.Loader2
     : card.childrenOpen ? LucideIcons.ChevronDown : LucideIcons.ChevronRight
+  // A ROLLUP's chevron does something different enough to need its own
+  // sentence: it does not open a body, it REPLACES this one card with the
+  // member tables it stands for, each landing in the hop column its own
+  // hop dictates. "Show what's inside" would promise a list.
+  const onLineage = card.contents?.onLineage ?? 0
+  const label = card.rollup
+    ? `Show the ${onLineage.toLocaleString()} inside ${card.label} that carry this lineage — each as its own card`
+    : card.childrenOpen ? `Hide what's inside ${card.label}` : `Show what's inside ${card.label}`
   return (
     <button
       type="button"
       className="nodrag flex-shrink-0 -ml-1 w-4 h-full flex items-center justify-center text-ink-muted/50 hover:text-accent-lineage focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded"
       // A disclosure: assistive tech needs the state, not just a tooltip.
       aria-expanded={card.childrenOpen}
-      aria-label={card.childrenOpen ? `Hide what's inside ${card.label}` : `Show what's inside ${card.label}`}
-      title={card.childrenOpen
-        ? `Hide what's inside ${card.label}`
-        : `Show what's inside ${card.label}`}
+      aria-label={label}
+      title={label}
       onClick={(e) => { e.stopPropagation(); ctx.onToggleFrame(card.expandKey!) }}
     >
       <Icon className={cn('w-3 h-3', card.fetch === 'loading' && 'animate-spin')} />
@@ -821,14 +890,14 @@ const WHEEL_PX_PER_ROW = 26
  * it is context, and it must never read as a connection.
  */
 function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; selected: boolean }) {
-  const { onPath, offPath } = usePathState(card.id)
+  const { onCone, offCone } = useConeState(card.id)
   const cursor = useContext(RowCursorContext)
   // The frame a row sits in is its containment parent — a row is only
   // ever emitted among its own parent's children.
   const hostKey = card.parentId ?? ''
   const onCursor = cursor !== null && cursor.frameKey === hostKey && cursor.urn === card.nodeId
   const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
-  const dim = card.dimmed ? (card.connected ? 'opacity-30' : 'opacity-20') : offPath ? OFF_PATH_CARD : undefined
+  const dim = card.dimmed ? (card.connected ? 'opacity-30' : 'opacity-20') : offCone ? OFF_CONE_CARD : undefined
 
   const activate = () => ctx.onSelect(card.nodeId)
   // The ⊕ tucks INSIDE a row (there is no outside), so the content
@@ -859,7 +928,7 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
           // Inside this, but off the lineage: background by default, and
           // it lights up only when you point at it.
           : 'border border-dashed border-black/[0.08] dark:border-white/[0.09] bg-transparent hover:border-accent-lineage/40 hover:bg-black/[0.02] dark:hover:bg-white/[0.03] opacity-60 hover:opacity-100',
-        selected ? 'ring-2 ring-accent-lineage' : onCursor ? 'ring-2 ring-accent-lineage/60' : onPath && 'ring-1 ring-accent-lineage/70',
+        selected ? 'ring-2 ring-accent-lineage' : onCursor ? 'ring-2 ring-accent-lineage/60' : onCone && 'ring-1 ring-accent-lineage/70',
         dim,
       )}
       style={{
@@ -879,7 +948,8 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
         card.connected ? '' : ' — inside this, but no lineage with the focused entity'
       } · click for a preview, double-click to focus`}
     >
-      {card.wired && <PortHandles />}
+      <PortHandles card={card} />
+      <SelfFlowBadge card={card} />
       <ContentsChevron card={card} ctx={ctx} />
       <div
         className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
@@ -979,12 +1049,12 @@ function FocusGraphCard({ data, selected }: NodeProps) {
   const focalReach = useContext(ReachContext)
   // Same reasoning for the path-to-focus highlight: a hover must re-
   // render only the cards whose highlight state actually changed.
-  const { onPath, offPath } = usePathState(card.id)
+  const { onCone, offCone } = useConeState(card.id)
   // One class, decided here: two `opacity-*` utilities on one element
   // are settled by their order in the stylesheet, not in the class list,
   // so the text filter's own dim and the path floor cannot both be
   // spelled out and left to fight.
-  const dim = card.dimmed ? 'opacity-30' : offPath ? OFF_PATH_CARD : undefined
+  const dim = card.dimmed ? 'opacity-30' : offCone ? OFF_CONE_CARD : undefined
   const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
 
   const activate = () => ctx.onSelect(card.nodeId)
@@ -1011,11 +1081,12 @@ function FocusGraphCard({ data, selected }: NodeProps) {
           'group relative rounded-xl border-2 px-3.5 py-2.5 bg-canvas-elevated cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
           selected
             ? 'ring-2 ring-accent-lineage ring-offset-1 ring-offset-canvas-elevated'
-            : onPath && 'ring-1 ring-accent-lineage/70',
+            : onCone && 'ring-1 ring-accent-lineage/70',
           dim,
         )}
       >
-        {card.wired && <PortHandles />}
+        <PortHandles card={card} />
+        <SelfFlowBadge card={card} />
         {/* The focus is where a walk starts, so both of its ⊕ live here
             — upstream on the left edge, downstream on the right. */}
         <WalkPills card={card} ctx={ctx} />
@@ -1092,11 +1163,12 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       style={{ width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: accent }}
       className={cn(
         'group relative flex items-center gap-2 rounded-lg border border-black/[0.07] dark:border-white/[0.08] px-2.5 cursor-pointer transition-colors bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-        selected ? 'ring-2 ring-accent-lineage' : onPath && 'ring-1 ring-accent-lineage/70',
+        selected ? 'ring-2 ring-accent-lineage' : onCone && 'ring-1 ring-accent-lineage/70',
         dim,
       )}
     >
-      {card.wired && <PortHandles />}
+      <PortHandles card={card} />
+      <SelfFlowBadge card={card} />
       <ContentsChevron card={card} ctx={ctx} />
       {(
         <div
@@ -1107,11 +1179,21 @@ function FocusGraphCard({ data, selected }: NodeProps) {
         </div>
       )}
       <div className="flex-1 min-w-0">
-        <p className="flex items-center gap-1.5 min-w-0 text-[12px] font-medium text-ink leading-snug">
-          <span className="truncate">{card.label}</span>
+        {/* A ROLLUP puts where it lives up on the NAME line and gives the
+            whole line below to its count. It is standing in for member
+            tables that are not on the board, so "7 on this lineage · of 8"
+            is the entire claim the card makes — and sharing that line with
+            a provenance ribbon (which has a floor under its truncation,
+            and the count does not) clipped the count away to
+            `7 on this lineage …`. Where it lives is context; how much it
+            hides is the answer. */}
+        <p className="flex items-baseline gap-1.5 min-w-0 text-[12px] font-medium text-ink leading-snug">
+          <span className={cn('truncate', card.rollup && 'flex-shrink-0 max-w-[55%]')}>{card.label}</span>
+          {card.rollup && <FrameAncestry card={card} ctx={ctx} />}
         </p>
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug min-w-0">
-          {(card.ancestry.length > 0 || card.parentLabel) && (
+          {card.rollup && <ContentsCount card={card} />}
+          {!card.rollup && (card.ancestry.length > 0 || card.parentLabel) && (
             <>
               <ProvenanceRibbon card={card} />
               <span className="text-ink-muted/40">·</span>
@@ -1132,11 +1214,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
             </>
           )}
           {/* No ×N on a frame either — same accumulator, same reason. */}
-          {card.contents && (
-            <>
-              <ContentsCount card={card} />
-            </>
-          )}
+          {card.contents && !card.rollup && <ContentsCount card={card} />}
         </p>
       </div>
       <CardActions card={card} ctx={ctx} />
@@ -1162,7 +1240,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
  */
 function FocusFrameNode({ data, selected }: NodeProps) {
   const { card, ctx } = data as unknown as { card: FocusCard; ctx: CardCtx }
-  const { onPath, offPath } = usePathState(card.id)
+  const { onCone, offCone } = useConeState(card.id)
   // A frame nested inside another frame is also one of ITS rows, so it
   // answers to the host's keyboard cursor like any other row does.
   const rowCursor = useContext(RowCursorContext)
@@ -1225,13 +1303,15 @@ function FocusFrameNode({ data, selected }: NodeProps) {
       }}
       className={cn(
         'relative rounded-xl border-2 border-dashed pointer-events-none bg-black/[0.02] dark:bg-white/[0.03]',
-        onCursor ? 'ring-2 ring-accent-lineage/60' : onPath && 'ring-1 ring-accent-lineage/70',
-        offPath && OFF_PATH_CARD,
+        onCursor ? 'ring-2 ring-accent-lineage/60' : onCone && 'ring-1 ring-accent-lineage/70',
+        offCone && OFF_CONE_CARD,
       )}
     >
       {/* The stack is the focal's own contents, and no wire ever lands on
-          it — its rows' lineage is drawn at the focal card above. */}
-      {card.wired && <PortHandles />}
+          it — its rows' lineage is drawn at the focal card above, so it
+          comes back with no ports at all. */}
+      <PortHandles card={card} />
+      <SelfFlowBadge card={card} />
       {/* An open container keeps its own lineage question: looking
           inside something must never end the walk. */}
       <WalkPills card={card} ctx={ctx} />
@@ -1709,26 +1789,45 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     labelVisible?: boolean
     /** Too many badges on this board for all of them to be read. */
     labelDense?: boolean
+    /** One end of this wire carries more flows than can be read as
+     *  separate lines, so it is drawn as part of a TRUNK. */
+    bundled?: boolean
+    /** ...and this wire is the one the trunk's label rides on. */
+    trunkCount?: number | null
   }
   // Hover emphasis is derived here from context: the edges ARRAY stays
   // identity-stable, so sweeping the pointer never rebuilds it (nor
   // makes React Flow reconcile every edge).
   const hoveredId = useContext(HoverContext)
   const emphasized = hoveredId != null && (source === hoveredId || target === hoveredId)
-  // Path-to-focus highlight — same context-routing reason as above.
-  const pathHighlight = useContext(PathHighlightContext)
-  const onPath = pathHighlight != null && pathHighlight.edgeKeys.has(id)
-  const offPath = pathHighlight != null && !onPath && pathHighlight.source === 'select'
-  const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
-  const strong = emphasized || onPath
-  // Highlighting STRENGTHENS what it points at; it does not wash out
-  // everything else. Hovering used to push every other wire to 20% and
-  // a path highlight to 12%, which turned reading one connection into
-  // losing the picture around it. Only a deliberate SELECTION quiets the
-  // rest now, and only to a floor that stays legible.
+  // Isolation — same context-routing reason as above.
+  const cone = useContext(IsolationContext)
+  const onCone = cone != null && cone.edgeKeys.has(id)
+  const offCone = cone != null && !onCone
+  const strong = emphasized || onCone
+  // A BUNDLED wire runs with its neighbours out of one port and splits
+  // only near the far end — control points pushed PAST each other, which
+  // is what makes the shared run straight instead of a fan of forty
+  // beziers leaving one dot at forty angles.
+  //
+  // ...unless the reader is inspecting this very cone, which is where the
+  // per-wire detail was moved to: isolation UN-BUNDLES what it isolates,
+  // so pointing at a hub is how you read one of its forty flows.
+  const bundled = (d.bundled ?? false) && !onCone
+  const [bezier, bezierLabelX, bezierLabelY] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
+  const dx = targetX - sourceX
+  const path = bundled
+    ? `M ${sourceX},${sourceY} C ${sourceX + dx * 0.72},${sourceY} ${sourceX + dx * 0.28},${targetY} ${targetX},${targetY}`
+    : bezier
+  const labelX = bundled ? (sourceX + targetX) / 2 : bezierLabelX
+  const labelY = bundled ? (sourceY + targetY) / 2 : bezierLabelY
+  // ISOLATION DIMS. At column grain, strengthening one wire among forty
+  // near-parallel ones is not visible at all — the answer to "which one
+  // is this" has to be that the others go quiet. To a floor that keeps
+  // the picture readable, and instantly undone on mouse-leave.
   const opacity = d.dimmed ? 0.12
     : strong ? 1
-      : offPath ? OFF_PATH_EDGE
+      : offCone ? OFF_CONE_EDGE
         : d.containment ? 0.45 : 0.7
   // A ×N survives density only where the reader is actually looking. A
   // CYCLE badge ignores density — "this lineage loops back" is a fact
@@ -1745,9 +1844,14 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // mid-air with no arrow under them. A badge is a thing SAID ABOUT a
   // wire, so it is decided by the wire that is there.
   const roomForLabel = labelFitsRun(sourceX, sourceY, targetX, targetY)
-  const showCount = (d.labelVisible ?? false) && roomForLabel && !d.dimmed && (!d.labelDense || strong)
+  // A TRUNK says what it stands for whatever the board's badge density
+  // is: it is the only statement forty bundled wires make, and without it
+  // a bundle is a shape rather than a number.
+  const trunk = bundled ? d.trunkCount ?? null : null
+  const showCount = trunk == null
+    && (d.labelVisible ?? false) && roomForLabel && !d.dimmed && (!d.labelDense || strong)
   const showCycle = (d.cycleBack ?? false) && roomForLabel && !d.dimmed
-  const showLabel = showCount || showCycle
+  const showLabel = showCount || showCycle || trunk != null
   return (
     <>
       <BaseEdge
@@ -1765,12 +1869,15 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
       {showLabel && (
         <EdgeLabelRenderer>
           <div
-            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`, opacity: offPath ? OFF_PATH_EDGE : 1 }}
+            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`, opacity: offCone ? OFF_CONE_EDGE : 1 }}
+            title={trunk != null
+              ? `${trunk.toLocaleString()} connections bundled — point at either end to read them one by one`
+              : undefined}
             className={cn(
               'absolute pointer-events-none px-1 py-px rounded-full bg-canvas-elevated border border-black/10 dark:border-white/10 text-[8.5px] font-semibold tabular-nums text-ink-muted shadow-sm',
               // Only a cycle badge needs to sit beside a count; a bare
               // count keeps exactly the box it has always had.
-              showCycle && 'flex items-center gap-0.5',
+              (showCycle || trunk != null) && 'flex items-center gap-0.5',
             )}
           >
             {/* This hop runs back towards the focus rather than away
@@ -1783,7 +1890,11 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
                 aria-label="This connection loops back"
               />
             )}
+            {trunk != null && (
+              <LucideIcons.Cable className="w-2 h-2 text-ink-muted/70" aria-hidden />
+            )}
             {showCount && `×${d.count.toLocaleString()}`}
+            {trunk != null && `×${trunk.toLocaleString()}`}
           </div>
         </EdgeLabelRenderer>
       )}
@@ -2466,26 +2577,41 @@ export function FocusGraphView({
     // draw — a property of the picture, so it is decided once here
     // rather than re-counted inside every edge.
     const labelDense = graph.edges.filter(e => e.labelVisible).length > LABEL_DENSITY_CAP
-    return graph.edges.map((e) => {
-      // Containment is never drawn as a wire — it NESTS. Every edge on
-      // the board is a lineage hop, tinted by the side it lands on.
-      const tint = Math.max(bandById.get(e.source) ?? 0, bandById.get(e.target) ?? 0) <= 0
-        ? TINT_UP
-        : TINT_DOWN
-      return {
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        type: 'focusEdge',
-        // Business users shouldn't infer direction from layout
-        // convention alone — every hop carries an explicit arrowhead.
-        markerEnd: { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
-        data: {
-          count: e.count, dimmed: e.dimmed, tint, cycleBack: e.cycleBack, reducedMotion,
-          labelVisible: e.labelVisible, labelDense,
-        },
-      }
-    })
+    return graph.edges
+      // NO STUBS, ABSOLUTELY. A wire whose card is not on this board has
+      // no anchor to start or end at, so React Flow draws it from the
+      // origin: the arrowheads that appear to grow out of a frame's edge
+      // and go nowhere. The builder already refuses to emit one (every
+      // FocusEdge names cards it emitted), and this is the second lock on
+      // the same door, at the layer that actually renders SVG — a card
+      // dropped anywhere between the two can never become a stub.
+      .filter(e => bandById.has(e.source) && bandById.has(e.target))
+      .map((e) => {
+        // Containment is never drawn as a wire — it NESTS. Every edge on
+        // the board is a lineage hop, tinted by the side it lands on.
+        const tint = Math.max(bandById.get(e.source) ?? 0, bandById.get(e.target) ?? 0) <= 0
+          ? TINT_UP
+          : TINT_DOWN
+        return {
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          // WHICH anchor, of however many that card carries. The layout
+          // assigned them in the far end's vertical order, so parallel
+          // flows between one pair of columns stay parallel.
+          sourceHandle: `out-${e.sourcePort}`,
+          targetHandle: `in-${e.targetPort}`,
+          type: 'focusEdge',
+          // Business users shouldn't infer direction from layout
+          // convention alone — every hop carries an explicit arrowhead.
+          markerEnd: { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
+          data: {
+            count: e.count, dimmed: e.dimmed, tint, cycleBack: e.cycleBack, reducedMotion,
+            labelVisible: e.labelVisible, labelDense,
+            bundled: e.bundled, trunkCount: e.trunkCount,
+          },
+        }
+      })
   }, [graph.cards, graph.edges, reducedMotion])
 
   const reachValue = useMemo(
@@ -2493,37 +2619,31 @@ export function FocusGraphView({
     [focalReach],
   )
 
-  // ── Path-to-focus highlight ──────────────────────────────────────
+  // ── Isolation ────────────────────────────────────────────────────
   //
-  // Trigger is hover-WITH-INTENT (150ms, so a sweeping pointer doesn't
-  // strobe the board) OR selection — hover wins while it is active, so
-  // the two can never fight over what is drawn; releasing the hover
-  // falls back to whatever is selected, never to nothing.
-  const [pathHoverId, setPathHoverId] = useState<string | null>(null)
-  const pathHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => () => { if (pathHoverTimer.current) clearTimeout(pathHoverTimer.current) }, [])
+  // Trigger is hover-WITH-INTENT (250ms, so a pointer crossing the board
+  // on its way somewhere never strobes it) OR a click, which sticks.
+  // Hover wins while it is active, so the two can never fight over what
+  // is drawn; releasing the hover falls back to whatever is selected,
+  // never to nothing.
+  const [coneHoverId, setConeHoverId] = useState<string | null>(null)
+  const coneHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (coneHoverTimer.current) clearTimeout(coneHoverTimer.current) }, [])
 
-  const focalCardId = useMemo(
-    () => graph.cards.find(c => c.nodeId === focalId)?.id ?? null,
-    [graph.cards, focalId],
-  )
   const selectedCardId = useMemo(
     () => (selectedId ? graph.cards.find(c => c.nodeId === selectedId)?.id ?? null : null),
     [graph.cards, selectedId],
   )
-  const pathSourceId = pathHoverId ?? selectedCardId
-  // WHICH gesture is asking, carried through so the cards and edges can
-  // tell "show me this path" (hover: strengthen only) from "I have
-  // chosen this one" (selection: may quiet the rest, to a floor).
-  const pathSource: 'hover' | 'select' = pathHoverId ? 'hover' : 'select'
-  const pathHighlightValue = useMemo(() => {
-    if (!pathSourceId || !focalCardId) return null
-    const found = pathToFocus(graph.edges, pathSourceId, focalCardId)
-    // Empty means "no path" (a roster extra, or the focus itself) —
-    // the contract both here and in pathToFocus is that this dims
-    // nothing rather than dimming the whole board for no reason.
-    return found.cardIds.size > 0 ? { ...found, source: pathSource } : null
-  }, [pathSourceId, pathSource, focalCardId, graph.edges])
+  const coneSourceId = coneHoverId ?? selectedCardId
+  const isolationValue = useMemo(() => {
+    if (!coneSourceId) return null
+    const found = isolationCone(graph.edges, coneSourceId)
+    // A cone of ONE card is a card with no drawn lineage — a roster
+    // extra, or a board with nothing wired yet. Blacking out the picture
+    // to say "this connects to nothing" is worse than saying nothing, so
+    // it dims nothing at all.
+    return found.cardIds.size > 1 ? found : null
+  }, [coneSourceId, graph.edges])
 
   const [rf, setRf] = useState<ReactFlowInstance | null>(null)
   useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion)
@@ -2556,7 +2676,7 @@ export function FocusGraphView({
     >
       <ReachContext.Provider value={reachValue}>
       <HoverContext.Provider value={hoveredId}>
-      <PathHighlightContext.Provider value={pathHighlightValue}>
+      <IsolationContext.Provider value={isolationValue}>
       <RowCursorContext.Provider value={rowCursor}>
       <ReactFlowProvider>
         <ReactFlow
@@ -2587,13 +2707,13 @@ export function FocusGraphView({
           onNodeMouseEnter={(_, n) => {
             if (n.type === 'focusCard') setHoveredId(n.id)
             if (n.type !== 'focusCard' && n.type !== 'focusFrame') return
-            if (pathHoverTimer.current) clearTimeout(pathHoverTimer.current)
-            pathHoverTimer.current = setTimeout(() => setPathHoverId(n.id), 150)
+            if (coneHoverTimer.current) clearTimeout(coneHoverTimer.current)
+            coneHoverTimer.current = setTimeout(() => setConeHoverId(n.id), HOVER_INTENT_MS)
           }}
           onNodeMouseLeave={() => {
             setHoveredId(null)
-            if (pathHoverTimer.current) { clearTimeout(pathHoverTimer.current); pathHoverTimer.current = null }
-            setPathHoverId(null)
+            if (coneHoverTimer.current) { clearTimeout(coneHoverTimer.current); coneHoverTimer.current = null }
+            setConeHoverId(null)
           }}
           proOptions={{ hideAttribution: true }}
           style={{ background: 'transparent' }}
@@ -2618,7 +2738,7 @@ export function FocusGraphView({
         </ReactFlow>
       </ReactFlowProvider>
       </RowCursorContext.Provider>
-      </PathHighlightContext.Provider>
+      </IsolationContext.Provider>
       </HoverContext.Provider>
       </ReachContext.Provider>
     </div>

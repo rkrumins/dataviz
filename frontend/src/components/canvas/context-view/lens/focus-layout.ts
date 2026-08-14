@@ -48,8 +48,10 @@ import type { LensWalkNode } from './closure-adapter'
 import {
     labelOf,
     layoutBands,
+    portFraction,
     rowHeight,
     ANCESTRY_CAP,
+    DENSITY_PORTS,
     labelFitsRun,
     CARD_H,
     CARD_W,
@@ -381,7 +383,6 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         groupsFrom(dir, subtreeOf(urn), `sub:${dir}:${urn}`)
 
     const revealedKeys = [...view.revealed.keys()].sort()
-    const admittedGroups: RevealGroup[] = []
     const processed = new Set<string>()
     /**
      * Admission. A key only becomes live once its own card is in the
@@ -432,7 +433,6 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                 if (fresh.length === 0) continue
                 budget -= 1
                 for (const member of fresh) admit(member)
-                if (!admittedGroups.some(g => g.root === group.root)) admittedGroups.push(group)
             }
         }
         if (!progressed) break
@@ -497,19 +497,33 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         hopCache.clear()
     }
 
-    // ── 2. ANSWER GRAIN ──────────────────────────────────────────────
+    // ── 2. PRESENTED UNITS — the FLATTEN ─────────────────────────────
+    //
+    // Every lineage-bearing TABLE is its own node, in the hop column its
+    // own hop dictates. Nothing is ever a box around tables: the levels
+    // above a table are breadcrumb text on it, and a container the reader
+    // has not drilled is ONE ROLLUP CARD standing for its members.
+    //
+    // Reported live and locked by the user (2026-08-14): `GOLD`'s seven
+    // tables drawn inside one GOLD frame put every peer flow between them
+    // OUTSIDE the box and back in — a knot of arcs with no left-to-right
+    // reading — and pinned all seven into the column of whichever member
+    // was nearest, so hop 2 and hop 3 sat in the hop-1 band. Flat, those
+    // are ordinary node→node wires across the columns and the knot cannot
+    // form.
 
     const childrenInPopulation = (urn: string): string[] =>
         (nodeOf(urn)?.children ?? []).filter(c => population.has(c))
 
-    /** The containment chain above the focus. Never geometry (see the
-     *  frame pass below), so it is never an answer grain either. */
+    /** The containment chain above the focus. Never geometry, so it is
+     *  never a presented unit either — it is the focal's breadcrumb. */
     const focusAncestors = new Set(ancestorsOf(sg.focusUrn))
+    const focusSubtree = subtreeOf(sg.focusUrn)
 
     /** Entities the data source itself put on a hop. They are what the
-     *  picture is OF at their grain, so the answer walk never sees
-     *  through one — and, because the walk stops there, no skipped level
-     *  can ever be carrying a wire when it is dropped from the geometry. */
+     *  picture is OF at their grain, so nothing is ever seen through
+     *  one — and no level dropped from the geometry can be carrying a
+     *  wire. */
     const carriesHop = new Set<string>()
     for (const hop of sg.lineageEdges) {
         if (!population.has(hop.sourceUrn) || !population.has(hop.targetUrn)) continue
@@ -517,59 +531,127 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         carriesHop.add(hop.targetUrn)
     }
 
-    /** A hop that ends on a LEAF: the data source named it, and there is
-     *  nothing inside it to open. It belongs in its owner's frame as a
-     *  ROW — that is what a table full of connected columns looks like —
-     *  rather than as a card of its own. A hop-carrier that HOLDS things
-     *  is its own card, because it has an inside to show. */
-    const isLeafHopCarrier = (urn: string): boolean =>
-        carriesHop.has(urn) && (nodeOf(urn)?.children.length ?? 0) === 0
+    /** Does this entity HOLD anything — whether or not this walk shipped
+     *  it? The declared count counts: a table whose lineage attaches at
+     *  TABLE grain ships none of its 22 columns, and it is still a table.
+     *
+     *  This is the ONE line that separates a table from a container. A
+     *  hop-carrier that holds things is a NODE (`dim_customer`, 22
+     *  columns, wired at its own grain); a hop-carrier that holds nothing
+     *  is a COLUMN, and belongs in its owner's card as a row. */
+    const holdsThings = (urn: string): boolean => {
+        if ((nodeOf(urn)?.children.length ?? 0) > 0) return true
+        const declared = dataOf(urn).childCount
+        return typeof declared === 'number' && declared > 0
+    }
 
-    /** Levels the layout opens by itself, and — of those — the ones it
-     *  opens WITHOUT drawing, because they are chrome the answer sits
-     *  under. Separate sets: a container holding rows is opened AND
-     *  drawn; a level walked past is opened and not. */
-    const spine = new Set<string>()
-    const walkedThrough = new Set<string>()
-    const spineSeen = new Set<string>()
-    const openThrough = (urn: string) => {
-        if (spineSeen.has(urn) || !population.has(urn)) return
-        spineSeen.add(urn)
+    /** A hop that ends on something with nothing inside it: a column. */
+    const isLeafHopCarrier = (urn: string): boolean =>
+        carriesHop.has(urn) && !holdsThings(urn)
+
+    /** The card a hop-carrier is DRAWN as — itself, or, for a column, the
+     *  table that owns it (the landed T14-I4 rule). */
+    const unitOf = (urn: string): string => {
+        const parent = nodeOf(urn)?.parent ?? null
+        return isLeafHopCarrier(urn) && parent && population.has(parent) ? parent : urn
+    }
+
+    /** THE PRESENTED UNITS: every partner card the board draws. The focus
+     *  and its contents are not among them (the focal card and its
+     *  contains-stack are those), and neither is anything above the focus
+     *  — a hop that lands there has no card and is said out loud instead
+     *  (`hopsAtCoarserGrain`). */
+    const units = new Set<string>()
+    for (const urn of population) {
+        if (!carriesHop.has(urn)) continue
+        const u = unitOf(urn)
+        if (focusSubtree.has(u) || focusAncestors.has(u)) continue
+        units.add(u)
+    }
+
+    /** The units a container would put on the board if it were drilled:
+     *  the ROOT-MOST ones under it, since a unit nested in a unit is
+     *  reached by drilling that one. */
+    const topmostUnitsIn = (urn: string): string[] => {
+        const out: string[] = []
+        const stack = [...childrenInPopulation(urn)]
+        while (stack.length > 0) {
+            const next = stack.pop()!
+            if (units.has(next)) { out.push(next); continue }
+            for (const kid of childrenInPopulation(next)) stack.push(kid)
+        }
+        return out
+    }
+
+    /** Containment levels that draw NO card of their own — chrome walked
+     *  through — and the ones the reader has DRILLED, which is the same
+     *  thing by request: the rollup is replaced by what it stood for. */
+    const chrome = new Set<string>()
+    const drilled = new Set<string>()
+    /** ...and the ones that DO draw a card while standing for members
+     *  they do not: `GOLD · 7 on this lineage · of 8`. */
+    const rollups = new Set<string>()
+    const classified = new Set<string>()
+    const classify = (urn: string) => {
+        if (classified.has(urn) || !population.has(urn)) return
+        classified.add(urn)
+        // THE FOCUS IS NEVER CHROME, whatever its shape: it is the thing
+        // you asked about, so it always gets its card and its
+        // contains-stack. Its contents are the stack's rows and are
+        // classified by nobody.
+        if (urn === sg.focusUrn) return
         const kids = childrenInPopulation(urn)
         if (kids.length === 0) return
-        // THE FOCUS IS NEVER CHROME. It is the thing you asked about: it
-        // always gets its card and its contains-stack, whatever its shape
-        // happens to be. (A focus with exactly one connected child and no
-        // hop of its own used to satisfy the pass-through test below,
-        // join the spine, and be demoted out of the picture — leaving a
-        // board with no focal card and, because every hop reprojects onto
-        // it, no wires at all.)
-        if (urn === sg.focusUrn) return
-        const above = focusAncestors.has(urn)
-        // The grain the answer is PRESENTED at: a container holding hops
-        // that end in it is what the picture is of. Open it so its rows
-        // show — `int_clean_orders_t1` with its connected columns in it,
-        // counted, searchable and paged in place — and draw it. Never
-        // above the focus, where nothing is drawn at all (R1).
-        if (!above && kids.some(isLeafHopCarrier)) { spine.add(urn); return }
-        // Otherwise chrome, and seen through: a level above the focus, or
-        // a PASS-THROUGH the data source has not itself named as a
-        // lineage end. Sticky, because the population only grows: a level
-        // once drawn through stays drawn through for this view state, or
-        // the arrival of a second child would turn it into a card and
-        // swallow the one already on the board.
-        if (above || view.walkedThrough.has(urn) || (kids.length === 1 && !carriesHop.has(urn))) {
-            spine.add(urn)
-            walkedThrough.add(urn)
-            for (const kid of kids) openThrough(kid)
+        // ABOVE THE FOCUS: breadcrumb, never geometry. (R1)
+        if (focusAncestors.has(urn)) {
+            chrome.add(urn)
+            for (const kid of kids) classify(kid)
+            return
         }
+        // A TABLE. Its columns are its rows; anything else it holds is a
+        // card of its own, so keep walking.
+        if (units.has(urn)) {
+            for (const kid of kids) classify(kid)
+            return
+        }
+        // A CONTAINER. One unit under it is chrome — a box around one
+        // table says what one word of breadcrumb says, for ~90px. Several
+        // is a genuine choice, so it is a ROLLUP until the reader drills
+        // it.
+        //
+        // STICKY (`view.walkedThrough`), because the population only ever
+        // grows: a level seen through while it held one table would
+        // become a rollup the moment a second arrived, and the card
+        // already on the board would vanish inside it. Nothing drawn may
+        // be taken away by a walk growing.
+        const opened = view.expandedContainment.has(urn) && !view.collapsedContainment.has(urn)
+        if (topmostUnitsIn(urn).length <= 1 || view.walkedThrough.has(urn)) {
+            chrome.add(urn)
+            for (const kid of kids) classify(kid)
+            return
+        }
+        if (opened) {
+            drilled.add(urn)
+            for (const kid of kids) classify(kid)
+            return
+        }
+        rollups.add(urn)
     }
-    for (const group of admittedGroups) openThrough(group.root)
-
-    const expanded = new Set<string>([...view.expandedContainment, ...spine])
-    for (const urn of view.collapsedContainment) expanded.delete(urn)
+    for (const urn of population) {
+        if ((model.get(urn)?.parent ?? null) === null) classify(urn)
+    }
+    /** Fed back into the next build's `LensViewState.walkedThrough`. */
+    const walkedThrough = new Set(chrome)
 
     // ── 3. VISIBILITY ────────────────────────────────────────────────
+
+    // OPEN BY DEFAULT, which is what flat means: nothing stands in for
+    // anything unless it says so. Exactly two things are shut — a ROLLUP
+    // (it stands for its members, by definition) and whatever the reader
+    // shut by hand.
+    const expanded = new Set<string>(population)
+    for (const urn of rollups) expanded.delete(urn)
+    for (const urn of view.collapsedContainment) expanded.delete(urn)
 
     // Pre-order, parents before children: `visibleLensNodes` stops at any
     // closed node, which IS the "every ancestor must be open" rule, and
@@ -578,7 +660,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const visible = new Set(visibleOrder)
 
     /** What is INSIDE the focus: its contains-stack rows. */
-    const focusContents = new Set(subtreeOf(sg.focusUrn))
+    const focusContents = new Set(focusSubtree)
     focusContents.delete(sg.focusUrn)
 
     /**
@@ -680,57 +762,35 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const drawnIn = new Set(projected.map(e => e.targetUrn))
     const drawnOut = new Set(projected.map(e => e.sourceUrn))
 
-    // ── 3b. NO PASSIVE WRAPPERS ──────────────────────────────────────
+    // ── 3b. NO WRAPPERS AT ALL ───────────────────────────────────────
     //
-    // A container the picture merely SAW THROUGH on its way to the
-    // answer is not geometry. Nothing is a frame for having been walked
-    // past: a frame means "this entity, opened", and the only two ways
-    // to get one are to BE the presented grain of a group (and be
-    // opened) or to be a container someone opened inside such a frame.
-    //
-    // Reported live: focusing REPORTING — a container inside the
-    // platform Snowflake — whose sources GOLD and INTERMEDIATE_T2 live
-    // in that SAME platform drew one Snowflake frame holding the focus
-    // and both sources stacked under it. No left-to-right flow, every
-    // wire looping back through the box, and an upstream band so empty
-    // it whispered "no upstream sources" over a picture full of them.
-    // Boxing a single group is the same mistake in miniature — it spends
-    // ~90px of chrome per level to say what one line of breadcrumb says.
-    //
-    // So a visible container is DEMOTED — no card at all, its children
-    // promoted to the top level of their own hop columns, each carrying
-    // the ancestry it came from — when it is:
+    // A containment level draws a card only when it IS the answer at its
+    // own grain — a table, or a container standing for members it does
+    // not draw. Everything else is DEMOTED: no card, its members promoted
+    // to the top level of their own hop columns, each carrying the
+    // breadcrumb of where it came from.
     //
     //   • ABOVE THE FOCUS. The thing you asked about anchors the picture
-    //     and is never enclosed by anything; what is above it is the
-    //     focal breadcrumb. (Its own contents are stated by the
-    //     contains-stack attached below the focal — see `emit`.)
-    //   • WALKED THROUGH by the answer grain. `walkedThrough` is exactly
-    //     the levels the walk saw past on its way to the answer, so they
-    //     are chrome by construction; the level the answer is presented
-    //     at is opened but never in it.
+    //     and is never enclosed; what is above it is the focal breadcrumb.
+    //   • CHROME — a container with one unit under it. ~90px of box per
+    //     level to say what one word of breadcrumb says.
+    //   • DRILLED — the reader asked for its members, so the rollup is
+    //     replaced by them. That is what drilling MEANS here.
     //
-    // Both cases are ancestor-closed (every ancestor of a focus-ancestor
-    // is one; every ancestor of a walked-through level was walked through
-    // to get there), so the demoted set is a prefix from the roots:
-    // nothing nested inside a surviving frame is ever demoted, and the
-    // cascade is just "keep walking down until something survives".
-    //
-    // A demoted level can never be carrying a wire: the grain walk stops
-    // at any entity the data source put on a hop (`carriesHop`), so a
-    // walked-through level has none — and a hop that ends on a focus
-    // ancestor is the one shape this rule cannot draw, which the focal
-    // says out loud rather than dropping in silence (see below).
+    // Reported live and then locked by the user: `GOLD` holding seven
+    // tables drew every peer flow between them as an arc leaving the box
+    // and coming back into it, and pinned hop-2 and hop-3 members into
+    // the hop-1 column. There is no box now, so there is no arc.
     const visibleChildrenOf = (urn: string): string[] =>
         (nodeOf(urn)?.children ?? []).filter(c => visible.has(c))
 
     const demoted = new Set<string>()
     for (const urn of visibleOrder) {
-        // Nothing is enclosed, so there is no wrapper to remove: a card
-        // with its contents shut stands for what is inside it, which is
-        // its job. And never the focus, whatever its shape.
+        // Never the focus, whatever its shape — and never a level whose
+        // members are all hidden, or demoting it would take them off the
+        // board with it.
         if (urn === sg.focusUrn || visibleChildrenOf(urn).length === 0) continue
-        if (focusAncestors.has(urn) || walkedThrough.has(urn)) demoted.add(urn)
+        if (focusAncestors.has(urn) || chrome.has(urn) || drilled.has(urn)) demoted.add(urn)
     }
 
     // A demoted level is off the board, but what the DATA SOURCE said
@@ -751,7 +811,14 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const guard = new Set<string>()
         while (cursor && demoted.has(cursor) && !guard.has(cursor)) {
             guard.add(cursor)
-            cursor = visibleChildrenOf(cursor)[0] ?? null
+            const kids = visibleChildrenOf(cursor)
+            // A DRILLED container has several members and no single heir.
+            // Its own frontier waits until the reader collapses it back to
+            // a rollup, which is the card that can offer it honestly:
+            // folding it onto one arbitrary member would be a number that
+            // member's click could not deliver, and onto all of them would
+            // be the same number said several times.
+            cursor = kids.length === 1 ? kids[0] : null
         }
         return cursor
     }
@@ -777,15 +844,28 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         foldedFrontiers.set(host, folded)
     }
 
-    /** The cards that get a hop column of their own: every model root,
-     *  and — through each demoted container — the groups it held. */
+    /** Is this entity a card in its OWN right, wherever it happens to sit
+     *  in the containment tree? A table, a rollup, or a level that is
+     *  demoted and whose members are. Everything else a card holds is one
+     *  of its ROWS. */
+    const drawsOwnCard = (urn: string): boolean =>
+        units.has(urn) || rollups.has(urn) || demoted.has(urn)
+
+    /** The cards that get a hop column of their own. NOTHING encloses
+     *  anything here: a table nested inside another table, or inside a
+     *  drilled container, is a top-level card exactly like one that is
+     *  not — its containment is stated by its breadcrumb. */
     const topLevelUnits: string[] = []
     const unitGuard = new Set<string>()
     const collectUnits = (urn: string) => {
         if (unitGuard.has(urn)) return
         unitGuard.add(urn)
-        if (!demoted.has(urn)) { topLevelUnits.push(urn); return }
-        for (const kid of visibleChildrenOf(urn)) collectUnits(kid)
+        if (!demoted.has(urn)) topLevelUnits.push(urn)
+        for (const kid of visibleChildrenOf(urn)) {
+            // Rows stay rows; anything that is a card of its own comes out
+            // to the top level.
+            if (demoted.has(urn) || drawsOwnCard(kid)) collectUnits(kid)
+        }
     }
     for (const urn of visibleOrder) {
         if ((nodeOf(urn)?.parent ?? null) === null) collectUnits(urn)
@@ -826,13 +906,83 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         weightCache.set(urn, n)
         return n
     }
+    // ── crossing reduction: one barycenter pass ──────────────────────
+    //
+    // A column of forty cards wired to a column of thirty draws 1,200
+    // possible crossings, and the order they happen to be stacked in
+    // decides how many of them are real. So each column is ordered
+    // against the one ALREADY PLACED nearer the focus: a card sits at the
+    // average height of the neighbours it is wired to over there.
+    //
+    // One pass, no iteration to a fixpoint: it is a heuristic, it must be
+    // deterministic, and — critically — it must compose with the frozen
+    // slot rule below. Rank wins over barycenter, so this only ever
+    // orders ARRIVALS; a card already on the board never moves because
+    // the walk grew a better arrangement underneath it.
+
+    const topLevelSet = new Set(topLevelUnits)
+    const hostCache = new Map<string, string | null>()
+    /** The top-level card an endpoint belongs to — itself, or whichever
+     *  card it is drawn inside. */
+    const topLevelHost = (urn: string): string | null => {
+        const hit = hostCache.get(urn)
+        if (hit !== undefined) return hit
+        let cursor: string | null = urn
+        const guard = new Set<string>()
+        while (cursor && !guard.has(cursor)) {
+            if (topLevelSet.has(cursor)) break
+            guard.add(cursor)
+            cursor = model.get(cursor)?.parent ?? null
+        }
+        const out = cursor && topLevelSet.has(cursor) ? cursor : null
+        hostCache.set(urn, out)
+        return out
+    }
+
+    /** urn → the top-level cards it is wired to, both directions. */
+    const wiredTo = new Map<string, Set<string>>()
+    const linkWire = (from: string, to: string) => {
+        const set = wiredTo.get(from) ?? new Set<string>()
+        set.add(to)
+        wiredTo.set(from, set)
+    }
+    for (const bundle of projected) {
+        const sHost = topLevelHost(bundle.sourceUrn)
+        const tHost = topLevelHost(bundle.targetUrn)
+        if (!sHost || !tHost || sHost === tHost) continue
+        linkWire(bundle.sourceUrn, tHost)
+        linkWire(bundle.targetUrn, sHost)
+        linkWire(sHost, tHost)
+        linkWire(tHost, sHost)
+    }
+
+    /** Where each top-level card sits in its own column, filled in as the
+     *  columns are ordered outward from the focus. */
+    const orderIndex = new Map<string, number>()
+    const NO_BARYCENTER = Number.MAX_SAFE_INTEGER
+    /** The average slot of everything this entity is wired to in the
+     *  columns already placed. `NO_BARYCENTER` when none of them are. */
+    const barycenterOf = (urn: string): number => {
+        let sum = 0
+        let n = 0
+        for (const host of wiredTo.get(urn) ?? []) {
+            const at = orderIndex.get(host)
+            if (at === undefined) continue
+            sum += at
+            n += 1
+        }
+        return n === 0 ? NO_BARYCENTER : sum / n
+    }
+
     /** A card already on the board keeps the slot it was first drawn in;
-     *  anything else ranks by weight, behind all of them. */
+     *  anything else is ordered to cross as little as possible, then by
+     *  weight, behind all of them. */
     const UNDRAWN = Number.MAX_SAFE_INTEGER
     const drawnRankOf = (urn: string): number => view.drawnRank.get(urn) ?? UNDRAWN
     const rankCards = (urns: string[]): string[] =>
         [...urns].sort((a, b) =>
             drawnRankOf(a) - drawnRankOf(b)
+            || barycenterOf(a) - barycenterOf(b)
             || weightOf(b) - weightOf(a)
             || labelFor(a).localeCompare(labelFor(b))
             || a.localeCompare(b))
@@ -1015,6 +1165,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         frameOffset: 0, frameWindowSize: FRAME_WINDOW, frameRows: NO_FRAME_ROWS,
         canOpenChildren: false, childrenOpen: false,
         expandKey: null, expanded: false, wired: false, deadEnd: false,
+        rollup: false, selfFlows: 0, portsIn: 0, portsOut: 0,
         fetch: null, dimmed: false,
         pillUp: null, pillDown: null, contents: null,
     })
@@ -1101,7 +1252,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
          *  a row removed by a search is a row you cannot see is there. */
         hostQuery = '',
     ) => {
-        const kids = rankCards((nodeOf(urn)?.children ?? []).filter(c => visible.has(c)))
+        // ROWS ONLY. A child that is a card in its own right — another
+        // table, a rollup, a level whose members are drawn — is out at the
+        // top level, wherever it sits in the containment tree. This is the
+        // whole flatten in one filter: nothing encloses anything but its
+        // own leaves.
+        const kids = rankCards(visibleChildrenOf(urn).filter(c => !drawsOwnCard(c)))
         const showAll = view.frameShowAll.has(urn)
         const isFocus = urn === sg.focusUrn
         const label = labelFor(urn)
@@ -1138,13 +1294,17 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // swelling the thing you asked about into a frame the rest of the
         // board sits beside.
         const isFrame = rows.length > 0 && !isFocus
+        // A CONTAINER standing for members it does not draw. Its chevron
+        // does not open a body — it REPLACES this card with those members.
+        const isRollup = rollups.has(urn)
         // A row of the contains-stack is CONTENTS. Its lineage is the
         // focus's lineage — drawn at the focal, offered by the focal's ⊕
         // — so a row neither carries a pill of its own nor gets to claim
-        // that the walk ended at it.
+        // that the walk ended at it. A ROLLUP never claims one either: it
+        // is standing in for members whose own ends it cannot see.
         const { pillUp, pillDown, deadEnd } = focusContents.has(urn)
             ? { pillUp: null, pillDown: null, deadEnd: false }
-            : walkStateOf(urn, isFrame, band)
+            : walkStateOf(urn, isFrame || isRollup, band)
         const windowSize = showAll ? FRAME_WINDOW_ALL : FRAME_WINDOW
         // The scroll window can never travel past what has loaded: a
         // restored share link, or a roster that shrank under a new
@@ -1180,6 +1340,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             expandKey: urn,
             expanded: isFrame,
             wired: drawnIn.has(urn) || drawnOut.has(urn),
+            rollup: isRollup,
             contents: contentsOf(urn),
             pillUp,
             pillDown,
@@ -1339,22 +1500,90 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         }
     }
 
-    // Column order, then rank inside the column: the heaviest source sits
-    // at the top of its band — except in band 0, which the focus always
-    // leads, because `layoutBands` centers that band's first card on the
-    // midline and the thing you asked about is what the midline is for.
-    const units = rankCards(topLevelUnits).sort((a, b) =>
-        signedHop(a) - signedHop(b)
-        || Number(b === sg.focusUrn) - Number(a === sg.focusUrn))
-    for (const unit of units) {
-        const band = signedHop(unit)
+    /**
+     * COLUMN BY COLUMN, OUTWARD FROM THE FOCUS — so each one can be
+     * ordered against the column already placed beside it.
+     *
+     * Three rules stacked, in this order and no other:
+     *
+     *  1. FROZEN SLOTS. A card already on the board holds its place for
+     *     this view state's lifetime (`drawnRank`). Ordering therefore
+     *     runs ONCE per membership change: arrivals are arranged, nothing
+     *     drawn is re-arranged under the pointer of whoever revealed it.
+     *  2. ADJACENCY. Cards from the same container sit together, and the
+     *     gap between groups is the only thing that says so (GROUP_GAP —
+     *     a box around them is the chrome this whole task deleted).
+     *  3. CROSSING REDUCTION, inside a group: barycenter against the
+     *     placed column, then a source above the sink it feeds where two
+     *     of them are wired to each other, then weight, then name.
+     */
+    const bandOf = new Map<string, number>()
+    for (const unit of topLevelUnits) bandOf.set(unit, signedHop(unit))
+    const columns = new Map<number, string[]>()
+    for (const unit of topLevelUnits) {
+        const band = bandOf.get(unit)!
         // The whole band a direction filter hides — never emitted, so its
         // cards, pills AND edges (an edge needs both endpoints' card ids)
         // are all absent at once. Band 0 (the focus's own subtree) is
         // never a "side" and is never skipped.
         if (directionFilter === 'in' && band > 0) continue
         if (directionFilter === 'out' && band < 0) continue
-        emit(unit, null, 0, band)
+        const list = columns.get(band)
+        if (list) list.push(unit)
+        else columns.set(band, [unit])
+    }
+    /** Does `a` feed `b` directly, both of them in this same column? Two
+     *  peers of one container at the same hop read left-to-right like
+     *  everything else on this board when the source is above the sink. */
+    const feeds = (a: string, b: string): boolean =>
+        (wiredTo.get(a)?.has(b) ?? false)
+        && projected.some(p =>
+            topLevelHost(p.sourceUrn) === a && topLevelHost(p.targetUrn) === b)
+
+    const orderColumn = (band: number, list: string[]): string[] => {
+        const ranked = rankCards(list)
+        if (band === 0) {
+            // `layoutBands` centres this band's FOCAL on the midline and
+            // hangs the rest below it; the thing you asked about is what
+            // the midline is for.
+            return [...ranked].sort((a, b) =>
+                Number(b === sg.focusUrn) - Number(a === sg.focusUrn))
+        }
+        // Group by immediate container, groups in the order their first
+        // member came out of the ranking — so the frozen slots decide the
+        // group order too, and adjacency never moves a drawn card.
+        const groups: string[][] = []
+        const groupAt = new Map<string, number>()
+        for (const urn of ranked) {
+            const key = model.get(urn)?.parent ?? `~root:${urn}`
+            const at = groupAt.get(key)
+            if (at === undefined) { groupAt.set(key, groups.length); groups.push([urn]) }
+            else groups[at].push(urn)
+        }
+        return groups.flatMap(group => {
+            // Sources above the sinks they feed, within the group. One
+            // stable insertion pass over an already-ordered list: it can
+            // only ever move a sink DOWN past a source it is fed by, so it
+            // terminates and stays deterministic.
+            const out = [...group]
+            for (let i = 0; i < out.length; i++) {
+                for (let j = i + 1; j < out.length; j++) {
+                    if (!feeds(out[j], out[i])) continue
+                    out.splice(i, 0, ...out.splice(j, 1))
+                    break
+                }
+            }
+            return out
+        })
+    }
+
+    const bandsOutward = [...columns.keys()].sort((a, b) => Math.abs(a) - Math.abs(b) || a - b)
+    for (const band of bandsOutward) {
+        const ordered = orderColumn(band, columns.get(band)!)
+        // Published BEFORE the next column is ordered — that is what the
+        // barycenter reads.
+        ordered.forEach((urn, i) => orderIndex.set(urn, i))
+        for (const unit of ordered) emit(unit, null, 0, band)
     }
 
     // ── LAST RESORT: the focus is never missing from its own board ────
@@ -1439,15 +1668,28 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
     // ── edges ────────────────────────────────────────────────────────
 
-    /** A hop that goes BACKWARDS in the picture's own hop numbering
-     *  closes a cycle: `B → A` where A is nearer the focus than B on the
-     *  same side. Stated per-direction because a node can legitimately
-     *  sit on both sides of a diamond without any cycle existing. */
-    const closesCycle = (bundle: ProjectedLensEdge): boolean => {
+    /**
+     * A hop that runs STRICTLY backwards in the picture's own hop
+     * numbering: `B → A` where A is genuinely nearer the focus than B on
+     * the same side. Stated per-direction because a node can legitimately
+     * sit on both sides of a diamond without any cycle existing.
+     *
+     * STRICT since the flatten. The old `≤` also stamped every wire
+     * between two cards at the SAME hop — and once containers stopped
+     * being boxes, an ordinary peer flow between two tables of one
+     * container (`fact_orders → dim_customer`, both one hop from the
+     * focus) became the common shape on the board. A loop badge on it is
+     * a claim about the data that is simply false, and the reader has no
+     * way to tell it from the true loops beside it.
+     *
+     * What a same-hop pair CAN be is a real cycle, and that is caught by
+     * the directed-cycle pass below rather than guessed at from numbering.
+     */
+    const runsBackwards = (bundle: ProjectedLensEdge): boolean => {
         const s = hopsOf(bundle.sourceUrn)
         const t = hopsOf(bundle.targetUrn)
-        if (s.down != null && t.down != null && t.down <= s.down) return true
-        if (s.up != null && t.up != null && s.up <= t.up) return true
+        if (s.down != null && t.down != null && t.down < s.down) return true
+        if (s.up != null && t.up != null && s.up < t.up) return true
         return false
     }
 
@@ -1493,12 +1735,20 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const sUrn = landingUrn(bundle.sourceUrn)
         const tUrn = landingUrn(bundle.targetUrn)
         if (!sUrn || !tUrn) { hopsAtCoarserGrain += bundle.weight; continue }
-        // Both ends rolled into one card, or into a card and something it
-        // CONTAINS: the wire would leave a card and come straight back
-        // into it. That is the contents talking among themselves — their
-        // rows' counts and the drill say it — and as geometry it is the
-        // stub arc that reads as a broken arrow.
-        if (sUrn === tUrn || subtreeOf(sUrn).has(tUrn) || subtreeOf(tUrn).has(sUrn)) continue
+        // BOTH ENDS ON ONE CARD. A collapsed container whose members feed
+        // each other, or an entity the data source wired to itself: it is
+        // a fact, and it is never a wire — a line that leaves a card and
+        // comes straight back into it is the arc that reads as a broken
+        // arrow. Said as a compact badge on the card instead.
+        if (sUrn === tUrn) {
+            const self = byId.get(cardIdByUrn.get(sUrn)!)
+            if (self) self.selfFlows += bundle.weight
+            continue
+        }
+        // One end rolled up into something that CONTAINS the other — an
+        // off-window row and its own frame. The contents talking among
+        // themselves; their rows' counts and the drill say it.
+        if (subtreeOf(sUrn).has(tUrn) || subtreeOf(tUrn).has(sUrn)) continue
         const source = cardIdByUrn.get(sUrn)!
         const target = cardIdByUrn.get(tUrn)!
         const id = `e:${source}>${target}`
@@ -1507,7 +1757,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         if (existing) {
             existing.count += bundle.weight
             if (existing.edgeTypeNorm !== norm) existing.edgeTypeNorm = ''
-            existing.cycleBack = existing.cycleBack || closesCycle(bundle)
+            existing.cycleBack = existing.cycleBack || runsBackwards(bundle)
             continue
         }
         byPair.set(id, {
@@ -1520,16 +1770,168 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             // match stays lit, or the filter would hide the answer's own
             // connections.
             dimmed: (byId.get(source)?.dimmed ?? false) && (byId.get(target)?.dimmed ?? false),
-            cycleBack: closesCycle(bundle),
+            cycleBack: runsBackwards(bundle),
+            sourcePort: 0,
+            targetPort: 0,
+            bundled: false,
+            trunkCount: null,
             // Decided from the geometry, below — there is none yet.
             labelVisible: false,
         })
     }
     const edges: FocusEdge[] = [...byPair.values()]
 
+    // ── the OTHER half of the cycle rule: a real directed loop ───────
+    //
+    // Hop numbering alone cannot see `A → B → A` between two cards at the
+    // same hop, and that is exactly what the flatten made common: two
+    // tables of one container feeding each other. So the drawn edge set is
+    // decomposed into strongly-connected components (Tarjan, iterative —
+    // a board is bounded but a recursive walk over it is still a stack
+    // this file should not gamble on), and every edge INSIDE a component
+    // of more than one card is on a loop by definition.
+    //
+    // Nothing else stamps a badge: a badge that fires on ordinary forward
+    // flow teaches the reader to ignore it, which costs them the one that
+    // matters.
+    const outgoing = new Map<string, string[]>()
+    for (const edge of edges) {
+        const list = outgoing.get(edge.source)
+        if (list) list.push(edge.target)
+        else outgoing.set(edge.source, [edge.target])
+    }
+    const sccOf = new Map<string, number>()
+    {
+        const index = new Map<string, number>()
+        const low = new Map<string, number>()
+        const onStack = new Set<string>()
+        const stack: string[] = []
+        let counter = 0
+        let components = 0
+        for (const root of byId.keys()) {
+            if (index.has(root)) continue
+            // (node, next child to visit)
+            const work: Array<{ v: string; i: number }> = [{ v: root, i: 0 }]
+            index.set(root, counter)
+            low.set(root, counter)
+            counter += 1
+            stack.push(root)
+            onStack.add(root)
+            while (work.length > 0) {
+                const frame = work[work.length - 1]
+                const kids = outgoing.get(frame.v) ?? []
+                if (frame.i < kids.length) {
+                    const w = kids[frame.i]
+                    frame.i += 1
+                    if (!index.has(w)) {
+                        index.set(w, counter)
+                        low.set(w, counter)
+                        counter += 1
+                        stack.push(w)
+                        onStack.add(w)
+                        work.push({ v: w, i: 0 })
+                    } else if (onStack.has(w)) {
+                        low.set(frame.v, Math.min(low.get(frame.v)!, index.get(w)!))
+                    }
+                    continue
+                }
+                work.pop()
+                const parentFrame = work[work.length - 1]
+                if (parentFrame) {
+                    low.set(parentFrame.v, Math.min(low.get(parentFrame.v)!, low.get(frame.v)!))
+                }
+                if (low.get(frame.v) === index.get(frame.v)) {
+                    const id = components++
+                    let member: string
+                    do {
+                        member = stack.pop()!
+                        onStack.delete(member)
+                        sccOf.set(member, id)
+                    } while (member !== frame.v)
+                }
+            }
+        }
+    }
+    const sccSize = new Map<number, number>()
+    for (const id of sccOf.values()) sccSize.set(id, (sccSize.get(id) ?? 0) + 1)
+    for (const edge of edges) {
+        const component = sccOf.get(edge.source)
+        if (component != null && component === sccOf.get(edge.target) && (sccSize.get(component) ?? 0) > 1) {
+            edge.cycleBack = true
+        }
+    }
+
     // ── 5. GEOMETRY ──────────────────────────────────────────────────
 
     layoutBands(cards)
+
+    // ── ports: where forty wires actually touch a card ───────────────
+    //
+    // Every wire used to attach at the middle of a card's edge, so a hub
+    // with forty incoming flows drew forty lines converging on one dot —
+    // a black wedge with no way to tell which line went where, and no way
+    // to point at one.
+    //
+    // So a card's incident wires are spread evenly down its edge, and the
+    // order they are spread in is the order of the FAR ends: wire 1 goes
+    // to the topmost neighbour, wire n to the bottom-most. That is what
+    // stops two adjacent parallel flows crossing each other between the
+    // same pair of columns — the crossing the barycenter pass above
+    // cannot reach, because it is inside one card rather than between two.
+    //
+    // Past `DENSITY_PORTS` there is no spreading left to do: the card is
+    // taller than the wires are apart, so that side BUNDLES instead —
+    // one trunk out of one port, splitting near the far ends, carrying
+    // the summed weight as its label. R5 isolation un-bundles whatever
+    // cone the reader points at, which is where the per-wire detail is.
+    const centreY = (card: FocusCard) => card.y + card.h / 2
+    const incident = (side: 'in' | 'out') => {
+        const by = new Map<string, FocusEdge[]>()
+        for (const edge of edges) {
+            const key = side === 'in' ? edge.target : edge.source
+            const list = by.get(key)
+            if (list) list.push(edge)
+            else by.set(key, [edge])
+        }
+        return by
+    }
+    const inByCard = incident('in')
+    const outByCard = incident('out')
+    for (const card of cards) {
+        const ins = inByCard.get(card.id) ?? []
+        const outs = outByCard.get(card.id) ?? []
+        const wire = (list: FocusEdge[], side: 'in' | 'out'): number => {
+            if (list.length === 0) return 0
+            // Far end's height decides the order, so parallel flows stay
+            // parallel. Tie-broken on the edge id so a build is a function
+            // of its input and nothing else.
+            const sorted = [...list].sort((a, b) => {
+                const fa = byId.get(side === 'in' ? a.source : a.target)
+                const fb = byId.get(side === 'in' ? b.source : b.target)
+                return (fa ? centreY(fa) : 0) - (fb ? centreY(fb) : 0) || a.id.localeCompare(b.id)
+            })
+            if (sorted.length > DENSITY_PORTS) {
+                for (const edge of sorted) {
+                    edge.bundled = true
+                    if (side === 'in') edge.targetPort = 0
+                    else edge.sourcePort = 0
+                }
+                // The trunk says what it stands for, ONCE, on the wire
+                // running through the middle of the bundle — which is
+                // where the trunk is thickest and where a reader looks.
+                const carrier = sorted[Math.floor(sorted.length / 2)]
+                carrier.trunkCount = sorted.reduce((acc, e) => acc + e.count, 0)
+                return 1
+            }
+            sorted.forEach((edge, i) => {
+                if (side === 'in') edge.targetPort = i
+                else edge.sourcePort = i
+            })
+            return sorted.length
+        }
+        card.portsIn = wire(ins, 'in')
+        card.portsOut = wire(outs, 'out')
+    }
 
     // A ×N badge belongs to a wire, so it may only render where the wire
     // can hold one: long enough for a pill, and with nothing already
@@ -1551,9 +1953,9 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const t = byId.get(edge.target)
         if (!s || !t) continue
         const sx = s.x + s.w
-        const sy = s.y + s.h / 2
+        const sy = s.y + s.h * portFraction(edge.sourcePort, s.portsOut)
         const tx = t.x
-        const ty = t.y + t.h / 2
+        const ty = t.y + t.h * portFraction(edge.targetPort, t.portsIn)
         if (!labelFitsRun(sx, sy, tx, ty)) continue
         const x = (sx + tx) / 2
         const y = (sy + ty) / 2
@@ -1649,77 +2051,74 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     }
 }
 
-// ── path-to-focus highlight ─────────────────────────────────────────
+// ── isolation: one element's whole visible lineage ──────────────────
 
 /**
- * Every card and edge on SOME shortest path between `fromId` and
- * `focalId`, computed over the PROJECTED edges (`FocusGraph.edges`) —
- * both orientations, so a wire drawn the other way still counts. Pure
- * and client-side: hovering or selecting a card asks nothing of the
- * server, because the answer is already sitting in the picture.
+ * Every card and edge on `fromId`'s VISIBLE LINEAGE CONE: everything it
+ * feeds, and everything that feeds it, transitively, as far as the
+ * picture goes. Pure and client-side: pointing at a card asks nothing of
+ * the server, because the answer is already on screen.
  *
- * "Some" rather than "the" on purpose — a diamond (two branches of equal
- * length rejoining before the focus) highlights BOTH branches, not one
- * arbitrarily chosen. Cycle-safe: BFS distance is computed once, and the
- * backtrack only ever walks strictly toward the focus, so a loop in the
- * projected edges cannot make it retrace its steps.
+ * TWO DIRECTED WALKS, not one undirected one, and the difference is the
+ * whole value of the feature. Undirected, every card of a connected board
+ * is on every other card's cone — and a lens board is connected by
+ * construction, because it is one entity's lineage. Isolating anything
+ * would light everything. Directed, `dim_customer`'s SIBLING feeding the
+ * same table stays quiet, which is the question a column of forty
+ * near-parallel wires actually raises.
  *
- * `fromId === focalId` (hovering the focus itself) and a `fromId` with
- * no route to the focus at all (a roster extra — a card shown only in
- * "everything inside" mode, off the lineage) both return empty sets: the
- * caller's contract is that an empty result means "nothing dims".
+ * This is the ONE highlight mechanism (T18 R5). It replaced the
+ * path-to-focus highlight, which answered a narrower question — "how does
+ * this reach the thing I searched for". The focus is on this cone
+ * whenever it is genuinely up- or downstream, so nothing was lost by
+ * folding one into the other.
+ *
+ * Bounded by the BOARD, not by the model: it walks the projected edges,
+ * of which there is one per drawn pair whatever the estate weighs.
+ * Cycle-safe by the visited set — a directed loop among the drawn cards
+ * (which the flatten made ordinary) terminates on the second visit.
+ *
+ * A `fromId` with no drawn edge at all — a roster extra, a card shown
+ * only in "everything inside" — comes back as itself alone, and the
+ * caller's contract is that a cone of one card dims nothing: isolating a
+ * thing with no lineage would black out the board to say so.
  */
-export function pathToFocus(
+export function isolationCone(
     edges: ReadonlyArray<FocusEdge>,
     fromId: string,
-    focalId: string,
 ): { edgeKeys: Set<string>; cardIds: Set<string> } {
-    if (fromId === focalId) return { edgeKeys: new Set(), cardIds: new Set() }
-
-    const adjacency = new Map<string, Array<{ to: string; edgeId: string }>>()
-    const link = (a: string, b: string, edgeId: string) => {
-        const list = adjacency.get(a)
+    const downstream = new Map<string, Array<{ to: string; edgeId: string }>>()
+    const upstream = new Map<string, Array<{ to: string; edgeId: string }>>()
+    const link = (
+        into: Map<string, Array<{ to: string; edgeId: string }>>,
+        a: string, b: string, edgeId: string,
+    ) => {
+        const list = into.get(a)
         if (list) list.push({ to: b, edgeId })
-        else adjacency.set(a, [{ to: b, edgeId }])
+        else into.set(a, [{ to: b, edgeId }])
     }
     for (const e of edges) {
-        link(e.source, e.target, e.id)
-        link(e.target, e.source, e.id)
+        link(downstream, e.source, e.target, e.id)
+        link(upstream, e.target, e.source, e.id)
     }
 
-    // BFS distance FROM THE FOCUS, so every node's distance is measured
-    // the same way regardless of which card is hovered.
-    const dist = new Map<string, number>([[focalId, 0]])
-    const queue = [focalId]
-    for (let i = 0; i < queue.length; i++) {
-        const u = queue[i]
-        const du = dist.get(u)!
-        for (const { to } of adjacency.get(u) ?? []) {
-            if (dist.has(to)) continue
-            dist.set(to, du + 1)
-            queue.push(to)
-        }
-    }
-    if (!dist.has(fromId)) return { edgeKeys: new Set(), cardIds: new Set() }
-
-    // Backtrack: every edge whose far end is exactly one step closer to
-    // the focus than its near end sits on SOME shortest path — multiple
-    // qualifying edges at one node is exactly the diamond case.
     const cardIds = new Set<string>([fromId])
     const edgeKeys = new Set<string>()
-    const seen = new Set<string>([fromId])
-    const stack = [fromId]
-    while (stack.length > 0) {
-        const u = stack.pop()!
-        const du = dist.get(u)!
-        if (du === 0) continue   // reached the focus
-        for (const { to, edgeId } of adjacency.get(u) ?? []) {
-            if (dist.get(to) !== du - 1) continue
-            edgeKeys.add(edgeId)
-            cardIds.add(to)
-            if (!seen.has(to)) { seen.add(to); stack.push(to) }
+    const walk = (adjacency: Map<string, Array<{ to: string; edgeId: string }>>) => {
+        const seen = new Set<string>([fromId])
+        const queue = [fromId]
+        for (let i = 0; i < queue.length; i++) {
+            for (const { to, edgeId } of adjacency.get(queue[i]) ?? []) {
+                edgeKeys.add(edgeId)
+                cardIds.add(to)
+                if (seen.has(to)) continue
+                seen.add(to)
+                queue.push(to)
+            }
         }
     }
+    walk(downstream)
+    walk(upstream)
     return { edgeKeys, cardIds }
 }
 
