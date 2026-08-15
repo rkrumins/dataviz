@@ -1166,10 +1166,17 @@ export function resolveFollowDelivery(pill: FocusPill, knownCount: number): Foll
 
 /** THE ONE PLACE a pill's three kinds resolve to a walk-hook call —
  *  dispatch only, no gate (see `resolveFollowDelivery`/`runFollow` for
- *  the gated version every card-anchored control uses). Kept as the
- *  direct call for the one caller with no card to anchor a triage list
- *  on — the grain seam's "trace columns" chip, which lives on an EDGE
- *  and whose far endpoint may not even be a drawn card. */
+ *  the gated version every card-anchored control uses). Two direct
+ *  callers left outside that gate, each with its own reason none of the
+ *  card-anchored controls share: the grain seam's "trace columns" chip
+ *  (lives on an EDGE, whose far endpoint may not even be a drawn card —
+ *  no card to anchor a triage list on at all) and `HubTriage`'s own
+ *  "load more" button (already INSIDE an open triage list — routing it
+ *  through `runFollow` would re-run `resolveFollowDelivery` on the same
+ *  over-gate cohort that opened the list and call `onOpenTriage` again,
+ *  circularly, on a panel already open). Every other direct call below
+ *  is a card-anchored control's own `!card.nodeId` fallback (nothing to
+ *  anchor a gate decision on), not a third exception. */
 function actOnPill(
   ctx: Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage'>,
   pill: FocusPill,
@@ -3447,6 +3454,14 @@ function HubTriage({ card, dir, ctx, drawnUrns, onDismiss }: {
               {' '}· {remainder.toLocaleString()} more not yet loaded
               <button
                 type="button"
+                // The SECOND documented `actOnPill` exception (see its
+                // own doc comment) — this list is already OPEN because
+                // an earlier click's own gate decided the cohort was
+                // over the threshold. Routing this "load more" through
+                // `runFollow` would re-run that SAME decision against
+                // the SAME cohort and re-open the list it is already
+                // inside of; it only ever needs to fetch further, never
+                // to decide again whether to fetch or to open triage.
                 onClick={() => actOnPill(ctx, pill!, dir)}
                 disabled={pill?.status === 'loading'}
                 className="ml-1 text-accent-lineage hover:underline disabled:opacity-50"

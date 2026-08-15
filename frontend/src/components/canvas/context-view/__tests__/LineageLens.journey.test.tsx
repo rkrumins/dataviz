@@ -442,7 +442,12 @@ describe('T26 R4 — spotlight across a seam (walkGrainSeamDeepNesting)', () => 
       // RPT (the focus) is its own auto-expand — `initialLensViewState`'s
       // OWN default a share-restore does not inherit for free (SURVIVE,
       // not RESET — see `viewStateForTransition`'s own doc comment).
-      opened: ['RPT'], collapsed: [], frameAll: [], framePages: [], frameQueries: [],
+      // BIGCO/REGION/IOT also need their OWN expand: without it, each
+      // collapses to breadcrumb chrome on its host's header instead of
+      // drawing as its own nested frame — the ONLY shape that gives the
+      // seam-climb anything to climb THROUGH (`card.frameId` chains).
+      // Matches the R3 harness fixture's own `expand` list exactly.
+      opened: ['RPT', 'BIGCO', 'REGION', 'IOT'], collapsed: [], frameAll: [], framePages: [], frameQueries: [],
       pinned: [], railWindow: null, condensedOpen: [],
     }
     renderLens(['RPT'], doneWalk(WALK_FIXTURES.walkGrainSeamDeepNesting.model), { walkSeed: seed })

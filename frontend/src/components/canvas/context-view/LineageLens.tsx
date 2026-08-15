@@ -470,6 +470,24 @@ export function LineageLens({
     })
     setDirectionState({ nodeId, dir: walkSeed.direction })
   }, [walkSeed, nodeId, walkStatus, sg])
+  // T26 — a walkSeed restore PENDING for this exact focal (named by the
+  // seed, not yet reflected in `viewState`) makes the walkedThrough/
+  // drawnRank feedback effects below UNSAFE for one render: `layout`
+  // there is built from `freshView` (the state the seed's own effect
+  // above is about to replace wholesale, in the SAME commit) — React
+  // applies queued updates in effect-DECLARATION order, so a feedback
+  // effect declared after this one would receive the seed's own
+  // freshly-restored view as `prev` and overwrite its `walkedThrough`
+  // with a value computed BEFORE the seed ever ran, silently
+  // re-collapsing containment levels the seed explicitly asked to keep
+  // expanded. Found via the journey suite's own seam step — a restored
+  // share link deep-nesting the reveal state is not reachable through
+  // any ordinary follow control, so no existing pin exercised this
+  // exact interleaving. A plain render-time value (props + state, never
+  // `seedAppliedRef` — reading a ref during render is banned by this
+  // codebase's own lint rule, and would race against the SAME effect
+  // ordering this guard exists to avoid).
+  const seedPendingForFocal = !!walkSeed && walkSeed.nodeId === nodeId && walkStatus === 'done' && viewState?.nodeId !== nodeId
 
   // T26 R2 — THE PIPELINE'S ORDERED SPINE. Four stages, always in this
   // order: buildFocusLayout → applyCondensation → applyHopWindow →
@@ -567,6 +585,8 @@ export function LineageLens({
   // in, grow-only, so it converges in one pass and re-centering (a new
   // view state) starts clean.
   useEffect(() => {
+    // See `seedPendingForFocal`'s own doc comment above.
+    if (seedPendingForFocal) return
     const seen = view.walkedThrough
     if ([...layout.walkedThrough].every(u => seen.has(u))) return
     // RATIFIED PATTERN, not an oversight: the layout is a pure function
@@ -580,7 +600,7 @@ export function LineageLens({
     // which is the whole lesson of the crash that shipped from here.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     editView(base => ({ ...base, walkedThrough: new Set(layout.walkedThrough) }))
-  }, [layout.walkedThrough, view.walkedThrough, editView])
+  }, [layout.walkedThrough, view.walkedThrough, editView, seedPendingForFocal])
 
   // And so is the ORDER. A card's rank comes from its weight, and weight
   // grows as the walk does — so a merge re-ordered cards already on the
@@ -588,11 +608,13 @@ export function LineageLens({
   // The layout reports the slot each drawn entity holds; this folds it
   // back, grow-only, so arrivals append instead of shuffling.
   useEffect(() => {
+    // See `seedPendingForFocal`'s own doc comment above.
+    if (seedPendingForFocal) return
     if (layout.drawnRank.size === view.drawnRank.size) return
     // Same ratified layout→view feedback as `walkedThrough` above.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     editView(base => ({ ...base, drawnRank: new Map(layout.drawnRank) }))
-  }, [layout.drawnRank, view.drawnRank, editView])
+  }, [layout.drawnRank, view.drawnRank, editView, seedPendingForFocal])
 
   const neighbors = useMemo(() => walkNeighborRecords(sg), [sg])
   const inConnections = neighbors.incoming.reduce((n, r) => n + r.weight, 0)
