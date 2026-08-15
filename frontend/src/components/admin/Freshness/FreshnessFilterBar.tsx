@@ -11,7 +11,8 @@
 import { Server, Layers, Search, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { FilterDropdown, type FilterOption } from '@/components/explorer/FilterDropdown'
-import type { StatusFacet } from './freshnessTriage'
+import type { FailureFacet, StatusFacet } from './freshnessTriage'
+import { FAILURE_CATEGORY_LABEL } from './failureGuidance'
 
 /** The four states the segmented control exposes (the tiles cover pending /
  *  cache coverage). ``''`` = All. */
@@ -43,6 +44,8 @@ interface Props {
     onWorkspacesChange: (ids: string[]) => void
     status: StatusFacet
     onStatusChange: (s: StatusFacet) => void
+    failureFacet?: FailureFacet
+    onFailureChange?: (f: FailureFacet) => void
     search: string
     onSearchChange: (v: string) => void
     onClearAll: () => void
@@ -67,12 +70,14 @@ function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
 export function FreshnessFilterBar({
     providerOptions, selectedProviders, onProvidersChange,
     workspaceOptions, selectedWorkspaces, onWorkspacesChange,
-    status, onStatusChange, search, onSearchChange, onClearAll,
+    status, onStatusChange, failureFacet = '', onFailureChange,
+    search, onSearchChange, onClearAll,
 }: Props) {
     const providerLabel = (id: string) => providerOptions.find(o => o.id === id)?.label ?? id
     const workspaceLabel = (id: string) => workspaceOptions.find(o => o.id === id)?.label ?? id
 
-    const hasFilters = selectedProviders.length > 0 || selectedWorkspaces.length > 0 || status !== '' || search.trim() !== ''
+    const hasFilters = selectedProviders.length > 0 || selectedWorkspaces.length > 0
+        || status !== '' || failureFacet !== '' || search.trim() !== ''
 
     return (
         <div className="space-y-2.5">
@@ -140,6 +145,12 @@ export function FreshnessFilterBar({
                 <div className="flex flex-wrap items-center gap-1.5">
                     {status !== '' && (
                         <Chip label={`Status: ${FACET_LABEL[status]}`} onRemove={() => onStatusChange('')} />
+                    )}
+                    {failureFacet !== '' && onFailureChange && (
+                        <Chip
+                            label={`Cause: ${FAILURE_CATEGORY_LABEL[failureFacet]}`}
+                            onRemove={() => onFailureChange('')}
+                        />
                     )}
                     {selectedProviders.map(id => (
                         <Chip key={`p-${id}`} label={`Provider: ${providerLabel(id)}`}

@@ -10,12 +10,16 @@
  * the triage-first sort — so the two can never drift apart. Each predicate is
  * annotated with the ``_summarize_freshness`` counter it mirrors.
  */
-import type { FreshnessRow } from '@/services/freshnessService'
+import type { FailureCategory, FreshnessRow } from '@/services/freshnessService'
+import { asFailureCategory } from './failureGuidance'
 
 // ── Status facets (tile ⇄ filter) ────────────────────────────────────
 
 /** The status facet carried in the URL (``?fstatus=``). Empty string = all. */
 export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped' | 'drifting' | 'suspended'
+
+/** Failure-cause facet (``?ffail=``). Empty = any cause. */
+export type FailureFacet = '' | FailureCategory
 
 /** Drift verdicts that mean the rollups no longer match the data. Both count
  *  toward the ``drifting`` tile; the split is only about which detector saw
@@ -97,6 +101,16 @@ export function matchesFacet(row: FreshnessRow, facet: StatusFacet): boolean {
         default:
             return true
     }
+}
+
+/** Does ``row`` match the failure-cause facet? Healthy rows never match a
+ *  non-empty cause filter. */
+export function matchesFailureFacet(
+    row: FreshnessRow, facet: FailureFacet,
+): boolean {
+    if (!facet) return true
+    if (row.aggregationStatus !== 'failed') return false
+    return (asFailureCategory(row.lastFailureCategory) ?? 'unknown') === facet
 }
 
 // ── Freshness state (the honest freshness-column badge) ───────────────

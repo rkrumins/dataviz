@@ -17,7 +17,7 @@ import { useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { RefreshCw, Zap } from 'lucide-react'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { usePermission } from '@/store/auth'
+import { usePermission, checkPermission, usePermissionClaims } from '@/store/auth'
 import { useToast } from '@/components/ui/toast'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { workspaceService } from '@/services/workspaceService'
@@ -35,8 +35,13 @@ import { OverlayIntegrity } from './OverlayIntegrity'
 import { useFleetFreshness, useRefreshSource, FRESHNESS_KEYS } from './useFreshness'
 import { useActiveJobs, ACTIVE_JOBS_KEY } from './useActiveJobs'
 import {
-    compareSeverity, isGroupAttention, matchesFacet, type StatusFacet,
+    compareSeverity, freshnessState, isGroupAttention, matchesFacet, matchesFailureFacet,
+    type FailureFacet, type StatusFacet,
 } from './freshnessTriage'
+import { asFailureCategory } from './failureGuidance'
+import { StartHereStrip } from './StartHereStrip'
+import { BulkRetryBar } from './BulkRetryBar'
+import { SelectionCheckbox } from './SelectionCheckbox'
 
 const SCOPE_LABEL: Record<RefreshScope, string> = {
     auto: 'Refresh',
@@ -46,12 +51,19 @@ const SCOPE_LABEL: Record<RefreshScope, string> = {
     full: 'Full refresh',
 }
 
-const COLS = 6
+const COLS = 7
 
 const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped', 'drifting', 'suspended']
+const FAILURE_FACETS: readonly FailureFacet[] = [
+    'out_of_memory', 'provider_unavailable', 'ontology', 'timeout', 'conflict', 'unknown',
+]
 
 function parseStatus(raw: string | null): StatusFacet {
     return (raw && (STATUS_FACETS as readonly string[]).includes(raw)) ? (raw as StatusFacet) : ''
+}
+
+function parseFailure(raw: string | null): FailureFacet {
+    return (raw && (FAILURE_FACETS as readonly string[]).includes(raw)) ? (raw as FailureFacet) : ''
 }
 
 function parseList(raw: string | null): string[] {
@@ -69,7 +81,9 @@ export function Freshness() {
     const fprov = useMemo(() => parseList(searchParams.get('fprov')), [searchParams])
     const fws = useMemo(() => parseList(searchParams.get('fws')), [searchParams])
     const fstatus = parseStatus(searchParams.get('fstatus'))
+    const ffail = parseFailure(searchParams.get('ffail'))
     const fq = searchParams.get('fq') ?? ''
+    const hasExplicitStatus = searchParams.has('fstatus')
 
     // Patch specific params, preserving everything else (notably ``tab``).
     // Discrete facet changes push a history entry; only debounced search
@@ -123,6 +137,8 @@ export function Freshness() {
     const [cadenceOpen, setCadenceOpen] = useState(false)
     const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({})
     const [expandedRow, setExpandedRow] = useState<string | null>(null)
+    const [selectedIds, setSelectedIds] = useState<string[]>([])
+    const attentionDefaultApplied = useRef(false)
 
     // ── Data ──────────────────────────────────────────────────────────
     // No server-side provider/workspace/stale filter: those are client facets
@@ -165,6 +181,18 @@ export function Freshness() {
 
     const rows = useMemo(() => fleet.data?.rows ?? [], [fleet.data])
     const summary = fleet.data?.summary ?? null
+
+    // Attention-first: on first land without an explicit fstatus, open on
+    // sources that need a person. URL still wins when the user set one.
+    useEffect(() => {
+        if (attentionDefaultApplied.current) return
+        if (!summary) return
+        attentionDefaultApplied.current = true
+        if (hasExplicitStatus) return
+        if ((summary.needsAttention ?? 0) > 0) {
+            patchParams({ fstatus: 'needsAttention' }, true)
+        }
+    }, [summary, hasExplicitStatus, patchParams])
 
     // Per-provider coverage summaries, keyed to match the group id (the
     // no-provider group is '—'). Null above the summary cap → the group
@@ -214,10 +242,11 @@ export function Freshness() {
     const q = fq.trim().toLowerCase()
     const tableRows = useMemo(() => scopeRows.filter(r =>
         matchesFacet(r, fstatus) &&
+        matchesFailureFacet(r, ffail) &&
         (q === '' ||
             (r.name || r.dataSourceId).toLowerCase().includes(q) ||
             (r.providerName ?? '').toLowerCase().includes(q)),
-    ), [scopeRows, fstatus, q])
+    ), [scopeRows, fstatus, ffail, q])
 
     // ── Grouping: attention groups first, severity-sorted within ──────
     const groups = useMemo(() => {
@@ -256,7 +285,7 @@ export function Freshness() {
         measure()
         window.addEventListener('resize', measure)
         return () => window.removeEventListener('resize', measure)
-    }, [fprov, fws, fstatus, fq])
+    }, [fprov, fws, fstatus, ffail, fq])
 
     // ── Refresh actions ───────────────────────────────────────────────
     const doRefresh = (dsId: string, scope: RefreshScope, firstBuild?: boolean) => {
@@ -285,12 +314,45 @@ export function Freshness() {
 
     const busyDsId = refreshSource.isPending ? refreshSource.variables?.dsId : undefined
     const truncated = (fleet.data?.total ?? 0) > rows.length
-    const hasFilters = fprov.length > 0 || fws.length > 0 || fstatus !== '' || q !== ''
-    const clearAll = () => patchParams({ fprov: null, fws: null, fstatus: null, fq: null })
+    const hasFilters = fprov.length > 0 || fws.length > 0 || fstatus !== '' || ffail !== '' || q !== ''
+    const clearAll = () => patchParams({ fprov: null, fws: null, fstatus: null, ffail: null, fq: null })
     const buildMode = confirm?.firstBuild === true
 
+    const toggleSelect = useCallback((id: string) => {
+        setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+    }, [])
+
+    const permissionClaims = usePermissionClaims()
+    const selectableIds = useMemo(() => (
+        tableRows
+            .filter(r => freshnessState(r) !== 'recomputing')
+            .filter(r => checkPermission(permissionClaims, 'workspace:datasource:manage', r.workspaceId))
+            .map(r => r.dataSourceId)
+    ), [tableRows, permissionClaims])
+
+    const allSelectableSelected = selectableIds.length > 0
+        && selectableIds.every(id => selectedIds.includes(id))
+    const someSelectableSelected = selectableIds.some(id => selectedIds.includes(id))
+
+    const toggleSelectAll = useCallback(() => {
+        setSelectedIds(prev => {
+            if (selectableIds.length === 0) return prev
+            const allOn = selectableIds.every(id => prev.includes(id))
+            if (allOn) return prev.filter(id => !selectableIds.includes(id))
+            const merged = new Set(prev)
+            for (const id of selectableIds) merged.add(id)
+            return Array.from(merged)
+        })
+    }, [selectableIds])
+
+    // Drop selections that left the visible set (facet change / refetch).
+    useEffect(() => {
+        const visible = new Set(tableRows.map(r => r.dataSourceId))
+        setSelectedIds(prev => prev.filter(id => visible.has(id)))
+    }, [tableRows])
+
     return (
-        <div className="space-y-4">
+        <div className={`space-y-4${selectedIds.length > 0 ? ' pb-24' : ''}`}>
             <OverlayIntegrity
                 summary={summary}
                 activeFacet={fstatus}
@@ -300,6 +362,20 @@ export function Freshness() {
                 reloading={fleet.isFetching}
                 onRefreshAll={isSystemAdmin ? () => setFleetDialogOpen(true) : undefined}
                 onOpenSource={setDrawerDsId}
+            />
+
+            <StartHereStrip
+                summary={summary}
+                rows={scopeRows}
+                status={fstatus}
+                failureFacet={ffail}
+                onStatus={(facet) => patchParams({ fstatus: facet || null })}
+                onFailure={(facet) => patchParams({
+                    ffail: facet || null,
+                    // Cause filters imply looking at failures.
+                    fstatus: facet ? 'needsAttention' : (fstatus || null),
+                })}
+                onClear={() => patchParams({ fstatus: null, ffail: null })}
             />
 
             {/* Stat band — scrolls away; the tiles are the status filter. */}
@@ -319,7 +395,9 @@ export function Freshness() {
                     selectedWorkspaces={fws}
                     onWorkspacesChange={(ids) => patchParams({ fws: ids.join(',') || null })}
                     status={fstatus}
-                    onStatusChange={(s) => patchParams({ fstatus: s || null })}
+                    onStatusChange={(s) => patchParams({ fstatus: s || null, ffail: null })}
+                    failureFacet={ffail}
+                    onFailureChange={(f) => patchParams({ ffail: f || null })}
                     search={searchInput}
                     onSearchChange={setSearchInput}
                     onClearAll={clearAll}
@@ -355,6 +433,20 @@ export function Freshness() {
                     <table className="w-full min-w-[720px] text-left">
                         <thead>
                             <tr className="text-[10px] uppercase tracking-wide text-ink-muted">
+                                <th style={{ top: headerTop }} className="pl-3 pr-1 py-2 w-10 sticky z-10 bg-canvas">
+                                    {selectableIds.length > 0 ? (
+                                        <SelectionCheckbox
+                                            selected={allSelectableSelected}
+                                            indeterminate={someSelectableSelected && !allSelectableSelected}
+                                            onToggle={toggleSelectAll}
+                                            ariaLabel={allSelectableSelected
+                                                ? 'Deselect all sources'
+                                                : 'Select all sources'}
+                                        />
+                                    ) : (
+                                        <span className="inline-block w-[18px]" aria-hidden />
+                                    )}
+                                </th>
                                 {['Source', 'Aggregation', 'Cache', 'Freshness', 'Last activity'].map(h => (
                                     <th key={h} style={{ top: headerTop }} className="px-3 py-2 font-semibold sticky z-10 bg-canvas">{h}</th>
                                 ))}
@@ -391,6 +483,14 @@ export function Freshness() {
                                                 expanded={expandedRow === row.dataSourceId}
                                                 onToggleExpand={(dsId) => setExpandedRow(cur => (cur === dsId ? null : dsId))}
                                                 onCancelJob={onCancelJob}
+                                                peerRows={tableRows}
+                                                onFilterFailure={(cat) => {
+                                                    const facet = asFailureCategory(cat)
+                                                    if (facet) patchParams({ ffail: facet, fstatus: 'needsAttention' })
+                                                }}
+                                                selectable
+                                                selected={selectedIds.includes(row.dataSourceId)}
+                                                onToggleSelect={toggleSelect}
                                             />
                                         ))}
                                     </Fragment>
@@ -400,6 +500,16 @@ export function Freshness() {
                     </table>
                 </div>
             )}
+
+            <BulkRetryBar
+                selectedIds={selectedIds}
+                rows={tableRows}
+                onClear={() => setSelectedIds([])}
+                onDone={() => {
+                    void fleet.refetch()
+                    void qc.invalidateQueries({ queryKey: ACTIVE_JOBS_KEY })
+                }}
+            />
 
             <FreshnessDrawer
                 key={drawerDsId ?? 'closed'}

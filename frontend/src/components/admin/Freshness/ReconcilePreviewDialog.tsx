@@ -161,16 +161,33 @@ export function ReconcilePreviewDialog({ open, onClose }: {
                                 </div>
                             ) : findings.length === 0 ? (
                                 <div className="flex flex-col items-center gap-2 py-10 px-6 text-center">
-                                    <CheckCircle2 className="w-8 h-8 text-emerald-500" />
-                                    <p className="text-sm font-semibold text-ink">
-                                        Nothing needs reconciling
-                                    </p>
-                                    <p className="text-[11px] text-ink-muted">
-                                        All {scanned.toLocaleString()} source
-                                        {scanned === 1 ? '' : 's'} checked are in step with
-                                        their data. Turning automation on would queue no
-                                        rebuilds right now.
-                                    </p>
+                                    <CheckCircle2 className={cn(
+                                        'w-8 h-8',
+                                        scanned === 0 ? 'text-ink-muted' : 'text-emerald-500',
+                                    )} />
+                                    {scanned === 0 ? (
+                                        <>
+                                            <p className="text-sm font-semibold text-ink">
+                                                No sources were eligible to check
+                                            </p>
+                                            <p className="text-[11px] text-ink-muted">
+                                                Nothing is in the reconcile set yet — sources
+                                                appear here once they have aggregation state.
+                                            </p>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <p className="text-sm font-semibold text-ink">
+                                                Nothing needs reconciling
+                                            </p>
+                                            <p className="text-[11px] text-ink-muted">
+                                                {scanned.toLocaleString()} source
+                                                {scanned === 1 ? '' : 's'} checked — nothing to
+                                                rebuild. Turning automation on would queue no
+                                                rebuilds right now.
+                                            </p>
+                                        </>
+                                    )}
                                 </div>
                             ) : (
                                 <>

@@ -35,6 +35,8 @@ import type { FreshnessState } from './freshnessTriage'
 import {
     AutoReconcileOffBadge, DriftStateBadge, REASON_LABEL,
 } from './DriftStateBadge'
+import { failureBadgeLabel, failureBadgeWhy, relatedFailureCount } from './failureGuidance'
+import { SelectionCheckbox } from './SelectionCheckbox'
 
 /** A quiet placeholder for an empty cell — muted enough that a never-built
  *  row's blank cells don't read as three shouting dashes. */
@@ -131,8 +133,9 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
         badges.push(
             <Badge key="failed"
                 tone="bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20"
-                Icon={AlertTriangle} label="Rebuild failed"
-                title="The last lineage rebuild failed. Open this source for what happened and how to resolve it."
+                Icon={AlertTriangle}
+                label={failureBadgeLabel(row)}
+                title={failureBadgeWhy(row)}
             />,
         )
     } else if (state === 'recomputing') {
@@ -239,6 +242,12 @@ interface Props {
     expanded?: boolean
     onToggleExpand?: (dsId: string) => void
     onCancelJob?: (dsId: string, jobId: string) => void
+    /** All visible rows — used for "N more like this" related-failure links. */
+    peerRows?: FreshnessRowData[]
+    onFilterFailure?: (category: string) => void
+    selected?: boolean
+    onToggleSelect?: (dsId: string) => void
+    selectable?: boolean
 }
 
 type RowAction = { scope: RefreshScope; label: string; Icon: typeof RefreshCw; iconClass: string; firstBuild?: boolean; hint?: string }
@@ -305,7 +314,11 @@ export function overflowActions(state: FreshnessState): RowAction[] {
     }
 }
 
-export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, onRefresh, busy, expanded, onToggleExpand, onCancelJob }: Props) {
+export function FreshnessRow({
+    row, job, colSpan, workspaceName, onOpenDrawer, onRefresh, busy, expanded,
+    onToggleExpand, onCancelJob, peerRows, onFilterFailure, selected,
+    onToggleSelect, selectable,
+}: Props) {
     const state = freshnessState(row)
     const actions = overflowActions(state)
     // Refresh IS the ds:manage mutation. Hide the menu entirely for viewers
@@ -320,15 +333,40 @@ export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, o
         ? Math.min(100, Math.max(0, Math.round(job.progress)))
         : 0
 
+    const severe = state === 'failed' || isReconcileSuspended(row)
+    const related = state === 'failed' && peerRows && onFilterFailure
+        ? relatedFailureCount(peerRows, row.lastFailureCategory, row.dataSourceId)
+        : 0
+
     return (
         <>
-        {/* The existing row, unchanged — same className, same six cells. */}
-        <tr className="border-t border-glass-border hover:bg-black/[0.015] dark:hover:bg-white/[0.015] transition-colors">
+        <tr className={cn(
+            'group/row border-t border-glass-border transition-colors duration-150',
+            'hover:bg-black/[0.015] dark:hover:bg-white/[0.015]',
+            selected
+                ? 'bg-indigo-500/[0.07] shadow-[inset_3px_0_0_0] shadow-indigo-500'
+                : severe && 'bg-red-500/[0.03] shadow-[inset_3px_0_0_0] shadow-red-500/60',
+        )}>
+            {/* Selection */}
+            <td className="pl-3 pr-1 py-2.5 align-middle w-10">
+                {selectable && canManage && state !== 'recomputing' && onToggleSelect ? (
+                    <SelectionCheckbox
+                        selected={!!selected}
+                        onToggle={() => onToggleSelect(row.dataSourceId)}
+                        ariaLabel={selected
+                            ? `Deselect ${row.name || row.dataSourceId}`
+                            : `Select ${row.name || row.dataSourceId}`}
+                    />
+                ) : (
+                    <span className="inline-block w-5" aria-hidden />
+                )}
+            </td>
+
             {/* Source */}
-            <td className="px-3 py-2 align-top">
+            <td className="px-3 py-2.5 align-top">
                 <button
                     onClick={() => onOpenDrawer(row.dataSourceId)}
-                    className="text-left group outline-none"
+                    className="text-left group outline-none min-w-0"
                 >
                     <span className="text-sm font-semibold text-ink group-hover:text-indigo-600 dark:group-hover:text-indigo-400 group-focus-visible:underline">
                         {row.name || row.dataSourceId}
@@ -359,7 +397,18 @@ export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, o
 
             {/* Freshness */}
             <td className="px-3 py-2 align-top">
-                <FreshnessBadges row={row} job={job} showProgressBar={!expanded} />
+                <div className="flex flex-col gap-1 items-start">
+                    <FreshnessBadges row={row} job={job} showProgressBar={!expanded} />
+                    {related > 0 && onFilterFailure && row.lastFailureCategory && (
+                        <button
+                            type="button"
+                            onClick={() => onFilterFailure(row.lastFailureCategory!)}
+                            className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                        >
+                            {related} more like this
+                        </button>
+                    )}
+                </div>
             </td>
 
             {/* Last activity */}

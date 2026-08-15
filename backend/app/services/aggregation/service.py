@@ -2257,13 +2257,13 @@ class AggregationService:
                 cooldown_interval_secs=cooldown_interval_secs,
                 state_row=state_row,
                 reconcile_enabled_global=cadence.reconcile_enabled,
+                last_failure_reason=last_failure_reason,
+                last_failure_category=last_failure_category,
             ),
             lkg_count=lkg_count,
             lkg_oldest_age_secs=lkg_oldest_age,
             cache_key_count=cache_key_count,
             cache_key_count_by_endpoint=cache_key_count_by_endpoint,
-            last_failure_reason=last_failure_reason,
-            last_failure_category=last_failure_category,
             retry_count=retry_count,
             live_fingerprint=live_fingerprint,
             live_node_count=live_node_count,
@@ -2756,6 +2756,8 @@ def _freshness_row_kwargs(
     cooldown_interval_secs: int = AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
     state_row: Optional[dict] = None,
     reconcile_enabled_global: Optional[bool] = None,
+    last_failure_reason: Optional[str] = None,
+    last_failure_category: Optional[str] = None,
 ) -> dict:
     """Map one workspace_data_sources row + its cache signals into the
     snake_case kwargs shared by ``FreshnessRow`` and ``FreshnessDoc``.
@@ -2799,6 +2801,8 @@ def _freshness_row_kwargs(
         last_reconciled_at=st.get("last_reconciled_at"),
         last_reconcile_reason=st.get("last_reconcile_reason"),
         last_reconcile_mode=st.get("last_reconcile_mode"),
+        last_failure_reason=last_failure_reason,
+        last_failure_category=last_failure_category,
     )
 
 
@@ -2869,6 +2873,49 @@ async def _running_job_map(
     for ds_id, job_id in rows:
         out.setdefault(ds_id, job_id)  # first per ds = newest (ordered)
     return out
+
+
+async def _latest_failure_map(
+    session: AsyncSession, ds_ids: List[str],
+) -> dict[str, dict]:
+    """``{ds_id: {reason, category}}`` for sources whose *latest* job failed.
+
+    One bounded query over the page's failed-status sources — the fleet
+    table needs the cause without a per-row round-trip. Same classifier as
+    the drawer. Best-effort: a query error returns ``{}``, never raises.
+    """
+    if not ds_ids:
+        return {}
+    try:
+        rows = (await session.execute(
+            select(
+                AggregationJobORM.data_source_id,
+                AggregationJobORM.status,
+                AggregationJobORM.error_message,
+            )
+            .where(AggregationJobORM.data_source_id.in_(ds_ids))
+            .order_by(
+                AggregationJobORM.data_source_id,
+                AggregationJobORM.updated_at.desc().nullslast(),
+            )
+        )).all()
+    except Exception as exc:
+        logger.warning("latest-failure map failed: %s", exc)
+        return {}
+
+    out: dict[str, dict] = {}
+    for ds_id, status, error in rows:
+        if ds_id in out:
+            continue  # first per ds = newest
+        if status != "failed":
+            out[ds_id] = {}  # mark seen so an older failed job cannot win
+            continue
+        out[ds_id] = {
+            "reason": error,
+            "category": classify_failure(error),
+        }
+    # Drop the "seen but not failed" placeholders.
+    return {k: v for k, v in out.items() if v}
 
 
 async def _reconcile_reason_map(session, jobs) -> Dict[str, Dict]:
@@ -3050,6 +3097,10 @@ async def assemble_fleet_freshness(
     # ``cooldownUntil`` badge honors both without any per-row reads.
     cadence = await read_global_cadence(session)
     states = await _state_map(session, ds_ids)
+    failed_ids = [
+        ds.id for ds in ds_list if ds.aggregation_status == "failed"
+    ]
+    failures = await _latest_failure_map(session, failed_ids)
 
     rows = [
         FreshnessRow(**_freshness_row_kwargs(
@@ -3066,6 +3117,8 @@ async def assemble_fleet_freshness(
             ),
             state_row=states.get(ds.id),
             reconcile_enabled_global=cadence.reconcile_enabled,
+            last_failure_reason=(failures.get(ds.id) or {}).get("reason"),
+            last_failure_category=(failures.get(ds.id) or {}).get("category"),
         ))
         for ds in ds_list
     ]

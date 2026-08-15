@@ -638,6 +638,27 @@ async def test_a_source_checked_recently_is_not_re_evaluated(session_factory):
     assert result.scanned == 0
 
 
+@pytest.mark.asyncio
+async def test_manual_check_re_evaluates_recently_checked_source(session_factory):
+    """Check now / Preview must ignore cadence due-ness — otherwise the UI
+    records a run with scanned=0 and operators lose confidence."""
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        checked_at=_ago(seconds=30),
+    )
+    svc = _FakeService()
+    manual = await ReconciliationSweeper(session_factory, lambda: svc).sweep(
+        mode="manual",
+    )
+    assert manual.scanned == 1
+
+    preview = await ReconciliationSweeper(session_factory, lambda: svc).sweep(
+        dry_run=True, mode="preview",
+    )
+    assert preview.scanned == 1
+
+
 # ── Preview ─────────────────────────────────────────────────────────────
 
 

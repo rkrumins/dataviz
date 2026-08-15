@@ -28,6 +28,9 @@ const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProvid
 
 vi.mock('@/store/auth', () => ({
     usePermission: (perm: string, workspaceId?: string | null) => permissionFn(perm, workspaceId),
+    usePermissionClaims: () => ({}),
+    checkPermission: (_claims: unknown, perm: string, workspaceId?: string | null) =>
+        Boolean(permissionFn(perm, workspaceId)),
 }))
 
 vi.mock('@/services/freshnessService', async () => {
@@ -146,6 +149,11 @@ describe('Freshness cockpit', () => {
         expect(screen.getByText('Customers Graph')).toBeInTheDocument()
         // "as of Xm ago" cache chips are present.
         expect(screen.getAllByText(/as of/i).length).toBeGreaterThan(0)
+        // Ready + queued rows expose selection; select-all targets every manageable
+        // non-recomputing source on the page.
+        expect(screen.getByRole('checkbox', { name: /select orders graph/i })).toBeInTheDocument()
+        expect(screen.getByRole('checkbox', { name: /select customers graph/i })).toBeInTheDocument()
+        expect(screen.getByRole('checkbox', { name: /select all sources/i })).toBeInTheDocument()
         // The source_changed row has a marker but NO running job → "Queued",
         // not "Recomputing" (which now means a job is genuinely in flight).
         expect(screen.getByText('Queued')).toBeInTheDocument()
@@ -214,7 +222,8 @@ describe('Freshness cockpit', () => {
             ...fleet,
             summary: { total: 2, ready: 2, pending: 0, failed: 0, notBuilt: 0, recomputing: 1, needsAttention: 1, cacheStamped: 2 },
         })
-        renderTab()
+        // Explicit empty status so attention-first does not auto-filter.
+        renderTab('/?tab=freshness&fstatus=')
 
         const band = await screen.findByRole('group', { name: /fleet summary/i })
         expect(within(band).getByRole('button', { name: /total sources/i })).toHaveTextContent('2')
@@ -250,10 +259,14 @@ describe('Freshness cockpit', () => {
                 drifting: 0, suspended: 1,
             },
         })
-        renderTab()
+        renderTab('/?tab=freshness&fstatus=')
 
         await waitFor(() => expect(screen.getByText('Held Source')).toBeInTheDocument())
-        await user.click(screen.getByRole('button', { name: /needs a person/i }))
+        // Pulse count — prefer the aria-pressed control over Start here chips.
+        const pulse = screen.getAllByRole('button', { name: /needs a person/i })
+            .find(el => el.getAttribute('aria-pressed') != null)
+        expect(pulse).toBeTruthy()
+        await user.click(pulse!)
         await waitFor(() => expect(screen.queryByText('Healthy Source')).not.toBeInTheDocument())
         expect(screen.getByText('Held Source')).toBeInTheDocument()
         expect(probe.search).toContain('fstatus=suspended')
@@ -265,6 +278,46 @@ describe('Freshness cockpit', () => {
         renderTab()
         expect(await screen.findByText(/could not load overlay integrity/i, {}, { timeout: 4000 }))
             .toBeInTheDocument()
+    })
+
+    it('defaults to needs-attention when the fleet has work waiting', async () => {
+        listFleet.mockResolvedValue({
+            ...fleet,
+            summary: {
+                total: 2, ready: 1, pending: 0, failed: 0, notBuilt: 0,
+                recomputing: 0, needsAttention: 1, cacheStamped: 2,
+            },
+        })
+        renderTab()
+        await waitFor(() => expect(probe.search).toContain('fstatus=needsAttention'))
+        expect(await screen.findByText('Orders Graph')).toBeInTheDocument()
+        expect(screen.queryByText('Customers Graph')).not.toBeInTheDocument()
+        expect(screen.getByText(/start here/i)).toBeInTheDocument()
+    })
+
+    it('names the failure cause on the row and filters related failures', async () => {
+        const user = userEvent.setup()
+        listFleet.mockResolvedValue({
+            total: 2,
+            rows: [
+                {
+                    ...fleet.rows[0], name: 'OOM One', aggregationStatus: 'failed',
+                    staleReason: null, lastFailureCategory: 'out_of_memory',
+                },
+                {
+                    ...fleet.rows[1], name: 'OOM Two', aggregationStatus: 'failed',
+                    staleReason: null, lastFailureCategory: 'out_of_memory',
+                },
+            ],
+            summary: {
+                total: 2, ready: 0, pending: 0, failed: 2, notBuilt: 0,
+                recomputing: 0, needsAttention: 2, cacheStamped: 2,
+            },
+        })
+        renderTab('/?tab=freshness&fstatus=')
+        await waitFor(() => expect(screen.getAllByText('Out of memory').length).toBeGreaterThanOrEqual(2))
+        await user.click(screen.getAllByRole('button', { name: /1 more like this/i })[0])
+        await waitFor(() => expect(probe.search).toContain('ffail=out_of_memory'))
     })
 
     // ── R5.2 — severity ordering helper ──────────────────────────────

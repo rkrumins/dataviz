@@ -79,4 +79,29 @@ describe('IntegrityPulse', () => {
         expect(screen.getByRole('alert')).toHaveTextContent(/could not load overlay integrity/i)
         expect(screen.queryByText('Sweeps have stopped')).not.toBeInTheDocument()
     })
+
+    it('does not claim last pass 0 checked', () => {
+        const run: ReconcileRun = {
+            id: 'r1', mode: 'manual', scanned: 0, skipped: 0, seeded: 0,
+            findings: 0, actions: 0, errors: 0, byReason: {}, bySkip: {},
+            startedAt: new Date().toISOString(),
+        }
+        render(
+            <IntegrityPulse
+                summary={SUMMARY}
+                policy={POLICY}
+                latestRun={run}
+                isError={false}
+                isLoading={false}
+                isAdmin={false}
+                onCheckNow={() => {}}
+                checking={false}
+                onPreview={() => {}}
+                onFacet={() => {}}
+                activeFacet=""
+            />,
+        )
+        expect(screen.getByText(/last pass found no sources to check/i)).toBeInTheDocument()
+        expect(screen.queryByText(/0 checked/i)).not.toBeInTheDocument()
+    })
 })

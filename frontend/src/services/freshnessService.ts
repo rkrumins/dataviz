@@ -85,6 +85,10 @@ export interface FreshnessRow {
     lastReconciledAt?: string | null
     lastReconcileReason?: ReconcileReason | string | null
     lastReconcileMode?: 'auto' | 'manual' | null
+    /** Populated on failed sources from the latest job — so the table can
+     *  name the cause without opening the drawer. */
+    lastFailureReason?: string | null
+    lastFailureCategory?: FailureCategory | null
 }
 
 export interface FreshnessDoc extends FreshnessRow {
@@ -105,11 +109,7 @@ export interface FreshnessDoc extends FreshnessRow {
     resolvedRebuildIntervalSecs?: number | null
     /** Where the resolved interval came from. */
     rebuildIntervalSource?: 'custom' | 'global' | 'default' | null
-    /** Failure surfacing (doc-only, populated only when the latest job failed):
-     *  the raw error, a coarse category for resolution guidance, and how many
-     *  attempts have been made. All null on a healthy source. */
-    lastFailureReason?: string | null
-    lastFailureCategory?: FailureCategory | null
+    /** How many rebuild attempts have been made (doc-only). */
     retryCount?: number | null
     /** The two numbers the integrity meter compares: what the statistics scan
      *  last counted in the graph, and what the last successful build reported

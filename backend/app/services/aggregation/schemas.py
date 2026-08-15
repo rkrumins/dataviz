@@ -569,6 +569,12 @@ class FreshnessRow(BaseModel):
     last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
     last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
     last_reconcile_mode: Optional[str] = Field(None, alias="lastReconcileMode")
+    # Failure surfacing for the fleet table: populated only when
+    # aggregation_status is failed and the latest job is failed. Same
+    # classifier as the drawer — so the row can name the cause without a
+    # second round-trip. Best-effort; never raises.
+    last_failure_reason: Optional[str] = Field(None, alias="lastFailureReason")
+    last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
 
     class Config:
         populate_by_name = True
@@ -603,11 +609,7 @@ class FreshnessDoc(FreshnessRow):
     cache_key_count_by_endpoint: Optional[Dict[str, int]] = Field(
         None, alias="cacheKeyCountByEndpoint",
     )
-    # Failure surfacing (spec §9c): populated only when the latest job for
-    # this source is ``failed`` (one bounded query); None otherwise —
-    # doc-only, best-effort, never raises.
-    last_failure_reason: Optional[str] = Field(None, alias="lastFailureReason")
-    last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
+    # Retry count stays doc-only (not needed to scan the fleet table).
     retry_count: Optional[int] = Field(None, alias="retryCount")
 
     # ── Reconciliation detail ─────────────────────────────────────────

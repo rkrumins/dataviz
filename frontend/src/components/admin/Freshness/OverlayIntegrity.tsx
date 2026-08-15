@@ -9,7 +9,7 @@ import { Clock, RefreshCw, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
 import { useToast } from '@/components/ui/toast'
-import type { FreshnessSummary } from '@/services/freshnessService'
+import type { FreshnessSummary, ReconcileRunResult } from '@/services/freshnessService'
 import type { StatusFacet } from './freshnessTriage'
 import { IntegrityPulse } from './IntegrityPulse'
 import { OvernightLedger } from './OvernightLedger'
@@ -18,6 +18,18 @@ import {
     useReconcileActivity, useReconcileNow, useReconciliation, FRESHNESS_KEYS,
 } from './useFreshness'
 import { useQueryClient } from '@tanstack/react-query'
+
+/** Honest Check-now toast — never "Checked 0 sources" when nothing ran. */
+export function checkNowSuccessMessage(res: ReconcileRunResult): string {
+    if (res.skipped) return 'A sweep is already running.'
+    const scanned = res.run?.scanned ?? 0
+    const actions = res.run?.actions ?? 0
+    if (scanned === 0) return 'No sources in the reconcile set yet.'
+    if (actions === 0) {
+        return `Checked ${scanned.toLocaleString()} source${scanned === 1 ? '' : 's'} — all clear.`
+    }
+    return `Checked ${scanned.toLocaleString()} source${scanned === 1 ? '' : 's'} — ${actions.toLocaleString()} reconciled.`
+}
 
 export function OverlayIntegrity({
     summary, activeFacet, onFacet, onOpenCadence, onReload, reloading,
@@ -44,11 +56,7 @@ export function OverlayIntegrity({
         reconcileNow.mutate({}, {
             onSuccess: (res) => {
                 void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.activity })
-                showToast(
-                    'success',
-                    res.skipped ? 'A sweep is already running.'
-                        : `Checked ${res.run?.scanned ?? 0} source${res.run?.scanned === 1 ? '' : 's'} — ${res.run?.actions ?? 0} reconciled.`,
-                )
+                showToast('success', checkNowSuccessMessage(res))
             },
             onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
         })

@@ -162,6 +162,10 @@ def _patch_fleet_collaborators(monkeypatch, *, signals=None, events=None,
         return running or {}
     monkeypatch.setattr(svc_mod, "_running_job_map", _running)
 
+    async def _failures(session, ds_ids):
+        return {}
+    monkeypatch.setattr(svc_mod, "_latest_failure_map", _failures)
+
     async def _stale():
         return stale or []
     monkeypatch.setattr(gc_mod, "list_stale_sources", _stale)
@@ -914,6 +918,35 @@ def test_source_doc_failure_fields_none_when_no_jobs(monkeypatch):
     assert doc.last_failure_reason is None
     assert doc.last_failure_category is None
     assert doc.retry_count is None
+
+
+def test_fleet_row_carries_failure_category_for_failed_sources(monkeypatch):
+    """The table must name the cause without opening the drawer — fleet
+    rows get a batched latest-job lookup for aggregation_status=failed."""
+    failed = _ds(id="ds-oom", status="failed")
+    ready = _ds(id="ds-ok", status="ready")
+    _patch_fleet_collaborators(monkeypatch)
+
+    async def _failures(session, ds_ids):
+        assert set(ds_ids) == {"ds-oom"}
+        return {
+            "ds-oom": {
+                "reason": "OOM command not allowed when used memory > 'maxmemory'.",
+                "category": "out_of_memory",
+            },
+        }
+
+    monkeypatch.setattr(svc_mod, "_latest_failure_map", _failures)
+    session = _FakeSession([
+        _FakeResult(scalar=2),
+        _FakeResult(rows=[(failed, "Prov A"), (ready, "Prov A")]),
+    ])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+    by_id = {r.data_source_id: r for r in resp.rows}
+    assert by_id["ds-oom"].last_failure_category == "out_of_memory"
+    assert "maxmemory" in (by_id["ds-oom"].last_failure_reason or "")
+    assert by_id["ds-ok"].last_failure_category is None
+    assert by_id["ds-ok"].last_failure_reason is None
 
 
 def test_source_unknown_ds_returns_none(monkeypatch):

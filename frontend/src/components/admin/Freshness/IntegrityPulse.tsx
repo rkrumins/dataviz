@@ -148,8 +148,14 @@ export function IntegrityPulse({
                 </button>
                 {latestRun && (
                     <span className="text-ink-muted tabular-nums">
-                        last pass {latestRun.scanned.toLocaleString()} checked
-                        {latestRun.actions > 0 && `, ${latestRun.actions.toLocaleString()} rebuilt`}
+                        {latestRun.scanned === 0
+                            ? 'last pass found no sources to check'
+                            : (
+                                <>
+                                    last pass {latestRun.scanned.toLocaleString()} checked
+                                    {latestRun.actions > 0 && `, ${latestRun.actions.toLocaleString()} rebuilt`}
+                                </>
+                            )}
                     </span>
                 )}
             </div>
