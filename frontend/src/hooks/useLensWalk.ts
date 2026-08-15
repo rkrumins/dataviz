@@ -29,14 +29,12 @@ export interface WalkEntry {
     error: string | null
     /** Key `${dir}:${urn}` — per-pill spinners; absent = idle. */
     extendStatus: ReadonlyMap<string, 'loading' | 'error'>
-    /** T24 F4 — the upstream/downstream depth THIS entry's own model was
-     *  last fetched at (the initial fetch, or a later `deepen`). Stepping
-     *  Back to an already-walked focal reads its OWN depth here, never
-     *  whatever the depth preference currently says. */
+    /** The upstream/downstream depth THIS entry's own model was fetched
+     *  at (T28 R1 — always the hook's own `initialDepth` param now that
+     *  the depth control that used to re-fetch a focal deeper is gone).
+     *  Stepping Back to an already-walked focal reads its OWN depth
+     *  here, never whatever the depth preference currently says. */
     depth: number
-    /** In-flight/failed state of a `deepen` call for this focal —
-     *  separate from `extendStatus`, which is per PILL, not per focal. */
-    deepenStatus: 'loading' | 'error' | null
 }
 
 export interface LensWalkData {
@@ -59,18 +57,6 @@ export interface LensWalkData {
     /** Re-kick a failed extend (same request shape and precondition as
      *  `extend`). */
     retryExtend: (cardUrn: string, dir: LensWalkDir, seedLeaves: string[]) => void
-    /** T24 F4 — re-fetch the CURRENT focal (`focusUrn`, the hook's own
-     *  param — never an arbitrary card) at `newDepth` and MERGE the
-     *  response into its model, additive like `extend`/`page`. A no-op,
-     *  by design, whenever `newDepth` is not strictly deeper than the
-     *  entry's own `depth` (nothing to fetch — a shallower or equal ask
-     *  is already answered) or the entry is not yet 'done'. Simplicity
-     *  over a partial/delta fetch: this re-walks the focal from scratch
-     *  at the new depth rather than trying to express "just the extra
-     *  hops" from the current frontier — `mergeClosures` dedupes, so the
-     *  result is identical, just one request instead of a fan-out over
-     *  every deepest-known frontier node. */
-    deepen: (newDepth: number) => void
 }
 
 const EMPTY_EXTEND_STATUS: ReadonlyMap<string, 'loading' | 'error'> = new Map()
@@ -136,10 +122,6 @@ export function useLensWalk(
     // startedRef, since a completed extend never blocks a LATER extend of
     // the same pill — e.g. paging the same hub again).
     const inFlightRef = useRef<Set<string>>(new Set())
-    // Single-flight for `deepen`, per cacheKey — a separate ref from
-    // `inFlightRef` because it is keyed by cacheKey alone (there is only
-    // ever one focal-deepen in flight at a time, never one per pill).
-    const deepenInFlightRef = useRef<Set<string>>(new Set())
     const sessionRef = useRef(0)
     // extend/page need the LATEST model synchronously (to compute
     // excludeUrns, and to merge into) without retriggering on every
@@ -156,7 +138,7 @@ export function useLensWalk(
             startedRef.current.add(cacheKey)
             setState(prev => setEntry(prev, cacheKey, {
                 model: emptyWalkModel(urn), status: 'unsupported', error: null, extendStatus: EMPTY_EXTEND_STATUS,
-                depth: initialDepth, deepenStatus: null,
+                depth: initialDepth,
             }))
             return
         }
@@ -165,7 +147,7 @@ export function useLensWalk(
         const session = sessionRef.current
         setState(prev => setEntry(prev, cacheKey, {
             model: emptyWalkModel(urn), status: 'loading', error: null, extendStatus: EMPTY_EXTEND_STATUS,
-            depth: initialDepth, deepenStatus: null,
+            depth: initialDepth,
         }))
         try {
             const res = await provider.traceClosure({
@@ -174,7 +156,7 @@ export function useLensWalk(
             if (session !== sessionRef.current) return   // lens closed mid-flight
             setState(prev => setEntry(prev, cacheKey, {
                 model: toLensClosure(res, urn), status: 'done', error: null, extendStatus: EMPTY_EXTEND_STATUS,
-                depth: initialDepth, deepenStatus: null,
+                depth: initialDepth,
             }))
         } catch (e) {
             if (session !== sessionRef.current) return
@@ -182,7 +164,7 @@ export function useLensWalk(
             setState(prev => setEntry(prev, cacheKey, {
                 model: emptyWalkModel(urn), status: 'error',
                 error: e instanceof Error ? e.message : String(e), extendStatus: EMPTY_EXTEND_STATUS,
-                depth: initialDepth, deepenStatus: null,
+                depth: initialDepth,
             }))
         }
     }, [provider, initialDepth])
@@ -279,54 +261,6 @@ export function useLensWalk(
         }))
     }, [runFrontierOp])
 
-    /** T24 F4 — see `LensWalkData.deepen`'s doc comment for the
-     *  full-refetch-not-delta rationale. Mirrors `runFrontierOp`'s shape
-     *  (same precondition, same session/in-flight guard pattern, same
-     *  merge), but targets the FOCAL directly rather than an arbitrary
-     *  card, and the response replaces the model's knowledge of BOTH
-     *  directions at the root (`direction: 'both'`) since a depth
-     *  re-fetch asks about the whole focal, not one side of one pill. */
-    const runDeepen = useCallback(async (newDepth: number) => {
-        if (!focusUrn) return
-        if (typeof provider?.traceClosure !== 'function') return
-        const cacheKey = cacheKeyFor(provider, focusUrn)
-        const startEntry = stateRef.current.get(cacheKey)
-        if (startEntry?.status !== 'done') return
-        // Nothing to fetch: this depth (or deeper) is already in hand.
-        // The UI's own "applies to your next walk" note is what a
-        // same-or-shallower click gets instead of a request.
-        if (newDepth <= startEntry.depth) return
-        if (deepenInFlightRef.current.has(cacheKey)) return
-        deepenInFlightRef.current.add(cacheKey)
-        const session = sessionRef.current
-        setState(prev => setEntry(
-            prev, cacheKey, { ...(prev.get(cacheKey) ?? startEntry), deepenStatus: 'loading' },
-        ))
-        try {
-            const res = await provider.traceClosure({
-                urn: focusUrn, direction: 'both', upstreamDepth: newDepth, downstreamDepth: newDepth,
-            })
-            if (session !== sessionRef.current) return   // lens closed mid-flight
-            setState(prev => {
-                const entry = prev.get(cacheKey)
-                if (!entry) return prev   // session cleared/re-created before this landed
-                const merged = mergeClosures(entry.model, res, { rootUrn: focusUrn, direction: 'both' })
-                return setEntry(prev, cacheKey, { ...entry, model: merged, depth: newDepth, deepenStatus: null })
-            })
-        } catch {
-            if (session !== sessionRef.current) return
-            setState(prev => {
-                const entry = prev.get(cacheKey)
-                if (!entry) return prev
-                return setEntry(prev, cacheKey, { ...entry, deepenStatus: 'error' })
-            })
-        } finally {
-            deepenInFlightRef.current.delete(cacheKey)
-        }
-    }, [provider, focusUrn])
-
-    const deepen = useCallback((newDepth: number) => { void runDeepen(newDepth) }, [runDeepen])
-
     // Initial fetch on focal change.
     useEffect(() => {
         if (!focusUrn) return
@@ -341,7 +275,6 @@ export function useLensWalk(
         sessionRef.current += 1
         startedRef.current.clear()
         inFlightRef.current.clear()
-        deepenInFlightRef.current.clear()
         setState(new Map())
     }, [focusUrn])
 
@@ -352,5 +285,5 @@ export function useLensWalk(
 
     const retry = useCallback((urn: string) => { void runFetch(urn) }, [runFetch])
 
-    return { walkFor, retry, extend, page, retryExtend: extend, deepen }
+    return { walkFor, retry, extend, page, retryExtend: extend }
 }

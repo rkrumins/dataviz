@@ -57,7 +57,7 @@ import {
   type LensViewState,
   type LensViewTransitionKind,
 } from './lens/focus-layout'
-import { applyHopWindow, bandRangeOf, HOP_WINDOW } from './lens/hop-window'
+import { applyHopWindow, HOP_WINDOW } from './lens/hop-window'
 import { applyCondensation } from './lens/condensation'
 import { enforceLensInvariants } from './lens/invariants'
 import { generateColorFromType } from '@/lib/type-visuals'
@@ -225,9 +225,6 @@ export interface LensWalkApi {
    *  retrying one is the same click on the same pill, so the ⊕ simply
    *  calls `extend` again and the two can never drift apart. */
   retry: (focusUrn: string) => void
-  /** T24 F4 — re-fetch the CURRENT focal at a deeper depth and merge.
-   *  See `useLensWalk`'s `LensWalkData.deepen` for the full contract. */
-  deepen: (newDepth: number) => void
 }
 
 /**
@@ -442,7 +439,6 @@ export function LineageLens({
   const lensFrameChildren = usePreferencesStore((s) => s.lensFrameChildren)
   const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
   const lensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
-  const setLensInitialDepth = usePreferencesStore((s) => s.setLensInitialDepth)
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
 
   // Restore a shared exploration — ONCE, the moment the seed's own focal
@@ -516,16 +512,17 @@ export function LineageLens({
     () => applyCondensation(layout, view.condensedOpen),
     [layout, view.condensedOpen],
   )
-  // T25 B — the board's visible hop radius: the depth control's own
-  // preset, defaulting to whatever this walk was actually fetched at —
-  // a depth-1 walk shows depth 1 without a second click.
-  const viewRadius = view.viewRadius ?? walk?.depth ?? (HOP_WINDOW - 1) / 2
+  // T28 R1 — the depth control (and its own `viewRadius` state) is gone;
+  // the window still needs SOME radius until R3 removes it too, so this
+  // reads what the walk was actually fetched at, same fallback `viewRadius`
+  // used to default to.
+  const windowRadius = walk?.depth ?? (HOP_WINDOW - 1) / 2
   // T23 R1 — the sliding window: a no-op whenever the fetched extent
   // already fits inside one glance (every fixture shy of a 20-hop chain
   // never pays for this).
   const windowed = useMemo(
-    () => applyHopWindow(condensed, view.railWindow, viewRadius),
-    [condensed, view.railWindow, viewRadius],
+    () => applyHopWindow(condensed, view.railWindow, windowRadius),
+    [condensed, view.railWindow, windowRadius],
   )
   // T26 R2 — the invariant stage: the focal card is drawn (a), the board
   // is never empty while `condensed` still has the focus (b — T17-A's
@@ -538,32 +535,9 @@ export function LineageLens({
     () => enforceLensInvariants(windowed.graph, condensed).graph,
     [windowed.graph, condensed],
   )
-  // The RAIL always shows the WHOLE fetched extent — independent of
-  // what the board currently draws — so it reads the RAW layout's own
-  // cards, not `windowed.graph`'s reduced set. Handed to the view only
-  // once the extent actually needs one (the CURRENT radius's own
-  // threshold — T25 B: no longer the fixed `HOP_WINDOW`, so the rail
-  // still offers itself as the manual override at any depth preset).
-  const railRange = useMemo(() => bandRangeOf(layout), [layout])
-  const railCards = railRange && railRange.max - railRange.min + 1 > viewRadius * 2 + 1 ? layout.cards : undefined
-
   const setRailWindow = useCallback((band: number) => {
     editView(base => ({ ...base, railWindow: band }))
   }, [editView])
-  // T25 B — the depth control's own preset: sets the visible radius
-  // immediately (a lower N shrinks the window with NO refetch — nothing
-  // fetched is ever thrown away, see `applyHopWindow`'s own doc comment)
-  // and re-centers on the focal, so a manually-moved rail window is
-  // always superseded by picking a depth rather than left to disagree
-  // with it silently.
-  const setViewRadius = useCallback((radius: number) => {
-    editView(base => ({ ...base, viewRadius: radius, railWindow: null }))
-  }, [editView])
-  // T25 B — does the CURRENT window still read as "depth N, centered on
-  // the focus"? A rail segment click re-centers away from band 0
-  // (`setRailWindow`), which the depth control has no preset for — it
-  // shows no button pressed rather than a stale, disagreeing one.
-  const radiusMatchesPreset = view.railWindow === null || view.railWindow === 0
   // One control, two meanings depending on which side is currently
   // showing: a condensed run's own connector chip ADDS itself here
   // (unfolds), and its unfolded boundary's re-condense control REMOVES
@@ -696,10 +670,10 @@ export function LineageLens({
   }, [])
 
   /**
-   * T25 A — an extend/page click that carries an `anchor` (WalkPill's or
-   * RailEnd's own card+urn, never the three un-triaged bridge controls)
-   * never pre-judges its own arrival by the frontier count it started
-   * from. It fetches, and waits: `pendingTriage`, keyed exactly like
+   * T25 A — an extend/page click that carries an `anchor` (WalkPill's own
+   * card+urn, never the un-triaged bridge controls) never pre-judges its
+   * own arrival by the frontier count it started from. It fetches, and
+   * waits: `pendingTriage`, keyed exactly like
    * `walk.extendStatus` (`walkStatusKey`), holds what to do once THIS
    * fetch resolves — reveal the page (small cohort) or open the hub
    * triage list populated (big one). Nodeid-scoped and reset on a new
@@ -1472,62 +1446,6 @@ export function LineageLens({
                   {shareCopied ? <LucideIcons.Check className="w-4 h-4" /> : <LucideIcons.Link2 className="w-4 h-4" />}
                 </button>
               </InfoTooltip>
-              {/* Depth — the board's own visible hop RADIUS, both
-                  directions, effective immediately (T25 B): picking N
-                  fetches deeper first if this focal needs it (T24 F4,
-                  unchanged), then sets the window to show exactly N hops
-                  each way, centered on the focus — a LOWER N never
-                  refetches, it just tightens the window (nothing served
-                  is ever thrown away; T23's fold chips + rail still name
-                  the rest). It is ALSO still the depth the next focal
-                  starts at (`setLensInitialDepth`, unchanged). A rail
-                  segment click can widen the window manually past
-                  whatever N is selected — this control then shows no
-                  button pressed rather than a stale, disagreeing one. */}
-              <div className="relative" data-tour="lens-depth">
-                <div
-                  role="group"
-                  aria-label="Depth — how far around the focus is shown, both ways; deepens this entity now if it needs more, and sets the depth for what you focus next"
-                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  {/* Always visible, not hover-only (F4) — the per-button
-                      title carries the full explanation; this is the
-                      short version a reader never has to hover for. */}
-                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
-                    Depth
-                  </span>
-                  {([1, 2, 3] as const).map((d) => (
-                    <button
-                      key={d}
-                      type="button"
-                      disabled={walk?.deepenStatus === 'loading'}
-                      onClick={() => {
-                        setLensInitialDepth(d)
-                        setViewRadius(d)
-                        if (walk?.status === 'done' && d > walk.depth) walkApi.deepen(d)
-                      }}
-                      title={`Show ${d} hop${d === 1 ? '' : 's'} each way — deepens this entity now if it needs more, and sets the depth for what you focus next`}
-                      aria-pressed={radiusMatchesPreset && viewRadius === d}
-                      className={cn(
-                        'flex items-center justify-center w-6 h-6 rounded-md text-[10.5px] font-semibold tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 disabled:opacity-50 disabled:cursor-wait',
-                        radiusMatchesPreset && viewRadius === d
-                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                          : 'text-ink-muted hover:text-ink',
-                      )}
-                    >
-                      {d}
-                    </button>
-                  ))}
-                  {walk?.deepenStatus === 'loading' && (
-                    <LucideIcons.Loader2 className="w-3 h-3 mr-1 animate-spin text-accent-lineage" aria-label="Fetching deeper lineage for this entity" />
-                  )}
-                </div>
-                {!radiusMatchesPreset && (
-                  <span className="absolute top-full left-0 mt-1 z-50 whitespace-nowrap px-2 py-1 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 text-[9.5px] text-ink-muted shadow-md">
-                    Showing a manually widened span — pick a depth to reset it
-                  </span>
-                )}
-              </div>
               {/* What a container opens into, by default. Each frame can
                   still be flipped on its own; this sets the starting
                   point for the next one you open (persisted).
@@ -1940,8 +1858,6 @@ export function LineageLens({
                 // makes, so the hover text can never claim a number the
                 // request itself would not back up.
                 seedCountFor={walkStatus === 'done' ? seedCountForCtx : undefined}
-                railCards={railCards}
-                railWindow={windowed.window}
                 onWindowJump={setRailWindow}
                 onCondenseRun={toggleCondense}
                 partnersFor={partnersFor}

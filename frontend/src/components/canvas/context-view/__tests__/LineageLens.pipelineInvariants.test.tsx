@@ -59,13 +59,13 @@ function renderWalk() {
       lineageEdges: [hop('U', 'F')],
       upstreamUrns: new Set(['U']),
     }),
-    status: 'done', error: null, extendStatus: new Map(), depth: 1, deepenStatus: null,
+    status: 'done', error: null, extendStatus: new Map(), depth: 1,
   }
   return render(
     <LineageLens
       history={{ entries: ['F'], cursor: 0 }}
       walk={walk}
-      walkApi={{ extend: () => {}, page: () => {}, retry: () => {}, deepen: () => {} }}
+      walkApi={{ extend: () => {}, page: () => {}, retry: () => {} }}
       onRecenter={() => {}}
       onBack={() => {}}
       onForward={() => {}}

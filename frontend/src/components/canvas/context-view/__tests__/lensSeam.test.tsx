@@ -122,8 +122,8 @@ function LensSeam({ provider, share, history: opened, prefDepth = 1, onRender }:
     ? share.depth
     : prefDepth
   const walk = useLensWalk(focal, provider, initialDepth)
-  const { extend, page, retry, deepen } = walk
-  const walkApi = useMemo(() => ({ extend, page, retry, deepen }), [extend, page, retry, deepen])
+  const { extend, page, retry } = walk
+  const walkApi = useMemo(() => ({ extend, page, retry }), [extend, page, retry])
   onRender?.(walkApi)
   const walkSeed = useMemo<LensWalkSeed | null>(() => (share
     ? {

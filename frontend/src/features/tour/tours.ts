@@ -393,10 +393,10 @@ TOURS.push({
       body: 'An open container is a **scrollable list**: spin the wheel over it and a 400-column table moves under a fixed frame, fetching more as you reach the end — the header keeps saying which rows you are on. **Click** any row for a preview beside it, with what it is, what flows through it, and where you can go next. Prefer the keyboard? **Tab** into the list, then **↑ ↓** to walk it, **Enter** to preview, **Shift+Enter** to focus there, **→** to open a row, **←** to step back out — and just **start typing** to jump to a name.',
     },
     {
-      target: '[data-tour="lens-depth"]',
+      target: '[data-tour="lens-direction"]',
       placement: 'bottom',
-      title: 'Set how far you reach',
-      body: 'The **1 / 2 / 3** control sets how many hops a *newly* focused entity fetches. Further along the same row, **Both / Root cause / Impact** narrows the picture to just what feeds this entity or just what it feeds — instantly, with nothing new to fetch.',
+      title: 'Narrow the view',
+      body: '**Both / Root cause / Impact** narrows the picture to just what feeds this entity or just what it feeds — instantly, with nothing new to fetch.',
     },
     {
       target: '[data-tour="lens-toggle"]',

@@ -17,12 +17,14 @@
  * — `walkSharedPlatform` for the everyday shape (a platform holding both
  * the focus and its partners), `walkWideHub` (its own row-paging pill)
  * and its sibling `walkUnfetchedFanTriage` for fan-out at real scale
- * crossing the triage gate, `walkLongChain` for the rail/window, and
- * R3's own `walkGrainSeamDeepNesting` for the seam — walked end to end
+ * crossing the triage gate, `walkLongChain` for a long chain, and R3's
+ * own `walkGrainSeamDeepNesting` for the seam — walked end to end
  * through the full gesture algebra: open → orient → spotlight (row /
  * card / frame / empty-side / seam) → follow from every control kind ×
  * state → chevron drill → re-anchor (double-click AND Focus-here) →
- * Back/Forward → depth radius → share round-trip.
+ * Back/Forward → share round-trip. (T28 removed the depth-radius and
+ * hop-rail steps this list once carried — see the R4/R5 note further
+ * down for what replaced them.)
  *
  * THREE GLOBAL INVARIANTS, asserted at EVERY step (see the two shared
  * assertions below `onBoard`):
@@ -65,10 +67,10 @@ import { WALK_FIXTURES } from '@/harness/lensFixtures'
 // readable in the ten lines around its own test. ──────────────────────
 
 const doneWalk = (model: WalkEntry['model'], depth = 1): WalkEntry => ({
-  model, status: 'done', error: null, extendStatus: new Map(), depth, deepenStatus: null,
+  model, status: 'done', error: null, extendStatus: new Map(), depth,
 })
 
-const makeApi = () => ({ extend: vi.fn(), page: vi.fn(), retry: vi.fn(), deepen: vi.fn() })
+const makeApi = () => ({ extend: vi.fn(), page: vi.fn(), retry: vi.fn() })
 type Api = ReturnType<typeof makeApi>
 
 function renderLens(
@@ -296,18 +298,6 @@ describe('T26 R4 — the journey acceptance suite (walkSharedPlatform)', () => {
     assertStrataCoherent(errorSpy)
   })
 
-  it('DEPTH RADIUS — picking a narrower depth tightens the window LIVE, no refetch, never blank', () => {
-    const { api } = renderLens(['F'], doneWalk(WALK_FIXTURES.walkLongChain.model, 3))
-    const one = screen.getByTitle(/Show 1 hop each way/)
-    fireEvent.click(one)
-    // INVARIANT 1 — visible immediately: the preset now reads pressed.
-    expect(one).toHaveAttribute('aria-pressed', 'true')
-    // INVARIANT 1, the other half of B's own promise — no round trip.
-    expect(api.deepen).not.toHaveBeenCalled()
-    assertBoardShows('ledger_snapshot')
-    assertStrataCoherent(errorSpy)
-  })
-
   it('SHARE ROUND-TRIP — the copied link decodes back to the same view state', () => {
     renderLens(['REPORTING'], doneWalk(sharedPlatform()))
     fireEvent.click(screen.getByText('dim_customer'))
@@ -383,27 +373,11 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
     assertStrataCoherent(errorSpy)
   })
 
-  it('FOLLOW FROM A RAIL END — a band folded outside the window still delivers on one click', () => {
-    renderLens(['F'], doneWalk(WALK_FIXTURES.walkLongChain.model, 3))
-    // Grow the chain past the depth-3 window (bands -3..+3): the model
-    // already HAS every link (a pure reveal, never a fetch — the same
-    // "the model is the roster" shape T25 A's own calculus rests on),
-    // one hop at a time, degree-one the whole way. Five reveals reach
-    // band -6 — an 8-band extent, past the window's own 7-band width —
-    // so the rail actually renders (T23 R1's own threshold: it is a
-    // no-op whenever the fetched extent already fits one glance).
-    for (const i of [9, 8, 7, 6, 5]) {
-      fireEvent.click(screen.getByTitle(new RegExp(`Shows the next hop upstream of stage_up_${String(i).padStart(2, '0')}`)))
-    }
-    // The rail always shows the WHOLE fetched extent, independent of the
-    // window — a folded hop several bands out still has its own segment.
-    const railEnd = screen.getByTitle(/Hop \d+ upstream .* — not currently drawn/)
-    fireEvent.click(railEnd)
-    // INVARIANT 1 — the rail's own click re-centers the window onto that
-    // band; the board never goes blank doing it.
-    assertBoardShows('ledger_snapshot')
-    assertStrataCoherent(errorSpy)
-  })
+  // T28 R2 removed the rail this step exercised ("FOLLOW FROM A RAIL
+  // END"); T28 R3 removes the window/fold mechanism the rail's own
+  // click used to steer. Replaced by R4's repro-first fixture below
+  // ("a click delivers cards, at any distance") once R3 lands — that
+  // fixture is this step's actual successor, not a new addition.
 })
 
 // ── SPOTLIGHT ACROSS A SEAM — R3's own fixture, reused here so the

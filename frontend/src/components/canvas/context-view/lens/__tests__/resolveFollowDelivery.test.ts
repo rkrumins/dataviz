@@ -1,8 +1,8 @@
 /**
  * T25 A review round 1 — the fetch-then-triage CALCULUS, tested
  * exhaustively over its own state matrix. Every follow control
- * (WalkPill's gutter pill — row and frame alike — RailEnd, InlineFollow,
- * the spotlight bridge) routes its click decision through
+ * (WalkPill's gutter pill — row and frame alike — InlineFollow,
+ * the spotlight bridge, LensPeek) routes its click decision through
  * `resolveFollowDelivery`; this file is the regression net for the
  * whole defect family it closes, not a per-control test each new
  * caller has to remember to write again. The bug it exists to prevent
