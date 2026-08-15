@@ -481,31 +481,36 @@ describe('P0 — perf harness (Task 20)', () => {
   })
 
   /**
-   * T27 fix round 1 — code review flagged an unmeasured deviation: T27
-   * unified every card-like kind onto one `FocusNode`, whose fiber now
-   * persists across a kind flip and so must call the SAME hooks every
-   * render regardless of branch — including `useContext(RowCursorContext)`,
-   * which only frame/row cards used to call. `useContext` re-renders its
-   * consumer on any Provider value change independent of `memo` (memo
-   * only gates PROP-driven re-renders), so a top-level entity card is now
-   * ALSO a `RowCursorContext` subscriber, where before T27 it was not.
+   * T27 fix round 1 measured, fix round 2 fixed — code review caught an
+   * unmeasured deviation: T27 unified every card-like kind onto one
+   * `FocusNode`, whose fiber now persists across a kind flip and so must
+   * call the SAME hooks every render regardless of branch — including
+   * what read the keyboard row cursor, which only frame/row cards used
+   * to read.
    *
-   * MEASURED, not budgeted: 149 of 151 board nodes re-render on a single
-   * ArrowDown — essentially the whole board, the exact broadcast-Provider
-   * pattern Task 20 P1 eliminated for hover/isolation (`ConeStore`) and
-   * fix-round-1 eliminated for the trail (`TrailStore`), now reintroduced
-   * for the row cursor by this task's own hooks-rules constraint. Per
-   * the review's own instruction this is disclosed and left alone here —
-   * scoping `RowCursorContext` the same way (a `useSyncExternalStore`
-   * selector keyed by frame + row id, so only the moved-into and
-   * moved-out-of row and cards that actually care about `onCursor`
-   * re-subscribe) is real, separately-scoped work, not a speculative
-   * optimization to fold into this fix round. This test is a
-   * measurement/regression instrument, not a pass/fail budget — it
-   * would only fail if the fan-out grew WORSE than "the whole board".
+   * BEFORE (fix round 1, `RowCursorContext` — a plain `React.Context`):
+   * 149 of 151 board nodes re-rendered on a single `ArrowDown` —
+   * essentially the whole board, the exact broadcast-Provider pattern
+   * Task 20 P1 eliminated for hover/isolation (`ConeStore`) and fix-
+   * round-1 (T21) eliminated for the trail (`TrailStore`), reintroduced
+   * here by this task's own hooks-rules constraint and hit by a gesture
+   * users repeat rapidly (held arrow keys) — contradicts the project's
+   * own performance bar, so review escalated it from "disclose" to "fix
+   * now" once the measurement came back.
+   *
+   * AFTER (fix round 2, `RowCursorStore` — a `useSyncExternalStore`
+   * selector keyed by frame + row id, the same pattern as `ConeStore`/
+   * `TrailStore`): a row-to-row move re-renders exactly the row LEAVING
+   * the cursor and the row ENTERING it — everything else's selector
+   * returns the same primitive it did last time, so React never re-runs
+   * it. Pinned as a REAL budget now, not a measurement instrument: the
+   * FIRST ArrowDown from a cold cursor (nothing to leave) touches one
+   * node; the SECOND — a genuine A→B move, the steady-state "holding the
+   * key down" case — touches at most a small, fixed handful, never
+   * anything close to the board's own size.
    */
-  describe('(T27 fix round 1) row-cursor arrow-key move fan-out — MEASURED, not yet budgeted', () => {
-    it('walkWideHub: moving the cursor inside one open frame — how much of the board answers', () => {
+  describe('(T27 fix round 2) row-cursor arrow-key move touches only what changed', () => {
+    it('walkWideHub: moving the cursor inside one open frame re-renders only the affected rows', () => {
       resetRenderCounts()
       const profiler = makeProfilerRecorder()
       const { container } = renderBoard('walkWideHub', profiler)
@@ -515,22 +520,32 @@ describe('P0 — perf harness (Task 20)', () => {
       const listbox = container.querySelector('[role="listbox"]')
       expect(listbox).not.toBeNull()
 
+      // First move: cold cursor, nothing to leave — one row gains it.
       profiler.reset()
       resetRenderCounts()
       act(() => { fireEvent.keyDown(listbox!, { key: 'ArrowDown' }) })
+      const firstMove = [...renderCounts.values()].reduce((n, v) => n + v, 0)
 
-      const totalRendered = [...renderCounts.values()].reduce((n, v) => n + v, 0)
+      // Second move: a genuine row-to-row transition — the steady-state
+      // shape of a reader holding the key down. Exactly this is what
+      // BEFORE this fix touched 149 of 151 board nodes.
+      profiler.reset()
+      resetRenderCounts()
+      act(() => { fireEvent.keyDown(listbox!, { key: 'ArrowDown' }) })
+      const secondMove = [...renderCounts.values()].reduce((n, v) => n + v, 0)
+
       console.log(
-        `[T27-fix-round-1] walkWideHub row-cursor ArrowDown: boardNodes=${board.length} `
+        `[T27-fix-round-2] walkWideHub row-cursor ArrowDown×2: boardNodes=${board.length} `
         + `commits=${profiler.commitCount} ms=${profiler.totalMs.toFixed(2)} `
-        + `totalComponentRenders=${totalRendered} (${JSON.stringify(Object.fromEntries(renderCounts))})`,
+        + `firstMove=${firstMove} secondMove=${secondMove} (${JSON.stringify(Object.fromEntries(renderCounts))})`,
       )
-      // Not a budget — see the doc comment above. Only that the
-      // instrument itself is live, so a silently-broken probe cannot
-      // report a hollow zero, and that the fan-out is bounded by the
-      // board's own size (never MORE than everything on it).
-      expect(totalRendered).toBeGreaterThan(0)
-      expect(totalRendered).toBeLessThanOrEqual(board.length)
+      // A generous ceiling (5, not 2) so this cannot flake on an
+      // unrelated re-render while still catching a regression back to
+      // anything resembling board-wide fan-out (151, or even 30).
+      expect(firstMove).toBeGreaterThan(0)
+      expect(firstMove).toBeLessThan(5)
+      expect(secondMove).toBeGreaterThan(0)
+      expect(secondMove).toBeLessThan(5)
     })
   })
 

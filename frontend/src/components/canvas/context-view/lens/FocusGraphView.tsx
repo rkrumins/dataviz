@@ -266,16 +266,76 @@ function useOnTrail(urn: string | null): boolean {
 
 /**
  * Where the KEYBOARD is: which frame is being browsed, and which of its
- * rows the cursor is resting on.
- *
- * Context for the same reason hover and reach are — arrowing down a
- * 400-row table must re-render the two rows whose cursor state changed,
- * never rebuild the nodes array. `frameKey` is the frame's own key (an
+ * rows the cursor is resting on. `frameKey` is the frame's own key (an
  * entity urn), so a row can tell "the cursor is on ME" from "the cursor
  * is on a row of some other frame that happens to share my urn" — which
  * a diamond genuinely can produce.
+ *
+ * A subscription store (T27 fix round 2), delivered through
+ * `useSyncExternalStore` for the exact reason `ConeStore`/`TrailStore`
+ * are — a plain `React.Context` here was the ORIGINAL design (arrowing
+ * down a 400-row table must re-render the two rows whose cursor state
+ * changed, never rebuild the nodes array), and it held up fine right up
+ * until T27 unified every card-like kind onto one persistent `FocusNode`
+ * fiber, which has to call the same hooks every render regardless of
+ * kind — so `useContext` here widened from "frame/row cards only" to
+ * "every card, including every unrelated top-level entity", and a
+ * `Provider` re-renders every consumer on ANY value change regardless
+ * of `memo` (memo only gates PROP-driven re-renders). MEASURED before
+ * fixing (see `perf.test.tsx`, T27 fix round 1): a single arrow-key move
+ * re-rendered 149 of 151 board nodes. Selectors return primitives ONLY,
+ * same rule as `ConeStore` — a fresh object from `getSnapshot` reads as
+ * "changed" on every call.
  */
-const RowCursorContext = createContext<{ frameKey: string; urn: string } | null>(null)
+class RowCursorStore {
+  private value: { frameKey: string; urn: string } | null = null
+  private readonly listeners = new Set<() => void>()
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  set(frameKey: string, urn: string | null): void {
+    if (urn === null) {
+      if (this.value === null) return
+      this.value = null
+    } else {
+      if (this.value !== null && this.value.frameKey === frameKey && this.value.urn === urn) return
+      this.value = { frameKey, urn }
+    }
+    for (const listener of this.listeners) listener()
+  }
+
+  /** Is THIS row/frame — named by the frame it lives in, plus its own
+   *  urn — the keyboard cursor's current target? */
+  isCursor = (frameKey: string, urn: string): boolean =>
+    this.value !== null && this.value.frameKey === frameKey && this.value.urn === urn
+
+  /** Which urn (if any) the cursor rests on inside THIS frame — what a
+   *  frame's own listbox needs for its row index / `aria-
+   *  activedescendant`, without subscribing to every OTHER frame's
+   *  cursor too. */
+  cursorUrnFor = (frameKey: string): string | null =>
+    this.value !== null && this.value.frameKey === frameKey ? this.value.urn : null
+}
+
+/** Fallback only — `FocusGraphView` always provides its own instance. */
+const RowCursorStoreContext = createContext<RowCursorStore>(new RowCursorStore())
+
+/** Whether `urn` (inside frame `frameKey`) carries the keyboard cursor —
+ *  a primitive boolean read through the store, so only the row/frame
+ *  whose OWN answer flips re-renders (the `ConeStore`/`useConeState`
+ *  pattern, applied to the row cursor). `frameKey`/`urn` may be `null`
+ *  (a top-level entity is never a row of anything) — the selector
+ *  always then returns the same primitive `false`, so `FocusNode`'s
+ *  hooks-rules subscription costs those cards a listener, never a
+ *  render. */
+function useRowCursor(frameKey: string | null, urn: string | null): boolean {
+  const store = useContext(RowCursorStoreContext)
+  return useSyncExternalStore(store.subscribe, () =>
+    frameKey !== null && urn !== null && store.isCursor(frameKey, urn))
+}
 
 /**
  * OFF THE CONE. Quiet enough to read as background, light enough that
@@ -2216,7 +2276,6 @@ function FocusNode({ data, selected }: NodeProps) {
   // could.
   const { anchor, onCone, offCone, hops } = useConeState(card.id)
   const onTrail = useOnTrail(card.nodeId)
-  const rowCursor = useContext(RowCursorContext)
 
   // A nested frame is one of its host's rows, so it answers to the
   // host's list the way any other row does — including saying whether
@@ -2226,7 +2285,12 @@ function FocusNode({ data, selected }: NodeProps) {
     : isRow
       ? (card.parentId ?? '')
       : null
-  const onCursor = hostKey !== null && rowCursor !== null && rowCursor.frameKey === hostKey && rowCursor.urn === card.nodeId
+  // T27 fix round 2 — a store selector, not a Context read: this call
+  // happens on EVERY card (hooks rules — see the comment above), but the
+  // returned primitive is always `false` for a top-level entity
+  // (`hostKey` null), so only a row/frame whose OWN cursor answer
+  // flipped actually re-renders.
+  const onCursor = useRowCursor(hostKey, card.nodeId)
 
   const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
   // Muted in place of the CSS filter this used to lean on — see
@@ -2417,10 +2481,17 @@ function FrameScrollRegion({ card, ctx, win }: {
   win: ReturnType<typeof frameWindow>
 }) {
   const key = card.expandKey ?? ''
-  const cursor = useContext(RowCursorContext)
+  // T27 fix round 2 — this frame's own cursor urn, via the store's
+  // per-frame selector: subscribes to every cursor move (hooks rules
+  // aside, this component only exists while ITS frame is open), but the
+  // returned primitive changes only when THIS frame's own answer does —
+  // a cursor move inside a DIFFERENT frame returns the same `null`/urn
+  // it did last time, so this region does not re-render for it.
+  const rowCursorStore = useContext(RowCursorStoreContext)
+  const cursorUrn = useSyncExternalStore(rowCursorStore.subscribe, () => rowCursorStore.cursorUrnFor(key))
   const rows = card.frameRows
-  const cursorIndex = cursor?.frameKey === key
-    ? rows.findIndex(r => r.urn === cursor.urn)
+  const cursorIndex = cursorUrn !== null
+    ? rows.findIndex(r => r.urn === cursorUrn)
     : -1
   // Type-ahead buffer: consecutive letters compose one search, a pause
   // starts a new one. Held in a ref because it is not visible state —
@@ -4106,8 +4177,10 @@ export function FocusGraphView({
 
   // Where the keyboard is inside a frame. Ephemeral view state — a
   // cursor is not part of the exploration a share link replays — and it
-  // reaches the rows by CONTEXT, so arrowing down a 400-row table
-  // re-renders the two rows whose ring changed, not the board.
+  // reaches the rows by STORE (T27 fix round 2 — see `RowCursorStore`'s
+  // own doc comment for why this is no longer a plain `Context`), so
+  // arrowing down a 400-row table re-renders the two rows whose ring
+  // changed, not the board.
   // Isolation is the LENS's state, so it survives everything on this
   // board that rebuilds — and so Escape, which the lens owns in one
   // place, can clear it in the right order. A caller that does not want
@@ -4118,10 +4191,13 @@ export function FocusGraphView({
     else onSelect(null)
   }, [onDismissProp, onSelect])
 
-  const [rowCursor, setRowCursor] = useState<{ frameKey: string; urn: string } | null>(null)
+  // One instance per mount, same pattern as `isolationStore`/`trailStore`
+  // below — `useState`'s lazy initializer, not a module singleton, so a
+  // lens with more than one board on screen never shares a cursor.
+  const [rowCursorStore] = useState(() => new RowCursorStore())
   const onRowCursor = useCallback((frameKey: string, urn: string | null) => {
-    setRowCursor(urn === null ? null : { frameKey, urn })
-  }, [])
+    rowCursorStore.set(frameKey, urn)
+  }, [rowCursorStore])
 
   /**
    * A wheel over a frame, resolved to whole rows.
@@ -4572,7 +4648,7 @@ export function FocusGraphView({
       <IsolationStoreContext.Provider value={isolationStore}>
       <TrailStoreContext.Provider value={trailStore}>
       <FollowContext.Provider value={ctx}>
-      <RowCursorContext.Provider value={rowCursor}>
+      <RowCursorStoreContext.Provider value={rowCursorStore}>
       <ReactFlowProvider>
         <ReactFlow
           nodes={nodes}
@@ -4738,7 +4814,7 @@ export function FocusGraphView({
           )}
         </ReactFlow>
       </ReactFlowProvider>
-      </RowCursorContext.Provider>
+      </RowCursorStoreContext.Provider>
       </FollowContext.Provider>
       </TrailStoreContext.Provider>
       </IsolationStoreContext.Provider>
