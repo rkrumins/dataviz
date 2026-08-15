@@ -1,5 +1,9 @@
 /**
- * T26 R4 — THE JOURNEY ACCEPTANCE SUITE.
+ * T26 R4 — THE JOURNEY ACCEPTANCE SUITE. Updated by T28 R5 for the
+ * user's live-verdict simplification (see that task's own brief): the
+ * depth-radius and hop-rail steps this suite used to carry are gone —
+ * "follow from every control kind × state" now carries their
+ * successor, R4 REPRO-FIRST/WALK TO ETERNITY, in their place.
  *
  * The north star (user, 2026-08-15, verbatim intent): "we want to allow
  * our users to walk the lineage from/to based on the Focus entity and
@@ -21,10 +25,9 @@
  * own `walkGrainSeamDeepNesting` for the seam — walked end to end
  * through the full gesture algebra: open → orient → spotlight (row /
  * card / frame / empty-side / seam) → follow from every control kind ×
- * state → chevron drill → re-anchor (double-click AND Focus-here) →
- * Back/Forward → share round-trip. (T28 removed the depth-radius and
- * hop-rail steps this list once carried — see the R4/R5 note further
- * down for what replaced them.)
+ * state (including R4's own "a click delivers cards, at any distance"
+ * and the walk-to-eternity pin) → chevron drill → re-anchor
+ * (double-click AND Focus-here) → Back/Forward → share round-trip.
  *
  * THREE GLOBAL INVARIANTS, asserted at EVERY step (see the two shared
  * assertions below `onBoard`):
@@ -373,11 +376,126 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
     assertStrataCoherent(errorSpy)
   })
 
-  // T28 R2 removed the rail this step exercised ("FOLLOW FROM A RAIL
-  // END"); T28 R3 removes the window/fold mechanism the rail's own
-  // click used to steer. Replaced by R4's repro-first fixture below
-  // ("a click delivers cards, at any distance") once R3 lands — that
-  // fixture is this step's actual successor, not a new addition.
+  /**
+   * T28 R4 — REPRO-FIRST: the user's own screenshot shape. Walk the
+   * chain out past `stage_up_05` — the branch point (`branchA` also
+   * feeds it), the one card condensation can never fully absorb behind
+   * a boundary, and — verified directly, not assumed — the exact card
+   * whose own onward click used to land outside the OLD default window
+   * (HOP_WINDOW's radius 3). PRE-FIX (reverted the R3 commit locally,
+   * re-ran this exact click sequence, restored R3 before landing
+   * anything): that click rendered "Chain continues · 2 further
+   * upstream of 1 more hop" instead of the delivered cards — the
+   * double-click-to-see-it defect the user reported, reproduced
+   * faithfully, not inferred. POST-FIX: the delivered hop is a real
+   * card, directly adjacent, on the FIRST click — no chip ever renders,
+   * because the card kind that rendered it no longer exists in the
+   * type system. Pinned in BOTH directions, per the brief's own
+   * instruction (downstream verified by code inspection rather than a
+   * second revert — `condensation.ts`/the deleted `hop-window.ts` carry
+   * no directional bias, and `branchB` mirrors `branchA` exactly in the
+   * fixture).
+   *
+   * NOTE on what this does NOT assert: condensation (T23 R2, KEPT by
+   * the user's own ruling) is free to fold a run of interior chain
+   * cards into one connector as it grows past `MIN_CONDENSE_RUN` — by
+   * design, verified directly in the same debug pass — stage_up_09/08/
+   * 07 fold away behind their own "— via N steps —▶" connector well
+   * before the click this test cares about. That is the SURVIVING
+   * feature working correctly, not the deleted window. This test's own
+   * claim is narrower and exact: the JUST-DELIVERED card (the one the
+   * click promised) is ALWAYS its own visible top-level card the
+   * instant it arrives — nothing folds the delivery itself, and the
+   * deleted chip's own text can never appear.
+   */
+  it('R4 REPRO-FIRST — a click past the old window edge delivers the card directly, no chip, ever (upstream)', () => {
+    renderLens(['F'], doneWalk(WALK_FIXTURES.walkLongChain.model, 3))
+    // stage_up_09 (band -1) is admitted for free. Four reveals reach
+    // stage_up_05 (band -5) — the branch point, still just inside the
+    // OLD default window's own effective reach.
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_09 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_08 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_07 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_06 only/))
+    assertBoardShows('stage_up_05')
+    expect(screen.queryByText(/Chain continues/)).toBeNull()
+
+    // ONE more click, past the old edge — the exact click the user's
+    // screenshot shows failing pre-fix (delivers stage_up_04 AND
+    // branch_reconciliation together, one page, comfortably under the
+    // triage gate).
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_05 only/))
+
+    // INVARIANT 1 — visible immediately: real cards, not a chip.
+    assertBoardShows('stage_up_04')
+    assertBoardShows('branch_reconciliation')
+    expect(screen.queryByText(/Chain continues/)).toBeNull()
+    assertStrataCoherent(errorSpy)
+  })
+
+  it('R4 REPRO-FIRST — a click past the old window edge delivers the card directly, no chip, ever (downstream)', () => {
+    renderLens(['F'], doneWalk(WALK_FIXTURES.walkLongChain.model, 3))
+    // stage_dn_00 (band +1) is admitted for free. Four reveals reach
+    // stage_dn_04 (band +5) — one hop short of the downstream branch
+    // point (`branchB`, mirroring `branchA`'s own upstream shape).
+    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_00 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_01 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_02 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_03 only/))
+    assertBoardShows('stage_dn_04')
+    expect(screen.queryByText(/Chain continues/)).toBeNull()
+
+    // ONE more click, past the old edge — delivers stage_dn_05 (dn04's
+    // own single downstream neighbour; unlike up05, `branch_adjustment`
+    // feeds INTO dn05, not out of dn04, so it arrives on the NEXT click,
+    // not this one — the asymmetry is the fixture's own shape, not this
+    // test's concern).
+    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_04 only/))
+
+    assertBoardShows('stage_dn_05')
+    expect(screen.queryByText(/Chain continues/)).toBeNull()
+    assertStrataCoherent(errorSpy)
+  })
+
+  /**
+   * T28 R4 — WALK TO ETERNITY: script N sequential reveals, N well past
+   * the old radius (up to stage_up_04, seven hops out — more than
+   * double the old radius of 3). Every hop renders as a card the
+   * instant it is revealed — ONE-CLICK-ONE-VISIBLE-DELIVERY, checked
+   * fresh at each step, not just the last one; the board is never
+   * empty; the deleted chip's own "Chain continues" text never appears,
+   * at any distance, because nothing in the pipeline can produce it any
+   * more. (Condensation folding OLDER interior cards behind their own
+   * connector as the run grows is the surviving, unrelated feature —
+   * see the repro-first test's own note just above for why this is not
+   * a regression to assert against.)
+   */
+  it('R4 WALK TO ETERNITY — seven sequential reveals upstream, each one delivers its own card, never a fold chip, never empty', () => {
+    renderLens(['F'], doneWalk(WALK_FIXTURES.walkLongChain.model, 3))
+    assertBoardShows('ledger_snapshot')
+    assertBoardShows('stage_up_09')   // admitted for free, no click
+
+    const reached: string[] = []
+    for (let i = 9; i >= 3; i--) {
+      const from = `stage_up_${String(i).padStart(2, '0')}`
+      const next = `stage_up_${String(i - 1).padStart(2, '0')}`
+      fireEvent.click(screen.getByTitle(new RegExp(`Shows the next hop upstream of ${from} only`)))
+      // INVARIANT 1, checked fresh at every step — the click JUST fired
+      // delivers a real card, immediately, whatever the distance.
+      assertBoardShows(next)
+      // INVARIANT 2 — the focus itself never leaves the board.
+      assertBoardShows('ledger_snapshot')
+      expect(screen.queryByText(/Chain continues/)).toBeNull()
+      reached.push(next)
+    }
+    // Seven reveals reached stage_up_02 — five bands past the old
+    // radius-3 edge (stage_up_07), the "N > the old radius" the brief
+    // asks for.
+    expect(reached).toEqual([
+      'stage_up_08', 'stage_up_07', 'stage_up_06', 'stage_up_05', 'stage_up_04', 'stage_up_03', 'stage_up_02',
+    ])
+    assertStrataCoherent(errorSpy)
+  })
 })
 
 // ── SPOTLIGHT ACROSS A SEAM — R3's own fixture, reused here so the
