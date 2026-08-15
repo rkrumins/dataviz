@@ -1,7 +1,7 @@
 """Announcement banner polls every 60s, not every 15s.
 
 Revision ID: 20260815_1200_announce_poll_60s
-Revises: 20260802_1000_open_publishing
+Revises: 20260802_1000_open_publish
 Create Date: 2026-08-15 12:00
 
 ``announcement_config.poll_interval_seconds`` shipped with a default of
@@ -28,7 +28,7 @@ from alembic import op
 
 
 revision: str = "20260815_1200_announce_poll_60s"
-down_revision: Union[str, None] = "20260802_1000_open_publishing"
+down_revision: Union[str, None] = "20260802_1000_open_publish"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
