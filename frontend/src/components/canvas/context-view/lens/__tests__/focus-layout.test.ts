@@ -1708,6 +1708,39 @@ describe('focus-layout — frames scroll instead of growing', () => {
             // renderer's own guard against appending it.
             expect(divider.count).toBe(0)
         })
+
+        it('T24 F6 review round 1 — the "already on this lineage" divider stays silent while a Find is active', () => {
+            // The exact shape `rosterExtras.length === 0` mistook for "the
+            // whole roster is exhausted": a query active, every CONNECTED
+            // row still matching it (so the list is non-empty), and
+            // `rosterExtras` forced to [] purely because a search is
+            // running (F2) — not because there is genuinely nothing left
+            // inside. Claiming "everything inside is already on this
+            // lineage" here would be false: the search is HIDING the rest
+            // of the roster, not reporting that it does not exist.
+            const nodes = [wnode('F'), wnode('T', 'dataset', 'src', { childCount: 2 })]
+            const contains: Array<[string, string]> = [['T', 'c0'], ['T', 'c1']]
+            const hops: Array<[string, string]> = [['c0', 'F'], ['c1', 'F']]
+            nodes.push(wnode('c0', 'schemaField', 'on_lineage_0'), wnode('c1', 'schemaField', 'on_lineage_1'))
+            const roster: LensWalkNode[] = [
+                wnode('c0', 'schemaField', 'on_lineage_0'),
+                wnode('c1', 'schemaField', 'on_lineage_1'),
+            ]
+            const sg = subgraph({ focus: 'F', nodes, contains, hops })
+            const base = initialLensViewState(sg)
+            const g = layout(sg, {
+                ...base,
+                expandedContainment: new Set([...base.expandedContainment, 'T']),
+                frameShowAll: new Set(['T']),
+                frameQueries: new Map([['T', 'on_lineage']]),
+            }, {
+                childrenAll: new Map([['T', { children: roster, hasMore: false, total: 2 }]]),
+                childrenAllStatus: new Map([['T', 'done']]),
+            })
+            const frame = cardFor(g, 'T')!
+            const rows = g.cards.filter(c => c.frameId === frame.id)
+            expect(rows.some(r => r.kind === 'divider')).toBe(false)
+        })
     })
 
     describe('row cues — every one of them a fact the model already holds', () => {

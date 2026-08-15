@@ -1462,7 +1462,13 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             // unchanged list — but only once the roster has genuinely
             // finished (not mid-fetch, and not merely this page: a
             // roster with more pages still might turn up something).
-            if (showAll && connectedRows.length > 0 && rosterExtras.length === 0
+            // `frameQuery === ''` (T24 F6 review round 1): `rosterExtras`
+            // is forced to [] the moment a search is active (F2, above),
+            // which made this fire on the STILL-UNSEEN rest of the roster
+            // every time a query happened to match every connected row —
+            // a false "everything inside is already on this lineage"
+            // sitting right under the search's own match count.
+            if (showAll && frameQuery === '' && connectedRows.length > 0 && rosterExtras.length === 0
                 && !roster?.hasMore && childrenAllStatus.get(urn) === 'done'
                 && i === rows.length - 1) {
                 pushCard({
