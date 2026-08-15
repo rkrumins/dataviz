@@ -389,6 +389,26 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "The Help panel and every guide stay available whether tours are on or off",
         ),
     ),
+    "realtimeChangeFeedEnabled": FeatureWiring(
+        key="realtimeChangeFeedEnabled",
+        posture="capability",
+        # Preview: ships OFF, and the both-halves reference rule is relaxed for
+        # experimental flags. There is no server gate to list and none is owed:
+        # the flag decides whether a client opens a stream, and the stream
+        # carries no data the client could not already fetch — only the news
+        # that it should. A user who forced it on would learn nothing they were
+        # not entitled to, because every topic is derived from their own
+        # session (`app/changes/topics.py`).
+        stage="experimental",
+        server_gates=(),
+        ui_surfaces=(
+            "Live connection to GET /api/v1/changes/stream, held by one tab per browser",
+        ),
+        still_allowed=(
+            "Every surface keeps its periodic check against GET /api/v1/changes, so updates "
+            "still arrive with the flag off — within a minute rather than within a second",
+        ),
+    ),
 }
 
 

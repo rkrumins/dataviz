@@ -147,13 +147,30 @@ function reconcile(): void {
 }
 
 /**
- * Read the manifest once and wake whatever moved.
+ * Bumped whenever the stream pushes something. Used to discard a manifest
+ * response that was already in flight when a push landed — see
+ * `pollChangeFeed`.
+ */
+let pushGeneration = 0
+
+/**
+ * Read the manifest and wake whatever moved.
  *
- * Exported so the transport can drive it: today a timer, and once the
- * stream lands, a reconnect.
+ * Exported so any transport can drive it: the poll timer, a stream
+ * opening, a `resync` frame, a tab regaining focus.
+ *
+ * A response that raced a push is discarded rather than applied. The
+ * manifest is authoritative in general — it is what lets a counter go
+ * *backwards* after a Redis eviction — but a read that started before a
+ * bump and returned after it holds a value that is simply older than
+ * what the stream just delivered. Applying it would roll the version
+ * back to what the subscriber has already satisfied, and the push would
+ * be silently lost until the next unrelated poll.
  */
 export async function pollChangeFeed(): Promise<void> {
+  const generationAtStart = pushGeneration
   const next = await fetchChangeManifest()
+  if (pushGeneration !== generationAtStart) return
   versions = next
   seeded = true
   reconcile()
@@ -284,30 +301,165 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null
 let transportEpoch = 0
 
 /**
- * Start reconciling. Returns a teardown.
+ * Apply a batch of `{topic: version}` pushed by the stream.
  *
- * Today the transport is a single jittered poll of the manifest, paused
- * while the tab is hidden and kicked once on return. That is already the
- * whole point of this store — one request per interval for every surface
- * in the app, in place of nine — and it is the floor the streaming
- * transport will fall back to when it cannot hold a connection.
- *
- * The loop deliberately awaits before re-arming rather than using
- * `setInterval`: a slow or hung manifest request must not stack another
- * on top of it. Every timer this store replaced had to learn that the
- * hard way.
+ * The stream carries the new version with the notification, so a delta
+ * is actionable on its own — no follow-up manifest read just to discover
+ * what the version became.
  */
-export function startChangeFeed(): () => void {
-  const myEpoch = ++transportEpoch
+function applyPushedVersions(pushed: ChangeVersions): void {
+  pushGeneration += 1
+  versions = { ...versions, ...pushed }
+  seeded = true
+  reconcile()
+}
+
+/** Full jitter: `random(0, min(cap, base * 2^attempt))`. */
+function backoffDelay(attempt: number): number {
+  const ceiling = Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5))
+  return Math.random() * ceiling
+}
+
+/**
+ * Hold a stream, reconnecting as needed. Returns a teardown.
+ *
+ * Three things here are not optional:
+ *
+ *  * **`close()` in `onerror`.** `EventSource` retries on its own, so a
+ *    handler that only records state leaves the browser's retry running
+ *    *alongside* ours and the connection count doubles per failure. The
+ *    job-progress hook nearby does exactly that; it gets away with it
+ *    only because its streams are short-lived and few.
+ *  * **Full jitter, not base-plus-jitter.** When a replica dies its
+ *    clients all reconnect at once, and only full jitter actually
+ *    decorrelates them.
+ *  * **Reconcile on every open.** The stream is allowed to lose things;
+ *    the manifest is what makes that safe.
+ */
+function connectStream(myEpoch: number): () => void {
+  let source: EventSource | null = null
+  let retryTimer: ReturnType<typeof setTimeout> | null = null
+  let attempt = 0
+  let closed = false
+
+  const open = () => {
+    if (closed || myEpoch !== transportEpoch) return
+    const es = new EventSource('/api/v1/changes/stream', { withCredentials: true })
+    source = es
+
+    es.onopen = () => {
+      attempt = 0
+      // Whatever happened while we were not listening shows up here as a
+      // version mismatch.
+      void pollChangeFeed().catch(() => {})
+    }
+
+    es.addEventListener('changed', (ev) => {
+      try {
+        const payload = JSON.parse((ev as MessageEvent).data)
+        if (payload?.topics) applyPushedVersions(payload.topics)
+      } catch {
+        // A frame we cannot parse is a reason to reconcile, not to fail.
+        void pollChangeFeed().catch(() => {})
+      }
+    })
+
+    es.addEventListener('resync', () => {
+      void pollChangeFeed().catch(() => {})
+    })
+
+    // The server closes on a schedule so every stream's authorization
+    // stays fresh — it authenticates once at open and cannot re-read the
+    // cookie afterwards. Reconnecting picks up whatever the keepalive
+    // has since rotated.
+    es.addEventListener('reauth', () => {
+      es.close()
+      if (closed || myEpoch !== transportEpoch) return
+      retryTimer = setTimeout(open, backoffDelay(0))
+    })
+
+    es.onerror = () => {
+      // Close before scheduling: the browser's own retry would otherwise
+      // run in parallel with ours.
+      es.close()
+      if (closed || myEpoch !== transportEpoch) return
+      retryTimer = setTimeout(open, backoffDelay(attempt++))
+    }
+  }
+
+  open()
+
+  return () => {
+    closed = true
+    if (retryTimer) clearTimeout(retryTimer)
+    source?.close()
+    source = null
+  }
+}
+
+// ── Cross-tab consolidation ───────────────────────────────────────────
+//
+// Everything above is per-tab, and tabs are the multiplier that made the
+// original problem as large as it was: nine pollers with no cross-tab
+// coordination meant N tabs cost N times as much. The stream removes the
+// request cost but not the connection cost — five tabs is five held
+// connections, and at fleet scale that is thousands of them doing the
+// same work.
+//
+// So one tab does the work and tells the others. The two primitives this
+// needs are both already in the codebase and are used the same way here:
+//
+//  * **Web Locks** for the election. `fetchWithTimeout` uses
+//    `navigator.locks` to keep concurrent tabs from racing a token
+//    refresh. A lock is held for as long as its callback's promise is
+//    pending, and — the property that matters — it is released
+//    automatically when the holding tab goes away, crash included. That
+//    is failover with no heartbeat, no lease, and no stale-leader
+//    detection to get wrong.
+//  * **BroadcastChannel** for the fan-out, extending the bus
+//    `permissionChangeBus` already runs rather than standing up a second.
+
+const LEADER_LOCK = 'nx-change-feed-leader'
+const BROADCAST_CHANNEL = 'nx-change-feed'
+
+let channel: BroadcastChannel | null = null
+
+function openChannel(): BroadcastChannel | null {
+  if (typeof BroadcastChannel === 'undefined') return null
+  if (channel === null) channel = new BroadcastChannel(BROADCAST_CHANNEL)
+  return channel
+}
+
+/** Leader → followers. BroadcastChannel does not echo to the sender. */
+function broadcastVersions(next: ChangeVersions): void {
+  try {
+    openChannel()?.postMessage({ versions: next })
+  } catch {
+    // A closed or unavailable channel just means the other tabs fall
+    // back to their own reconciliation floor.
+  }
+}
+
+/**
+ * Do the actual work of the feed: hold a stream and a reconciliation
+ * poll, and tell the other tabs whatever we learn.
+ */
+function startLeaderWork(myEpoch: number, useStream: boolean): () => void {
+  const stopStream = useStream ? connectStream(myEpoch) : () => {}
+
+  const publish = async () => {
+    await pollChangeFeed()
+    broadcastVersions(versions)
+  }
 
   const tick = async () => {
     if (myEpoch !== transportEpoch) return
     if (typeof document === 'undefined' || !document.hidden) {
       try {
-        await pollChangeFeed()
+        await publish()
       } catch {
-        // A failed manifest read is not worth reporting: the surfaces
-        // keep what they have, and the next tick tries again. The server
+        // A failed manifest read is not worth reporting: surfaces keep
+        // what they have and the next tick tries again. The server
         // answers 503 here when its registry is unreachable, which is
         // deliberately not the same as "nothing changed".
       }
@@ -319,16 +471,108 @@ export function startChangeFeed(): () => void {
   void tick()
   const unsubscribeVisible = onAppVisible(() => {
     if (myEpoch !== transportEpoch) return
-    void pollChangeFeed().catch(() => {})
+    void publish().catch(() => {})
   })
 
   return () => {
-    transportEpoch += 1
     if (pollTimer) {
       clearTimeout(pollTimer)
       pollTimer = null
     }
     unsubscribeVisible()
+    stopStream()
+  }
+}
+
+/**
+ * Contend for leadership; do the work if we win, listen if we do not.
+ *
+ * Without Web Locks — jsdom, and a few older browsers — every tab leads.
+ * That is the pre-consolidation behaviour, which is correct and merely
+ * unconsolidated, so it is the right thing to degrade to.
+ */
+function startWithLeaderElection(myEpoch: number, useStream: boolean): () => void {
+  let stopWork: (() => void) | null = null
+  let releaseLock: (() => void) | null = null
+  let abandoned = false
+
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
+  if (!locks?.request) {
+    return startLeaderWork(myEpoch, useStream)
+  }
+
+  // Followers apply what the leader learns. A follower opens no stream
+  // and runs no timer, so its steady-state cost is zero.
+  const onMessage = (ev: MessageEvent) => {
+    if (myEpoch !== transportEpoch) return
+    const next = ev.data?.versions
+    if (next && typeof next === 'object') applyPushedVersions(next)
+  }
+  openChannel()?.addEventListener('message', onMessage)
+
+  // One read on startup regardless of role: a tab opened mid-session
+  // holds nothing, and waiting for the leader's next broadcast would
+  // leave it blank until something happened to change.
+  void pollChangeFeed().catch(() => {})
+
+  // Resolves when we acquire the lock, which for a follower is when the
+  // current leader's tab goes away — that is the whole failover story.
+  void locks
+    .request(LEADER_LOCK, () =>
+      new Promise<void>((resolve) => {
+        if (abandoned || myEpoch !== transportEpoch) {
+          resolve()
+          return
+        }
+        releaseLock = resolve
+        stopWork = startLeaderWork(myEpoch, useStream)
+      }),
+    )
+    .catch(() => {
+      // A lock manager that rejects (private-mode quirks, a released
+      // context) must not leave the tab with no feed at all.
+      if (!abandoned && myEpoch === transportEpoch) {
+        stopWork = startLeaderWork(myEpoch, useStream)
+      }
+    })
+
+  return () => {
+    abandoned = true
+    openChannel()?.removeEventListener('message', onMessage)
+    stopWork?.()
+    stopWork = null
+    // Releasing hands leadership to whichever tab is next in the queue.
+    releaseLock?.()
+    releaseLock = null
+  }
+}
+
+/**
+ * Start reconciling. Returns a teardown.
+ *
+ * One tab per browser does the work; the rest listen. Within that tab,
+ * two transports run together, and that is deliberate rather than
+ * redundant:
+ *
+ *  * **A stream**, which is what makes an idle tab cost nothing at all.
+ *  * **A slow manifest poll**, which is what makes the stream safe to be
+ *    lossy. It is the reconciliation floor — it catches a bump lost to a
+ *    Redis blip, a gap across a reconnect, a stream refused because a
+ *    process was full. Without it every one of those would be a surface
+ *    silently stuck on stale data.
+ *
+ * The poll stays at the cadence the *slowest* of the nine original polls
+ * ran at, so even fully degraded — no stream, no leader election — this
+ * is one request per minute for the whole app rather than nine.
+ */
+export function startChangeFeed(options?: { stream?: boolean }): () => void {
+  const myEpoch = ++transportEpoch
+  const useStream = options?.stream ?? typeof EventSource !== 'undefined'
+  const stopWork = startWithLeaderElection(myEpoch, useStream)
+
+  return () => {
+    transportEpoch += 1
+    stopWork()
   }
 }
 
@@ -337,6 +581,13 @@ export function __resetChangeFeedForTests(): void {
   subscriptions.clear()
   versions = {}
   seeded = false
+  pushGeneration = 0
+  try {
+    channel?.close()
+  } catch {
+    // Already closed.
+  }
+  channel = null
   transportEpoch += 1
   if (pollTimer) {
     clearTimeout(pollTimer)

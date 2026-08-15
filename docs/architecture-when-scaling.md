@@ -193,6 +193,9 @@ Every module-level mutable state moves to Redis or is eliminated:
 - Frontend already uses a single base URL (load balancer / ingress). No fetch logic changes needed.
 - **Sticky sessions forbidden.** Any feature that assumes per-user in-memory state breaks. (None today, verified.)
 - Long-lived connections (SSE for job progress, if added) must use Redis pub/sub on the backend so any web replica can fan events out from any worker.
+- **The change feed** (`app/changes/`) follows that rule, with one addition worth stating because the obvious implementation gets it wrong: fan-out is **per process, not per client**. One background task per web process tails the change stream and serves every client attached to it from memory. The job-events SSE next door does the opposite — a blocking `XREAD` per connected client — and that only works because almost nobody watches job rows. The bus pool is `max_connections=20` per process, it is shared with session revocation and permission claims, and it *raises* rather than waits when exhausted. A channel every open tab holds would take the whole replica's ability to authenticate down with it.
+- **Realtime is a secondary signal, always.** Every subscribed surface also reconciles against `GET /api/v1/changes` on a slow timer, so a dropped connection, a lost bump or a refused stream costs latency and never correctness. This is what lets the transport be lossy, and lossy is what lets it be cheap.
+- **One connection per browser, not per tab.** Tabs elect a leader via `navigator.locks`; followers receive updates over a `BroadcastChannel`. Web Locks release automatically when the holding tab goes away, so failover needs no lease, heartbeat, or stale-leader detection.
 - New `X-Synodic-Replica-Id` response header (uuid per process) — debugging aid surfaced in DevTools.
 
 ## Observability

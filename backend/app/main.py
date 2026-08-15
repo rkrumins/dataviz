@@ -1129,6 +1129,21 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("Versioning projection worker not started: %s", exc)
 
+    # Change-feed hub. Runs on EVERY web process, unlike the singleton
+    # workers below — it is not doing work, it is a fan-out: one tail of
+    # the change stream serving every client attached to this process.
+    # Which is exactly why it must be per-process and cannot be a
+    # singleton role: a client's SSE connection lands on an arbitrary one
+    # of the eight, so all eight need to be listening.
+    try:
+        from .changes.hub import get_hub as _get_change_hub
+        _get_change_hub().start()
+    except Exception as exc:
+        # Non-fatal. Without the hub the stream endpoint refuses and
+        # clients fall back to polling the manifest, which is the
+        # documented degraded mode rather than an outage.
+        logger.warning("Change-feed hub not started: %s", exc)
+
     # Phase 0 — outbox relay → append-only auth_audit_log. Runs only on
     # the documented owner role (CONTROLPLANE / DEV via runs_scheduler)
     # so multiple WEB replicas don't all drain the same outbox.
@@ -1225,6 +1240,16 @@ async def lifespan(_app: FastAPI):
             await asyncio.wait_for(_event_loop_task, timeout=1.0)
         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             pass
+
+    # Stop the change-feed hub. Before the Redis teardown below, and
+    # before the DB pools: it wakes every attached subscriber so their
+    # streams close deliberately rather than being cut mid-flight and
+    # reconnecting in lockstep.
+    try:
+        from .changes.hub import get_hub as _get_change_hub
+        await _get_change_hub().stop()
+    except Exception as exc:
+        logger.warning("Change-feed hub shutdown warning: %s", exc)
 
     # Phase 0 — stop the outbox relay before DB pool teardown.
     _outbox_relay_shutdown = getattr(_app.state, "_outbox_relay_shutdown", None)

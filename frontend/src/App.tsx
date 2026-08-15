@@ -24,6 +24,7 @@ import {
 } from '@/store/sessionKeepalive'
 import { usePreferencesStore } from '@/store/preferences'
 import { startChangeFeed } from '@/store/changeFeed'
+import { featureEnabled } from '@/store/features'
 import { queryClient } from '@/lib/queryClient'
 
 /**
@@ -79,7 +80,14 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     // manifest is usually in hand by the time they subscribe — a
     // subscriber that already knows the current version seeds from it
     // silently instead of refetching what it just fetched on mount.
-    const stopChangeFeed = startChangeFeed()
+    //
+    // The flag gates only the STREAM, not the feed: with it off the
+    // periodic manifest check still runs, so every surface still updates
+    // — within a minute rather than within a second. That is why turning
+    // this off is a latency decision and never a correctness one.
+    const stopChangeFeed = startChangeFeed({
+      stream: featureEnabled('realtimeChangeFeedEnabled'),
+    })
     // Public endpoint — every authenticated user.
     enableProviderHealthPolling()
     // Workspace-scoped read endpoint. Toggle in both directions so a

@@ -64,6 +64,12 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     // never be what stops someone.
     inviteLinksEnabled: true,
     toursEnabled: false,                  // experimental preview — ships OFF
+    // Fail CLOSED, and for once that is the CHEAP direction rather than the
+    // cautious one: off means every surface keeps its periodic check against
+    // the change manifest, which is correct, just a minute slower. Guessing
+    // it ON while the values fetch is still in flight would have every tab
+    // open a stream the deployment may not want.
+    realtimeChangeFeedEnabled: false,
 }
 
 /** Last served values, cached so a returning visitor's first paint reflects the
