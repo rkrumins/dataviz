@@ -231,6 +231,27 @@ describe('the business journey — a table\'s lineage through a seven-level esta
     expect(onRecenter).toHaveBeenCalledWith('t0')
   })
 
+  // T25 C — a real double-click is two native clicks close together, and
+  // a browser only fuses them into one `dblclick` if the second lands on
+  // the SAME element the first did. `fireEvent.doubleClick` above just
+  // dispatches one synthetic `dblclick` straight at the handler, so it
+  // would keep passing even if a real double-click could never reach
+  // this element — jsdom cannot synthesize the two-click sequence to
+  // catch that. What it CAN check is the one precondition a real
+  // double-click depends on: that the single click every double-click
+  // starts with — which runs the SAME row's onSelect+onIsolate here —
+  // never tears the clicked element down and rebuilds it. A rebuilt
+  // node is a new target under the second physical click, and no native
+  // `dblclick` would ever fire on it.
+  it('T25 C — the row a click just selected is not torn down and rebuilt', () => {
+    renderLens(['F'], doneWalk(collateralsEstate()))
+    const row = screen.getByText('loan_positions').closest('[role="option"]')
+    expect(row).not.toBeNull()
+    fireEvent.click(row!)
+    expect(document.body.contains(row)).toBe(true)
+    expect(row!.textContent).toContain('loan_positions')
+  })
+
   it('stepping Back to an already-walked focal is instant — no loading state', () => {
     const onBack = vi.fn()
     const { rerender, api } = renderLens(
