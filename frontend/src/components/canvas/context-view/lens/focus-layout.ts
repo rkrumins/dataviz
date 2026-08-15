@@ -1364,7 +1364,22 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             // anything: it is the thing you asked about, which is what
             // centres it on the midline and what the accent is for. What
             // R7 changed is how it PRESENTS what it holds, not what it is.
-            id: isFocus ? 'f' : isFrame ? `fr:${urn}` : `n:${urn}`,
+            //
+            // T27 — `id` no longer branches on `isFrame`. It used to
+            // (`fr:${urn}` vs `n:${urn}`), which meant a card's React
+            // Flow id itself changed the moment `kind` flipped from
+            // 'entity' to 'frame' (its first child arriving) — a SECOND,
+            // independent remount mechanism alongside the node TYPE flip
+            // (`FocusNode`'s own doc comment covers that one): React Flow
+            // keys its nodes array by id, so a changed id is a removed
+            // node plus an added one, not an update, whatever the type
+            // unification does. Safe to drop: de-duplication in
+            // `pushCard` above is keyed by `card.nodeId` (the urn) via
+            // `cardIdByUrn`, never by `card.id` itself, so the prefix was
+            // never load-bearing for the "one entity, one card" rule —
+            // purely a labeling convention, and the one this task's own
+            // bug lived in.
+            id: isFocus ? 'f' : `n:${urn}`,
             kind: isFocus ? 'focal' : isFrame ? 'frame' : 'entity',
             nodeId: urn,
             band,

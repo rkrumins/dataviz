@@ -255,39 +255,36 @@ describe('the business journey — a table\'s lineage through a seven-level esta
   // T25 C1 review round 1 — a SECOND, VERIFIED remount mechanism, found
   // while re-checking C1 for the "couldn't reproduce is not a closing
   // state" mandate. `holdsRows(card)` (focus-cards.ts) — `card.kind ===
-  // 'frame' || 'focal'` — drives the React Flow node TYPE a card renders
-  // through (`FocusGraphView.tsx`'s `baseNodes`: `type: holdsRows(card)
-  // ? 'focusFrame' : ... : 'focusCard'`). A card's `kind` legitimately
-  // flips from 'entity' to 'frame' the moment its FIRST child is
-  // admitted (an existing test two files over — "renders through a
-  // merge that changes what every card IS" — already documents this
-  // exact transition, just without checking DOM identity). React Flow
-  // keys its node wrapper by `id`, but the COMPONENT it renders for
-  // that id is looked up by `type` — a different type for the same id
-  // is a different React component, which React cannot update in
-  // place: it unmounts the old one and mounts the new one. VERIFIED
-  // directly (a throwaway DOM-identity probe, not assumed): the SAME
-  // 'upstream_table' card's DOM node is gone — `document.body.contains`
-  // false — after a rerender whose only change is that card gaining its
-  // first child. A double-click that straddles this exact transition
-  // (the clicked card's OWN children arriving, from an in-flight fetch,
-  // between the first and second click) would break for the same
-  // reason walkedThrough — the browser's dblclick synthesis needs the
-  // second click to land on the SAME element the first one did.
+  // 'frame' || 'focal'` — used to drive the React Flow node TYPE a card
+  // rendered through (`FocusGraphView.tsx`'s `baseNodes`: `type:
+  // holdsRows(card) ? 'focusFrame' : ... : 'focusCard'`). A card's
+  // `kind` legitimately flips from 'entity' to 'frame' the moment its
+  // FIRST child is admitted (an existing test two files over — "renders
+  // through a merge that changes what every card IS" — already
+  // documents this exact transition, just without checking DOM
+  // identity). React Flow keys its node wrapper by `id`, but the
+  // COMPONENT it renders for that id is looked up by `type` — a
+  // different type for the same id is a different React component,
+  // which React cannot update in place: it unmounts the old one and
+  // mounts the new one. VERIFIED directly (a throwaway DOM-identity
+  // probe, not assumed): the SAME 'upstream_table' card's DOM node used
+  // to be gone — `document.body.contains` false — after a rerender
+  // whose only change was that card gaining its first child. A
+  // double-click that straddles this exact transition (the clicked
+  // card's OWN children arriving, from an in-flight fetch, between the
+  // first and second click) would break for the same reason — the
+  // browser's dblclick synthesis needs the second click to land on the
+  // SAME element the first one did.
   //
-  // RULED not fixed here: the only fix that removes the remount is
-  // unifying 'focusFrame'/'focusCard' into one stable React Flow node
-  // type with internal branching (or typing every container-CAPABLE
-  // entity as a frame from its very first render, before any child has
-  // arrived) — either is a real, separately-scoped redesign (broad
-  // visual and layout consequences across the whole board, not a click
-  // fix), not a one-file patch this task's SCOPE GUARD covers. This is
-  // the named root cause with the fix deferred BY DESIGN — dispatched as
-  // its own task (T27, one stable node identity for container-capable
-  // entities) immediately after this one lands. Skipped rather than
-  // deleted or left silently passing: this is the reproduction T27
-  // should start from — unskipped BY the node-identity task, not before.
-  it.skip('T25 C1 review round 1 — a card gaining its first child is NOT remounted (currently fails — see comment above; unskipped by the node-identity task, T27)', () => {
+  // FIXED by T27 — 'focusFrame' and 'focusCard' are unified into one
+  // stable React Flow node type (`FocusNode`, registered as the sole
+  // 'focusCard') that dispatches on `card.kind` internally instead of
+  // switching type; the outer element carrying the id/role/gesture
+  // handlers is now written once and reused across a kind flip
+  // regardless of which content (`EntityContent`/`RowContent`/
+  // `FrameContent`) is nested inside it. Unskipped as that task's own
+  // definition of done.
+  it('T25 C1 review round 1 — a card gaining its first child is NOT remounted (T27)', () => {
     const { rerender } = renderLens(['F'], doneWalk(walkModel('F', {
       nodes: [wnode('F', 'dataset', 'orders_enriched'), wnode('u', 'dataset', 'upstream_table')],
       lineageEdges: [hop('u', 'F')],
@@ -316,6 +313,58 @@ describe('the business journey — a table\'s lineage through a seven-level esta
       />,
     )
     expect(document.body.contains(before)).toBe(true)
+  })
+
+  // T27 R2 — the actual gesture the DOM-identity pin above exists to
+  // protect: a double-click whose two physical clicks straddle the exact
+  // kind transition (this card's OWN children arriving, from an
+  // in-flight fetch, between the first click and the second) must still
+  // fire `onFocus`. Driven deterministically the same way every other
+  // async arrival in this file is — the caller controls `walk` one
+  // state transition at a time via `rerender`, so "between the two
+  // clicks" is a literal render this test commands, not a timer or a
+  // promise it has to win a race against. `fireEvent.click` then
+  // `fireEvent.doubleClick`, both against the SAME captured element
+  // reference: a real browser's second click would land on whatever
+  // element currently occupies that screen position, which is only the
+  // ORIGINAL element if — as T27 guarantees — the kind flip never tore
+  // it down.
+  it('T27 R2 — a double-click straddling a kind transition still fires onFocus', () => {
+    const onRecenter = vi.fn()
+    const { rerender } = renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [wnode('F', 'dataset', 'orders_enriched'), wnode('u', 'dataset', 'upstream_table')],
+      lineageEdges: [hop('u', 'F')],
+      upstreamUrns: new Set(['u']),
+    })), { onRecenter })
+    const before = screen.getByText('upstream_table').closest('[role="button"], [role="option"]')!
+    // First click of the pair — the card is still 'entity' kind here.
+    fireEvent.click(before)
+    // Its own child arrives mid-gesture: the exact transition T25 C1
+    // pinned as the remount trigger.
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={doneWalk(walkModel('F', {
+          nodes: [
+            wnode('F', 'dataset', 'orders_enriched'),
+            wnode('u', 'dataset', 'upstream_table', { childCount: 4 }),
+            wnode('u:col', 'schemaField', 'order_id'),
+          ],
+          containmentEdges: [holds('u', 'u:col')],
+          lineageEdges: [hop('u', 'F'), hop('u:col', 'F')],
+          upstreamUrns: new Set(['u', 'u:col']),
+        }))}
+        walkApi={{ extend: () => {}, page: () => {}, retry: () => {}, deepen: () => {} }}
+        onRecenter={onRecenter}
+        onBack={() => {}}
+        onForward={() => {}}
+        onClose={() => {}}
+      />,
+    )
+    // Second click of the pair, on the SAME element reference — a real
+    // dblclick's second click would find nowhere else to land.
+    fireEvent.doubleClick(before)
+    expect(onRecenter).toHaveBeenCalledWith('u')
   })
 
   it('stepping Back to an already-walked focal is instant — no loading state', () => {
@@ -1628,8 +1677,10 @@ describe('the shell around the picture', () => {
     })))
 
     // The table is where the hops end, so it arrives as the frame its
-    // columns are rows of.
-    const frame = document.querySelector('.react-flow__node-focusFrame')
+    // columns are rows of. T27 — 'focusFrame' is retired (frame/focal
+    // and entity/row now share one React Flow type, 'focusCard', so a
+    // card's kind never remounts it); found by its own name instead.
+    const frame = screen.getByText('raw_orders').closest('.react-flow__node')
     expect(frame?.className).toContain('draggable')
     // The column rides along as a child node, so dragging the table
     // moves the whole thing — a table never sheds a column.
@@ -2192,15 +2243,22 @@ describe('what is really inside a container', () => {
   it('R7: the focus is one node with its contents as rows inside it', () => {
     renderLens(['F'], focusWithColumns())
 
-    // Same node type as the partner frame beside it — one language.
-    // Found by `title` rather than `getByText`: at 22 characters this
-    // name crosses `MiddleTruncateName`'s split floor (Task 20, P6), so
-    // its text is two adjacent spans — invisible to a plain text query,
-    // which only reads an element's own direct text children. The title
-    // always carries the whole name regardless of how it renders.
+    // Same node LANGUAGE as the partner frame beside it. T27 unified
+    // 'focusFrame'/'focusCard' into one React Flow type ('focusCard' for
+    // both — React Flow's own wrapper carries that class regardless of
+    // kind now), so this is no longer a distinct class name to look for
+    // there; the frame's own chrome (a pointer-events-none outer shell,
+    // never an entity card's role="button") is the structural signature
+    // that survives the unification. Found by `title` rather than
+    // `getByText`: at 22 characters this name crosses
+    // `MiddleTruncateName`'s split floor (Task 20, P6), so its text is
+    // two adjacent spans — invisible to a plain text query, which only
+    // reads an element's own direct text children. The title always
+    // carries the whole name regardless of how it renders.
     const focal = document.querySelector('[title="int_clean_products_t2"]')!
-      .closest('.react-flow__node')!
-    expect(focal.className).toContain('react-flow__node-focusFrame')
+      .closest('.pointer-events-none')
+    expect(focal).not.toBeNull()
+    expect(focal!.getAttribute('role')).not.toBe('button')
 
     // Its column is a ROW of it: an option of the focus's own list, not
     // a row of some panel underneath.

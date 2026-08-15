@@ -351,8 +351,9 @@ export interface LensReach {
 }
 
 export interface FocusCard {
-  /** Stable across rebuilds so shared cards glide between focal swaps:
-   *  'f' | n:urn | fr:urn */
+  /** Stable across rebuilds AND across a `kind` flip (T27 — a card
+   *  never changes id when it gains or loses its first child, or its
+   *  React Flow node remounts): 'f' | n:urn */
   id: string
   kind: FocusCardKind
   /** Backing entity urn. */
@@ -390,7 +391,8 @@ export interface FocusCard {
   /** The one relationship type this card's hops share, '' when they
    *  differ or it carries none. */
   edgeTypeNorm: string
-  /** Frame this card is nested inside (`fr:${urn}`), else null. */
+  /** The nesting frame's own `id` (`n:${urn}`, or `'f'` for the focus),
+   *  else null. */
   frameId: string | null
   /** Nesting level, 0 for a top-level card. Drives the indent; the tree
    *  itself is derived, never stored. */

@@ -1222,8 +1222,8 @@ function pillHoverTitle(card: FocusCard, pill: FocusPill, dir: 'in' | 'out', fra
  * affordance — a small pill spelling out a raw connection count — is now
  * what it collapses BACK to: a compact icon (plus a card-count for a
  * reveal, the one number that means "visible arrivals"). Hovering the
- * element it belongs to (the card/row/frame's own `group` — FrameRow and
- * FocusGraphCard already carried it; FocusFrameNode gained it for this)
+ * element it belongs to (the card/row/frame's own `group`, carried on
+ * `FocusNode`'s outer shell for every kind alike since T27)
  * expands it into a DataHub-style zone with the verb spelled out, at the
  * SAME anchor `gutterPos`/`pillAnchor` always used — the placement
  * contract is unchanged; only what the reader sees at rest and on hover.
@@ -1562,106 +1562,19 @@ const WHEEL_PX_PER_ROW = 26
  * A row the walk never reached keeps the quiet "no lineage" treatment —
  * it is context, and it must never read as a connection.
  */
-function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; selected: boolean }) {
-  const { anchor, onCone, offCone, hops } = useConeState(card.id)
-  const onTrail = useOnTrail(card.nodeId)
-  const cursor = useContext(RowCursorContext)
-  // The frame a row sits in is its containment parent — a row is only
-  // ever emitted among its own parent's children.
-  const hostKey = card.parentId ?? ''
-  const onCursor = cursor !== null && cursor.frameKey === hostKey && cursor.urn === card.nodeId
-  const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
-  // The row's OWN colour, muted in place of the CSS filter this used to
-  // lean on — see OFF_CONE_CARD. Used everywhere `accent` paints
-  // something outside the onCone/selected treatment, which stays at
-  // full saturation (the two states are mutually exclusive with offCone).
-  const displayAccent = offCone ? muteColor(accent) : accent
-  const dim = card.dimmed ? (card.connected ? 'opacity-30' : 'opacity-20') : offCone ? OFF_CONE_CARD : undefined
-
-  /**
-   * Click a row: preview it, and leave the KEYBOARD where the reader
-   * just put their attention — on the list this row belongs to.
-   *
-   * A row is an `option` its list owns by id, never a DOM child of it
-   * (React Flow draws rows as the frame's siblings), so a click that
-   * left focus outside the list left every arrow key aimed at the LENS,
-   * which walks the focus history — the board replaced under a reader
-   * browsing a table. The handoff is what makes T16's row keys reachable
-   * with a mouse at all; `preventScroll` because the list lives inside a
-   * transformed React Flow viewport and the browser's own scroll-into-
-   * view would jump the board.
-   */
-  const activate = () => {
-    ctx.onSelect(card.nodeId)
-    // ...and isolate what it flows through. One click, both: the preview
-    // says what this row IS, the isolation says where it goes.
-    ctx.onIsolate(card.id)
-    document.getElementById(listDomId(hostKey))?.focus({ preventScroll: true })
-    // AFTER the focus, deliberately: the list parks a fresh cursor on its
-    // first visible row when it gains focus, and the row the reader
-    // actually clicked is the one that should carry it.
-    if (card.nodeId) ctx.onRowCursor(hostKey, card.nodeId)
-  }
-  // The ⊕ tucks INSIDE a row (there is no outside), so the content
-  // yields exactly the room a pill owns and no label runs under one.
-  const gutters = gutterEnds(card)
+function RowContent({ card, ctx, displayAccent, onTrail, offCone }: {
+  card: FocusCard
+  ctx: CardCtx
+  displayAccent: string
+  onTrail: boolean
+  offCone: boolean
+}) {
   // The row's flow tally used to hang off its ×N as a tooltip. Both are
   // gone: the peek panel states it in words, scoped to what it actually
   // is ("1 flow in this walk"), which is the honest home for a number
   // that describes the FETCH rather than the entity.
-
   return (
-    <div
-      id={rowDomId(hostKey, card.nodeId ?? card.id)}
-      // An option of its frame's listbox — see `rowDomId`. The frame is
-      // the single tab stop; a row is reached with the arrow keys and
-      // named by `aria-activedescendant`, so Tab never has to walk 400
-      // columns to get past a table.
-      role="option"
-      aria-selected={selected}
-      tabIndex={-1}
-      // A wheel anywhere over a frame scrolls it, and a row is what the
-      // pointer is actually over. `nowheel` is what stops React Flow
-      // zooming the board out from under the gesture.
-      className={cn(
-        'nowheel group relative flex items-center gap-2 rounded-lg px-2.5 cursor-pointer transition-colors focus-visible:outline-none',
-        card.connected
-          ? 'border border-black/[0.07] dark:border-white/[0.08] bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50'
-          // Inside this, but off the lineage: background by default, and
-          // it lights up only when you point at it.
-          : 'border border-dashed border-black/[0.08] dark:border-white/[0.09] bg-transparent hover:border-accent-lineage/40 hover:bg-black/[0.02] dark:hover:bg-white/[0.03] opacity-60 hover:opacity-100',
-        onCursor && 'ring-2 ring-accent-lineage/60',
-        dim,
-      )}
-      style={{
-        width: card.w,
-        height: card.h,
-        ...(card.connected ? { borderLeftWidth: 3, borderLeftColor: displayAccent } : {}),
-        paddingLeft: gutters.left ? PILL_ZONE : undefined,
-        paddingRight: gutters.right ? PILL_ZONE : undefined,
-        // Selected, or lit by an isolation: the ring is the ENTITY TYPE's
-        // colour, so a lit board says what each lit thing is.
-        ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 8px 20px -8px ${accent}59` }
-          : onCone ? coneLift(accent, anchor, hops)
-            : {}),
-      }}
-      onWheel={(e) => {
-        e.stopPropagation()
-        ctx.onFrameWheel(hostKey, e.deltaY)
-      }}
-      onClick={activate}
-      onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
-      // The click/double-click instruction used to ride along on every
-      // row's native tooltip and, being the browser's own, could wedge
-      // over the board rather than dismiss (Task 20, P6, two reported
-      // screenshots). Dropped rather than moved to a design-system
-      // tooltip: the peek that a click opens states "Focus here ⇧↵"
-      // itself, so the instruction is not lost, only said once, where a
-      // reader who has already clicked can actually use it.
-      title={`${card.label}${card.description ? ` — ${card.description}` : ''}${
-        card.connected ? '' : ' — inside this, but no lineage with the focused entity'
-      }`}
-    >
+    <>
       {card.wired && <PortHandles />}
       <ContentsChevron card={card} ctx={ctx} />
       <div
@@ -1728,7 +1641,7 @@ function FrameRow({ card, ctx, selected }: { card: FocusCard; ctx: CardCtx; sele
         <span className="flex-shrink-0 text-[9px] text-ink-muted/50">no lineage</span>
       )}
       <WalkPills card={card} ctx={ctx} />
-    </div>
+    </>
   )
 }
 
@@ -1755,58 +1668,15 @@ function FrameDividerNode({ data }: NodeProps) {
   )
 }
 
-function FocusGraphCard({ data, selected }: NodeProps) {
-  bumpRenderCount('FocusGraphCard')
-  const { card, ctx } = data as unknown as {
-    card: FocusCard
-    ctx: CardCtx
-  }
-  // The isolation arrives via a subscription store (`useConeState`, P1)
-  // so a hover re-renders only the cards whose cone state actually
-  // changed, not every card on the board.
-  const { anchor, onCone, offCone, hops } = useConeState(card.id)
-  const onTrail = useOnTrail(card.nodeId)
-  // One class, decided here: two `opacity-*` utilities on one element
-  // are settled by their order in the stylesheet, not in the class list,
-  // so the text filter's own dim and the cone floor cannot both be
-  // spelled out and left to fight.
-  const dim = card.dimmed ? 'opacity-30' : offCone ? OFF_CONE_CARD : undefined
-  const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
-  // Muted in place of the CSS filter this used to lean on — see
-  // OFF_CONE_CARD. `accent` itself stays at full saturation for the
-  // onCone/selected treatment, mutually exclusive with offCone.
-  const displayAccent = offCone ? muteColor(accent) : accent
-
-  const activate = () => { ctx.onSelect(card.nodeId); ctx.onIsolate(card.id) }
-  const keyActivate = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); activate() }
-  }
-
-  // ── Inside a frame: ONE row language, whatever the row is ──
-  if (card.frameId) return <FrameRow card={card} ctx={ctx} selected={selected} />
-
-  // ── Entity: the rich neighbor card, at the top level of a band ──
+function EntityContent({ card, ctx, displayAccent, onTrail, offCone }: {
+  card: FocusCard
+  ctx: CardCtx
+  displayAccent: string
+  onTrail: boolean
+  offCone: boolean
+}) {
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={activate}
-      onKeyDown={keyActivate}
-      onDoubleClick={(e) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }}
-      // Dropped the click/double-click instruction (Task 20, P6) — same
-      // reasoning as FrameRow's own title, just above.
-      title={`${card.label}${card.description ? ` — ${card.description}` : ''}`}
-      style={{
-        width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: displayAccent,
-        ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 8px 20px -8px ${accent}59` }
-          : onCone ? coneLift(accent, anchor, hops)
-            : {}),
-      }}
-      className={cn(
-        'group relative flex items-center gap-2 rounded-lg border border-black/[0.07] dark:border-white/[0.08] px-2.5 cursor-pointer transition-colors bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-        dim,
-      )}
-    >
+    <>
       {card.wired && <PortHandles />}
       <ContentsChevron card={card} ctx={ctx} />
       {(
@@ -1853,7 +1723,7 @@ function FocusGraphCard({ data, selected }: NodeProps) {
       </div>
       <CardActions card={card} ctx={ctx} />
       <WalkPills card={card} ctx={ctx} />
-    </div>
+    </>
   )
 }
 
@@ -1881,21 +1751,19 @@ function findTitle(card: FocusCard): string {
  * Rendered BEHIND its children (see zIndex where nodes are built), with
  * a header that stays interactive while the body lets clicks through to
  * the child cards sitting on top.
+ *
+ * T27 — content only; see `FocusNode`'s doc comment for why the outer
+ * shell (and the double-click that focuses this container) lives there
+ * instead of here.
  */
-function FocusFrameNode({ data, selected }: NodeProps) {
-  bumpRenderCount('FocusFrameNode')
-  const { card, ctx, focalStats } = data as unknown as {
-    card: FocusCard
-    ctx: CardCtx
-    focalStats?: { coarser: number }
-  }
-  const { anchor, onCone, offCone, hops } = useConeState(card.id)
-  const onTrail = useOnTrail(card.nodeId)
-  // A frame nested inside another frame is also one of ITS rows, so it
-  // answers to the host's keyboard cursor like any other row does.
-  const rowCursor = useContext(RowCursorContext)
-  const hostKey = card.frameId ? card.parentId ?? '' : null
-  const onCursor = hostKey !== null && rowCursor?.frameKey === hostKey && rowCursor.urn === card.nodeId
+function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }: {
+  card: FocusCard
+  ctx: CardCtx
+  focalStats?: { coarser: number }
+  isFocal: boolean
+  displayAccent: string
+  onTrail: boolean
+}) {
   // The Find box is asked for rather than always sitting there — see the
   // header, where 64px of permanent input clipped the honest counts.
   const [findOpen, setFindOpen] = useState(false)
@@ -1912,7 +1780,6 @@ function FocusFrameNode({ data, selected }: NodeProps) {
    * else — the rows, the scroll region, Find, Connected|All, the peek,
    * the keyboard — is the SAME machinery, unchanged.
    */
-  const isFocal = card.kind === 'focal'
   // Where this node's BODY starts — under whichever header it carries.
   // The focus's is taller (it says what it is, where it lives and how
   // far the walk reached), so every message that sits at the top of the
@@ -1926,11 +1793,6 @@ function FocusFrameNode({ data, selected }: NodeProps) {
   // Reach arrives via context so a growing walk re-renders ONLY this
   // node — it used to invalidate every node in the graph.
   const focalReach = useContext(ReachContext)
-  const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
-  // Muted in place of the CSS filter this used to lean on — see
-  // OFF_CONE_CARD. `accent` itself stays at full saturation for the
-  // onCone/selected treatment, mutually exclusive with offCone.
-  const displayAccent = offCone ? muteColor(accent) : accent
   // Whether anything will sit beside the name — see the name's width.
   // Never on the focal: its provenance is the breadcrumb below the name,
   // where the whole chain is clickable.
@@ -1976,40 +1838,7 @@ function FocusFrameNode({ data, selected }: NodeProps) {
         : `${card.frameConnectedCount.toLocaleString()} on this lineage · of ${total}`
       : `${card.count.toLocaleString()} connected inside${via}`
   return (
-    <div
-      // A nested frame is one of its host's rows, so it answers to the
-      // host's list the way any other row does — including saying whether
-      // IT is the one selected.
-      {...(hostKey !== null && card.nodeId
-        ? { id: rowDomId(hostKey, card.nodeId), role: 'option' as const, 'aria-selected': !!selected }
-        : {})}
-      style={{
-        width: card.w,
-        height: card.h,
-        borderColor: isFocal ? displayAccent : `${displayAccent}55`,
-        ...(isFocal
-          ? { background: `linear-gradient(150deg, ${displayAccent}24, ${displayAccent}08 60%)` }
-          : {}),
-        // In priority: what the reader chose, then what the isolation
-        // lights, then the focus's own standing glow (muted with it when
-        // off-cone — that glow is not the onCone/selected treatment).
-        ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 10px 34px -6px ${accent}66` }
-          : onCone ? coneLift(accent, anchor, hops)
-            : isFocal ? { boxShadow: `0 10px 34px ${displayAccent}33` }
-              : {}),
-      }}
-      className={cn(
-        // `group`: what a hover ghost-zone follow control (WalkPill)
-        // expands against — the frame/focal root did not carry it before
-        // R1, so the pill's own hover had nothing to answer to here.
-        'group relative rounded-xl border-2 pointer-events-none',
-        // The anchor is SOLID and lit; a partner container is a dashed
-        // outline around rows that speak for themselves.
-        isFocal ? 'bg-canvas-elevated' : 'border-dashed bg-black/[0.02] dark:bg-white/[0.03]',
-        onCursor && 'ring-2 ring-accent-lineage/60',
-        offCone && OFF_CONE_CARD,
-      )}
-    >
+    <>
       {card.wired && <PortHandles />}
       {onTrail && <TrailMark />}
       {/* An open container keeps its own lineage question: looking
@@ -2328,6 +2157,227 @@ function FocusFrameNode({ data, selected }: NodeProps) {
       {card.childrenOpen && (
         <FrameScrollRegion card={card} ctx={ctx} win={win} />
       )}
+    </>
+  )
+}
+
+/**
+ * The stable outer shell every card-like node renders through (T27 — one
+ * stable node identity per entity, for life). `card.kind` legitimately
+ * flips 'entity' → 'frame' the instant a card gains its first child (or
+ * back, if it loses its last one) — this is what keeps that an ordinary
+ * re-render instead of a remount: ONE `<div>`, written once below, whose
+ * id/role/handlers/style/className are computed per kind but whose TAG
+ * and TREE POSITION never change, so React reconciles it as "same
+ * element, new props" regardless of which branch is active. Only the
+ * CONTENT nested inside it (RowContent/EntityContent/FrameContent) is
+ * free to remount wholesale on a kind flip — it holds nothing a gesture
+ * depends on surviving.
+ *
+ * Double-click is the reason this matters: a real double-click needs its
+ * second physical click to land on the SAME element the first one did.
+ * Before this, a card gaining its first child mid-session swapped React
+ * Flow's node TYPE ('focusCard' → 'focusFrame'), which unmounted and
+ * remounted this element — killing any double-click straddling that
+ * instant, console-silently (T25 C1). One registered type plus one
+ * inline outer element removes the seam a gesture could ever straddle.
+ * A container's double-click now also focuses it — new for a frame, but
+ * the same gesture its entity self already offered, and the only way
+ * for the second click of a straddling pair to have anywhere to land.
+ */
+function FocusNode({ data, selected }: NodeProps) {
+  bumpRenderCount('FocusNode')
+  const { card, ctx, focalStats } = data as unknown as {
+    card: FocusCard
+    ctx: CardCtx
+    focalStats?: { coarser: number }
+  }
+  const isFrame = holdsRows(card)
+  const isRow = !isFrame && !!card.frameId
+
+  // Every render of this element calls the SAME hooks in the SAME order
+  // — this fiber now persists across a kind flip, so it can never branch
+  // on which hooks to call the way the three components it replaces once
+  // could.
+  const { anchor, onCone, offCone, hops } = useConeState(card.id)
+  const onTrail = useOnTrail(card.nodeId)
+  const rowCursor = useContext(RowCursorContext)
+
+  // A nested frame is one of its host's rows, so it answers to the
+  // host's list the way any other row does — including saying whether
+  // IT is the one selected; a nested row is exactly that already.
+  const hostKey = isFrame
+    ? (card.frameId ? card.parentId ?? '' : null)
+    : isRow
+      ? (card.parentId ?? '')
+      : null
+  const onCursor = hostKey !== null && rowCursor !== null && rowCursor.frameKey === hostKey && rowCursor.urn === card.nodeId
+
+  const accent = card.type === 'not loaded' ? NEUTRAL_ACCENT : ctx.visualFor(card.type).color
+  // Muted in place of the CSS filter this used to lean on — see
+  // OFF_CONE_CARD. `accent` itself stays at full saturation for the
+  // onCone/selected treatment, mutually exclusive with offCone.
+  const displayAccent = offCone ? muteColor(accent) : accent
+  const isFocal = card.kind === 'focal'
+
+  const dblClick = (e: React.MouseEvent) => { e.stopPropagation(); if (card.nodeId) ctx.onFocus(card.nodeId) }
+
+  if (isFrame) {
+    return (
+      <div
+        {...(hostKey !== null && card.nodeId
+          ? { id: rowDomId(hostKey, card.nodeId), role: 'option' as const, 'aria-selected': !!selected }
+          : {})}
+        onDoubleClick={dblClick}
+        style={{
+          width: card.w,
+          height: card.h,
+          borderColor: isFocal ? displayAccent : `${displayAccent}55`,
+          ...(isFocal
+            ? { background: `linear-gradient(150deg, ${displayAccent}24, ${displayAccent}08 60%)` }
+            : {}),
+          // In priority: what the reader chose, then what the isolation
+          // lights, then the focus's own standing glow (muted with it when
+          // off-cone — that glow is not the onCone/selected treatment).
+          ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 10px 34px -6px ${accent}66` }
+            : onCone ? coneLift(accent, anchor, hops)
+              : isFocal ? { boxShadow: `0 10px 34px ${displayAccent}33` }
+                : {}),
+        }}
+        className={cn(
+          // `group`: what a hover ghost-zone follow control (WalkPill)
+          // expands against — the frame/focal root did not carry it before
+          // R1, so the pill's own hover had nothing to answer to here.
+          'group relative rounded-xl border-2 pointer-events-none',
+          // The anchor is SOLID and lit; a partner container is a dashed
+          // outline around rows that speak for themselves.
+          isFocal ? 'bg-canvas-elevated' : 'border-dashed bg-black/[0.02] dark:bg-white/[0.03]',
+          onCursor && 'ring-2 ring-accent-lineage/60',
+          offCone && OFF_CONE_CARD,
+        )}
+      >
+        <FrameContent card={card} ctx={ctx} focalStats={focalStats} isFocal={isFocal} displayAccent={displayAccent} onTrail={onTrail} />
+      </div>
+    )
+  }
+
+  if (isRow) {
+    // The frame a row sits in is its containment parent — a row is only
+    // ever emitted among its own parent's children.
+    const rowHostKey = card.parentId ?? ''
+    // The ⊕ tucks INSIDE a row (there is no outside), so the content
+    // yields exactly the room a pill owns and no label runs under one.
+    const gutters = gutterEnds(card)
+    const dim = card.dimmed ? (card.connected ? 'opacity-30' : 'opacity-20') : offCone ? OFF_CONE_CARD : undefined
+    /**
+     * Click a row: preview it, and leave the KEYBOARD where the reader
+     * just put their attention — on the list this row belongs to.
+     *
+     * A row is an `option` its list owns by id, never a DOM child of it
+     * (React Flow draws rows as the frame's siblings), so a click that
+     * left focus outside the list left every arrow key aimed at the LENS,
+     * which walks the focus history — the board replaced under a reader
+     * browsing a table. The handoff is what makes T16's row keys reachable
+     * with a mouse at all; `preventScroll` because the list lives inside a
+     * transformed React Flow viewport and the browser's own scroll-into-
+     * view would jump the board.
+     */
+    const activate = () => {
+      ctx.onSelect(card.nodeId)
+      // ...and isolate what it flows through. One click, both: the preview
+      // says what this row IS, the isolation says where it goes.
+      ctx.onIsolate(card.id)
+      document.getElementById(listDomId(rowHostKey))?.focus({ preventScroll: true })
+      // AFTER the focus, deliberately: the list parks a fresh cursor on its
+      // first visible row when it gains focus, and the row the reader
+      // actually clicked is the one that should carry it.
+      if (card.nodeId) ctx.onRowCursor(rowHostKey, card.nodeId)
+    }
+    return (
+      <div
+        id={rowDomId(rowHostKey, card.nodeId ?? card.id)}
+        // An option of its frame's listbox — see `rowDomId`. The frame is
+        // the single tab stop; a row is reached with the arrow keys and
+        // named by `aria-activedescendant`, so Tab never has to walk 400
+        // columns to get past a table.
+        role="option"
+        aria-selected={selected}
+        tabIndex={-1}
+        // A wheel anywhere over a frame scrolls it, and a row is what the
+        // pointer is actually over. `nowheel` is what stops React Flow
+        // zooming the board out from under the gesture.
+        className={cn(
+          'nowheel group relative flex items-center gap-2 rounded-lg px-2.5 cursor-pointer transition-colors focus-visible:outline-none',
+          card.connected
+            ? 'border border-black/[0.07] dark:border-white/[0.08] bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50'
+            // Inside this, but off the lineage: background by default, and
+            // it lights up only when you point at it.
+            : 'border border-dashed border-black/[0.08] dark:border-white/[0.09] bg-transparent hover:border-accent-lineage/40 hover:bg-black/[0.02] dark:hover:bg-white/[0.03] opacity-60 hover:opacity-100',
+          onCursor && 'ring-2 ring-accent-lineage/60',
+          dim,
+        )}
+        style={{
+          width: card.w,
+          height: card.h,
+          ...(card.connected ? { borderLeftWidth: 3, borderLeftColor: displayAccent } : {}),
+          paddingLeft: gutters.left ? PILL_ZONE : undefined,
+          paddingRight: gutters.right ? PILL_ZONE : undefined,
+          // Selected, or lit by an isolation: the ring is the ENTITY TYPE's
+          // colour, so a lit board says what each lit thing is.
+          ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 8px 20px -8px ${accent}59` }
+            : onCone ? coneLift(accent, anchor, hops)
+              : {}),
+        }}
+        onWheel={(e) => {
+          e.stopPropagation()
+          ctx.onFrameWheel(rowHostKey, e.deltaY)
+        }}
+        onClick={activate}
+        onDoubleClick={dblClick}
+        // The click/double-click instruction used to ride along on every
+        // row's native tooltip and, being the browser's own, could wedge
+        // over the board rather than dismiss (Task 20, P6, two reported
+        // screenshots). Dropped rather than moved to a design-system
+        // tooltip: the peek that a click opens states "Focus here ⇧↵"
+        // itself, so the instruction is not lost, only said once, where a
+        // reader who has already clicked can actually use it.
+        title={`${card.label}${card.description ? ` — ${card.description}` : ''}${
+          card.connected ? '' : ' — inside this, but no lineage with the focused entity'
+        }`}
+      >
+        <RowContent card={card} ctx={ctx} displayAccent={displayAccent} onTrail={onTrail} offCone={offCone} />
+      </div>
+    )
+  }
+
+  // ── Entity: the rich neighbor card, at the top level of a band ──
+  const dim = card.dimmed ? 'opacity-30' : offCone ? OFF_CONE_CARD : undefined
+  const activate = () => { ctx.onSelect(card.nodeId); ctx.onIsolate(card.id) }
+  const keyActivate = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); activate() }
+  }
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={activate}
+      onKeyDown={keyActivate}
+      onDoubleClick={dblClick}
+      // Dropped the click/double-click instruction (Task 20, P6) — same
+      // reasoning as the row's own title, just above.
+      title={`${card.label}${card.description ? ` — ${card.description}` : ''}`}
+      style={{
+        width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: displayAccent,
+        ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 8px 20px -8px ${accent}59` }
+          : onCone ? coneLift(accent, anchor, hops)
+            : {}),
+      }}
+      className={cn(
+        'group relative flex items-center gap-2 rounded-lg border border-black/[0.07] dark:border-white/[0.08] px-2.5 cursor-pointer transition-colors bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] hover:border-accent-lineage/50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+        dim,
+      )}
+    >
+      <EntityContent card={card} ctx={ctx} displayAccent={displayAccent} onTrail={onTrail} offCone={offCone} />
     </div>
   )
 }
@@ -2458,7 +2508,7 @@ function FrameScrollRegion({ card, ctx, win }: {
         className="nowheel nodrag pointer-events-auto absolute inset-x-0 bottom-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded-b-xl"
         style={{ top: headerHeight(card) }}
         // Addressable, so a click on one of the rows it owns can hand
-        // the keyboard back to it — see `FrameRow`'s activate.
+        // the keyboard back to it — see `FocusNode`'s row-branch activate.
         id={listDomId(key)}
         // The single tab stop for the whole list: Tab must not have to
         // walk 400 columns to get past a table. Inside it, the arrow
@@ -2619,7 +2669,13 @@ function FrameScrollThumb({ card, win, onScroll }: {
   )
 }
 
-const MemoFocusFrameNode = memo(FocusFrameNode, (prev, next) => {
+// T27 — ONE memo boundary for every card-like kind (entity, row, frame,
+// focal), now that they share one React Flow node type. Its checks are
+// the UNION of the two comparators this replaces (`focalStats?.coarser`
+// only ever differs for the focal — `data.focalStats` is `undefined` on
+// both sides for everything else, so the comparison is a free no-op
+// there, exactly as it was before this merged the two boundaries).
+const MemoFocusNode = memo(FocusNode, (prev, next) => {
   // `selected` is read now (a nested frame is one of its host's rows and
   // says so), so a memo that ignored it would freeze that state.
   if (prev.selected !== next.selected) return false
@@ -2629,13 +2685,6 @@ const MemoFocusFrameNode = memo(FocusFrameNode, (prev, next) => {
     // Carried by the focus, which is one of these nodes now.
     && a.focalStats?.coarser === b.focalStats?.coarser
     && sameCard(a.card, b.card)
-})
-
-const MemoFocusGraphCard = memo(FocusGraphCard, (prev, next) => {
-  if (prev.selected !== next.selected) return false
-  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx }
-  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx }
-  return a.ctx === b.ctx && sameCard(a.card, b.card)
 })
 
 // ── Band labels ──────────────────────────────────────────────────────
@@ -2751,8 +2800,7 @@ const MemoFrameDividerNode = memo(FrameDividerNode, (prev, next) => {
 const MemoBandLabelNode = memo(BandLabelNode, (prev, next) => prev.data === next.data)
 
 const NODE_TYPES = {
-  focusCard: MemoFocusGraphCard,
-  focusFrame: MemoFocusFrameNode,
+  focusCard: MemoFocusNode,
   focusDivider: MemoFrameDividerNode,
   bandLabel: MemoBandLabelNode,
   focusFold: MemoFoldChipNode,
@@ -3158,11 +3206,12 @@ function ExtendGhost({ card, dir }: { card: FocusCard; dir: 'in' | 'out' }) {
 /**
  * T23 R2 — the RE-CONDENSE control: a currently-unfolded run's own
  * boundary card carries it back. A flow-space overlay (the same pattern
- * `ExtendGhost` uses) rather than chrome added inside `FocusGraphCard`/
- * `FocusFrameNode` — the boundary can be EITHER kind, and this codebase's
- * gutter-pill positioning (`pillAnchor`/`gutterPos`) has its own
- * documented occlusion history (T24 F1); a corner overlay outside both
- * cards' DOM carries zero risk of colliding with it.
+ * `ExtendGhost` uses) rather than chrome added inside `FocusNode`'s own
+ * content (`EntityContent`/`RowContent`/`FrameContent`) — the boundary
+ * can be EITHER kind, and this codebase's gutter-pill positioning
+ * (`pillAnchor`/`gutterPos`) has its own documented occlusion history
+ * (T24 F1); a corner overlay outside both cards' DOM carries zero risk
+ * of colliding with it.
  */
 function CondenseRunMarker({ card }: { card: FocusCard }) {
   const [tx, ty, zoom] = useStore(s => s.transform)
@@ -4144,11 +4193,16 @@ export function FocusGraphView({
       return {
         id: card.id,
         // The focus is drawn by the same node as a container frame — one
-        // language for anything that holds rows (R7).
-        type: holdsRows(card) ? 'focusFrame'
-          : card.kind === 'divider' ? 'focusDivider'
-            : card.kind === 'fold' ? 'focusFold'
-              : 'focusCard',
+        // language for anything that holds rows (R7). T27 — and the SAME
+        // React Flow type as a plain entity/row too: a card's `kind`
+        // legitimately flips 'entity' → 'frame' the moment it gains its
+        // first child, and a type change here would remount the node
+        // (killing any gesture straddling that instant, most visibly a
+        // double-click — see `FocusNode`'s own doc comment). `FocusNode`
+        // dispatches on `card.kind` internally instead.
+        type: card.kind === 'divider' ? 'focusDivider'
+          : card.kind === 'fold' ? 'focusFold'
+            : 'focusCard',
         zIndex: depthOf(card) * 2 + (holdsRows(card) ? 0 : 1),
         ...(parent ? { parentId: parent.id } : {}),
         position: parent
@@ -4534,8 +4588,13 @@ export function FocusGraphView({
           // cannot disagree about what one of them means.
           onPaneClick={onDismiss}
           onNodeMouseEnter={(_, n) => {
-            if (n.type === 'focusCard') setHoveredId(n.id)
-            if (n.type !== 'focusCard' && n.type !== 'focusFrame') return
+            if (n.type !== 'focusCard') return
+            // T27 — 'focusCard' now covers entity/row AND frame/focal
+            // nodes alike (one stable type, see `FocusNode`), so telling
+            // them apart here for the hover-preview treatment (frames
+            // never get it) reads `card.kind` instead of the node type.
+            const nodeCard = (n.data as { card?: FocusCard } | undefined)?.card
+            if (nodeCard && !holdsRows(nodeCard)) setHoveredId(n.id)
             if (coneHoverTimer.current) clearTimeout(coneHoverTimer.current)
             coneHoverTimer.current = setTimeout(() => setHoverConeId(n.id), HOVER_INTENT_MS)
           }}
