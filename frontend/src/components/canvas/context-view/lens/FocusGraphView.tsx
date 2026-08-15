@@ -467,9 +467,6 @@ interface CardCtx {
    *  for a row-level ⊕ (always exactly one entity, itself) and for a
    *  caller with no walk to grow (the visual harness). */
   seedCountFor?: (nodeId: string, dir: 'in' | 'out') => number
-  /** T23 R1 — re-center the sliding window so `band` is visible: a rail
-   *  segment click on a folded column, or a fold chip's own click. */
-  onWindowJump?: (band: number) => void
   /** T23 R2 — fold a currently-unfolded run back (the boundary card's
    *  own re-condense control). */
   onCondenseRun?: (connectorId: string) => void
@@ -537,8 +534,6 @@ interface FocusGraphViewProps {
   onExtend?: (key: string, nodeId: string, dir: 'in' | 'out', anchor?: { cardId: string; nodeId: string }) => void
   onPage?: (nodeId: string, dir: 'in' | 'out', cursor: string, anchor?: { cardId: string; nodeId: string }) => void
   seedCountFor?: (nodeId: string, dir: 'in' | 'out') => number
-  /** T23 R1 — re-center the sliding window (see `CardCtx.onWindowJump`). */
-  onWindowJump?: (band: number) => void
   /** T23 R2 — fold a run back (see `CardCtx.onCondenseRun`). */
   onCondenseRun?: (connectorId: string) => void
   /** T23 R3 — see `CardCtx.partnersFor`. */
@@ -655,13 +650,6 @@ function sameCard(a: FocusCard, b: FocusCard): boolean {
       const x = a[k] ?? null, y = b[k] ?? null
       if (x === null || y === null) { if (x !== y) return false; continue }
       if (x.onLineage !== y.onLineage || x.total !== y.total) return false
-      continue
-    }
-    // T23 R1/R2 — fresh records the same reason pillUp/contents are.
-    if (k === 'fold') {
-      const x = a[k] ?? null, y = b[k] ?? null
-      if (x === null || y === null) { if (x !== y) return false; continue }
-      if (x.dir !== y.dir || x.hops !== y.hops || x.cards !== y.cards || x.connections !== y.connections) return false
       continue
     }
     if (k === 'condenseRun') {
@@ -2824,49 +2812,6 @@ function BandLabelNode({ data }: NodeProps) {
   )
 }
 
-/**
- * T23 R1 — the SLIDING WINDOW's terminal chip: everything folded off
- * one side of the board, stated honestly and wired to page the window
- * further that way. Never a card in the ordinary sense — no urn, no
- * isolate/select, no wire ports of its own beyond what `hop-window.ts`
- * rerouted into it.
- */
-function FoldChipNode({ data }: NodeProps) {
-  const { card, ctx } = data as unknown as { card: FocusCard; ctx: CardCtx }
-  const fold = card.fold
-  if (!fold) return null
-  const upstream = fold.dir === 'in'
-  return (
-    <button
-      type="button"
-      onClick={(e) => { e.stopPropagation(); ctx.onWindowJump?.(card.band) }}
-      title={`Reveal the next hop ${upstream ? 'upstream' : 'downstream'} — ${fold.cards.toLocaleString()} ${fold.cards === 1 ? 'entity' : 'entities'} across ${fold.hops.toLocaleString()} more hop${fold.hops === 1 ? '' : 's'}`}
-      style={{ width: card.w, height: card.h }}
-      className={cn(
-        'nodrag flex flex-col items-center justify-center gap-0.5 rounded-xl border border-dashed',
-        'border-black/15 dark:border-white/20 bg-black/[0.02] dark:bg-white/[0.03]',
-        'hover:border-accent-lineage/50 hover:bg-accent-lineage/5 transition-colors text-center px-2',
-      )}
-    >
-      {upstream
-        ? <LucideIcons.ChevronsLeft className="w-4 h-4 text-ink-muted/60" />
-        : <LucideIcons.ChevronsRight className="w-4 h-4 text-ink-muted/60" />}
-      <span className="text-[10px] font-semibold text-ink-muted">
-        Chain continues · {fold.cards.toLocaleString()} further {upstream ? 'upstream' : 'downstream'}
-      </span>
-      <span className="text-[9px] text-ink-muted/60 tabular-nums">
-        of {fold.hops.toLocaleString()} more hop{fold.hops === 1 ? '' : 's'}
-      </span>
-    </button>
-  )
-}
-
-const MemoFoldChipNode = memo(FoldChipNode, (prev, next) => {
-  const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx }
-  const b = next.data as unknown as { card: FocusCard; ctx: CardCtx }
-  return a.ctx === b.ctx && sameCard(a.card, b.card)
-})
-
 const MemoFrameDividerNode = memo(FrameDividerNode, (prev, next) => {
   const a = prev.data as unknown as { card: FocusCard; ctx: CardCtx }
   const b = next.data as unknown as { card: FocusCard; ctx: CardCtx }
@@ -2890,7 +2835,6 @@ const NODE_TYPES = {
   focusCard: MemoFocusNode,
   focusDivider: MemoFrameDividerNode,
   bandLabel: MemoBandLabelNode,
-  focusFold: MemoFoldChipNode,
 }
 
 // ── Edge ─────────────────────────────────────────────────────────────
@@ -4008,7 +3952,6 @@ export function FocusGraphView({
   onExtend,
   onPage,
   seedCountFor,
-  onWindowJump,
   onCondenseRun,
   partnersFor,
   onPin,
@@ -4113,12 +4056,11 @@ export function FocusGraphView({
     onExtend,
     onPage,
     seedCountFor,
-    onWindowJump,
     onCondenseRun,
     partnersFor,
     onPin,
     onOpenTriage,
-  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onDismiss, onRevealMore, onExtend, onPage, seedCountFor, onWindowJump, onCondenseRun, partnersFor, onPin, onOpenTriage])
+  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onDismiss, onRevealMore, onExtend, onPage, seedCountFor, onCondenseRun, partnersFor, onPin, onOpenTriage])
 
   const baseNodes = useMemo((): Node[] => {
     const minYByBand = new Map<number, number>()
@@ -4154,19 +4096,15 @@ export function FocusGraphView({
         // (killing any gesture straddling that instant, most visibly a
         // double-click — see `FocusNode`'s own doc comment). `FocusNode`
         // dispatches on `card.kind` internally instead.
-        type: card.kind === 'divider' ? 'focusDivider'
-          : card.kind === 'fold' ? 'focusFold'
-            : 'focusCard',
+        type: card.kind === 'divider' ? 'focusDivider' : 'focusCard',
         zIndex: depthOf(card) * 2 + (holdsRows(card) ? 0 : 1),
         ...(parent ? { parentId: parent.id } : {}),
         position: parent
           ? { x: card.x - parent.x, y: card.y - parent.y }
           : { x: card.x, y: card.y },
         // Rearrange the picture freely; a frame's children move with it
-        // rather than out of it, so a table never sheds its columns. A
-        // fold chip is chrome, not a card — nothing to drag, it would
-        // just leave the window edge it marks.
-        draggable: parent === undefined && card.kind !== 'fold',
+        // rather than out of it, so a table never sheds its columns.
+        draggable: parent === undefined,
         selectable: false,
         focusable: false,
         data: card.kind === 'focal'

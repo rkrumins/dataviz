@@ -57,7 +57,6 @@ import {
   type LensViewState,
   type LensViewTransitionKind,
 } from './lens/focus-layout'
-import { applyHopWindow, HOP_WINDOW } from './lens/hop-window'
 import { applyCondensation } from './lens/condensation'
 import { enforceLensInvariants } from './lens/invariants'
 import { generateColorFromType } from '@/lib/type-visuals'
@@ -252,9 +251,6 @@ export interface LensWalkSeed {
   /** T23 R3 — placements from a v3 share link; `[]` for a v2 one (it
    *  predates hub triage). */
   pinned: string[]
-  /** T23 R1 — the rail's own window center from a v3 share link; `null`
-   *  for a v2 one, which is also the default ("centered on the focal"). */
-  railWindow: number | null
   /** T23 R2 — unfolded connector ids from a v3 share link; `[]` for a v2
    *  one (it predates condensation, so nothing was ever folded to begin
    *  with — every run just opens condensed, as it always does). */
@@ -394,17 +390,17 @@ export function LineageLens({
   // T25 C2, invariant (b) — the answer to "does an ORDINARY in-session
   // re-anchor (double-click / Focus-here / breadcrumb — every path runs
   // through `ctx.onFocus` → the `onRecenter` prop → `lensPush`, one
-  // shared mechanism) actually reset `railWindow`/`viewRadius`/
-  // `condensedOpen`/`pinned`, or does it take some OTHER path where they
-  // never reset?" It is NOT the walkSeed-restoration effect below — that
-  // is a SEPARATE, one-time mechanism that only ever fires for a
-  // restored SHARE LINK, and an ordinary re-anchor never touches it.
-  // The reset here is this plain derived value, re-evaluated on EVERY
-  // render, with no effect and no async gap in between: the moment
-  // `nodeId` changes, `viewState?.nodeId === nodeId` is false on THIS
-  // SAME render, so `view` falls back to a fresh `freshView`
-  // atomically — there is no tick where a stale `railWindow` from the
-  // old focal is live under the new one. See
+  // shared mechanism) actually reset `condensedOpen`/`pinned`, or does
+  // it take some OTHER path where they never reset?" It is NOT the
+  // walkSeed-restoration effect below — that is a SEPARATE, one-time
+  // mechanism that only ever fires for a restored SHARE LINK, and an
+  // ordinary re-anchor never touches it. The reset here is this plain
+  // derived value, re-evaluated on EVERY render, with no effect and no
+  // async gap in between: the moment `nodeId` changes,
+  // `viewState?.nodeId === nodeId` is false on THIS SAME render, so
+  // `view` falls back to a fresh `freshView` atomically — there is no
+  // tick where a stale value from the old focal is live under the new
+  // one. See
   // `LineageLens.test.tsx`'s "re-anchoring from a walked-through state"
   // describe block for the pin walking this exact in-session path.
   const view = viewState?.nodeId === nodeId ? viewState.view : freshView
@@ -485,13 +481,16 @@ export function LineageLens({
   // ordering this guard exists to avoid).
   const seedPendingForFocal = !!walkSeed && walkSeed.nodeId === nodeId && walkStatus === 'done' && viewState?.nodeId !== nodeId
 
-  // T26 R2 — THE PIPELINE'S ORDERED SPINE. Four stages, always in this
-  // order: buildFocusLayout → applyCondensation → applyHopWindow →
-  // enforceLensInvariants (invariants.ts, always LAST). Each pass is
-  // licensed to remove exactly one thing (condensation: pass-through
-  // interiors; the window: non-focal bands) — the invariant stage is
-  // the global enforcement that neither removed more than that, checked
-  // once, after everything, rather than trusted per-pass.
+  // T28 R3 — THE PIPELINE'S ORDERED SPINE. Three stages, always in this
+  // order: buildFocusLayout → applyCondensation → enforceLensInvariants
+  // (invariants.ts, always LAST). The window stage (`applyHopWindow`)
+  // that used to sit between condensation and the invariant stage is
+  // gone — the user's own ruling was "focus mode should walk the tree
+  // to eternity," so the board just grows; nothing removes a band
+  // anymore. Condensation is licensed to remove exactly one thing
+  // (pass-through interiors) — the invariant stage is the global
+  // enforcement that it didn't remove more than that, checked once,
+  // after everything, rather than trusted per-pass.
   const layout = useMemo(() => buildFocusLayout({
     sg,
     view,
@@ -505,39 +504,26 @@ export function LineageLens({
   }), [sg, view, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter])
 
   // T23 R2 — pass-through condensation, a pure re-projection over the
-  // built layout (never touches population/grain/rank — see
-  // condensation.ts's own doc comment for why it runs BEFORE the window,
-  // below).
+  // built layout (never touches population/grain/rank).
   const condensed = useMemo(
     () => applyCondensation(layout, view.condensedOpen),
     [layout, view.condensedOpen],
   )
-  // T28 R1 — the depth control (and its own `viewRadius` state) is gone;
-  // the window still needs SOME radius until R3 removes it too, so this
-  // reads what the walk was actually fetched at, same fallback `viewRadius`
-  // used to default to.
-  const windowRadius = walk?.depth ?? (HOP_WINDOW - 1) / 2
-  // T23 R1 — the sliding window: a no-op whenever the fetched extent
-  // already fits inside one glance (every fixture shy of a 20-hop chain
-  // never pays for this).
-  const windowed = useMemo(
-    () => applyHopWindow(condensed, view.railWindow, windowRadius),
-    [condensed, view.railWindow, windowRadius],
-  )
   // T26 R2 — the invariant stage: the focal card is drawn (a), the board
-  // is never empty while `condensed` still has the focus (b — T17-A's
+  // is never empty while `layout` still has the focus (b — T17-A's
   // guarantee, T25-C2's own inline fallback, both relocated here so no
   // later pass can silently undermine them), every edge endpoint
   // resolves to a drawn card (c), and no card claims an undrawn frame
-  // (d). See invariants.ts's own doc comment for the full contract and
-  // the degradation each violation takes.
+  // (d). `layout` (pre-condensation) is the one fallback stage left now
+  // the window is gone — condensation is licensed to remove interiors,
+  // never the focal, so this is the same "stage immediately before it"
+  // relationship the window used to have with `condensed`. See
+  // invariants.ts's own doc comment for the full contract and the
+  // degradation each violation takes.
   const boardGraph = useMemo(
-    () => enforceLensInvariants(windowed.graph, condensed).graph,
-    [windowed.graph, condensed],
+    () => enforceLensInvariants(condensed, layout).graph,
+    [condensed, layout],
   )
-  const setRailWindow = useCallback((band: number) => {
-    editView(base => ({ ...base, railWindow: band }))
-  }, [editView])
   // One control, two meanings depending on which side is currently
   // showing: a condensed run's own connector chip ADDS itself here
   // (unfolds), and its unfolded boundary's re-condense control REMOVES
@@ -1178,7 +1164,6 @@ export function LineageLens({
       framePages: [...view.frameOffsets],
       frameQueries: [...view.frameQueries],
       pinned: [...view.pinned],
-      railWindow: view.railWindow,
       condensedOpen: [...view.condensedOpen],
     })
     const url = new URL(window.location.href)
@@ -1858,7 +1843,6 @@ export function LineageLens({
                 // makes, so the hover text can never claim a number the
                 // request itself would not back up.
                 seedCountFor={walkStatus === 'done' ? seedCountForCtx : undefined}
-                onWindowJump={setRailWindow}
                 onCondenseRun={toggleCondense}
                 partnersFor={partnersFor}
                 onPin={pinEntities}

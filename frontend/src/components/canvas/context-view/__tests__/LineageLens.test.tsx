@@ -532,7 +532,7 @@ describe('the business journey — a table\'s lineage through a seven-level esta
       frameAll: [],
       framePages: [],
       frameQueries: [],
-      pinned: [], railWindow: null, condensedOpen: [],
+      pinned: [], condensedOpen: [],
     }
     const { api } = renderLens(['F'], doneWalk(collateralsEstate()), { walkSeed })
 
@@ -1552,7 +1552,7 @@ describe('the shell around the picture', () => {
     expect(onBoard('label-c')).toBe(true)
   })
 
-  it('the share link encodes the exploration on screen as v3 (T23 — pinned/railWindow/condensedOpen)', () => {
+  it('the share link encodes the exploration on screen as v3 (T23 — pinned/condensedOpen; T28 R3 — railWindow always null now)', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 2 })
     const writeText = vi.fn()
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
@@ -1569,8 +1569,9 @@ describe('the shell around the picture', () => {
     expect(decoded.mode).toBe('graph')
     expect(decoded.depth).toBe(2)
     expect(decoded.direction).toBe('in')
-    // Nothing placed, no window steered, nothing unfolded — a plain
-    // exploration's own v3 fields are the same empty/null they open with.
+    // Nothing placed, nothing unfolded — a plain exploration's own v3
+    // fields are the same empty/null they open with. `railWindow` is
+    // ALWAYS null now (T28 R3 — encodeLensShare writes nothing for it).
     expect(decoded.pinned).toEqual([])
     expect(decoded.railWindow).toBeNull()
     expect(decoded.condensedOpen).toEqual([])
@@ -1778,7 +1779,7 @@ describe('pointing at an element isolates its lineage cone', () => {
       nodeId: 'F', direction: 'both',
       revealed: [['in:F', 1], ['out:F', 1], ['in:A', 1], ['in:B', 1]],
       opened: [], collapsed: [], frameAll: [], framePages: [], frameQueries: [],
-      pinned: [], railWindow: null, condensedOpen: [],
+      pinned: [], condensedOpen: [],
     }
     renderLens(['F'], doneWalk(walkModel('F', {
       nodes: [wnode('H', 'dataset', 'hub'), wnode('A', 'dataset', 'branch_a'), wnode('B', 'dataset', 'branch_b'), wnode('F', 'dataset', 'the_focus')],
@@ -2531,7 +2532,7 @@ describe('what is really inside a container', () => {
         // would otherwise be open by default.
         nodeId: 'F', direction: 'both', revealed: [['in:F', 1]], opened: ['T'], collapsed: [],
         frameAll: [], framePages: [], frameQueries: [['T', 'ship']],
-        pinned: [], railWindow: null, condensedOpen: [],
+        pinned: [], condensedOpen: [],
       }
       const { rerender, api } = renderLens(['F'], wideConnectedTable(), { onLoadAllChildren, walkSeed })
       act(() => { vi.advanceTimersByTime(300) })
@@ -2572,7 +2573,7 @@ describe('what is really inside a container', () => {
     const walkSeed: LensWalkSeed = {
       nodeId: 'F', direction: 'both', revealed: [['in:F', 1]], opened: ['T'], collapsed: [],
       frameAll: ['T'], framePages: [], frameQueries: [['T', 'ship']],
-      pinned: [], railWindow: null, condensedOpen: [],
+      pinned: [], condensedOpen: [],
     }
     renderLens(['F'], wideConnectedTable(), {
       walkSeed,
@@ -2595,7 +2596,7 @@ describe('what is really inside a container', () => {
     const walkSeed: LensWalkSeed = {
       nodeId: 'F', direction: 'both', revealed: [['in:F', 1]], opened: ['T'], collapsed: [],
       frameAll: [], framePages: [], frameQueries: [['T', 'zzz']],
-      pinned: [], railWindow: null, condensedOpen: [],
+      pinned: [], condensedOpen: [],
     }
     renderLens(['F'], wideConnectedTable(), { walkSeed })
     // Nothing among the twelve columns contains "zzz".
@@ -2608,7 +2609,7 @@ describe('what is really inside a container', () => {
     const walkSeed: LensWalkSeed = {
       nodeId: 'F', direction: 'both', revealed: [['in:F', 1]], opened: ['T'], collapsed: [],
       frameAll: [], framePages: [], frameQueries: [['T', 'ship']],
-      pinned: [], railWindow: null, condensedOpen: [],
+      pinned: [], condensedOpen: [],
     }
     renderLens(['F'], wideConnectedTable(), {
       walkSeed,

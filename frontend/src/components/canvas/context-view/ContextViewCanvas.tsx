@@ -3110,13 +3110,15 @@ export function ContextViewCanvas({
   const lensWalkSeed = useMemo<LensWalkSeed | null>(() => {
     if (!initialLensShare || (initialLensShare.v !== 2 && initialLensShare.v !== 3)) return null
     const { entries, cursor, direction, revealed, opened, collapsed, frameAll, framePages, frameQueries } = initialLensShare
-    // T23 — a v2 link predates placements/rail-window/condensed-open;
-    // the graceful degrade is the same shape a fresh focal opens with
-    // (nothing placed, window centered, everything condensed).
-    const { pinned, railWindow, condensedOpen } = initialLensShare.v === 3
+    // T23 — a v2 link predates placements/condensed-open; the graceful
+    // degrade is the same shape a fresh focal opens with (nothing
+    // placed, everything condensed). T28 R3 — a v3 link's own
+    // `railWindow` field still decodes (old links keep restoring) but is
+    // no longer read into the seed — the window it named is gone.
+    const { pinned, condensedOpen } = initialLensShare.v === 3
       ? initialLensShare
-      : { pinned: [], railWindow: null, condensedOpen: [] }
-    return { nodeId: entries[cursor], direction, revealed, opened, collapsed, frameAll, framePages, frameQueries, pinned, railWindow, condensedOpen }
+      : { pinned: [], condensedOpen: [] }
+    return { nodeId: entries[cursor], direction, revealed, opened, collapsed, frameAll, framePages, frameQueries, pinned, condensedOpen }
   }, [initialLensShare])
   // "What is really inside this entity" — membership, which the lineage
   // walk structurally cannot answer (it only ever knows the

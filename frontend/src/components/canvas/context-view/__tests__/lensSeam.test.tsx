@@ -129,7 +129,7 @@ function LensSeam({ provider, share, history: opened, prefDepth = 1, onRender }:
     ? {
       nodeId: share.entries[share.cursor], direction: 'both', revealed: [],
       opened: [], collapsed: [], frameAll: [], framePages: [], frameQueries: [],
-      pinned: [], railWindow: null, condensedOpen: [],
+      pinned: [], condensedOpen: [],
     }
     : null), [share])
   return (

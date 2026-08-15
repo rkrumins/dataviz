@@ -422,7 +422,7 @@ describe('T26 R4 — spotlight across a seam (walkGrainSeamDeepNesting)', () => 
       // seam-climb anything to climb THROUGH (`card.frameId` chains).
       // Matches the R3 harness fixture's own `expand` list exactly.
       opened: ['RPT', 'BIGCO', 'REGION', 'IOT'], collapsed: [], frameAll: [], framePages: [], frameQueries: [],
-      pinned: [], railWindow: null, condensedOpen: [],
+      pinned: [], condensedOpen: [],
     }
     renderLens(['RPT'], doneWalk(WALK_FIXTURES.walkGrainSeamDeepNesting.model), { walkSeed: seed })
     // The certain path renders regardless of isolation.

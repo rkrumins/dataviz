@@ -40,9 +40,9 @@ const FIXTURES = process.argv.slice(2).length
   // at table grain, and again at COLUMN grain, where eight wires run
   // side by side and only one of them is the answer.
   //
-  // ...and the half of a windowed list a shot at rest cannot show: the
+  // ...and the half of a scrolled list a shot at rest cannot show: the
   // fade under the header and the step back, which exist only once the
-  // window has left the top.
+  // list has scrolled past the top.
   //
   // ...and the SCALE MANDATE (user, 2026-08-14): a 20-hop chain, and a
   // hub of 100 upstream across twelve systems plus 40 downstream — so a
@@ -54,10 +54,13 @@ const FIXTURES = process.argv.slice(2).length
   // frame carries (under-claim) — plus the in-frame routing and badge
   // legibility the same estate exercises.
   //
-  // ...and T23's own three: the hop RAIL + sliding WINDOW at the scale
-  // that forces both (walkLongChain's default state), a run unfolded
-  // with the window steered off-centre (the same fixture, one connector
-  // opened), and the hub-TRIAGE list at true hundred-partner scale.
+  // ...and T23 R2's own condensation: a run unfolded (its four interior
+  // steps drawn), the far run and the whole downstream side still
+  // condensed, for contrast in the same shot. (T28 R3 removed T23 R1's
+  // hop rail and sliding window — walkLongChain's own 20-hop chain is
+  // now this SUITE's full-width showcase: the board just grows, all 21
+  // cards drawn, no fold chip anywhere.) Plus the hub-TRIAGE list at
+  // true hundred-partner scale.
   : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall', 'walkDirectionAndHighlight',
     'walkSharedPlatform', 'walkSharedPlatformLeaf', 'walkSharedPlatformOneColumn', 'walkDensePills',
     'walkChildrenRich', 'walkChildrenScrolled', 'walkColumnFocus', 'walkPlatformFocus',

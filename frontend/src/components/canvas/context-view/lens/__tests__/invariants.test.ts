@@ -1,11 +1,14 @@
 /**
  * T26 R2 — the invariant stage, pinned as the hostile-state battery the
- * brief calls for: stale window centers (a focal-excluding `windowed`),
- * condensed sets referencing gone cards (dangling edges/frames), and an
- * empty model (neither `windowed` nor `fallback` has the focus). Each
- * check is pinned in isolation from the others, and the "clean input"
- * case is pinned for referential stability — the invariant stage must
- * cost nothing when there is nothing to fix.
+ * brief calls for: a focal-excluding `drawn` graph with the focus still
+ * in `fallback` (T28 R3 — genuinely reachable now only if `applyCondensation`
+ * ever mishandled the focal; the generic contract itself does not know
+ * or care why `drawn` lost it), condensed sets referencing gone cards
+ * (dangling edges/frames), and an empty model (neither `drawn` nor
+ * `fallback` has the focus). Each check is pinned in isolation from the
+ * others, and the "clean input" case is pinned for referential
+ * stability — the invariant stage must cost nothing when there is
+ * nothing to fix.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { enforceLensInvariants } from '../invariants'
@@ -50,29 +53,29 @@ describe('enforceLensInvariants — clean input costs nothing', () => {
 describe('enforceLensInvariants — (a)/(b) the focal card is drawn; the board is never empty', () => {
     afterEach(() => vi.restoreAllMocks())
 
-    it('windowed already has the focal — used as-is, fallback ignored', () => {
-        const windowed = graphOf([card('f', { kind: 'focal' })])
+    it('drawn already has the focal — used as-is, fallback ignored', () => {
+        const drawn = graphOf([card('f', { kind: 'focal' })])
         const fallback = graphOf([card('f', { kind: 'focal' }), card('a')])
-        const { graph, violations } = enforceLensInvariants(windowed, fallback)
-        expect(graph).toBe(windowed)
+        const { graph, violations } = enforceLensInvariants(drawn, fallback)
+        expect(graph).toBe(drawn)
         expect(violations).toEqual([])
     })
 
-    it('STALE WINDOW CENTER — windowed lost the focal, fallback still has it: falls back, dev-asserts', () => {
+    it('DRAWN LOST THE FOCAL — fallback still has it: falls back, dev-asserts', () => {
         const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
-        const windowed = graphOf([card('a')]) // no focal — a window centered far off-band, e.g. a raced center
+        const drawn = graphOf([card('a')]) // no focal — an earlier pass dropped it somehow
         const fallback = graphOf([card('f', { kind: 'focal' }), card('a')])
-        const { graph, violations } = enforceLensInvariants(windowed, fallback)
+        const { graph, violations } = enforceLensInvariants(drawn, fallback)
         expect(graph).toBe(fallback)
         expect(violations.map(v => v.code)).toEqual(['focal-missing'])
         expect(spy).toHaveBeenCalled()
     })
 
-    it('EMPTY MODEL — neither windowed nor fallback has the focal: forces focusRecovered so the whisper fires', () => {
+    it('EMPTY MODEL — neither drawn nor fallback has the focal: forces focusRecovered so the whisper fires', () => {
         const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
-        const windowed = graphOf([])
+        const drawn = graphOf([])
         const fallback = graphOf([])
-        const { graph, violations } = enforceLensInvariants(windowed, fallback)
+        const { graph, violations } = enforceLensInvariants(drawn, fallback)
         expect(graph.focusRecovered).toBe(true)
         expect(violations.map(v => v.code)).toEqual(['board-empty'])
         expect(spy).toHaveBeenCalled()
@@ -84,24 +87,15 @@ describe('enforceLensInvariants — (c) every edge endpoint resolves to a drawn 
 
     it('CONDENSED SET REFERENCING A GONE CARD — a dangling edge is dropped, not drawn floating', () => {
         vi.spyOn(console, 'error').mockImplementation(() => {})
-        const windowed = graphOf(
+        const drawn = graphOf(
             [card('f', { kind: 'focal' }), card('a')],
             [edge('e1', 'f', 'a'), edge('e2', 'f', 'GONE')],
         )
-        const { graph, violations } = enforceLensInvariants(windowed, windowed)
+        const { graph, violations } = enforceLensInvariants(drawn, drawn)
         expect(graph.edges.map(e => e.id)).toEqual(['e1'])
         expect(violations.map(v => v.code)).toEqual(['dangling-edge'])
     })
 
-    it('a fold-chip pseudo-card ("fold:in"/"fold:out") is a VALID endpoint, not dangling', () => {
-        const windowed = graphOf(
-            [card('f', { kind: 'focal' }), card('fold:in', { kind: 'fold' })],
-            [edge('e1', 'fold:in', 'f')],
-        )
-        const { graph, violations } = enforceLensInvariants(windowed, windowed)
-        expect(graph.edges).toHaveLength(1)
-        expect(violations).toEqual([])
-    })
 })
 
 describe('enforceLensInvariants — (d) cone/strata coherence: no card claims an undrawn frame', () => {
@@ -109,11 +103,11 @@ describe('enforceLensInvariants — (d) cone/strata coherence: no card claims an
 
     it('a card whose frameId is not drawn is promoted to top-level, not dropped', () => {
         vi.spyOn(console, 'error').mockImplementation(() => {})
-        const windowed = graphOf([
+        const drawn = graphOf([
             card('f', { kind: 'focal' }),
             card('row', { frameId: 'GONE_FRAME' }),
         ])
-        const { graph, violations } = enforceLensInvariants(windowed, windowed)
+        const { graph, violations } = enforceLensInvariants(drawn, drawn)
         const row = graph.cards.find(c => c.id === 'row')
         expect(row).toBeDefined()
         expect(row!.frameId).toBeNull()
@@ -121,12 +115,12 @@ describe('enforceLensInvariants — (d) cone/strata coherence: no card claims an
     })
 
     it('a card whose frameId IS drawn is untouched', () => {
-        const windowed = graphOf([
+        const drawn = graphOf([
             card('f', { kind: 'focal' }),
             card('frame1', { kind: 'frame' }),
             card('row', { frameId: 'frame1' }),
         ])
-        const { graph, violations } = enforceLensInvariants(windowed, windowed)
+        const { graph, violations } = enforceLensInvariants(drawn, drawn)
         expect(graph.cards.find(c => c.id === 'row')!.frameId).toBe('frame1')
         expect(violations).toEqual([])
     })
@@ -135,12 +129,12 @@ describe('enforceLensInvariants — (d) cone/strata coherence: no card claims an
 describe('enforceLensInvariants — hostile compound state: everything wrong at once', () => {
     it('missing focal, a dangling edge, AND a dangling frame — all four checks fire together, board still renders', () => {
         vi.spyOn(console, 'error').mockImplementation(() => {})
-        const windowed = graphOf([card('a')]) // no focal at all
+        const drawn = graphOf([card('a')]) // no focal at all
         const fallback = graphOf(
             [card('f', { kind: 'focal' }), card('a'), card('row', { frameId: 'GONE' })],
             [edge('e1', 'f', 'a'), edge('e2', 'f', 'GONE')],
         )
-        const { graph, violations } = enforceLensInvariants(windowed, fallback)
+        const { graph, violations } = enforceLensInvariants(drawn, fallback)
         expect(graph.cards.some(c => c.kind === 'focal')).toBe(true)
         expect(graph.edges.map(e => e.id)).toEqual(['e1'])
         expect(graph.cards.find(c => c.id === 'row')!.frameId).toBeNull()

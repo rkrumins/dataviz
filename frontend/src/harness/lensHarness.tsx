@@ -164,7 +164,6 @@ export function Harness() {
           onRevealMore={noop}
           onExtend={noop}
           onPage={noop}
-          onWindowJump={noop}
           onCondenseRun={noop}
           partnersFor={built.partnersFor}
           onPin={noop}

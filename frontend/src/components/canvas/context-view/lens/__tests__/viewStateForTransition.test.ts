@@ -56,8 +56,6 @@ const populated: LensViewState = {
     frameQueries: new Map([['C1', 'q']]),
     frameOffsets: new Map([['C1', 2]]),
     pinned: new Set(['X']),
-    railWindow: 5,
-    viewRadius: 4,
     condensedOpen: new Set(['conn1']),
 }
 
@@ -77,8 +75,6 @@ describe('viewStateForTransition — the five RESET kinds are identical (T25-C2)
             expect(v.frameQueries.size).toBe(0)
             expect(v.frameOffsets.size).toBe(0)
             expect(v.pinned.size).toBe(0)
-            expect(v.railWindow).toBeNull()
-            expect(v.viewRadius).toBeNull()
             expect(v.condensedOpen.size).toBe(0)
         })
 
@@ -109,7 +105,6 @@ describe('viewStateForTransition — share-restore SURVIVES the seed\'s fields, 
         frameQueries: [['C1', 'find me']],
         framePages: [['C1', 3]],
         pinned: ['P1', 'P2'],
-        railWindow: 2,
         condensedOpen: ['conn1'],
     }
 
@@ -122,7 +117,6 @@ describe('viewStateForTransition — share-restore SURVIVES the seed\'s fields, 
         expect([...v.frameQueries.entries()]).toEqual(seed.frameQueries)
         expect([...v.frameOffsets.entries()]).toEqual(seed.framePages)
         expect([...v.pinned]).toEqual(seed.pinned)
-        expect(v.railWindow).toBe(2)
         expect([...v.condensedOpen]).toEqual(seed.condensedOpen)
     })
 
@@ -131,12 +125,6 @@ describe('viewStateForTransition — share-restore SURVIVES the seed\'s fields, 
         expect(v.selection).toBeNull()
         expect(v.walkedThrough.size).toBe(0)
         expect(v.drawnRank.size).toBe(0)
-        expect(v.viewRadius).toBeNull()
-    })
-
-    it('a null railWindow in the seed survives as null (v2 link degrade), not coerced', () => {
-        const v = viewStateForTransition('share-restore', null, { sg, seed: { ...seed, railWindow: null } })
-        expect(v.railWindow).toBeNull()
     })
 
     it('no seed at all (defensive) falls back to a full fresh reset, same as the five RESET kinds', () => {

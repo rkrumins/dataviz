@@ -1,13 +1,17 @@
 /**
  * T25 C2 — invariant (c), tested in isolation from invariant (a): even
- * if `applyHopWindow` itself somehow returned a window that excludes
+ * if `applyCondensation` itself somehow returned a graph that excludes
  * the focal (a future regression in that function, or any other stage
  * between it and the board), `LineageLens`'s own last-line-of-defense
- * check must still recover a non-empty board. `applyHopWindow` is
+ * check must still recover a non-empty board. `applyCondensation` is
  * mocked here specifically so this test cannot pass merely because
- * invariant (a) already prevents the bad window from arising — the two
+ * invariant (a) already prevents the bad graph from arising — the two
  * invariants are independent layers, and this file proves the SECOND
- * one on its own.
+ * one on its own. (T28 R3 — this used to mock `applyHopWindow`, the
+ * pass that sat between condensation and the invariant stage; the
+ * window is gone, so `applyCondensation`'s own output is now the
+ * pipeline's last non-invariant stage, and the fallback `enforceLensInvariants`
+ * recovers from is `buildFocusLayout`'s pre-condensation output.)
  */
 import { render, screen, cleanup } from '@testing-library/react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
@@ -16,19 +20,16 @@ import { usePreferencesStore } from '@/store/preferences'
 import type { WalkEntry } from '@/hooks/useLensWalk'
 import type { LensWalkModel, LensWalkNode } from '../lens/closure-adapter'
 
-vi.mock('@/components/canvas/context-view/lens/hop-window', () => ({
-  HOP_WINDOW: 7,
-  bandRangeOf: () => null,
-  // A window that folds EVERYTHING, focal included — exactly the shape
-  // a stale/raced `center` produced in the reported defect. Ignores its
-  // real inputs entirely: this test exists to prove `LineageLens`'s own
-  // fallback works no matter WHAT the window pass hands it back.
-  applyHopWindow: (graph: { cards: Array<{ kind: string }> }) => {
+vi.mock('@/components/canvas/context-view/lens/condensation', () => ({
+  MIN_CONDENSE_RUN: 2,
+  // A condensed graph that drops EVERYTHING, focal included — exactly
+  // the shape a hypothetical regression in this pass would produce.
+  // Ignores its real inputs entirely: this test exists to prove
+  // `LineageLens`'s own fallback works no matter WHAT condensation
+  // hands it back.
+  applyCondensation: (graph: { cards: Array<{ kind: string }> }) => {
     mockCalled = true
-    return {
-      graph: { ...graph, cards: graph.cards.filter(c => c.kind === 'fold') },
-      window: { min: 999, max: 999 },
-    }
+    return { ...graph, cards: graph.cards.filter(c => c.kind !== 'focal' && c.kind !== 'entity') }
   },
 }))
 let mockCalled = false

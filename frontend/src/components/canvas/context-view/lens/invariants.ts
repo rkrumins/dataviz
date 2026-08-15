@@ -1,16 +1,21 @@
 /**
  * invariants — T26 R2's INVARIANT STAGE: the layout pipeline's ordered
- * spine is `buildFocusLayout` → `applyCondensation` → `applyHopWindow` →
- * HERE, always last (`LineageLens.tsx` wires the four in this order).
+ * spine is `buildFocusLayout` → `applyCondensation` → HERE, always last
+ * (`LineageLens.tsx` wires the three in this order). T28 R3 removed the
+ * sliding-window stage (`applyHopWindow`) that used to sit between
+ * condensation and this module — the board just grows now — so this
+ * module's own two-argument shape (a "wants to draw" graph and the
+ * fallback stage before it) is unchanged, only what LineageLens.tsx now
+ * passes for each has: `applyCondensation`'s own output, and the
+ * pre-condensation `buildFocusLayout` output as the fallback.
  *
- * Each earlier pass is licensed to remove exactly one thing and nothing
- * else: `applyHopWindow` may fold non-focal BANDS into a terminal chip;
- * `applyCondensation` may fold pass-through INTERIORS into a connector
- * chip. Neither is licensed to remove the focal, orphan an edge, or
- * orphan a frame reference — this module is the enforcement that they
- * didn't, checked globally, after every pass, in ONE place, rather than
- * trusted per-pass or re-derived by whichever component happens to
- * render the result.
+ * The one remaining earlier pass is licensed to remove exactly one
+ * thing and nothing else: `applyCondensation` may fold pass-through
+ * INTERIORS into a connector chip. It is not licensed to remove the
+ * focal, orphan an edge, or orphan a frame reference — this module is
+ * the enforcement that it didn't, checked globally, after every pass,
+ * in ONE place, rather than trusted per-pass or re-derived by whichever
+ * component happens to render the result.
  *
  * Four invariants, checked in order:
  *   (a) the focal card is drawn.
@@ -27,9 +32,9 @@
  *       light what the reader is actually looking at.
  *
  * A violation is dev-asserted (never silent) and degraded HONESTLY:
- * (a)/(b) fall back a stage (window → condensed) and, if even the
- * fallback cannot place the focus, flag `focusRecovered` so the
- * existing "Showing the focus on its own" whisper fires — the same
+ * (a)/(b) fall back a stage (condensed → pre-condensation layout) and,
+ * if even the fallback cannot place the focus, flag `focusRecovered` so
+ * the existing "Showing the focus on its own" whisper fires — the same
  * user-facing signal T17-A already ships, not a new one. (c) drops the
  * dangling edge. (d) promotes the orphaned card to top-level (clears
  * its `frameId`) rather than dropping it — the reader loses a nesting
@@ -50,13 +55,13 @@ export interface LensInvariantResult {
 }
 
 /**
- * `windowed` is what the pipeline WANTS to draw; `fallback` is the stage
- * before it (the condensed, unwindowed graph) — the one place left to
- * recover the focus from if `windowed` lost it. Pure: logs through
- * `console.error` in dev only, never throws, always returns something
- * drawable.
+ * `drawn` is what the pipeline WANTS to draw (the post-condensation
+ * graph); `fallback` is the stage before it (the pre-condensation
+ * layout) — the one place left to recover the focus from if `drawn`
+ * lost it. Pure: logs through `console.error` in dev only, never
+ * throws, always returns something drawable.
  */
-export function enforceLensInvariants(windowed: FocusGraph, fallback: FocusGraph): LensInvariantResult {
+export function enforceLensInvariants(drawn: FocusGraph, fallback: FocusGraph): LensInvariantResult {
     const violations: LensInvariantViolation[] = []
     const assert = (v: LensInvariantViolation) => {
         violations.push(v)
@@ -65,10 +70,10 @@ export function enforceLensInvariants(windowed: FocusGraph, fallback: FocusGraph
 
     // (a) + (b) — the focal card is drawn; the board is never empty while
     // an earlier pass still has it.
-    let graph = windowed
+    let graph = drawn
     if (!graph.cards.some(c => c.kind === 'focal')) {
         if (fallback.cards.some(c => c.kind === 'focal')) {
-            assert({ code: 'focal-missing', detail: 'the windowed board lost the focus — falling back to the unwindowed layout' })
+            assert({ code: 'focal-missing', detail: 'the condensed board lost the focus — falling back to the pre-condensation layout' })
             graph = fallback
         } else {
             // Structurally shouldn't happen — `buildFocusLayout`'s own

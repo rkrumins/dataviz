@@ -27,27 +27,41 @@ const fullV3 = (): Omit<LensShareStateV3, 'v'> => ({
   condensedOpen: ['condense:urn:li:dataset:(a,b,PROD)>urn:li:dataset:(a,c,PROD)'],
 })
 
+/** T28 R3 — `encodeLensShare` no longer accepts `railWindow` (nothing has
+ *  one to hand over); every caller below that wants to ENCODE a state
+ *  strips it via this helper. `fullV3()` itself stays the full DECODE-
+ *  shape (an old token can still carry a real value — see the decode-
+ *  side tests) — only the encode direction is restricted. */
+const forEncode = (s: Omit<LensShareStateV3, 'v'>): Omit<LensShareStateV3, 'v' | 'railWindow'> => {
+  const { railWindow: _railWindow, ...rest } = s
+  void _railWindow
+  return rest
+}
+
 describe('lens shareCodec v3 (T23 — placements, rail window, condensed-open)', () => {
-  it('round-trips a full v3 exploration, including the three new fields', () => {
+  it('round-trips a full v3 exploration — pinned/condensedOpen; railWindow always decodes back null (T28 R3, encode-nothing)', () => {
     const state = fullV3()
-    const token = encodeLensShare(state)
+    const token = encodeLensShare(forEncode(state))
     expect(token).toMatch(/^[A-Za-z0-9_-]+$/)
-    expect(decodeLensShare(token)).toEqual({ v: 3, ...state })
+    expect(decodeLensShare(token)).toEqual({ v: 3, ...state, railWindow: null })
   })
 
   it('encodeLensShare always writes the CURRENT version (v3)', () => {
-    const token = encodeLensShare(fullV3())
+    const token = encodeLensShare(forEncode(fullV3()))
     expect(decodeLensShare(token)?.v).toBe(3)
   })
 
-  it('round-trips railWindow: null (the default — centered on the focal)', () => {
-    const state = { ...fullV3(), railWindow: null }
-    expect(decodeLensShare(encodeLensShare(state))).toEqual({ v: 3, ...state })
+  it('T28 R3 — encodeLensShare never writes a real railWindow: every token it produces decodes the field back as null, regardless of what the caller\'s own state held before R3 deleted it', () => {
+    const token = encodeLensShare(forEncode(fullV3()))
+    const decoded = decodeLensShare(token)
+    expect(decoded?.v).toBe(3)
+    if (decoded?.v !== 3) throw new Error('expected a v3 token')
+    expect(decoded.railWindow).toBeNull()
   })
 
   it('round-trips empty pinned/condensedOpen — nothing placed, nothing unfolded', () => {
     const state = { ...fullV3(), pinned: [], condensedOpen: [] }
-    expect(decodeLensShare(encodeLensShare(state))).toEqual({ v: 3, ...state })
+    expect(decodeLensShare(encodeLensShare(forEncode(state)))).toEqual({ v: 3, ...state, railWindow: null })
   })
 
   it('a v2 token — written before T23 — still restores its FULL exploration, none of the new fields', () => {
@@ -78,7 +92,7 @@ describe('lens shareCodec v3 (T23 — placements, rail window, condensed-open)',
 describe('lens shareCodec v2', () => {
   it('round-trips a full exploration, including unicode and URN punctuation', () => {
     const state = fullV2()
-    const token = encodeLensShare({ ...state, pinned: [], railWindow: null, condensedOpen: [] })
+    const token = encodeLensShare({ ...state, pinned: [], condensedOpen: [] })
     // URL-safe: no characters that need query escaping.
     expect(token).toMatch(/^[A-Za-z0-9_-]+$/)
     expect(decodeLensShare(token)).toEqual({ v: 3, ...state, pinned: [], railWindow: null, condensedOpen: [] })
@@ -86,13 +100,13 @@ describe('lens shareCodec v2', () => {
 
   it('round-trips the "both" direction and depth 1', () => {
     const state = { ...fullV2(), direction: 'both' as const, depth: 1 }
-    const token = encodeLensShare({ ...state, pinned: [], railWindow: null, condensedOpen: [] })
+    const token = encodeLensShare({ ...state, pinned: [], condensedOpen: [] })
     expect(decodeLensShare(token)).toEqual({ v: 3, ...state, pinned: [], railWindow: null, condensedOpen: [] })
   })
 
   it('rejects malformed input instead of throwing (a link can never break the app)', () => {
     expect(decodeLensShare('not-base64!!!')).toBeNull()
-    expect(decodeLensShare(encodeLensShare(fullV3()).slice(4))).toBeNull()
+    expect(decodeLensShare(encodeLensShare(forEncode(fullV3())).slice(4))).toBeNull()
   })
 
   it('rejects a wrong or missing version', () => {

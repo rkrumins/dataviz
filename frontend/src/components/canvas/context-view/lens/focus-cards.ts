@@ -217,9 +217,7 @@ export function frameWindow(card: FocusCard) {
   }
 }
 
-/** `'fold'` (T23 R1) — a terminal chip standing for a folded run of hop
- *  columns; never a real entity, never row-holding, never wired. */
-export type FocusCardKind = 'focal' | 'entity' | 'frame' | 'divider' | 'fold'
+export type FocusCardKind = 'focal' | 'entity' | 'frame' | 'divider'
 
 /**
  * Cards that HOLD ROWS: a container someone opened, and the FOCUS, which
@@ -487,28 +485,12 @@ export interface FocusCard {
    *  contents are ON THIS LINEAGE, and how many it holds in total (null
    *  when the count is genuinely unknown — a floor is not a total). */
   contents: { onLineage: number; total: number | null } | null
-  /** T23 R1 — a `'fold'` card only: the terminal chip standing for every
-   *  hop-column the sliding window has folded off this side. Absent on
-   *  every other kind. */
-  fold?: FocusFoldInfo | null
   /** T23 R2 — this card is the visible BOUNDARY of a maximal degree-1
    *  pass-through run that is currently UNFOLDED (its interior cards are
    *  drawn); the re-condense control renders here. Null/absent while the
    *  run is condensed (there is nothing to fold back) or this card
    *  borders no run. */
   condenseRun?: FocusCondenseRunInfo | null
-}
-
-/** T23 R1 — what a hop-window fold chip states: how much of the fetched
- *  extent it stands for, so its own wording never drifts from `HopRail`'s. */
-export interface FocusFoldInfo {
-  dir: 'in' | 'out'
-  /** Hop COLUMNS folded away. */
-  hops: number
-  /** Cards folded away — what "N further" actually counts. */
-  cards: number
-  /** Raw connections the folded cards carry into the window's edge. */
-  connections: number
 }
 
 /** T23 R2 — the run a boundary card's re-condense control folds back. */

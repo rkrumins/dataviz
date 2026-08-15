@@ -78,9 +78,16 @@ export interface LensShareStateV3 extends Omit<LensShareStateV2, 'v'> {
   /** T23 R3 — urns the reader placed on the board from a hub triage
    *  list, verbatim off `LensViewState.pinned`. */
   pinned: string[]
-  /** T23 R1 — the hop rail's own window center (signed hop distance),
-   *  or `null` for "centered on the focal" — `LensViewState.railWindow`
-   *  verbatim. */
+  /** T23 R1 — the hop rail's own window center (signed hop distance), or
+   *  `null` for "centered on the focal". T28 R3 removed the rail and the
+   *  window it moved — this field is DECODE-ONLY now (tolerate an old
+   *  token that still carries a real value, never reject it), and
+   *  `encodeLensShare` always writes `null` for it: nothing downstream
+   *  reads a decoded value into `LensViewState` any more (there is no
+   *  `railWindow` field left there to carry it into). Kept in the wire
+   *  shape, rather than dropped, so a v3 token stays structurally
+   *  decodable without a v4 bump — an old link's OTHER fields (pinned,
+   *  condensedOpen, the walked path) still restore in full. */
   railWindow: number | null
   /** T23 R2 — connector ids the reader explicitly unfolded, verbatim off
    *  `LensViewState.condensedOpen`. */
@@ -92,8 +99,12 @@ export interface LensShareStateV3 extends Omit<LensShareStateV2, 'v'> {
  *  subset described above. */
 export type LensShareState = LensShareStateV1 | LensShareStateV2 | LensShareStateV3
 
-export function encodeLensShare(state: Omit<LensShareStateV3, 'v'>): string {
-  const json = JSON.stringify({ v: 3, ...state })
+/** T28 R3 — `railWindow` is decode-only now (see `LensShareStateV3`'s own
+ *  doc comment): no caller has one to hand over any more, so it is not
+ *  part of what this function accepts, and every token it writes states
+ *  `null` for it — "encode nothing for it," the documented choice. */
+export function encodeLensShare(state: Omit<LensShareStateV3, 'v' | 'railWindow'>): string {
+  const json = JSON.stringify({ v: 3, ...state, railWindow: null })
   // UTF-8-safe base64url (labels/urns can contain any unicode).
   const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(json)))
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')

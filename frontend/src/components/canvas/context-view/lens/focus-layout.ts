@@ -154,19 +154,6 @@ export interface LensViewState {
      *  highest. Grow-only for this view state's lifetime, same as every
      *  other placement here. */
     pinned: ReadonlySet<string>
-    /** T23 R1 — the sliding window's own center column (signed hop
-     *  distance), or `null` for "centered on the focal" (the default the
-     *  window opens at). Meaningless — and ignored — whenever the
-     *  fetched extent already fits inside `HOP_WINDOW`. */
-    railWindow: number | null
-    /** T25 B — the board's visible hop RADIUS from the focal, both
-     *  directions: the depth control's own preset (`railWindow` above is
-     *  the rail's manual override — the two combine into one window,
-     *  never fought over). `null` defaults to the walk's own fetched
-     *  depth, so a depth-1 walk shows depth 1 without a second click.
-     *  Reset with the rest of this state when the focus changes — a new
-     *  focal starts at its own depth, not the last one's radius. */
-    viewRadius: number | null
     /** T23 R2 — connector ids (see `condensation.ts`) the reader has
      *  explicitly unfolded; every OTHER maximal pass-through run stays
      *  condensed by default. Sticky per view state, like everything else
@@ -235,7 +222,6 @@ export interface LensViewSeed {
     frameQueries: ReadonlyArray<[string, string]>
     framePages: ReadonlyArray<[string, number]>
     pinned: ReadonlyArray<string>
-    railWindow: number | null
     condensedOpen: ReadonlyArray<string>
 }
 
@@ -245,9 +231,7 @@ export interface LensViewSeed {
  * only) carried to SURVIVE from the shared link. Nothing else in the lens
  * may build a `LensViewState` for a transition; `initialLensViewState`
  * below and every transition call site in `LineageLens.tsx` route
- * through this. `railWindow` SURVIVES a restore verbatim, but is CLAMPED
- * downstream regardless — `hop-window.ts`'s own invariant (a) guarantees
- * the window can never exclude the focal, whatever this hands it.
+ * through this.
  *
  * `prev` is accepted for symmetry with a kind that might one day carry
  * something forward mid-session; no kind today reads it — the T25-C2
@@ -275,8 +259,6 @@ export function viewStateForTransition(
         frameQueries: new Map(),
         frameOffsets: new Map(),
         pinned: new Set(),
-        railWindow: null,
-        viewRadius: null,
         condensedOpen: new Set(),
     }
     switch (kind) {
@@ -304,11 +286,6 @@ export function viewStateForTransition(
                 frameQueries: new Map(seed.frameQueries), // SURVIVE
                 frameOffsets: new Map(seed.framePages), // SURVIVE
                 pinned: new Set(seed.pinned), // SURVIVE
-                railWindow: seed.railWindow, // SURVIVE (clamped downstream — see doc comment above)
-                // Not carried either: `null` defaults to the restored
-                // walk's own fetched depth, which is the radius a
-                // depth-set share was ever meant to reproduce.
-                viewRadius: fresh.viewRadius, // RESET
                 condensedOpen: new Set(seed.condensedOpen), // SURVIVE
             }
         }

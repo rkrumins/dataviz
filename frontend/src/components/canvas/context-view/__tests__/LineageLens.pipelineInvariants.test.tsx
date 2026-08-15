@@ -1,14 +1,15 @@
 /**
  * T26 R2 — the invariant stage's (c)/(d) checks, proven through the
- * FULL pipeline (buildFocusLayout → applyCondensation → applyHopWindow
- * → enforceLensInvariants), not just against the pure function in
+ * FULL pipeline (buildFocusLayout → applyCondensation →
+ * enforceLensInvariants — T28 R3 removed the window stage that used to
+ * sit between the last two), not just against the pure function in
  * isolation (see invariants.test.ts for that). `applyCondensation` is
  * mocked to hand back a "condensed set referencing gone cards" — the
  * brief's own named hostile shape — so this cannot pass merely because
  * `buildFocusLayout` itself would never produce a dangling reference;
  * it proves the LAST stage catches a bad one arriving from ANY earlier
  * pass, exactly the way `LineageLens.boardNeverEmpty.test.tsx` proves
- * invariant (a)/(b) the same way for the window stage.
+ * invariant (a)/(b) the same way for condensation's own output.
  */
 import { render, screen, cleanup } from '@testing-library/react'
 import { describe, it, expect, vi, afterEach } from 'vitest'

@@ -15,7 +15,6 @@
 import { boundaryFrontierFilter, buildLensSubgraph, distinctSystemCount } from '@/components/canvas/context-view/lens/lens-subgraph'
 import { buildFocusLayout, initialLensViewState } from '@/components/canvas/context-view/lens/focus-layout'
 import { applyCondensation } from '@/components/canvas/context-view/lens/condensation'
-import { applyHopWindow } from '@/components/canvas/context-view/lens/hop-window'
 import { walkNeighborRecords } from '@/components/canvas/context-view/LineageLens'
 import type { WalkFixture } from './lensFixtures'
 
@@ -34,15 +33,15 @@ export function buildWalk(fixture: WalkFixture) {
     walkStatus: 'done',
     directionFilter: fixture.directionFilter,
   })
-  // T23 — THE SAME two-pass projection `LineageLens` runs (condensation,
-  // then the sliding window): a screenshot through the raw
-  // `buildFocusLayout` output alone would show neither R1 nor R2, which
-  // is exactly the gap that made an earlier shot of this fixture no
-  // evidence of either feature at all — reproduced, then fixed, not
-  // assumed fixed by import order.
+  // T23 — THE SAME condensation projection `LineageLens` runs: a
+  // screenshot through the raw `buildFocusLayout` output alone would
+  // show no condensed runs at all, which is exactly the gap that made
+  // an earlier shot of this fixture no evidence of the feature —
+  // reproduced, then fixed, not assumed fixed by import order. (T28 R3
+  // removed the sliding-window pass this comment used to also describe
+  // — the board just grows now.)
   const condensed = applyCondensation(layout, view.condensedOpen)
-  const windowed = applyHopWindow(condensed, view.railWindow)
-  const graph = windowed.graph
+  const graph = condensed
   return {
     graph,
     focalId: sg.focusUrn,

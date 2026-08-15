@@ -926,26 +926,25 @@ const walkWideHub = (): WalkFixture => {
 }
 
 /**
- * T23 R1/R2 — the twenty-hop chain with the run NEAREST the focus
- * unfolded (its four interior steps drawn) and the window steered
- * off-centre to hold them: the "condensed run + its unfold" and "a
- * window move" mandatory shots together — both are the SAME state
- * (`condensedOpen`/`railWindow`) a reader reaches by clicking, not two
- * separate pictures. The FAR run (`up00`..`up05`) and the whole
- * downstream side stay condensed/folded, for contrast in the same shot.
- * Connector ids are `condense:${boundaryA}>${boundaryB}` over CARD ids
+ * T23 R2 — the twenty-hop chain with the run NEAREST the focus unfolded
+ * (its four interior steps drawn): the "condensed run + its unfold"
+ * mandatory shot. The FAR run (`up00`..`up05`) and the whole downstream
+ * side stay condensed/folded, for contrast in the same shot. Connector
+ * ids are `condense:${boundaryA}>${boundaryB}` over CARD ids
  * (`condensation.ts`) — `up05`'s run head is `n:up05`, and the focal's
- * own card id is the bare `'f'` (`focus-layout.ts`'s `baseCard`).
+ * own card id is the bare `'f'` (`focus-layout.ts`'s `baseCard`). (T28
+ * R3 removed the sliding window this fixture used to ALSO steer
+ * off-centre in the same shot — the board just grows now, so there is
+ * no window position left to demonstrate.)
  */
 const walkLongChainUnfolded = (): WalkFixture => {
   const base = walkLongChain()
   return {
     ...base,
-    title: 'The chain — one run unfolded, the window steered off-centre',
+    title: 'The chain — one run unfolded',
     script: b => ({
       ...(base.script ? base.script(b) : b),
       condensedOpen: new Set(['condense:n:up05>f']),
-      railWindow: -3,
     }),
   }
 }

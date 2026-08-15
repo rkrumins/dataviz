@@ -31,7 +31,6 @@ import { FocusGraphView } from '../FocusGraphView'
 import { buildFocusLayout, initialLensViewState } from '../focus-layout'
 import { buildLensSubgraph } from '../lens-subgraph'
 import { applyCondensation } from '../condensation'
-import { applyHopWindow } from '../hop-window'
 import { WALK_FIXTURES } from '@/harness/lensFixtures'
 import { buildWalk } from '@/harness/buildWalk'
 import { renderCounts, resetRenderCounts } from '../renderProbe'
@@ -277,47 +276,82 @@ describe('P0 — perf harness (Task 20)', () => {
   })
 
   /**
-   * T23 R1 — the sliding window's own wall-time, against T20's own
-   * budget (P3's `REBUILD_BUDGET_MS`/`REGRESSION_CEILING_MS`, reused
-   * verbatim — the brief's own instruction is "must hit T20's budgets",
-   * not a new number). `applyHopWindow` runs on the CONDENSED graph
-   * (`LineageLens`'s own pipeline order), so this times condensation
-   * once (its own cost, fixed per view state) plus the window moving
-   * across the WHOLE chain — every center a rail click could ask for,
-   * not one arbitrary position.
+   * T28 R3 — THE WINDOW NEVER FOLDS; THE BOARD JUST GROWS. `applyHopWindow`
+   * (T23 R1) is gone — nothing narrows what React Flow has to draw
+   * anymore, so an UNBOUNDED-WIDTH `walkLongChain` — every hop drawn as
+   * its own card, condensation's own runs unfolded too (its default
+   * condensed state is not "unbounded", it is the OTHER feature this
+   * board still has) — is the new worst case for the pipeline's own
+   * rebuild cost. Replaces the deleted "(T23 R1) window move wall-time"
+   * block: that measured the window's OWN pass in isolation; this
+   * measures the pipeline it used to sit inside (`buildFocusLayout` →
+   * condensation), now the last two stages before the board renders, at
+   * full width — against T20's own budget verbatim, per the brief's own
+   * instruction ("must hit T20's budgets, not a new number").
    */
-  describe('(T23 R1) window move wall-time — walkLongChain', () => {
+  describe('(T28 R3) full-width rebuild wall-time — walkLongChain, no window', () => {
     // T20 P3's own numbers verbatim — see the (d) block above for the
     // rationale (a 4× regression guard, not a tight budget assertion).
     const REGRESSION_CEILING_MS = 50 * 4
-    it('applyHopWindow, moved across every center the rail can reach', () => {
+    it('buildFocusLayout + applyCondensation, every hop unfolded, repeated rebuild', () => {
       const fixture = WALK_FIXTURES.walkLongChain
       const sg = buildLensSubgraph(fixture.model)
       const base = initialLensViewState(sg)
-      const view = fixture.script ? fixture.script(base) : base
-      const layout = buildFocusLayout({
+      const scripted = fixture.script ? fixture.script(base) : base
+
+      // Discover every run condensation folds by default (empty
+      // `condensedOpen`), from the connectors its OWN output states —
+      // not a hardcoded id guess, which would silently stop meaning
+      // anything the moment the fixture's own branch points changed.
+      const foldedByDefault = applyCondensation(
+        buildFocusLayout({
+          sg, query: '', hiddenTypes: new Set<string>(),
+          extendStatus: fixture.extendStatus ?? new Map(),
+          childrenAll: fixture.childrenAll ?? new Map(),
+          childrenAllStatus: new Map(),
+          walkStatus: 'done' as const,
+          directionFilter: fixture.directionFilter,
+          view: scripted,
+        }),
+        scripted.condensedOpen,
+      )
+      const connectorIds = foldedByDefault.edges
+        .map(e => e.condensed?.connectorId)
+        .filter((id): id is string => id != null)
+      expect(connectorIds.length).toBeGreaterThan(0)   // the premise: SOMETHING folds by default here
+
+      // Unbounded width: every one of those runs held open — the same
+      // per-focal edit a reader clicking every connector chip would
+      // produce, just built directly rather than via N clicks.
+      const view = { ...scripted, condensedOpen: new Set(connectorIds) }
+      const input = {
         sg, view, query: '', hiddenTypes: new Set<string>(),
         extendStatus: fixture.extendStatus ?? new Map(),
         childrenAll: fixture.childrenAll ?? new Map(),
         childrenAllStatus: new Map(),
         walkStatus: 'done' as const,
         directionFilter: fixture.directionFilter,
-      })
-      const condensed = applyCondensation(layout, view.condensedOpen)
+      }
+      const rebuild = () => applyCondensation(buildFocusLayout(input), view.condensedOpen)
 
       // Warm up (JIT) — untimed.
-      applyHopWindow(condensed, 0)
+      const warm = rebuild()
+      // Confirms the "unbounded width" premise this test exists to time:
+      // no connector edge survives — every run this fixture ever folds
+      // is unfolded, and every model node is its own top-level card.
+      expect(warm.edges.some(e => e.condensed != null)).toBe(false)
+      expect(warm.cards.filter(c => !c.frameId).length).toBe(fixture.model.nodes.length)
 
-      const centers = Array.from({ length: 21 }, (_, i) => i - 10)
+      const N = 20
       const samples: number[] = []
-      for (const center of centers) {
+      for (let i = 0; i < N; i++) {
         const start = performance.now()
-        applyHopWindow(condensed, center)
+        rebuild()
         samples.push(performance.now() - start)
       }
-      const avg = samples.reduce((a, b) => a + b, 0) / samples.length
+      const avg = samples.reduce((a, b) => a + b, 0) / N
       const max = Math.max(...samples)
-      console.log(`[T23-R1] walkLongChain window-move moves=${samples.length} avgMs=${avg.toFixed(3)} maxMs=${max.toFixed(3)}`)
+      console.log(`[T28-R3] walkLongChain full-width rebuild cards=${warm.cards.length} edges=${warm.edges.length} avgMs=${avg.toFixed(3)} maxMs=${max.toFixed(3)}`)
       expect(avg).toBeGreaterThan(0)
       expect(avg).toBeLessThan(REGRESSION_CEILING_MS)
     })

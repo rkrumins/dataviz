@@ -6,15 +6,13 @@
  * changes) and re-condenses via an explicit control on the run's own
  * boundary card.
  *
- * A pure post-pass over an already-built `FocusGraph`, for the identical
- * reason `hop-window.ts` is one: it never touches population, grain or
- * rank, so a run's own drawn identity (and everything downstream of it —
- * the isolation cone, the window) survives folding and unfolding for
- * free. `applyHopWindow` is expected to run AFTER this, so a run that
- * spans columns the window goes on to fold counts its interior exactly
- * once — through the ONE synthetic edge this leaves behind, never
- * through cards the window would otherwise have to re-discover and fold
- * a second time.
+ * A pure post-pass over an already-built `FocusGraph`: it never touches
+ * population, grain or rank, so a run's own drawn identity (and
+ * everything downstream of it — the isolation cone) survives folding and
+ * unfolding for free. (T28 R3 removed the sliding window that used to
+ * run after this stage and fold bands past a fixed radius — the board
+ * just grows now; condensation is the only thing left that ever
+ * collapses drawn cards.)
  */
 import { holdsRows, type FocusCard, type FocusEdge, type FocusGraph } from './focus-cards'
 
