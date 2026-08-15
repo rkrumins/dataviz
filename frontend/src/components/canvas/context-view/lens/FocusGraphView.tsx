@@ -130,9 +130,11 @@ const ReachContext = createContext<LensReach | null>(null)
  * threading it through `edge.data` would put a FUNCTION in data React
  * Flow diffs on every rebuild. `onCondenseRun` (T23 R2) rides the same
  * context for the identical reason — a condensed run's own connector
- * chip lives on an edge too.
+ * chip lives on an edge too. `onOpenTriage` (T23 R3 fix round 1) rides
+ * it for the same reason again — the rail's own end pill (`RailEnd`)
+ * has no `CardCtx` either, only whichever card's pill it is showing.
  */
-const FollowContext = createContext<Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage' | 'onCondenseRun'>>({})
+const FollowContext = createContext<Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage' | 'onCondenseRun' | 'onOpenTriage'>>({})
 /**
  * ISOLATION — the visible lineage cone of whatever the reader is
  * pointing at (see `isolationCone` in focus-layout.ts), and the one
@@ -3784,25 +3786,43 @@ function railSegmentsOf(fullCards: readonly FocusCard[], trailUrns: ReadonlySet<
  *  with several live pills (a hub sitting at the fetched boundary) picks
  *  the heaviest, deterministically, and the reader reaches the rest by
  *  travelling there — the SAME "reach the individual pill" path a rail
- *  click always offers. */
-function railEndPill(fullCards: readonly FocusCard[], edgeBand: number, dir: 'in' | 'out'): FocusPill | null {
+ *  click always offers. Carries the CARD id alongside the pill (T23 R3
+ *  fix round 1) — `RailEnd`'s own triage gate needs it as the anchor,
+ *  the same way `WalkPill` already has `card` in scope for its own. */
+function railEndPill(fullCards: readonly FocusCard[], edgeBand: number, dir: 'in' | 'out'): { cardId: string; pill: FocusPill } | null {
   const atEdge = fullCards.filter(c => !c.frameId && c.band === edgeBand)
-  let best: FocusPill | null = null
+  let best: { cardId: string; pill: FocusPill } | null = null
   for (const c of atEdge) {
     const pill = dir === 'in' ? c.pillUp : c.pillDown
     if (!pill || pill.kind === 'reveal') continue   // reveal is already-fetched — not "not loaded"
-    if (!best || (pill.count ?? Infinity) > (best.count ?? Infinity)) best = pill
+    if (!best || (pill.count ?? Infinity) > (best.pill.count ?? Infinity)) best = { cardId: c.id, pill }
   }
   return best
 }
 
-function RailEnd({ pill, dir }: { pill: FocusPill; dir: 'in' | 'out' }) {
+/** T23 R3 fix round 1 — the rail's own end pill is a THIRD live path to
+ *  an extend/page fetch (`WalkPill`'s gutter pill and the focal's inline
+ *  follow are the other two), and until this fix it was the one
+ *  ungated one: `pillCatalogue`'s PAGED (96) or `extendChain`'s GOLD
+ *  (246) sitting at the fetched boundary could be fired from here with
+ *  no triage list in between, at the exact same real-world scale the
+ *  gate exists for. Same `triageDeliveryOf`/`TRIAGE_THRESHOLD` check
+ *  `WalkPill` runs, on the card `railEndPill` found the pill on. */
+function RailEnd({ cardId, pill, dir }: { cardId: string; pill: FocusPill; dir: 'in' | 'out' }) {
   const follow = useContext(FollowContext)
   const upstream = dir === 'in'
+  const delivery = triageDeliveryOf(pill)
+  const act = () => {
+    if (delivery != null && delivery > TRIAGE_THRESHOLD && follow.onOpenTriage) {
+      follow.onOpenTriage(cardId, dir)
+      return
+    }
+    actOnPill(follow, pill, dir)
+  }
   return (
     <button
       type="button"
-      onClick={(e) => { e.stopPropagation(); actOnPill(follow, pill, dir) }}
+      onClick={(e) => { e.stopPropagation(); act() }}
       title={`Not yet loaded ${upstream ? 'upstream' : 'downstream'}${pill.count != null ? ` · ${pill.count.toLocaleString()} more` : ''} — click to fetch further`}
       className="nodrag flex-shrink-0 flex items-center gap-1 px-1.5 h-5 rounded-full border border-dashed border-black/15 dark:border-white/20 text-[9px] text-ink-muted hover:border-accent-lineage/50 hover:text-accent-lineage transition-colors"
     >
@@ -3854,7 +3874,7 @@ function HopRail({
   return (
     <Panel position="top-center" className="!top-2 pointer-events-none">
       <div className="pointer-events-auto flex items-center gap-1 px-2 py-1.5 rounded-full bg-canvas-elevated/95 border border-black/10 dark:border-white/10 shadow-md backdrop-blur-sm max-w-[min(90vw,900px)] overflow-x-auto">
-        {endIn && <RailEnd pill={endIn} dir="in" />}
+        {endIn && <RailEnd cardId={endIn.cardId} pill={endIn.pill} dir="in" />}
         {segments.map(seg => {
           const isFocal = seg.band === 0
           const inWindow = !win || (seg.band >= win.min && seg.band <= win.max)
@@ -3883,7 +3903,7 @@ function HopRail({
             </button>
           )
         })}
-        {endOut && <RailEnd pill={endOut} dir="out" />}
+        {endOut && <RailEnd cardId={endOut.cardId} pill={endOut.pill} dir="out" />}
       </div>
     </Panel>
   )
@@ -4374,9 +4394,18 @@ export function FocusGraphView({
   // resolved fresh each render like `peekCard`: a window move or a
   // re-layout that drops it closes the panel by simply having nothing
   // left to render, rather than a stale position.
+  // T23 R3 fix round 1 — `RailEnd`'s own anchor lives at the EXTREME of
+  // the fetched extent, which is exactly the card the window is most
+  // likely to have folded away (`railCards`, not `graph.cards`, is
+  // where it still exists) — a lookup scoped to the drawn graph alone
+  // silently found nothing and the panel never opened. `HubTriage`'s
+  // own clamp keeps whatever position this resolves to on-screen either
+  // way, same as `LensPeek`'s.
   const triageCard = useMemo(
-    () => (triageAnchor ? graph.cards.find(c => c.id === triageAnchor.cardId) ?? null : null),
-    [graph.cards, triageAnchor],
+    () => (triageAnchor
+      ? graph.cards.find(c => c.id === triageAnchor.cardId) ?? railCards?.find(c => c.id === triageAnchor.cardId) ?? null
+      : null),
+    [graph.cards, railCards, triageAnchor],
   )
   // Which urns are already full citizens of the board — a triage row for
   // one of them reads as placed rather than offering to do it again.

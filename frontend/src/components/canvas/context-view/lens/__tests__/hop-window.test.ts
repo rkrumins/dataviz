@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { applyHopWindow, bandRangeOf, HOP_WINDOW } from '../hop-window'
-import type { FocusCard, FocusEdge, FocusGraph } from '../focus-cards'
+import { BAND_GAP, CARD_W, type FocusCard, type FocusEdge, type FocusGraph } from '../focus-cards'
 
 const card = (id: string, band: number, overrides: Partial<FocusCard> = {}): FocusCard => ({
     id, kind: 'entity', nodeId: id, band,
@@ -78,6 +78,21 @@ describe('hop-window — applyHopWindow', () => {
         const foldOut = graph.cards.find(c => c.id === 'fold:out')!
         expect(foldIn.fold).toEqual({ dir: 'in', hops: 7, cards: 7, connections: 7 })
         expect(foldOut.fold).toEqual({ dir: 'out', hops: 7, cards: 7, connections: 7 })
+    })
+
+    it('positions each fold chip from its OWN band, not the flow origin (fix round 1 — a hardcoded x:0 stacked every chip on the focal)', () => {
+        const g = chain(10)
+        const { graph } = applyHopWindow(g, null)
+        const foldIn = graph.cards.find(c => c.id === 'fold:in')!
+        const foldOut = graph.cards.find(c => c.id === 'fold:out')!
+        // The exact formula every ordinary card's own `x` comes from
+        // (focus-cards.ts) — AND, directly, the historical bug's own
+        // literal value, so a regression back to a hardcoded 0 fails
+        // even if someone "fixes" the formula check by re-deriving it.
+        expect(foldIn.x).toBe(foldIn.band * (CARD_W + BAND_GAP))
+        expect(foldOut.x).toBe(foldOut.band * (CARD_W + BAND_GAP))
+        expect(foldIn.x).not.toBe(0)
+        expect(foldOut.x).not.toBe(0)
     })
 
     it('reroutes the boundary wire into the fold chip rather than dropping it silently', () => {

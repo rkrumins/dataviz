@@ -587,6 +587,36 @@ const hubFanIn = (n: number) => {
   return walkModel('F', { nodes, lineageEdges, upstreamUrns: new Set(nodes.slice(1).map(n => n.urn)) })
 }
 
+/** T23 R3 fix round 1 — a chain long enough to draw the RAIL (band span
+ *  9 > HOP_WINDOW's 7), with a live, large frontier on the FARTHEST
+ *  upstream card — `railEndPill`'s own "◀ N more · not loaded" end. */
+const railChain = (upFrontierCount: number) => {
+  const nodes = [wnode('F', 'dataset', 'ledger')]
+  const lineageEdges = []
+  let prev = 'F'
+  for (let i = 1; i <= 4; i++) {
+    const urn = `up${i}`
+    nodes.push(wnode(urn, 'dataset', `stage_up_${i}`))
+    lineageEdges.push(hop(urn, prev))
+    prev = urn
+  }
+  prev = 'F'
+  for (let i = 1; i <= 4; i++) {
+    const urn = `dn${i}`
+    nodes.push(wnode(urn, 'dataset', `stage_dn_${i}`))
+    lineageEdges.push(hop(prev, urn))
+    prev = urn
+  }
+  return walkModel('F', {
+    nodes, lineageEdges,
+    upstreamUrns: new Set(['up1', 'up2', 'up3', 'up4']),
+    downstreamUrns: new Set(['dn1', 'dn2', 'dn3', 'dn4']),
+    // `pillFor`'s frontier branch reports `totalCount - degreeUp` —
+    // whatever that nets out to here, it is comfortably past the gate.
+    frontierUp: [frontier('up4', upFrontierCount)],
+  })
+}
+
 // The lens's OWN outer chrome is also `role="dialog"` (`aria-label`
 // "Connections of X" — see the F3 share tests below), and so is
 // `LensPeek` ("Preview of X") — the triage panel's own aria-label
@@ -623,6 +653,31 @@ describe('hub triage (T23 R3)', () => {
     expect(api.page).not.toHaveBeenCalled()
     expect(api.extend).not.toHaveBeenCalled()
     expect(triage()).toBeTruthy()
+  })
+
+  it('fix round 1 — the rail\'s own "not loaded" end is gated too, not a fourth ungated bypass', () => {
+    // The rail only draws once the fetched extent outgrows one glance
+    // (HOP_WINDOW) — `railChain`'s 9-column span (-4..+4) clears it, but
+    // a CHAIN admits one hop per reveal (walkLongChain's own gotcha:
+    // REVEAL_PAGE governs sibling groups, not chain depth) — so up2..up4
+    // need their own reveal clicks before the rail has anything to span.
+    const { api } = renderLens(['F'], doneWalk(railChain(100)))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_1 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_2 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_3 only/))
+    // Downstream too — the rail only draws past HOP_WINDOW's own span,
+    // and upstream alone (bands -4..0) does not clear it.
+    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_1 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_2 only/))
+    const end = screen.getByTitle(/Not yet loaded upstream · \d+ more — click to fetch further/)
+    fireEvent.click(end)
+    // Gated exactly like WalkPill's own gutter pill: no fetch fired,
+    // the triage list opened on the card the pill actually belongs to
+    // (`stage_up_4`, the farthest-upstream card) instead.
+    expect(api.extend).not.toHaveBeenCalled()
+    expect(api.page).not.toHaveBeenCalled()
+    const dialog = triage()!
+    expect(within(dialog).getByText('of stage_up_4')).toBeTruthy()
   })
 
   it('the header states the known count honestly, with no unfetched remainder for a reveal (everything it stands for is already in the model)', () => {
