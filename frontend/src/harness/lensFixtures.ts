@@ -81,8 +81,9 @@ export interface WalkFixture {
   trailAdjacent?: Array<[string, string]>
   /** T23 R3 — pre-opens the hub-triage list for the shot (it only ever
    *  opens from a click, which a still picture can't drive). The CARD id
-   *  a follow control hangs off — `'f'` for the focal, `n:${urn}`/
-   *  `fr:${urn}` otherwise, the same scheme `isolatedId` above uses. */
+   *  a follow control hangs off — `'f'` for the focal, `n:${urn}`
+   *  otherwise (T27 — one id scheme regardless of kind), the same
+   *  scheme `isolatedId` above uses. */
   triageAnchor?: { cardId: string; dir: 'in' | 'out' }
 }
 

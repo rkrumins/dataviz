@@ -1868,6 +1868,21 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
         // Where the FOCUS needs a keyboard way in, it has a real button
         // of its own (its name, below).
         onClick={() => { ctx.onSelect(card.nodeId); ctx.onIsolate(card.id) }}
+        // T27 fix round 1 — every control under here (chevron,
+        // Connected|All, Find and its own text input, the per-frame
+        // Focus button, the focal's own name button) only stops its
+        // OWN `click`: `click` and `dblclick` are independent native
+        // events with independent propagation, so a `stopPropagation`
+        // written for one never touches the other. Without this, a
+        // double-click landing on ANY of those controls — most hostile
+        // case, double-clicking a word while typing in Find — bubbled
+        // past the header to `FocusNode`'s own outer `onDoubleClick`
+        // and re-anchored the board out from under the click. One guard
+        // here covers every control at once; a double-click on the
+        // frame's own blank chrome (outside this header) still reaches
+        // `FocusNode` and still focuses it — that part is intentional,
+        // see `FocusNode`'s own doc comment.
+        onDoubleClick={(e) => e.stopPropagation()}
       >
       <div className={cn('flex items-center gap-1.5 min-w-0', isFocal && 'w-full')}>
         {hasContents && (

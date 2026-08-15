@@ -367,6 +367,76 @@ describe('the business journey — a table\'s lineage through a seven-level esta
     expect(onRecenter).toHaveBeenCalledWith('u')
   })
 
+  // T27 fix round 1 — code review caught a real, undisclosed regression:
+  // every header sub-control (chevron, Connected|All, Find + its own
+  // input, the per-frame Focus button, the focal's own name button)
+  // only ever called `stopPropagation` inside its OWN `onClick` —
+  // `click` and `dblclick` are independent native events with
+  // independent propagation, so a double-click landing on any of them
+  // bubbled straight past the header to `FocusNode`'s new outer
+  // `onDoubleClick` and re-anchored the board out from under the click.
+  // Most hostile case: double-clicking a word while typing into Find.
+  // Fixed with one `onDoubleClick` guard on the header container itself
+  // (`FocusGraphView.tsx`), which every one of these pins would fail
+  // without. The complete algebra: header controls never re-anchor: a
+  // double-click on the frame's own BLANK chrome still does (the
+  // disclosed, intentional new behaviour); and a row inside a frame
+  // focuses ITSELF, never its host frame (rows are React Flow siblings
+  // of their frame, not DOM descendants, so this was never at risk from
+  // the same bug — pinned anyway, since it is the other half of "which
+  // element does a double-click in here actually mean").
+  it('T27 fix round 1 — double-click on a frame\'s header chevron does not re-anchor the board', () => {
+    const onRecenter = vi.fn()
+    renderLens(['F'], doneWalk(collateralsEstate()), { onRecenter })
+    // "Collapse Sales" — Sales' rows are open by default (T24's own
+    // branchy-domain behaviour), so this is the chevron's live label.
+    fireEvent.doubleClick(screen.getByLabelText('Collapse Sales'))
+    expect(onRecenter).not.toHaveBeenCalled()
+  })
+
+  it('T27 fix round 1 — double-click on a frame\'s header Find input does not re-anchor the board', () => {
+    const onRecenter = vi.fn()
+    // A container wide enough that Find is offered at rest (win.scrollable
+    // needs more rows than the frame's own window, FRAME_WINDOW = 8) —
+    // no toggle click required to reach a real <input>.
+    const nine = Array.from({ length: 9 }, (_, i) => `r${i}`)
+    renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [
+        wnode('F', 'dataset', 'orders_enriched'),
+        wnode('BIG', 'dataset', 'wide_container', { childCount: 9 }),
+        ...nine.map(id => wnode(id, 'schemaField', id)),
+      ],
+      containmentEdges: nine.map(id => holds('BIG', id)),
+      lineageEdges: nine.map(id => hop(id, 'F')),
+      upstreamUrns: new Set(nine),
+    })), { onRecenter })
+    // Collapsed to its icon until asked for — a real click opens it,
+    // the same way a reader's first click would.
+    fireEvent.click(screen.getByLabelText('Find inside wide_container'))
+    const find = screen.getByLabelText('Find inside wide_container')
+    expect(find.tagName).toBe('INPUT')
+    fireEvent.doubleClick(find)
+    expect(onRecenter).not.toHaveBeenCalled()
+  })
+
+  it('T27 fix round 1 — double-click on a frame\'s own blank chrome still re-anchors it', () => {
+    const onRecenter = vi.fn()
+    renderLens(['F'], doneWalk(collateralsEstate()), { onRecenter })
+    // The outer shell itself, not any header control inside it — see
+    // `FocusNode`'s own doc comment for why this one is intentional.
+    const outer = screen.getByText('Sales').closest('.pointer-events-none')!
+    fireEvent.doubleClick(outer)
+    expect(onRecenter).toHaveBeenCalledWith('SALES')
+  })
+
+  it('T27 fix round 1 — double-click on a row inside a frame focuses the ROW, not the frame', () => {
+    const onRecenter = vi.fn()
+    renderLens(['F'], doneWalk(collateralsEstate()), { onRecenter })
+    fireEvent.doubleClick(screen.getByText('orders_raw'))
+    expect(onRecenter).toHaveBeenCalledWith('s1')
+    expect(onRecenter).not.toHaveBeenCalledWith('SALES')
+  })
+
   it('stepping Back to an already-walked focal is instant — no loading state', () => {
     const onBack = vi.fn()
     const { rerender, api } = renderLens(

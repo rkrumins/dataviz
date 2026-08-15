@@ -480,6 +480,60 @@ describe('P0 — perf harness (Task 20)', () => {
     })
   })
 
+  /**
+   * T27 fix round 1 — code review flagged an unmeasured deviation: T27
+   * unified every card-like kind onto one `FocusNode`, whose fiber now
+   * persists across a kind flip and so must call the SAME hooks every
+   * render regardless of branch — including `useContext(RowCursorContext)`,
+   * which only frame/row cards used to call. `useContext` re-renders its
+   * consumer on any Provider value change independent of `memo` (memo
+   * only gates PROP-driven re-renders), so a top-level entity card is now
+   * ALSO a `RowCursorContext` subscriber, where before T27 it was not.
+   *
+   * MEASURED, not budgeted: 149 of 151 board nodes re-render on a single
+   * ArrowDown — essentially the whole board, the exact broadcast-Provider
+   * pattern Task 20 P1 eliminated for hover/isolation (`ConeStore`) and
+   * fix-round-1 eliminated for the trail (`TrailStore`), now reintroduced
+   * for the row cursor by this task's own hooks-rules constraint. Per
+   * the review's own instruction this is disclosed and left alone here —
+   * scoping `RowCursorContext` the same way (a `useSyncExternalStore`
+   * selector keyed by frame + row id, so only the moved-into and
+   * moved-out-of row and cards that actually care about `onCursor`
+   * re-subscribe) is real, separately-scoped work, not a speculative
+   * optimization to fold into this fix round. This test is a
+   * measurement/regression instrument, not a pass/fail budget — it
+   * would only fail if the fan-out grew WORSE than "the whole board".
+   */
+  describe('(T27 fix round 1) row-cursor arrow-key move fan-out — MEASURED, not yet budgeted', () => {
+    it('walkWideHub: moving the cursor inside one open frame — how much of the board answers', () => {
+      resetRenderCounts()
+      const profiler = makeProfilerRecorder()
+      const { container } = renderBoard('walkWideHub', profiler)
+      const board = nodes(container)
+      // `sys00`..`sys11` are open containers (rows visible by default,
+      // same as every other partner frame); each owns one listbox.
+      const listbox = container.querySelector('[role="listbox"]')
+      expect(listbox).not.toBeNull()
+
+      profiler.reset()
+      resetRenderCounts()
+      act(() => { fireEvent.keyDown(listbox!, { key: 'ArrowDown' }) })
+
+      const totalRendered = [...renderCounts.values()].reduce((n, v) => n + v, 0)
+      console.log(
+        `[T27-fix-round-1] walkWideHub row-cursor ArrowDown: boardNodes=${board.length} `
+        + `commits=${profiler.commitCount} ms=${profiler.totalMs.toFixed(2)} `
+        + `totalComponentRenders=${totalRendered} (${JSON.stringify(Object.fromEntries(renderCounts))})`,
+      )
+      // Not a budget — see the doc comment above. Only that the
+      // instrument itself is live, so a silently-broken probe cannot
+      // report a hollow zero, and that the fan-out is bounded by the
+      // board's own size (never MORE than everything on it).
+      expect(totalRendered).toBeGreaterThan(0)
+      expect(totalRendered).toBeLessThanOrEqual(board.length)
+    })
+  })
+
   describe('(e) initial mount', () => {
     it('walkSharedPlatform: mount-phase actualDuration', () => {
       const profiler = makeProfilerRecorder()
