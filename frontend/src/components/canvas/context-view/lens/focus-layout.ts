@@ -213,20 +213,61 @@ export interface FocusLayoutInput {
     directionFilter?: LensDirectionFilter
 }
 
+/** Every focal-transition kind the lens recognizes (T26 R1). All five
+ *  non-restore kinds are proven (T25-C2) to behave IDENTICALLY — a full
+ *  reset, atomically, as `LensViewState`'s own reset value — so they are
+ *  kept distinct here for auditability and future divergence, not
+ *  because today's behaviour differs per kind. `'lens-open'` is the
+ *  first-ever focal of a session; `'share-restore'` is the one kind
+ *  that SURVIVES fields from a shared link instead of resetting them. */
+export type LensViewTransitionKind =
+    'reanchor' | 'back' | 'forward' | 'path-jump' | 'share-restore' | 'lens-open'
+
+/** The subset of a restored share link's fields that seed `LensViewState`
+ *  on a `'share-restore'` transition — structurally typed (not imported
+ *  from `LineageLens.tsx`'s `LensWalkSeed`) so this module stays a pure,
+ *  dependency-free layout module; `LensWalkSeed` satisfies this shape. */
+export interface LensViewSeed {
+    revealed: ReadonlyArray<[string, number]>
+    opened: ReadonlyArray<string>
+    collapsed: ReadonlyArray<string>
+    frameAll: ReadonlyArray<string>
+    frameQueries: ReadonlyArray<[string, string]>
+    framePages: ReadonlyArray<[string, number]>
+    pinned: ReadonlyArray<string>
+    railWindow: number | null
+    condensedOpen: ReadonlyArray<string>
+}
+
 /**
- * Where a walk starts: one page of neighbours in each direction, and the
- * containment spine down to the focus already open, so the focus is on
- * the board the moment the walk lands rather than buried inside a
- * container the user has to go hunting for.
+ * THE single owner of what a focal transition does to `LensViewState` —
+ * every field explicitly RESET (fresh default), or (for `'share-restore'`
+ * only) carried to SURVIVE from the shared link. Nothing else in the lens
+ * may build a `LensViewState` for a transition; `initialLensViewState`
+ * below and every transition call site in `LineageLens.tsx` route
+ * through this. `railWindow` SURVIVES a restore verbatim, but is CLAMPED
+ * downstream regardless — `hop-window.ts`'s own invariant (a) guarantees
+ * the window can never exclude the focal, whatever this hands it.
+ *
+ * `prev` is accepted for symmetry with a kind that might one day carry
+ * something forward mid-session; no kind today reads it — the T25-C2
+ * finding is that a focal transition starts every field completely
+ * fresh, which is what makes the reset safe to compute as a pure,
+ * atomic value rather than a stateful effect (see `LineageLens.tsx`'s
+ * `view` derivation).
  */
-export function initialLensViewState(sg: LensSubgraph<LensWalkNode>): LensViewState {
-    return {
+export function viewStateForTransition(
+    kind: LensViewTransitionKind,
+    _prev: LensViewState | null,
+    nextFocal: { sg: LensSubgraph<LensWalkNode>; seed?: LensViewSeed | null },
+): LensViewState {
+    const fresh: LensViewState = {
         selection: null,
         revealed: new Map([
-            [revealKey('in', sg.focusUrn), 1],
-            [revealKey('out', sg.focusUrn), 1],
+            [revealKey('in', nextFocal.sg.focusUrn), 1],
+            [revealKey('out', nextFocal.sg.focusUrn), 1],
         ]),
-        expandedContainment: new Set([...focusAncestorChain(sg), sg.focusUrn]),
+        expandedContainment: new Set([...focusAncestorChain(nextFocal.sg), nextFocal.sg.focusUrn]),
         collapsedContainment: new Set(),
         frameShowAll: new Set(),
         walkedThrough: new Set(),
@@ -238,6 +279,50 @@ export function initialLensViewState(sg: LensSubgraph<LensWalkNode>): LensViewSt
         viewRadius: null,
         condensedOpen: new Set(),
     }
+    switch (kind) {
+        case 'reanchor':
+        case 'back':
+        case 'forward':
+        case 'path-jump':
+        case 'lens-open':
+            // Every field RESET.
+            return fresh
+        case 'share-restore': {
+            const seed = nextFocal.seed
+            if (!seed) return fresh
+            return {
+                selection: fresh.selection, // RESET — a restored link never re-opens a selection
+                revealed: new Map(seed.revealed), // SURVIVE
+                expandedContainment: new Set(seed.opened), // SURVIVE
+                collapsedContainment: new Set(seed.collapsed), // SURVIVE
+                frameShowAll: new Set(seed.frameAll), // SURVIVE
+                // Not carried in a link: the grain a shared picture is
+                // drawn at, and the slots its cards hold, are both
+                // re-derived from the model the link replays.
+                walkedThrough: fresh.walkedThrough, // RESET
+                drawnRank: fresh.drawnRank, // RESET
+                frameQueries: new Map(seed.frameQueries), // SURVIVE
+                frameOffsets: new Map(seed.framePages), // SURVIVE
+                pinned: new Set(seed.pinned), // SURVIVE
+                railWindow: seed.railWindow, // SURVIVE (clamped downstream — see doc comment above)
+                // Not carried either: `null` defaults to the restored
+                // walk's own fetched depth, which is the radius a
+                // depth-set share was ever meant to reproduce.
+                viewRadius: fresh.viewRadius, // RESET
+                condensedOpen: new Set(seed.condensedOpen), // SURVIVE
+            }
+        }
+    }
+}
+
+/**
+ * Where a walk starts: one page of neighbours in each direction, and the
+ * containment spine down to the focus already open, so the focus is on
+ * the board the moment the walk lands rather than buried inside a
+ * container the user has to go hunting for.
+ */
+export function initialLensViewState(sg: LensSubgraph<LensWalkNode>): LensViewState {
+    return viewStateForTransition('lens-open', null, { sg })
 }
 
 const EMPTY_STRINGS: string[] = []

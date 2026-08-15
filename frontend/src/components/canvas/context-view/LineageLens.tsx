@@ -48,13 +48,14 @@ import {
 } from './lens/lens-subgraph'
 import {
   buildFocusLayout,
-  initialLensViewState,
   revealKey,
+  viewStateForTransition,
   walkStatusKey,
   type LensDirectionFilter,
   type LensFetchStatus,
   type LensRoster,
   type LensViewState,
+  type LensViewTransitionKind,
 } from './lens/focus-layout'
 import { applyHopWindow, bandRangeOf, HOP_WINDOW } from './lens/hop-window'
 import { applyCondensation } from './lens/condensation'
@@ -63,7 +64,7 @@ import { cn } from '@/lib/utils'
 import { usePreferencesStore } from '@/store/preferences'
 import { useTourStore } from '@/features/tour/tourStore'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
-import { lensFocalOf, type LensHistory } from './lens/lensHistory'
+import { lensFocalOf, lensTransitionKind, type LensHistory } from './lens/lensHistory'
 import { labelOf, edgeLabelFor, orientationHalf, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach, type TriagePartner } from './lens/focus-cards'
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView, TRIAGE_THRESHOLD } from './lens/FocusGraphView'
@@ -336,6 +337,30 @@ export function LineageLens({
   const canBack = cursor > 0
   const canForward = cursor < entries.length - 1
 
+  // T26 R1 — which of the five in-session transition kinds produced the
+  // CURRENT `history`, purely from comparing it against the previous
+  // render's (`lensTransitionKind`, lensHistory.ts — pure history-shape
+  // classification, unit-tested on its own). The React-sanctioned
+  // "adjust state during rendering" pattern (react.dev, "Adjusting some
+  // state when a prop changes"): a plain conditional `setState` call in
+  // the render body itself, never an effect — so it can never lag a
+  // tick behind `nodeId` (React re-renders immediately, before
+  // committing, whenever this branch fires) and is idempotent across a
+  // StrictMode double-render or any re-render where `history` did not
+  // change (the branch only fires when the reference actually differs).
+  const [transitionTrack, setTransitionTrack] = useState<{ history: LensHistory; kind: LensViewTransitionKind }>(
+    () => ({ history, kind: 'lens-open' }),
+  )
+  // Computed fresh for THIS render (not read back off `transitionTrack`,
+  // which will not reflect the `setTransitionTrack` call below until
+  // React's own immediate re-render) — see the pattern's own citation
+  // above for why reading state written this same render is stale.
+  let transitionKind = transitionTrack.kind
+  if (transitionTrack.history !== history) {
+    transitionKind = lensTransitionKind(transitionTrack.history, history)
+    setTransitionTrack({ history, kind: transitionKind })
+  }
+
   // Query is keyed to the focal node — re-centering starts with a fresh
   // filter without needing a reset effect.
   const [queryState, setQueryState] = useState<{ nodeId: string | null; q: string }>({ nodeId: null, q: '' })
@@ -352,10 +377,16 @@ export function LineageLens({
     [model, nodeId],
   )
 
-  // Where a walk starts: the focus's containment spine already open and
-  // one page of neighbours each way. Recomputed only when the model
-  // changes, so it is a stable identity for the layout memo below.
-  const initialView = useMemo(() => initialLensViewState(sg), [sg])
+  // T26 R1 — what a fresh transition to THIS focal should show, per
+  // `viewStateForTransition` (focus-layout.ts), the single owner of
+  // every `LensViewState` field's disposition across a transition.
+  // Recomputed only when the model or the transition kind changes, so
+  // it is a stable identity for the layout memo below. No `prev` to
+  // offer: none of the five in-session kinds reads it (T25-C2's own
+  // finding — a transition resets every field fresh), and threading
+  // `viewState` through here would recompute this on every in-view
+  // edit, not just a transition.
+  const freshView = useMemo(() => viewStateForTransition(transitionKind, null, { sg }), [sg, transitionKind])
   const [viewState, setViewState] = useState<{ nodeId: string | null; view: LensViewState } | null>(null)
   // Discarded on re-center, exactly like the filter and chip state: a
   // new focal is a new question, not a continuation of this one — EXCEPT
@@ -373,18 +404,18 @@ export function LineageLens({
   // The reset here is this plain derived value, re-evaluated on EVERY
   // render, with no effect and no async gap in between: the moment
   // `nodeId` changes, `viewState?.nodeId === nodeId` is false on THIS
-  // SAME render, so `view` falls back to a fresh `initialView`
+  // SAME render, so `view` falls back to a fresh `freshView`
   // atomically — there is no tick where a stale `railWindow` from the
   // old focal is live under the new one. See
   // `LineageLens.test.tsx`'s "re-anchoring from a walked-through state"
   // describe block for the pin walking this exact in-session path.
-  const view = viewState?.nodeId === nodeId ? viewState.view : initialView
+  const view = viewState?.nodeId === nodeId ? viewState.view : freshView
   const editView = useCallback((edit: (base: LensViewState) => LensViewState) => {
     setViewState(prev => ({
       nodeId,
-      view: edit(prev?.nodeId === nodeId ? prev.view : initialView),
+      view: edit(prev?.nodeId === nodeId ? prev.view : freshView),
     }))
-  }, [nodeId, initialView])
+  }, [nodeId, freshView])
 
   // Type-filter chips — lens-local, keyed to the focal (like the text
   // filter) so re-centering starts clean.
@@ -425,35 +456,19 @@ export function LineageLens({
     if (!walkSeed || walkSeed.nodeId !== nodeId || walkStatus !== 'done') return
     if (seedAppliedRef.current === nodeId) return
     seedAppliedRef.current = nodeId
+    // T26 R1 — routed through `viewStateForTransition`, the single owner
+    // of what SURVIVES from a seed vs RESETS (`walkedThrough`/`drawnRank`
+    // re-derive from the replayed model; `viewRadius` defaults to the
+    // restored walk's own fetched depth — see that function's own
+    // per-field disposition for the full reasoning, previously inline
+    // here). No `prev` to offer — this is a one-time restore, not an
+    // edit of whatever view state preceded it.
     setViewState({
       nodeId,
-      view: {
-        selection: null,
-        revealed: new Map(walkSeed.revealed),
-        expandedContainment: new Set(walkSeed.opened),
-        collapsedContainment: new Set(walkSeed.collapsed),
-        frameShowAll: new Set(walkSeed.frameAll),
-        frameQueries: new Map(walkSeed.frameQueries),
-        frameOffsets: new Map(walkSeed.framePages),
-        // Not carried in a link: the grain a shared picture is drawn at,
-        // and the slots its cards hold, are both re-derived from the
-        // model the link replays — which is the same model the sharer
-        // saw, so they come out the same.
-        walkedThrough: new Set(),
-        drawnRank: new Map(),
-        pinned: new Set(walkSeed.pinned),
-        railWindow: walkSeed.railWindow,
-        // T25 B — not carried in a link either, same reasoning as
-        // `walkedThrough`/`drawnRank` above: `null` defaults to the
-        // restored walk's own fetched depth (`initialLensShare.depth`
-        // already travels and drove that fetch), which is the radius a
-        // depth-set share was ever meant to reproduce.
-        viewRadius: null,
-        condensedOpen: new Set(walkSeed.condensedOpen),
-      },
+      view: viewStateForTransition('share-restore', null, { sg, seed: walkSeed }),
     })
     setDirectionState({ nodeId, dir: walkSeed.direction })
-  }, [walkSeed, nodeId, walkStatus])
+  }, [walkSeed, nodeId, walkStatus, sg])
 
   const layout = useMemo(() => buildFocusLayout({
     sg,
