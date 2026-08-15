@@ -82,6 +82,20 @@ _ALLOWED_DIRS = (
     # Cache layer / ancestor cache — direct Redis use is the
     # design, not a transport concern.
     "backend/app/services/aggregation/redis_client.py",
+    # The change feed's own transport seam. Same shape as the JobBroker
+    # rather than a hole in the rule: ``ChangeRegistry`` is a Protocol
+    # with a Redis implementation and an in-memory one, and these two
+    # files are the only places that touch Redis — ``registry.py`` writes
+    # (INCR + XADD), ``hub.py`` reads (one XREAD per PROCESS, fanned out
+    # in-memory to every attached client). The rest of the package
+    # (``publish.py``, ``topics.py``, the endpoints) goes through the
+    # Protocol and stays covered by this rule.
+    #
+    # Deliberately listed file by file rather than as the whole
+    # ``backend/app/changes`` directory, so a future file in that package
+    # that reaches for Redis directly is still caught.
+    "backend/app/changes/registry.py",
+    "backend/app/changes/hub.py",
     # Operational / DLQ admin paths inside insights_service.
     "backend/insights_service/__main__.py",
     # Tests themselves may inspect Redis directly.
