@@ -454,15 +454,23 @@ function startLeaderWork(myEpoch: number, useStream: boolean): () => void {
 
   const tick = async () => {
     if (myEpoch !== transportEpoch) return
-    if (typeof document === 'undefined' || !document.hidden) {
-      try {
-        await publish()
-      } catch {
-        // A failed manifest read is not worth reporting: surfaces keep
-        // what they have and the next tick tries again. The server
-        // answers 503 here when its registry is unreachable, which is
-        // deliberately not the same as "nothing changed".
-      }
+    // Deliberately NOT gated on this tab's own visibility, unlike every
+    // poller this replaced. The leader works on behalf of every tab in
+    // the browser, and the leader is whichever tab won the lock — very
+    // often a background one while the user reads a different tab. A
+    // hidden-tab pause here would stop the reconciliation floor for
+    // tabs the user is actively looking at.
+    //
+    // What made the pause worth having was N tabs each polling; there is
+    // one poller per browser now, so the cost it was protecting against
+    // no longer exists.
+    try {
+      await publish()
+    } catch {
+      // A failed manifest read is not worth reporting: surfaces keep
+      // what they have and the next tick tries again. The server answers
+      // 503 here when its registry is unreachable, which is deliberately
+      // not the same as "nothing changed".
     }
     if (myEpoch !== transportEpoch) return
     pollTimer = setTimeout(tick, withJitter(POLLING_INTERVALS.changeManifest))
