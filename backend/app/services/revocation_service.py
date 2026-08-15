@@ -429,6 +429,33 @@ class RevocationService:
 # safety net).
 
 
+def _publish_permissions_changed(session, *, user_id: str) -> None:
+    """Tell ``user_id``'s open tabs their claims moved.
+
+    Deferred to the caller's commit rather than fired here, and the
+    distinction matters: ``GET /me/permissions`` answers from a freshly
+    minted token, which is resolved from the bindings table. Announcing
+    before the binding write commits would send the client to re-read
+    claims that have not changed yet — and, having recorded the new
+    version, it would never ask again.
+
+    Best-effort, like everything else on this path: no session means no
+    transaction to hang the publish on, and the client's reconciliation
+    poll covers it.
+    """
+    if session is None:
+        return
+    try:
+        from backend.app.changes import topics as change_topics
+        from backend.app.changes.publish import publish_change_after_commit
+
+        publish_change_after_commit(session, change_topics.permissions_for(user_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "_publish_permissions_changed(user=%s) failed: %s", user_id, exc,
+        )
+
+
 async def _emit_session_revoked(
     session, *, user_id: str, reason: str, sessions_killed: int = 1,
 ) -> None:
@@ -487,6 +514,7 @@ async def revoke_subject_sessions(
             await _emit_session_revoked(
                 session, user_id=subject_id, reason=reason,
             )
+            _publish_permissions_changed(session, user_id=subject_id)
             return 1
         except Exception as exc:  # noqa: BLE001 — best-effort by design
             logger.warning(
@@ -519,6 +547,7 @@ async def revoke_subject_sessions(
                 await _emit_session_revoked(
                     session, user_id=m.user_id, reason=reason,
                 )
+                _publish_permissions_changed(session, user_id=m.user_id)
                 count += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

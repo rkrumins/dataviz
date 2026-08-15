@@ -1,14 +1,15 @@
 /**
  * useNotifications — the bell's data.
  *
- * Poll posture matches the app's other always-mounted idle polls
- * (announcements, ``/me/permissions``): the interval baseline comes from
- * ``config/polling.ts``, and ``refetchIntervalInBackground`` is left at
- * its default of false so a hidden tab costs nothing. The interval is the
- * floor, not the mechanism people notice — ``refetchOnWindowFocus`` is
- * what makes the badge correct the moment someone looks at the tab.
+ * There is no interval. A notification exists because somebody else did
+ * something — it is an event, and the change feed delivers it as one, so
+ * this refetches when the caller's notification topic moves rather than
+ * once a minute forever on the chance that it did.
  *
- * ``staleTime`` has to be set explicitly: the app-wide default is five
+ * ``refetchOnWindowFocus`` stays: it is what makes the badge correct the
+ * moment someone looks at the tab, and it covers the window where the
+ * feed's transport is reconnecting. ``staleTime`` has to be set
+ * explicitly for it to mean anything — the app-wide default is five
  * minutes, which would make the focus refetch a no-op for most returns.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -18,7 +19,7 @@ import {
     type Notification,
     type NotificationList,
 } from '@/services/notificationsService'
-import { POLLING_INTERVALS } from '@/config/polling'
+import { useUserChangeTopic } from '@/store/changeFeed'
 
 export const NOTIFICATIONS_QUERY_KEY = ['me', 'notifications'] as const
 
@@ -39,13 +40,21 @@ export function useNotifications(): UseNotificationsResult {
     const query = useQuery<NotificationList>({
         queryKey: NOTIFICATIONS_QUERY_KEY,
         queryFn: () => listNotifications(),
-        refetchInterval: POLLING_INTERVALS.notifications,
+        // No ``refetchInterval``: the change feed wakes this when the
+        // caller's notification topic moves. A notification is written
+        // by someone else's action, so there is a real event to hang
+        // the refresh on — polling for one was asking a question whose
+        // answer was almost always no, once a minute, per tab.
         refetchOnWindowFocus: true,
         staleTime: 15_000,
         // A bell is never worth a retry storm; one attempt, then wait for
-        // the next poll.
+        // the next signal.
         retry: 1,
     })
+
+    useUserChangeTopic('notifications', () =>
+        queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_QUERY_KEY }),
+    )
 
     const markRead = useMutation<NotificationList, Error, string[] | undefined>({
         mutationFn: (ids) => markNotificationsRead(ids),

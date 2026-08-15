@@ -21,6 +21,8 @@ from pydantic import BaseModel
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.changes import topics as change_topics
+from backend.app.changes.publish import publish_change_after_commit
 from backend.app.db.models import (
     GroupMemberORM,
     NotificationORM,
@@ -80,6 +82,15 @@ async def notify(
                 resource_id=resource_id,
             ))
         await session.flush()
+        # Tell each recipient's open tabs, once this transaction commits.
+        # Registered here rather than at the five call sites because this
+        # is the one place that knows who was notified, and because the
+        # timing is not something a caller could get right anyway: the
+        # session dependency commits after the handler returns, so no
+        # line in a handler is post-commit. A rollback discards this.
+        publish_change_after_commit(
+            session, *(change_topics.notifications_for(uid) for uid in recipients)
+        )
         return len(recipients)
     except Exception:  # noqa: BLE001 — audit aid, never the write contract
         logger.exception("notify failed (kind=%s resource=%s)", kind, resource_id)

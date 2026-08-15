@@ -21,6 +21,8 @@ from backend.app.config.features import (
     validate_and_merge_values,
 )
 from backend.app.auth.dependencies import get_current_user
+from backend.app.changes import topics as change_topics
+from backend.app.changes.publish import publish_change_after_commit
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import feature_flags_repo, feature_registry_repo
 from backend.app.db.repositories.feature_flags_repo import ConcurrencyConflictError
@@ -252,8 +254,14 @@ async def patch_features(
         actor_name=actor_name,
     )
 
-    # Bust cached flag values so subsequent reads see the new state immediately
+    # Bust cached flag values so subsequent reads see the new state immediately.
+    # ``invalidate()`` only clears THIS process's copy, and production runs
+    # eight of them — the other seven kept serving the old values until
+    # their own 30s TTL lapsed. The change bump closes that: every worker's
+    # clients are told to re-read, so a flag flip reaches the whole fleet
+    # instead of whichever worker happened to serve the PATCH.
     _flag_service.invalidate()
+    publish_change_after_commit(session, change_topics.FEATURES)
 
     meta = None
     if experimental_notice_body is not None and isinstance(experimental_notice_body, dict):
@@ -433,6 +441,7 @@ async def deprecate_definition(
         raise HTTPException(status_code=404, detail={"detail": f"Feature not found: {key}", "code": "NOT_FOUND"})
     await feature_flags_repo.remove_keys_from_config(session, {key})
     _flag_service.invalidate()
+    publish_change_after_commit(session, change_topics.FEATURES)
     return await _full_response(session)
 
 

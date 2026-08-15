@@ -14,6 +14,7 @@
 import { create } from 'zustand'
 import { fetchPublicFeatureValues } from '@/services/featuresService'
 import { onAppVisible } from '@/lib/appVisibility'
+import { TOPICS, subscribeToTopic } from '@/store/changeFeed'
 
 /**
  * Seeds — mirror the backend registry defaults (`app/config/features_seed.py`) for EVERY flag
@@ -174,10 +175,6 @@ export function useFeatureChoice<T extends string>(
     })
 }
 
-/** How often a VISIBLE tab re-checks the served flags. The server caches these for 30s, and the
- *  payload is a few hundred bytes with no auth, so this is cheap. Background tabs never poll. */
-const REFRESH_MS = 60_000
-
 /**
  * Keep flags current WITHOUT a page reload.
  *
@@ -188,13 +185,18 @@ const REFRESH_MS = 60_000
  * every versioning write — and every open tab, including the admin's own, would go on showing
  * the buttons until someone happened to hard-refresh. A flag that lies is worse than no flag.
  *
- * Two cheap signals close it, no websocket required:
+ * Two signals close it, neither of them a timer:
  *   * the tab becoming visible again — which is what a human actually does after changing a
  *     setting in another tab, and costs one request at the moment they look;
- *   * a slow poll while visible, so a tab left open on a dashboard still converges.
+ *   * the `features` change topic moving, which is what an admin's save actually is. A tab left
+ *     open on a dashboard converges within a second of the write instead of within a minute of
+ *     it, and the sixty requests an hour it used to spend confirming nothing had changed are
+ *     simply not made.
  *
- * A hidden tab polls nothing: it will refresh the instant it is looked at, which is the only
- * moment its correctness matters.
+ * The topic subscription also closes a gap the poll never could: the server's flag cache is
+ * per-process with a 30s TTL, and `invalidate()` only clears the worker that served the write.
+ * The other seven kept serving the old value, so whether a tab saw the change depended on which
+ * worker answered it.
  *
  * Returns a teardown for tests. Enforcement remains SERVER-side (the 403 write gate); this only
  * decides what the UI offers, so a missed refresh is a cosmetic lag, never a security hole.
@@ -207,10 +209,17 @@ export function startFeaturesSync(): () => void {
     // `onAppVisible` owns the `visibilitychange` + `focus` pair for the whole app
     // and coalesces them. Subscribing to both here meant one alt-tab fetched flags
     // twice, and this was one of five surfaces doing exactly that.
-    const unsubscribe = onAppVisible(refresh)
-    const timer = window.setInterval(refresh, REFRESH_MS)
+    const unsubscribeVisible = onAppVisible(refresh)
+    // An admin toggling a flag is an event, so the flags refresh on that
+    // event rather than on a timer that spent all day confirming nothing
+    // had changed. This also closes a real gap: the server's flag cache
+    // is per-process with a 30s TTL and `invalidate()` only clears the
+    // worker that served the write, so the other workers went on serving
+    // the old value. The bump reaches every client regardless of which
+    // worker answers them.
+    const unsubscribeTopic = subscribeToTopic(TOPICS.features, refresh)
     return () => {
-        unsubscribe()
-        window.clearInterval(timer)
+        unsubscribeVisible()
+        unsubscribeTopic()
     }
 }

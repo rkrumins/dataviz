@@ -9,7 +9,7 @@
 import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AlertTriangle, CheckCircle, ArrowRight, Sparkles, PauseCircle } from 'lucide-react'
-import { usePolling } from '@/hooks/usePolling'
+import { TOPICS, useChangeTopic } from '@/store/changeFeed'
 import { useAnnouncementStore } from '@/store/announcements'
 
 const SNOOZE_TICK = 1000 // re-check snooze expiry every second
@@ -54,20 +54,29 @@ function formatSnoozeLabel(minutes: number): string {
 }
 
 export function GlobalAnnouncementBanner() {
-  const { announcements, snoozedUntil, pollIntervalSeconds, fetchActive, fetchConfig, snooze } = useAnnouncementStore()
+  const { announcements, snoozedUntil, fetchActive, fetchConfig, snooze } = useAnnouncementStore()
   const [, setTick] = useState(0) // force re-render to check snooze expiry
 
-  // Fetch config on mount (polling interval, default snooze)
+  // Fetch config (default snooze) and the current banners on mount.
+  // The initial fetch is explicit now: it used to come free from
+  // ``usePolling``'s fire-on-mount, and ``useChangeTopic`` deliberately
+  // does not fetch on subscribe — it seeds from the version it already
+  // holds, precisely so that a surface's own mount fetch is not
+  // immediately duplicated.
   useEffect(() => {
     fetchConfig()
-  }, [fetchConfig])
+    void fetchActive()
+  }, [fetchConfig, fetchActive])
 
-  // Poll for announcements with jitter + Page Visibility pause via the
-  // shared hook. ``pollIntervalSeconds`` comes from the admin config
-  // and changes when ops dials it remotely; usePolling re-arms its
-  // timer on dep change. WS-2's ETag headers mean ~95% of these
-  // poll requests become 304 No-Body in steady state.
-  usePolling(fetchActive, pollIntervalSeconds * 1000)
+  // Refresh when the announcements topic moves, not on a timer. An
+  // announcement changes when an admin writes one — a handful of times a
+  // year — so the poll this replaces was asking a question whose answer
+  // was almost always no, four times a minute, per tab, forever.
+  //
+  // No local fallback timer: the change feed owns that. It polls one
+  // manifest for every subscribed surface at once, so the safety net is
+  // one request for the whole app rather than one per banner.
+  useChangeTopic(TOPICS.announcements, fetchActive)
 
   // Tick every second to re-evaluate snooze expiry
   useEffect(() => {

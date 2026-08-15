@@ -48,6 +48,18 @@ export const POLLING_INTERVALS = {
    */
   providerStatus: 60_000,
   /**
+   * The change manifest (`GET /api/v1/changes`) — the one request that
+   * replaced nine.
+   *
+   * This is a reconciliation floor, not the mechanism: surfaces are woken
+   * by the feed, and this exists to catch anything the transport missed
+   * (a bump lost to a Redis blip, a stream that was disconnected). 60s is
+   * the cadence the *slowest* of the nine polls used to run at, so the
+   * worst case after this change is the best case before it — for one
+   * endpoint instead of nine.
+   */
+  changeManifest: 60_000,
+  /**
    * Aggregation worker fleet panel (admin → workspace). Ticks while the
    * panel is mounted; the fleet is a live operational view, so 10s is
    * the cadence an operator expects. Jitter and the hidden-tab pause

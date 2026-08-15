@@ -108,6 +108,30 @@ _REACHABLE_PROBE_CACHE_S = float(os.getenv("PROVIDER_PREFLIGHT_CACHE_S", "3"))
 _NON_CLOSED_BREAKER_STATES = (BreakerState.OPEN.value, BreakerState.HALF_OPEN.value)
 
 
+async def _publish_provider_state_changed() -> None:
+    """Tell connected clients that provider state moved.
+
+    Called only on an actual transition — a provider recovering, or a
+    breaker tripping closed → open — never on a probe that merely
+    confirms what was already true. That distinction is the whole reason
+    this is safe to wire into the probe path: provider health is checked
+    constantly, and a bump per check would turn every client's idle poll
+    into an idle refetch, which is worse than the poll it replaced.
+
+    Best-effort and non-fatal: provider observation must not depend on
+    Redis being reachable.
+    """
+    try:
+        from backend.app.changes import topics as change_topics
+        from backend.app.changes.publish import publish_change
+
+        await publish_change(
+            change_topics.PROVIDER_HEALTH, change_topics.PROVIDER_STATUS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("provider state change publish failed: %s", exc)
+
+
 class HealthState(str, Enum):
     """Observable health of a provider from the manager's perspective."""
     UNKNOWN = "unknown"
@@ -719,6 +743,7 @@ class ProviderManager:
                 "Provider %s recovered (source=%s) — breakers reset, cache evicted",
                 provider_id, source,
             )
+            await _publish_provider_state_changed()
 
     async def record_probe_failure(
         self,
@@ -810,6 +835,12 @@ class ProviderManager:
                 logger.warning(
                     "Failed to pre-trip breaker %r: %s", cache_key, exc,
                 )
+
+        # A non-empty ``pre_trip_targets`` means a breaker just went
+        # closed → open: this provider has actually changed state, as
+        # opposed to failing another probe it was already failing.
+        if pre_trip_targets:
+            await _publish_provider_state_changed()
 
     def snapshot_state(
         self, provider_id: str, graph_name: str = "",

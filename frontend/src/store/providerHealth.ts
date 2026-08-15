@@ -9,6 +9,8 @@
 import { create } from 'zustand'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { TIMEOUTS } from '@/config/timeouts'
+import { onAppVisible } from '@/lib/appVisibility'
+import { TOPICS, subscribeToTopic } from '@/store/changeFeed'
 
 export type ProviderStatus = 'healthy' | 'unhealthy' | 'unknown'
 
@@ -108,69 +110,78 @@ export const useProviderHealthStore = create<ProviderHealthState>((set, get) => 
 
 // ─── Polling ──────────────────────────────────────────────────────────────────
 
-// 60s (was 30s): aligned to the provider-status poll so provider health
-// polling settles at ~once/minute. The advisory signal doesn't need to be
-// tighter — real outages surface through request failures and the banner.
-const POLL_INTERVAL_MS = 60_000
-let pollTimer: ReturnType<typeof setTimeout> | null = null
 let authReady = false
-// Set SYNCHRONOUSLY by startPolling, before any await. The old guard tested
-// `pollTimer`, which is only assigned AFTER `await refresh()` resolves — so
-// for the entire duration of the in-flight request it was still null and the
-// guard let re-entrant callers through, each spawning another chain.
+/** Teardown for the change-topic subscription, or null when not subscribed. */
+let unsubscribeTopic: (() => void) | null = null
+// Set SYNCHRONOUSLY before any await, so a re-entrant caller cannot start a
+// second read while the first is still in flight. The original guard tested
+// `pollTimer`, which was only assigned AFTER `await refresh()` resolved — so
+// for the whole duration of the in-flight request it was still null and the
+// guard let re-entrant callers straight through.
 let running = false
-// Invalidates in-flight chains. A poll parked in `await refresh()` holds no
-// timer handle yet, so stopPolling() has nothing to clear; without an epoch it
-// wakes up afterwards and re-arms itself, resurrecting a chain that was meant
-// to be dead. Every leaked chain then reschedules itself forever and can never
-// be cancelled, so the request rate climbs monotonically for the lifetime of
-// the tab (measured: this 60s poll arriving 5.9x/second — ~350 live chains —
-// with the heap climbing alongside as each chain retains its closure).
+// Invalidates a read that is parked in `await refresh()` when the session
+// ends underneath it, so it cannot apply its result to a torn-down store.
 //
-// This bites hardest exactly when a provider is DOWN: the re-entrancy window
-// IS the in-flight request latency, and /health/providers probes the dead
-// provider with a 30s timeout. A healthy provider answers in milliseconds and
-// the window is too small to notice.
+// It used to carry more weight than that. This was a self-rescheduling chain,
+// and a parked poll held no timer handle, so a teardown's clearTimeout had
+// nothing to cancel: the poll woke afterwards and re-armed itself,
+// resurrecting a chain that was meant to be dead. Each leaked chain then
+// rescheduled forever and could never be cancelled, so the request rate
+// climbed monotonically for the lifetime of the tab — measured at this 60s
+// poll arriving 5.9x/second, roughly 350 live chains, with the heap climbing
+// alongside as every chain retained its closure. It bit hardest exactly when
+// a provider was DOWN, because the re-entrancy window IS the in-flight
+// request latency and /health/providers probes a dead provider with a 30s
+// timeout.
+//
+// Nothing re-arms now, so that whole failure mode is gone by construction.
 let epoch = 0
 
-function startPolling() {
+/** Read provider health once. Nothing re-arms; the caller decides when. */
+function refreshOnce() {
   if (running || !authReady) return
+  if (typeof document !== 'undefined' && document.hidden) return
   running = true
   const myEpoch = epoch
-
-  const poll = async () => {
-    if (myEpoch !== epoch) return
-    await useProviderHealthStore.getState().refresh()
-    if (myEpoch !== epoch) return
-    const jitter = Math.random() * 5_000
-    pollTimer = setTimeout(poll, POLL_INTERVAL_MS + jitter)
-  }
-  void poll()
+  void (async () => {
+    try {
+      if (myEpoch !== epoch) return
+      await useProviderHealthStore.getState().refresh()
+    } finally {
+      if (myEpoch === epoch) running = false
+    }
+  })()
 }
 
 function stopPolling() {
   epoch += 1
   running = false
-  if (pollTimer) {
-    clearTimeout(pollTimer)
-    pollTimer = null
+  if (unsubscribeTopic) {
+    unsubscribeTopic()
+    unsubscribeTopic = null
   }
 }
 
-/** Call once after auth resolves to enable polling. */
+/** Call once after auth resolves. */
 export function enableProviderHealthPolling() {
   authReady = true
-  if (typeof document !== 'undefined' && !document.hidden) {
-    startPolling()
+  // Provider health changes when a provider actually goes down or comes
+  // back, and the backend publishes exactly those transitions — not every
+  // probe, which would make this busier than the poll it replaces. So the
+  // indicator now moves when the thing it indicates moves, instead of
+  // asking sixty times an hour whether it had.
+  if (unsubscribeTopic === null) {
+    unsubscribeTopic = subscribeToTopic(TOPICS.providerHealth, refreshOnce)
   }
+  refreshOnce()
 }
 
-if (typeof document !== 'undefined') {
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      stopPolling()
-    } else {
-      startPolling()
-    }
-  })
+/** Call on logout / session loss. */
+export function disableProviderHealthPolling() {
+  authReady = false
+  stopPolling()
 }
+
+// Coming back to a tab is worth one read: the change feed's transport may
+// have been disconnected while it was hidden.
+onAppVisible(refreshOnce)

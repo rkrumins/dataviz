@@ -37,23 +37,29 @@ import { useAuthStore, claimsSnapshot } from './auth'
 import type { PermissionClaims } from '@/services/authService'
 import { authService } from '@/services/authService'
 import { getQueryClient } from '@/lib/queryClient'
-import { POLLING_INTERVALS, withJitter } from '@/config/polling'
 import { notifyPermissionsChanged } from './permissionChangeBus'
 import { onAppVisible } from '@/lib/appVisibility'
+import { subscribeToUserTopic } from '@/store/changeFeed'
 
-const POLL_INTERVAL_MS = POLLING_INTERVALS.permissions
-
-let pollTimer: ReturnType<typeof setTimeout> | null = null
 let authReady = false
+/** Teardown for the change-topic subscription, or null when not subscribed. */
+let unsubscribeTopic: (() => void) | null = null
 /** Set SYNCHRONOUSLY before the first await, so a re-entrant caller cannot
- *  start a second chain while the first is still in flight. `epoch` invalidates
- *  a chain that is parked in ``await pollOnce()``: such a chain holds no timer
- *  handle, so ``stopPolling()``'s ``clearTimeout`` has nothing to cancel, and
- *  without the epoch it wakes up afterwards and calls ``scheduleNext()``,
- *  resurrecting itself. Same defect as ``store/providerHealth.ts`` — every
- *  re-entrant enable / tab-focus during an in-flight request permanently leaked
- *  another immortal, self-rescheduling chain, and the request rate climbed for
- *  the lifetime of the tab. */
+ *  start a second read while the first is still in flight.
+ *
+ *  This used to guard something more dangerous. The refresh was a
+ *  self-rescheduling chain, and a chain parked in ``await pollOnce()``
+ *  held no timer handle — so a teardown's ``clearTimeout`` had nothing
+ *  to cancel, and the parked chain woke up afterwards and re-armed
+ *  itself. Every re-entrant enable or tab-focus during an in-flight
+ *  request leaked another immortal chain and the request rate climbed
+ *  for the lifetime of the tab (the same defect
+ *  ``store/providerHealth.ts`` carried).
+ *
+ *  Nothing re-arms now, so that class of leak is gone by construction.
+ *  ``epoch`` still earns its place for the narrower case: a read parked
+ *  in its request when the session ends must not apply its result to a
+ *  store that has since been torn down. */
 let running = false
 let epoch = 0
 /** JSON-stringified previous claims, used for cheap change detection.
@@ -139,37 +145,29 @@ async function pollOnce(): Promise<void> {
     }
 }
 
-function scheduleNext(myEpoch: number): void {
-    if (myEpoch !== epoch) return
-    if (!authReady || typeof document === 'undefined' || document.hidden) return
-    pollTimer = setTimeout(async () => {
-        if (myEpoch !== epoch) return
-        await pollOnce()
-        scheduleNext(myEpoch)
-    }, withJitter(POLL_INTERVAL_MS))
-}
-
 function stopPolling(): void {
     epoch += 1
     running = false
-    if (pollTimer) {
-        clearTimeout(pollTimer)
-        pollTimer = null
-    }
 }
 
-/** Start exactly one poll chain: fire now, then resume the jittered cadence.
- *  Idempotent — a chain that is already running, INCLUDING one parked in an
- *  in-flight request, is left alone rather than duplicated. */
-function startChain(): void {
+/** Re-read the caller's claims, once.
+ *
+ *  There is no chain any more — nothing re-arms, so nothing can leak a
+ *  second one. ``epoch`` still guards the window where a poll is parked
+ *  in its request and the session ends underneath it: that poll must not
+ *  apply its result to a store that has since been torn down. */
+function refreshClaims(): void {
     if (running || !authReady) return
     if (typeof document !== 'undefined' && document.hidden) return
     running = true
     const myEpoch = epoch
     void (async () => {
-        if (myEpoch !== epoch) return
-        await pollOnce()
-        scheduleNext(myEpoch)
+        try {
+            if (myEpoch !== epoch) return
+            await pollOnce()
+        } finally {
+            if (myEpoch === epoch) running = false
+        }
     })()
 }
 
@@ -193,8 +191,12 @@ export function enablePermissionPolling(): void {
     // broadcast. Restoring a window of ten tabs paid that on every one.
     // Seeding is pure state, safe to do while hidden; only the chain waits.
     lastSnapshot = claimsSnapshot(useAuthStore.getState().permissions)
-    if (typeof document !== 'undefined' && document.hidden) return
-    startChain()
+    // An admin changing your bindings is an event, and the backend now
+    // publishes it. Subscribe instead of asking every 60 seconds whether
+    // it happened — the answer was no essentially every time.
+    if (unsubscribeTopic === null) {
+        unsubscribeTopic = subscribeToUserTopic('permissions', refreshClaims)
+    }
 }
 
 /** Call on session loss / logout to stop polling and clear the
@@ -202,6 +204,10 @@ export function enablePermissionPolling(): void {
 export function disablePermissionPolling(): void {
     authReady = false
     lastSnapshot = ''
+    if (unsubscribeTopic) {
+        unsubscribeTopic()
+        unsubscribeTopic = null
+    }
     stopPolling()
 }
 
@@ -221,13 +227,10 @@ if (typeof document !== 'undefined') {
 // a request per switch. ``onAppVisible``'s refresh floor bounds that.
 onAppVisible(() => {
     if (!authReady) return
-    // Poll immediately so the user sees any mutation that happened while
-    // they were away, then resume the regular cadence. stopPolling() bumps
-    // the epoch, which retires any chain still parked in an in-flight
-    // request, so startChain() leaves exactly one chain running — not one
-    // more.
-    stopPolling()
-    startChain()
+    // Re-read on return: the change feed's transport may have been
+    // disconnected while the tab was hidden, and this is the moment the
+    // user would notice stale claims.
+    refreshClaims()
 })
 
 // Test-only escape hatch. Tests need to exercise a single tick of
