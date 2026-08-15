@@ -9,11 +9,26 @@
  * wrong version, wrong shapes — returns null and the app simply opens
  * normally (a share link must never be able to break the canvas).
  *
- * v2 is the current shape (below). v1 — written before the walk-model
- * swap (T10) — carried a state model (`closed`/`frontier`/`containers`/
- * `contains`) that no longer exists, so decoding a v1 token restores only
- * `entries`/`cursor`/`mode`: a colleague's old link still lands on the
- * same walked path, in the same body mode, rather than failing outright.
+ * v3 is the current shape (below) — T23 grew `LensViewState` by three
+ * fields (`pinned`/`railWindow`/`condensedOpen`, the hub-triage
+ * placements, the rail's own window position, and which condensed runs
+ * are unfolded), and a v2 token has none of them. Bumped rather than
+ * folded silently into v2, per the same reasoning `framePages`' own note
+ * below already sets out: a NEW field a v2 encoder never wrote is
+ * indistinguishable from one it wrote as empty, so a version bump is
+ * what lets `decodeLensShare` tell "this link predates placements" apart
+ * from "this link's reader placed nothing" — the first restores to
+ * empty/null (a graceful, documented degrade, exactly v1→v2's own
+ * pattern), the second is just what it says.
+ *
+ * v2 — written before T23 — carries everything v3 does except those
+ * three fields; a v2 token still restores its FULL exploration (nothing
+ * about it was wrong, it is simply from before the feature existed).
+ * v1 — written before the walk-model swap (T10) — carried a state model
+ * (`closed`/`frontier`/`containers`/`contains`) that no longer exists, so
+ * decoding a v1 token restores only `entries`/`cursor`/`mode`: a
+ * colleague's old link still lands on the same walked path, in the same
+ * body mode, rather than failing outright.
  */
 
 export type LensSharePreset = 'both' | 'in' | 'out'
@@ -58,11 +73,27 @@ export interface LensShareStateV2 {
   frameQueries: Array<[string, string]>
 }
 
-/** v2 → the full exploration; v1 → the graceful subset described above. */
-export type LensShareState = LensShareStateV1 | LensShareStateV2
+export interface LensShareStateV3 extends Omit<LensShareStateV2, 'v'> {
+  v: 3
+  /** T23 R3 — urns the reader placed on the board from a hub triage
+   *  list, verbatim off `LensViewState.pinned`. */
+  pinned: string[]
+  /** T23 R1 — the hop rail's own window center (signed hop distance),
+   *  or `null` for "centered on the focal" — `LensViewState.railWindow`
+   *  verbatim. */
+  railWindow: number | null
+  /** T23 R2 — connector ids the reader explicitly unfolded, verbatim off
+   *  `LensViewState.condensedOpen`. */
+  condensedOpen: string[]
+}
 
-export function encodeLensShare(state: Omit<LensShareStateV2, 'v'>): string {
-  const json = JSON.stringify({ v: 2, ...state })
+/** v3 → the full exploration; v2 → the same, minus placements/window/
+ *  condensed-open (all three restore empty/null); v1 → the graceful
+ *  subset described above. */
+export type LensShareState = LensShareStateV1 | LensShareStateV2 | LensShareStateV3
+
+export function encodeLensShare(state: Omit<LensShareStateV3, 'v'>): string {
+  const json = JSON.stringify({ v: 3, ...state })
   // UTF-8-safe base64url (labels/urns can contain any unicode).
   const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(json)))
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
@@ -100,7 +131,7 @@ export function decodeLensShare(raw: string): LensShareState | null {
       // not sink an otherwise-valid path + mode restore.
       return { v: 1, entries, cursor, mode }
     }
-    if (s.v !== 2) return null
+    if (s.v !== 2 && s.v !== 3) return null
 
     if (s.direction !== 'both' && s.direction !== 'in' && s.direction !== 'out') return null
     // Bounded to the depth control's own sanctioned maximum (1|2|3, see
@@ -124,8 +155,7 @@ export function decodeLensShare(raw: string): LensShareState | null {
     const frameQueries = pairArray(s.frameQueries, v => typeof v === 'string')
     if (frameQueries === null) return null
 
-    return {
-      v: 2,
+    const v2Shape: Omit<LensShareStateV2, 'v'> = {
       entries,
       cursor,
       mode,
@@ -138,6 +168,18 @@ export function decodeLensShare(raw: string): LensShareState | null {
       framePages: framePages as Array<[string, number]>,
       frameQueries: frameQueries as Array<[string, string]>,
     }
+    if (s.v === 2) return { v: 2, ...v2Shape }
+
+    // v3 — T23's own three fields, absent from a v2 token by definition
+    // (it predates them): validated the same defensive way as everything
+    // else here, never assumed present.
+    const pinned = stringArray(s.pinned)
+    if (pinned === null) return null
+    if (s.railWindow !== null && (typeof s.railWindow !== 'number' || !Number.isFinite(s.railWindow))) return null
+    const condensedOpen = stringArray(s.condensedOpen)
+    if (condensedOpen === null) return null
+
+    return { v: 3, ...v2Shape, pinned, railWindow: s.railWindow, condensedOpen }
   } catch {
     return null
   }

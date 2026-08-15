@@ -79,6 +79,11 @@ export interface WalkFixture {
   /** Consecutive stops in the walked path, as `[from, to]` urn pairs —
    *  the wires that draw slightly firmer. */
   trailAdjacent?: Array<[string, string]>
+  /** T23 R3 — pre-opens the hub-triage list for the shot (it only ever
+   *  opens from a click, which a still picture can't drive). The CARD id
+   *  a follow control hangs off — `'f'` for the focal, `n:${urn}`/
+   *  `fr:${urn}` otherwise, the same scheme `isolatedId` above uses. */
+  triageAnchor?: { cardId: string; dir: 'in' | 'out' }
 }
 
 const scripted = (
@@ -920,6 +925,46 @@ const walkWideHub = (): WalkFixture => {
 }
 
 /**
+ * T23 R1/R2 — the twenty-hop chain with the run NEAREST the focus
+ * unfolded (its four interior steps drawn) and the window steered
+ * off-centre to hold them: the "condensed run + its unfold" and "a
+ * window move" mandatory shots together — both are the SAME state
+ * (`condensedOpen`/`railWindow`) a reader reaches by clicking, not two
+ * separate pictures. The FAR run (`up00`..`up05`) and the whole
+ * downstream side stay condensed/folded, for contrast in the same shot.
+ * Connector ids are `condense:${boundaryA}>${boundaryB}` over CARD ids
+ * (`condensation.ts`) — `up05`'s run head is `n:up05`, and the focal's
+ * own card id is the bare `'f'` (`focus-layout.ts`'s `baseCard`).
+ */
+const walkLongChainUnfolded = (): WalkFixture => {
+  const base = walkLongChain()
+  return {
+    ...base,
+    title: 'The chain — one run unfolded, the window steered off-centre',
+    script: b => ({
+      ...(base.script ? base.script(b) : b),
+      condensedOpen: new Set(['condense:n:up05>f']),
+      railWindow: -3,
+    }),
+  }
+}
+
+/**
+ * T23 R3 — `walkWideHub` with the hub-triage list forced open on F's own
+ * hundred-incoming upstream direction: the mandatory "triage list on
+ * walkWideHub" shot. FORCED, not clicked — the canonical fixture's own
+ * default script (T20) admits all twelve systems for free (12 ≤
+ * REVEAL_PAGE), so no ⊕ here would naturally cross the triage gate; the
+ * panel is shown at the scale it exists for regardless, the same reason
+ * `isolatedId` forces a state a still picture cannot click its way to.
+ */
+const walkWideHubTriage = (): WalkFixture => ({
+  ...walkWideHub(),
+  title: 'The hundred-incoming hub — the triage list, forced open',
+  triageAnchor: { cardId: 'f', dir: 'in' },
+})
+
+/**
  * THE GRAIN SEAM (Task 22, R1) — both failure directions in one estate.
  *
  *   Snowflake ⊃ REPORTING (chrome, demoted) ⊃ rpt_customer_360 (the focus)
@@ -1043,7 +1088,9 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkColumnFocus: walkColumnFocus(),
   walkPlatformFocus: walkPlatformFocus(),
   walkLongChain: walkLongChain(),
+  walkLongChainUnfolded: walkLongChainUnfolded(),
   walkWideHub: walkWideHub(),
+  walkWideHubTriage: walkWideHubTriage(),
   walkGrainSeam: walkGrainSeam(),
   walkGrainSeamUnderclaim: walkGrainSeamUnderclaim(),
 }

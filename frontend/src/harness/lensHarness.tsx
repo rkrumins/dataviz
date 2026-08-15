@@ -164,6 +164,14 @@ export function Harness() {
           onRevealMore={noop}
           onExtend={noop}
           onPage={noop}
+          railCards={built.railCards}
+          railWindow={built.railWindow}
+          onWindowJump={noop}
+          onCondenseRun={noop}
+          partnersFor={built.partnersFor}
+          onPin={noop}
+          onOpenTriage={noop}
+          triageAnchor={built.triageAnchor}
         />
       </ReactFlowProvider>
       {perfReport && (

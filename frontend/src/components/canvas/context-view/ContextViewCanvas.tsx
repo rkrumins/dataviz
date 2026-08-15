@@ -3095,22 +3095,28 @@ export function ContextViewCanvas({
   // store.
   const lensFocal = lensFocalOf(lensHistory)
   const userLensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
-  // A share v2 link's `depth` overrides the pref for exactly the
+  // A share v2/v3 link's `depth` overrides the pref for exactly the
   // RESTORED focal's initial fetch: useLensWalk's own cache guard
   // (`startedRef`) means this can only ever matter for that ONE fetch —
   // once it has fired (or for any other focal), the user's own
   // preference is what's in effect, so this never becomes a silent,
   // permanent override for the rest of the session.
-  const lensInitialDepth = initialLensShare && initialLensShare.v === 2 && lensFocal === initialLensShare.entries[initialLensShare.cursor]
+  const lensInitialDepth = initialLensShare && (initialLensShare.v === 2 || initialLensShare.v === 3) && lensFocal === initialLensShare.entries[initialLensShare.cursor]
     ? initialLensShare.depth
     : userLensInitialDepth
   const lensWalk = useLensWalk(lensFocal, provider, lensInitialDepth)
   // The rest of a restored exploration — applied once, inside the lens,
   // to the same focal the depth override above targets.
   const lensWalkSeed = useMemo<LensWalkSeed | null>(() => {
-    if (!initialLensShare || initialLensShare.v !== 2) return null
+    if (!initialLensShare || (initialLensShare.v !== 2 && initialLensShare.v !== 3)) return null
     const { entries, cursor, direction, revealed, opened, collapsed, frameAll, framePages, frameQueries } = initialLensShare
-    return { nodeId: entries[cursor], direction, revealed, opened, collapsed, frameAll, framePages, frameQueries }
+    // T23 — a v2 link predates placements/rail-window/condensed-open;
+    // the graceful degrade is the same shape a fresh focal opens with
+    // (nothing placed, window centered, everything condensed).
+    const { pinned, railWindow, condensedOpen } = initialLensShare.v === 3
+      ? initialLensShare
+      : { pinned: [], railWindow: null, condensedOpen: [] }
+    return { nodeId: entries[cursor], direction, revealed, opened, collapsed, frameAll, framePages, frameQueries, pinned, railWindow, condensedOpen }
   }, [initialLensShare])
   // "What is really inside this entity" — membership, which the lineage
   // walk structurally cannot answer (it only ever knows the

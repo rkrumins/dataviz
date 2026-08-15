@@ -43,6 +43,7 @@ import {
   boundaryFrontierFilter,
   buildLensSubgraph,
   distinctSystemCount,
+  rootUrnOf,
   type LensSubgraph,
 } from './lens/lens-subgraph'
 import {
@@ -54,13 +55,15 @@ import {
   type LensRoster,
   type LensViewState,
 } from './lens/focus-layout'
+import { applyHopWindow, bandRangeOf, HOP_WINDOW } from './lens/hop-window'
+import { applyCondensation } from './lens/condensation'
 import { generateColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { usePreferencesStore } from '@/store/preferences'
 import { useTourStore } from '@/features/tour/tourStore'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { lensFocalOf, type LensHistory } from './lens/lensHistory'
-import { labelOf, edgeLabelFor, orientationHalf, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach } from './lens/focus-cards'
+import { labelOf, edgeLabelFor, orientationHalf, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach, type TriagePartner } from './lens/focus-cards'
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
 
@@ -72,36 +75,39 @@ const EMPTY_EXTEND_STATUS: ReadonlyMap<string, 'loading' | 'error'> = new Map()
 const EMPTY_ROSTERS: ReadonlyMap<string, LensRoster> = new Map()
 const EMPTY_ROSTER_STATUS: ReadonlyMap<string, LensFetchStatus> = new Map()
 
-/** One hop-1 neighbour of the focus, as the walk model reports it —
- *  the same edges the graph body draws, counted the same way, so the
- *  two bodies cannot disagree about what is connected. */
-interface WalkNeighbor {
-  urn: string
-  label: string
-  type: string
-  /** Raw hops between this entity and the focus side. */
-  weight: number
-  /** The one relationship type these hops share, '' when they differ. */
-  edgeTypeNorm: string
-  parentUrn: string | null
-  parentLabel: string | null
-}
+/**
+ * One hop-1 neighbour of an anchor, as the walk model reports it — the
+ * same edges the graph body draws, counted the same way, so the two
+ * bodies cannot disagree about what is connected. `TriagePartner`
+ * (focus-cards.ts) is this same shape plus its containment ROOT — the
+ * hub-triage list's own "system" grouping.
+ */
+type WalkNeighbor = TriagePartner
 
 /**
- * The focus's direct neighbours, straight off the walk model.
+ * An anchor's direct neighbours, straight off the walk model —
+ * `sg.focusUrn` for the focal's own orientation sentence, or any other
+ * urn for T23 R3's hub-triage list (opened off a follow control that is
+ * not necessarily the focal's own).
  *
- * "Hop 1" is structural: a lineage edge with one endpoint on the FOCUS
- * SIDE (the focus plus everything contained in it — a container has no
+ * "Hop 1" is structural: a lineage edge with one endpoint on the ANCHOR
+ * SIDE (the anchor plus everything contained in it — a container has no
  * edges of its own, only its descendants do) and the other outside it.
- * That is exactly the rule `buildLensSubgraph` uses to number hops, so
- * the list body and the graph body are two renderings of one fact.
+ * That is exactly the rule `buildLensSubgraph` uses to number hops from
+ * the FOCUS, generalized here to any anchor so a triage list opened on a
+ * frame's own ⊕ counts the same way that frame's badge already does.
+ *
+ * Exported so the harness (`buildWalk.ts`) can build a triage-list shot
+ * through the SAME function `partnersFor` calls in production, rather
+ * than a second copy that could quietly drift from it.
  */
-function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>): {
+// eslint-disable-next-line react-refresh/only-export-components
+export function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>, anchorUrn: string = sg.focusUrn): {
   incoming: WalkNeighbor[]
   outgoing: WalkNeighbor[]
 } {
   const focusSide = new Set<string>()
-  const stack = [sg.focusUrn]
+  const stack = [anchorUrn]
   while (stack.length > 0) {
     const urn = stack.pop()!
     if (focusSide.has(urn) || !sg.nodes.has(urn)) continue
@@ -125,6 +131,12 @@ function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>): {
       .map(([urn, { weight, types }]) => {
         const node = sg.nodes.get(urn)
         const parentUrn = node?.parent ?? null
+        // T23 R3 — the containment ROOT, not just the immediate parent:
+        // "grouped by system" reads the same "system" the orientation
+        // sentence's own "across N systems" already means
+        // (`distinctSystemCount`), not whatever frame happens to be one
+        // level up.
+        const systemUrn = rootUrnOf(sg, urn)
         return {
           urn,
           label: labelFor(urn),
@@ -133,6 +145,8 @@ function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>): {
           edgeTypeNorm: types.size === 1 ? [...types][0] : '',
           parentUrn,
           parentLabel: parentUrn ? labelFor(parentUrn) : null,
+          systemUrn,
+          systemLabel: systemUrn === urn ? labelFor(urn) : labelFor(systemUrn),
         }
       })
       .sort((a, b) => b.weight - a.weight || a.label.localeCompare(b.label) || a.urn.localeCompare(b.urn))
@@ -229,6 +243,16 @@ export interface LensWalkSeed {
   frameAll: string[]
   framePages: Array<[string, number]>
   frameQueries: Array<[string, string]>
+  /** T23 R3 — placements from a v3 share link; `[]` for a v2 one (it
+   *  predates hub triage). */
+  pinned: string[]
+  /** T23 R1 — the rail's own window center from a v3 share link; `null`
+   *  for a v2 one, which is also the default ("centered on the focal"). */
+  railWindow: number | null
+  /** T23 R2 — unfolded connector ids from a v3 share link; `[]` for a v2
+   *  one (it predates condensation, so nothing was ever folded to begin
+   *  with — every run just opens condensed, as it always does). */
+  condensedOpen: string[]
 }
 
 export interface LineageLensProps {
@@ -393,6 +417,9 @@ export function LineageLens({
         // saw, so they come out the same.
         walkedThrough: new Set(),
         drawnRank: new Map(),
+        pinned: new Set(walkSeed.pinned),
+        railWindow: walkSeed.railWindow,
+        condensedOpen: new Set(walkSeed.condensedOpen),
       },
     })
     setDirectionState({ nodeId, dir: walkSeed.direction })
@@ -409,6 +436,45 @@ export function LineageLens({
     walkStatus,
     directionFilter,
   }), [sg, view, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter])
+
+  // T23 R2 — pass-through condensation, a pure re-projection over the
+  // built layout (never touches population/grain/rank — see
+  // condensation.ts's own doc comment for why it runs BEFORE the window,
+  // below).
+  const condensed = useMemo(
+    () => applyCondensation(layout, view.condensedOpen),
+    [layout, view.condensedOpen],
+  )
+  // T23 R1 — the sliding window: a no-op whenever the fetched extent
+  // already fits inside one glance (every fixture shy of a 20-hop chain
+  // never pays for this).
+  const windowed = useMemo(
+    () => applyHopWindow(condensed, view.railWindow),
+    [condensed, view.railWindow],
+  )
+  // The RAIL always shows the WHOLE fetched extent — independent of
+  // what the board currently draws — so it reads the RAW layout's own
+  // cards, not `windowed.graph`'s reduced set. Handed to the view only
+  // once the extent actually needs one (HOP_WINDOW's own threshold).
+  const railRange = useMemo(() => bandRangeOf(layout), [layout])
+  const railCards = railRange && railRange.max - railRange.min + 1 > HOP_WINDOW ? layout.cards : undefined
+
+  const setRailWindow = useCallback((band: number) => {
+    editView(base => ({ ...base, railWindow: band }))
+  }, [editView])
+  // One control, two meanings depending on which side is currently
+  // showing: a condensed run's own connector chip ADDS itself here
+  // (unfolds), and its unfolded boundary's re-condense control REMOVES
+  // itself (folds back) — each control only ever renders in the state
+  // where its own click is the toggle's only possible direction.
+  const toggleCondense = useCallback((connectorId: string) => {
+    editView(base => {
+      const next = new Set(base.condensedOpen)
+      if (next.has(connectorId)) next.delete(connectorId)
+      else next.add(connectorId)
+      return { ...base, condensedOpen: next }
+    })
+  }, [editView])
 
   // The grain is STICKY: a level once drawn through stays drawn through
   // while this walk grows, or a second child arriving would turn a level
@@ -447,6 +513,29 @@ export function LineageLens({
   const neighbors = useMemo(() => walkNeighborRecords(sg), [sg])
   const inConnections = neighbors.incoming.reduce((n, r) => n + r.weight, 0)
   const outConnections = neighbors.outgoing.reduce((n, r) => n + r.weight, 0)
+
+  /** T23 R3 — the hub-triage list's own data source: an arbitrary
+   *  follow control's partners, weight-sorted, straight off the walk
+   *  model (never a fetch of its own — `walkNeighborRecords` is a pure
+   *  re-projection, same as `neighbors` above). A stable identity so
+   *  `FocusGraphView`'s `ctx` memo does not rebuild on every render. */
+  const partnersFor = useCallback(
+    (urn: string, dir: 'in' | 'out'): TriagePartner[] =>
+      walkNeighborRecords(sg, urn)[dir === 'in' ? 'incoming' : 'outgoing'],
+    [sg],
+  )
+
+  /** T23 R3 — a triage-list PLACEMENT: admit one or more specific urns
+   *  regardless of rank or reveal budget (`LensViewState.pinned`,
+   *  `buildFocusLayout`'s own admission for it). Grow-only, like every
+   *  other view-state edit here. */
+  const pinEntities = useCallback((urns: readonly string[]) => {
+    editView(base => {
+      const next = new Set(base.pinned)
+      for (const urn of urns) next.add(urn)
+      return { ...base, pinned: next }
+    })
+  }, [editView])
 
   // ── Growing the walk ───────────────────────────────────────────────
 
@@ -723,6 +812,26 @@ export function LineageLens({
     [nodeId],
   )
 
+  /** T23 R3 — which follow control's hub-triage list is open, keyed to
+   *  the focal exactly like `isolationState` above: a new focal is a new
+   *  question, and a triage list anchored to a card that is no longer
+   *  drawn would be a panel over nothing. Not persisted to the share
+   *  codec — it is a transient reading tool, not exploration state. */
+  const [triageState, setTriageState] = useState<{ nodeId: string | null; anchor: { cardId: string; dir: 'in' | 'out' } | null }>({ nodeId: null, anchor: null })
+  const triageAnchor = triageState.nodeId === nodeId ? triageState.anchor : null
+  const setTriageAnchor = useCallback(
+    (anchor: { cardId: string; dir: 'in' | 'out' } | null) => setTriageState({ nodeId, anchor }),
+    [nodeId],
+  )
+  /** Stable identity for `FocusGraphView`'s `ctx` memo, same reason
+   *  `extendWalk`/`seedCountForCtx` need one — an inline arrow at the
+   *  call site would rebuild `ctx` (and every card reading it) on every
+   *  render. */
+  const openTriage = useCallback(
+    (cardId: string, dir: 'in' | 'out') => setTriageAnchor({ cardId, dir }),
+    [setTriageAnchor],
+  )
+
   /**
    * Lens-local keys: capture phase so the canvas's document-level
    * keyboard handler never sees them while the lens is open.
@@ -751,11 +860,14 @@ export function LineageLens({
   const peekOpen = selection !== null
     && layout.cards.some(c => c.nodeId === selection && c.frameId !== null)
   const dismissOne = useCallback(() => {
+    // T23 R3 — the triage list is the newest, most local layer a click
+    // could have opened; it closes first, same reasoning as the peek.
+    if (triageAnchor !== null) { setTriageAnchor(null); return }
     if (peekOpen) { setSelection(null); return }
     if (isolatedId !== null) { setIsolated(null); return }
     if (selection !== null) { setSelection(null); return }
     onClose()
-  }, [peekOpen, isolatedId, selection, setIsolated, setSelection, onClose])
+  }, [triageAnchor, peekOpen, isolatedId, selection, setTriageAnchor, setIsolated, setSelection, onClose])
 
   useEffect(() => {
     if (!nodeId) return
@@ -923,6 +1035,9 @@ export function LineageLens({
       frameAll: [...view.frameShowAll],
       framePages: [...view.frameOffsets],
       frameQueries: [...view.frameQueries],
+      pinned: [...view.pinned],
+      railWindow: view.railWindow,
+      condensedOpen: [...view.condensedOpen],
     })
     const url = new URL(window.location.href)
     url.searchParams.set('lens', token)
@@ -1621,7 +1736,7 @@ export function LineageLens({
             )}
             <div data-tour="lens-graph" className="relative flex-1 min-h-0">
               <FocusGraphView
-                graph={layout}
+                graph={windowed.graph}
                 focalId={nodeId}
                 // 'unsupported' deliberately passes NOTHING: the
                 // empty-direction whispers are a claim about what the
@@ -1659,6 +1774,14 @@ export function LineageLens({
                 // makes, so the hover text can never claim a number the
                 // request itself would not back up.
                 seedCountFor={walkStatus === 'done' ? seedCountForCtx : undefined}
+                railCards={railCards}
+                railWindow={windowed.window}
+                onWindowJump={setRailWindow}
+                onCondenseRun={toggleCondense}
+                partnersFor={partnersFor}
+                onPin={pinEntities}
+                triageAnchor={triageAnchor}
+                onOpenTriage={openTriage}
               />
               {/* Status surfaces — a lone focal card floating in space
                   explains nothing. */}

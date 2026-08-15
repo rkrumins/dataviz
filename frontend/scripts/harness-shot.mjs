@@ -53,10 +53,15 @@ const FIXTURES = process.argv.slice(2).length
   // its mirror, a row's cone going dark through a coarse hop its own
   // frame carries (under-claim) — plus the in-frame routing and badge
   // legibility the same estate exercises.
+  //
+  // ...and T23's own three: the hop RAIL + sliding WINDOW at the scale
+  // that forces both (walkLongChain's default state), a run unfolded
+  // with the window steered off-centre (the same fixture, one connector
+  // opened), and the hub-TRIAGE list at true hundred-partner scale.
   : ['walkCollaterals', 'walkDeep', 'walkDiamond', 'walkHub', 'walkFrontier', 'walkSmall', 'walkDirectionAndHighlight',
     'walkSharedPlatform', 'walkSharedPlatformLeaf', 'walkSharedPlatformOneColumn', 'walkDensePills',
     'walkChildrenRich', 'walkChildrenScrolled', 'walkColumnFocus', 'walkPlatformFocus',
-    'walkIsolatedCone', 'walkIsolatedLeafCone', 'walkLongChain', 'walkWideHub',
+    'walkIsolatedCone', 'walkIsolatedLeafCone', 'walkLongChain', 'walkLongChainUnfolded', 'walkWideHub', 'walkWideHubTriage',
     'walkGrainSeam', 'walkGrainSeamUnderclaim']
 
 function findChromium() {

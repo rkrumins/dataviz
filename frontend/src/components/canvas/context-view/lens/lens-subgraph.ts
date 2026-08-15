@@ -451,6 +451,25 @@ export function distinctSystemCount<N extends LensNodeLike>(
     return roots.size
 }
 
+/**
+ * The top-level containment root ONE urn sits under — the same walk
+ * `distinctSystemCount` does per-urn, exposed standalone for T23 R3's
+ * "grouped by system" rollup, which needs the root ITSELF rather than
+ * how many distinct ones a set spans. Unmemoized (a triage list groups
+ * once per open, not per render of something large).
+ */
+export function rootUrnOf<N extends LensNodeLike>(sg: LensSubgraph<N>, start: string): string {
+    let cursor = start
+    const seen = new Set<string>([start])
+    for (;;) {
+        const parent = sg.nodes.get(cursor)?.parent ?? null
+        if (!parent || seen.has(parent)) break
+        seen.add(parent)
+        cursor = parent
+    }
+    return cursor
+}
+
 /** A lineage hop as actually drawn: between two VISIBLE nodes. */
 export interface ProjectedLensEdge {
     /** A currently-visible node. Direction is verbatim from the underlying

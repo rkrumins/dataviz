@@ -14,13 +14,16 @@
  */
 import { boundaryFrontierFilter, buildLensSubgraph, distinctSystemCount } from '@/components/canvas/context-view/lens/lens-subgraph'
 import { buildFocusLayout, initialLensViewState } from '@/components/canvas/context-view/lens/focus-layout'
+import { applyCondensation } from '@/components/canvas/context-view/lens/condensation'
+import { applyHopWindow, bandRangeOf, HOP_WINDOW } from '@/components/canvas/context-view/lens/hop-window'
+import { walkNeighborRecords } from '@/components/canvas/context-view/LineageLens'
 import type { WalkFixture } from './lensFixtures'
 
 export function buildWalk(fixture: WalkFixture) {
   const sg = buildLensSubgraph(fixture.model)
   const base = initialLensViewState(sg)
   const view = fixture.script ? fixture.script(base) : base
-  const graph = buildFocusLayout({
+  const layout = buildFocusLayout({
     sg,
     view,
     query: '',
@@ -31,9 +34,35 @@ export function buildWalk(fixture: WalkFixture) {
     walkStatus: 'done',
     directionFilter: fixture.directionFilter,
   })
+  // T23 — THE SAME two-pass projection `LineageLens` runs (condensation,
+  // then the sliding window): a screenshot through the raw
+  // `buildFocusLayout` output alone would show neither R1 nor R2, which
+  // is exactly the gap that made an earlier shot of this fixture no
+  // evidence of either feature at all — reproduced, then fixed, not
+  // assumed fixed by import order.
+  const condensed = applyCondensation(layout, view.condensedOpen)
+  const windowed = applyHopWindow(condensed, view.railWindow)
+  const railRange = bandRangeOf(layout)
+  const graph = windowed.graph
   return {
     graph,
     focalId: sg.focusUrn,
+    // T23 R1 — the rail's own contract: the WHOLE fetched extent,
+    // independent of what the window currently draws. `undefined`
+    // whenever the extent already fits one glance, same threshold
+    // `LineageLens` itself gates on.
+    railCards: railRange && railRange.max - railRange.min + 1 > HOP_WINDOW ? layout.cards : undefined,
+    railWindow: windowed.window,
+    // T23 R3 — the hub-triage list's data source, straight off the walk
+    // model; `fixture.triageAnchor` (a still picture's only way to show
+    // a panel that only ever opens from a click) resolves against THIS
+    // graph's own cards below.
+    partnersFor: (urn: string, dir: 'in' | 'out') =>
+      walkNeighborRecords(sg, urn)[dir === 'in' ? 'incoming' : 'outgoing'],
+    // T23 R3 — pre-opens the triage panel for a still shot; `undefined`
+    // (no click possible without a live app) leaves it closed, same as
+    // every other fixture.
+    triageAnchor: fixture.triageAnchor ?? null,
     directionFilter: fixture.directionFilter,
     selectedId: fixture.selectedId ?? null,
     isolatedId: fixture.isolatedId ?? null,

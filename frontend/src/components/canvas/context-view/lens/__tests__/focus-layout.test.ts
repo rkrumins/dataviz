@@ -950,6 +950,55 @@ describe('focus-layout — reveal paging', () => {
     })
 })
 
+// ── T23 R3: triage-list placement ──────────────────────────────────────
+
+describe('focus-layout — pinned (T23 R3, a triage-list placement)', () => {
+    it('places a specific low-ranked entity on the board, bypassing rank order and the reveal budget', () => {
+        // 20 weight-1 groups, ranked by label (all weights tied) — labels
+        // run z80 (u19) .. z99 (u00), so u00 ranks dead LAST and is one of
+        // the eight the default REVEAL_PAGE=12 page never reaches. Pin it.
+        const weights = new Array(20).fill(1)
+        const labels = weights.map((_, i) => `z${String(99 - i).padStart(2, '0')}`)
+        const sg = fanIn(weights, labels)
+        const base = initialLensViewState(sg)
+        expect(cardFor(layout(sg, base), 'u00')).toBeUndefined()   // confirms it's outside the default page
+        const g = layout(sg, { ...base, pinned: new Set(['u00']) })
+        expect(cardFor(g, 'u00')).toBeDefined()
+        // Nothing else the reveal page would not otherwise have shown —
+        // pinning one entity does not admit the other seven still ranked
+        // ahead of it that the default page's own budget already excludes.
+        expect(urns(g).filter(u => u !== 'F')).toHaveLength(REVEAL_PAGE + 1)
+    })
+
+    it('a pinned entity is a full citizen — wired, and counted like any other card', () => {
+        const weights = new Array(20).fill(1)
+        const labels = weights.map((_, i) => `z${String(99 - i).padStart(2, '0')}`)
+        const sg = fanIn(weights, labels)
+        const base = initialLensViewState(sg)
+        const g = layout(sg, { ...base, pinned: new Set(['u00']) })
+        const card = cardFor(g, 'u00')!
+        expect(card.wired).toBe(true)
+        expect(g.edges.some(e => e.source === card.id || e.target === card.id)).toBe(true)
+    })
+
+    it('pinning an already-drawn entity is a no-op — one card, never a duplicate', () => {
+        const weights = new Array(20).fill(1)
+        const labels = weights.map((_, i) => `z${String(99 - i).padStart(2, '0')}`)
+        const sg = fanIn(weights, labels)
+        const base = initialLensViewState(sg)
+        const already = urns(layout(sg, base)).filter(u => u !== 'F')[0]
+        const g = layout(sg, { ...base, pinned: new Set([already]) })
+        expect(g.cards.filter(c => c.nodeId === already)).toHaveLength(1)
+        expect(urns(g).filter(u => u !== 'F')).toHaveLength(REVEAL_PAGE)
+    })
+
+    it('pinning an urn the walk never named is silently ignored, not a crash', () => {
+        const sg = fanIn([1, 1])
+        const base = initialLensViewState(sg)
+        expect(() => layout(sg, { ...base, pinned: new Set(['ghost:not-in-model']) })).not.toThrow()
+    })
+})
+
 // ── pills ────────────────────────────────────────────────────────────
 
 describe('focus-layout — every ⊕ counts the same thing: connections', () => {

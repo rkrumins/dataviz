@@ -329,6 +329,7 @@ describe('the business journey — a table\'s lineage through a seven-level esta
       frameAll: [],
       framePages: [],
       frameQueries: [],
+      pinned: [], railWindow: null, condensedOpen: [],
     }
     const { api } = renderLens(['F'], doneWalk(collateralsEstate()), { walkSeed })
 
@@ -418,7 +419,19 @@ describe('the ⊕ tells the truth about what it costs', () => {
   })
 
   it('a page carries the server\'s own cursor back verbatim', () => {
-    const { api } = renderLens(['F'], doneWalk(pillCatalogue()))
+    // T23 R3 — a LOCAL, smaller-count model: `pillCatalogue`'s own PAGED
+    // (96) now legitimately opens the hub-triage list instead (see the
+    // 'hub triage' describe block below, which proves exactly that on
+    // this same fixture) — this test's own concern is the cursor
+    // forwarding mechanic, which needs a delivery UNDER the triage gate
+    // to exercise the page click at all.
+    const smallPage = walkModel('F', {
+      nodes: [wnode('F', 'dataset', 'orders_enriched'), wnode('PAGED', 'dataset', 'partially_loaded')],
+      lineageEdges: [hop('PAGED', 'F')],
+      upstreamUrns: new Set(['PAGED']),
+      frontierUp: [frontier('PAGED', 20, 'eyJvZmZzZXQiOjMwfQ==')],
+    })
+    const { api } = renderLens(['F'], doneWalk(smallPage))
     fireEvent.click(screen.getByTitle(/Loads the next hop upstream of partially_loaded/))
     expect(api.page).toHaveBeenCalledWith('PAGED', 'up', 'eyJvZmZzZXQiOjMwfQ==')
     expect(api.extend).not.toHaveBeenCalled()
@@ -467,7 +480,14 @@ describe('the ⊕ tells the truth about what it costs', () => {
    * REVEAL PAGE on that card and an extend click never opened one. The pill
    * then flipped to a reveal of "1", and only the SECOND click drew anything.
    */
-  const extendChain = (withConsumer: boolean) => doneWalk(walkModel('F', {
+  // T23 R3 — `total` defaults to the original 246 (every OTHER caller
+  // below still asserts that exact number in its own hover text); the
+  // "ONE click" test passes a smaller one, since 246 now legitimately
+  // opens the hub-triage list instead (see the 'hub triage' describe
+  // block, which proves exactly that on this same shape) and this
+  // test's own concern — one click, one visible delivery — needs a
+  // delivery UNDER the gate to reach the extend click at all.
+  const extendChain = (withConsumer: boolean, total = 246) => doneWalk(walkModel('F', {
     nodes: [
       wnode('F', 'dataset', 'clean_tickets'),
       wnode('GOLD', 'CONTAINER', 'GOLD', { childCount: 8 }),
@@ -478,13 +498,13 @@ describe('the ⊕ tells the truth about what it costs', () => {
       ...(withConsumer ? [hop('GOLD', 'MART')] : []),
     ],
     downstreamUrns: new Set(withConsumer ? ['GOLD', 'MART'] : ['GOLD']),
-    // The server says 246 more connections hang off GOLD downstream.
-    frontierDown: [{ urn: 'GOLD', totalCount: 246, nextCursor: null }],
+    // The server says `total` more connections hang off GOLD downstream.
+    frontierDown: [{ urn: 'GOLD', totalCount: total, nextCursor: null }],
   }))
 
   it('ONE click on an extend ⊕ delivers a VISIBLE cohort — no second click', () => {
     const api = makeApi()
-    const { rerender } = renderLens(['F'], extendChain(false), {}, api)
+    const { rerender } = renderLens(['F'], extendChain(false, 20), {}, api)
     expect(onBoard('mart_tickets_daily')).toBe(false)
 
     fireEvent.click(screen.getByTitle(/Loads the next hop downstream of GOLD only/))
@@ -495,7 +515,7 @@ describe('the ⊕ tells the truth about what it costs', () => {
     rerender(
       <LineageLens
         history={{ entries: ['F'], cursor: 0 }}
-        walk={extendChain(true)}
+        walk={extendChain(true, 20)}
         walkApi={api}
         onRecenter={vi.fn()}
         onBack={vi.fn()}
@@ -510,9 +530,9 @@ describe('the ⊕ tells the truth about what it costs', () => {
     // And no second click was needed to get there.
     expect(api.extend).toHaveBeenCalledTimes(1)
     // The residual pill is honest and in the SAME unit it started in —
-    // one of the 246 connections is now drawn, so 245 remain. It does not
+    // one of the 20 connections is now drawn, so 19 remain. It does not
     // flip to a card count and read as changing its mind.
-    expect(screen.getByTitle(/Loads the next hop downstream of GOLD only · 245 data flows recorded/)).toBeTruthy()
+    expect(screen.getByTitle(/Loads the next hop downstream of GOLD only · 19 data flows recorded/)).toBeTruthy()
   })
 
   it('the ⊕ speaks in verbs at rest; the hover states connections consistently, whatever the kind', () => {
@@ -547,6 +567,168 @@ describe('the ⊕ tells the truth about what it costs', () => {
     renderLens(['F'], { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map(), depth: 1, deepenStatus: null })
     expect(screen.queryByTitle(/Loads the next hop/)).toBeNull()
     expect(screen.queryByTitle(/Shows the next hop/)).toBeNull()
+  })
+})
+
+// ── T23 R3 — HUB TRIAGE ────────────────────────────────────────────────
+
+/** Forty flat upstream sources, all weight 1 — a reveal whose WHOLE
+ *  ranking (`groupsTotal`) exceeds the triage gate (`TRIAGE_THRESHOLD`,
+ *  three reveal pages) even though the first page still admits twelve
+ *  of them for free, same as `crowdedFanIn` above but past the gate. */
+const hubFanIn = (n: number) => {
+  const nodes = [wnode('F', 'dataset', 'dim_customer')]
+  const lineageEdges = []
+  for (let i = 0; i < n; i++) {
+    const urn = `s${String(i).padStart(3, '0')}`
+    nodes.push(wnode(urn, 'dataset', `source_${String(i).padStart(3, '0')}`))
+    lineageEdges.push(hop(urn, 'F'))
+  }
+  return walkModel('F', { nodes, lineageEdges, upstreamUrns: new Set(nodes.slice(1).map(n => n.urn)) })
+}
+
+// The lens's OWN outer chrome is also `role="dialog"` (`aria-label`
+// "Connections of X" — see the F3 share tests below), and so is
+// `LensPeek` ("Preview of X") — the triage panel's own aria-label
+// ("X — upstream sources"/"X — downstream consumers") is the one that
+// never collides with either, so every query here goes through it
+// rather than a bare, ambiguous `getByRole('dialog')`.
+const triage = () => screen.queryByRole('dialog', { name: /upstream sources|downstream consumers/ })
+/** `onBoard` matches text anywhere in the document, and a triage row's
+ *  own label is exactly the entity name a placed CARD would also show —
+ *  once the list is open, a placed-vs-listed check has to exclude the
+ *  list's own rows to mean "on the board" rather than "mentioned
+ *  anywhere on screen". */
+const onBoardOutside = (dialog: HTMLElement, label: string) =>
+  screen.queryAllByText(label).some(el => !dialog.contains(el))
+
+describe('hub triage (T23 R3)', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
+  afterEach(() => cleanup())
+
+  it('a reveal whose whole delivery exceeds the gate opens the triage list instead of dumping a page', () => {
+    renderLens(['F'], doneWalk(hubFanIn(40)))
+    expect(onBoard('source_020')).toBe(false)
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only/))
+    // No page landed on the board — the click opened the list, not a reveal.
+    expect(onBoard('source_020')).toBe(false)
+    expect(triage()).toBeTruthy()
+  })
+
+  it('an extend/page past the gate opens the triage list instead of fetching in place', () => {
+    // `pillCatalogue`'s own PAGED (96) — the exact fixture the cursor-
+    // forwarding test above uses a smaller stand-in to avoid.
+    const { api } = renderLens(['F'], doneWalk(pillCatalogue()))
+    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of partially_loaded/))
+    expect(api.page).not.toHaveBeenCalled()
+    expect(api.extend).not.toHaveBeenCalled()
+    expect(triage()).toBeTruthy()
+  })
+
+  it('the header states the known count honestly, with no unfetched remainder for a reveal (everything it stands for is already in the model)', () => {
+    renderLens(['F'], doneWalk(hubFanIn(40)))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only/))
+    const dialog = triage()!
+    expect(within(dialog).getByText('40 known')).toBeTruthy()
+    expect(within(dialog).queryByText(/more not yet loaded/)).toBeNull()
+  })
+
+  it('search filters the list, and clicking a row places that entity on the board — a full citizen, not a preview', () => {
+    renderLens(['F'], doneWalk(hubFanIn(40)))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only/))
+    const dialog = triage()!
+    fireEvent.change(within(dialog).getByPlaceholderText('Find…'), { target: { value: 'source_039' } })
+    expect(within(dialog).queryByTitle('Place source_020 on the board')).toBeNull()
+    expect(onBoardOutside(dialog, 'source_039')).toBe(false)
+    fireEvent.click(within(dialog).getByTitle('Place source_039 on the board'))
+    expect(onBoardOutside(dialog, 'source_039')).toBe(true)
+    // Placed, not merely previewed: the row now reads as already on the
+    // board rather than offering to place it again.
+    expect(within(dialog).getByTitle('source_039 is already on the board')).toBeTruthy()
+  })
+
+  it('"Show top 12" places twelve at once, weight-sorted', () => {
+    renderLens(['F'], doneWalk(hubFanIn(40)))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only/))
+    const dialog = triage()!
+    fireEvent.click(within(dialog).getByText('Show top 12'))
+    // Every source ties on weight (one hop each) — the tiebreak is the
+    // label, so the alphabetically-first twelve win, same order the
+    // list itself renders them in. The list stays open (every label is
+    // still IN it), so the board check has to look outside it.
+    expect(onBoardOutside(dialog, 'source_000')).toBe(true)
+    expect(onBoardOutside(dialog, 'source_011')).toBe(true)
+    expect(onBoardOutside(dialog, 'source_012')).toBe(false)
+  })
+
+  it('"grouped by system" rolls partners up into per-system cards, and "Place all" places the whole group', () => {
+    // Containment groups the REVEAL admission by root too (same rule a
+    // frame's own badge uses) — three systems is under REVEAL_PAGE, so
+    // all three admit for free and this pill falls through to the
+    // FRONTIER branch, same as `pillCatalogue`'s PAGED above. That is
+    // deliberate here: it is what lets the partners already in the
+    // model carry real containment (something to group by) while the
+    // gate itself still fires off a genuine, separate unfetched
+    // remainder — the exact two-part header the brief asks for.
+    const SYSTEMS = 3
+    const nodes = [wnode('F', 'dataset', 'core_ledger')]
+    const containmentEdges = []
+    const lineageEdges = []
+    for (let s = 0; s < SYSTEMS; s++) {
+      nodes.push(wnode(`sys${s}`, 'system', `source_system_${s}`))
+    }
+    for (let i = 0; i < 40; i++) {
+      const sysUrn = `sys${i % SYSTEMS}`
+      const urn = `s${String(i).padStart(3, '0')}`
+      nodes.push(wnode(urn, 'dataset', `feed_${String(i).padStart(3, '0')}`))
+      containmentEdges.push(holds(sysUrn, urn))
+      lineageEdges.push(hop(urn, 'F'))
+    }
+    renderLens(['F'], doneWalk(walkModel('F', {
+      nodes, containmentEdges, lineageEdges,
+      upstreamUrns: new Set(nodes.slice(1 + SYSTEMS).map(n => n.urn)),
+      // `count` is `totalCount - degreeUp`, not `totalCount` verbatim
+      // (see `pillFor`'s frontier branch) — F already has 40 known
+      // upstream hops, so the genuinely-unfetched remainder here is
+      // 100 - 40 = 60, comfortably past the gate.
+      frontierUp: [frontier('F', 100)],
+    })))
+    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of core_ledger only/))
+    const dialog = triage()!
+    expect(within(dialog).getByText('40 known · 60 more not yet loaded')).toBeTruthy()
+    fireEvent.click(within(dialog).getByTitle('Group by system'))
+    // Forty split evenly across three systems.
+    expect(within(dialog).getByText('source_system_0')).toBeTruthy()
+    expect(within(dialog).getByText(/14 entities/)).toBeTruthy()
+    // The three systems already admit for free (3 ≤ REVEAL_PAGE — that
+    // is exactly what put this pill on the FRONTIER branch above), so
+    // every member is already drawn; "Place all" is verified through
+    // `view.pinned` itself instead of a board-visibility change that
+    // this particular fixture can never produce.
+    const writeText = vi.fn()
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    fireEvent.click(within(dialog).getByTitle('Place all 14 entities from source_system_0 on the board'))
+    fireEvent.click(screen.getByLabelText('Copy exploration link'))
+    const url = new URL(writeText.mock.calls[0][0] as string)
+    const decoded = decodeLensShare(url.searchParams.get('lens') ?? '')
+    if (decoded?.v !== 3) throw new Error('expected a v3 token')
+    for (let i = 0; i < 40; i += SYSTEMS) expect(decoded.pinned).toContain(`s${String(i).padStart(3, '0')}`)
+  })
+
+  it('Escape closes the triage list first — the newest layer, dismissed before anything else the lens owns', () => {
+    renderLens(['F'], doneWalk(hubFanIn(40)))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only/))
+    expect(triage()).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(triage()).toBeNull()
+  })
+
+  it('a click on the pane behind the board closes the triage list too', () => {
+    renderLens(['F'], doneWalk(hubFanIn(40)))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only/))
+    expect(triage()).toBeTruthy()
+    fireEvent.click(document.querySelector('.react-flow__pane')!)
+    expect(triage()).toBeNull()
   })
 })
 
@@ -1070,7 +1252,7 @@ describe('the shell around the picture', () => {
     expect(onBoard('label-c')).toBe(true)
   })
 
-  it('the share link encodes the exploration on screen as v2', () => {
+  it('the share link encodes the exploration on screen as v3 (T23 — pinned/railWindow/condensedOpen)', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 2 })
     const writeText = vi.fn()
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
@@ -1081,12 +1263,17 @@ describe('the shell around the picture', () => {
     expect(writeText).toHaveBeenCalledTimes(1)
     const url = new URL(writeText.mock.calls[0][0] as string)
     const decoded = decodeLensShare(url.searchParams.get('lens') ?? '')
-    expect(decoded?.v).toBe(2)
-    if (decoded?.v !== 2) throw new Error('expected a v2 token')
+    expect(decoded?.v).toBe(3)
+    if (decoded?.v !== 3) throw new Error('expected a v3 token')
     expect(decoded.entries).toEqual(['F'])
     expect(decoded.mode).toBe('graph')
     expect(decoded.depth).toBe(2)
     expect(decoded.direction).toBe('in')
+    // Nothing placed, no window steered, nothing unfolded — a plain
+    // exploration's own v3 fields are the same empty/null they open with.
+    expect(decoded.pinned).toEqual([])
+    expect(decoded.railWindow).toBeNull()
+    expect(decoded.condensedOpen).toEqual([])
     usePreferencesStore.setState({ lensInitialDepth: 1 })
   })
 
@@ -1289,6 +1476,7 @@ describe('pointing at an element isolates its lineage cone', () => {
       nodeId: 'F', direction: 'both',
       revealed: [['in:F', 1], ['out:F', 1], ['in:A', 1], ['in:B', 1]],
       opened: [], collapsed: [], frameAll: [], framePages: [], frameQueries: [],
+      pinned: [], railWindow: null, condensedOpen: [],
     }
     renderLens(['F'], doneWalk(walkModel('F', {
       nodes: [wnode('H', 'dataset', 'hub'), wnode('A', 'dataset', 'branch_a'), wnode('B', 'dataset', 'branch_b'), wnode('F', 'dataset', 'the_focus')],
@@ -2034,6 +2222,7 @@ describe('what is really inside a container', () => {
         // would otherwise be open by default.
         nodeId: 'F', direction: 'both', revealed: [['in:F', 1]], opened: ['T'], collapsed: [],
         frameAll: [], framePages: [], frameQueries: [['T', 'ship']],
+        pinned: [], railWindow: null, condensedOpen: [],
       }
       const { rerender, api } = renderLens(['F'], wideConnectedTable(), { onLoadAllChildren, walkSeed })
       act(() => { vi.advanceTimersByTime(300) })
@@ -2074,6 +2263,7 @@ describe('what is really inside a container', () => {
     const walkSeed: LensWalkSeed = {
       nodeId: 'F', direction: 'both', revealed: [['in:F', 1]], opened: ['T'], collapsed: [],
       frameAll: ['T'], framePages: [], frameQueries: [['T', 'ship']],
+      pinned: [], railWindow: null, condensedOpen: [],
     }
     renderLens(['F'], wideConnectedTable(), {
       walkSeed,
@@ -2096,6 +2286,7 @@ describe('what is really inside a container', () => {
     const walkSeed: LensWalkSeed = {
       nodeId: 'F', direction: 'both', revealed: [['in:F', 1]], opened: ['T'], collapsed: [],
       frameAll: [], framePages: [], frameQueries: [['T', 'zzz']],
+      pinned: [], railWindow: null, condensedOpen: [],
     }
     renderLens(['F'], wideConnectedTable(), { walkSeed })
     // Nothing among the twelve columns contains "zzz".
@@ -2108,6 +2299,7 @@ describe('what is really inside a container', () => {
     const walkSeed: LensWalkSeed = {
       nodeId: 'F', direction: 'both', revealed: [['in:F', 1]], opened: ['T'], collapsed: [],
       frameAll: [], framePages: [], frameQueries: [['T', 'ship']],
+      pinned: [], railWindow: null, condensedOpen: [],
     }
     renderLens(['F'], wideConnectedTable(), {
       walkSeed,

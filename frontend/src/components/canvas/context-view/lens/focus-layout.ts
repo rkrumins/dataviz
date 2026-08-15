@@ -147,6 +147,23 @@ export interface LensViewState {
     /** Per frame: the first row its scroll window is resting on (0-based
      *  row index), clamped by the layout to what has actually loaded. */
     frameOffsets: ReadonlyMap<string, number>
+    /** T23 R3 — entities the reader placed on the board from a hub
+     *  triage list. Admitted into the population OUTSIDE the reveal-page
+     *  budget/rank order (see the population stage below): a triage pick
+     *  is a specific, deliberate choice, not a page of whatever ranks
+     *  highest. Grow-only for this view state's lifetime, same as every
+     *  other placement here. */
+    pinned: ReadonlySet<string>
+    /** T23 R1 — the sliding window's own center column (signed hop
+     *  distance), or `null` for "centered on the focal" (the default the
+     *  window opens at). Meaningless — and ignored — whenever the
+     *  fetched extent already fits inside `HOP_WINDOW`. */
+    railWindow: number | null
+    /** T23 R2 — connector ids (see `condensation.ts`) the reader has
+     *  explicitly unfolded; every OTHER maximal pass-through run stays
+     *  condensed by default. Sticky per view state, like everything else
+     *  here — re-centering starts clean. */
+    condensedOpen: ReadonlySet<string>
 }
 
 /** One entity's roster — "what is really in here", connected or not.
@@ -208,6 +225,9 @@ export function initialLensViewState(sg: LensSubgraph<LensWalkNode>): LensViewSt
         drawnRank: new Map(),
         frameQueries: new Map(),
         frameOffsets: new Map(),
+        pinned: new Set(),
+        railWindow: null,
+        condensedOpen: new Set(),
     }
 }
 
@@ -518,6 +538,15 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         }
         if (!progressed) break
     }
+
+    // T23 R3 — a triage-list PLACEMENT: admit this urn regardless of
+    // group rank or reveal budget. A pick from the list is a specific,
+    // deliberate choice ("place THIS one"), not a page of whatever ranks
+    // highest — `admit` already closes over containment ancestors, so a
+    // pinned entity reaches the board through its own container exactly
+    // the way any other admission does, and becomes a full citizen of
+    // everything downstream (weight, rank, wires, Reach).
+    for (const urn of view.pinned) admit(urn)
 
     // ── the column a card sits in: its signed hop distance ───────────
 
@@ -991,7 +1020,8 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // THE SAME CALL the admission loop makes for this key, so the badge
         // below counts exactly the set one click draws from, and a fetch is
         // never offered while anything free is still queued underneath it.
-        const remainingGroups = rankedGroups(dir, urn)
+        const allGroups = rankedGroups(dir, urn)
+        const remainingGroups = allGroups
             .filter(g => g.members.some(m => !population.has(m)))
         // Something drawn inside this card offers these already, at the
         // grain that owns them. Nothing is offered twice, and nothing is
@@ -1019,6 +1049,10 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                 // needs it (a page is a page of groups, not of hops), and
                 // the badge must never be it.
                 groups: remainingGroups.length,
+                // T23 R3 — this key's WHOLE ranking, admitted or not: the
+                // hub-triage gate's own stable "how big is this control"
+                // fact (see `FocusPill.groupsTotal`'s own doc comment).
+                groupsTotal: allGroups.length,
                 key: revealKey(dir, urn),
                 cursor: undefined,
                 status: undefined,

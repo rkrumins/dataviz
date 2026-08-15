@@ -30,6 +30,8 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { FocusGraphView } from '../FocusGraphView'
 import { buildFocusLayout, initialLensViewState } from '../focus-layout'
 import { buildLensSubgraph } from '../lens-subgraph'
+import { applyCondensation } from '../condensation'
+import { applyHopWindow } from '../hop-window'
 import { WALK_FIXTURES } from '@/harness/lensFixtures'
 import { buildWalk } from '@/harness/buildWalk'
 import { renderCounts, resetRenderCounts } from '../renderProbe'
@@ -272,6 +274,53 @@ describe('P0 — perf harness (Task 20)', () => {
         expect(avg).toBeLessThan(REGRESSION_CEILING_MS)
       })
     }
+  })
+
+  /**
+   * T23 R1 — the sliding window's own wall-time, against T20's own
+   * budget (P3's `REBUILD_BUDGET_MS`/`REGRESSION_CEILING_MS`, reused
+   * verbatim — the brief's own instruction is "must hit T20's budgets",
+   * not a new number). `applyHopWindow` runs on the CONDENSED graph
+   * (`LineageLens`'s own pipeline order), so this times condensation
+   * once (its own cost, fixed per view state) plus the window moving
+   * across the WHOLE chain — every center a rail click could ask for,
+   * not one arbitrary position.
+   */
+  describe('(T23 R1) window move wall-time — walkLongChain', () => {
+    // T20 P3's own numbers verbatim — see the (d) block above for the
+    // rationale (a 4× regression guard, not a tight budget assertion).
+    const REGRESSION_CEILING_MS = 50 * 4
+    it('applyHopWindow, moved across every center the rail can reach', () => {
+      const fixture = WALK_FIXTURES.walkLongChain
+      const sg = buildLensSubgraph(fixture.model)
+      const base = initialLensViewState(sg)
+      const view = fixture.script ? fixture.script(base) : base
+      const layout = buildFocusLayout({
+        sg, view, query: '', hiddenTypes: new Set<string>(),
+        extendStatus: fixture.extendStatus ?? new Map(),
+        childrenAll: fixture.childrenAll ?? new Map(),
+        childrenAllStatus: new Map(),
+        walkStatus: 'done' as const,
+        directionFilter: fixture.directionFilter,
+      })
+      const condensed = applyCondensation(layout, view.condensedOpen)
+
+      // Warm up (JIT) — untimed.
+      applyHopWindow(condensed, 0)
+
+      const centers = Array.from({ length: 21 }, (_, i) => i - 10)
+      const samples: number[] = []
+      for (const center of centers) {
+        const start = performance.now()
+        applyHopWindow(condensed, center)
+        samples.push(performance.now() - start)
+      }
+      const avg = samples.reduce((a, b) => a + b, 0) / samples.length
+      const max = Math.max(...samples)
+      console.log(`[T23-R1] walkLongChain window-move moves=${samples.length} avgMs=${avg.toFixed(3)} maxMs=${max.toFixed(3)}`)
+      expect(avg).toBeGreaterThan(0)
+      expect(avg).toBeLessThan(REGRESSION_CEILING_MS)
+    })
   })
 
   /**

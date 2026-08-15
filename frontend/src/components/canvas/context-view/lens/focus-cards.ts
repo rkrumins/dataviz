@@ -217,7 +217,9 @@ export function frameWindow(card: FocusCard) {
   }
 }
 
-export type FocusCardKind = 'focal' | 'entity' | 'frame' | 'divider'
+/** `'fold'` (T23 R1) — a terminal chip standing for a folded run of hop
+ *  columns; never a real entity, never row-holding, never wired. */
+export type FocusCardKind = 'focal' | 'entity' | 'frame' | 'divider' | 'fold'
 
 /**
  * Cards that HOLD ROWS: a container someone opened, and the FOCUS, which
@@ -282,9 +284,43 @@ export interface FocusPill {
    *  needs it — a page is a page of groups, not of hops — and the badge
    *  must never be it. */
   groups?: number
+  /** T23 R3 — reveal only: this key's WHOLE ranking (already-admitted
+   *  groups plus `groups` above), regardless of how many pages a reader
+   *  has already opened. The hub-triage threshold reads THIS, not
+   *  `groups`: "does this control's own delivery ever exceed ~3 pages"
+   *  is a stable fact about the control, not one that flickers back
+   *  under the threshold the moment a reader has already clicked it
+   *  once. Absent for `extend`/`page`, where `count` already means this
+   *  (nothing is admitted from a frontier before it fires). */
+  groupsTotal?: number
   key: string
   cursor?: string
   status?: 'loading' | 'error'
+}
+
+/**
+ * T23 R3 — one partner a hub-triage list can place on the board: a
+ * direct lineage neighbour of the anchor, already named in the walk
+ * model (an unfetched partner has no urn yet — the list's own header
+ * states the unfetched remainder separately, off the pill it opened
+ * from). Weight-sorted, and carrying its own containment ROOT (not just
+ * its immediate parent) so "All, grouped by system" rolls up the way
+ * the orientation sentence's own "across N systems" already does
+ * (`distinctSystemCount`) — one definition of "system" everywhere.
+ */
+export interface TriagePartner {
+  urn: string
+  label: string
+  type: string
+  /** Raw hops between this partner and the anchor side. */
+  weight: number
+  /** The one relationship type these hops share, '' when they differ. */
+  edgeTypeNorm: string
+  parentUrn: string | null
+  parentLabel: string | null
+  /** The top-level containment root this partner sits under. */
+  systemUrn: string
+  systemLabel: string
 }
 
 /**
@@ -449,6 +485,36 @@ export interface FocusCard {
    *  contents are ON THIS LINEAGE, and how many it holds in total (null
    *  when the count is genuinely unknown — a floor is not a total). */
   contents: { onLineage: number; total: number | null } | null
+  /** T23 R1 — a `'fold'` card only: the terminal chip standing for every
+   *  hop-column the sliding window has folded off this side. Absent on
+   *  every other kind. */
+  fold?: FocusFoldInfo | null
+  /** T23 R2 — this card is the visible BOUNDARY of a maximal degree-1
+   *  pass-through run that is currently UNFOLDED (its interior cards are
+   *  drawn); the re-condense control renders here. Null/absent while the
+   *  run is condensed (there is nothing to fold back) or this card
+   *  borders no run. */
+  condenseRun?: FocusCondenseRunInfo | null
+}
+
+/** T23 R1 — what a hop-window fold chip states: how much of the fetched
+ *  extent it stands for, so its own wording never drifts from `HopRail`'s. */
+export interface FocusFoldInfo {
+  dir: 'in' | 'out'
+  /** Hop COLUMNS folded away. */
+  hops: number
+  /** Cards folded away — what "N further" actually counts. */
+  cards: number
+  /** Raw connections the folded cards carry into the window's edge. */
+  connections: number
+}
+
+/** T23 R2 — the run a boundary card's re-condense control folds back. */
+export interface FocusCondenseRunInfo {
+  connectorId: string
+  dir: 'in' | 'out'
+  /** Interior cards the run hides once condensed. */
+  steps: number
 }
 
 export interface FocusEdge {
@@ -510,6 +576,12 @@ export interface FocusEdge {
    *  ×N one (T22, R3 fix round 1). The wire's own muted/dashed treatment
    *  is unaffected — only the badge is withheld. */
   seamSlotted: boolean
+  /** T23 R2 — this edge stands for a condensed maximal degree-1
+   *  pass-through run: draw the "— via N steps —▶" connector chip
+   *  instead of a plain ×N badge. `count` above is still the honest sum
+   *  of the run's own interior raw hops — condensing never changes what
+   *  a number means, only how many cards it took to get there. */
+  condensed?: { connectorId: string; steps: number } | null
 }
 
 export interface FocusGraph {
