@@ -59,6 +59,7 @@ import {
 } from './lens/focus-layout'
 import { applyHopWindow, bandRangeOf, HOP_WINDOW } from './lens/hop-window'
 import { applyCondensation } from './lens/condensation'
+import { enforceLensInvariants } from './lens/invariants'
 import { generateColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { usePreferencesStore } from '@/store/preferences'
@@ -470,6 +471,13 @@ export function LineageLens({
     setDirectionState({ nodeId, dir: walkSeed.direction })
   }, [walkSeed, nodeId, walkStatus, sg])
 
+  // T26 R2 — THE PIPELINE'S ORDERED SPINE. Four stages, always in this
+  // order: buildFocusLayout → applyCondensation → applyHopWindow →
+  // enforceLensInvariants (invariants.ts, always LAST). Each pass is
+  // licensed to remove exactly one thing (condensation: pass-through
+  // interiors; the window: non-focal bands) — the invariant stage is
+  // the global enforcement that neither removed more than that, checked
+  // once, after everything, rather than trusted per-pass.
   const layout = useMemo(() => buildFocusLayout({
     sg,
     view,
@@ -501,31 +509,17 @@ export function LineageLens({
     () => applyHopWindow(condensed, view.railWindow, viewRadius),
     [condensed, view.railWindow, viewRadius],
   )
-  /**
-   * T25 C2 — invariant (c), the LAST line of defense, checked AFTER the
-   * window post-pass, independent of `applyHopWindow`'s own hard
-   * invariant (a) (which already makes this near-impossible from the
-   * window alone — this exists anyway, because the promise is about the
-   * BOARD, not about which single stage kept it). The reported defect:
-   * a fully-populated header ("177 connections", type chips, "Reveal 40
-   * on canvas" enabled — the MODEL loaded) over a board with ZERO
-   * cards — layout-empty, not data-empty, and console-silent. Same
-   * "symptom guard, not a cause fix" shape as `buildFocusLayout`'s own
-   * `focusRecovered` (T17-A) — it fires after the real repair (a) above,
-   * and asserts in dev so the next cause is found rather than absorbed.
-   */
-  const boardGraph = useMemo(() => {
-    const hasFocalInWindow = windowed.graph.cards.some(c => c.kind === 'focal')
-    const hasFocalInCondensed = condensed.cards.some(c => c.kind === 'focal')
-    if (hasFocalInWindow || !hasFocalInCondensed) return windowed.graph
-    if (import.meta.env.DEV) {
-      console.error(
-        '[lens] the windowed board lost the focus — falling back to the unwindowed layout.',
-        { focus: nodeId, railWindow: view.railWindow, viewRadius },
-      )
-    }
-    return condensed
-  }, [windowed.graph, condensed, nodeId, view.railWindow, viewRadius])
+  // T26 R2 — the invariant stage: the focal card is drawn (a), the board
+  // is never empty while `condensed` still has the focus (b — T17-A's
+  // guarantee, T25-C2's own inline fallback, both relocated here so no
+  // later pass can silently undermine them), every edge endpoint
+  // resolves to a drawn card (c), and no card claims an undrawn frame
+  // (d). See invariants.ts's own doc comment for the full contract and
+  // the degradation each violation takes.
+  const boardGraph = useMemo(
+    () => enforceLensInvariants(windowed.graph, condensed).graph,
+    [windowed.graph, condensed],
+  )
   // The RAIL always shows the WHOLE fetched extent — independent of
   // what the board currently draws — so it reads the RAW layout's own
   // cards, not `windowed.graph`'s reduced set. Handed to the view only
