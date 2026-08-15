@@ -25,7 +25,10 @@ forward migration replaces the old one (the real gate), and a chain replay
 drops the ``create_all``-produced constraint by name and recreates it
 identically.
 
-Plain forward DDL per docs/MIGRATIONS.md.
+``refresh_events.job_id`` / ``idx_refresh_events_job`` are inspector-guarded
+so a database that already received them (another branch, partial apply) does
+not die on DuplicateColumn. The trigger-source CHECK swap is not in
+``db_init`` and must still run.
 """
 from __future__ import annotations
 
@@ -51,43 +54,71 @@ _TRIGGERS_AFTER = (
 )
 
 
+def _columns(inspector: sa.engine.reflection.Inspector, table: str) -> set:
+    return {c["name"] for c in inspector.get_columns(table)}
+
+
+def _index_names(inspector: sa.engine.reflection.Inspector, table: str) -> set:
+    return {ix["name"] for ix in inspector.get_indexes(table)}
+
+
+_SCHEMA = "aggregation"
+_JOBS = "aggregation_jobs"
+_EVENTS = "refresh_events"
+
+
 def upgrade() -> None:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+
     # ── 1. Reconciliation-driven jobs are identifiable ───────────────
+    # Table is aggregation.aggregation_jobs (not aggregation.jobs — that is
+    # graphver). Must still run: db_init's CHECK stops at post_purge/auto.
     op.drop_constraint(
-        "ck_agg_jobs_trigger_source", "jobs",
-        type_="check", schema="aggregation",
+        "ck_agg_jobs_trigger_source", _JOBS,
+        type_="check", schema=_SCHEMA,
     )
     op.create_check_constraint(
-        "ck_agg_jobs_trigger_source", "jobs", _TRIGGERS_AFTER,
-        schema="aggregation",
+        "ck_agg_jobs_trigger_source", _JOBS, _TRIGGERS_AFTER,
+        schema=_SCHEMA,
     )
 
     # ── 2. The audit event names the job it produced ─────────────────
-    op.add_column(
-        "refresh_events", sa.Column("job_id", sa.Text(), nullable=True),
-    )
-    # Job History looks up "why was this job queued" for a page of jobs at a
-    # time, so the lookup is by job_id and must not scan.
-    op.create_index(
-        "idx_refresh_events_job", "refresh_events", ["job_id"],
-    )
+    if inspector.has_table(_EVENTS):
+        present = _columns(inspector, _EVENTS)
+        if "job_id" not in present:
+            op.add_column(
+                _EVENTS, sa.Column("job_id", sa.Text(), nullable=True),
+            )
+        # Job History looks up "why was this job queued" for a page of jobs at a
+        # time, so the lookup is by job_id and must not scan.
+        if "idx_refresh_events_job" not in _index_names(inspector, _EVENTS):
+            op.create_index(
+                "idx_refresh_events_job", _EVENTS, ["job_id"],
+            )
 
 
 def downgrade() -> None:
-    op.drop_index("idx_refresh_events_job", "refresh_events")
-    op.drop_column("refresh_events", "job_id")
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+
+    if inspector.has_table(_EVENTS):
+        if "idx_refresh_events_job" in _index_names(inspector, _EVENTS):
+            op.drop_index("idx_refresh_events_job", _EVENTS)
+        if "job_id" in _columns(inspector, _EVENTS):
+            op.drop_column(_EVENTS, "job_id")
 
     # Any 'reconcile' jobs would violate the restored constraint, so relabel
     # them onto the nearest pre-existing trigger first.
     op.execute(
-        "UPDATE aggregation.jobs SET trigger_source = 'api' "
+        f"UPDATE {_SCHEMA}.{_JOBS} SET trigger_source = 'api' "
         "WHERE trigger_source = 'reconcile'"
     )
     op.drop_constraint(
-        "ck_agg_jobs_trigger_source", "jobs",
-        type_="check", schema="aggregation",
+        "ck_agg_jobs_trigger_source", _JOBS,
+        type_="check", schema=_SCHEMA,
     )
     op.create_check_constraint(
-        "ck_agg_jobs_trigger_source", "jobs", _TRIGGERS_BEFORE,
-        schema="aggregation",
+        "ck_agg_jobs_trigger_source", _JOBS, _TRIGGERS_BEFORE,
+        schema=_SCHEMA,
     )

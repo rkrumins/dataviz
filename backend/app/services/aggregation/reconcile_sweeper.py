@@ -92,9 +92,13 @@ class _Action:
     reason: str
     evidence: Dict
     first_build: bool
-    # Display name, carried only so the dry-run preview can list findings a
-    # person recognises. Never used for a decision.
+    # Display fields, carried only so the dry-run preview / run detail can
+    # list findings a person recognises. Never used for a decision.
     name: Optional[str] = None
+    provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
+    skip: Optional[str] = None
+    acted: bool = False
 
 
 @dataclass
@@ -113,12 +117,18 @@ class SweepResult:
     by_skip: Dict[str, int] = field(default_factory=dict)
     # Populated on preview runs so the UI can show what WOULD be reconciled.
     pending: List[_Action] = field(default_factory=list)
+    # Compact per-finding rows persisted on the run (acted and held).
+    finding_rows: List[Dict] = field(default_factory=list)
 
     def detail_json(self) -> str:
+        findings = self.finding_rows[:_SCAN_CAP]
         return json.dumps({
             "byReason": self.by_reason,
             "bySkip": self.by_skip,
-            "sample": [a.data_source_id for a in self.pending[:20]],
+            "findings": findings,
+            # Kept so anything still reading the original sample of ids
+            # does not go blank after this revision.
+            "sample": [f.get("dataSourceId") for f in findings[:20]],
         })
 
 
@@ -238,6 +248,7 @@ class ReconciliationSweeper:
 
         actions: List[_Action] = []
         nudges: List[tuple] = []
+        suspend_notices: List[dict] = []
 
         # Resolved BEFORE the lock is claimed. The graphver store sits behind
         # its own engine and possibly its own database, and the advisory lock
@@ -284,6 +295,7 @@ class ReconciliationSweeper:
 
             first_builds = 0
             for state in states:
+                ctx_row = ctx.get(state.data_source_id, {})
                 obs = self._observe(
                     state, ctx, policy,
                     reconcile_enabled=resolve_reconcile_enabled(
@@ -306,8 +318,40 @@ class ReconciliationSweeper:
 
                 result.scanned += 1
                 verdict = evaluate(obs, policy)
-                state.last_reconcile_checked_at = _now_iso()
+                now = _now_iso()
+                prev_drift = state.drift_state
+                state.last_reconcile_checked_at = now
                 state.drift_state = verdict.drift_state
+                if (
+                    not dry_run
+                    and verdict.skip == "suspended"
+                    and prev_drift != "suspended"
+                ):
+                    suspend_notices.append({
+                        "workspace_id": state.workspace_id,
+                        "data_source_id": state.data_source_id,
+                        "source_name": (
+                            ctx_row.get("name") or state.data_source_id
+                        ),
+                    })
+
+                if verdict.reason:
+                    state.last_finding_at = now
+                    state.last_finding_reason = verdict.reason
+                    try:
+                        state.last_finding_evidence = json.dumps(
+                            verdict.evidence or {},
+                        )
+                    except (TypeError, ValueError):
+                        state.last_finding_evidence = None
+                    result.findings += 1
+                    result.by_reason[verdict.reason] = (
+                        result.by_reason.get(verdict.reason, 0) + 1
+                    )
+                elif verdict.skip == "in_sync":
+                    state.last_finding_at = None
+                    state.last_finding_reason = None
+                    state.last_finding_evidence = None
 
                 if not verdict.should_act:
                     result.skipped += 1
@@ -330,13 +374,13 @@ class ReconciliationSweeper:
                     elif verdict.skip in ("stats_stale", "stats_unhealthy"):
                         if len(nudges) < _NUDGE_CAP:
                             nudges.append((state.data_source_id, state.workspace_id))
+                    if verdict.reason:
+                        result.finding_rows.append(_finding_row(
+                            state, ctx_row, verdict, acted=False,
+                        ))
                     continue
 
-                result.findings += 1
-                result.by_reason[verdict.reason] = (
-                    result.by_reason.get(verdict.reason, 0) + 1
-                )
-
+                acted = False
                 if dry_run or len(actions) >= max_actions:
                     if not dry_run and len(actions) >= max_actions:
                         logger.info(
@@ -345,41 +389,49 @@ class ReconciliationSweeper:
                             max_actions, state.data_source_id,
                         )
                     if dry_run:
-                        actions.append(_Action(
-                            data_source_id=state.data_source_id,
-                            workspace_id=state.workspace_id,
-                            reason=verdict.reason,
-                            evidence=verdict.evidence,
-                            first_build=verdict.reason == "never_aggregated",
-                            name=ctx.get(state.data_source_id, {}).get("name"),
+                        actions.append(_action_from(
+                            state, ctx_row, verdict, acted=False,
                         ))
+                    result.finding_rows.append(_finding_row(
+                        state, ctx_row, verdict, acted=False,
+                    ))
                     continue
 
                 first_build = verdict.reason == "never_aggregated"
                 if first_build:
                     if first_builds >= _FIRST_BUILD_CAP:
+                        result.finding_rows.append(_finding_row(
+                            state, ctx_row, verdict, acted=False,
+                            skip="cap",
+                        ))
                         continue
                     first_builds += 1
 
-                actions.append(_Action(
-                    data_source_id=state.data_source_id,
-                    workspace_id=state.workspace_id,
-                    reason=verdict.reason,
-                    evidence=verdict.evidence,
-                    first_build=first_build,
-                    name=ctx.get(state.data_source_id, {}).get("name"),
+                actions.append(_action_from(
+                    state, ctx_row, verdict, acted=True,
                 ))
+                acted = True
                 # Advance the baseline AT ACTION TIME so this finding cannot
                 # re-fire every sweep while the rebuild is in flight. If the
                 # rebuild then fails, retry is the stale-marker reconciler's
                 # job — two mechanisms must never both retry one rebuild.
                 self._adopt(state, obs)
-                state.last_reconciled_at = _now_iso()
+                state.last_reconciled_at = now
                 state.last_reconcile_reason = verdict.reason
                 state.last_reconcile_mode = "manual" if data_source_ids else "auto"
                 state.reconcile_consecutive_actions = (
                     state.reconcile_consecutive_actions or 0
                 ) + 1
+                result.finding_rows.append(_finding_row(
+                    state, ctx_row, verdict, acted=acted,
+                ))
+
+            if suspend_notices:
+                from backend.app.db.repositories.notification_repo import (
+                    notify_reconcile_suspended,
+                )
+                for notice in suspend_notices:
+                    await notify_reconcile_suspended(session, **notice)
 
             await session.commit()  # releases the advisory lock
         return actions, nudges
@@ -436,6 +488,7 @@ class ReconciliationSweeper:
         from backend.app.db.models import (
             DataSourcePollingConfigORM,
             DataSourceStatsORM,
+            ProviderORM,
             WorkspaceDataSourceORM,
         )
         from .fingerprint import raw_fingerprint_from_counts
@@ -452,19 +505,26 @@ class ReconciliationSweeper:
                 WorkspaceDataSourceORM.ontology_id,
                 WorkspaceDataSourceORM.provider_id,
                 WorkspaceDataSourceORM.projection_mode,
-                # Only for the preview's finding list. A blast-radius screen
-                # showing raw ``ds_`` ids cannot be read by the person deciding
-                # whether to switch automation on.
                 WorkspaceDataSourceORM.label,
-            ).where(WorkspaceDataSourceORM.id.in_(ds_ids))
+                ProviderORM.name,
+            ).select_from(WorkspaceDataSourceORM)
+            .outerjoin(
+                ProviderORM,
+                ProviderORM.id == WorkspaceDataSourceORM.provider_id,
+            )
+            .where(WorkspaceDataSourceORM.id.in_(ds_ids))
         )).all()
         seen = set()
-        for ds_id, deleted_at, is_active, ontology_id, provider_id, proj, label in rows:
+        for (
+            ds_id, deleted_at, is_active, ontology_id, provider_id, proj,
+            label, provider_name,
+        ) in rows:
             seen.add(ds_id)
             out[ds_id].update(
                 deleted=bool(deleted_at) or is_active is False,
                 ontology_id=ontology_id,
                 provider_id=provider_id,
+                provider_name=provider_name,
                 name=label,
                 # Versioned: Postgres masters the graph and FalkorDB is a
                 # rebuildable read cache, so every count-based signal here is
@@ -680,7 +740,7 @@ class ReconciliationSweeper:
                 async with self._session_factory() as session:
                     if action.first_build:
                         await self._dispatch_first_build(
-                            svc, session, action, actor,
+                            svc, session, action, actor, result.run_id,
                         )
                     else:
                         await svc.signal_source_changed(
@@ -694,6 +754,7 @@ class ReconciliationSweeper:
                             # and reads in Job History as a person clicking
                             # Rebuild — indistinguishable from a manual one.
                             trigger_source="reconcile",
+                            run_id=result.run_id,
                         )
                 result.actions += 1
             except asyncio.CancelledError:
@@ -705,7 +766,7 @@ class ReconciliationSweeper:
                     action.data_source_id, action.reason, exc,
                 )
 
-    async def _dispatch_first_build(self, svc, session, action, actor) -> None:
+    async def _dispatch_first_build(self, svc, session, action, actor, run_id) -> None:
         """Queue the very first aggregation for an onboarded source.
 
         Deliberately NOT via ``signal_source_changed``: that path treats a
@@ -747,6 +808,7 @@ class ReconciliationSweeper:
             reason=action.reason,
             evidence=action.evidence,
             job_id=job.id,
+            run_id=run_id,
         )
 
     async def _nudge_stats(self, ds_id, workspace_id) -> None:
@@ -795,6 +857,35 @@ class ReconciliationSweeper:
                 await session.commit()
         except Exception as exc:
             logger.warning("reconcile sweep: run record failed: %s", exc)
+
+
+def _action_from(state, ctx_row, verdict, *, acted: bool) -> _Action:
+    return _Action(
+        data_source_id=state.data_source_id,
+        workspace_id=state.workspace_id,
+        reason=verdict.reason,
+        evidence=verdict.evidence,
+        first_build=verdict.reason == "never_aggregated",
+        name=ctx_row.get("name"),
+        provider_id=ctx_row.get("provider_id"),
+        provider_name=ctx_row.get("provider_name"),
+        skip=verdict.skip,
+        acted=acted,
+    )
+
+
+def _finding_row(state, ctx_row, verdict, *, acted: bool, skip=None) -> Dict:
+    return {
+        "dataSourceId": state.data_source_id,
+        "name": ctx_row.get("name"),
+        "workspaceId": state.workspace_id,
+        "providerId": ctx_row.get("provider_id"),
+        "providerName": ctx_row.get("provider_name"),
+        "reason": verdict.reason,
+        "acted": acted,
+        "skip": skip if skip is not None else verdict.skip,
+        "evidence": verdict.evidence or {},
+    }
 
 
 def _within_cooldown(

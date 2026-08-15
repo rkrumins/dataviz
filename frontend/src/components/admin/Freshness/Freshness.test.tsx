@@ -11,7 +11,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProviders, listWorkspaces, permissionFn, listJobsGlobal } = vi.hoisted(() => ({
+const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProviders, listWorkspaces, permissionFn, listJobsGlobal, getReconciliation, getReconciliationActivity, reconcileNow } = vi.hoisted(() => ({
     listFleet: vi.fn(),
     refreshSource: vi.fn(),
     getSourceDoc: vi.fn(),
@@ -21,6 +21,9 @@ const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProvid
     listWorkspaces: vi.fn(),
     permissionFn: vi.fn(),
     listJobsGlobal: vi.fn(),
+    getReconciliation: vi.fn(),
+    getReconciliationActivity: vi.fn(),
+    reconcileNow: vi.fn(),
 }))
 
 vi.mock('@/store/auth', () => ({
@@ -38,6 +41,9 @@ vi.mock('@/services/freshnessService', async () => {
             getSourceDoc,
             refreshAll,
             getBatch,
+            getReconciliation,
+            getReconciliationActivity,
+            reconcileNow,
         },
     }
 })
@@ -113,6 +119,20 @@ describe('Freshness cockpit', () => {
         listWorkspaces.mockResolvedValue([{ id: 'ws-1', name: 'Analytics' }])
         // Default: no active jobs, so unrelated tests see no live-progress badges.
         listJobsGlobal.mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 })
+        getReconciliation.mockResolvedValue({
+            policy: {
+                enabled: true, checkIntervalSecs: 3600,
+                envEnabled: true, envCheckIntervalSecs: 3600, envMaxActionsPerRun: 10,
+                envShrinkTolerancePct: 10, envStatsMaxAgeSecs: 2700, allDetectors: [],
+            },
+            runs: [{
+                id: 'rcn_1', mode: 'auto', scanned: 12, skipped: 10, seeded: 0,
+                findings: 2, actions: 2, errors: 0, byReason: {}, bySkip: {},
+                startedAt: recent,
+            }],
+        })
+        getReconciliationActivity.mockResolvedValue({ since: recent, items: [] })
+        reconcileNow.mockResolvedValue({ skipped: false, findings: [], run: null })
         // Default: caller can manage sources (rows show actions); not admin.
         permissionFn.mockImplementation((perm: string) => perm === 'workspace:datasource:manage')
     })
@@ -216,6 +236,37 @@ describe('Freshness cockpit', () => {
         expect(probe.search).not.toContain('fstatus')
     })
 
+    it('toggles the suspended facet from the pulse needs-a-person count', async () => {
+        const user = userEvent.setup()
+        listFleet.mockResolvedValue({
+            total: 2,
+            rows: [
+                { ...fleet.rows[0], driftState: 'suspended', name: 'Held Source' },
+                { ...fleet.rows[1], driftState: 'inSync', name: 'Healthy Source' },
+            ],
+            summary: {
+                total: 2, ready: 2, pending: 0, failed: 0, notBuilt: 0,
+                recomputing: 0, needsAttention: 1, cacheStamped: 2,
+                drifting: 0, suspended: 1,
+            },
+        })
+        renderTab()
+
+        await waitFor(() => expect(screen.getByText('Held Source')).toBeInTheDocument())
+        await user.click(screen.getByRole('button', { name: /needs a person/i }))
+        await waitFor(() => expect(screen.queryByText('Healthy Source')).not.toBeInTheDocument())
+        expect(screen.getByText('Held Source')).toBeInTheDocument()
+        expect(probe.search).toContain('fstatus=suspended')
+    })
+
+    it('renders a recon fetch error instead of looking healthy', async () => {
+        getReconciliation.mockReset()
+        getReconciliation.mockRejectedValue(new Error('boom'))
+        renderTab()
+        expect(await screen.findByText(/could not load overlay integrity/i, {}, { timeout: 4000 }))
+            .toBeInTheDocument()
+    })
+
     // ── R5.2 — severity ordering helper ──────────────────────────────
     it('orders rows by severity, then recency, then name', () => {
         const mk = (p: Partial<FreshnessRowData>): FreshnessRowData =>
@@ -249,6 +300,10 @@ describe('Freshness cockpit', () => {
         expect(isDrifting(managed)).toBe(false)
         expect(needsAttention(managed)).toBe(false)
         expect(severityRank(managed)).toBe(severityRank(ready))
+
+        const suspended = mk({ name: 'suspended', aggregationStatus: 'ready', driftState: 'suspended' })
+        expect(needsAttention(suspended)).toBe(true)
+        expect(isDrifting(suspended)).toBe(false)
 
         const shuffled = [ready, notBuilt, failed, cooldown, pending, recomputing, drifting]
         expect(shuffled.slice().sort(compareSeverity).map(r => r.name))

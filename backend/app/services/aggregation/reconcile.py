@@ -163,12 +163,21 @@ class Policy:
         return reason in self.detectors
 
 
+# Holds: the condition is real, but we refuse to queue a rebuild. Detectors
+# still run so the cockpit has a reason and the counts behind it. Distinct
+# from absolute guards (deleted, no stats, …) which cannot evaluate at all.
+_HOLD_SKIPS: Tuple[str, ...] = (
+    "cooldown", "failed_backoff", "disabled", "suspended",
+)
+
+
 @dataclass(frozen=True)
 class Verdict:
     """The outcome of evaluating one source.
 
-    Exactly one of ``reason`` / ``skip`` is set. ``seed`` marks the
-    first-sight case: the sweeper writes the baseline and acts on nothing.
+    A clean finding has ``reason`` and no ``skip``. An absolute skip has
+    ``skip`` and no ``reason``. A *hold* has both: the drift is real, but
+    we refuse to act (cooldown, automation off, breaker).
     """
     data_source_id: str
     reason: Optional[str] = None
@@ -179,7 +188,7 @@ class Verdict:
 
     @property
     def should_act(self) -> bool:
-        return self.reason is not None
+        return self.reason is not None and self.skip is None
 
 
 def evaluate(obs: Observation, policy: Policy) -> Verdict:
@@ -198,6 +207,7 @@ def evaluate(obs: Observation, policy: Policy) -> Verdict:
         reason, evidence = detector(obs, policy)
         if reason is None:
             continue
+        packed = {**_base_evidence(obs), **evidence}
         if not policy.allows(reason):
             # The condition holds but this detector is switched off. Report
             # the drift state anyway — the UI still shows the truth, we just
@@ -206,13 +216,25 @@ def evaluate(obs: Observation, policy: Policy) -> Verdict:
                 data_source_id=obs.data_source_id,
                 skip="disabled",
                 drift_state=_REASON_STATE[reason],
-                evidence=evidence,
+                evidence=packed,
+            )
+        hold = _hold(obs, policy)
+        if hold is not None:
+            return Verdict(
+                data_source_id=obs.data_source_id,
+                reason=reason,
+                skip=hold,
+                drift_state=(
+                    "suspended" if hold == "suspended"
+                    else _REASON_STATE[reason]
+                ),
+                evidence=packed,
             )
         return Verdict(
             data_source_id=obs.data_source_id,
             reason=reason,
             drift_state=_REASON_STATE[reason],
-            evidence={**_base_evidence(obs), **evidence},
+            evidence=packed,
         )
 
     # Nothing wrong. A source with no baseline yet still needs one written.
@@ -279,6 +301,12 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
         # reconciler in scheduler.py owns its retry cadence. Two mechanisms
         # must never both retry the same rebuild.
         return "already_marked"
+    return None
+
+
+def _hold(obs: Observation, policy: Policy) -> Optional[str]:
+    """Post-detector refusal to act. Unlike ``_guard``, these run AFTER the
+    detectors so a held source still carries a reason and evidence."""
     if obs.in_cooldown:
         return "cooldown"
     if obs.recently_failed:
@@ -286,9 +314,6 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
     if not obs.reconcile_enabled:
         return "disabled"
     if obs.consecutive_actions >= policy.breaker_cap:
-        # The breaker: something about this source makes the finding
-        # un-clearable, and we have already rebuilt it breaker_cap times.
-        # Stop, and surface it as needing a human.
         return "suspended"
     return None
 

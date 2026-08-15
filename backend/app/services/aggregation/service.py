@@ -1537,6 +1537,7 @@ class AggregationService:
         audit_reason: Optional[str] = None,
         evidence: Optional[dict] = None,
         trigger_source: str = "api",
+        run_id: Optional[str] = None,
     ) -> SourceChangedResponse:
         """Convergence entry point after a DIRECT write to a source's graph.
 
@@ -1623,7 +1624,7 @@ class AggregationService:
             event_id = await self._emit_signal_event(
                 workspace_id=workspace_id, ds_id=ds_id, origin=origin,
                 actor=actor, gate="unchanged", actions={}, outcome="noop",
-                audit_reason=audit_reason, evidence=evidence,
+                audit_reason=audit_reason, evidence=evidence, run_id=run_id,
             )
             return SourceChangedResponse(
                 changed=False,
@@ -1782,6 +1783,7 @@ class AggregationService:
             actor=actor, gate=("forced" if force else "changed"),
             actions=actions, outcome=outcome, detail=trigger_detail,
             audit_reason=audit_reason, evidence=evidence, job_id=job_id,
+            run_id=run_id,
         )
 
         return SourceChangedResponse(
@@ -1797,6 +1799,7 @@ class AggregationService:
     async def _emit_signal_event(
         self, *, workspace_id, ds_id, origin, actor, gate, actions, outcome,
         detail=None, audit_reason=None, evidence=None, job_id=None,
+        run_id=None,
     ) -> Optional[str]:
         """Best-effort audit emit for one ``signal_source_changed`` outcome.
 
@@ -1821,6 +1824,7 @@ class AggregationService:
                 reason=audit_reason,
                 evidence=evidence,
                 job_id=job_id,
+                run_id=run_id,
             )
         except Exception as exc:
             logger.warning(
@@ -3189,12 +3193,16 @@ async def _assemble_fleet_summary(
         ds_id for ds_id, st in full_states.items()
         if st.get("drift_state") in _DRIFTING_STATES
     }
+    suspended_ids = {
+        ds_id for ds_id, st in full_states.items()
+        if st.get("drift_state") == "suspended"
+    }
 
     summary = _summarize_freshness(
-        full_rows, full_signals, full_running, drifting_ids,
+        full_rows, full_signals, full_running, drifting_ids, suspended_ids,
     )
     provider_summaries = _summarize_by_provider(
-        full_rows, full_signals, full_running, drifting_ids,
+        full_rows, full_signals, full_running, drifting_ids, suspended_ids,
     )
     return summary, provider_summaries
 
@@ -3207,20 +3215,22 @@ _DRIFTING_STATES = frozenset({"drifting", "overlayMissing"})
 def _summarize_freshness(
     full_rows: list, signals: dict, running: dict,
     drifting_ids: Optional[set] = None,
+    suspended_ids: Optional[set] = None,
 ) -> FreshnessSummary:
     """Reduce ``(ds_id, workspace_id, aggregation_status, ...)`` rows +
     their Redis signals + running-job map into the fleet summary counts
     (only the first 3 columns are read here; trailing provider columns,
     when present, are for ``_summarize_by_provider``).
-    ``needs_attention`` is a per-row OR (marker present or failed), not a
-    sum of the two buckets — a row that is both failed and marked stale
-    counts once. ``pending`` counts rows with a live job (see
-    ``_assemble_fleet_summary`` docstring), independent of
+    ``needs_attention`` is a per-row OR (marker, failed, drifting, or
+    suspended), not a sum of those buckets — a row that is both failed
+    and marked stale counts once. ``pending`` counts rows with a live job
+    (see ``_assemble_fleet_summary`` docstring), independent of
     ``aggregation_status`` — a row can be both ``ready`` (from its last
     completed run) and ``pending`` (a new rebuild already in flight)."""
     drifting_ids = drifting_ids or set()
+    suspended_ids = suspended_ids or set()
     ready = pending = failed = not_built = 0
-    recomputing = needs_attention = cache_stamped = drifting = 0
+    recomputing = needs_attention = cache_stamped = drifting = suspended = 0
     for row in full_rows:
         ds_id, ws_id, status = row[0], row[1], row[2]
         if status == "ready":
@@ -3240,9 +3250,13 @@ def _summarize_freshness(
         is_drifting = ds_id in drifting_ids
         if is_drifting:
             drifting += 1
-        # A drifting source is serving data that no longer matches its graph,
-        # so it belongs in the same triage bucket as a failed or marked one.
-        if marker or status == "failed" or is_drifting:
+        is_suspended = ds_id in suspended_ids
+        if is_suspended:
+            suspended += 1
+        # A drifting or suspended source is serving data that no longer
+        # matches its graph, so it belongs in the same triage bucket as a
+        # failed or marked one. Suspended is the case that needs a person.
+        if marker or status == "failed" or is_drifting or is_suspended:
             needs_attention += 1
         if cache_as_of:
             cache_stamped += 1
@@ -3256,12 +3270,14 @@ def _summarize_freshness(
         needs_attention=needs_attention,
         cache_stamped=cache_stamped,
         drifting=drifting,
+        suspended=suspended,
     )
 
 
 def _summarize_by_provider(
     full_rows: list, signals: dict, running: dict,
     drifting_ids: Optional[set] = None,
+    suspended_ids: Optional[set] = None,
 ) -> list[ProviderFreshnessSummary]:
     """Per-provider breakdown of the SAME rows ``_summarize_freshness``
     reduces, grouped by ``(provider_id, provider_name)`` (row columns 4
@@ -3274,13 +3290,16 @@ def _summarize_by_provider(
 
     result = []
     for (provider_id, provider_name), rows in groups.items():
-        s = _summarize_freshness(rows, signals, running, drifting_ids)
+        s = _summarize_freshness(
+            rows, signals, running, drifting_ids, suspended_ids,
+        )
         result.append(ProviderFreshnessSummary(
             provider_id=provider_id,
             provider_name=provider_name,
             total=s.total, ready=s.ready, pending=s.pending, failed=s.failed,
             not_built=s.not_built, needs_attention=s.needs_attention,
             cache_stamped=s.cache_stamped, drifting=s.drifting,
+            suspended=s.suspended,
         ))
     result.sort(key=lambda ps: (ps.provider_name is None, ps.provider_name or ""))
     return result
@@ -3358,6 +3377,114 @@ async def assemble_reconcile_overview(
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Reconcile run history read failed: %s", exc)
     return ReconcileOverviewResponse(policy=_policy_response(cadence), runs=runs)
+
+
+def parse_activity_since(raw: Optional[str]) -> datetime:
+    """``since`` query: ISO timestamp, or a duration like ``24h``. Default
+    is the last 24 hours."""
+    now = datetime.now(timezone.utc)
+    if not raw:
+        return now - timedelta(hours=24)
+    text = raw.strip()
+    if text.endswith("h") and text[:-1].isdigit():
+        return now - timedelta(hours=int(text[:-1]))
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            "since must be an ISO timestamp or a duration like 24h",
+        ) from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _activity_outcome(finding: dict, event) -> str:
+    if not finding.get("acted"):
+        return "held"
+    if event is not None and event.outcome in ("error", "failed"):
+        return "failed"
+    return "rebuilt"
+
+
+async def assemble_reconcile_activity(
+    session: AsyncSession, *, since: Optional[datetime] = None,
+) -> "ReconcileActivityResponse":
+    """Overnight blotter: findings persisted on ``reconcile_runs`` joined
+    to ``refresh_events`` by ``run_id``. Preview passes are excluded —
+    they evaluate and record, they do not change anything overnight.
+
+    Never raises: a missing table degrades to an empty ledger rather than
+    500ing the cockpit."""
+    from backend.app.db.models import RefreshEventORM
+    from .models import ReconcileRunORM
+    from .schemas import ReconcileActivityItem, ReconcileActivityResponse
+
+    cutoff = since or (datetime.now(timezone.utc) - timedelta(hours=24))
+    cutoff_iso = cutoff.isoformat()
+    items: list = []
+    try:
+        runs = (await session.execute(
+            select(ReconcileRunORM)
+            .where(ReconcileRunORM.mode != "preview")
+            .where(ReconcileRunORM.started_at >= cutoff_iso)
+            .order_by(ReconcileRunORM.started_at.desc())
+        )).scalars().all()
+        run_ids = [r.id for r in runs]
+        events_by_key: dict[tuple, object] = {}
+        if run_ids:
+            event_rows = (await session.execute(
+                select(RefreshEventORM)
+                .where(RefreshEventORM.origin == "reconcile-sweep")
+                .where(RefreshEventORM.run_id.in_(run_ids))
+                .order_by(RefreshEventORM.ts.desc())
+            )).scalars().all()
+            for ev in event_rows:
+                key = (ev.run_id, ev.data_source_id)
+                events_by_key.setdefault(key, ev)
+
+        for run in runs:
+            detail = {}
+            if run.detail:
+                try:
+                    detail = json.loads(run.detail)
+                except (TypeError, ValueError):
+                    detail = {}
+            findings = detail.get("findings") or []
+            mode = run.mode if run.mode in ("auto", "manual") else "auto"
+            for finding in findings:
+                ds_id = finding.get("dataSourceId")
+                if not ds_id:
+                    continue
+                event = events_by_key.get((run.id, ds_id))
+                evidence = finding.get("evidence") or {}
+                if event and event.evidence:
+                    try:
+                        evidence = json.loads(event.evidence) or evidence
+                    except (TypeError, ValueError):
+                        pass
+                items.append(ReconcileActivityItem(
+                    run_id=run.id,
+                    run_started_at=run.started_at,
+                    ts=(event.ts if event else run.started_at),
+                    data_source_id=ds_id,
+                    name=finding.get("name"),
+                    workspace_id=finding.get("workspaceId"),
+                    provider_id=finding.get("providerId"),
+                    provider_name=finding.get("providerName"),
+                    reason=finding.get("reason") or (
+                        event.reason if event else None
+                    ),
+                    mode=mode,
+                    outcome=_activity_outcome(finding, event),
+                    skip=finding.get("skip"),
+                    job_id=event.job_id if event else None,
+                    evidence=evidence if isinstance(evidence, dict) else {},
+                ))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Reconcile activity read failed: %s", exc)
+
+    return ReconcileActivityResponse(since=cutoff_iso, items=items)
 
 
 async def save_reconcile_policy(

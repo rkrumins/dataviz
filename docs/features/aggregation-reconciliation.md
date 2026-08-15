@@ -208,6 +208,12 @@ knows **what** the rebuild did. Two changes connect them, in both directions:
   in memory, since `refresh_events` is `public` and `aggregation.jobs` is not —
   and only for jobs whose trigger is `reconcile`, so an ordinary page issues no
   extra query.
+- **`refresh_events.run_id`.** Names the `reconcile_runs` pass that produced
+  the event. The overnight blotter joins on it instead of filtering Job History
+  by trigger + calendar day. Compact `findings` on the run (acted and held)
+  are what let the ledger answer "found, not rebuilt" without a new table.
+  `last_finding_*` on the state row is the live detector evidence, distinct
+  from `last_reconcile_*` which remains "last rebuild queued".
 
 The result: Job History's Trigger column reads **"Rollups were missing"** rather
 than "API", filters by **Reconciliation**, and its expanded row carries the
@@ -222,9 +228,16 @@ source per hour — with tallies by reason and by skip code, trimmed to 30 days.
 | Method & path | Gate | Mode |
 |---|---|---|
 | `GET /api/v1/admin/freshness/reconciliation` | ingestion-read | in-process |
+| `GET /api/v1/admin/freshness/reconciliation/activity?since=` | ingestion-read | in-process |
 | `PUT /api/v1/admin/freshness/reconciliation` | `system:admin` | in-process |
 | `POST /api/v1/admin/freshness/reconcile-now` `{dryRun, dataSourceIds?}` | `system:admin` | proxy |
 | `PATCH /api/v1/admin/data-sources/{id}/freshness-settings` | `ds:manage` | existing |
+
+`activity` defaults to the last 24 hours (`since=24h`, or an ISO timestamp).
+Each row is a finding from `reconcile_runs.detail.findings`, joined to
+`refresh_events` by `run_id`, so a rebuilt source carries its `jobId` and a
+held source (cooldown, cap, automation off, already suspended) is still
+visible.
 
 The reads stay in-process in both modes because they are pure SQL over tables
 the web tier already reads; the write proxies because the sweeper lives on the
@@ -237,6 +250,24 @@ control plane. `actor` is forced server-side.
 
 ## UI
 
+Freshness is a command center whose identity is **overlay integrity**, not a
+collapsible footnote under cache tiles.
+
+The **Integrity Pulse** is the signature: Watching / Detecting only, last and
+next check, drifting count, sources that need a person (`suspended`), last-pass
+tallies, Check now / Preview / Cadence. The whole card goes amber when sweeps
+have stopped (last run older than three check intervals). A recon fetch error
+renders; it must not look healthy.
+
+The **overnight blotter** groups the last 24 hours by sweep. A rebuilt row
+links to Job History by `jobId`; a held row says why. Clicking a source opens
+`?fds=`.
+
+Compact stat tiles and the provider-grouped fleet table stay below. There is
+no eighth generic tile: `fstatus=suspended` is toggled from the pulse's
+"needs a person" count, which comes from the server summary (not the 200-row
+page). `needsAttention` includes suspended.
+
 A version-controlled source shows the **Version controlled** badge, swaps the
 integrity meter for an explanation of why counting rollups would measure the
 wrong thing, and **hides** the per-source toggle and interval override rather
@@ -246,27 +277,32 @@ already in `DRIFT_SPEC`, indigo-600 sits ΔE 7.5 from violet-600 ("Blocked") to
 normal vision — worse than the red/amber pair below — and 1.3 apart under
 protanopia. sky-600 is the only candidate that adds no new collision.
 
-**Preview before committing.** The runs panel's *Preview* opens a dry sweep —
+**Preview before committing.** The pulse's *Preview* opens a dry sweep —
 every source evaluated exactly as a real pass would, nothing queued — grouped by
-reason with the evidence behind each finding. This is what makes enabling
-automation on an established fleet a decision rather than a gamble.
+reason with the evidence behind each finding, including the provider name. This
+is what makes enabling automation on an established fleet a decision rather
+than a gamble.
 
 **The sweep's own health.** A stopped control plane is a silent failure: no
 source is ever re-checked and every drift verdict freezes at its last value,
-looking perfectly current. The panel shows *Sweeps have stopped* once the last
+looking perfectly current. The pulse shows *Sweeps have stopped* once the last
 run is older than three check intervals, and *Not yet run* before the first.
+System Status carries the same signal (`probe_reconciliation`) plus a
+`suspendedCount`. Transition into `suspended` also rings `reconcile.suspended`
+for workspace `datasource:manage` holders **and** globally bound `system:admin`,
+unread-deduped per source, linking to `?fds=`.
 
 The drawer's open source lives in the URL (`?tab=freshness&fds=<id>`), so a link
-from a reconciliation job, a data-source profile, or a copied address lands on
-that source's detail instead of an unfiltered fleet table.
+from a reconciliation job, a data-source profile, a bell, or a copied address
+lands on that source's detail instead of an unfiltered fleet table.
 
-Ingestion → Freshness: a "Drifting" stat tile and filter facet, a per-row
-verdict badge with its reason, a Reconciliation panel in the source drawer
-(integrity meter, history sparkline, per-source toggle, check-frequency
-override, last-checked/last-reconciled/why), a collapsible run-history panel,
-and the policy controls inside the existing **Cadence & reconciliation**
-dialog. The verdict also appears on the data-source profile with a link
-through to the cockpit.
+Ingestion → Freshness: Integrity Pulse + overnight blotter, a "Drifting" stat
+tile and filter facet, a per-row verdict badge with its reason, a Reconciliation
+panel in the source drawer (integrity meter, history sparkline, per-source
+toggle, check-frequency override, last-checked/last-reconciled/why), and the
+policy controls inside the existing **Cadence & reconciliation** dialog. The
+verdict also appears on the data-source profile with a link through to
+`?fds=<this source>`.
 
 Every drift state ships an icon **and** a written label. Light-mode `red-600`
 and `amber-600` measure ΔE 14.4 apart to normal vision — below the 15 floor
@@ -296,9 +332,11 @@ seven states.
    `AGGREGATED: 0`.
 4. `POST .../reconcile-now {"dryRun": true}` → one finding,
    `reason: "overlay_missing"`, evidence `expected: N, observed: 0`, nothing queued.
-5. Run it for real → a job with `trigger_source='schedule'` or a
-   `signal_source_changed` rebuild; a `refresh_events` row with
-   `origin='reconcile-sweep'`; the tab shows Drifting → Recomputing.
+5. Run it for real → a job with `trigger_source='reconcile'` (never
+   `schedule` — that value is the cron-driven scheduler); a `refresh_events`
+   row with `origin='reconcile-sweep'` and `run_id` of the pass; the blotter
+   shows the source as Rebuilt with a job link; the tab shows Drifting →
+   Recomputing.
 6. On completion: count restored, verdict back to In sync, `last_reconciled_at`
    stamped, a `reconcile_runs` row recorded.
 7. **Opt-out:** disable auto-reconcile on the source and repeat 2–3 → still

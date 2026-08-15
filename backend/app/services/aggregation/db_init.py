@@ -199,6 +199,12 @@ async def init_aggregation_db() -> None:
                 f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
                 "ADD COLUMN IF NOT EXISTS reconcile_consecutive_actions "
                 "INTEGER NULL DEFAULT 0",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS last_finding_at TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS last_finding_reason TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS last_finding_evidence TEXT NULL",
                 f"CREATE INDEX IF NOT EXISTS ix_ds_state_recon_due "
                 f"ON {SCHEMA_NAME}.data_source_state (last_reconcile_checked_at)",
             )

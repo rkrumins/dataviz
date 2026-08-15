@@ -29,7 +29,7 @@ const ALL_TABS: TabDef[] = [
     { id: 'providers', label: 'Providers', icon: Server, desc: 'View provider credentials and health' },
     { id: 'assets', label: 'Data Sources', icon: Layers, desc: 'Register and configure data sources' },
     { id: 'jobs', label: 'Job History', icon: Activity, desc: 'Aggregation job history and monitoring' },
-    { id: 'freshness', label: 'Freshness', icon: Gauge, desc: 'Monitor and refresh source freshness across the fleet' },
+    { id: 'freshness', label: 'Freshness', icon: Gauge, desc: 'Monitor overlay integrity and source freshness' },
 ]
 
 /** "until 3:45 PM" for a same-day snooze, "until Wed 8:00 AM" otherwise. */

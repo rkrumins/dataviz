@@ -87,6 +87,7 @@ async def _assemble(app_state) -> dict:
         probes.probe_projection_lag(),
         probes.probe_aggregation_jobs(app_state),
         probes.probe_stats_polling(),
+        probes.probe_reconciliation(),
         probes.probe_outbox(app_state),
         probes.probe_overview(app_state),
         probes.probe_graph_providers(app_state),
@@ -95,8 +96,8 @@ async def _assemble(app_state) -> dict:
     )
     (viz, mgmt_db, gv_db, bus_redis, cache_redis, falkordb,
      controlplane, worker, stats_svc, graph_svc,
-     streams, projection, agg_jobs, stats_polling, outbox, overview,
-     graph_providers, bootstrap_jobs) = results
+     streams, projection, agg_jobs, stats_polling, reconciliation, outbox,
+     overview, graph_providers, bootstrap_jobs) = results
 
     services = [
         _coerce_service(viz, "vizService", "Viz Service"),
@@ -114,6 +115,7 @@ async def _assemble(app_state) -> dict:
     projection = _coerce_data(projection)
     agg_jobs = _coerce_data(agg_jobs)
     stats_polling = _coerce_data(stats_polling)
+    reconciliation = _coerce_data(reconciliation)
     outbox = _coerce_data(outbox)
     overview = _coerce_data(overview)
     graph_providers = _coerce_data(graph_providers)
@@ -142,6 +144,8 @@ async def _assemble(app_state) -> dict:
     insights_dlq = next((d for d in dlq_rows if d.get("family") == "insights"), {})
     if (insights_dlq.get("len") or 0) > 0:
         _degrade(stats_tile, f"DLQ {insights_dlq['len']}")
+    if reconciliation and reconciliation.get("stopped"):
+        _degrade(by_key["aggregationControlplane"], "Sweeps have stopped")
 
     bootstrap_jobs = _coerce_data(bootstrap_jobs)
 
@@ -178,5 +182,6 @@ async def _assemble(app_state) -> dict:
         "aggregationJobs": agg_jobs,
         "bootstrapJobs": bootstrap_jobs,
         "statsPolling": stats_polling,
+        "reconciliation": reconciliation,
         "outbox": outbox,
     }

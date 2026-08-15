@@ -31,6 +31,7 @@ const FACET_LABEL: Record<Exclude<StatusFacet, ''>, string> = {
     notBuilt: 'Not built',
     cacheStamped: 'Cache coverage',
     drifting: 'Drifting',
+    suspended: 'Needs a person',
 }
 
 interface Props {

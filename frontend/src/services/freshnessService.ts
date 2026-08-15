@@ -194,6 +194,28 @@ export interface ReconcileOverview {
     runs: ReconcileRun[]
 }
 
+export interface ReconcileActivityItem {
+    runId: string
+    runStartedAt?: string | null
+    ts?: string | null
+    dataSourceId: string
+    name?: string | null
+    workspaceId?: string | null
+    providerId?: string | null
+    providerName?: string | null
+    reason?: ReconcileReason | string | null
+    mode: 'auto' | 'manual'
+    outcome: 'rebuilt' | 'held' | 'failed'
+    skip?: string | null
+    jobId?: string | null
+    evidence: Record<string, unknown>
+}
+
+export interface ReconcileActivity {
+    since: string
+    items: ReconcileActivityItem[]
+}
+
 export interface ReconcileRunResult {
     run?: ReconcileRun | null
     findings: ReconcileFinding[]
@@ -222,6 +244,8 @@ export interface FreshnessSummary {
     /** Rows whose last reconciliation check found the rollups out of step
      *  (``drifting`` or ``overlayMissing``). */
     drifting: number
+    /** Circuit breaker tripped — automation stopped; a person has to look. */
+    suspended?: number
 }
 
 /** Per-provider breakdown of the fleet ``summary`` — identical bucket
@@ -239,6 +263,7 @@ export interface ProviderFreshnessSummary {
     needsAttention: number
     cacheStamped: number
     drifting: number
+    suspended?: number
 }
 
 export interface FreshnessFleetResponse {
@@ -370,6 +395,13 @@ export const freshnessService = {
     getReconciliation(limit = 20): Promise<ReconcileOverview> {
         return authFetch<ReconcileOverview>(
             `${BASE}/freshness/reconciliation?limit=${limit}`,
+        )
+    },
+
+    /** Overnight blotter: findings joined to jobs by run_id. Default 24h. */
+    getReconciliationActivity(since = '24h'): Promise<ReconcileActivity> {
+        return authFetch<ReconcileActivity>(
+            `${BASE}/freshness/reconciliation/activity?since=${encodeURIComponent(since)}`,
         )
     },
 

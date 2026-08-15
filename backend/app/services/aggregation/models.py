@@ -265,6 +265,12 @@ class AggregationDataSourceStateORM(Base):
     # Stored verdict, stamped at every evaluation and read straight off the
     # column by the freshness API — the read path must never run detection.
     drift_state = Column(Text, nullable=True)
+    # Live finding, stamped whenever evaluate() returns a detector reason
+    # (including holds: cooldown, automation off, breaker). Cleared on
+    # in_sync. Distinct from last_reconcile_* which is the last rebuild.
+    last_finding_at = Column(Text, nullable=True)
+    last_finding_reason = Column(Text, nullable=True)
+    last_finding_evidence = Column(Text, nullable=True)
     # Circuit breaker. Increments on every action, resets whenever an
     # evaluation finds nothing wrong. At the cap the source is suspended, so
     # a finding we can never clear cannot rebuild a huge graph hourly forever.

@@ -328,6 +328,31 @@ def test_fleet_summary_counts_mixed_fixture(monkeypatch):
     assert s.recomputing == 2  # ds-ready + ds-failed both have markers
     assert s.needs_attention == 2  # ds-ready(marker) + ds-failed(marker&failed, counted once)
     assert s.cache_stamped == 2  # ds-ready + ds-failed have genat
+    assert s.suspended == 0
+
+
+def test_fleet_summary_counts_suspended_in_needs_attention(monkeypatch):
+    """A source the breaker tripped is a person-required row: it must
+    increment ``suspended`` AND ``needsAttention``, without also counting
+    as drifting (the overlay is still wrong; the split is that automation
+    will not retry)."""
+    ds_ok = _ds(id="ds-ok", status="ready")
+    ds_held = _ds(id="ds-held", status="ready")
+    _patch_fleet_collaborators(monkeypatch)
+    _patch_cadence(
+        monkeypatch,
+        states={"ds-held": {"drift_state": "suspended"}},
+    )
+    session = _FakeSession([
+        _FakeResult(scalar=2),
+        _FakeResult(rows=[(ds_ok, "Prov A"), (ds_held, "Prov A")]),
+    ])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+    s = resp.summary
+    assert s is not None
+    assert s.suspended == 1
+    assert s.drifting == 0
+    assert s.needs_attention == 1
 
 
 def test_fleet_summary_pending_ignores_dead_status_value(monkeypatch):

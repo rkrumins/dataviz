@@ -15,8 +15,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Clock, RefreshCw, Zap } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { RefreshCw, Zap } from 'lucide-react'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { usePermission } from '@/store/auth'
 import { useToast } from '@/components/ui/toast'
@@ -32,7 +31,7 @@ import { FreshnessStatBand } from './FreshnessStatBand'
 import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
 import { CadenceSettingsDialog } from './CadenceSettingsDialog'
-import { ReconciliationRunsPanel } from './ReconciliationRunsPanel'
+import { OverlayIntegrity } from './OverlayIntegrity'
 import { useFleetFreshness, useRefreshSource, FRESHNESS_KEYS } from './useFreshness'
 import { useActiveJobs, ACTIVE_JOBS_KEY } from './useActiveJobs'
 import {
@@ -49,7 +48,7 @@ const SCOPE_LABEL: Record<RefreshScope, string> = {
 
 const COLS = 6
 
-const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped', 'drifting']
+const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped', 'drifting', 'suspended']
 
 function parseStatus(raw: string | null): StatusFacet {
     return (raw && (STATUS_FACETS as readonly string[]).includes(raw)) ? (raw as StatusFacet) : ''
@@ -292,48 +291,22 @@ export function Freshness() {
 
     return (
         <div className="space-y-4">
-            {/* Reload — the fleet also auto-refreshes every 30s while mounted. */}
-            <div className="flex items-center justify-end gap-2">
-                {isSystemAdmin && (
-                    <button
-                        onClick={() => setFleetDialogOpen(true)}
-                        className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
-                    >
-                        <Zap className="w-3.5 h-3.5" />
-                        Refresh all sources
-                    </button>
-                )}
-                {isSystemAdmin && (
-                    <button
-                        onClick={() => setCadenceOpen(true)}
-                        className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
-                    >
-                        <Clock className="w-3.5 h-3.5" />
-                        Cadence settings
-                    </button>
-                )}
-                <button
-                    onClick={() => fleet.refetch()}
-                    disabled={fleet.isFetching}
-                    aria-label="Reload freshness"
-                    className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors disabled:opacity-50"
-                >
-                    <RefreshCw className={cn('w-3.5 h-3.5', fleet.isFetching && 'animate-spin')} />
-                    Reload
-                </button>
-            </div>
+            <OverlayIntegrity
+                summary={summary}
+                activeFacet={fstatus}
+                onFacet={(facet) => patchParams({ fstatus: facet || null })}
+                onOpenCadence={isSystemAdmin ? () => setCadenceOpen(true) : undefined}
+                onReload={() => { void fleet.refetch() }}
+                reloading={fleet.isFetching}
+                onRefreshAll={isSystemAdmin ? () => setFleetDialogOpen(true) : undefined}
+                onOpenSource={setDrawerDsId}
+            />
 
             {/* Stat band — scrolls away; the tiles are the status filter. */}
             <FreshnessStatBand
                 summary={summary}
                 activeFacet={fstatus}
                 onToggle={(facet) => patchParams({ fstatus: facet || null })}
-            />
-
-            {/* Automatic reconciliation — one line when collapsed: is it on,
-                when did it last check, and what did it find. */}
-            <ReconciliationRunsPanel
-                onOpenSettings={isSystemAdmin ? () => setCadenceOpen(true) : undefined}
             />
 
             {/* Sticky faceted filter bar */}

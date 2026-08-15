@@ -23,6 +23,7 @@ import {
     CheckCircle2,
     Megaphone,
     Share2,
+    ShieldAlert,
     XCircle,
     type LucideIcon,
 } from 'lucide-react'
@@ -62,6 +63,11 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: XCircle,
         icon: 'text-rose-500',
         tile: 'bg-rose-500/10',
+    },
+    'reconcile.suspended': {
+        Icon: ShieldAlert,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
     },
 }
 

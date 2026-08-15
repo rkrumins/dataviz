@@ -2548,9 +2548,14 @@ class RefreshEventORM(Base):
     # rebuild was decided on and Job History knows WHAT the rebuild did, and
     # nothing joined them. Logical reference (no FK — different domain).
     job_id = Column(Text, nullable=True)
+    # The reconcile_runs row that produced this event, when the origin is
+    # reconcile-sweep. Lets the overnight ledger join "this pass" to the
+    # sources it touched, instead of filtering Job History by trigger + day.
+    run_id = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("idx_refresh_events_ds_ts", "data_source_id", "ts"),
+        Index("idx_refresh_events_origin_run", "origin", "run_id"),
         CheckConstraint(
             # 'reconcile' is the stale-marker reconciler in scheduler.py;
             # 'reconcile-sweep' is the drift / overlay-integrity sweep. They

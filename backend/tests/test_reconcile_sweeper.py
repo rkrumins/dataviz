@@ -349,6 +349,7 @@ async def test_never_built_source_gets_a_first_build_via_trigger(session_factory
     # The audit event names the job it produced, so a reader can cross from
     # "why we rebuilt" to "what the rebuild did".
     assert events[0].job_id == "agg_fake"
+    assert events[0].run_id == result.run_id
 
 
 @pytest.mark.asyncio
@@ -554,8 +555,16 @@ async def test_per_source_opt_out_detects_but_never_acts(session_factory):
     result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
 
     assert result.actions == 0
+    assert result.findings == 1
     assert result.by_skip == {"disabled": 1}
     assert svc.signals == []
+    st = await _state(session_factory)
+    assert st.drift_state == "overlayMissing"
+    assert st.last_finding_reason == "overlay_missing"
+    assert st.last_finding_at is not None
+    evidence = json.loads(st.last_finding_evidence)
+    assert evidence["expectedAggregatedEdges"] == 500
+    assert evidence["observedAggregatedEdges"] == 0
 
 
 @pytest.mark.asyncio
@@ -669,6 +678,83 @@ async def test_each_sweep_records_a_run_with_its_tallies(session_factory):
     detail = json.loads(run.detail)
     assert detail["byReason"] == {"overlay_missing": 1}
     assert detail["bySkip"] == {"in_sync": 1}
+    findings = detail["findings"]
+    assert len(findings) == 1
+    assert findings[0]["dataSourceId"] == "ds_a"
+    assert findings[0]["name"] == "Label for ds_a"
+    assert findings[0]["providerName"] == "p"
+    assert findings[0]["reason"] == "overlay_missing"
+    assert findings[0]["acted"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_clean_pass_clears_a_stale_finding(session_factory):
+    """Once the overlay is back, the live finding on the state row must
+    not keep reporting the previous wipe."""
+    await _seed(
+        session_factory, edge_counts={"FLOWS_TO": 200},
+        reconcile_enabled=False,
+    )
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+    st = await _state(session_factory)
+    assert st.last_finding_reason == "overlay_missing"
+
+    async with session_factory() as s:
+        row = await s.get(AggregationDataSourceStateORM, "ds_1")
+        row.reconcile_enabled = True
+        # Pretend the overlay came back (and the last check is due).
+        from backend.app.db.models import DataSourceStatsORM
+        stats = await s.get(DataSourceStatsORM, "ds_1")
+        stats.edge_type_counts = json.dumps({"FLOWS_TO": 200, "AGGREGATED": 500})
+        row.last_reconcile_checked_at = None
+        await s.commit()
+
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+    st = await _state(session_factory)
+    assert st.drift_state == "inSync"
+    assert st.last_finding_reason is None
+    assert st.last_finding_evidence is None
+
+
+@pytest.mark.asyncio
+async def test_a_queued_rebuild_names_the_sweep_on_the_audit_event(
+    session_factory,
+):
+    """The overnight ledger joins refresh_events to reconcile_runs by
+    run_id. Without it the only join is trigger + calendar day."""
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    _, kw = svc.signals[0]
+    assert kw["run_id"] == result.run_id
+
+
+@pytest.mark.asyncio
+async def test_a_first_build_audit_event_carries_the_run_id(session_factory):
+    await _seed(
+        session_factory,
+        agg_status="none", expected_edges=0, raw_fingerprint=None,
+        edge_counts={"FLOWS_TO": 200}, job_rows=(),
+        last_aggregated_ago_secs=None,
+    )
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+    async with session_factory() as s:
+        events = (await s.execute(select(RefreshEventORM))).scalars().all()
+    assert events[0].run_id == result.run_id
+
+
+@pytest.mark.asyncio
+async def test_preview_findings_carry_the_provider_name(session_factory):
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep(dry_run=True, mode="preview")
+    pending = result.pending[0]
+    assert pending.name == "Label for ds_1"
+    assert pending.provider_id == "prov_1"
+    assert pending.provider_name == "p"
 
 
 @pytest.mark.asyncio
@@ -684,6 +770,146 @@ async def test_a_dispatch_failure_is_counted_not_raised(session_factory):
     ).sweep()
     assert result.errors == 1
     assert result.actions == 0
+
+
+@pytest.mark.asyncio
+async def test_activity_returns_acted_and_held(session_factory):
+    """The overnight ledger joins run findings to refresh_events by run_id,
+    so a held finding (automation off) is visible next to a rebuilt one."""
+    from backend.app.services.aggregation.service import assemble_reconcile_activity
+
+    await _seed(
+        session_factory, ds_id="ds_act",
+        agg_status="none", expected_edges=0, raw_fingerprint=None,
+        edge_counts={"FLOWS_TO": 200}, job_rows=(),
+        last_aggregated_ago_secs=None,
+    )
+    await _seed(
+        session_factory, ds_id="ds_hold",
+        edge_counts={"FLOWS_TO": 200},
+        reconcile_enabled=False,
+    )
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+
+    async with session_factory() as s:
+        resp = await assemble_reconcile_activity(s)
+
+    by_id = {row.data_source_id: row for row in resp.items}
+    assert set(by_id) == {"ds_act", "ds_hold"}
+    rebuilt = by_id["ds_act"]
+    held = by_id["ds_hold"]
+    assert rebuilt.outcome == "rebuilt"
+    assert rebuilt.job_id == "agg_fake"
+    assert rebuilt.run_id == result.run_id
+    assert rebuilt.reason == "never_aggregated"
+    assert rebuilt.mode == "auto"
+    assert rebuilt.provider_name == "p"
+    assert held.outcome == "held"
+    assert held.job_id is None
+    assert held.skip == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_preview_runs_do_not_appear_on_the_ledger(session_factory):
+    from backend.app.services.aggregation.service import assemble_reconcile_activity
+
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep(
+        dry_run=True, mode="preview",
+    )
+    async with session_factory() as s:
+        resp = await assemble_reconcile_activity(s)
+    assert resp.items == []
+
+
+@pytest.mark.asyncio
+async def test_transition_into_suspended_notifies_once(
+    session_factory, monkeypatch,
+):
+    calls = []
+
+    async def _fake_notify(session, **kw):
+        calls.append(kw)
+        return 1
+
+    monkeypatch.setattr(
+        "backend.app.db.repositories.notification_repo.notify_reconcile_suspended",
+        _fake_notify,
+    )
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        consecutive=3,
+    )
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+    assert len(calls) == 1
+    assert calls[0]["data_source_id"] == "ds_1"
+    assert calls[0]["workspace_id"] == "ws_1"
+
+    async with session_factory() as s:
+        st = await s.get(AggregationDataSourceStateORM, "ds_1")
+        st.last_reconcile_checked_at = None
+        await s.commit()
+
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_notify_dedupes_unread_same_kind_and_resource(session_factory):
+    from backend.app.db.models import NotificationORM
+    from backend.app.db.repositories.notification_repo import notify
+
+    async with session_factory() as s:
+        s.add(NotificationORM(
+            user_id="u1", kind="reconcile.suspended", title="first",
+            resource_id="ds_1",
+        ))
+        await s.flush()
+        n = await notify(
+            s,
+            user_ids=["u1", "u2"],
+            kind="reconcile.suspended",
+            title="again",
+            resource_id="ds_1",
+            dedupe_unread=True,
+        )
+        await s.commit()
+        assert n == 1
+        rows = (await s.execute(select(NotificationORM))).scalars().all()
+        users = {r.user_id for r in rows}
+        assert users == {"u1", "u2"}
+
+
+@pytest.mark.asyncio
+async def test_probe_reconciliation_stopped_and_suspended(
+    session_factory, monkeypatch,
+):
+    from backend.app.services.system_status import probes
+
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        consecutive=3,
+    )
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+
+    async with session_factory() as s:
+        run = (await s.execute(select(ReconcileRunORM))).scalars().one()
+        run.started_at = _ago(hours=10)
+        await s.commit()
+
+    monkeypatch.setattr(
+        "backend.app.db.engine.get_session_factory",
+        lambda role=None: session_factory,
+    )
+    snap = await probes.probe_reconciliation()
+    assert snap is not None
+    assert snap["stopped"] is True
+    assert snap["suspendedCount"] == 1
+    assert snap["notYetRun"] is False
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,7 @@ import type { FreshnessRow } from '@/services/freshnessService'
 // ── Status facets (tile ⇄ filter) ────────────────────────────────────
 
 /** The status facet carried in the URL (``?fstatus=``). Empty string = all. */
-export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped' | 'drifting'
+export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped' | 'drifting' | 'suspended'
 
 /** Drift verdicts that mean the rollups no longer match the data. Both count
  *  toward the ``drifting`` tile; the split is only about which detector saw
@@ -61,6 +61,7 @@ export function needsAttention(row: FreshnessRow): boolean {
     return hasStaleMarker(row)
         || row.aggregationStatus === 'failed'
         || isDrifting(row)
+        || isReconcileSuspended(row)
 }
 
 /** A cooldown is holding the next rebuild off (``cooldownUntil`` in the future). */
@@ -90,6 +91,8 @@ export function matchesFacet(row: FreshnessRow, facet: StatusFacet): boolean {
             return row.cacheAsOf != null
         case 'drifting':
             return isDrifting(row)
+        case 'suspended':
+            return isReconcileSuspended(row)
         case '':
         default:
             return true
