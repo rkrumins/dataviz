@@ -65,7 +65,11 @@ const FIXTURES = process.argv.slice(2).length
     'walkGrainSeam', 'walkGrainSeamUnderclaim',
     // T25 A — the fetch-then-triage fix: a cohort that ARRIVED from a
     // genuine fetch (known + a real remainder), not a fully-local one.
-    'walkUnfetchedFanTriage']
+    'walkUnfetchedFanTriage',
+    // T26 R3 — the seam terminus: a column spotlighted several
+    // containment levels deep, where each level carries its own
+    // unrelated coarse traffic (the user's reported shape, 11.36.49/53).
+    'walkGrainSeamDeepNesting']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH

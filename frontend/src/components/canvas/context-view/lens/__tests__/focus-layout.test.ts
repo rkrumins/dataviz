@@ -2423,6 +2423,74 @@ describe('focus-layout — the grain seam (R1)', () => {
         expect(cone.cardIds.has(cardFor(g, 'MKT')!.id)).toBe(true)
         expect(cone.cardIds.has(cardFor(g, 'IOT')!.id)).toBe(true)
     })
+
+    // T26 R3 — REPRO FIRST: spotlight ONE column, several containment
+    // levels deep, where EVERY ancestor level between it and the root
+    // carries its own, unrelated coarse traffic — the user's reported
+    // shape (11.36.49/53), "most of the board lights orange". Manual
+    // card/edge construction (same pattern as the R1b tests above) so the
+    // seam-walk's own cardinality is asserted directly, independent of
+    // `buildFocusLayout`'s grain computation.
+    it('one-column-spotlight: the cone terminates at the FIRST seam — it does not climb the ancestor chain', () => {
+        const cardX = (id: string, frameId: string | null = null): FocusCard =>
+            ({ ...({} as FocusCard), id, nodeId: id, frameId, kind: frameId ? 'entity' : 'frame' })
+        const edgeX = (id: string, source: string, target: string, grainCoarse = false): FocusEdge =>
+            ({
+                id, source, target, count: 1, edgeTypeNorm: '', dimmed: false,
+                cycleBack: false, cycleAnchor: false, labelVisible: false,
+                grainCoarse, sameAncestorFrame: null, labelT: 0.5, seamSlotted: false,
+            })
+        // COL ⊂ TABLE ⊂ SCHEMA ⊂ DATABASE — four containment levels.
+        // TABLE (the anchor's OWN immediate frame — the one true seam)
+        // carries its own direct coarse bundle; SCHEMA and DATABASE, one
+        // and two levels further up, each carry a SEPARATE, unrelated
+        // one. Before the fix, climbing the whole ancestor chain admitted
+        // all three; the rule says only the first.
+        const cards = [
+            cardX('DATABASE'), cardX('SCHEMA', 'DATABASE'), cardX('TABLE', 'SCHEMA'), cardX('COL', 'TABLE'),
+            cardX('TABLE_PRODUCER'), cardX('SCHEMA_PRODUCER'), cardX('DB_PRODUCER'),
+        ]
+        const edges = [
+            edgeX('e_table', 'TABLE_PRODUCER', 'TABLE', true),
+            edgeX('e_schema', 'SCHEMA_PRODUCER', 'SCHEMA', true),
+            edgeX('e_db', 'DB_PRODUCER', 'DATABASE', true),
+        ]
+        const cone = isolationCone({ cards, edges }, 'COL')!
+        expect(cone).not.toBeNull()
+        // The one true seam: TABLE's own direct coarse partner lights.
+        expect(cone.cardIds.has('TABLE_PRODUCER')).toBe(true)
+        expect(cone.edgeIds.has('e_table')).toBe(true)
+        // NOT the transitive closure through the rest of the ancestor
+        // chain — SCHEMA's and DATABASE's own, unrelated coarse traffic
+        // never lights from a column spotlight several levels below them.
+        expect(cone.cardIds.has('SCHEMA_PRODUCER')).toBe(false)
+        expect(cone.cardIds.has('DB_PRODUCER')).toBe(false)
+        expect(cone.edgeIds.has('e_schema')).toBe(false)
+        expect(cone.edgeIds.has('e_db')).toBe(false)
+        // Cardinality bounded exactly: the anchor's own containment
+        // ancestors (TABLE, SCHEMA, DATABASE — every box it sits in) plus
+        // the one seam host's direct coarse partner. Not the whole board.
+        expect([...cone.cardIds].sort()).toEqual(['COL', 'DATABASE', 'SCHEMA', 'TABLE', 'TABLE_PRODUCER'])
+    })
+
+    it('a seam host with NO direct coarse edges of its own lights nothing further — never climbs to find one', () => {
+        const cardX = (id: string, frameId: string | null = null): FocusCard =>
+            ({ ...({} as FocusCard), id, nodeId: id, frameId, kind: frameId ? 'entity' : 'frame' })
+        const edgeX = (id: string, source: string, target: string, grainCoarse = false): FocusEdge =>
+            ({
+                id, source, target, count: 1, edgeTypeNorm: '', dimmed: false,
+                cycleBack: false, cycleAnchor: false, labelVisible: false,
+                grainCoarse, sameAncestorFrame: null, labelT: 0.5, seamSlotted: false,
+            })
+        // TABLE (the anchor's own seam host) has no coarse bundle of its
+        // own; only SCHEMA, one level further up, does. Before the fix
+        // this still lit (the walk climbed past an empty host); after,
+        // nothing does — the detailed walk terminates at the FIRST seam
+        // whether or not it has anything to say.
+        const cards = [cardX('SCHEMA'), cardX('TABLE', 'SCHEMA'), cardX('COL', 'TABLE'), cardX('SCHEMA_PRODUCER')]
+        const edges = [edgeX('e_schema', 'SCHEMA_PRODUCER', 'SCHEMA', true)]
+        expect(isolationCone({ cards, edges }, 'COL')).toBeNull()
+    })
 })
 
 describe('focus-layout — in-frame routing (R2)', () => {

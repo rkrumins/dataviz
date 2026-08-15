@@ -2244,14 +2244,28 @@ export function isolationCone(
     // than against the row itself — the model cannot say which of a
     // frame's rows a table-grain hop "really" belongs to, so the honest
     // answer is to show it, seamed, rather than let the row read as
-    // unconnected. Walks the ANCHOR's OWN ancestor chain only, pulling in
-    // each ancestor's own DIRECT coarse bundles — never what THOSE bundles
-    // connect onward to, which would turn one row's cone into its whole
-    // platform's. A frame anchor needs none of this: its own bundles are
-    // already in `seeds`/`graph.edges` via the ordinary walk above.
-    let seamHost = cardById.get(anchorId)?.frameId ?? null
-    let seamGuard = 0
-    while (seamHost && seamGuard++ < 32) {
+    // unconnected.
+    //
+    // T26 R3 — TERMINATES at the FIRST seam, never climbs further. The
+    // anchor's own immediate containing frame is the ONE seam host: its
+    // direct coarse bundles light (one coarse hop — "connected at table
+    // grain"), and that is where the detailed walk stops. Two things this
+    // does NOT do, both on purpose: it never walks onward through `far`'s
+    // OWN edges (a table-grain partner's own lineage is not this cone's
+    // business), and — the fix itself, a prior version's actual bug — it
+    // never climbs PAST this one host to a grandparent container and
+    // admits ITS bundles too. Reported live: spotlighting a single column
+    // whose table sat several containment levels deep, each level with its
+    // own unrelated coarse traffic, lit most of the board — every ancestor
+    // between the column and the platform root contributing its own
+    // "entire coarse traffic", compounding level by level. The RULE: one
+    // seam, one honest coarse hop, no transitive re-expansion — beyond it
+    // the reader gets the seam chip ("trace columns"), not a claim the
+    // cone did not actually walk. A frame anchor needs none of this: its
+    // own bundles are already in `seeds`/`graph.edges` via the ordinary
+    // walk above.
+    const seamHost = cardById.get(anchorId)?.frameId ?? null
+    if (seamHost) {
         for (const e of graph.edges) {
             if (!e.grainCoarse || (e.source !== seamHost && e.target !== seamHost)) continue
             edgeIds.add(e.id)
@@ -2264,7 +2278,6 @@ export function isolationCone(
             if (!hops.has(seamHost)) hops.set(seamHost, SEAM_HOP_DEPTH)
             if (!hops.has(far)) hops.set(far, SEAM_HOP_DEPTH + 1)
         }
-        seamHost = cardById.get(seamHost)?.frameId ?? null
     }
 
     if (edgeIds.size === 0) return null

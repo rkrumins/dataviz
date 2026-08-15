@@ -1114,6 +1114,78 @@ const walkGrainSeamUnderclaim = (): WalkFixture => ({
   isolatedId: 'n:TXN',
 })
 
+/**
+ * T26 R3 — THE SEAM TERMINUS (the user's reported shape, 11.36.49/53):
+ * spotlight ONE row, several containment levels deep, where EVERY
+ * ancestor level between it and the platform root carries its OWN,
+ * unrelated coarse traffic.
+ *
+ *   rpt_customer_360 (the focus) — full_name → transactions (genuine,
+ *     column-certain — the certain path a spotlight must keep honest)
+ *   BigCo Data Cloud ⊃ US-EAST ⊃ IoT ⊃ transactions (the row)
+ *   Marketing → IoT: the ONE legitimate seam — a table-grain producer of
+ *     transactions' OWN containing frame (same shape as the existing
+ *     under-claim fixture above, one level).
+ *   region_replication_feed → US-EAST: a SEPARATE, unrelated coarse
+ *     producer one containment level further up — before the fix,
+ *     isolating transactions lit this too, climbing straight past its
+ *     own seam.
+ *   bigco_platform_audit → BigCo Data Cloud: two levels further still —
+ *     the "keeps walking transitively → most of the board lights
+ *     orange" the user reported. After the fix, neither ever lights:
+ *     the detailed walk terminates at IoT, the one true seam.
+ */
+const walkGrainSeamDeepNestingModel = () => walkModel('RPT', {
+  nodes: [
+    wnode('RPT', 'dataset', 'rpt_customer_360', { childCount: 1, description: 'Curated customer profile' }),
+    wnode('FN', 'schemaField', 'full_name'),
+    // TXN's own containment chain — BIGCO ⊃ REGION ⊃ IOT ⊃ TXN — entirely
+    // unrelated to RPT's own ancestry (a DIFFERENT platform's estate).
+    // Each of BIGCO/REGION/IOT is ALSO a direct lineage-hop endpoint
+    // below, which is what earns it a real, band-positioned card: a
+    // pure containment ancestor never does (it collapses to breadcrumb
+    // chrome — see `walkGrainSeamDeepNestingModel`'s sibling attempt,
+    // superseded, in this fixture's own git history) — only a hop
+    // endpoint gets one. Three real ancestor frames, three unrelated
+    // coarse producers, is the shape that actually exercises the climb.
+    wnode('BIGCO', 'PLATFORM', 'BigCo Data Cloud', { childCount: 3 }),
+    wnode('REGION', 'CONTAINER', 'US-EAST', { childCount: 2 }),
+    wnode('IOT', 'PLATFORM', 'IoT', { childCount: 4 }),
+    wnode('TXN', 'dataset', 'transactions'),
+    // The ONE legitimate seam — IoT's own direct coarse producer, the
+    // row's immediate containing frame.
+    wnode('MKT', 'PLATFORM', 'Marketing', { childCount: 12 }),
+    // Unrelated coarse traffic, one and two containment levels further
+    // up — must never light from a row spotlighted inside IoT.
+    wnode('REGION_SRC', 'dataset', 'region_replication_feed', { childCount: 8 }),
+    wnode('BIGCO_SRC', 'dataset', 'bigco_platform_audit', { childCount: 10 }),
+  ],
+  containmentEdges: [
+    holds('RPT', 'FN'),
+    holds('BIGCO', 'REGION'), holds('REGION', 'IOT'), holds('IOT', 'TXN'),
+  ],
+  lineageEdges: [
+    // The genuine column-to-column wire — the certain path a spotlight
+    // must keep honest.
+    hop('FN', 'TXN'),
+    hop('MKT', 'IOT'),
+    hop('REGION_SRC', 'REGION'),
+    hop('BIGCO_SRC', 'BIGCO'),
+  ],
+  upstreamUrns: new Set(['MKT', 'REGION_SRC', 'BIGCO_SRC']),
+  downstreamUrns: new Set(['IOT', 'TXN']),
+})
+
+const walkGrainSeamDeepNesting = (): WalkFixture => ({
+  title: 'The seam terminates at the FIRST containment boundary — not the whole ancestor chain',
+  model: walkGrainSeamDeepNestingModel(),
+  script: base => scripted(base, {
+    reveal: [['in:IOT', 1], ['in:REGION', 1], ['in:BIGCO', 1]],
+    expand: ['BIGCO', 'REGION', 'IOT'],
+  }),
+  isolatedId: 'n:TXN',
+})
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkCollaterals: walkCollaterals(),
   walkIsolatedCone: walkIsolatedCone(),
@@ -1139,4 +1211,5 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkUnfetchedFanTriage: walkUnfetchedFanTriage(),
   walkGrainSeam: walkGrainSeam(),
   walkGrainSeamUnderclaim: walkGrainSeamUnderclaim(),
+  walkGrainSeamDeepNesting: walkGrainSeamDeepNesting(),
 }
