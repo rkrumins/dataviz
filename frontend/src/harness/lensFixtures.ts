@@ -965,6 +965,50 @@ const walkWideHubTriage = (): WalkFixture => ({
 })
 
 /**
+ * T25 A — the OTHER triage shape `walkWideHubTriage` cannot show: a
+ * cohort that ARRIVED from a genuine fetch rather than sat fully local
+ * from the start. `HUB` carries forty-five of its own downstream
+ * consumers already known (a page that landed) plus a frontier claiming
+ * sixty more — so the panel states BOTH halves Rule 2 promises, "45
+ * known · 60 more not yet loaded" with its own ⊕ load-more, the shape
+ * the reported empty wall ("0 known · N more not yet loaded · Nothing
+ * fetched here yet") could never reach because it opened before any
+ * fetch fired. FORCED open, same reason `walkWideHubTriage` is — a
+ * still picture cannot click its way through a fetch.
+ */
+const walkUnfetchedFanTriage = (): WalkFixture => {
+  const nodes = [
+    wnode('F', 'dataset', 'payments_core', { description: 'Settled payment events' }),
+    wnode('HUB', 'dataset', 'downstream_hub', { childCount: 105 }),
+  ]
+  const lineageEdges = [hop('F', 'HUB')]
+  for (let i = 0; i < 45; i++) {
+    const urn = `d${String(i).padStart(3, '0')}`
+    nodes.push(wnode(urn, 'dataset', `consumer_${String(i).padStart(3, '0')}`))
+    lineageEdges.push(hop('HUB', urn))
+  }
+  return {
+    title: 'A cohort that just ARRIVED — the triage list populated, with an honest remainder',
+    model: walkModel('F', {
+      nodes,
+      lineageEdges,
+      upstreamUrns: new Set(),
+      downstreamUrns: new Set(['HUB', ...nodes.slice(2).map(n => n.urn)]),
+      // The genuine unfetched remainder — still there, still honest,
+      // now stated INSIDE the panel rather than gating the click that
+      // reaches it.
+      frontierDown: [frontier('HUB', 105)],
+    }),
+    // All forty-five known consumers fully admitted (4 reveal pages ×
+    // 12 ≥ 45) — otherwise `pillFor` still finds local groups to reveal
+    // and never reaches the frontier branch, and the panel's remainder
+    // line (the whole point of this fixture) never appears.
+    script: base => scripted(base, { reveal: [['out:HUB', 4]] }),
+    triageAnchor: { cardId: 'n:HUB', dir: 'out' },
+  }
+}
+
+/**
  * THE GRAIN SEAM (Task 22, R1) — both failure directions in one estate.
  *
  *   Snowflake ⊃ REPORTING (chrome, demoted) ⊃ rpt_customer_360 (the focus)
@@ -1091,6 +1135,7 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkLongChainUnfolded: walkLongChainUnfolded(),
   walkWideHub: walkWideHub(),
   walkWideHubTriage: walkWideHubTriage(),
+  walkUnfetchedFanTriage: walkUnfetchedFanTriage(),
   walkGrainSeam: walkGrainSeam(),
   walkGrainSeamUnderclaim: walkGrainSeamUnderclaim(),
 }

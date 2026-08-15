@@ -134,7 +134,7 @@ const ReachContext = createContext<LensReach | null>(null)
  * it for the same reason again — the rail's own end pill (`RailEnd`)
  * has no `CardCtx` either, only whichever card's pill it is showing.
  */
-const FollowContext = createContext<Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage' | 'onCondenseRun' | 'onOpenTriage'>>({})
+const FollowContext = createContext<Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage' | 'onCondenseRun' | 'onOpenTriage' | 'partnersFor'>>({})
 /**
  * ISOLATION — the visible lineage cone of whatever the reader is
  * pointing at (see `isolationCone` in focus-layout.ts), and the one
@@ -389,11 +389,17 @@ interface CardCtx {
   /** Show the next page of neighbours ALREADY in the walk model —
    *  a re-projection, never a fetch. Keyed `${'in'|'out'}:${urn}`. */
   onRevealMore?: (key: string) => void
-  /** Fetch one further hop from this card, in this direction. */
-  onExtend?: (key: string, nodeId: string, dir: 'in' | 'out') => void
+  /** Fetch one further hop from this card, in this direction. `anchor`
+   *  (T25 A) names the card whose ⊕ this is — WalkPill/RailEnd pass it
+   *  so the caller can watch THIS fetch resolve and decide, once it has,
+   *  whether the arrived+known cohort reveals in place or opens the hub
+   *  triage list. Absent for every other caller (InlineFollow, the
+   *  trace-columns chip, the spotlight bridge) — they stay un-triaged,
+   *  unchanged. */
+  onExtend?: (key: string, nodeId: string, dir: 'in' | 'out', anchor?: { cardId: string; nodeId: string }) => void
   /** Page a partially-loaded adjacency further, with the server's own
-   *  cursor carried back verbatim. */
-  onPage?: (nodeId: string, dir: 'in' | 'out', cursor: string) => void
+   *  cursor carried back verbatim. See `onExtend`'s `anchor` doc. */
+  onPage?: (nodeId: string, dir: 'in' | 'out', cursor: string, anchor?: { cardId: string; nodeId: string }) => void
   /** T24 F7 — how many entities a FRAME-level ⊕ click would actually
    *  seed the walk from, in this direction: the exact count
    *  `seedLeavesFor` computes (same boundary rule, same cap), so the
@@ -468,8 +474,8 @@ interface FocusGraphViewProps {
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
   onRevealMore?: (key: string) => void
-  onExtend?: (key: string, nodeId: string, dir: 'in' | 'out') => void
-  onPage?: (nodeId: string, dir: 'in' | 'out', cursor: string) => void
+  onExtend?: (key: string, nodeId: string, dir: 'in' | 'out', anchor?: { cardId: string; nodeId: string }) => void
+  onPage?: (nodeId: string, dir: 'in' | 'out', cursor: string, anchor?: { cardId: string; nodeId: string }) => void
   seedCountFor?: (nodeId: string, dir: 'in' | 'out') => number
   /** T23 R1 — re-center the sliding window (see `CardCtx.onWindowJump`). */
   onWindowJump?: (band: number) => void
@@ -1069,10 +1075,15 @@ export function triageDeliveryOf(pill: FocusPill): number | null {
  *  (T22), so none of them can ever disagree about what one click does.
  *  Takes only the three callbacks it uses, not the whole `CardCtx` — the
  *  seam chip lives on an EDGE, which has no card context of its own. */
-function actOnPill(ctx: Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage'>, pill: FocusPill, dir: 'in' | 'out') {
+function actOnPill(
+  ctx: Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage'>,
+  pill: FocusPill,
+  dir: 'in' | 'out',
+  anchor?: { cardId: string; nodeId: string },
+) {
   if (pill.kind === 'reveal') ctx.onRevealMore?.(pill.key)
-  else if (pill.kind === 'page' && pill.cursor) ctx.onPage?.(pillTarget(pill.key), dir, pill.cursor)
-  else ctx.onExtend?.(pill.key, pillTarget(pill.key), dir)
+  else if (pill.kind === 'page' && pill.cursor) ctx.onPage?.(pillTarget(pill.key), dir, pill.cursor, anchor)
+  else ctx.onExtend?.(pill.key, pillTarget(pill.key), dir, anchor)
 }
 
 /** A reveal's REST-state card count, honestly abbreviated (F1 secondary)
@@ -1179,18 +1190,30 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
   const base = 'nodrag pointer-events-auto z-20 absolute -translate-y-1/2 flex items-center justify-center gap-1 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors'
   const anchor = pillAnchor(card)
   const side = upstream ? 'upstream' : 'downstream'
-  // T23 R3 — a delivery past the gate opens the hub-triage list instead
-  // of dumping a page (or, for extend/page, an unknown-shaped fetch)
-  // onto the board. `card.nodeId` guards the one caller with none (the
-  // visual harness's own synthetic pills, if any) — `onOpenTriage` needs
-  // a real urn's partners to show.
+  // T23 R3 / T25 A — a delivery past the gate opens the hub-triage list
+  // instead of dumping a page onto the board. `reveal` is always
+  // already-local data, so it gates on `groupsTotal` — how much of it
+  // there is. `extend`/`page` gate on how much is ALREADY KNOWN
+  // (`partnersFor`, the same count `HubTriage` itself will show), never
+  // on `pill.count` — that is the UNFETCHED frontier, and gating a click
+  // on it is the empty-panel bug: every ⊕ on a wholly-unfetched fan
+  // opened a panel with nothing in it ("0 known · N more not yet
+  // loaded"), because the frontier is a promise, not a delivery. A
+  // fetch/page whose OWN known cohort is still small always fetches —
+  // see the arrival-driven triage-or-reveal decision in `extendWalk`/
+  // `pageWalk`, which is what a big unfetched cohort gets instead.
+  // `card.nodeId` guards the one caller with none (the visual harness's
+  // own synthetic pills, if any) — `onOpenTriage`/`partnersFor` both
+  // need a real urn.
   const delivery = triageDeliveryOf(pill)
+  const knownCount = card.nodeId ? ctx.partnersFor?.(card.nodeId, dir)?.length ?? 0 : 0
+  const gate = pill.kind === 'reveal' ? delivery : knownCount
   const act = () => {
-    if (card.nodeId && delivery != null && delivery > TRIAGE_THRESHOLD && ctx.onOpenTriage) {
+    if (card.nodeId && gate != null && gate > TRIAGE_THRESHOLD && ctx.onOpenTriage) {
       ctx.onOpenTriage(card.id, dir)
       return
     }
-    actOnPill(ctx, pill, dir)
+    actOnPill(ctx, pill, dir, card.nodeId ? { cardId: card.id, nodeId: card.nodeId } : undefined)
   }
   // F1 — expansion pins the REST edge (GUTTER_REST_EDGE) and lets the
   // FAR edge move, so a hovered/focused in-frame pill grows outward
@@ -3289,9 +3312,11 @@ function HubTriage({ card, dir, ctx, drawnUrns, onDismiss }: {
       </div>
 
       {filtered.length === 0 ? (
-        <p className="px-2.5 py-4 text-[10px] text-ink-muted/70 text-center">
-          {partners.length === 0 ? 'Nothing fetched here yet.' : 'No match.'}
-        </p>
+        // T25 A — this panel only ever opens once `partners` is already
+        // past the gate (an already-fetched big fan, or an arrival that
+        // just crossed it), so an empty `filtered` here can only be an
+        // active search with no match — never "nothing fetched yet".
+        <p className="px-2.5 py-4 text-[10px] text-ink-muted/70 text-center">No match.</p>
       ) : grouped ? (
         <div className="overflow-y-auto nowheel px-2 py-1.5 space-y-1" style={{ maxHeight: TRIAGE_LIST_H }}>
           {bySystem.map(g => (
@@ -3789,13 +3814,13 @@ function railSegmentsOf(fullCards: readonly FocusCard[], trailUrns: ReadonlySet<
  *  click always offers. Carries the CARD id alongside the pill (T23 R3
  *  fix round 1) — `RailEnd`'s own triage gate needs it as the anchor,
  *  the same way `WalkPill` already has `card` in scope for its own. */
-function railEndPill(fullCards: readonly FocusCard[], edgeBand: number, dir: 'in' | 'out'): { cardId: string; pill: FocusPill } | null {
+function railEndPill(fullCards: readonly FocusCard[], edgeBand: number, dir: 'in' | 'out'): { cardId: string; nodeId: string; pill: FocusPill } | null {
   const atEdge = fullCards.filter(c => !c.frameId && c.band === edgeBand)
-  let best: { cardId: string; pill: FocusPill } | null = null
+  let best: { cardId: string; nodeId: string; pill: FocusPill } | null = null
   for (const c of atEdge) {
     const pill = dir === 'in' ? c.pillUp : c.pillDown
-    if (!pill || pill.kind === 'reveal') continue   // reveal is already-fetched — not "not loaded"
-    if (!best || (pill.count ?? Infinity) > (best.pill.count ?? Infinity)) best = { cardId: c.id, pill }
+    if (!pill || pill.kind === 'reveal' || !c.nodeId) continue   // reveal is already-fetched — not "not loaded"
+    if (!best || (pill.count ?? Infinity) > (best.pill.count ?? Infinity)) best = { cardId: c.id, nodeId: c.nodeId, pill }
   }
   return best
 }
@@ -3808,16 +3833,20 @@ function railEndPill(fullCards: readonly FocusCard[], edgeBand: number, dir: 'in
  *  no triage list in between, at the exact same real-world scale the
  *  gate exists for. Same `triageDeliveryOf`/`TRIAGE_THRESHOLD` check
  *  `WalkPill` runs, on the card `railEndPill` found the pill on. */
-function RailEnd({ cardId, pill, dir }: { cardId: string; pill: FocusPill; dir: 'in' | 'out' }) {
+function RailEnd({ cardId, nodeId, pill, dir }: { cardId: string; nodeId: string; pill: FocusPill; dir: 'in' | 'out' }) {
   const follow = useContext(FollowContext)
   const upstream = dir === 'in'
-  const delivery = triageDeliveryOf(pill)
+  // T25 A — same gate `WalkPill` runs: `railEndPill` only ever hands
+  // this an extend/page pill (never reveal — see its own filter), so
+  // this always gates on what's ALREADY KNOWN about `nodeId`, never on
+  // the pill's unfetched frontier count.
+  const knownCount = follow.partnersFor?.(nodeId, dir)?.length ?? 0
   const act = () => {
-    if (delivery != null && delivery > TRIAGE_THRESHOLD && follow.onOpenTriage) {
+    if (knownCount > TRIAGE_THRESHOLD && follow.onOpenTriage) {
       follow.onOpenTriage(cardId, dir)
       return
     }
-    actOnPill(follow, pill, dir)
+    actOnPill(follow, pill, dir, { cardId, nodeId })
   }
   return (
     <button
@@ -3874,7 +3903,7 @@ function HopRail({
   return (
     <Panel position="top-center" className="!top-2 pointer-events-none">
       <div className="pointer-events-auto flex items-center gap-1 px-2 py-1.5 rounded-full bg-canvas-elevated/95 border border-black/10 dark:border-white/10 shadow-md backdrop-blur-sm max-w-[min(90vw,900px)] overflow-x-auto">
-        {endIn && <RailEnd cardId={endIn.cardId} pill={endIn.pill} dir="in" />}
+        {endIn && <RailEnd cardId={endIn.cardId} nodeId={endIn.nodeId} pill={endIn.pill} dir="in" />}
         {segments.map(seg => {
           const isFocal = seg.band === 0
           const inWindow = !win || (seg.band >= win.min && seg.band <= win.max)
@@ -3903,7 +3932,7 @@ function HopRail({
             </button>
           )
         })}
-        {endOut && <RailEnd cardId={endOut.cardId} pill={endOut.pill} dir="out" />}
+        {endOut && <RailEnd cardId={endOut.cardId} nodeId={endOut.nodeId} pill={endOut.pill} dir="out" />}
       </div>
     </Panel>
   )

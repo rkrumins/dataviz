@@ -411,6 +411,37 @@ const pillCatalogue = () => {
   })
 }
 
+/**
+ * T25 A — the arrival `pillCatalogue`'s wholly-unfetched PAGED would
+ * land: `n` of PAGED's OWN upstream sources merged in, `extendStatus`
+ * cleared for the key the click started (`up:PAGED`) — exactly what
+ * `useLensWalk` hands back once the fetch resolves. `remainder`, when
+ * given, is the genuine unfetched amount still left after this page.
+ */
+const pagedArrival = (n: number, remainder: number | null = null): WalkEntry => {
+  const base = pillCatalogue()
+  const nodes = [...base.nodes]
+  const lineageEdges = [...base.lineageEdges]
+  for (let i = 0; i < n; i++) {
+    const urn = `ps${String(i).padStart(3, '0')}`
+    nodes.push(wnode(urn, 'dataset', `paged_source_${String(i).padStart(3, '0')}`))
+    lineageEdges.push(hop(urn, 'PAGED'))
+  }
+  return {
+    model: walkModel('F', {
+      nodes,
+      lineageEdges,
+      upstreamUrns: new Set([...base.upstreamUrns, ...nodes.slice(base.nodes.length).map(nd => nd.urn)]),
+      downstreamUrns: base.downstreamUrns,
+      frontierUp: [
+        frontier('EXACT', 48), frontier('UNKNOWN', null), frontier('BUSY', 12), frontier('FAILED', 9),
+        ...(remainder != null ? [frontier('PAGED', remainder)] : []),
+      ],
+    }),
+    status: 'done', error: null, extendStatus: new Map(), depth: 1, deepenStatus: null,
+  }
+}
+
 /** Fourteen upstream groups against a REVEAL_PAGE of twelve, so the
  *  focus's own ⊕ has a remainder to offer from data already in hand. */
 const crowdedFanIn = () => {
@@ -531,6 +562,24 @@ describe('the ⊕ tells the truth about what it costs', () => {
     fireEvent.click(screen.getByTitle(/Loads the next hop downstream of GOLD only/))
     expect(api.extend).toHaveBeenCalledTimes(1)
     expect(api.extend).toHaveBeenCalledWith('GOLD', 'down', ['GOLD'])
+
+    // T25 A — the fetch is IN FLIGHT (exactly what `useLensWalk` shows
+    // the instant this click's own request starts): the reveal page now
+    // opens only once the arrival is KNOWN, not pre-emptively at click
+    // time, so nothing should be visible yet — still no second CLICK,
+    // just the render the response's own arrival causes.
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={{ ...extendChain(false, 20), extendStatus: new Map([['down:GOLD', 'loading']]) }}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(onBoard('mart_tickets_daily')).toBe(false)
 
     // The merged response lands, exactly as `useLensWalk` would hand it over.
     rerender(
@@ -666,17 +715,97 @@ describe('hub triage (T23 R3)', () => {
     expect(triage()).toBeTruthy()
   })
 
-  it('an extend/page past the gate opens the triage list instead of fetching in place', () => {
-    // `pillCatalogue`'s own PAGED (96) — the exact fixture the cursor-
-    // forwarding test above uses a smaller stand-in to avoid.
+  // T25 A — the reported P0: clicking ⊕ on a WHOLLY-UNFETCHED fan used to
+  // gate on `pill.count` (the unfetched frontier — 96 here) and open the
+  // triage list BEFORE any fetch: "0 known · 96 more not yet loaded",
+  // greyed "Show top 12", every re-click re-presenting the same empty
+  // wall. The gate now reads what is actually KNOWN (0 — nothing about
+  // PAGED's own upstream has landed) rather than what might arrive, so
+  // the click just fetches, exactly like any other unfetched fan.
+  it('T25 A — a wholly-unfetched extend/page FETCHES first, no pre-fetch triage wall', () => {
     const { api } = renderLens(['F'], doneWalk(pillCatalogue()))
     fireEvent.click(screen.getByTitle(/Loads the next hop upstream of partially_loaded/))
-    expect(api.page).not.toHaveBeenCalled()
-    expect(api.extend).not.toHaveBeenCalled()
-    expect(triage()).toBeTruthy()
+    expect(api.page).toHaveBeenCalledWith('PAGED', 'up', 'eyJvZmZzZXQiOjMwfQ==')
+    expect(triage()).toBeNull()
   })
 
-  it('fix round 1 — the rail\'s own "not loaded" end is gated too, not a fourth ungated bypass', () => {
+  it('T25 A — on arrival, a cohort past the gate opens the triage list POPULATED, not empty', () => {
+    const api = makeApi()
+    const { rerender } = renderLens(['F'], doneWalk(pillCatalogue()), {}, api)
+    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of partially_loaded/))
+
+    // The fetch is IN FLIGHT — exactly what `useLensWalk` shows the
+    // instant the click's own request starts, before the response lands.
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={doneWalk(pillCatalogue(), new Map([['up:PAGED', 'loading']]))}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(triage()).toBeNull()
+
+    // The merge lands: forty of PAGED's OWN upstream sources — a
+    // genuinely large fan — with `extendStatus` cleared for the key the
+    // click started, exactly as `useLensWalk` would hand it over.
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={pagedArrival(40, 56)}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    const dialog = triage()!
+    expect(dialog).toBeTruthy()
+    expect(within(dialog).getByText(/40 known/)).toBeTruthy()
+    expect(within(dialog).queryByText('Nothing fetched here yet.')).toBeNull()
+  })
+
+  it('T25 A — on arrival, a small cohort reveals directly — no wall, no panel', () => {
+    const api = makeApi()
+    const { rerender } = renderLens(['F'], doneWalk(pillCatalogue()), {}, api)
+    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of partially_loaded/))
+
+    // In flight, same as the populated-panel test above — the reveal
+    // must not fire before the response is actually known.
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={doneWalk(pillCatalogue(), new Map([['up:PAGED', 'loading']]))}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(onBoard('paged_source_000')).toBe(false)
+
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={pagedArrival(6)}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(triage()).toBeNull()
+    expect(onBoard('paged_source_000')).toBe(true)
+    expect(onBoard('paged_source_005')).toBe(true)
+  })
+
+  it('fix round 1 — the rail\'s own "not loaded" end fetches too, not a fourth ungated wall (T25 A)', () => {
     // The rail only draws once the fetched extent outgrows one glance
     // (HOP_WINDOW) — `railChain`'s 9-column span (-4..+4) clears it, but
     // a CHAIN admits one hop per reveal (walkLongChain's own gotcha:
@@ -692,13 +821,11 @@ describe('hub triage (T23 R3)', () => {
     fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_2 only/))
     const end = screen.getByTitle(/Not yet loaded upstream · \d+ more — click to fetch further/)
     fireEvent.click(end)
-    // Gated exactly like WalkPill's own gutter pill: no fetch fired,
-    // the triage list opened on the card the pill actually belongs to
-    // (`stage_up_4`, the farthest-upstream card) instead.
-    expect(api.extend).not.toHaveBeenCalled()
-    expect(api.page).not.toHaveBeenCalled()
-    const dialog = triage()!
-    expect(within(dialog).getByText('of stage_up_4')).toBeTruthy()
+    // T25 A — up4 has ZERO known upstream of its own, so the click
+    // fetches (same gate `WalkPill`'s own gutter pill now runs) instead
+    // of walling off an empty triage list.
+    expect(api.extend).toHaveBeenCalledWith('up4', 'up', ['up4'])
+    expect(triage()).toBeNull()
   })
 
   it('the header states the known count honestly, with no unfetched remainder for a reveal (everything it stands for is already in the model)', () => {

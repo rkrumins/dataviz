@@ -62,7 +62,10 @@ const FIXTURES = process.argv.slice(2).length
     'walkSharedPlatform', 'walkSharedPlatformLeaf', 'walkSharedPlatformOneColumn', 'walkDensePills',
     'walkChildrenRich', 'walkChildrenScrolled', 'walkColumnFocus', 'walkPlatformFocus',
     'walkIsolatedCone', 'walkIsolatedLeafCone', 'walkLongChain', 'walkLongChainUnfolded', 'walkWideHub', 'walkWideHubTriage',
-    'walkGrainSeam', 'walkGrainSeamUnderclaim']
+    'walkGrainSeam', 'walkGrainSeamUnderclaim',
+    // T25 A — the fetch-then-triage fix: a cohort that ARRIVED from a
+    // genuine fetch (known + a real remainder), not a fully-local one.
+    'walkUnfetchedFanTriage']
 
 function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH
