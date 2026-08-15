@@ -390,6 +390,13 @@ interface CardCtx {
   /** Page a partially-loaded adjacency further, with the server's own
    *  cursor carried back verbatim. */
   onPage?: (nodeId: string, dir: 'in' | 'out', cursor: string) => void
+  /** T24 F7 — how many entities a FRAME-level ⊕ click would actually
+   *  seed the walk from, in this direction: the exact count
+   *  `seedLeavesFor` computes (same boundary rule, same cap), so the
+   *  hover text and the request it describes can never disagree. Absent
+   *  for a row-level ⊕ (always exactly one entity, itself) and for a
+   *  caller with no walk to grow (the visual harness). */
+  seedCountFor?: (nodeId: string, dir: 'in' | 'out') => number
 }
 
 interface FocusGraphViewProps {
@@ -442,6 +449,7 @@ interface FocusGraphViewProps {
   onRevealMore?: (key: string) => void
   onExtend?: (key: string, nodeId: string, dir: 'in' | 'out') => void
   onPage?: (nodeId: string, dir: 'in' | 'out', cursor: string) => void
+  seedCountFor?: (nodeId: string, dir: 'in' | 'out') => number
 }
 
 const iconByName = (name: string): LucideIcons.LucideIcon =>
@@ -1010,10 +1018,30 @@ function pillVerb(pill: FocusPill, dir: 'in' | 'out'): string {
   return pill.kind === 'page' ? `Load more ${side}` : `Load ${side}`
 }
 
+/** T24 F7 — is this pill's card a CONTAINER acting for everything inside
+ *  it (a frame, or a focal that itself holds contents), or a single row
+ *  acting only for itself? The two promise different things — one click
+ *  on a frame's ⊕ walks every lineage-participating entity inside it at
+ *  once; a row's walks only the row — and the reported confusion was
+ *  one wording standing in for both. */
+/** T24 F7 — is THIS pill's own click a multi-entity ("frame-level") walk,
+ *  or a single-entity ("row-level") one? Decided by the ACTUAL seed
+ *  count for this exact urn+direction (`seedCountFor`, the same call
+ *  `extendWalk` makes) whenever it is available, never by a structural
+ *  guess: a card can have children (`canOpenChildren`) yet still seed
+ *  only itself in ONE particular direction (none of its children carry
+ *  a frontier that way) — "everything in X (1 entity)" would be a
+ *  stranger, less honest claim than the plain row wording in that case.
+ *  `canOpenChildren` is the fallback ONLY when there is no walk to ask
+ *  (the visual harness) — a structural guess beats no signal at all. */
+function isFrameLevelPill(card: FocusCard, seedCount: number | null): boolean {
+  return seedCount != null ? seedCount > 1 : card.canOpenChildren
+}
+
 /** The hover explanation — where a raw connection count is allowed to
  *  live (T17-E's one-number-system: verbs on the control's own face,
  *  flow counts in hover/peek/wires, never both in one place). */
-function pillHoverTitle(card: FocusCard, pill: FocusPill, dir: 'in' | 'out'): string {
+function pillHoverTitle(card: FocusCard, pill: FocusPill, dir: 'in' | 'out', frameLevel: boolean, seedCount: number | null): string {
   const side = dir === 'in' ? 'upstream' : 'downstream'
   const flows = pill.count != null
     ? ` · ${pill.count.toLocaleString()} data flow${pill.count === 1 ? '' : 's'} recorded`
@@ -1021,8 +1049,16 @@ function pillHoverTitle(card: FocusCard, pill: FocusPill, dir: 'in' | 'out'): st
   const cap = pill.kind === 'reveal' && pill.groups != null && pill.groups > REVEAL_PAGE
     ? ` — this click brings the first ${REVEAL_PAGE} of ${pill.groups.toLocaleString()} cards`
     : ''
+  if (frameLevel) {
+    const verb = pill.kind === 'reveal' ? 'Show' : 'Load'
+    // R1b/R1c — the exact count, never a guess; absent (no walk to
+    // grow) omits the parenthetical rather than inventing a number.
+    const scope = seedCount != null ? ` (${seedCount.toLocaleString()} ${seedCount === 1 ? 'entity' : 'entities'})` : ''
+    return `${verb} ${side} for everything in ${card.label}${scope}${flows}${cap}`
+  }
   const verb = pill.kind === 'reveal' ? 'Shows' : 'Loads'
-  return `${verb} the next hop ${side} of ${card.label}${flows}${cap}`
+  const parent = card.parentLabel ? ` (${card.parentLabel})` : ''
+  return `${verb} the next hop ${side} of ${card.label}${parent} only${flows}${cap}`
 }
 
 /**
@@ -1099,7 +1135,15 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
   }
 
   const verb = pillVerb(pill, dir)
-  const title = pillHoverTitle(card, pill, dir)
+  // R1b/R1c — the exact entity count THIS click would seed the walk
+  // from (same call `extendWalk` makes), computed once and shared by
+  // the hover title and the "all" tag so the two can never disagree.
+  const seedCount = ctx.seedCountFor?.(pillTarget(pill.key), dir) ?? null
+  // T24 F7 — the small "all" tag renders ONLY on a frame-level control,
+  // never a row's: the one visual difference a reader sees without
+  // hovering at all, so the two do not read as the same control.
+  const frameLevel = isFrameLevelPill(card, seedCount)
+  const title = pillHoverTitle(card, pill, dir, frameLevel, seedCount)
   // The one number a follow control's REST state may show: a reveal's
   // card count — a visible arrival, not a flow. Everything else is
   // icon-only at rest: the shape that let eight stacked "+5" pills happen
@@ -1134,11 +1178,30 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
         pos,
       )}
     >
+      {/* T24 F7 — the one thing about this control a reader sees WITHOUT
+          hovering: a frame-level ⊕ acts for everything inside it, never
+          just itself, so it carries this the whole time the row-level
+          one never does. Sized and placed to sit clear of both the
+          icon/restCount at rest and the outward expansion on hover
+          (F1) — an overlay, not a competitor for PILL_ZONE's budget. */}
+      {frameLevel && (
+        <span
+          aria-hidden="true"
+          className={cn(
+            'pointer-events-none absolute -top-1.5 flex items-center justify-center px-[3px] h-[9px] rounded-full bg-accent-lineage text-white text-[6px] font-bold leading-none tracking-wide',
+            upstream ? 'right-0' : 'left-0',
+          )}
+        >
+          ALL
+        </span>
+      )}
       {upstream && <LucideIcons.Plus className="w-2.5 h-2.5 flex-shrink-0" />}
       {restCount != null && (
         <span className="group-hover/pill:hidden group-focus-visible/pill:hidden truncate">{restCountLabel(restCount)}</span>
       )}
-      <span className="hidden group-hover/pill:inline group-focus-visible/pill:inline whitespace-nowrap">{verb}</span>
+      <span className="hidden group-hover/pill:inline group-focus-visible/pill:inline whitespace-nowrap">
+        {verb}{frameLevel ? ' · all' : ''}
+      </span>
       {!upstream && <LucideIcons.Plus className="w-2.5 h-2.5 flex-shrink-0" />}
     </button>
   )
@@ -3241,6 +3304,7 @@ export function FocusGraphView({
   onRevealMore,
   onExtend,
   onPage,
+  seedCountFor,
 }: FocusGraphViewProps) {
   // Type visuals resolved ONCE per schema for the whole graph. Cards
   // used to each subscribe to the schema store and linear-scan the
@@ -3334,7 +3398,8 @@ export function FocusGraphView({
     onRevealMore,
     onExtend,
     onPage,
-  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onDismiss, onRevealMore, onExtend, onPage])
+    seedCountFor,
+  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onDismiss, onRevealMore, onExtend, onPage, seedCountFor])
 
   const baseNodes = useMemo((): Node[] => {
     const minYByBand = new Map<number, number>()

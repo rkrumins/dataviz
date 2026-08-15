@@ -506,6 +506,15 @@ export function LineageLens({
     markAnchor(urn)
   }, [walkApi, sg, revealMore, markAnchor])
 
+  // T24 F7 — a stable identity, same reason `extendWalk` needs one: an
+  // inline arrow here would give `FocusGraphView`'s own `ctx` a new
+  // reference every render, and its card memo comparators start with
+  // `a.ctx === b.ctx` — every card would re-render on every tick.
+  const seedCountForCtx = useCallback(
+    (urn: string, dir: 'in' | 'out') => seedLeavesFor(sg, urn, dir).length,
+    [sg],
+  )
+
   /** The rest of THIS node's adjacency, with the server's own cursor —
    *  and, for the same reason as `extendWalk`, room to draw what arrives. */
   const pageWalk = useCallback((urn: string, dir: 'in' | 'out', cursor: string) => {
@@ -1645,6 +1654,11 @@ export function LineageLens({
                 onRevealMore={walkStatus === 'done' ? revealMore : undefined}
                 onExtend={walkStatus === 'done' ? extendWalk : undefined}
                 onPage={walkStatus === 'done' ? pageWalk : undefined}
+                // T24 F7 — the exact count a frame-level ⊕'s own click
+                // would seed the walk from: the SAME call `extendWalk`
+                // makes, so the hover text can never claim a number the
+                // request itself would not back up.
+                seedCountFor={walkStatus === 'done' ? seedCountForCtx : undefined}
               />
               {/* Status surfaces — a lone focal card floating in space
                   explains nothing. */}

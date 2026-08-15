@@ -168,7 +168,7 @@ async function revealPrior() {
   // The pill is on `b_amount`'s own row ("amount") — its frontier, not
   // the table's: `T`'s rows are already drawn, so `T`'s own ⊕ defers to
   // the finer grain that actually owns this offer (`drawnInsideOffers`).
-  fireEvent.click(await screen.findByTitle(/Shows the next hop upstream of amount · 1 data flow recorded/))
+  fireEvent.click(await screen.findByTitle(/Shows the next hop upstream of amount \(customers\) only · 1 data flow recorded/))
 }
 
 /** Collapse `customers`, so its ⊕ has to speak for the columns it hides.
@@ -236,7 +236,11 @@ describe('lens seam — one click, one action, one acknowledgement', () => {
     await collapseTable()
 
     // 9 + 4, minus the one producer now on the board.
-    fireEvent.click(await screen.findByTitle(/Loads the next hop upstream of customers · 12 data flows recorded/))
+    // T24 F7 — a FRAME-level pill (T is collapsed, but still a frame —
+    // this is exactly the finer-grain case `drawnInsideOffers` hands
+    // back to it) names its scope and the exact entity count the click
+    // below will seed from (2 — the same `seedUrns` it asserts).
+    fireEvent.click(await screen.findByTitle(/Load upstream for everything in customers \(2 entities\) · 12 data flows recorded/))
 
     expect(traceClosure).toHaveBeenCalledTimes(2)
     expect(traceClosure.mock.calls[1]![0]).toMatchObject({
@@ -257,11 +261,11 @@ describe('lens seam — one click, one action, one acknowledgement', () => {
     await revealPrior()
     await collapseTable()
 
-    fireEvent.click(await screen.findByTitle(/Loads the next hop upstream of customers/))
+    fireEvent.click(await screen.findByTitle(/Load upstream for everything in customers/))
     // Feedback lands in the same tick as the click — the pill IS the
     // spinner now, so there is no + left to click twice.
     expect(screen.getByLabelText('Fetching upstream lineage')).toBeTruthy()
-    expect(screen.queryByTitle(/Loads the next hop upstream of customers/)).toBeNull()
+    expect(screen.queryByTitle(/Load upstream for everything in customers/)).toBeNull()
 
     fireEvent.click(screen.getByLabelText('Fetching upstream lineage'))
     expect(traceClosure).toHaveBeenCalledTimes(2)
@@ -271,7 +275,7 @@ describe('lens seam — one click, one action, one acknowledgement', () => {
     const { provider, traceClosure } = makeProvider()
     await openLens({ provider })
 
-    fireEvent.click(await screen.findByTitle(/Loads the next hop downstream of collaterals · 12 data flows recorded/))
+    fireEvent.click(await screen.findByTitle(/Loads the next hop downstream of collaterals only · 12 data flows recorded/))
 
     expect(traceClosure).toHaveBeenCalledTimes(2)
     expect(traceClosure.mock.calls[1]![0]).toMatchObject({

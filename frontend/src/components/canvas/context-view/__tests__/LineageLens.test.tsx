@@ -219,7 +219,8 @@ describe('the business journey — a table\'s lineage through a seven-level esta
     const { api } = renderLens(['F'], doneWalk(collateralsEstate()))
     // "6 more upstream of loan_positions" — the remainder the data
     // source reported, minus what is already in hand.
-    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of loan_positions · 6 data flows recorded/))
+    // T24 F7 — a row-level pill names its scope ("(RISK_DB) only").
+    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of loan_positions \(RISK_DB\) only · 6 data flows recorded/))
     expect(api.extend).toHaveBeenCalledWith('t0', 'up', ['t0'])
   })
 
@@ -409,7 +410,7 @@ describe('the ⊕ tells the truth about what it costs', () => {
     const { api } = renderLens(['F'], doneWalk(crowdedFanIn()))
     // Twelve of fourteen fit on the first page.
     expect(onBoard('source_12')).toBe(false)
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer · 2 data flows recorded/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only · 2 data flows recorded/))
     expect(onBoard('source_12')).toBe(true)
     expect(onBoard('source_13')).toBe(true)
     expect(api.extend).not.toHaveBeenCalled()
@@ -427,11 +428,13 @@ describe('the ⊕ tells the truth about what it costs', () => {
     renderLens(['F'], doneWalk(pillCatalogue()))
     // The exact remainder lives in the hover (R1: the control's own face
     // speaks in verbs, never a raw connection count).
-    const exact = screen.getByTitle(/Loads the next hop upstream of has_48_more · 48 data flows recorded/)
+    // T24 F7 — no containment parent here, so only the "only" scope
+    // word is added (no parenthetical).
+    const exact = screen.getByTitle(/Loads the next hop upstream of has_48_more only · 48 data flows recorded/)
     expect(exact.title).toContain('48')
     // The server did not report a total — no flow count in the hover at
     // all, and never a fabricated number anywhere on the control.
-    const countless = screen.getByTitle('Loads the next hop upstream of count_unknown')
+    const countless = screen.getByTitle('Loads the next hop upstream of count_unknown only')
     expect(countless.textContent).not.toMatch(/\d/)
   })
 
@@ -484,7 +487,7 @@ describe('the ⊕ tells the truth about what it costs', () => {
     const { rerender } = renderLens(['F'], extendChain(false), {}, api)
     expect(onBoard('mart_tickets_daily')).toBe(false)
 
-    fireEvent.click(screen.getByTitle(/Loads the next hop downstream of GOLD/))
+    fireEvent.click(screen.getByTitle(/Loads the next hop downstream of GOLD only/))
     expect(api.extend).toHaveBeenCalledTimes(1)
     expect(api.extend).toHaveBeenCalledWith('GOLD', 'down', ['GOLD'])
 
@@ -509,7 +512,7 @@ describe('the ⊕ tells the truth about what it costs', () => {
     // The residual pill is honest and in the SAME unit it started in —
     // one of the 246 connections is now drawn, so 245 remain. It does not
     // flip to a card count and read as changing its mind.
-    expect(screen.getByTitle(/Loads the next hop downstream of GOLD · 245 data flows recorded/)).toBeTruthy()
+    expect(screen.getByTitle(/Loads the next hop downstream of GOLD only · 245 data flows recorded/)).toBeTruthy()
   })
 
   it('the ⊕ speaks in verbs at rest; the hover states connections consistently, whatever the kind', () => {
@@ -521,7 +524,7 @@ describe('the ⊕ tells the truth about what it costs', () => {
     // in the hover; the face speaks a verb, with a card-count for a
     // reveal only (a visible arrival, not a flow).
     renderLens(['F'], extendChain(false))
-    const extend = screen.getByTitle(/Loads the next hop downstream of GOLD · 246 data flows recorded/)
+    const extend = screen.getByTitle(/Loads the next hop downstream of GOLD only · 246 data flows recorded/)
     expect(extend.textContent).not.toMatch(/\d/)
 
     cleanup()
@@ -529,12 +532,12 @@ describe('the ⊕ tells the truth about what it costs', () => {
     // two carry one connection each. The FACE shows the card count (2,
     // a visible arrival); the hover states the same two as flows.
     renderLens(['F'], doneWalk(crowdedFanIn()))
-    const reveal = screen.getByTitle(/Shows the next hop upstream of dim_customer · 2 data flows recorded/)
+    const reveal = screen.getByTitle(/Shows the next hop upstream of dim_customer only · 2 data flows recorded/)
     expect(reveal.textContent).toContain('2')
 
     cleanup()
     renderLens(['F'], doneWalk(pillCatalogue()))
-    expect(screen.getByTitle(/Loads the next hop upstream of partially_loaded · 96 data flows recorded/)).toBeTruthy()
+    expect(screen.getByTitle(/Loads the next hop upstream of partially_loaded only · 96 data flows recorded/)).toBeTruthy()
   })
 
   it('offers no ⊕ at all until the focal\'s own model has landed', () => {
@@ -636,6 +639,59 @@ describe('F1 — the follow pill never blocks the row it sits on', () => {
     // ("1.2K") stays honest while fitting the capped rest width. The
     // exact count is still what the hover title states in full.
     expect(pill.textContent).toContain('1.2K')
+  })
+})
+
+// ── F7 — PARENT ⊕ VS ROW ⊕: SCOPE-NAMING + "ALL" TAG ─────────────────
+
+describe('F7 — a frame-level follow control names its scope; a row-level one names its own (T24 F7)', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
+  afterEach(() => cleanup())
+
+  // T holds two columns, BOTH with their own upstream frontier — so T's
+  // OWN pill genuinely seeds from two distinct entities (customer_id,
+  // order_id), and customer_id's own pill seeds from just itself.
+  const frameAndRowPills = () => doneWalk(walkModel('F', {
+    nodes: [
+      wnode('F', 'dataset', 'orders_enriched'),
+      wnode('T', 'dataset', 'raw_orders', { childCount: 2 }),
+      wnode('c1', 'schemaField', 'customer_id'),
+      wnode('c2', 'schemaField', 'order_id'),
+    ],
+    containmentEdges: [holds('T', 'c1'), holds('T', 'c2')],
+    lineageEdges: [hop('c1', 'F'), hop('c2', 'F')],
+    upstreamUrns: new Set(['c1', 'c2']),
+    frontierUp: [frontier('c1', 5), frontier('c2', 3)],
+  }))
+
+  it('the frame-level control names its scope and the exact entity count it will seed from', () => {
+    renderLens(['F'], frameAndRowPills())
+    // While raw_orders is OPEN, its own ⊕ defers to the finer grain —
+    // its columns already offer this individually (`drawnInsideOffers`,
+    // the exact mechanism lensSeam.test.tsx pins for this same shape).
+    // Collapsing it is what brings the frame's OWN pill back.
+    fireEvent.click(screen.getByLabelText('Collapse raw_orders'))
+    // Reported: "Load upstream for everything in PaymentGateway
+    // (3 entities)" — here, raw_orders (T) genuinely seeds from BOTH
+    // its columns (5 + 3 = 8 flows), so R1c holds: 2, never a guess.
+    expect(screen.getByTitle('Load upstream for everything in raw_orders (2 entities) · 8 data flows recorded')).toBeTruthy()
+  })
+
+  it('the row-level control names ONLY its own entity, qualified by its parent', () => {
+    renderLens(['F'], frameAndRowPills())
+    // Reported: "Loads the next hop upstream of Customers (Payment)
+    // only" — customer_id seeds from nobody but itself.
+    expect(screen.getByTitle('Loads the next hop upstream of customer_id (raw_orders) only · 5 data flows recorded')).toBeTruthy()
+  })
+
+  it('the small "all" tag renders ONLY on the frame-level control, never the row-level one', () => {
+    renderLens(['F'], frameAndRowPills())
+    const rowPill = screen.getByTitle('Loads the next hop upstream of customer_id (raw_orders) only · 5 data flows recorded')
+    expect(within(rowPill).queryByText('ALL')).toBeNull()
+
+    fireEvent.click(screen.getByLabelText('Collapse raw_orders'))
+    const framePill = screen.getByTitle('Load upstream for everything in raw_orders (2 entities) · 8 data flows recorded')
+    expect(within(framePill).getByText('ALL')).toBeTruthy()
   })
 })
 
