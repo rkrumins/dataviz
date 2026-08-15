@@ -252,6 +252,69 @@ describe('the business journey — a table\'s lineage through a seven-level esta
     expect(row!.textContent).toContain('loan_positions')
   })
 
+  // T25 C1 review round 1 — a SECOND, VERIFIED remount mechanism, found
+  // while re-checking C1 for the "couldn't reproduce is not a closing
+  // state" mandate. `holdsRows(card)` (focus-cards.ts) — `card.kind ===
+  // 'frame' || 'focal'` — drives the React Flow node TYPE a card renders
+  // through (`FocusGraphView.tsx`'s `baseNodes`: `type: holdsRows(card)
+  // ? 'focusFrame' : ... : 'focusCard'`). A card's `kind` legitimately
+  // flips from 'entity' to 'frame' the moment its FIRST child is
+  // admitted (an existing test two files over — "renders through a
+  // merge that changes what every card IS" — already documents this
+  // exact transition, just without checking DOM identity). React Flow
+  // keys its node wrapper by `id`, but the COMPONENT it renders for
+  // that id is looked up by `type` — a different type for the same id
+  // is a different React component, which React cannot update in
+  // place: it unmounts the old one and mounts the new one. VERIFIED
+  // directly (a throwaway DOM-identity probe, not assumed): the SAME
+  // 'upstream_table' card's DOM node is gone — `document.body.contains`
+  // false — after a rerender whose only change is that card gaining its
+  // first child. A double-click that straddles this exact transition
+  // (the clicked card's OWN children arriving, from an in-flight fetch,
+  // between the first and second click) would break for the same
+  // reason walkedThrough — the browser's dblclick synthesis needs the
+  // second click to land on the SAME element the first one did.
+  //
+  // NOT fixed here: the only fix that removes the remount is unifying
+  // 'focusFrame'/'focusCard' into one stable React Flow node type with
+  // internal branching (or typing every container-CAPABLE entity as a
+  // frame from its very first render, before any child has arrived) —
+  // either is a real, separately-scoped redesign (broad visual and
+  // layout consequences across the whole board, not a click fix), not a
+  // one-file patch this task's SCOPE GUARD covers. Skipped rather than
+  // deleted or left silently passing: this is the reproduction a future
+  // fix should start from, and removing `.skip` is the whole test.
+  it.skip('T25 C1 review round 1 — a card gaining its first child is NOT remounted (currently fails — see comment above)', () => {
+    const { rerender } = renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [wnode('F', 'dataset', 'orders_enriched'), wnode('u', 'dataset', 'upstream_table')],
+      lineageEdges: [hop('u', 'F')],
+      upstreamUrns: new Set(['u']),
+    })))
+    const before = screen.getByText('upstream_table').closest('[role="button"], [role="option"]')
+    expect(before).not.toBeNull()
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={doneWalk(walkModel('F', {
+          nodes: [
+            wnode('F', 'dataset', 'orders_enriched'),
+            wnode('u', 'dataset', 'upstream_table', { childCount: 4 }),
+            wnode('u:col', 'schemaField', 'order_id'),
+          ],
+          containmentEdges: [holds('u', 'u:col')],
+          lineageEdges: [hop('u', 'F'), hop('u:col', 'F')],
+          upstreamUrns: new Set(['u', 'u:col']),
+        }))}
+        walkApi={{ extend: () => {}, page: () => {}, retry: () => {}, deepen: () => {} }}
+        onRecenter={() => {}}
+        onBack={() => {}}
+        onForward={() => {}}
+        onClose={() => {}}
+      />,
+    )
+    expect(document.body.contains(before)).toBe(true)
+  })
+
   it('stepping Back to an already-walked focal is instant — no loading state', () => {
     const onBack = vi.fn()
     const { rerender, api } = renderLens(
