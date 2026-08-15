@@ -3125,4 +3125,112 @@ describe('re-anchoring from a walked-through state (T25 C2, invariant b)', () =>
     expect(screen.queryByText(/Showing a manually widened span/)).toBeNull()
     expect(screen.getByTitle(/Show 1 hop each way/)).toHaveAttribute('aria-pressed', 'true')
   })
+
+  // T25 C2 (2/2) — THE DETERMINISTIC RACE, named and pinned rather than
+  // left as "couldn't reproduce": a re-anchor while a T25 A fetch is
+  // still IN FLIGHT on the OLD focal. `pendingTriage` (LineageLens.tsx)
+  // is nodeId-scoped exactly like `viewState` — this proves it, the same
+  // way invariant (b)'s own test proves `viewState`'s reset, by walking
+  // the EXACT interleaving with no sleeps: fire the fetch, THEN
+  // re-anchor before it resolves (both are plain synchronous `rerender`
+  // calls — no fake timers needed, because in this component's own
+  // contract `walk` is a PROP the caller controls one state transition
+  // at a time; the interleaving IS the sequence of props handed to
+  // `rerender`, not wall-clock time). Without the nodeId guard, a stale
+  // resolution could fire `revealMore`/`openTriage` against card ids
+  // that belong to a walk the board is no longer showing.
+  it('a fetch left in flight on the OLD focal never fires its arrival decision against the NEW one (T25 C2, 2/2 — the deterministic race)', () => {
+    const api = makeApi()
+    const { rerender } = renderLens(['F'], doneWalk(pillCatalogue()), {}, api)
+    // Start the fetch on F's own wholly-unfetched PAGED card — marks a
+    // `pendingTriage` entry tagged nodeId: 'F'.
+    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of partially_loaded/))
+    expect(api.page).toHaveBeenCalledTimes(1)
+    // ARM it: the fetch is visibly in flight — still focal F — exactly
+    // what `useLensWalk` shows the instant the click's own request
+    // starts (see the T25 A "on arrival" tests above for why this step
+    // cannot be skipped: without it, `seenLoading` is never set and the
+    // race below is vacuous — it would pass whether or not the nodeId
+    // guard exists at all).
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={doneWalk(pillCatalogue(), new Map([['up:PAGED', 'loading']]))}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    // The interleaving: re-anchor to B BEFORE F's fetch ever resolves.
+    // B's own model coincidentally ALSO has a 'PAGED' entity — the SAME
+    // urn F's in-flight fetch was anchored on — with forty of its OWN
+    // upstream sources already known. This is what makes a guard
+    // failure OBSERVABLE rather than merely inert: without the nodeId
+    // check, the stale entry would recompute `partnersFor('PAGED','in')`
+    // against B's CURRENT model (40, past the gate) and open a triage
+    // panel anchored to a card id from F's own layout, on B's board —
+    // wrong regardless of whether the id happens to resolve to anything
+    // real there.
+    const focalB = doneWalk(walkModel('B', {
+      nodes: [
+        wnode('B', 'dataset', 'target_table'),
+        wnode('SRC', 'dataset', 'upstream_of_b'),
+        wnode('PAGED', 'dataset', 'unrelated_but_same_urn'),
+        ...Array.from({ length: 40 }, (_, i) => wnode(`bp${i}`, 'dataset', `b_paged_source_${i}`)),
+      ],
+      lineageEdges: [
+        hop('SRC', 'B'), hop('PAGED', 'B'),
+        ...Array.from({ length: 40 }, (_, i) => hop(`bp${i}`, 'PAGED')),
+      ],
+      upstreamUrns: new Set(['SRC', 'PAGED', ...Array.from({ length: 40 }, (_, i) => `bp${i}`)]),
+    }))
+    rerender(
+      <LineageLens
+        history={{ entries: ['F', 'B'], cursor: 1 }}
+        walk={focalB}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    // THE RACE ITSELF, right here: `focalB`'s OWN `extendStatus` never
+    // had an `up:PAGED` key to begin with — indistinguishable, to a
+    // nodeId-blind reader, from F's fetch having just resolved WHILE B
+    // is what's on screen. Without the nodeId guard on `pendingTriage`,
+    // THIS is the render where a stale arrival fires `openTriage`
+    // against F's own PAGED card id — which, in this fixture, resolves
+    // to B's OWN coincidentally-named-but-unrelated PAGED entity (40
+    // known upstream sources of its own — past the gate), so the wrong
+    // fire is externally OBSERVABLE rather than merely inert: a triage
+    // panel the user never asked for, materializing the instant the
+    // re-anchor lands. The new focal's board must render immediately —
+    // not blank, not waiting on F's fetch, nothing stolen from F's click.
+    expect(onBoard('target_table')).toBe(true)
+    expect(onBoard('upstream_of_b')).toBe(true)
+    expect(triage()).toBeNull()
+    // One more render for good measure — the guard's effect is stable,
+    // not a one-tick coincidence.
+    rerender(
+      <LineageLens
+        history={{ entries: ['F', 'B'], cursor: 1 }}
+        walk={{ ...focalB, model: { ...focalB.model } }}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    // B's board is undisturbed: no triage panel materialized (which
+    // would have opened anchored to F's PAGED card — invisible on B's
+    // own board, an inert but corrupt state), and B's own content is
+    // still exactly what it was.
+    expect(triage()).toBeNull()
+    expect(onBoard('target_table')).toBe(true)
+    expect(onBoard('upstream_of_b')).toBe(true)
+  })
 })
