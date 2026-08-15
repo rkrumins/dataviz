@@ -2889,6 +2889,40 @@ describe('browsing what is inside — the peek and the keyboard', () => {
     expect(peek()).toBeNull()
   })
 
+  // T26 — the peek's own follow button used to dispatch straight to
+  // `ctx.onRevealMore`/`onExtend`/`onPage`, bypassing `resolveFollowDelivery`
+  // entirely: the ONE card-anchored follow control in the whole lens that
+  // never ran the gate. A row whose own cohort is FULLY known but ranks
+  // past the triage threshold (a 'reveal' pill's own gate, per T25 A —
+  // `groupsTotal > TRIAGE_THRESHOLD`) proves it: before this fix, clicking
+  // it from the peek dumped a page directly; now it opens the SAME
+  // populated triage list the row's own ⊕ would.
+  it('the peek\'s own follow button runs the SAME gate every other card-anchored control does', () => {
+    const nodes = [
+      wnode('F', 'dataset', 'stg_orders'),
+      wnode('T', 'dataset', 'raw_orders', { childCount: 1 }),
+      wnode('c1', 'schemaField', 'order_id'),
+      ...Array.from({ length: 40 }, (_, i) => wnode(`s${String(i).padStart(3, '0')}`, 'dataset', `source_${String(i).padStart(3, '0')}`)),
+    ]
+    const lineageEdges = [
+      hop('c1', 'F'),
+      ...Array.from({ length: 40 }, (_, i) => hop(`s${String(i).padStart(3, '0')}`, 'c1')),
+    ]
+    const api = makeApi()
+    renderLens(['F'], doneWalk(walkModel('F', {
+      nodes,
+      containmentEdges: [holds('T', 'c1')],
+      lineageEdges,
+      upstreamUrns: new Set(['c1', ...Array.from({ length: 40 }, (_, i) => `s${String(i).padStart(3, '0')}`)]),
+    })), {}, api)
+    fireEvent.click(row('order_id'))
+    fireEvent.click(within(peek() as HTMLElement).getByText(/Walk further upstream/))
+    // The gate opened the SAME triage list a card-anchored click always
+    // does — never a raw reveal dump, and never nothing.
+    expect(triage()).toBeTruthy()
+    expect(api.extend).not.toHaveBeenCalled()
+  })
+
   it('the peek focuses where it is, and opens what it holds', () => {
     const onRecenter = vi.fn()
     renderLens(['F'], table(), { onRecenter })

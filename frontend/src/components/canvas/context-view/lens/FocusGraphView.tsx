@@ -3722,9 +3722,15 @@ function LensPeek({ card, host, ctx, onDismiss }: {
             disabled={pill.status === 'loading'}
             onClick={() => {
               onDismiss()
-              if (pill.kind === 'reveal') ctx.onRevealMore?.(pill.key)
-              else if (pill.kind === 'page' && pill.cursor) ctx.onPage?.(pillTarget(pill.key), pillDir, pill.cursor)
-              else ctx.onExtend?.(pill.key, pillTarget(pill.key), pillDir)
+              // T26 — routed through the SAME gated calculus every other
+              // card-anchored follow control uses (WalkPill, RailEnd, the
+              // spotlight bridge): a real card (`card`) is in scope here,
+              // so this was never actually a `actOnPill`-only case — it
+              // was a straggler that bypassed the gate entirely, never
+              // offering a wholly-unfetched large fan its own triage list.
+              if (!card.nodeId) { actOnPill(ctx, pill, pillDir); return }
+              const known = ctx.partnersFor?.(card.nodeId, pillDir)?.length ?? 0
+              runFollow(ctx, pill, pillDir, known, { cardId: card.id, nodeId: card.nodeId })
             }}
             className={cn(
               act,
