@@ -361,6 +361,23 @@ export function LineageLens({
   // new focal is a new question, not a continuation of this one — EXCEPT
   // for a one-time seed restored from a share link (below), which is the
   // sanctioned way a focal's starting view can be anything but default.
+  //
+  // T25 C2, invariant (b) — the answer to "does an ORDINARY in-session
+  // re-anchor (double-click / Focus-here / breadcrumb — every path runs
+  // through `ctx.onFocus` → the `onRecenter` prop → `lensPush`, one
+  // shared mechanism) actually reset `railWindow`/`viewRadius`/
+  // `condensedOpen`/`pinned`, or does it take some OTHER path where they
+  // never reset?" It is NOT the walkSeed-restoration effect below — that
+  // is a SEPARATE, one-time mechanism that only ever fires for a
+  // restored SHARE LINK, and an ordinary re-anchor never touches it.
+  // The reset here is this plain derived value, re-evaluated on EVERY
+  // render, with no effect and no async gap in between: the moment
+  // `nodeId` changes, `viewState?.nodeId === nodeId` is false on THIS
+  // SAME render, so `view` falls back to a fresh `initialView`
+  // atomically — there is no tick where a stale `railWindow` from the
+  // old focal is live under the new one. See
+  // `LineageLens.test.tsx`'s "re-anchoring from a walked-through state"
+  // describe block for the pin walking this exact in-session path.
   const view = viewState?.nodeId === nodeId ? viewState.view : initialView
   const editView = useCallback((edit: (base: LensViewState) => LensViewState) => {
     setViewState(prev => ({

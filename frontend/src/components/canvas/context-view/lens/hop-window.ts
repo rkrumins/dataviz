@@ -117,6 +117,14 @@ export function applyHopWindow(
   // board with nothing on it, indistinguishable from data loss. Widening
   // past `radius` here, on the rare far-off-center case, is the correct
   // trade — a bigger board beats an empty one.
+  //
+  // Placed AFTER the range clamp above, not before it — equivalently:
+  // band 0 (the focal) is always inside `[range.min, range.max]` (the
+  // focal card is always top-level and always drawn, the same
+  // precondition `LineageLens`'s own invariant (c) checks), so forcing
+  // `lo`/`hi` to include 0 can never need to be re-clamped back out of
+  // range by the two `if` statements above — doing it last is simpler
+  // and needs no second pass, not a different result.
   if (lo > 0) lo = 0
   if (hi < 0) hi = 0
 

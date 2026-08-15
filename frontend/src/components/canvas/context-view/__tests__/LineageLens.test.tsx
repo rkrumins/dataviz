@@ -275,16 +275,19 @@ describe('the business journey — a table\'s lineage through a seven-level esta
   // reason walkedThrough — the browser's dblclick synthesis needs the
   // second click to land on the SAME element the first one did.
   //
-  // NOT fixed here: the only fix that removes the remount is unifying
-  // 'focusFrame'/'focusCard' into one stable React Flow node type with
-  // internal branching (or typing every container-CAPABLE entity as a
-  // frame from its very first render, before any child has arrived) —
-  // either is a real, separately-scoped redesign (broad visual and
-  // layout consequences across the whole board, not a click fix), not a
-  // one-file patch this task's SCOPE GUARD covers. Skipped rather than
-  // deleted or left silently passing: this is the reproduction a future
-  // fix should start from, and removing `.skip` is the whole test.
-  it.skip('T25 C1 review round 1 — a card gaining its first child is NOT remounted (currently fails — see comment above)', () => {
+  // RULED not fixed here: the only fix that removes the remount is
+  // unifying 'focusFrame'/'focusCard' into one stable React Flow node
+  // type with internal branching (or typing every container-CAPABLE
+  // entity as a frame from its very first render, before any child has
+  // arrived) — either is a real, separately-scoped redesign (broad
+  // visual and layout consequences across the whole board, not a click
+  // fix), not a one-file patch this task's SCOPE GUARD covers. This is
+  // the named root cause with the fix deferred BY DESIGN — dispatched as
+  // its own task (T27, one stable node identity for container-capable
+  // entities) immediately after this one lands. Skipped rather than
+  // deleted or left silently passing: this is the reproduction T27
+  // should start from — unskipped BY the node-identity task, not before.
+  it.skip('T25 C1 review round 1 — a card gaining its first child is NOT remounted (currently fails — see comment above; unskipped by the node-identity task, T27)', () => {
     const { rerender } = renderLens(['F'], doneWalk(walkModel('F', {
       nodes: [wnode('F', 'dataset', 'orders_enriched'), wnode('u', 'dataset', 'upstream_table')],
       lineageEdges: [hop('u', 'F')],
