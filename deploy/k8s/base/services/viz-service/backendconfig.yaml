@@ -12,6 +12,28 @@ spec:
     type: HTTP
     requestPath: /api/v1/health/ready
     port: 8000
-  timeoutSec: 120
+  # Backend-service timeout. On a GCP Application Load Balancer this is
+  # NOT an idle timeout — it bounds the whole exchange, from the first
+  # request byte to the LAST response byte. A Server-Sent-Events response
+  # never sends its last byte, so this value is a hard ceiling on stream
+  # lifetime and heartbeats do nothing to extend it. At 120 every stream
+  # died two minutes in, which reads as "realtime is flaky" and costs a
+  # reconnect stampede every two minutes across the fleet.
+  #
+  # 1200 sits comfortably above the change feed's own 15-minute maximum
+  # stream lifetime (streams are closed and reopened deliberately, so
+  # they stay well inside the access token's validity) plus slack.
+  #
+  # Raising this does relax the backstop for ordinary requests too, which
+  # is acceptable because it was never the real control: the application
+  # bounds its own requests in _TimeoutMiddleware, whose slowest tier
+  # (versioning, 120s) is far tighter than this. If that ever stops being
+  # true, the cleaner split is to give the streaming route its own
+  # Service and BackendConfig so long-lived connections are isolated from
+  # the request pool entirely.
+  timeoutSec: 1200
   connectionDraining:
-    drainingTimeoutSec: 30
+    # Long enough for open streams to be closed by the app's own shutdown
+    # path — which sends a final frame with a jittered retry hint — rather
+    # than being cut mid-flight and reconnecting in lockstep.
+    drainingTimeoutSec: 60

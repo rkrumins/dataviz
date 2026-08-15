@@ -22,6 +22,7 @@ import os
 
 import pytest
 
+from backend.app.common.sse_registry import register_sse_path
 from backend.app.main import _TimeoutMiddleware
 
 
@@ -283,9 +284,9 @@ async def test_no_runtime_error_no_response_returned_under_repeated_timeouts():
     assert not errors, f"Middleware raised {len(errors)} times: {errors[:3]}"
 
 
-async def test_sse_path_bypasses_timeout():
-    """SSE bypass: long-lived /events streams must not be cancelled."""
-
+async def _run_slow_stream(path: str) -> tuple[asyncio.Event, "_Sink"]:
+    """Drive a response slower than the default timeout through the
+    middleware at ``path``. Returns (completed, sink)."""
     completed = asyncio.Event()
 
     async def long_stream_app(scope, receive, send):
@@ -298,9 +299,38 @@ async def test_sse_path_bypasses_timeout():
 
     mw = _TimeoutMiddleware(long_stream_app)
     sink = _Sink()
-    await mw(_http_scope("/api/v1/views/events"), _Receiver(), sink)
+    await mw(_http_scope(path), _Receiver(), sink)
+    return completed, sink
+
+
+async def test_registered_sse_path_bypasses_timeout():
+    """SSE bypass: long-lived registered streams must not be cancelled."""
+    # Additive and idempotent. Deliberately NOT paired with
+    # reset_for_testing(): the registry is populated at import time by the
+    # modules that own the real streams, so clearing it here would
+    # silently un-register them for every test that runs afterwards.
+    register_sse_path("/api/v1/test-only/{thing_id}/events")
+    completed, sink = await _run_slow_stream("/api/v1/test-only/abc/events")
 
     assert completed.is_set(), "SSE stream was cut off by the timeout middleware"
+    assert sink.terminal_chunks == 1
+
+
+async def test_unregistered_events_path_does_not_bypass():
+    """A route is not a stream just because its name ends in "/events".
+
+    The bypass used to be ``path.endswith("/events")``, and
+    ``POST /api/v1/telemetry/events`` — an ordinary JSON write — matched
+    it. That endpoint ran with no timeout and no readiness gate purely
+    because of what it was called. Membership is now declared, so an
+    unregistered path gets the ordinary deadline like anything else.
+    """
+    completed, sink = await _run_slow_stream("/api/v1/telemetry/events")
+
+    assert not completed.is_set(), (
+        "an unregistered /events path bypassed the timeout — the endswith "
+        "heuristic is back"
+    )
     assert sink.terminal_chunks == 1
 
 

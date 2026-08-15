@@ -31,6 +31,7 @@ from backend.app.auth.dependencies import (
     get_permission_claims,
     requires,
 )
+from backend.app.common.sse_registry import register_sse_path
 from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.db.repositories import data_source_repo
 from backend.app.ontology import gate as ontology_gate
@@ -688,6 +689,39 @@ async def get_job(
 
 # ── SSE: GET /data-sources/{ds_id}/aggregation-jobs/{job_id}/events ──
 
+# Declare the stream to the timeout middleware, which must not race a
+# deadline against a response that stays open as long as the client is
+# listening. The path is the fully-mounted one: this router is included
+# under the /admin prefix (see api/v1/api.py), on top of /api/v1.
+register_sse_path(
+    "/api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job_id}/events"
+)
+
+# Ceiling on concurrent job streams in THIS process.
+#
+# Each stream parks a Redis connection for its whole lifetime: the
+# consumer live-tails with a blocking XREAD. That connection comes from
+# the shared bus pool, which is built with ``max_connections=20``
+# (``services/aggregation/redis_client.py``) and is the same pool every
+# other Redis user in the process draws from — session revocation
+# checks, permission claims, rate-limit counters. The pool is
+# non-blocking: on exhaustion it RAISES rather than waiting, so twenty
+# people watching job rows does not degrade the streams, it starts
+# failing authentication for everyone on the replica.
+#
+# Five leaves the bulk of the pool for request-path work. A refused
+# stream is a non-event: the job table renders from its polled query and
+# treats live updates as an overlay, so the viewer sees a slightly less
+# lively progress bar and nothing else.
+#
+# This is a bound, not a fix. The real repair is to stop using one Redis
+# connection per client and fan out per-process from a single tail —
+# tracked as the change-feed hub work.
+_MAX_CONCURRENT_JOB_STREAMS = int(
+    os.getenv("AGGREGATION_JOB_SSE_MAX_CONCURRENT", "5")
+)
+_job_stream_slots = asyncio.Semaphore(_MAX_CONCURRENT_JOB_STREAMS)
+
 
 @router.get(
     "/data-sources/{ds_id}/aggregation-jobs/{job_id}/events",
@@ -720,6 +754,23 @@ async def stream_job_events(
     # by alias to disambiguate.
     from backend.app.jobs import get_consumer
     from backend.app.jobs.broker import JobScope as BrokerJobScope
+
+    # Claim a stream slot before opening anything. The short wait absorbs
+    # the case where a slot is about to free up; past that we refuse
+    # rather than queue, because a caller blocked here is holding a
+    # worker while contributing nothing.
+    try:
+        await asyncio.wait_for(_job_stream_slots.acquire(), timeout=0.05)
+    except (asyncio.TimeoutError, TimeoutError):
+        logger.info(
+            "SSE stream %s: refused, %d/%d job-stream slots busy on this process",
+            job_id, _MAX_CONCURRENT_JOB_STREAMS, _MAX_CONCURRENT_JOB_STREAMS,
+        )
+        return Response(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": "5"},
+        )
+
     consumer = get_consumer()
     broker_scope = BrokerJobScope(job_id=job_id)
 
@@ -758,6 +809,13 @@ async def stream_job_events(
                 f"event: error\n"
                 f"data: {{\"detail\": \"stream error\"}}\n\n"
             ).encode("utf-8")
+        finally:
+            # Release in ``finally``, not after the loop: the common exit
+            # is the client going away, which arrives as GeneratorExit /
+            # CancelledError rather than a normal return. Anything that
+            # only ran on the happy path would leak a slot per closed tab
+            # until the process had none left.
+            _job_stream_slots.release()
 
     return StreamingResponse(
         _frames(),

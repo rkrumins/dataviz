@@ -48,6 +48,14 @@ export const POLLING_INTERVALS = {
    */
   providerStatus: 60_000,
   /**
+   * Aggregation worker fleet panel (admin → workspace). Ticks while the
+   * panel is mounted; the fleet is a live operational view, so 10s is
+   * the cadence an operator expects. Jitter and the hidden-tab pause
+   * come from `usePolling`, which this now uses — the panel previously
+   * hand-rolled its own loop and had neither.
+   */
+  aggregationFleet: 10_000,
+  /**
    * Aggregation job history — only ticks while a job is actually
    * pending/running. Bumped from 3s to 5s because below 5s the UI
    * gains nothing (humans perceive ~2s as "real time") and the cost

@@ -21,6 +21,7 @@ from .middleware.security_headers import SecurityHeadersMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from .providers.manager import provider_manager
+from backend.app.common.sse_registry import is_sse_path
 from backend.auth_service.csrf import CSRFMiddleware
 from backend.auth_service.cookies import (
     ACCESS_COOKIE_NAME as _ACCESS_COOKIE_NAME,
@@ -1714,12 +1715,15 @@ class _TimeoutMiddleware:
     unrecoverable state.
     """
 
-    # P1.8 — explicit SSE path registry. Routers may extend this at
-    # startup via ``register_sse_path("/api/v1/.../my-stream")``. The
-    # default suffix ``/events`` matches today's only SSE convention but
-    # the contract is explicit registration, not endswith heuristics.
-    _SSE_PATH_SUFFIXES: tuple[str, ...] = ("/events",)
-    _SSE_EXACT_PATHS: frozenset[str] = frozenset()
+    # P1.8 — explicit SSE path registry, in
+    # ``backend/app/common/sse_registry.py``. Streaming routes call
+    # ``register_sse_path(...)`` beside their own handler.
+    #
+    # This used to be ``path.endswith("/events")``. That is a guess about
+    # naming rather than a statement about behaviour, and it guessed
+    # wrong: ``POST /api/v1/telemetry/events`` is an ordinary JSON write
+    # that happens to end in the same word, and it was running with no
+    # timeout and no readiness gate as a result.
 
     def __init__(self, app):
         self.app = app
@@ -1775,12 +1779,7 @@ class _TimeoutMiddleware:
         return self._default_timeout
 
     def _is_sse_path(self, path: str) -> bool:
-        if path in self._SSE_EXACT_PATHS:
-            return True
-        for suffix in self._SSE_PATH_SUFFIXES:
-            if path.endswith(suffix):
-                return True
-        return False
+        return is_sse_path(path)
 
     # P1.10 — paths that are ALWAYS allowed through, even when the app
     # has not flipped its readiness gate. Liveness probes must answer
