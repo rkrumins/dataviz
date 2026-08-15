@@ -323,27 +323,27 @@ export function Freshness() {
     }, [])
 
     const permissionClaims = usePermissionClaims()
-    const selectableIds = useMemo(() => (
+    const selectableFailedIds = useMemo(() => (
         tableRows
-            .filter(r => freshnessState(r) !== 'recomputing')
+            .filter(r => freshnessState(r) === 'failed')
             .filter(r => checkPermission(permissionClaims, 'workspace:datasource:manage', r.workspaceId))
             .map(r => r.dataSourceId)
     ), [tableRows, permissionClaims])
 
-    const allSelectableSelected = selectableIds.length > 0
-        && selectableIds.every(id => selectedIds.includes(id))
-    const someSelectableSelected = selectableIds.some(id => selectedIds.includes(id))
+    const allSelectableSelected = selectableFailedIds.length > 0
+        && selectableFailedIds.every(id => selectedIds.includes(id))
+    const someSelectableSelected = selectableFailedIds.some(id => selectedIds.includes(id))
 
     const toggleSelectAll = useCallback(() => {
         setSelectedIds(prev => {
-            if (selectableIds.length === 0) return prev
-            const allOn = selectableIds.every(id => prev.includes(id))
-            if (allOn) return prev.filter(id => !selectableIds.includes(id))
+            if (selectableFailedIds.length === 0) return prev
+            const allOn = selectableFailedIds.every(id => prev.includes(id))
+            if (allOn) return prev.filter(id => !selectableFailedIds.includes(id))
             const merged = new Set(prev)
-            for (const id of selectableIds) merged.add(id)
+            for (const id of selectableFailedIds) merged.add(id)
             return Array.from(merged)
         })
-    }, [selectableIds])
+    }, [selectableFailedIds])
 
     // Drop selections that left the visible set (facet change / refetch).
     useEffect(() => {
@@ -434,14 +434,14 @@ export function Freshness() {
                         <thead>
                             <tr className="text-[10px] uppercase tracking-wide text-ink-muted">
                                 <th style={{ top: headerTop }} className="pl-3 pr-1 py-2 w-10 sticky z-10 bg-canvas">
-                                    {selectableIds.length > 0 ? (
+                                    {selectableFailedIds.length > 0 ? (
                                         <SelectionCheckbox
                                             selected={allSelectableSelected}
                                             indeterminate={someSelectableSelected && !allSelectableSelected}
                                             onToggle={toggleSelectAll}
                                             ariaLabel={allSelectableSelected
-                                                ? 'Deselect all sources'
-                                                : 'Select all sources'}
+                                                ? 'Deselect all failed sources'
+                                                : 'Select all failed sources'}
                                         />
                                     ) : (
                                         <span className="inline-block w-[18px]" aria-hidden />

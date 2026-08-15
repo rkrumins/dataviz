@@ -1,48 +1,18 @@
 /**
- * BulkRetryBar — floating selection dock (WorkspaceBulkBar shape).
- * Safe refresh for any selection; confirmed rebuild / retry by state.
+ * BulkRetryBar — floating selection dock (same shape as WorkspaceBulkBar /
+ * ExplorerBulkActions). Appears only when failed sources are selected.
  */
 import { useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Database, Loader2, RotateCcw, X } from 'lucide-react'
+import { Loader2, RotateCcw, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
 import { freshnessService } from '@/services/freshnessService'
-import type { FreshnessRow, RefreshScope } from '@/services/freshnessService'
+import type { FreshnessRow } from '@/services/freshnessService'
 import { FAILURE_CATEGORY_LABEL, asFailureCategory, countFailuresByCategory } from './failureGuidance'
-import { freshnessState } from './freshnessTriage'
 
 const CONCURRENCY = 3
 const CAP = 50
-
-type ConfirmKind = 'retry' | 'rebuild' | null
-
-async function fanOutRefresh(
-    ids: string[],
-    scope: RefreshScope,
-    onProgress: (p: { done: number; total: number; errors: number }) => void,
-): Promise<{ errors: number; total: number }> {
-    const capped = ids.slice(0, CAP)
-    let errors = 0
-    let done = 0
-    const queue = [...capped]
-    onProgress({ done: 0, total: capped.length, errors: 0 })
-    const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
-        while (queue.length) {
-            const id = queue.shift()
-            if (!id) break
-            try {
-                await freshnessService.refreshSource(id, { scope })
-            } catch {
-                errors += 1
-            }
-            done += 1
-            onProgress({ done, total: capped.length, errors })
-        }
-    })
-    await Promise.all(workers)
-    return { errors, total: capped.length }
-}
 
 export function BulkRetryBar({
     selectedIds, rows, onClear, onDone,
@@ -54,96 +24,49 @@ export function BulkRetryBar({
 }) {
     const { showToast } = useToast()
     const [running, setRunning] = useState(false)
-    const [confirming, setConfirming] = useState<ConfirmKind>(null)
+    const [confirming, setConfirming] = useState(false)
     const [progress, setProgress] = useState<{ done: number; total: number; errors: number } | null>(null)
 
     const selected = rows.filter(r => selectedIds.includes(r.dataSourceId))
-    const failedIds = selected
-        .filter(r => freshnessState(r) === 'failed')
-        .map(r => r.dataSourceId)
-    const rebuildIds = selected
-        .filter(r => freshnessState(r) !== 'failed' && freshnessState(r) !== 'recomputing')
-        .map(r => r.dataSourceId)
-    const causes = countFailuresByCategory(selected.filter(r => freshnessState(r) === 'failed'))
+    const causes = countFailuresByCategory(selected)
     const top = causes[0]
     const n = Math.min(selectedIds.length, CAP)
     const pct = progress && progress.total > 0
         ? Math.round((progress.done / progress.total) * 100)
         : 0
 
-    const finish = (errors: number, total: number, okMsg: string) => {
+    const run = async () => {
+        setConfirming(false)
+        setRunning(true)
+        const ids = selectedIds.slice(0, CAP)
+        setProgress({ done: 0, total: ids.length, errors: 0 })
+        let errors = 0
+        let done = 0
+        const queue = [...ids]
+        const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+            while (queue.length) {
+                const id = queue.shift()
+                if (!id) break
+                try {
+                    await freshnessService.refreshSource(id, { scope: 'rollups' })
+                } catch {
+                    errors += 1
+                }
+                done += 1
+                setProgress({ done, total: ids.length, errors })
+            }
+        })
+        await Promise.all(workers)
         setRunning(false)
         showToast(
             errors === 0 ? 'success' : 'error',
             errors === 0
-                ? okMsg
-                : `Finished with ${errors} error${errors === 1 ? '' : 's'} of ${total}.`,
+                ? `Retry queued for ${ids.length} source${ids.length === 1 ? '' : 's'}.`
+                : `Retry finished with ${errors} error${errors === 1 ? '' : 's'} of ${ids.length}.`,
         )
         onDone()
         onClear()
         setProgress(null)
-        setConfirming(null)
-    }
-
-    const runCaches = async () => {
-        setConfirming(null)
-        setRunning(true)
-        const { errors, total } = await fanOutRefresh(
-            selectedIds, 'read-caches', setProgress,
-        )
-        finish(
-            errors,
-            total,
-            `Cache refresh queued for ${total} source${total === 1 ? '' : 's'}.`,
-        )
-    }
-
-    const runRetry = async () => {
-        setConfirming(null)
-        setRunning(true)
-        const { errors, total } = await fanOutRefresh(failedIds, 'rollups', setProgress)
-        finish(
-            errors,
-            total,
-            `Retry queued for ${total} source${total === 1 ? '' : 's'}.`,
-        )
-    }
-
-    const runRebuild = async () => {
-        setConfirming(null)
-        setRunning(true)
-        const { errors, total } = await fanOutRefresh(rebuildIds, 'rollups', setProgress)
-        finish(
-            errors,
-            total,
-            `Rebuild queued for ${total} source${total === 1 ? '' : 's'}.`,
-        )
-    }
-
-    const subtitle = () => {
-        if (progress) {
-            return `${progress.done}/${progress.total} queued`
-                + (progress.errors > 0 ? ` · ${progress.errors} failed to start` : '')
-        }
-        if (confirming === 'retry') {
-            return (
-                <>
-                    Retry rebuild on {failedIds.length === 1 ? 'this failed source' : `${failedIds.length} failed sources`}?
-                    {selected.some(r => asFailureCategory(r.lastFailureCategory) === 'out_of_memory') && (
-                        <> Free graph-store memory first if these are OOM.</>
-                    )}
-                </>
-            )
-        }
-        if (confirming === 'rebuild') {
-            return `Rebuild lineage on ${rebuildIds.length === 1 ? 'this source' : `${rebuildIds.length} sources`}?`
-        }
-        if (top) return <>Mostly {FAILURE_CATEGORY_LABEL[top.category].toLowerCase()}</>
-        if (failedIds.length > 0 && rebuildIds.length > 0) {
-            return `${failedIds.length} failed · ${rebuildIds.length} ready to rebuild`
-        }
-        if (failedIds.length > 0) return 'Failed sources — retry or refresh caches'
-        return 'Refresh caches or rebuild lineage'
     }
 
     return (
@@ -179,100 +102,62 @@ export function BulkRetryBar({
                                 <p className="text-sm font-semibold text-ink whitespace-nowrap">
                                     {n === 1 ? '1 source selected' : `${n.toLocaleString()} sources selected`}
                                 </p>
-                                <p className="text-[11px] text-ink-muted truncate max-w-[240px] sm:max-w-sm">
-                                    {subtitle()}
+                                <p className="text-[11px] text-ink-muted truncate max-w-[220px] sm:max-w-xs">
+                                    {progress
+                                        ? `${progress.done}/${progress.total} queued`
+                                            + (progress.errors > 0 ? ` · ${progress.errors} failed to start` : '')
+                                        : confirming
+                                            ? (
+                                                <>
+                                                    Retry rebuild?
+                                                    {selected.some(r => asFailureCategory(r.lastFailureCategory) === 'out_of_memory') && (
+                                                        <> Free graph-store memory first if these are OOM.</>
+                                                    )}
+                                                </>
+                                            )
+                                            : top
+                                                ? <>Mostly {FAILURE_CATEGORY_LABEL[top.category].toLowerCase()}</>
+                                                : 'Ready to retry lineage rebuilds'}
                                 </p>
                             </div>
 
                             <span className="hidden sm:block w-px h-5 bg-glass-border mx-1" />
 
-                            <button
-                                type="button"
-                                onClick={() => void runCaches()}
-                                disabled={running || confirming !== null}
-                                className={cn(
-                                    'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
-                                    'text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors',
-                                    'disabled:opacity-50',
-                                )}
-                            >
-                                {running && !confirming
-                                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                    : <Database className="w-3.5 h-3.5" />}
-                                Refresh caches
-                            </button>
-
-                            {failedIds.length > 0 && (
-                                confirming === 'retry' ? (
-                                    <button
-                                        type="button"
-                                        onClick={() => void runRetry()}
-                                        disabled={running}
-                                        className={cn(
-                                            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
-                                            'text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm shadow-indigo-600/20 transition-colors',
-                                            'disabled:opacity-50',
-                                        )}
-                                    >
-                                        {running
-                                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                            : <RotateCcw className="w-3.5 h-3.5" />}
-                                        Confirm retry
-                                    </button>
-                                ) : (
-                                    <button
-                                        type="button"
-                                        onClick={() => setConfirming('retry')}
-                                        disabled={running || confirming !== null}
-                                        className={cn(
-                                            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
-                                            'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors',
-                                            'disabled:opacity-50',
-                                        )}
-                                    >
-                                        <RotateCcw className="w-3.5 h-3.5" />
-                                        Retry rebuild
-                                    </button>
-                                )
-                            )}
-
-                            {rebuildIds.length > 0 && (
-                                confirming === 'rebuild' ? (
-                                    <button
-                                        type="button"
-                                        onClick={() => void runRebuild()}
-                                        disabled={running}
-                                        className={cn(
-                                            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
-                                            'text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm shadow-indigo-600/20 transition-colors',
-                                            'disabled:opacity-50',
-                                        )}
-                                    >
-                                        {running
-                                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                            : <RotateCcw className="w-3.5 h-3.5" />}
-                                        Confirm rebuild
-                                    </button>
-                                ) : (
-                                    <button
-                                        type="button"
-                                        onClick={() => setConfirming('rebuild')}
-                                        disabled={running || confirming !== null}
-                                        className={cn(
-                                            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
-                                            'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors',
-                                            'disabled:opacity-50',
-                                        )}
-                                    >
-                                        <RotateCcw className="w-3.5 h-3.5" />
-                                        Rebuild lineage
-                                    </button>
-                                )
+                            {!confirming ? (
+                                <button
+                                    type="button"
+                                    onClick={() => setConfirming(true)}
+                                    disabled={running}
+                                    className={cn(
+                                        'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
+                                        'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors',
+                                        'disabled:opacity-50',
+                                    )}
+                                >
+                                    <RotateCcw className="w-3.5 h-3.5" />
+                                    Retry rebuild
+                                </button>
+                            ) : (
+                                <button
+                                    type="button"
+                                    onClick={() => void run()}
+                                    disabled={running}
+                                    className={cn(
+                                        'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
+                                        'text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm shadow-indigo-600/20 transition-colors',
+                                        'disabled:opacity-50',
+                                    )}
+                                >
+                                    {running
+                                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                        : <RotateCcw className="w-3.5 h-3.5" />}
+                                    Confirm retry
+                                </button>
                             )}
 
                             <button
                                 type="button"
-                                onClick={() => { setConfirming(null); onClear() }}
+                                onClick={() => { setConfirming(false); onClear() }}
                                 disabled={running}
                                 title="Clear selection"
                                 className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"

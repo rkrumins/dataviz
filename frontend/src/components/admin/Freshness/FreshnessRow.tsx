@@ -349,7 +349,7 @@ export function FreshnessRow({
         )}>
             {/* Selection */}
             <td className="pl-3 pr-1 py-2.5 align-middle w-10">
-                {selectable && canManage && state !== 'recomputing' && onToggleSelect ? (
+                {selectable && canManage && state === 'failed' && onToggleSelect ? (
                     <SelectionCheckbox
                         selected={!!selected}
                         onToggle={() => onToggleSelect(row.dataSourceId)}

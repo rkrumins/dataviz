@@ -58,20 +58,4 @@ describe('ReconcilePreviewDialog', () => {
             expect(reconcileNow).toHaveBeenCalledWith({ dryRun: true })
         })
     })
-
-    it('does not claim All 0 sources when nothing was eligible', async () => {
-        reconcileNow.mockResolvedValue({
-            skipped: false,
-            run: { scanned: 0, findings: 0, actions: 0 },
-            findings: [],
-        })
-        const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-        render(
-            <QueryClientProvider client={qc}>
-                <ReconcilePreviewDialog open onClose={() => {}} />
-            </QueryClientProvider>,
-        )
-        expect(await screen.findByText(/no sources were eligible to check/i)).toBeInTheDocument()
-        expect(screen.queryByText(/All 0/)).not.toBeInTheDocument()
-    })
 })

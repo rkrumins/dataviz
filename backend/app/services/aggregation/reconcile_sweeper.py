@@ -286,10 +286,6 @@ class ReconciliationSweeper:
 
             states = await self._candidates(
                 session, data_source_ids, global_interval,
-                force_all=(
-                    data_source_ids is not None
-                    or result.mode in ("manual", "preview")
-                ),
             )
             if not states:
                 return actions, nudges
@@ -314,18 +310,10 @@ class ReconciliationSweeper:
                 # cannot know each source's override, so the exact check is
                 # here. A not-yet-due source is left untouched (no checked_at
                 # write) and reappears on a later tick.
-                #
-                # Manual Check now and Preview always re-evaluate: otherwise a
-                # just-finished auto tick leaves scanned=0 and the UI looks dead.
-                # Explicit dataSourceIds already bypass this gate.
                 interval = resolve_reconcile_interval(
                     state.reconcile_check_interval_secs, global_interval,
                 )
-                force_due = (
-                    data_source_ids is not None
-                    or result.mode in ("manual", "preview")
-                )
-                if not force_due and not self._is_due(state, interval):
+                if data_source_ids is None and not self._is_due(state, interval):
                     continue
 
                 result.scanned += 1
@@ -463,18 +451,14 @@ class ReconciliationSweeper:
         except Exception:
             return True
 
-    async def _candidates(self, session, data_source_ids, global_interval, *, force_all=False):
-        """Bounded, oldest-checked-first. Explicit ids and manual/preview
-        (``force_all``) bypass due-ness so Check now actually re-evaluates."""
+    async def _candidates(self, session, data_source_ids, global_interval):
+        """Bounded, oldest-checked-first. Explicit ids bypass due-ness (the
+        on-demand path)."""
         from .models import AggregationDataSourceStateORM as S
 
         stmt = select(S)
         if data_source_ids:
             stmt = stmt.where(S.data_source_id.in_(data_source_ids))
-        elif force_all:
-            stmt = stmt.order_by(
-                S.last_reconcile_checked_at.asc().nullsfirst()
-            ).limit(_SCAN_CAP)
         else:
             interval = min(
                 global_interval or _MIN_CHECK_INTERVAL_SECS,

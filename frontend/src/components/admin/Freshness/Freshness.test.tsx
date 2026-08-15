@@ -149,11 +149,6 @@ describe('Freshness cockpit', () => {
         expect(screen.getByText('Customers Graph')).toBeInTheDocument()
         // "as of Xm ago" cache chips are present.
         expect(screen.getAllByText(/as of/i).length).toBeGreaterThan(0)
-        // Ready + queued rows expose selection; select-all targets every manageable
-        // non-recomputing source on the page.
-        expect(screen.getByRole('checkbox', { name: /select orders graph/i })).toBeInTheDocument()
-        expect(screen.getByRole('checkbox', { name: /select customers graph/i })).toBeInTheDocument()
-        expect(screen.getByRole('checkbox', { name: /select all sources/i })).toBeInTheDocument()
         // The source_changed row has a marker but NO running job → "Queued",
         // not "Recomputing" (which now means a job is genuinely in flight).
         expect(screen.getByText('Queued')).toBeInTheDocument()
