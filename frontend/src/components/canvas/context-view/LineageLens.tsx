@@ -426,6 +426,12 @@ export function LineageLens({
         drawnRank: new Map(),
         pinned: new Set(walkSeed.pinned),
         railWindow: walkSeed.railWindow,
+        // T25 B — not carried in a link either, same reasoning as
+        // `walkedThrough`/`drawnRank` above: `null` defaults to the
+        // restored walk's own fetched depth (`initialLensShare.depth`
+        // already travels and drove that fetch), which is the radius a
+        // depth-set share was ever meant to reproduce.
+        viewRadius: null,
         condensedOpen: new Set(walkSeed.condensedOpen),
       },
     })
@@ -452,23 +458,43 @@ export function LineageLens({
     () => applyCondensation(layout, view.condensedOpen),
     [layout, view.condensedOpen],
   )
+  // T25 B — the board's visible hop radius: the depth control's own
+  // preset, defaulting to whatever this walk was actually fetched at —
+  // a depth-1 walk shows depth 1 without a second click.
+  const viewRadius = view.viewRadius ?? walk?.depth ?? (HOP_WINDOW - 1) / 2
   // T23 R1 — the sliding window: a no-op whenever the fetched extent
   // already fits inside one glance (every fixture shy of a 20-hop chain
   // never pays for this).
   const windowed = useMemo(
-    () => applyHopWindow(condensed, view.railWindow),
-    [condensed, view.railWindow],
+    () => applyHopWindow(condensed, view.railWindow, viewRadius),
+    [condensed, view.railWindow, viewRadius],
   )
   // The RAIL always shows the WHOLE fetched extent — independent of
   // what the board currently draws — so it reads the RAW layout's own
   // cards, not `windowed.graph`'s reduced set. Handed to the view only
-  // once the extent actually needs one (HOP_WINDOW's own threshold).
+  // once the extent actually needs one (the CURRENT radius's own
+  // threshold — T25 B: no longer the fixed `HOP_WINDOW`, so the rail
+  // still offers itself as the manual override at any depth preset).
   const railRange = useMemo(() => bandRangeOf(layout), [layout])
-  const railCards = railRange && railRange.max - railRange.min + 1 > HOP_WINDOW ? layout.cards : undefined
+  const railCards = railRange && railRange.max - railRange.min + 1 > viewRadius * 2 + 1 ? layout.cards : undefined
 
   const setRailWindow = useCallback((band: number) => {
     editView(base => ({ ...base, railWindow: band }))
   }, [editView])
+  // T25 B — the depth control's own preset: sets the visible radius
+  // immediately (a lower N shrinks the window with NO refetch — nothing
+  // fetched is ever thrown away, see `applyHopWindow`'s own doc comment)
+  // and re-centers on the focal, so a manually-moved rail window is
+  // always superseded by picking a depth rather than left to disagree
+  // with it silently.
+  const setViewRadius = useCallback((radius: number) => {
+    editView(base => ({ ...base, viewRadius: radius, railWindow: null }))
+  }, [editView])
+  // T25 B — does the CURRENT window still read as "depth N, centered on
+  // the focus"? A rail segment click re-centers away from band 0
+  // (`setRailWindow`), which the depth control has no preset for — it
+  // shows no button pressed rather than a stale, disagreeing one.
+  const radiusMatchesPreset = view.railWindow === null || view.railWindow === 0
   // One control, two meanings depending on which side is currently
   // showing: a condensed run's own connector chip ADDS itself here
   // (unfolds), and its unfolded boundary's re-condense control REMOVES
@@ -1091,10 +1117,6 @@ export function LineageLens({
   // BOTH of the bar's actions confirm the click rather than one of them
   // doing so silently.
   const [pathCopied, setPathCopied] = useState(false)
-  // T24 F4 — a same-or-shallower depth click fetches nothing (the
-  // entity already has that much); this is the brief confirmation that
-  // told the reader so, instead of a click that visibly did nothing.
-  const [depthNote, setDepthNote] = useState(false)
   const copyShareLink = () => {
     const token = encodeLensShare({
       entries,
@@ -1377,19 +1399,22 @@ export function LineageLens({
                   {shareCopied ? <LucideIcons.Check className="w-4 h-4" /> : <LucideIcons.Link2 className="w-4 h-4" />}
                 </button>
               </InfoTooltip>
-              {/* Initial depth — how many hops each direction. T24 F4:
-                  clicking DEEPER than the current focal's own fetched
-                  depth now re-fetches and merges it immediately (the old
-                  "never touches the current focal" copy was simply
-                  wrong — it only ever wrote a preference, so a reader
-                  who clicked 3 hoping to see further from HERE got
-                  nothing until their next focus). Clicking the same
-                  depth or shallower still only sets the preference —
-                  served hops are never trimmed (that is T23's window). */}
+              {/* Depth — the board's own visible hop RADIUS, both
+                  directions, effective immediately (T25 B): picking N
+                  fetches deeper first if this focal needs it (T24 F4,
+                  unchanged), then sets the window to show exactly N hops
+                  each way, centered on the focus — a LOWER N never
+                  refetches, it just tightens the window (nothing served
+                  is ever thrown away; T23's fold chips + rail still name
+                  the rest). It is ALSO still the depth the next focal
+                  starts at (`setLensInitialDepth`, unchanged). A rail
+                  segment click can widen the window manually past
+                  whatever N is selected — this control then shows no
+                  button pressed rather than a stale, disagreeing one. */}
               <div className="relative" data-tour="lens-depth">
                 <div
                   role="group"
-                  aria-label="Hops to fetch — deepens this entity now if it needs more, and sets the depth for what you focus next"
+                  aria-label="Depth — how far around the focus is shown, both ways; deepens this entity now if it needs more, and sets the depth for what you focus next"
                   className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
                 >
                   {/* Always visible, not hover-only (F4) — the per-button
@@ -1405,19 +1430,14 @@ export function LineageLens({
                       disabled={walk?.deepenStatus === 'loading'}
                       onClick={() => {
                         setLensInitialDepth(d)
-                        if (walk?.status !== 'done') return
-                        if (d > walk.depth) {
-                          walkApi.deepen(d)
-                        } else {
-                          setDepthNote(true)
-                          window.setTimeout(() => setDepthNote(false), 1600)
-                        }
+                        setViewRadius(d)
+                        if (walk?.status === 'done' && d > walk.depth) walkApi.deepen(d)
                       }}
-                      title={`Fetch ${d} hop${d === 1 ? '' : 's'} each way — deepens this entity now if it needs more, and sets the depth for what you focus next`}
-                      aria-pressed={lensInitialDepth === d}
+                      title={`Show ${d} hop${d === 1 ? '' : 's'} each way — deepens this entity now if it needs more, and sets the depth for what you focus next`}
+                      aria-pressed={radiusMatchesPreset && viewRadius === d}
                       className={cn(
                         'flex items-center justify-center w-6 h-6 rounded-md text-[10.5px] font-semibold tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 disabled:opacity-50 disabled:cursor-wait',
-                        lensInitialDepth === d
+                        radiusMatchesPreset && viewRadius === d
                           ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
                           : 'text-ink-muted hover:text-ink',
                       )}
@@ -1429,9 +1449,9 @@ export function LineageLens({
                     <LucideIcons.Loader2 className="w-3 h-3 mr-1 animate-spin text-accent-lineage" aria-label="Fetching deeper lineage for this entity" />
                   )}
                 </div>
-                {depthNote && (
+                {!radiusMatchesPreset && (
                   <span className="absolute top-full left-0 mt-1 z-50 whitespace-nowrap px-2 py-1 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 text-[9.5px] text-ink-muted shadow-md">
-                    Applies to your next walk — this entity already has that much (or more)
+                    Showing a manually widened span — pick a depth to reset it
                   </span>
                 )}
               </div>

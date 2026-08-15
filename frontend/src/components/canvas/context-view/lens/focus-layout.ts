@@ -159,6 +159,14 @@ export interface LensViewState {
      *  window opens at). Meaningless — and ignored — whenever the
      *  fetched extent already fits inside `HOP_WINDOW`. */
     railWindow: number | null
+    /** T25 B — the board's visible hop RADIUS from the focal, both
+     *  directions: the depth control's own preset (`railWindow` above is
+     *  the rail's manual override — the two combine into one window,
+     *  never fought over). `null` defaults to the walk's own fetched
+     *  depth, so a depth-1 walk shows depth 1 without a second click.
+     *  Reset with the rest of this state when the focus changes — a new
+     *  focal starts at its own depth, not the last one's radius. */
+    viewRadius: number | null
     /** T23 R2 — connector ids (see `condensation.ts`) the reader has
      *  explicitly unfolded; every OTHER maximal pass-through run stays
      *  condensed by default. Sticky per view state, like everything else
@@ -227,6 +235,7 @@ export function initialLensViewState(sg: LensSubgraph<LensWalkNode>): LensViewSt
         frameOffsets: new Map(),
         pinned: new Set(),
         railWindow: null,
+        viewRadius: null,
         condensedOpen: new Set(),
     }
 }

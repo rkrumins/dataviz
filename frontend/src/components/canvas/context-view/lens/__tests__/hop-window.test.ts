@@ -137,3 +137,55 @@ describe('hop-window — applyHopWindow', () => {
         expect(graph.cards.some(c => c.id === 'up4')).toBe(false)
     })
 })
+
+// T25 B — the depth control's own radius, honest at every setting: the
+// fold chips must state exactly what they hide and the rail's own
+// threshold must track the SAME radius, not the fixed HOP_WINDOW.
+describe('hop-window — applyHopWindow at a caller-chosen radius (T25 B)', () => {
+    it('depth 1 shows exactly one hop each way, everything else folded', () => {
+        const g = chain(10)
+        const { graph, window } = applyHopWindow(g, null, 1)
+        expect(window).toEqual({ min: -1, max: 1 })
+        const survivingBands = graph.cards.filter(c => c.kind !== 'fold').map(c => c.band)
+        expect(survivingBands.sort((a, b) => a - b)).toEqual([-1, 0, 1])
+        const foldIn = graph.cards.find(c => c.id === 'fold:in')!
+        const foldOut = graph.cards.find(c => c.id === 'fold:out')!
+        expect(foldIn.fold).toEqual({ dir: 'in', hops: 9, cards: 9, connections: 9 })
+        expect(foldOut.fold).toEqual({ dir: 'out', hops: 9, cards: 9, connections: 9 })
+    })
+
+    it('depth 2 shows exactly two hops each way', () => {
+        const g = chain(10)
+        const { graph, window } = applyHopWindow(g, null, 2)
+        expect(window).toEqual({ min: -2, max: 2 })
+        const survivingBands = graph.cards.filter(c => c.kind !== 'fold').map(c => c.band)
+        expect(survivingBands.sort((a, b) => a - b)).toEqual([-2, -1, 0, 1, 2])
+    })
+
+    it('is a no-op at a radius that already covers the whole fetched extent — nothing folds, no chips, no rail need', () => {
+        const g = chain(3)   // -3..3, 7 columns
+        const { graph, window } = applyHopWindow(g, null, 3)
+        expect(window).toBeNull()
+        expect(graph).toBe(g)
+        expect(graph.cards.some(c => c.kind === 'fold')).toBe(false)
+    })
+
+    it('a smaller radius folds MORE than a larger one, from the exact same fetched graph', () => {
+        const g = chain(10)
+        const narrow = applyHopWindow(g, null, 1)
+        const wide = applyHopWindow(g, null, 3)
+        const narrowFold = narrow.graph.cards.find(c => c.id === 'fold:in')!.fold!.cards
+        const wideFold = wide.graph.cards.find(c => c.id === 'fold:in')!.fold!.cards
+        expect(narrowFold).toBeGreaterThan(wideFold)
+        // Nothing fetched is ever lost — folding is a pure re-projection
+        // over the SAME source graph, at either radius.
+        expect(bandRangeOf(g)).toEqual({ min: -10, max: 10 })
+    })
+
+    it('the default radius (no third argument) is unchanged — every existing caller keeps HOP_WINDOW\'s own fixed radius', () => {
+        const g = chain(10)
+        const withDefault = applyHopWindow(g, null)
+        const withExplicitThree = applyHopWindow(g, null, (HOP_WINDOW - 1) / 2)
+        expect(withDefault.window).toEqual(withExplicitThree.window)
+    })
+})

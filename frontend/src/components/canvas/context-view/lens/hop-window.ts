@@ -75,11 +75,15 @@ const foldCard = (
 })
 
 /**
- * Fold everything outside `[center - RADIUS, center + RADIUS]` into one
+ * Fold everything outside `[center - radius, center + radius]` into one
  * terminal chip per side. `center` null defaults to the focal's own
  * column (band 0) — a walk the reader has not yet steered the window on
  * opens centered on what they asked about, same as the layout itself
  * always has.
+ *
+ * `radius` (T25 B) is the depth control's own preset — defaults to
+ * `HOP_WINDOW`'s original fixed radius (3) for every caller that does
+ * not carry a per-focal one (every existing test, the visual harness).
  *
  * A no-op (returns `graph` unchanged) whenever the fetched extent
  * already fits the window — every fixture shy of `walkLongChain` never
@@ -88,11 +92,12 @@ const foldCard = (
 export function applyHopWindow(
   graph: FocusGraph,
   center: number | null,
+  radius: number = (HOP_WINDOW - 1) / 2,
 ): { graph: FocusGraph; window: { min: number; max: number } | null } {
   const range = bandRangeOf(graph)
-  if (!range || range.max - range.min + 1 <= HOP_WINDOW) return { graph, window: null }
+  if (!range || range.max - range.min + 1 <= radius * 2 + 1) return { graph, window: null }
 
-  const RADIUS = (HOP_WINDOW - 1) / 2
+  const RADIUS = radius
   const focus = center ?? 0
   let lo = focus - RADIUS
   let hi = focus + RADIUS

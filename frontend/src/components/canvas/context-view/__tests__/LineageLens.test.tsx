@@ -438,7 +438,12 @@ const pagedArrival = (n: number, remainder: number | null = null): WalkEntry => 
         ...(remainder != null ? [frontier('PAGED', remainder)] : []),
       ],
     }),
-    status: 'done', error: null, extendStatus: new Map(), depth: 1, deepenStatus: null,
+    // T25 B — the visible window now defaults to the WALK's own depth,
+    // not a fixed radius; PAGED's own upstream sources land two hops out
+    // (F → PAGED → ps###), so this needs `depth: 2` or the window folds
+    // them away regardless of the arrival/reveal decision this fixture
+    // exists to test.
+    status: 'done', error: null, extendStatus: new Map(), depth: 2, deepenStatus: null,
   }
 }
 
@@ -806,12 +811,15 @@ describe('hub triage (T23 R3)', () => {
   })
 
   it('fix round 1 — the rail\'s own "not loaded" end fetches too, not a fourth ungated wall (T25 A)', () => {
-    // The rail only draws once the fetched extent outgrows one glance
-    // (HOP_WINDOW) — `railChain`'s 9-column span (-4..+4) clears it, but
-    // a CHAIN admits one hop per reveal (walkLongChain's own gotcha:
-    // REVEAL_PAGE governs sibling groups, not chain depth) — so up2..up4
-    // need their own reveal clicks before the rail has anything to span.
-    const { api } = renderLens(['F'], doneWalk(railChain(100)))
+    // The rail only draws once the fetched extent outgrows the visible
+    // window — `railChain`'s 9-column span (-4..+4) clears radius 3
+    // (T25 B: the default window radius, `depth: 3` here matching it so
+    // this test's own concern — RailEnd's triage gate — is not entangled
+    // with the depth-radius one), but a CHAIN admits one hop per reveal
+    // (walkLongChain's own gotcha: REVEAL_PAGE governs sibling groups,
+    // not chain depth) — so up2..up4 need their own reveal clicks before
+    // the rail has anything to span.
+    const { api } = renderLens(['F'], doneWalk(railChain(100), undefined, 3))
     fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_1 only/))
     fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_2 only/))
     fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_3 only/))
@@ -1373,7 +1381,7 @@ describe('the shell around the picture', () => {
     // already-deep-enough current focal is exactly that case.
     usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 3 })
     const { api } = renderLens(['b'], { ...simple(), depth: 3 })
-    fireEvent.click(screen.getByTitle(/Fetch 1 hop each way/))
+    fireEvent.click(screen.getByTitle(/Show 1 hop each way/))
     expect(usePreferencesStore.getState().lensInitialDepth).toBe(1)
     expect(api.deepen).not.toHaveBeenCalled()
     expect(api.extend).not.toHaveBeenCalled()
@@ -1381,7 +1389,7 @@ describe('the shell around the picture', () => {
     usePreferencesStore.setState({ lensInitialDepth: 1 })
   })
 
-  it('a HIGHER depth click deepens the current focal immediately (T24 F4)', () => {
+  it('a HIGHER depth click deepens the current focal AND widens the visible radius — both effects (T24 F4 / T25 B)', () => {
     // Reported: clicking 1/2/3 only ever wrote the preference —
     // useLensWalk's cache key excludes depth and the started-guard
     // never refetches, so the CURRENT focal never grew no matter what
@@ -1389,7 +1397,9 @@ describe('the shell around the picture', () => {
     // the click now compares against.
     usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 })
     const { api } = renderLens(['b'], simple())
-    fireEvent.click(screen.getByTitle(/Fetch 3 hops each way/))
+    const three = screen.getByTitle(/Show 3 hops each way/)
+    expect(three).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(three)
     expect(usePreferencesStore.getState().lensInitialDepth).toBe(3)
     // Exactly one merge-fetch, for the current focal, at the clicked depth.
     expect(api.deepen).toHaveBeenCalledTimes(1)
@@ -1397,18 +1407,49 @@ describe('the shell around the picture', () => {
     // Not the extend/page/retry machinery — this is its own call.
     expect(api.extend).not.toHaveBeenCalled()
     expect(api.retry).not.toHaveBeenCalled()
+    // T25 B — the OTHER effect, immediate and independent of the fetch:
+    // the board's own visible radius is now 3, reflected honestly on
+    // the control itself.
+    expect(three).toHaveAttribute('aria-pressed', 'true')
     usePreferencesStore.setState({ lensInitialDepth: 1 })
   })
 
-  it('a lower-or-equal depth click fetches nothing and shows the inline note (T24 F4)', () => {
+  it('a lower-or-equal depth click fetches nothing but still sets the visible radius immediately (T25 B)', () => {
+    // T25 B — the "applies to your next walk" note this pinned is GONE:
+    // a same-or-shallower click no longer fetches nothing AND says so:
+    // it still has an immediate, visible effect (the radius), which is
+    // exactly what made the note obsolete.
     usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 })
     const { api } = renderLens(['b'], { ...simple(), depth: 2 })
     expect(screen.queryByText(/Applies to your next walk/)).toBeNull()
 
-    fireEvent.click(screen.getByTitle(/Fetch 2 hops each way/))   // equal to walk.depth
+    const two = screen.getByTitle(/Show 2 hops each way/)
+    fireEvent.click(two)   // equal to walk.depth
     expect(api.deepen).not.toHaveBeenCalled()
-    expect(screen.getByText(/Applies to your next walk/)).toBeTruthy()
+    expect(screen.queryByText(/Applies to your next walk/)).toBeNull()
+    expect(two).toHaveAttribute('aria-pressed', 'true')
 
+    usePreferencesStore.setState({ lensInitialDepth: 1 })
+  })
+
+  it('a LOWER depth click trims the view with no refetch, and returning to the fetched depth shows the same board (T25 B)', () => {
+    // The pin: select-1-from-3 trims WITHOUT a refetch and WITHOUT
+    // touching `drawnRank`/`walkedThrough` — returning to 3 must show
+    // exactly the same board, not a re-derived one. `simple()`'s three
+    // bands (-1, 0, +1) fit inside radius 1 already (nothing to fold at
+    // either radius here — `walkLongChain`-scale folding is `hop-window
+    // .test.ts`'s own concern) — this pins the NO-REFETCH/NO-RESHUFFLE
+    // guarantee, not the fold visual.
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 3 })
+    const { api } = renderLens(['b'], { ...simple(), depth: 3 })
+    const before = screen.getByText('label-a').textContent
+    fireEvent.click(screen.getByTitle(/Show 1 hop each way/))
+    expect(api.deepen).not.toHaveBeenCalled()
+    expect(api.extend).not.toHaveBeenCalled()
+    expect(onBoard('label-a')).toBe(true)
+    fireEvent.click(screen.getByTitle(/Show 3 hops each way/))
+    expect(api.deepen).not.toHaveBeenCalled()   // already fetched at 3 — no refetch
+    expect(screen.getByText('label-a').textContent).toBe(before)
     usePreferencesStore.setState({ lensInitialDepth: 1 })
   })
 
@@ -1418,7 +1459,7 @@ describe('the shell around the picture', () => {
     // Visible text inside the group, found without hovering or reading
     // a `title` attribute — the group's own `aria-label` doesn't count
     // as a VISIBLE caption for a sighted reader.
-    const group = screen.getByLabelText(/Hops to fetch/)
+    const group = screen.getByLabelText(/Depth — how far around the focus is shown/)
     expect(within(group).getByText('Depth')).toBeTruthy()
   })
 
@@ -2896,5 +2937,47 @@ describe('the lens survives gaining and losing its focal', () => {
     }))
     expect(() => rerender(lens(['F'], 0, grown))).not.toThrow()
     expect(screen.getAllByText('order_id').length).toBeGreaterThan(0)
+  })
+})
+
+// ── T25 B — DEPTH = VISIBLE HOP RADIUS ──────────────────────────────
+
+describe('depth is the board\'s own visible hop radius (T25 B)', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 }))
+  afterEach(() => { cleanup(); usePreferencesStore.setState({ lensInitialDepth: 1 }) })
+
+  it('a rail segment moved manually leaves the depth control with no button pressed, and picking a depth resets it', () => {
+    // Same setup as the RailEnd fetch-then-triage test above: at depth 3
+    // (radius 3, bands -3..+3) the reveal chain's own FOURTH admitted
+    // card — up4, band -4 — lands just past the window and folds, so
+    // the rail carries exactly one segment outside it to move onto
+    // manually, with everything else still inside the depth-3 preset.
+    renderLens(['F'], doneWalk(railChain(100), undefined, 3))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_1 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_2 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_3 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_1 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_2 only/))
+
+    const three = screen.getByTitle(/Show 3 hops each way/)
+    expect(three).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByText(/Showing a manually widened span/)).toBeNull()
+
+    // The folded segment (band -4, outside the radius-3 window) — the
+    // rail's own manual override, unchanged from T23.
+    fireEvent.click(screen.getByTitle(/Hop 4 upstream .* — not currently drawn/))
+
+    // T25 B — the window no longer reads as "depth 3, centered on the
+    // focus" (it moved OFF-center), and the control says so rather than
+    // showing a stale 3.
+    expect(three).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByTitle(/Show 1 hop each way/)).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByTitle(/Show 2 hops each way/)).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByText(/Showing a manually widened span/)).toBeTruthy()
+
+    // Picking a depth is unambiguous: it wins over the manual move.
+    fireEvent.click(three)
+    expect(three).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByText(/Showing a manually widened span/)).toBeNull()
   })
 })
