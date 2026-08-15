@@ -469,6 +469,31 @@ export function LineageLens({
     () => applyHopWindow(condensed, view.railWindow, viewRadius),
     [condensed, view.railWindow, viewRadius],
   )
+  /**
+   * T25 C2 — invariant (c), the LAST line of defense, checked AFTER the
+   * window post-pass, independent of `applyHopWindow`'s own hard
+   * invariant (a) (which already makes this near-impossible from the
+   * window alone — this exists anyway, because the promise is about the
+   * BOARD, not about which single stage kept it). The reported defect:
+   * a fully-populated header ("177 connections", type chips, "Reveal 40
+   * on canvas" enabled — the MODEL loaded) over a board with ZERO
+   * cards — layout-empty, not data-empty, and console-silent. Same
+   * "symptom guard, not a cause fix" shape as `buildFocusLayout`'s own
+   * `focusRecovered` (T17-A) — it fires after the real repair (a) above,
+   * and asserts in dev so the next cause is found rather than absorbed.
+   */
+  const boardGraph = useMemo(() => {
+    const hasFocalInWindow = windowed.graph.cards.some(c => c.kind === 'focal')
+    const hasFocalInCondensed = condensed.cards.some(c => c.kind === 'focal')
+    if (hasFocalInWindow || !hasFocalInCondensed) return windowed.graph
+    if (import.meta.env.DEV) {
+      console.error(
+        '[lens] the windowed board lost the focus — falling back to the unwindowed layout.',
+        { focus: nodeId, railWindow: view.railWindow, viewRadius },
+      )
+    }
+    return condensed
+  }, [windowed.graph, condensed, nodeId, view.railWindow, viewRadius])
   // The RAIL always shows the WHOLE fetched extent — independent of
   // what the board currently draws — so it reads the RAW layout's own
   // cards, not `windowed.graph`'s reduced set. Handed to the view only
@@ -1829,7 +1854,7 @@ export function LineageLens({
             )}
             <div data-tour="lens-graph" className="relative flex-1 min-h-0">
               <FocusGraphView
-                graph={windowed.graph}
+                graph={boardGraph}
                 focalId={nodeId}
                 // 'unsupported' deliberately passes NOTHING: the
                 // empty-direction whispers are a claim about what the

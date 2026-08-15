@@ -114,20 +114,62 @@ describe('hop-window — applyHopWindow', () => {
     it('re-centering the window (rail jump) is pure — a new center recomputes the fold from the SAME graph', () => {
         const g = chain(10)
         const atMinus5 = applyHopWindow(g, -5)
-        expect(atMinus5.window).toEqual({ min: -8, max: -2 })
-        // -2 sits ON the new window's own edge — present, unfolded.
+        // T25 C2 — the natural [-8,-2] widens to include band 0 (the
+        // focal), the hard invariant below pins directly.
+        expect(atMinus5.window).toEqual({ min: -8, max: 0 })
+        // -2 sits ON the natural window's own edge — present, unfolded.
         expect(atMinus5.graph.cards.some(c => c.id === 'up2')).toBe(true)
-        // -1 no longer does — it folded into the (now downstream-side) chip.
-        expect(atMinus5.graph.cards.some(c => c.id === 'up1')).toBe(false)
+        // -9/-10 still fold — outside even the widened window.
+        expect(atMinus5.graph.cards.some(c => c.id === 'up9')).toBe(false)
         // The ORIGINAL graph object is untouched by computing this.
         expect(bandRangeOf(g)).toEqual({ min: -10, max: 10 })
     })
 
-    it('clamps a window request near the fetched edge to still show a full HOP_WINDOW', () => {
+    it('clamps a window request near the fetched edge to still show a full HOP_WINDOW — unless doing so would exclude the focal (T25 C2)', () => {
         const g = chain(10)
         const { window } = applyHopWindow(g, -10)   // asking to center on the very edge
-        expect(window).toEqual({ min: -10, max: -4 })
-        expect(window!.max - window!.min + 1).toBe(HOP_WINDOW)
+        // T25 C2 — the classic "still show HOP_WINDOW columns" clamp
+        // would land [-10,-4], which excludes band 0. The hard invariant
+        // wins: the window widens past HOP_WINDOW rather than lose the
+        // focal, even for a deliberate, far-off-center manual rail move.
+        expect(window).toEqual({ min: -10, max: 0 })
+        expect(window!.max - window!.min + 1).toBeGreaterThan(HOP_WINDOW)
+    })
+
+    // T25 C2 — THE BLANK BOARD ON RE-ANCHOR: a window computed relative
+    // to a stale/manually-moved center must never be able to fold the
+    // focal away, whatever `center` asks for. A fully-populated header
+    // over a board with nothing on it is indistinguishable from data
+    // loss to the reader; this is the hard invariant that makes it
+    // structurally impossible regardless of where the bad `center` came
+    // from (a race, a stale share link, a deep rail jump — the mechanism
+    // producing an off-focal center doesn't matter to this guarantee).
+    describe('applyHopWindow can never emit a board without the focal (T25 C2, hard invariant)', () => {
+        it('the focal card itself always survives, at any center, at any radius', () => {
+            const g = chain(20)
+            for (const center of [-20, -15, -10, -1, 0, 1, 10, 15, 20]) {
+                for (const radius of [1, 2, 3, 5]) {
+                    const { graph } = applyHopWindow(g, center, radius)
+                    expect(graph.cards.some(c => c.id === 'f')).toBe(true)
+                }
+            }
+        })
+
+        it('the computed window range always contains band 0', () => {
+            const g = chain(20)
+            for (const center of [-20, -19, 19, 20]) {
+                const { window } = applyHopWindow(g, center, 2)
+                expect(window).not.toBeNull()
+                expect(window!.min).toBeLessThanOrEqual(0)
+                expect(window!.max).toBeGreaterThanOrEqual(0)
+            }
+        })
+
+        it('a center already close enough to 0 is unaffected — the invariant only widens when it must', () => {
+            const g = chain(10)
+            const { window } = applyHopWindow(g, 0, 3)
+            expect(window).toEqual({ min: -3, max: 3 })
+        })
     })
 
     it('a card on the window edge keeps its OWN card, unfolded', () => {

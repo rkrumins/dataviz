@@ -108,6 +108,17 @@ export function applyHopWindow(
   if (hi > range.max) { lo -= hi - range.max; hi = range.max }
   lo = Math.max(range.min, lo)
   hi = Math.min(range.max, hi)
+  // T25 C2 — HARD INVARIANT: this function is structurally incapable of
+  // emitting a board without the focal's own column (band 0), whatever
+  // `center` asks for. A window jumped far from band 0 (a deep rail
+  // move, or — the reported blank board — a `center` left over from a
+  // DIFFERENT walk racing a re-anchor) would otherwise fold the focus
+  // away along with everything else: a fully-populated header over a
+  // board with nothing on it, indistinguishable from data loss. Widening
+  // past `radius` here, on the rare far-off-center case, is the correct
+  // trade — a bigger board beats an empty one.
+  if (lo > 0) lo = 0
+  if (hi < 0) hi = 0
 
   const byId = new Map(graph.cards.map(c => [c.id, c]))
   const topBand = (id: string) => topLevelBandOf(byId, id)

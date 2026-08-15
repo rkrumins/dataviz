@@ -3007,3 +3007,59 @@ describe('depth is the board\'s own visible hop radius (T25 B)', () => {
     expect(screen.queryByText(/Showing a manually widened span/)).toBeNull()
   })
 })
+
+// ── T25 C2 — RE-ANCHOR RESETS ALL T23-ERA VIEW STATE ────────────────
+
+describe('re-anchoring from a walked-through state (T25 C2, invariant b)', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 }))
+  afterEach(() => { cleanup(); usePreferencesStore.setState({ lensInitialDepth: 1 }) })
+
+  it('a manually-moved rail window, a picked depth, and a condensed run on the OLD focal never leak into the NEW one', () => {
+    const api = makeApi()
+    const { rerender } = renderLens(['F'], doneWalk(railChain(100), undefined, 3), {}, api)
+    // Walk the SAME state the reported blank board came from: reveal a
+    // chain, pick a depth, and move the rail window manually.
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_1 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_2 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_3 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_1 only/))
+    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_2 only/))
+    fireEvent.click(screen.getByTitle(/Show 3 hops each way/))
+    fireEvent.click(screen.getByTitle(/Hop 4 upstream .* — not currently drawn/))
+    expect(screen.getByText(/Showing a manually widened span/)).toBeTruthy()
+
+    // Re-anchor — the exact transition `ctx.onFocus` → `onRecenter` →
+    // `lensPush` drives, whether reached by a double-click, "Focus
+    // here", or a breadcrumb: a NEW entry, a NEW focal, same component.
+    const newFocal = doneWalk(walkModel('B', {
+      nodes: [wnode('B', 'dataset', 'target_table'), wnode('SRC', 'dataset', 'upstream_of_b')],
+      lineageEdges: [hop('SRC', 'B')],
+      upstreamUrns: new Set(['SRC']),
+    }))
+    rerender(
+      <LineageLens
+        history={{ entries: ['F', 'B'], cursor: 1 }}
+        walk={newFocal}
+        walkApi={api}
+        onRecenter={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+
+    // Invariant (c) / the reported symptom: the header names the new
+    // focus AND the board actually draws it — not a blank board under a
+    // populated header.
+    expect(screen.getByRole('dialog', { name: 'Connections of target_table' })).toBeTruthy()
+    expect(onBoard('target_table')).toBe(true)
+    expect(onBoard('upstream_of_b')).toBe(true)
+
+    // Invariant (b): none of the old focal's T23-era state survived —
+    // the depth control reads as a clean preset again (not "no button
+    // pressed", the OLD focal's manually-widened state), at the NEW
+    // focal's own pref-driven depth, not whatever "3" meant for F.
+    expect(screen.queryByText(/Showing a manually widened span/)).toBeNull()
+    expect(screen.getByTitle(/Show 1 hop each way/)).toHaveAttribute('aria-pressed', 'true')
+  })
+})
