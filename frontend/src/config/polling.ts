@@ -31,6 +31,13 @@ export const POLLING_INTERVALS = {
    * minute of announcement latency is invisible. Ops can still dial
    * it down remotely via the admin config when a faster banner is
    * genuinely needed.
+   *
+   * This value used to be decorative. The admin config's own default
+   * was 15s (`announcement_config.poll_interval_seconds`) and the
+   * service's failure fallback was 15s too, so the moment
+   * `fetchConfig()` resolved — or failed — every tab dropped to 15s and
+   * the constant below stopped applying. Both are 60s now, so the three
+   * agree and this is genuinely the baseline.
    */
   announcements: 60_000,
   /**

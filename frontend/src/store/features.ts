@@ -13,6 +13,7 @@
  */
 import { create } from 'zustand'
 import { fetchPublicFeatureValues } from '@/services/featuresService'
+import { onAppVisible } from '@/lib/appVisibility'
 
 /**
  * Seeds — mirror the backend registry defaults (`app/config/features_seed.py`) for EVERY flag
@@ -203,13 +204,13 @@ export function startFeaturesSync(): () => void {
         if (document.visibilityState !== 'visible') return
         void useFeaturesStore.getState().loadFeatures()
     }
-    const onVisibility = () => refresh()
-    document.addEventListener('visibilitychange', onVisibility)   // fires on document, not window
-    window.addEventListener('focus', refresh)
+    // `onAppVisible` owns the `visibilitychange` + `focus` pair for the whole app
+    // and coalesces them. Subscribing to both here meant one alt-tab fetched flags
+    // twice, and this was one of five surfaces doing exactly that.
+    const unsubscribe = onAppVisible(refresh)
     const timer = window.setInterval(refresh, REFRESH_MS)
     return () => {
-        document.removeEventListener('visibilitychange', onVisibility)
-        window.removeEventListener('focus', refresh)
+        unsubscribe()
         window.clearInterval(timer)
     }
 }

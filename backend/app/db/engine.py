@@ -740,7 +740,7 @@ async def init_db() -> None:
                 await conn.execute(
                     sa_text(
                         "INSERT INTO announcement_config (id, poll_interval_seconds, default_snooze_minutes, updated_at) "
-                        "VALUES (1, 15, 30, :now)"
+                        "VALUES (1, 60, 30, :now)"
                     ),
                     {"now": now_iso},
                 )

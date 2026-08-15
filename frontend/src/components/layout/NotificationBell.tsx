@@ -16,6 +16,7 @@ import * as Popover from '@radix-ui/react-popover'
 import { adminUserService, type InviteActivityItem } from '@/services/adminUserService'
 import { formatUtc, timeAgo, toUtcDate } from '@/lib/timeAgo'
 import { roleVisualFor } from '@/lib/roleVisual'
+import { onAppVisible } from '@/lib/appVisibility'
 
 const SEEN_KEY = 'nx-invite-activity-seen'
 
@@ -63,13 +64,14 @@ export function NotificationBell() {
     })()
 
     const refresh = () => setTick(n => n + 1)
-    document.addEventListener('visibilitychange', refresh)
-    window.addEventListener('focus', refresh)
+    // One coalesced signal instead of a `visibilitychange` + `focus`
+    // pair. Listening to both fired this twice on every alt-tab, and
+    // four other surfaces were doing the same thing beside it.
+    const unsubscribe = onAppVisible(refresh)
     const timer = window.setInterval(refresh, REFRESH_MS)
     return () => {
       cancelled = true
-      document.removeEventListener('visibilitychange', refresh)
-      window.removeEventListener('focus', refresh)
+      unsubscribe()
       window.clearInterval(timer)
     }
   }, [tick])

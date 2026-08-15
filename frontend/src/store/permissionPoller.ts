@@ -39,6 +39,7 @@ import { authService } from '@/services/authService'
 import { getQueryClient } from '@/lib/queryClient'
 import { POLLING_INTERVALS, withJitter } from '@/config/polling'
 import { notifyPermissionsChanged } from './permissionChangeBus'
+import { onAppVisible } from '@/lib/appVisibility'
 
 const POLL_INTERVAL_MS = POLLING_INTERVALS.permissions
 
@@ -204,22 +205,30 @@ export function disablePermissionPolling(): void {
     stopPolling()
 }
 
+// Going hidden stays on the raw event: ``onAppVisible`` only fires on the
+// way back, and a hidden tab must stop its chain promptly rather than wait
+// for anything to coalesce.
 if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
-        if (document.hidden) {
-            stopPolling()
-            return
-        }
-        if (!authReady) return
-        // Tab returned to focus — poll immediately so the user sees
-        // any mutation that happened while they were away, then
-        // resume the regular cadence. stopPolling() bumps the epoch, which
-        // retires any chain still parked in an in-flight request, so
-        // startChain() below leaves exactly one chain running — not one more.
-        stopPolling()
-        startChain()
+        if (document.hidden) stopPolling()
     })
 }
+
+// Coming back goes through the shared, coalesced signal. This used to live
+// in the same raw listener above, which meant every attention event
+// restarted the chain — and a restart is not free here: it polls
+// immediately and resets the 60s clock, so rapid window-switching produced
+// a request per switch. ``onAppVisible``'s refresh floor bounds that.
+onAppVisible(() => {
+    if (!authReady) return
+    // Poll immediately so the user sees any mutation that happened while
+    // they were away, then resume the regular cadence. stopPolling() bumps
+    // the epoch, which retires any chain still parked in an in-flight
+    // request, so startChain() leaves exactly one chain running — not one
+    // more.
+    stopPolling()
+    startChain()
+})
 
 // Test-only escape hatch. Tests need to exercise a single tick of
 // ``pollOnce`` without waiting for a real setTimeout; the production
