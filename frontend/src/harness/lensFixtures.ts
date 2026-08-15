@@ -937,6 +937,12 @@ const walkWideHub = (): WalkFixture => {
  *   BILLING ⊃ billing_source ⊃ full_name_src → full_name: a genuine
  *     COLUMN-to-COLUMN producer, for contrast — the seam must never
  *     touch this wire.
+ *   BILLING ⊃ billing_snapshot (TABLE-grain) → full_name: a coarse
+ *     producer sitting in the SAME container, right beside
+ *     billing_source's row — T24 F8 review round 1's own ask: a
+ *     same-colour, same-direction, adjacent certain/coarse pair so the
+ *     dash-vs-solid contrast is verifiable apples-to-apples, not just
+ *     across a busier six-wire bundle on the other side of the board.
  *   full_name → transactions (IoT): fine both ways.
  *   Marketing → IoT: a PLATFORM-grain hop landing on IoT's own frame,
  *     nothing to do with any specific row inside it — the UNDER-claim
@@ -958,9 +964,12 @@ const walkGrainSeamModel = () => {
     wnode('GOLD', 'CONTAINER', 'GOLD', { childCount: 8 }),
     ...['01', '02', '03', '04', '05', '06'].map(n =>
       wnode(`G${n}`, 'dataset', `crm_snapshot_${n}`, { childCount: 10 })),
-    wnode('BILL', 'CONTAINER', 'BILLING', { childCount: 3 }),
+    wnode('BILL', 'CONTAINER', 'BILLING', { childCount: 4 }),
     wnode('BSRC', 'dataset', 'billing_source', { childCount: 6 }),
     wnode('BFN', 'schemaField', 'full_name_src'),
+    // The certain wire's own coarse neighbour — review round 1's
+    // same-colour, same-direction, adjacent pair.
+    wnode('BSNAP', 'dataset', 'billing_snapshot', { childCount: 4 }),
     wnode('IOT', 'PLATFORM', 'IoT', { childCount: 4 }),
     wnode('TXN', 'dataset', 'transactions'),
     wnode('MKT', 'PLATFORM', 'Marketing', { childCount: 12 }),
@@ -970,7 +979,7 @@ const walkGrainSeamModel = () => {
     containmentEdges: [
       holds('SNOW', 'REPORTING'), holds('REPORTING', 'RPT'), holds('RPT', 'FN'), holds('RPT', 'SD'),
       ...['01', '02', '03', '04', '05', '06'].map(n => holds('GOLD', `G${n}`)),
-      holds('BILL', 'BSRC'), holds('BSRC', 'BFN'),
+      holds('BILL', 'BSRC'), holds('BSRC', 'BFN'), holds('BILL', 'BSNAP'),
       holds('IOT', 'TXN'),
     ],
     lineageEdges: [
@@ -981,11 +990,14 @@ const walkGrainSeamModel = () => {
       hop('G01', 'G02', 'FEEDS'),
       // The genuine column-to-column contrast the seam must never touch.
       hop('BFN', 'FN'),
+      // Its own coarse neighbour, same container, same target, same
+      // direction — review round 1's adjacent apples-to-apples pair.
+      hop('BSNAP', 'FN'),
       hop('FN', 'TXN'),
       // The under-claim: lands on IoT's own frame, not on any row of it.
       hop('MKT', 'IOT'),
     ],
-    upstreamUrns: new Set(['GOLD', 'G01', 'G02', 'G03', 'G04', 'G05', 'G06', 'BILL', 'BSRC', 'BFN']),
+    upstreamUrns: new Set(['GOLD', 'G01', 'G02', 'G03', 'G04', 'G05', 'G06', 'BILL', 'BSRC', 'BFN', 'BSNAP']),
     downstreamUrns: new Set(['IOT', 'TXN']),
     frontierUp: [frontier('G01', 3)],
   })
@@ -995,7 +1007,13 @@ const walkGrainSeamModel = () => {
 const walkGrainSeam = (): WalkFixture => ({
   title: 'The grain seam — table-grain producers land honestly, never as column-true',
   model: walkGrainSeamModel(),
-  script: base => scripted(base, { reveal: [['in:IOT', 1]] }),
+  // `expand: ['BSRC']` keeps `full_name_src` drawn as its own row — with
+  // a second BILLING sibling now beside it (review round 1's adjacent
+  // pair), the default single-child auto-expand no longer applies, and a
+  // collapsed billing_source would draw the certain wire from the TABLE
+  // boundary instead, silently turning the "must never touch this wire"
+  // contrast into a coarse-vs-coarse comparison.
+  script: base => scripted(base, { reveal: [['in:IOT', 1]], expand: ['BSRC'] }),
   isolatedId: 'n:FN',
 })
 

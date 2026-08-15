@@ -65,40 +65,35 @@ describe('edgeGrainVisual', () => {
     tint: '#3b82f6', mutedTint: '#9ca3af',
   }
 
-  it('a column-certain cone wire: full colour, full weight, the tight flowing dash', () => {
+  it('a column-certain cone wire: full colour, full weight, SOLID and static — no class at all', () => {
     const v = edgeGrainVisual({ ...base, onCone: true, strong: true, adjacent: true })
     expect(v.stroke).toBe('#3b82f6') // the cone's own tint, not muted
     expect(v.strokeWidth).toBe(3) // adjacent
-    expect(v.className).toBe('lens-cone-flow')
-    expect(v.strokeDasharray).toBeUndefined() // the class carries the dash
+    expect(v.strokeDasharray).toBeUndefined() // solid — the grain fact IS the absence of a dash
+    expect(v.className).toBe(false) // nothing to animate — a certain wire never moves
   })
 
-  it('a coarse (SEAM) cone wire: the SAME full colour and weight as certain — F8, the muting was the bug', () => {
+  it('a coarse (SEAM) cone wire: the SAME full colour and weight as certain — only the dash and motion differ', () => {
     const certain = edgeGrainVisual({ ...base, onCone: true, strong: true, adjacent: true })
     const coarse = edgeGrainVisual({ ...base, onCone: true, seam: true, strong: true, adjacent: true })
-    expect(coarse.stroke).toBe(certain.stroke) // full cone colour, not mutedTint
+    expect(coarse.stroke).toBe(certain.stroke) // full cone colour, not mutedTint — F8, the muting was the bug
     expect(coarse.strokeWidth).toBe(certain.strokeWidth) // full stroke weight, unchanged by grain
+    expect(coarse.strokeDasharray).toBe('12 8') // the classic bold dashed ribbon
+    expect(coarse.strokeDasharray).not.toBe(certain.strokeDasharray) // F8 rule 4: solid vs dashed
+    expect(coarse.className).toBe('lens-seam-flow') // only a coarse wire ever animates
   })
 
-  it('certain vs coarse stay honestly distinguishable — different class, F8 rule 4', () => {
-    const certain = edgeGrainVisual({ ...base, onCone: true, strong: true })
-    const coarse = edgeGrainVisual({ ...base, onCone: true, seam: true, strong: true })
-    expect(certain.className).toBe('lens-cone-flow')
-    expect(coarse.className).toBe('lens-seam-flow')
-    expect(certain.className).not.toBe(coarse.className)
-  })
-
-  it('a plain off-cone wire under an active isolation: muted, thin, and never dashed', () => {
+  it('a plain off-cone wire under an active isolation: muted, thin, never dashed, never animated', () => {
     const v = edgeGrainVisual({ ...base, offCone: true })
     expect(v.stroke).toBe('#9ca3af') // mutedTint
     expect(v.strokeWidth).toBe(1) // whisper-thin — thinner than the 1.5 background floor
-    expect(v.className).toBeFalsy() // no motion off-cone
     expect(v.strokeDasharray).toBeUndefined()
+    expect(v.className).toBe(false)
   })
 
-  it('an off-cone CONTAINMENT wire loses its own dash too — F8b stratum 3, the regression this fix closes', () => {
-    // Before this fix, `containment` always won a dash regardless of
-    // cone state — texture at whisper opacity read as noise, not
+  it('an off-cone CONTAINMENT wire loses its own dash too — F8b stratum 3', () => {
+    // `containment` always won a dash regardless of cone state before
+    // this fix — texture at whisper opacity read as noise, not
     // recession, on exactly this wire.
     const v = edgeGrainVisual({ ...base, offCone: true, containment: true })
     expect(v.strokeDasharray).toBeUndefined()
@@ -109,10 +104,20 @@ describe('edgeGrainVisual', () => {
     expect(v.strokeDasharray).toBe('4 4')
   })
 
-  it('reduced motion silences the drift on both certain and coarse wires alike', () => {
+  it('reduced motion cannot strip a coarse wire\'s dash — the regression review round 1 caught, twice', () => {
+    // Round 1's actual bug: grain used to live ONLY inside an animation
+    // class, so `!reducedMotion` gating that class stripped a coarse
+    // wire's only dash along with its motion, leaving it pixel-identical
+    // to a certain wire exactly when motion was off — breaking the F8
+    // rule-4 honesty pin. Grain is now a static fact of the base stroke,
+    // wholly independent of `className`, so no motion preference can
+    // touch it — and `className` itself is not even gated by
+    // `reducedMotion` any more: only a SEAM wire ever gets one, and the
+    // CSS layer (not this function) is what silences its animation.
     const certain = edgeGrainVisual({ ...base, onCone: true, strong: true, reducedMotion: true })
     const coarse = edgeGrainVisual({ ...base, onCone: true, seam: true, strong: true, reducedMotion: true })
-    expect(certain.className).toBeFalsy()
-    expect(coarse.className).toBeFalsy()
+    expect(certain.strokeDasharray).toBeUndefined() // still solid
+    expect(coarse.strokeDasharray).toBe('12 8') // still dashed — grain survives motion being off
+    expect(coarse.className).toBe('lens-seam-flow') // the class survives too — CSS mutes only its animation
   })
 })

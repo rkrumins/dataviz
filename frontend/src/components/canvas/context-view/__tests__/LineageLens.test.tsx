@@ -582,7 +582,14 @@ describe('F1 — the follow pill never blocks the row it sits on', () => {
     frontierUp: [frontier('c1', 5)],
   }))
 
-  it('clicking the row\'s ContentsChevron toggles ITS contents, never the follow pill (the exact repro)', () => {
+  it('clicking the row\'s ContentsChevron toggles ITS contents, never the follow pill', () => {
+    // jsdom dispatches this click straight at the chevron element, so it
+    // cannot exercise the actual paint-order occlusion the bug was (a
+    // real browser routing the click to whichever element visually sits
+    // on top) — that is what the harness screenshot verifies. The two
+    // tests below (own-hover-only, outward growth) are the real
+    // regression guards: they pin the CSS that stops the pill from
+    // covering the chevron in the first place, reviewed round 1.
     usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'all' })
     const onLoadAllChildren = vi.fn()
     const { api } = renderLens(['F'], nestedColumnWithPill(), { onLoadAllChildren })
@@ -1250,19 +1257,23 @@ describe('pointing at an element isolates its lineage cone', () => {
     }
   })
 
-  it('isolates just the same under reduced motion — only the drift goes', () => {
+  it('isolates just the same under reduced motion', () => {
     // The wires' own drift is not assertable here: React Flow draws no
     // edges at all until its nodes have been MEASURED, and jsdom measures
-    // nothing. It is gated twice over — the class is not applied when the
-    // preference is set, and the app's own reduced-motion rules switch
-    // `.lens-cone-flow` off besides — and the harness screenshot is where
-    // it is actually looked at.
+    // nothing (the harness screenshot is where the drift itself is
+    // actually looked at). A certain (column-true) wire never carries a
+    // flow class at all any more (review round 1, T24 — grain is a
+    // static base-stroke fact, and only a coarse wire ever animates), so
+    // there is nothing left to gate here for THIS fixture's plain edges;
+    // `edgeGrainVisual`'s own unit tests pin the reduced-motion behaviour
+    // directly. What this integration-level check still verifies is that
+    // the isolation state machinery itself is unaffected by the motion
+    // preference.
     usePreferencesStore.setState({ lensViewMode: 'graph', reducedMotion: true })
     try {
       renderLens(['b'], siblings())
       fireEvent.click(screen.getByText('label-a'))
-      expect(document.querySelectorAll('.lens-cone-flow')).toHaveLength(0)
-      // ...and the cone is still isolated, motion or not.
+      // The cone is still isolated, motion or not.
       expect(nodeFor('label-d').className).toContain(QUIET)
       expect(lit(nodeFor('label-a'))).toBe(true)
     } finally {

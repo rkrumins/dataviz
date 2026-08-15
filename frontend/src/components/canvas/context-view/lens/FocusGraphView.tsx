@@ -2552,21 +2552,29 @@ const NODE_TYPES = {
 
 // ── Edge ─────────────────────────────────────────────────────────────
 
-/** THE GRAIN SEAM's own visual contract (T24, F8 + F8b) — pulled out as a
- *  pure function of the wire's cone state so the three strata it decides
- *  between are unit-testable without a full React Flow render (which
- *  needs measured nodes jsdom never provides — see the reduced-motion
- *  isolation test in LineageLens.test.tsx).
+/** THE GRAIN SEAM's own visual contract (T24, F8 + F8b; redesigned twice
+ *  in review round 1). First draft shared one dash-and-animate class
+ *  between grains, muted only by colour (the F8b bug). Second draft tried
+ *  solid-plus-animated-overlay for BOTH grains — technically sound in an
+ *  isolated check, but on the real curved, multi-wire boards this exists
+ *  to fix, a certain wire's supposedly-solid base and a coarse wire's
+ *  dashed one were not reliably tellable apart at a glance, the exact
+ *  failure the F8 rule-4 honesty pin exists to catch. Landed here, the
+ *  reviewer's own literal recommendation: grain is a STATIC fact with NO
+ *  motion involved at all, so there is nothing for busy geometry or a
+ *  compressed screenshot to blur together.
  *
- *  - ON CONE, column-certain: full colour, full weight, the tight
- *    flowing dash (`.lens-cone-flow`) — the strongest thing on the board.
- *  - ON CONE, coarse (a SEAM wire): the SAME full colour and weight — a
- *    coarse wire is still cone knowledge, not off-cone knowledge — but
- *    the classic bold dashed ribbon (`.lens-seam-flow`) instead, so
- *    certain and coarse stay honestly distinguishable on a mixed cone.
- *  - OFF CONE: muted colour, thinner, and never dashed — not even a
+ *  - Column-certain: solid, full colour, full weight — no animation.
+ *  - Coarse (a SEAM wire): the classic bold dashed ribbon, animated,
+ *    full colour, full weight — still cone knowledge, not muted.
+ *  - Off cone: muted colour, thinner, never dashed — not even a
  *    containment wire's own dash — because texture at whisper opacity
  *    reads as noise, not recession (F8b, stratum 3).
+ *
+ *  Pulled out as a pure function of the wire's cone state so the strata
+ *  it decides between are unit-testable without a full React Flow
+ *  render (which needs measured nodes jsdom never provides — see the
+ *  reduced-motion isolation test in LineageLens.test.tsx).
  */
 export function edgeGrainVisual(p: {
   onCone: boolean
@@ -2580,9 +2588,15 @@ export function edgeGrainVisual(p: {
   reducedMotion: boolean
   tint: string
   mutedTint: string
-}): { className: string | false | undefined; stroke: string; strokeWidth: number; strokeDasharray: string | undefined } {
+}): { className: string | false; stroke: string; strokeWidth: number; strokeDasharray: string | undefined } {
   return {
-    className: !p.reducedMotion && (p.seam ? 'lens-seam-flow' : p.onCone && 'lens-cone-flow'),
+    // Only a SEAM wire ever animates — a certain wire is solid and
+    // static by definition, nothing to gate on reduced motion at all.
+    // `.lens-seam-flow`'s own dash survives reduced motion in the CSS
+    // (only its animation stops); it is not gated here either, so
+    // reduced motion can never strip the grain signal (review round 1's
+    // first bug).
+    className: p.seam && 'lens-seam-flow',
     stroke: p.offCone ? p.mutedTint : p.tint,
     strokeWidth: p.onCone
       ? (p.adjacent ? 3 : 2.25)
@@ -2590,7 +2604,9 @@ export function edgeGrainVisual(p: {
         : p.trail ? (p.aggregated ? 2.5 : 2)
           : p.offCone ? (p.aggregated ? 1.5 : 1)
             : p.aggregated ? 2 : 1.5,
-    strokeDasharray: !p.offCone && p.containment ? '4 4' : undefined,
+    // Solid for certain, the classic bold dash for coarse — a static
+    // fact of the grain, independent of `className`'s own animation.
+    strokeDasharray: p.seam ? '12 8' : (!p.offCone && p.containment ? '4 4' : undefined),
   }
 }
 
@@ -2753,16 +2769,10 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
         id={id}
         path={path}
         markerEnd={markerEnd}
-        // A slow drift ALONG the cone, in the direction the data flows —
-        // on every cone wire, certain or coarse, so grain never reads as
-        // "less alive" (T24, F8 — muting a coarse wire's motion is what
-        // made an all-coarse board go flat). The PATTERN still carries the
-        // grain fact: `.lens-cone-flow`'s tight 9/7 dash reads as a single
-        // flowing ribbon (as close to "solid, in motion" as a dash gets);
-        // `.lens-seam-flow`'s longer, more open dash reads as the classic
-        // dashed ribbon, on purpose — the two must stay tellable apart on
-        // a mixed cone. A class rather than an inline animation so the
-        // app's own reduced-motion rules reach both.
+        // Only a SEAM wire ever carries this class — a certain wire is
+        // solid and static, nothing to animate (review round 1, T24: an
+        // animated overlay shared by both grains read too close to call
+        // apart on the real curved, bundled boards this exists to fix).
         className={cn(visual.className)}
         style={{
           // Colour is what the eye follows, so the background gives up
@@ -2771,18 +2781,18 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
           // nothing extra on a wide board. A SEAM wire keeps the cone's
           // own FULL colour (T24, F8) — table-grain knowledge is still
           // cone knowledge; muting it made an all-coarse board read as if
-          // nothing were isolated at all. The dash is what says
-          // "coarser", not the colour.
+          // nothing were isolated at all. The DASH is what says
+          // "coarser", not the colour — see `edgeGrainVisual`.
           stroke: visual.stroke,
           // Three steps, no more: the wire the reader is pointing at and
           // its first hop, the rest of the cone, and the background. Off
           // cone during an active isolation goes thinner still — whisper,
           // never textured (F8b, stratum 3).
           strokeWidth: visual.strokeWidth,
-          // Containment's own chunkier dash — withheld off-cone during an
-          // active isolation (F8b, stratum 3: texture at low opacity
-          // reads as noise, not recession). A SEAM wire's dash now lives
-          // entirely in the `.lens-seam-flow` class above, not here.
+          // Solid for certain, the classic bold dash for coarse — a
+          // static fact of the grain, unconditional on motion, so
+          // reduced motion can never strip it (review round 1's first
+          // bug: the dash used to live only inside an animation class).
           strokeDasharray: visual.strokeDasharray,
           opacity,
           transition: d.reducedMotion ? undefined : 'opacity 140ms ease-out, stroke-width 140ms ease-out',

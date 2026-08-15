@@ -160,19 +160,6 @@
     }
   }
 
-  /* A wire on an ISOLATED lineage cone (Lineage Lens): a slow drift in
-     the direction the data flows, so a cone reads as a route rather than
-     as a colour. The offset is exactly two dash periods (9 + 7), which is
-     what makes the loop seamless — the app's older `flow` runs 40 over a
-     12px period and visibly jumps every third second.
-     Deliberately the only motion on that board; it is switched off both
-     ways under reduced motion, dashes included, because a static dashed
-     wire beside a solid one states a difference the picture doesn't mean. */
-  .lens-cone-flow {
-    stroke-dasharray: 9 7;
-    animation: lens-flow 1.6s linear infinite;
-  }
-
   @keyframes lens-flow {
     from {
       stroke-dashoffset: 32;
@@ -182,14 +169,18 @@
     }
   }
 
-  /* THE GRAIN SEAM (T24, F8): a coarse (table-grain) wire on an isolated
-     cone — same full colour, full weight, and drift as `.lens-cone-flow`,
-     but a longer, more open dash than its 9/7 so the two remain honestly
-     distinguishable side by side on a mixed cone (the dash IS the grain
-     signal, so it must never read as the SAME pattern as a certain wire).
-     Unlike `.lens-cone-flow`, the dash survives reduced motion — a frozen
-     dash correctly says "this connection is coarser", where a frozen dash
-     on a CERTAIN wire would say something false. Only the drift stops. */
+  /* THE GRAIN SEAM (T24, F8; landed in review round 1 — an earlier draft
+     also animated certain, column-true wires with a tight 9/7 dash, but
+     on the real curved, bundled boards this exists to fix, that solid
+     base and this one's dashed base were not reliably tellable apart at
+     a glance, exactly what the F8 honesty pin exists to catch). A coarse
+     (table-grain) wire on an isolated cone gets the ONLY motion a cone
+     ever carries — a slow drift in the direction the data flows, full
+     colour, full weight, its own bold open dash — while a certain wire
+     stays solid and static, so grain is legible from the base stroke
+     alone regardless of motion. The dash survives reduced motion; only
+     the drift stops — a frozen dash correctly says "this connection is
+     coarser," which stays true whether or not anything is moving. */
   .lens-seam-flow {
     stroke-dasharray: 12 8;
     animation: lens-flow 1.6s linear infinite;
@@ -748,7 +739,6 @@
 @media (prefers-reduced-motion: reduce) {
   .nx-edge-animated,
   .nx-edge-expanding,
-  .lens-cone-flow,
   .lens-seam-flow,
   .skeleton,
   .lineage-pulse,
@@ -763,7 +753,6 @@
 }
 :root.reduce-motion .nx-edge-animated,
 :root.reduce-motion .nx-edge-expanding,
-:root.reduce-motion .lens-cone-flow,
 :root.reduce-motion .lens-seam-flow,
 :root.reduce-motion .skeleton,
 :root.reduce-motion .lineage-pulse,
@@ -775,10 +764,3 @@
 :root.reduce-motion [data-trace-active="true"] [data-trace-focus="true"]::after {
   animation: none !important;
 }
-
-/* A frozen dashed wire says "different kind of connection", which is not
-   what the isolation means — so the dashes go with the motion. */
-@media (prefers-reduced-motion: reduce) {
-  .lens-cone-flow { stroke-dasharray: none !important; }
-}
-:root.reduce-motion .lens-cone-flow { stroke-dasharray: none !important; }
