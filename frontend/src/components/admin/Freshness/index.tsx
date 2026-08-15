@@ -39,6 +39,7 @@ import {
     type FailureFacet, type StatusFacet,
 } from './freshnessTriage'
 import { asFailureCategory } from './failureGuidance'
+import { parseDriftWindow } from './reconcileHealth'
 import { StartHereStrip } from './StartHereStrip'
 import { BulkRetryBar } from './BulkRetryBar'
 import { SelectionCheckbox } from './SelectionCheckbox'
@@ -82,8 +83,8 @@ export function Freshness() {
     const fws = useMemo(() => parseList(searchParams.get('fws')), [searchParams])
     const fstatus = parseStatus(searchParams.get('fstatus'))
     const ffail = parseFailure(searchParams.get('ffail'))
+    const fwin = parseDriftWindow(searchParams.get('fwin'))
     const fq = searchParams.get('fq') ?? ''
-    const hasExplicitStatus = searchParams.has('fstatus')
 
     // Patch specific params, preserving everything else (notably ``tab``).
     // Discrete facet changes push a history entry; only debounced search
@@ -138,7 +139,6 @@ export function Freshness() {
     const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({})
     const [expandedRow, setExpandedRow] = useState<string | null>(null)
     const [selectedIds, setSelectedIds] = useState<string[]>([])
-    const attentionDefaultApplied = useRef(false)
 
     // ── Data ──────────────────────────────────────────────────────────
     // No server-side provider/workspace/stale filter: those are client facets
@@ -181,18 +181,6 @@ export function Freshness() {
 
     const rows = useMemo(() => fleet.data?.rows ?? [], [fleet.data])
     const summary = fleet.data?.summary ?? null
-
-    // Attention-first: on first land without an explicit fstatus, open on
-    // sources that need a person. URL still wins when the user set one.
-    useEffect(() => {
-        if (attentionDefaultApplied.current) return
-        if (!summary) return
-        attentionDefaultApplied.current = true
-        if (hasExplicitStatus) return
-        if ((summary.needsAttention ?? 0) > 0) {
-            patchParams({ fstatus: 'needsAttention' }, true)
-        }
-    }, [summary, hasExplicitStatus, patchParams])
 
     // Per-provider coverage summaries, keyed to match the group id (the
     // no-provider group is '—'). Null above the summary cap → the group
@@ -323,27 +311,27 @@ export function Freshness() {
     }, [])
 
     const permissionClaims = usePermissionClaims()
-    const selectableFailedIds = useMemo(() => (
+    const selectableIds = useMemo(() => (
         tableRows
-            .filter(r => freshnessState(r) === 'failed')
+            .filter(r => freshnessState(r) !== 'recomputing')
             .filter(r => checkPermission(permissionClaims, 'workspace:datasource:manage', r.workspaceId))
             .map(r => r.dataSourceId)
     ), [tableRows, permissionClaims])
 
-    const allSelectableSelected = selectableFailedIds.length > 0
-        && selectableFailedIds.every(id => selectedIds.includes(id))
-    const someSelectableSelected = selectableFailedIds.some(id => selectedIds.includes(id))
+    const allSelectableSelected = selectableIds.length > 0
+        && selectableIds.every(id => selectedIds.includes(id))
+    const someSelectableSelected = selectableIds.some(id => selectedIds.includes(id))
 
     const toggleSelectAll = useCallback(() => {
         setSelectedIds(prev => {
-            if (selectableFailedIds.length === 0) return prev
-            const allOn = selectableFailedIds.every(id => prev.includes(id))
-            if (allOn) return prev.filter(id => !selectableFailedIds.includes(id))
+            if (selectableIds.length === 0) return prev
+            const allOn = selectableIds.every(id => prev.includes(id))
+            if (allOn) return prev.filter(id => !selectableIds.includes(id))
             const merged = new Set(prev)
-            for (const id of selectableFailedIds) merged.add(id)
+            for (const id of selectableIds) merged.add(id)
             return Array.from(merged)
         })
-    }, [selectableFailedIds])
+    }, [selectableIds])
 
     // Drop selections that left the visible set (facet change / refetch).
     useEffect(() => {
@@ -362,6 +350,8 @@ export function Freshness() {
                 reloading={fleet.isFetching}
                 onRefreshAll={isSystemAdmin ? () => setFleetDialogOpen(true) : undefined}
                 onOpenSource={setDrawerDsId}
+                window={fwin}
+                onWindowChange={(w) => patchParams({ fwin: w === '24h' ? null : w })}
             />
 
             <StartHereStrip
@@ -434,14 +424,14 @@ export function Freshness() {
                         <thead>
                             <tr className="text-[10px] uppercase tracking-wide text-ink-muted">
                                 <th style={{ top: headerTop }} className="pl-3 pr-1 py-2 w-10 sticky z-10 bg-canvas">
-                                    {selectableFailedIds.length > 0 ? (
+                                    {selectableIds.length > 0 ? (
                                         <SelectionCheckbox
                                             selected={allSelectableSelected}
                                             indeterminate={someSelectableSelected && !allSelectableSelected}
                                             onToggle={toggleSelectAll}
                                             ariaLabel={allSelectableSelected
-                                                ? 'Deselect all failed sources'
-                                                : 'Select all failed sources'}
+                                                ? 'Deselect all sources'
+                                                : 'Select all sources'}
                                         />
                                     ) : (
                                         <span className="inline-block w-[18px]" aria-hidden />

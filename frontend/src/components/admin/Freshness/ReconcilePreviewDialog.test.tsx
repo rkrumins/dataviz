@@ -54,6 +54,8 @@ describe('ReconcilePreviewDialog', () => {
         expect(await screen.findByText('Sol Xlarge')).toBeInTheDocument()
         expect(screen.getByText(/Warehouse/)).toBeInTheDocument()
         expect(screen.getByText(/Rollups were missing/)).toBeInTheDocument()
+        expect(screen.getByText(/4 checked/)).toBeInTheDocument()
+        expect(screen.getByText(/would rebuild/)).toBeInTheDocument()
         await waitFor(() => {
             expect(reconcileNow).toHaveBeenCalledWith({ dryRun: true })
         })

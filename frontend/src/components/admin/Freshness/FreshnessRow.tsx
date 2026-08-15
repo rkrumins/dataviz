@@ -85,6 +85,22 @@ const STATUS_STYLE: Record<string, { label: string; tone: string; Icon: typeof C
     skipped: { label: 'Skipped', tone: 'bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20', Icon: Minus },
 }
 
+export function CacheStatusPill({ cached }: { cached: boolean }) {
+    return cached
+        ? (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wide bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20">
+                <Database className="w-3 h-3" />
+                Cached
+            </span>
+        )
+        : (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wide bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20">
+                <Minus className="w-3 h-3" />
+                Not cached
+            </span>
+        )
+}
+
 export function AggStatusPill({ status }: { status?: string | null }) {
     const s = (status && STATUS_STYLE[status]) || {
         label: 'Not built', tone: 'bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20', Icon: Minus,
@@ -349,7 +365,7 @@ export function FreshnessRow({
         )}>
             {/* Selection */}
             <td className="pl-3 pr-1 py-2.5 align-middle w-10">
-                {selectable && canManage && state === 'failed' && onToggleSelect ? (
+                {selectable && canManage && state !== 'recomputing' && onToggleSelect ? (
                     <SelectionCheckbox
                         selected={!!selected}
                         onToggle={() => onToggleSelect(row.dataSourceId)}
@@ -390,9 +406,12 @@ export function FreshnessRow({
 
             {/* Cache */}
             <td className="px-3 py-2 align-top">
-                {row.cacheAsOf
-                    ? <TimeStamp at={row.cacheAsOf} prefix="as of" icon={Database} />
-                    : <EmptyCell />}
+                <div className="flex flex-col gap-1">
+                    <CacheStatusPill cached={row.cacheAsOf != null} />
+                    {row.cacheAsOf
+                        ? <TimeStamp at={row.cacheAsOf} prefix="updated" icon={Database} />
+                        : <EmptyCell />}
+                </div>
             </td>
 
             {/* Freshness */}

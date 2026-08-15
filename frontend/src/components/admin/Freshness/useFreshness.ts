@@ -45,7 +45,8 @@ export const FRESHNESS_KEYS = {
     all: ['freshness'] as const,
     fleetPrefix: ['freshness', 'fleet'] as const,
     reconciliation: ['freshness', 'reconciliation'] as const,
-    activity: ['freshness', 'reconciliation', 'activity'] as const,
+    activityPrefix: ['freshness', 'reconciliation', 'activity'] as const,
+    activity: (since = '24h') => ['freshness', 'reconciliation', 'activity', since] as const,
     fleet: (params: FleetParams) =>
         [
             'freshness',
@@ -150,10 +151,13 @@ export function useReconciliation(enabled = true): UseQueryResult<ReconcileOverv
     })
 }
 
-export function useReconcileActivity(enabled = true): UseQueryResult<ReconcileActivity, Error> {
+export function useReconcileActivity(
+    since = '24h',
+    enabled = true,
+): UseQueryResult<ReconcileActivity, Error> {
     return useQuery<ReconcileActivity, Error>({
-        queryKey: FRESHNESS_KEYS.activity,
-        queryFn: () => freshnessService.getReconciliationActivity(),
+        queryKey: FRESHNESS_KEYS.activity(since),
+        queryFn: () => freshnessService.getReconciliationActivity(since),
         enabled,
         staleTime: 30_000,
         refetchInterval: RECONCILE_POLL_MS,
@@ -185,7 +189,7 @@ export function useReconcileNow(): UseMutationResult<
         onSuccess: (_res, vars) => {
             if (vars.dryRun) return   // a preview changed nothing
             void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.reconciliation })
-            void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.activity })
+            void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.activityPrefix })
             void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
             void qc.invalidateQueries({ queryKey: ACTIVE_JOBS_KEY })
         },

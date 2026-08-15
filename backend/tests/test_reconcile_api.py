@@ -334,6 +334,16 @@ def test_activity_since_accepts_a_duration():
     assert 5.5 * 3600 < age < 6.5 * 3600
 
 
+def test_activity_since_accepts_3h_and_7d():
+    from backend.app.services.aggregation.service import parse_activity_since
+
+    three = parse_activity_since("3h")
+    week = parse_activity_since("7d")
+    now = datetime.now(timezone.utc)
+    assert 2.5 * 3600 < (now - three).total_seconds() < 3.5 * 3600
+    assert 6.5 * 86400 < (now - week).total_seconds() < 7.5 * 86400
+
+
 def test_activity_since_rejects_garbage():
     from backend.app.services.aggregation.service import parse_activity_since
 

@@ -1,7 +1,7 @@
 /**
  * OverlayIntegrity — the Freshness command center's identity card.
  *
- * Integrity Pulse + overnight blotter. Cadence and Reload live here, not
+ * Integrity Pulse + windowed blotter. Cadence and Reload live here, not
  * in a right-aligned button row above seven generic tiles.
  */
 import { useState } from 'react'
@@ -9,7 +9,7 @@ import { Clock, RefreshCw, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
 import { useToast } from '@/components/ui/toast'
-import type { FreshnessSummary } from '@/services/freshnessService'
+import type { FreshnessSummary, ReconcileRun } from '@/services/freshnessService'
 import type { StatusFacet } from './freshnessTriage'
 import { IntegrityPulse } from './IntegrityPulse'
 import { OvernightLedger } from './OvernightLedger'
@@ -18,10 +18,14 @@ import {
     useReconcileActivity, useReconcileNow, useReconciliation, FRESHNESS_KEYS,
 } from './useFreshness'
 import { useQueryClient } from '@tanstack/react-query'
+import {
+    DRIFT_WINDOWS, checkNowToast, parseDriftWindow, windowDriftCounts, windowPhrase,
+    type DriftWindow,
+} from './reconcileHealth'
 
 export function OverlayIntegrity({
     summary, activeFacet, onFacet, onOpenCadence, onReload, reloading,
-    onRefreshAll, onOpenSource,
+    onRefreshAll, onOpenSource, window: windowProp, onWindowChange,
 }: {
     summary: FreshnessSummary | null | undefined
     activeFacet: StatusFacet
@@ -31,24 +35,28 @@ export function OverlayIntegrity({
     reloading: boolean
     onRefreshAll?: () => void
     onOpenSource: (id: string) => void
+    window?: DriftWindow
+    onWindowChange?: (w: DriftWindow) => void
 }) {
     const isAdmin = usePermission('system:admin')
     const { showToast } = useToast()
     const qc = useQueryClient()
     const recon = useReconciliation()
-    const activity = useReconcileActivity()
+    const driftWindow = parseDriftWindow(windowProp)
+    const activity = useReconcileActivity(driftWindow)
     const reconcileNow = useReconcileNow()
     const [previewOpen, setPreviewOpen] = useState(false)
+    const [lastCheck, setLastCheck] = useState<ReconcileRun | null>(null)
+
+    const items = activity.data?.items ?? []
+    const windowCounts = windowDriftCounts(items)
 
     const runNow = () => {
         reconcileNow.mutate({}, {
             onSuccess: (res) => {
-                void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.activity })
-                showToast(
-                    'success',
-                    res.skipped ? 'A sweep is already running.'
-                        : `Checked ${res.run?.scanned ?? 0} source${res.run?.scanned === 1 ? '' : 's'} — ${res.run?.actions ?? 0} reconciled.`,
-                )
+                if (res.run) setLastCheck(res.run)
+                void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.activityPrefix })
+                showToast('success', checkNowToast(res, summary?.total))
             },
             onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
         })
@@ -101,7 +109,7 @@ export function OverlayIntegrity({
                 <IntegrityPulse
                     summary={summary}
                     policy={recon.data?.policy}
-                    latestRun={recon.data?.runs[0]}
+                    latestRun={lastCheck ?? recon.data?.runs[0]}
                     isError={recon.isError}
                     isLoading={recon.isLoading}
                     isAdmin={isAdmin}
@@ -112,14 +120,50 @@ export function OverlayIntegrity({
                     activeFacet={activeFacet}
                 />
                 <div>
-                    <h3 className="text-[10px] uppercase tracking-wide text-ink-muted mb-1.5">
-                        Overnight blotter
-                    </h3>
+                    <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                        <h3 className="text-[10px] uppercase tracking-wide text-ink-muted">
+                            Drift in this window
+                        </h3>
+                        <div
+                            role="group"
+                            aria-label="Drift window"
+                            className="inline-flex items-center rounded-lg border border-glass-border p-0.5"
+                        >
+                            {DRIFT_WINDOWS.map(({ key, label }) => {
+                                const active = driftWindow === key
+                                return (
+                                    <button
+                                        key={key}
+                                        type="button"
+                                        aria-pressed={active}
+                                        onClick={() => onWindowChange?.(key)}
+                                        className={cn(
+                                            'h-6 px-1.5 rounded-md text-[10px] font-semibold tabular-nums transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                            active
+                                                ? 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400'
+                                                : 'text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
+                                        )}
+                                    >
+                                        {label}
+                                    </button>
+                                )
+                            })}
+                        </div>
+                        {items.length > 0 && (
+                            <span className="text-[11px] text-ink-muted tabular-nums ml-auto">
+                                {windowCounts.drifted.toLocaleString()} drifted
+                                {windowCounts.rebuilt > 0 && (
+                                    <> · {windowCounts.rebuilt.toLocaleString()} rebuilt</>
+                                )}
+                            </span>
+                        )}
+                    </div>
                     <OvernightLedger
-                        items={activity.data?.items ?? []}
+                        items={items}
                         isError={activity.isError}
                         isLoading={activity.isLoading}
                         onOpenSource={onOpenSource}
+                        emptyLabel={`No drift findings in ${windowPhrase(driftWindow)}.`}
                     />
                 </div>
             </div>
@@ -127,6 +171,7 @@ export function OverlayIntegrity({
             <ReconcilePreviewDialog
                 open={previewOpen}
                 onClose={() => setPreviewOpen(false)}
+                fleetTotal={summary?.total}
             />
         </section>
     )

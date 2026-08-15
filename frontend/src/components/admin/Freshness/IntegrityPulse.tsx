@@ -13,7 +13,7 @@ import { TimeStamp } from '@/components/ui/TimeStamp'
 import type { FreshnessSummary, ReconcilePolicy, ReconcileRun } from '@/services/freshnessService'
 import type { StatusFacet } from './freshnessTriage'
 import {
-    formatHorizon, nextCheckAt, policyWord, sweepsHaveStopped,
+    formatHorizon, lastPassLabel, nextCheckAt, policyWord, sweepsHaveStopped,
 } from './reconcileHealth'
 
 export function IntegrityPulse({
@@ -148,8 +148,7 @@ export function IntegrityPulse({
                 </button>
                 {latestRun && (
                     <span className="text-ink-muted tabular-nums">
-                        last pass {latestRun.scanned.toLocaleString()} checked
-                        {latestRun.actions > 0 && `, ${latestRun.actions.toLocaleString()} rebuilt`}
+                        last pass {lastPassLabel(latestRun, summary?.total)}
                     </span>
                 )}
             </div>

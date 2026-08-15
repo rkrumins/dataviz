@@ -694,21 +694,41 @@ async def run_reconcile(body: ReconcileRunInternal):
         return ReconcileRunResponse(skipped=True)
     return ReconcileRunResponse(
         run=_run_model_cp(result),
-        findings=[
-            ReconcileFinding(
-                data_source_id=a.data_source_id,
-                workspace_id=a.workspace_id,
-                # The preview is read by a person deciding whether to switch
-                # automation on; a list of raw ``ds_`` ids does not answer that.
-                name=a.name,
-                provider_id=a.provider_id,
-                provider_name=a.provider_name,
-                reason=a.reason,
-                evidence=a.evidence,
-            )
-            for a in result.pending
-        ],
+        findings=_findings_from_result(result),
     )
+
+
+def _findings_from_result(result):
+    """Named drifted sources for Check now and Preview. Live runs persist
+    ``finding_rows``; dry-run Preview also fills ``pending``."""
+    from .schemas import ReconcileFinding
+
+    if result.finding_rows:
+        return [
+            ReconcileFinding(
+                data_source_id=row["dataSourceId"],
+                workspace_id=row.get("workspaceId"),
+                name=row.get("name"),
+                provider_id=row.get("providerId"),
+                provider_name=row.get("providerName"),
+                reason=row["reason"],
+                evidence=row.get("evidence") or {},
+            )
+            for row in result.finding_rows
+            if row.get("dataSourceId") and row.get("reason")
+        ]
+    return [
+        ReconcileFinding(
+            data_source_id=a.data_source_id,
+            workspace_id=a.workspace_id,
+            name=a.name,
+            provider_id=a.provider_id,
+            provider_name=a.provider_name,
+            reason=a.reason,
+            evidence=a.evidence,
+        )
+        for a in result.pending
+    ]
 
 
 def _run_model_cp(result):

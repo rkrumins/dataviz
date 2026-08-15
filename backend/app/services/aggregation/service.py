@@ -3439,13 +3439,14 @@ def parse_activity_since(raw: Optional[str]) -> datetime:
     if not raw:
         return now - timedelta(hours=24)
     text = raw.strip()
-    if text.endswith("h") and text[:-1].isdigit():
-        return now - timedelta(hours=int(text[:-1]))
+    if len(text) > 1 and text[-1] in ("h", "d") and text[:-1].isdigit():
+        n = int(text[:-1])
+        return now - (timedelta(hours=n) if text[-1] == "h" else timedelta(days=n))
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(
-            "since must be an ISO timestamp or a duration like 24h",
+            "since must be an ISO timestamp or a duration like 24h or 7d",
         ) from exc
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)

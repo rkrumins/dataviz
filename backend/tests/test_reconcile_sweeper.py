@@ -638,6 +638,42 @@ async def test_a_source_checked_recently_is_not_re_evaluated(session_factory):
     assert result.scanned == 0
 
 
+@pytest.mark.asyncio
+async def test_manual_sweep_re_evaluates_a_recently_checked_source(session_factory):
+    """Check now is a full-fleet pass, not an early hourly tick."""
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        checked_at=_ago(seconds=30),
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep(
+        mode="manual",
+    )
+    assert result is not None
+    assert result.scanned == 1
+    assert result.findings == 1
+    assert result.finding_rows[0]["dataSourceId"] == "ds_1"
+
+
+@pytest.mark.asyncio
+async def test_preview_re_evaluates_a_recently_checked_source(session_factory):
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        checked_at=_ago(seconds=30),
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep(
+        dry_run=True, mode="preview",
+    )
+    assert result is not None
+    assert result.scanned == 1
+    assert result.findings == 1
+    assert result.actions == 0
+    assert [p.data_source_id for p in result.pending] == ["ds_1"]
+
+
 # ── Preview ─────────────────────────────────────────────────────────────
 
 

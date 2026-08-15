@@ -43,11 +43,13 @@ function outcomeLabel(item: ReconcileActivityItem): string {
 
 export function OvernightLedger({
     items, isError, isLoading, onOpenSource,
+    emptyLabel = 'Nothing to report overnight — no findings in the last 24 hours.',
 }: {
     items: ReconcileActivityItem[]
     isError: boolean
     isLoading: boolean
     onOpenSource: (id: string) => void
+    emptyLabel?: string
 }) {
     if (isError) {
         return (
@@ -69,7 +71,7 @@ export function OvernightLedger({
         return (
             <div className="flex items-center gap-2 py-3 text-[12px] text-ink-muted">
                 <History className="w-3.5 h-3.5 shrink-0" />
-                Nothing to report overnight — no findings in the last 24 hours.
+                {emptyLabel}
             </div>
         )
     }

@@ -64,6 +64,21 @@ describe('OvernightLedger', () => {
         expect(onOpen).toHaveBeenCalledWith('ds-1')
     })
 
+    it('uses the horizon empty copy', () => {
+        render(
+            <MemoryRouter>
+                <OvernightLedger
+                    items={[]}
+                    isError={false}
+                    isLoading={false}
+                    onOpenSource={() => {}}
+                    emptyLabel="No drift findings in the last 3 hours."
+                />
+            </MemoryRouter>,
+        )
+        expect(screen.getByText('No drift findings in the last 3 hours.')).toBeInTheDocument()
+    })
+
     it('falls back to the reconcile trigger filter when a rebuild has no job id', () => {
         render(
             <MemoryRouter>

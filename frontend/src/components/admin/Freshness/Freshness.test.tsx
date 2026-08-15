@@ -147,8 +147,8 @@ describe('Freshness cockpit', () => {
             expect(screen.getByText('Orders Graph')).toBeInTheDocument()
         })
         expect(screen.getByText('Customers Graph')).toBeInTheDocument()
-        // "as of Xm ago" cache chips are present.
-        expect(screen.getAllByText(/as of/i).length).toBeGreaterThan(0)
+        expect(screen.getAllByText('Cached').length).toBeGreaterThan(0)
+        expect(screen.getAllByText(/updated/i).length).toBeGreaterThan(0)
         // The source_changed row has a marker but NO running job → "Queued",
         // not "Recomputing" (which now means a job is genuinely in flight).
         expect(screen.getByText('Queued')).toBeInTheDocument()
@@ -217,8 +217,7 @@ describe('Freshness cockpit', () => {
             ...fleet,
             summary: { total: 2, ready: 2, pending: 0, failed: 0, notBuilt: 0, recomputing: 1, needsAttention: 1, cacheStamped: 2 },
         })
-        // Explicit empty status so attention-first does not auto-filter.
-        renderTab('/?tab=freshness&fstatus=')
+        renderTab('/?tab=freshness')
 
         const band = await screen.findByRole('group', { name: /fleet summary/i })
         expect(within(band).getByRole('button', { name: /total sources/i })).toHaveTextContent('2')
@@ -275,7 +274,7 @@ describe('Freshness cockpit', () => {
             .toBeInTheDocument()
     })
 
-    it('defaults to needs-attention when the fleet has work waiting', async () => {
+    it('lands on every source instead of auto-filtering to needs-attention', async () => {
         listFleet.mockResolvedValue({
             ...fleet,
             summary: {
@@ -284,10 +283,10 @@ describe('Freshness cockpit', () => {
             },
         })
         renderTab()
-        await waitFor(() => expect(probe.search).toContain('fstatus=needsAttention'))
         expect(await screen.findByText('Orders Graph')).toBeInTheDocument()
-        expect(screen.queryByText('Customers Graph')).not.toBeInTheDocument()
-        expect(screen.getByText(/start here/i)).toBeInTheDocument()
+        expect(screen.getByText('Customers Graph')).toBeInTheDocument()
+        expect(probe.search).not.toContain('fstatus=needsAttention')
+        expect(probe.search).not.toContain('fstatus=drifting')
     })
 
     it('names the failure cause on the row and filters related failures', async () => {
@@ -313,6 +312,21 @@ describe('Freshness cockpit', () => {
         await waitFor(() => expect(screen.getAllByText('Out of memory').length).toBeGreaterThanOrEqual(2))
         await user.click(screen.getAllByRole('button', { name: /1 more like this/i })[0])
         await waitFor(() => expect(probe.search).toContain('ffail=out_of_memory'))
+    })
+
+    it('lets an operator select ready sources and refresh caches in bulk', async () => {
+        const user = userEvent.setup()
+        renderTab('/?tab=freshness&fstatus=')
+        await waitFor(() => expect(screen.getByText('Customers Graph')).toBeInTheDocument())
+        await user.click(screen.getByRole('checkbox', { name: 'Select all sources' }))
+        expect(await screen.findByText('2 sources selected')).toBeInTheDocument()
+        const caches = screen.getAllByRole('button', { name: 'Refresh caches' })
+        expect(caches.length).toBeGreaterThan(0)
+        expect(screen.getByRole('button', { name: 'Rebuild lineage' })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'Retry rebuild' })).not.toBeInTheDocument()
+        await user.click(caches[caches.length - 1])
+        await waitFor(() => expect(refreshSource).toHaveBeenCalled())
+        expect(refreshSource.mock.calls.every(([, body]) => body.scope === 'read-caches')).toBe(true)
     })
 
     // ── R5.2 — severity ordering helper ──────────────────────────────
