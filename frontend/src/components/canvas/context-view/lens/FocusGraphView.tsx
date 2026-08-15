@@ -2552,6 +2552,48 @@ const NODE_TYPES = {
 
 // ── Edge ─────────────────────────────────────────────────────────────
 
+/** THE GRAIN SEAM's own visual contract (T24, F8 + F8b) — pulled out as a
+ *  pure function of the wire's cone state so the three strata it decides
+ *  between are unit-testable without a full React Flow render (which
+ *  needs measured nodes jsdom never provides — see the reduced-motion
+ *  isolation test in LineageLens.test.tsx).
+ *
+ *  - ON CONE, column-certain: full colour, full weight, the tight
+ *    flowing dash (`.lens-cone-flow`) — the strongest thing on the board.
+ *  - ON CONE, coarse (a SEAM wire): the SAME full colour and weight — a
+ *    coarse wire is still cone knowledge, not off-cone knowledge — but
+ *    the classic bold dashed ribbon (`.lens-seam-flow`) instead, so
+ *    certain and coarse stay honestly distinguishable on a mixed cone.
+ *  - OFF CONE: muted colour, thinner, and never dashed — not even a
+ *    containment wire's own dash — because texture at whisper opacity
+ *    reads as noise, not recession (F8b, stratum 3).
+ */
+export function edgeGrainVisual(p: {
+  onCone: boolean
+  offCone: boolean
+  seam: boolean
+  strong: boolean
+  adjacent: boolean
+  aggregated: boolean
+  trail: boolean
+  containment: boolean
+  reducedMotion: boolean
+  tint: string
+  mutedTint: string
+}): { className: string | false | undefined; stroke: string; strokeWidth: number; strokeDasharray: string | undefined } {
+  return {
+    className: !p.reducedMotion && (p.seam ? 'lens-seam-flow' : p.onCone && 'lens-cone-flow'),
+    stroke: p.offCone ? p.mutedTint : p.tint,
+    strokeWidth: p.onCone
+      ? (p.adjacent ? 3 : 2.25)
+      : p.strong ? (p.aggregated ? 3 : 2.5)
+        : p.trail ? (p.aggregated ? 2.5 : 2)
+          : p.offCone ? (p.aggregated ? 1.5 : 1)
+            : p.aggregated ? 2 : 1.5,
+    strokeDasharray: !p.offCone && p.containment ? '4 4' : undefined,
+  }
+}
+
 function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd, data }: EdgeProps) {
   bumpRenderCount('FocusGraphEdgeComp')
   const d = data as unknown as {
@@ -2688,10 +2730,23 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // overlap R3 exists to prevent, just for a seam badge instead of a ×N
   // one (fix round 1). The wire's own muted/dashed treatment is
   // unaffected; only the badge is withheld.
-  const showSeam = seam && (d.seamSlotted ?? false) && roomForLabel && !d.dimmed
-  const showCount = (d.labelVisible ?? false) && roomForLabel && !d.dimmed && (!d.labelDense || strong) && !showSeam
+  const seamSlot = seam && (d.seamSlotted ?? false) && roomForLabel && !d.dimmed
+  // A seam chip renders only where it is ACTIONABLE (T24, F8) — an inert
+  // refusal circle told the reader nothing they could not already read in
+  // the spotlight chip's own "(N at table grain)" count, and on a wide
+  // fan-in it drew as debris floating mid-wire. The slot still belongs to
+  // the seam either way (below), so an inert wire's midpoint stays empty
+  // rather than falling back to a ×N or cycle badge.
+  const showSeam = seamSlot && continuationPill != null
+  const showCount = (d.labelVisible ?? false) && roomForLabel && !d.dimmed && (!d.labelDense || strong) && !seamSlot
   const showCycle = (d.cycleBack ?? false) && roomForLabel && !d.dimmed
-    && (!d.labelDense || strong || (d.cycleAnchor ?? false)) && !showSeam
+    && (!d.labelDense || strong || (d.cycleAnchor ?? false)) && !seamSlot
+  // THE GRAIN SEAM's visual contract, T24 F8 + F8b — see `edgeGrainVisual`.
+  const visual = edgeGrainVisual({
+    onCone, offCone, seam, strong, adjacent,
+    aggregated: !!d.aggregated, trail: !!d.trail, containment: d.containment,
+    reducedMotion: !!d.reducedMotion, tint: d.tint, mutedTint: d.mutedTint,
+  })
   return (
     <>
       <BaseEdge
@@ -2699,77 +2754,66 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
         path={path}
         markerEnd={markerEnd}
         // A slow drift ALONG the cone, in the direction the data flows —
-        // the one piece of motion on this board, and only ever on the
-        // wires the reader asked about. A class rather than an inline
-        // animation so the app's own reduced-motion rules reach it, both
-        // the OS setting and the in-app preference. A SEAM wire never
-        // drifts — motion reads as "certain and moving", the opposite of
-        // what this wire is saying.
-        className={cn(onCone && !seam && !d.reducedMotion && 'lens-cone-flow')}
+        // on every cone wire, certain or coarse, so grain never reads as
+        // "less alive" (T24, F8 — muting a coarse wire's motion is what
+        // made an all-coarse board go flat). The PATTERN still carries the
+        // grain fact: `.lens-cone-flow`'s tight 9/7 dash reads as a single
+        // flowing ribbon (as close to "solid, in motion" as a dash gets);
+        // `.lens-seam-flow`'s longer, more open dash reads as the classic
+        // dashed ribbon, on purpose — the two must stay tellable apart on
+        // a mixed cone. A class rather than an inline animation so the
+        // app's own reduced-motion rules reach both.
+        className={cn(visual.className)}
         style={{
           // Colour is what the eye follows, so the background gives up
-          // its saturation. Dimming alone flattens the board into one grey wash — but
-          // a `filter: saturate()` forces its own compositor layer per
-          // wire, and a wide board can carry hundreds of them off-cone at
-          // once. `mutedTint` is the SAME desaturation, pre-computed once
-          // per edge at build time (Task 20, P2) rather than asked of the
-          // compositor on every one of them. A SEAM wire takes the SAME
-          // muted colour an off-cone wire does — table-grain knowledge is
-          // not the cone's own full-saturation certainty, whatever its
-          // opacity or dash says beside it.
-          stroke: offCone || seam ? d.mutedTint : d.tint,
+          // its saturation off-cone. `mutedTint` is a precomputed
+          // desaturation (Task 20, P2), not a CSS filter, so it costs
+          // nothing extra on a wide board. A SEAM wire keeps the cone's
+          // own FULL colour (T24, F8) — table-grain knowledge is still
+          // cone knowledge; muting it made an all-coarse board read as if
+          // nothing were isolated at all. The dash is what says
+          // "coarser", not the colour.
+          stroke: visual.stroke,
           // Three steps, no more: the wire the reader is pointing at and
-          // its first hop, the rest of the cone, and the background.
-          strokeWidth: onCone
-            ? (adjacent ? 3 : 2.25)
-            : strong ? (d.aggregated ? 3 : 2.5)
-              // THE TRAIL: slightly firmer than the plain background —
-              // never louder than the cone or a hover, which still say
-              // more (what runs through THIS point, right now).
-              : d.trail ? (d.aggregated ? 2.5 : 2)
-                : d.aggregated ? 2 : 1.5,
-          // A SEAM wire's own fine, static dash — distinct from
-          // containment's chunkier one and the cone-flow's animated one,
-          // reading as "muted" rather than "moving" (T22, R1).
-          strokeDasharray: seam ? '2 3' : d.containment ? '4 4' : undefined,
+          // its first hop, the rest of the cone, and the background. Off
+          // cone during an active isolation goes thinner still — whisper,
+          // never textured (F8b, stratum 3).
+          strokeWidth: visual.strokeWidth,
+          // Containment's own chunkier dash — withheld off-cone during an
+          // active isolation (F8b, stratum 3: texture at low opacity
+          // reads as noise, not recession). A SEAM wire's dash now lives
+          // entirely in the `.lens-seam-flow` class above, not here.
+          strokeDasharray: visual.strokeDasharray,
           opacity,
           transition: d.reducedMotion ? undefined : 'opacity 140ms ease-out, stroke-width 140ms ease-out',
         }}
       />
-      {showSeam && (
-        // THE GRAIN SEAM's own chip (T22, R1) — quiet at rest, on
-        // purpose: a wide text pill on every coarse wire of a six-way
-        // fan-in is the exact confetti this codebase's own follow
-        // controls (T21, R1) were rewritten to stop being. A compact
-        // badge instead, matching that rule — the honest words live in
-        // its title/aria-label, one hover away, never fabricated,
-        // never hidden. A real button when the far side can answer
-        // finer; an inert one when it honestly cannot (R1.1).
+      {showSeam && continuationPill && (
+        // THE GRAIN SEAM's own chip (T22, R1; actionable-only T24, F8) —
+        // quiet at rest, on purpose: a wide text pill on every coarse wire
+        // of a six-way fan-in is the exact confetti this codebase's own
+        // follow controls (T21, R1) were rewritten to stop being. A
+        // compact premium pill instead, matching that rule and this
+        // component's own amber "downstream/attention" accent — the
+        // honest words live in its title/aria-label, one hover away,
+        // never fabricated, never hidden. Renders ONLY when the far side
+        // can actually answer finer; an inert refusal drew nothing this
+        // chip's own spotlight-chip count did not already say, and read
+        // as debris on a busy board — it draws nothing here now.
         <EdgeLabelRenderer>
-          {continuationPill ? (
-            <button
-              type="button"
-              title={`Table grain from here — trace the columns this wire feeds${continuationPill.count != null ? ` · ${continuationPill.count.toLocaleString()} data flow${continuationPill.count === 1 ? '' : 's'} recorded` : ''}`}
-              aria-label="Table grain from here — trace columns"
-              onClick={(e) => {
-                e.stopPropagation()
-                actOnPill(follow, continuationPill, farIsSource ? 'in' : 'out')
-              }}
-              style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
-              className="nodrag pointer-events-auto absolute w-4 h-4 rounded-full flex items-center justify-center bg-canvas-elevated border border-amber-500/50 text-amber-600 dark:text-amber-400 shadow-sm hover:bg-amber-500/10 hover:border-amber-500"
-            >
-              <LucideIcons.Layers className="w-2.5 h-2.5" />
-            </button>
-          ) : (
-            <span
-              title="Table grain from here — the data source has not reported finer detail for this connection"
-              aria-label="Table grain from here — no finer detail available"
-              style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
-              className="pointer-events-none absolute w-4 h-4 rounded-full flex items-center justify-center bg-canvas-elevated border border-black/10 dark:border-white/15 text-ink-muted/60 shadow-sm"
-            >
-              <LucideIcons.Layers className="w-2.5 h-2.5" />
-            </span>
-          )}
+          <button
+            type="button"
+            title={`Table grain from here — trace the columns this wire feeds${continuationPill.count != null ? ` · ${continuationPill.count.toLocaleString()} data flow${continuationPill.count === 1 ? '' : 's'} recorded` : ''}`}
+            aria-label="Table grain from here — trace columns"
+            onClick={(e) => {
+              e.stopPropagation()
+              actOnPill(follow, continuationPill, farIsSource ? 'in' : 'out')
+            }}
+            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
+            className="nodrag pointer-events-auto absolute w-5 h-5 rounded-full flex items-center justify-center bg-canvas-elevated border border-amber-500/60 text-amber-600 dark:text-amber-400 shadow-md hover:bg-amber-500/10 hover:border-amber-500"
+          >
+            <LucideIcons.Layers className="w-3 h-3" />
+          </button>
         </EdgeLabelRenderer>
       )}
       {(showCount || showCycle) && (

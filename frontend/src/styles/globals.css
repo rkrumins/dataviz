@@ -182,6 +182,19 @@
     }
   }
 
+  /* THE GRAIN SEAM (T24, F8): a coarse (table-grain) wire on an isolated
+     cone — same full colour, full weight, and drift as `.lens-cone-flow`,
+     but a longer, more open dash than its 9/7 so the two remain honestly
+     distinguishable side by side on a mixed cone (the dash IS the grain
+     signal, so it must never read as the SAME pattern as a certain wire).
+     Unlike `.lens-cone-flow`, the dash survives reduced motion — a frozen
+     dash correctly says "this connection is coarser", where a frozen dash
+     on a CERTAIN wire would say something false. Only the drift stops. */
+  .lens-seam-flow {
+    stroke-dasharray: 12 8;
+    animation: lens-flow 1.6s linear infinite;
+  }
+
   /* === Cinematic Trace Mode ===
      When `data-trace-active="true"` is set on a canvas root, the focus
      node pulses with an accent-lineage halo and trace-incident edges get
@@ -736,6 +749,7 @@
   .nx-edge-animated,
   .nx-edge-expanding,
   .lens-cone-flow,
+  .lens-seam-flow,
   .skeleton,
   .lineage-pulse,
   .lineage-pulse::after,
@@ -750,6 +764,7 @@
 :root.reduce-motion .nx-edge-animated,
 :root.reduce-motion .nx-edge-expanding,
 :root.reduce-motion .lens-cone-flow,
+:root.reduce-motion .lens-seam-flow,
 :root.reduce-motion .skeleton,
 :root.reduce-motion .lineage-pulse,
 :root.reduce-motion .lineage-pulse::after,
