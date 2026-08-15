@@ -941,6 +941,32 @@ describe('hub triage (T23 R3)', () => {
     fireEvent.click(document.querySelector('.react-flow__pane')!)
     expect(triage()).toBeNull()
   })
+
+  // T25 A review round 1 — the user's LATER screenshots (Transactions,
+  // Orders — 61 and 78 flows) hit the identical empty-panel bug at ROW
+  // level: a second, independent recurrence of the exact same mistake
+  // this task already fixed once at the top-level gutter pill and the
+  // rail end. Same `WalkPill` component renders both, but the gate used
+  // to be re-derived per call site — this pins that a row nested in a
+  // frame gets the SAME fetch-first treatment, through the ONE shared
+  // calculus (`resolveFollowDelivery`), not a re-derived one.
+  it('a ROW-level ⊕ (nested in a frame) gets the same fetch-first treatment as a top-level card', () => {
+    const { api } = renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [
+        wnode('F', 'dataset', 'ledger'),
+        wnode('DB', 'DATABASE', 'warehouse', { childCount: 1 }),
+        wnode('TXN', 'dataset', 'transactions'),
+      ],
+      containmentEdges: [holds('DB', 'TXN')],
+      lineageEdges: [hop('TXN', 'F')],
+      upstreamUrns: new Set(['DB', 'TXN']),
+      // 61 unfetched, matching the user's own "Transactions" screenshot.
+      frontierUp: [frontier('TXN', 61)],
+    })))
+    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of transactions/))
+    expect(api.extend).toHaveBeenCalledWith('TXN', 'up', ['TXN'])
+    expect(triage()).toBeNull()
+  })
 })
 
 // ── F1 — THE FOLLOW PILL NEVER BLOCKS THE ROW IT SITS ON ──────────────

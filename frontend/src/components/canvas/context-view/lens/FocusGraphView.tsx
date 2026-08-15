@@ -1055,26 +1055,61 @@ const pillTarget = (key: string): string => key.slice(key.indexOf(':') + 1)
 export const TRIAGE_THRESHOLD = REVEAL_PAGE * 3
 
 /**
- * How big THIS control's whole delivery is, regardless of how many
- * pages a reader has already opened — a stable fact about the control,
- * not one that drops back under the gate the moment it has been clicked
- * once. `reveal` reads `groupsTotal` (the key's whole ranking); `extend`/
- * `page` read `count` (nothing is admitted from a frontier before it
- * fires, so the remainder already means this). `null` when the data
- * source genuinely never said — an unknown size is not evidence of a
- * large one, so it never trips the gate.
+ * T25 A review round 1 — THE FETCH-THEN-TRIAGE CALCULUS, one pure
+ * function every follow control routes a click's DECISION through
+ * (WalkPill's gutter pill — row and frame alike — RailEnd, InlineFollow,
+ * the spotlight bridge). Before this it was re-derived separately at
+ * each control's own `act()`, and drifted: WalkPill and RailEnd each
+ * gated on the pill's UNFETCHED frontier count for extend/page (the
+ * empty-panel bug — see the fix below), and the SAME wrong number was
+ * one copy-paste away from reappearing at a third or fourth control (the
+ * user's later screenshots found it at ROW level too — Transactions,
+ * Orders — a second, independent recurrence of the identical mistake).
+ * One function closes the whole defect family at once, and the state
+ * matrix below (`resolveFollowDelivery.test.ts`) is the regression net
+ * for it — not a per-control test each new caller has to remember to
+ * write again.
+ *
+ * `knownCount` is the ALREADY-KNOWN cohort for this urn+direction —
+ * `partnersFor`'s own count, the exact number `HubTriage` would show —
+ * NEVER the pill's own `count` for extend/page (that is the UNFETCHED
+ * remainder; gating a click on what has not arrived yet is the bug).
+ * `reveal` is always already-local data, so it gates on `groupsTotal`
+ * (the key's WHOLE ranking, not just what one page admits) instead.
  */
+export interface FollowDelivery {
+  action: 'reveal' | 'extend' | 'page' | 'triage-open'
+  why: string
+}
+
 // eslint-disable-next-line react-refresh/only-export-components
-export function triageDeliveryOf(pill: FocusPill): number | null {
-  return pill.kind === 'reveal' ? pill.groupsTotal ?? null : pill.count
+export function resolveFollowDelivery(pill: FocusPill, knownCount: number): FollowDelivery {
+  if (pill.kind === 'reveal') {
+    const delivery = pill.groupsTotal ?? null
+    if (delivery != null && delivery > TRIAGE_THRESHOLD) {
+      return { action: 'triage-open', why: `reveal: whole ranking ${delivery} exceeds the gate (${TRIAGE_THRESHOLD})` }
+    }
+    return { action: 'reveal', why: 'reveal: already local data, under the gate' }
+  }
+  // extend/page: an ALREADY-fetched big fan (triage's original purpose)
+  // still opens the panel directly — populated by definition. Anything
+  // else fetches; the frontier estimate never gates a click, because it
+  // describes what has NOT arrived, not what a click would deliver.
+  if (knownCount > TRIAGE_THRESHOLD) {
+    return { action: 'triage-open', why: `${pill.kind}: already known ${knownCount} exceeds the gate (${TRIAGE_THRESHOLD}) — an already-fetched big fan` }
+  }
+  if (pill.kind === 'page' && pill.cursor) {
+    return { action: 'page', why: 'page: known cohort under the gate — fetch the rest' }
+  }
+  return { action: 'extend', why: 'extend: known cohort under the gate — fetch the next hop' }
 }
 
 /** THE ONE PLACE a pill's three kinds resolve to a walk-hook call —
- *  shared by the on-card control, the focal's inline follow, the
- *  spotlight chip's bridge button, and the grain seam's "trace columns"
- *  (T22), so none of them can ever disagree about what one click does.
- *  Takes only the three callbacks it uses, not the whole `CardCtx` — the
- *  seam chip lives on an EDGE, which has no card context of its own. */
+ *  dispatch only, no gate (see `resolveFollowDelivery`/`runFollow` for
+ *  the gated version every card-anchored control uses). Kept as the
+ *  direct call for the one caller with no card to anchor a triage list
+ *  on — the grain seam's "trace columns" chip, which lives on an EDGE
+ *  and whose far endpoint may not even be a drawn card. */
 function actOnPill(
   ctx: Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage'>,
   pill: FocusPill,
@@ -1084,6 +1119,24 @@ function actOnPill(
   if (pill.kind === 'reveal') ctx.onRevealMore?.(pill.key)
   else if (pill.kind === 'page' && pill.cursor) ctx.onPage?.(pillTarget(pill.key), dir, pill.cursor, anchor)
   else ctx.onExtend?.(pill.key, pillTarget(pill.key), dir, anchor)
+}
+
+/** The gated version of `actOnPill` — runs the calculus, then dispatches
+ *  exactly what it decided. Every follow control with a real card to
+ *  anchor a triage list on (WalkPill, RailEnd, InlineFollow, the
+ *  spotlight bridge) calls this, never `actOnPill` directly, so the
+ *  gate decision and the dispatch can never drift apart from each
+ *  other or between controls. */
+function runFollow(
+  ctx: Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage' | 'onOpenTriage'>,
+  pill: FocusPill,
+  dir: 'in' | 'out',
+  knownCount: number,
+  anchor: { cardId: string; nodeId: string },
+) {
+  const delivery = resolveFollowDelivery(pill, knownCount)
+  if (delivery.action === 'triage-open') { ctx.onOpenTriage?.(anchor.cardId, dir); return }
+  actOnPill(ctx, pill, dir, anchor)
 }
 
 /** A reveal's REST-state card count, honestly abbreviated (F1 secondary)
@@ -1190,30 +1243,15 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
   const base = 'nodrag pointer-events-auto z-20 absolute -translate-y-1/2 flex items-center justify-center gap-1 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors'
   const anchor = pillAnchor(card)
   const side = upstream ? 'upstream' : 'downstream'
-  // T23 R3 / T25 A — a delivery past the gate opens the hub-triage list
-  // instead of dumping a page onto the board. `reveal` is always
-  // already-local data, so it gates on `groupsTotal` — how much of it
-  // there is. `extend`/`page` gate on how much is ALREADY KNOWN
-  // (`partnersFor`, the same count `HubTriage` itself will show), never
-  // on `pill.count` — that is the UNFETCHED frontier, and gating a click
-  // on it is the empty-panel bug: every ⊕ on a wholly-unfetched fan
-  // opened a panel with nothing in it ("0 known · N more not yet
-  // loaded"), because the frontier is a promise, not a delivery. A
-  // fetch/page whose OWN known cohort is still small always fetches —
-  // see the arrival-driven triage-or-reveal decision in `extendWalk`/
-  // `pageWalk`, which is what a big unfetched cohort gets instead.
-  // `card.nodeId` guards the one caller with none (the visual harness's
-  // own synthetic pills, if any) — `onOpenTriage`/`partnersFor` both
-  // need a real urn.
-  const delivery = triageDeliveryOf(pill)
+  // T25 A review round 1 — routed through the ONE shared calculus
+  // (`resolveFollowDelivery`/`runFollow`) every card-anchored follow
+  // control now uses. `card.nodeId` guards the one caller with none (the
+  // visual harness's own synthetic pills, if any) — `onOpenTriage`/
+  // `partnersFor` both need a real urn to anchor a triage list on.
   const knownCount = card.nodeId ? ctx.partnersFor?.(card.nodeId, dir)?.length ?? 0 : 0
-  const gate = pill.kind === 'reveal' ? delivery : knownCount
   const act = () => {
-    if (card.nodeId && gate != null && gate > TRIAGE_THRESHOLD && ctx.onOpenTriage) {
-      ctx.onOpenTriage(card.id, dir)
-      return
-    }
-    actOnPill(ctx, pill, dir, card.nodeId ? { cardId: card.id, nodeId: card.nodeId } : undefined)
+    if (!card.nodeId) { actOnPill(ctx, pill, dir); return }
+    runFollow(ctx, pill, dir, knownCount, { cardId: card.id, nodeId: card.nodeId })
   }
   // F1 — expansion pins the REST edge (GUTTER_REST_EDGE) and lets the
   // FAR edge move, so a hovered/focused in-frame pill grows outward
@@ -1329,14 +1367,21 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
 /** The focal's ORIENTATION SENTENCE (R1) carries its own follow control
  *  per direction, inline — a compact icon rather than the gutter pill's
  *  full ghost zone (that one already sits at the card's edge; this is
- *  the SAME action — `actOnPill` — reachable without hunting for it). */
-function InlineFollow({ pill, dir, ctx }: { pill: FocusPill; dir: 'in' | 'out'; ctx: CardCtx }) {
+ *  the SAME action — routed through the same calculus as every other
+ *  card-anchored follow control (T25 A review round 1) — reachable
+ *  without hunting for it). */
+function InlineFollow({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; dir: 'in' | 'out'; ctx: CardCtx }) {
   if (!ctx.onRevealMore && !ctx.onExtend && !ctx.onPage) return null
   const verb = pillVerb(pill, dir)
+  const knownCount = card.nodeId ? ctx.partnersFor?.(card.nodeId, dir)?.length ?? 0 : 0
   return (
     <button
       type="button"
-      onClick={(e) => { e.stopPropagation(); actOnPill(ctx, pill, dir) }}
+      onClick={(e) => {
+        e.stopPropagation()
+        if (!card.nodeId) { actOnPill(ctx, pill, dir); return }
+        runFollow(ctx, pill, dir, knownCount, { cardId: card.id, nodeId: card.nodeId })
+      }}
       title={verb}
       aria-label={verb}
       disabled={pill.status === 'loading'}
@@ -2232,8 +2277,8 @@ function FocusFrameNode({ data, selected }: NodeProps) {
                   {' · '}
                   {orientationHalf('feeds', 'consumer', 'downstream', focalReach.down, focalReach.moreDown, focalReach.downSystems, 'feeds nothing downstream')}
                 </span>
-                {card.pillUp && <InlineFollow pill={card.pillUp} dir="in" ctx={ctx} />}
-                {card.pillDown && <InlineFollow pill={card.pillDown} dir="out" ctx={ctx} />}
+                {card.pillUp && <InlineFollow card={card} pill={card.pillUp} dir="in" ctx={ctx} />}
+                {card.pillDown && <InlineFollow card={card} pill={card.pillDown} dir="out" ctx={ctx} />}
               </p>
             )}
           </>
@@ -3831,23 +3876,17 @@ function railEndPill(fullCards: readonly FocusCard[], edgeBand: number, dir: 'in
  *  ungated one: `pillCatalogue`'s PAGED (96) or `extendChain`'s GOLD
  *  (246) sitting at the fetched boundary could be fired from here with
  *  no triage list in between, at the exact same real-world scale the
- *  gate exists for. Same `triageDeliveryOf`/`TRIAGE_THRESHOLD` check
- *  `WalkPill` runs, on the card `railEndPill` found the pill on. */
+ *  gate exists for. Routed through the SAME `resolveFollowDelivery`/
+ *  `runFollow` calculus `WalkPill` uses, on the card `railEndPill`
+ *  found the pill on. */
 function RailEnd({ cardId, nodeId, pill, dir }: { cardId: string; nodeId: string; pill: FocusPill; dir: 'in' | 'out' }) {
   const follow = useContext(FollowContext)
   const upstream = dir === 'in'
-  // T25 A — same gate `WalkPill` runs: `railEndPill` only ever hands
-  // this an extend/page pill (never reveal — see its own filter), so
-  // this always gates on what's ALREADY KNOWN about `nodeId`, never on
-  // the pill's unfetched frontier count.
+  // `railEndPill` only ever hands this an extend/page pill (never
+  // reveal — see its own filter), so the calculus always gates on
+  // what's ALREADY KNOWN about `nodeId`.
   const knownCount = follow.partnersFor?.(nodeId, dir)?.length ?? 0
-  const act = () => {
-    if (knownCount > TRIAGE_THRESHOLD && follow.onOpenTriage) {
-      follow.onOpenTriage(cardId, dir)
-      return
-    }
-    actOnPill(follow, pill, dir, { cardId, nodeId })
-  }
+  const act = () => runFollow(follow, pill, dir, knownCount, { cardId, nodeId })
   return (
     <button
       type="button"
@@ -4604,7 +4643,11 @@ export function FocusGraphView({
                     {side.pill && (
                       <button
                         type="button"
-                        onClick={() => actOnPill(ctx, side.pill!, dir)}
+                        onClick={() => {
+                          if (!anchorCard.nodeId) { actOnPill(ctx, side.pill!, dir); return }
+                          const known = ctx.partnersFor?.(anchorCard.nodeId, dir)?.length ?? 0
+                          runFollow(ctx, side.pill!, dir, known, { cardId: anchorCard.id, nodeId: anchorCard.nodeId })
+                        }}
                         disabled={side.pill.status === 'loading'}
                         className="nodrag flex-shrink-0 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-accent-lineage bg-accent-lineage/12 hover:bg-accent-lineage/20 disabled:opacity-50 transition-colors"
                       >
