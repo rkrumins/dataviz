@@ -705,6 +705,48 @@ describe('Freshness cockpit', () => {
         })
     })
 
+    it('after Probe drift on an external source, offers Rebuild lineage now', async () => {
+        const user = userEvent.setup()
+        permissionFn.mockImplementation(
+            (perm: string) => perm === 'system:admin' || perm === 'workspace:datasource:manage',
+        )
+        getSourceDoc.mockImplementation(async (_id: string, probe?: boolean) => ({
+            ...baseDoc,
+            platformMastered: false,
+            drifted: probe ? true : null,
+            liveFingerprint: probe ? 'live-fp' : null,
+            liveNodeCount: probe ? 99 : null,
+            liveEdgeCount: probe ? 40 : null,
+        }))
+        renderDrawer()
+
+        await user.click(await screen.findByRole('button', { name: /probe now/i }))
+        expect(await screen.findByText(/live graph does not match the last aggregation/i)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /rebuild lineage now/i })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /reconcile this source/i })).toBeInTheDocument()
+
+        await user.click(screen.getByRole('button', { name: /rebuild lineage now/i }))
+        await waitFor(() => {
+            expect(refreshSource).toHaveBeenCalledWith('ds-1', expect.objectContaining({ scope: 'rollups' }))
+        })
+    })
+
+    it('after Probe drift on a versioned source, points to version control without a reconcile fix', async () => {
+        const user = userEvent.setup()
+        getSourceDoc.mockImplementation(async (_id: string, probe?: boolean) => ({
+            ...baseDoc,
+            platformMastered: true,
+            drifted: probe ? true : null,
+            liveFingerprint: probe ? 'live-fp' : null,
+        }))
+        renderDrawer()
+
+        await user.click(await screen.findByRole('button', { name: /probe now/i }))
+        expect(await screen.findByText(/version control owns the rollups/i)).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /rebuild lineage now/i })).not.toBeInTheDocument()
+        expect(screen.getByRole('link', { name: /open version control/i })).toBeInTheDocument()
+    })
+
     // ── G3.R3 — fleet "Refresh all sources" (admin-gated) ────────────
     it('gates Refresh all sources to system:admin, fires the chosen scope, and stops polling on done', async () => {
         const user = userEvent.setup()

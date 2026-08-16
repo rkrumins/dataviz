@@ -33,15 +33,24 @@ describe('sweepsHaveStopped', () => {
 })
 
 describe('lastPassLabel', () => {
-    it('names checked, in sync, drifted, and queued', () => {
-        expect(lastPassLabel({ scanned: 47, findings: 2, actions: 1 }, 47))
+    it('names checked, in sync, drifted, and queued from bySkip', () => {
+        expect(lastPassLabel({
+            scanned: 47, findings: 2, actions: 1,
+            bySkip: { in_sync: 40, platform_mastered: 3, stats_stale: 2 },
+        }, 47)).toBe(
+            '47 of 47 checked · 3 versioned · 2 stats stale · 40 in sync · 2 drifted · 1 queued',
+        )
+    })
+
+    it('falls back when bySkip is missing', () => {
+        expect(lastPassLabel({ scanned: 47, findings: 2, actions: 1, bySkip: {} }, 47))
             .toBe('47 of 47 checked · 45 in sync · 2 drifted · 1 queued')
     })
 
     it('names an empty auto tick as nobody due, not an empty set', () => {
-        expect(lastPassLabel({ scanned: 0, findings: 0, actions: 0 }, 12))
+        expect(lastPassLabel({ scanned: 0, findings: 0, actions: 0, bySkip: {} }, 12))
             .toBe('no sources were due this tick')
-        expect(checkNowToast({ skipped: false, run: { scanned: 0, findings: 0, actions: 0 } }))
+        expect(checkNowToast({ skipped: false, run: { scanned: 0, findings: 0, actions: 0, bySkip: {} } }))
             .toBe('No sources in the reconcile set yet.')
     })
 
@@ -53,7 +62,7 @@ describe('lastPassLabel', () => {
 })
 
 describe('pickLastPassRun', () => {
-    it('prefers lastCheck, then the newest run that scanned someone', () => {
+    it('ignores empty lastCheck when a scanned run exists', () => {
         const empty: ReconcileRun = {
             id: 'empty', mode: 'auto', scanned: 0, skipped: 0, seeded: 0,
             findings: 0, actions: 0, errors: 0, byReason: {}, bySkip: {},
@@ -61,12 +70,47 @@ describe('pickLastPassRun', () => {
         }
         const meaningful: ReconcileRun = {
             id: 'm', mode: 'manual', scanned: 12, skipped: 10, seeded: 0,
-            findings: 2, actions: 2, errors: 0, byReason: {}, bySkip: {},
+            findings: 2, actions: 2, errors: 0, byReason: {}, bySkip: { in_sync: 10 },
             startedAt: new Date(Date.now() - 60_000).toISOString(),
         }
         expect(pickLastPassRun([empty, meaningful])).toEqual(meaningful)
-        expect(pickLastPassRun([empty, meaningful], empty)).toEqual(empty)
+        expect(pickLastPassRun([empty, meaningful], empty)).toEqual(meaningful)
         expect(pickLastPassRun([empty])).toBeUndefined()
+        expect(pickLastPassRun([empty, meaningful], meaningful)).toEqual(meaningful)
+    })
+})
+
+describe('IntegrityPulse clock', () => {
+    it('bases next-in on the last scanned pass, not an empty tick', () => {
+        const empty: ReconcileRun = {
+            id: 'empty', mode: 'auto', scanned: 0, skipped: 0, seeded: 0,
+            findings: 0, actions: 0, errors: 0, byReason: {}, bySkip: {},
+            startedAt: new Date().toISOString(),
+        }
+        const pass: ReconcileRun = {
+            id: 'pass', mode: 'manual', scanned: 5, skipped: 5, seeded: 0,
+            findings: 0, actions: 0, errors: 0, byReason: {}, bySkip: { in_sync: 5 },
+            // 30 minutes ago → with 1h interval, next in ~30m
+            startedAt: new Date(Date.now() - 30 * 60_000).toISOString(),
+        }
+        render(
+            <IntegrityPulse
+                summary={SUMMARY}
+                policy={POLICY}
+                latestRun={empty}
+                lastPassRun={pass}
+                isError={false}
+                isLoading={false}
+                isAdmin={false}
+                onCheckNow={() => {}}
+                checking={false}
+                onPreview={() => {}}
+                onFacet={() => {}}
+                activeFacet=""
+            />,
+        )
+        expect(screen.getByText(/next in 30m/)).toBeInTheDocument()
+        expect(screen.getByText(/last pass 5 of 10 checked · 5 in sync · 0 drifted/)).toBeInTheDocument()
     })
 })
 
@@ -75,7 +119,7 @@ describe('IntegrityPulse', () => {
         const stale = new Date(Date.now() - 4 * 3600 * 1000).toISOString()
         const run: ReconcileRun = {
             id: 'r1', mode: 'auto', scanned: 12, skipped: 10, seeded: 0,
-            findings: 2, actions: 2, errors: 0, byReason: {}, bySkip: {},
+            findings: 2, actions: 2, errors: 0, byReason: {}, bySkip: { in_sync: 10 },
             startedAt: stale,
         }
         render(

@@ -25,6 +25,7 @@ import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
 import {
     useReconcileNow, useRefreshSource, useSetFreshnessSettings, useSourceFreshness,
 } from './useFreshness'
+import { checkNowToast } from './reconcileHealth'
 import { DRIFT_SPEC, DriftStateBadge, REASON_LABEL, type DriftState } from './DriftStateBadge'
 import { OverlayIntegrityMeter } from './OverlayIntegrityMeter'
 import { EvidencePair, reconcileEvidenceRows } from './reconcileEvidence'
@@ -254,12 +255,7 @@ function ReconciliationSection({ doc }: { doc: FreshnessDoc }) {
         reconcileNow.mutate(
             { dataSourceIds: [doc.dataSourceId] },
             {
-                onSuccess: (res) => showToast(
-                    'success',
-                    res.skipped ? 'A sweep is already running — this source is in it.'
-                        : (res.run?.actions ?? 0) > 0 ? 'Reconciliation started.'
-                            : 'Checked — nothing needed reconciling.',
-                ),
+                onSuccess: (res) => showToast('success', checkNowToast(res)),
                 onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
             },
         )
@@ -397,7 +393,7 @@ function ReconciliationSection({ doc }: { doc: FreshnessDoc }) {
                             className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-xs font-semibold text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 transition-colors disabled:opacity-50"
                         >
                             <RefreshCw className={cn('w-3.5 h-3.5', reconcileNow.isPending && 'animate-spin')} />
-                            {reconcileNow.isPending ? 'Checking…' : 'Check now'}
+                            {reconcileNow.isPending ? 'Reconciling…' : 'Reconcile now'}
                         </button>
                     )}
                 </div>
@@ -706,7 +702,9 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
 
     const { showToast } = useToast()
     const canManage = usePermission('workspace:datasource:manage', doc?.workspaceId ?? undefined)
+    const isAdmin = usePermission('system:admin')
     const refresh = useRefreshSource()
+    const reconcileNow = useReconcileNow()
     const name = doc?.name || dsId || 'this source'
 
     // Clear cache is the safe reset — no confirm; Retry rebuilds (may fail
@@ -727,9 +725,28 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
         })
         setRetryOpen(false)
     }
+    const doRebuildLineage = () => {
+        if (!dsId) return
+        refresh.mutate({ dsId, scope: 'rollups' }, {
+            onSuccess: () => showToast('success', `Lineage rebuild queued for ${name}.`),
+            onError: (e) => showToast('error', e.message || 'Could not start the rebuild.'),
+        })
+    }
+    const doReconcileThisSource = () => {
+        if (!dsId) return
+        reconcileNow.mutate(
+            { dataSourceIds: [dsId] },
+            {
+                onSuccess: (res) => showToast('success', checkNowToast(res)),
+                onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
+            },
+        )
+    }
     const retryMessage = doc?.lastFailureCategory === 'out_of_memory'
         ? 'Retries the aggregated-lineage rebuild for this source. It may fail again until memory is freed in the graph store.'
         : 'Retries the aggregated-lineage rebuild for this source. This can take a while.'
+
+    const mastered = doc ? isPlatformMastered(doc) : false
 
     return createPortal(
         <>
@@ -844,16 +861,75 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                                 Compare the last aggregation against the live source. This makes one bounded call to the provider.
                                             </p>
                                         )}
-                                        {probe && !probing && (
+                                        {probe && probing && (
+                                            <p className="text-[11px] text-ink-muted flex items-center gap-1.5">
+                                                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                                Reading live fingerprint…
+                                            </p>
+                                        )}
+                                        {probe && !probing && error && (
+                                            <p className="text-[11px] text-red-600 dark:text-red-400">
+                                                Probe failed — {error.message || 'could not reach the live source.'}
+                                            </p>
+                                        )}
+                                        {probe && !probing && !error && doc && (
                                             <div className="space-y-2">
-                                                {doc.drifted === true && (
-                                                    <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-600 dark:text-amber-400">
-                                                        <AlertTriangle className="w-3.5 h-3.5" /> Drift detected — the live source differs from the last aggregation.
+                                                {doc.drifted === true && mastered && (
+                                                    <div className="space-y-2">
+                                                        <div className="flex items-start gap-1.5 text-xs font-semibold text-amber-600 dark:text-amber-400">
+                                                            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                                                            <span>
+                                                                FalkorDB is a rebuildable copy — the live fingerprint differs from the last aggregation, but version control owns the rollups. Check now will not queue a rebuild for this source.
+                                                            </span>
+                                                        </div>
+                                                        {doc.workspaceId && (
+                                                            <Link
+                                                                to={`/workspaces/${doc.workspaceId}`}
+                                                                className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-600 dark:text-sky-400 hover:underline"
+                                                            >
+                                                                Open version control for this source
+                                                                <ArrowUpRight className="w-3 h-3" />
+                                                            </Link>
+                                                        )}
+                                                    </div>
+                                                )}
+                                                {doc.drifted === true && !mastered && (
+                                                    <div className="space-y-2">
+                                                        <div className="flex items-start gap-1.5 text-xs font-semibold text-amber-600 dark:text-amber-400">
+                                                            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                                                            <span>
+                                                                The live graph does not match the last aggregation. Auto rebuild runs only after a Check now / sweep that sees current counts — Probe does not queue one.
+                                                            </span>
+                                                        </div>
+                                                        <div className="flex flex-wrap items-center gap-2">
+                                                            {canManage && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={doRebuildLineage}
+                                                                    disabled={refresh.isPending}
+                                                                    className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                                                                >
+                                                                    <RotateCcw className={cn('w-3.5 h-3.5', refresh.isPending && 'animate-spin')} />
+                                                                    Rebuild lineage now
+                                                                </button>
+                                                            )}
+                                                            {isAdmin && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={doReconcileThisSource}
+                                                                    disabled={reconcileNow.isPending}
+                                                                    className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-xs font-semibold text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 transition-colors disabled:opacity-50"
+                                                                >
+                                                                    <RefreshCw className={cn('w-3.5 h-3.5', reconcileNow.isPending && 'animate-spin')} />
+                                                                    Reconcile this source
+                                                                </button>
+                                                            )}
+                                                        </div>
                                                     </div>
                                                 )}
                                                 {doc.drifted === false && (
                                                     <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
-                                                        <CheckCircle2 className="w-3.5 h-3.5" /> In sync — the live source matches the last aggregation.
+                                                        <CheckCircle2 className="w-3.5 h-3.5" /> In sync — the live fingerprint matches the last aggregation.
                                                     </div>
                                                 )}
                                                 <div className="grid grid-cols-2 gap-x-4 gap-y-2 pt-1">

@@ -27,9 +27,10 @@ import { MOTION } from '@/lib/motion'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { useToast } from '@/components/ui/toast'
-import type { ReconcileFinding } from '@/services/freshnessService'
+import type { ReconcileFinding, ReconcileRun } from '@/services/freshnessService'
 import { DRIFT_SPEC, REASON_LABEL } from './DriftStateBadge'
 import { EvidencePair, reconcileEvidenceRows } from './reconcileEvidence'
+import { lastPassLabel } from './reconcileHealth'
 import { useReconcileNow } from './useFreshness'
 
 /** Detector code → the drift state it implies, so the preview wears the same
@@ -90,19 +91,27 @@ export function ReconcilePreviewDialog({ open, onClose, fleetTotal }: {
     const preview = useReconcileNow()
     const [findings, setFindings] = useState<ReconcileFinding[] | null>(null)
     const [scanned, setScanned] = useState(0)
-    const [inStep, setInStep] = useState(0)
+    const [passSummary, setPassSummary] = useState('')
 
     // Run the dry sweep on open, once. Re-opening re-runs it, which is right:
     // a preview of a stale fleet state would be worse than no preview.
     useEffect(() => {
-        if (!open) { setFindings(null); return }
+        if (!open) { setFindings(null); setPassSummary(''); return }
         preview.mutate({ dryRun: true }, {
             onSuccess: (res) => {
                 const next = res.findings ?? []
                 const n = res.run?.scanned ?? 0
                 setFindings(next)
                 setScanned(n)
-                setInStep(Math.max(0, n - (res.run?.findings ?? next.length)))
+                const run = res.run as Pick<ReconcileRun, 'scanned' | 'findings' | 'actions' | 'bySkip'> | undefined
+                setPassSummary(run
+                    ? lastPassLabel({
+                        scanned: run.scanned,
+                        findings: run.findings ?? next.length,
+                        actions: run.actions ?? 0,
+                        bySkip: run.bySkip ?? {},
+                    }, fleetTotal)
+                    : '')
             },
             onError: (e) => {
                 showToast('error', e.message || 'Could not run the preview.')
@@ -170,12 +179,14 @@ export function ReconcilePreviewDialog({ open, onClose, fleetTotal }: {
                                     <p className="text-sm font-semibold text-ink">
                                         {scanned === 0
                                             ? 'No sources were eligible to check'
-                                            : 'All sources checked are in sync'}
+                                            : 'Nothing would rebuild'}
                                     </p>
                                     <p className="text-[11px] text-ink-muted">
                                         {scanned === 0
                                             ? 'Nothing in the reconcile set yet — sources appear here after their first aggregation state is recorded.'
-                                            : `All ${scanned.toLocaleString()} source${scanned === 1 ? '' : 's'} checked match their data. Turning automation on would queue no rebuilds right now.`}
+                                            : passSummary
+                                                ? `${passSummary}. Turning automation on would queue no rebuilds right now.`
+                                                : `All ${scanned.toLocaleString()} source${scanned === 1 ? '' : 's'} checked. Turning automation on would queue no rebuilds right now.`}
                                     </p>
                                 </div>
                             ) : (
@@ -184,12 +195,7 @@ export function ReconcilePreviewDialog({ open, onClose, fleetTotal }: {
                                         <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
                                         <p className="text-[11px] text-ink-secondary leading-relaxed">
                                             <span className="font-semibold text-ink">
-                                                {scanned.toLocaleString()}
-                                                {fleetTotal && fleetTotal > scanned
-                                                    ? ` of ${fleetTotal.toLocaleString()}`
-                                                    : ''} checked
-                                                {' · '}{inStep.toLocaleString()} in sync
-                                                {' · '}{findings.length.toLocaleString()} would rebuild
+                                                {passSummary || `${scanned.toLocaleString()} checked · ${findings.length.toLocaleString()} would rebuild`}
                                             </span>
                                             . Each rebuild is a full aggregation job — on a
                                             large graph that is real work, and the per-sweep

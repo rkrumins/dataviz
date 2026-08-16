@@ -462,7 +462,7 @@ def test_every_verdict_uses_the_published_vocabulary(over):
     v = evaluate(_obs(**over), POLICY)
     assert v.reason is None or v.reason in REASONS
     assert v.skip is None or v.skip in SKIP_REASONS
-    assert v.drift_state in DRIFT_STATES
+    assert v.drift_state is None or v.drift_state in DRIFT_STATES
 
 
 def test_acting_requires_a_reason_and_no_hold():

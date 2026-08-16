@@ -37,12 +37,15 @@ export function windowPhrase(window: DriftWindow): string {
 }
 
 export function lastPassLabel(
-    run: Pick<ReconcileRun, 'scanned' | 'findings' | 'actions'>,
+    run: Pick<ReconcileRun, 'scanned' | 'findings' | 'actions' | 'bySkip'>,
     fleetTotal?: number | null,
 ): string {
     const scanned = run.scanned
     const drifted = run.findings
-    const inStep = Math.max(0, scanned - drifted)
+    const bySkip = run.bySkip ?? {}
+    const inSync = bySkip.in_sync ?? 0
+    const versioned = bySkip.platform_mastered ?? 0
+    const statsStale = (bySkip.stats_stale ?? 0) + (bySkip.stats_unhealthy ?? 0)
     const total = fleetTotal ?? scanned
     // An auto tick with nobody due still records a run — that is not
     // "the reconcile set is empty"; it is "nothing was due this tick".
@@ -50,26 +53,49 @@ export function lastPassLabel(
     const checked = total > RECONCILE_SCAN_CAP && scanned < total
         ? `${scanned.toLocaleString()} of ${total.toLocaleString()} checked — oldest first`
         : `${scanned.toLocaleString()} of ${Math.max(scanned, total).toLocaleString()} checked`
-    const parts = [checked, `${inStep.toLocaleString()} in sync`, `${drifted.toLocaleString()} drifted`]
+    const parts = [checked]
+    if (versioned > 0) parts.push(`${versioned.toLocaleString()} versioned`)
+    if (statsStale > 0) parts.push(`${statsStale.toLocaleString()} stats stale`)
+    // Prefer the named in_sync skip tally. Fall back when an older run has
+    // no bySkip breakdown so we do not claim scanned − findings are all healthy.
+    const syncCount = Object.keys(bySkip).length > 0
+        ? inSync
+        : Math.max(0, scanned - drifted - versioned - statsStale)
+    parts.push(`${syncCount.toLocaleString()} in sync`)
+    parts.push(`${drifted.toLocaleString()} drifted`)
     if (run.actions > 0) parts.push(`${run.actions.toLocaleString()} queued`)
     return parts.join(' · ')
 }
 
 /**
- * The run the pulse should describe as "last pass". Prefer an explicit
- * Check now result; otherwise the newest run that actually scanned someone.
- * Empty auto ticks prove liveness elsewhere — they are not a meaningful pass.
+ * The run the pulse should describe as "last pass" and use for next-check.
+ * Prefer an explicit Check now result; otherwise the newest run that actually
+ * scanned someone. Empty auto ticks prove liveness elsewhere — they must not
+ * reset "next in".
  */
 export function pickLastPassRun(
     runs: ReconcileRun[] | undefined,
     lastCheck?: ReconcileRun | null,
 ): ReconcileRun | undefined {
-    if (lastCheck) return lastCheck
+    if (lastCheck && lastCheck.scanned > 0) return lastCheck
+    if (lastCheck && !runs?.some(r => r.scanned > 0)) return lastCheck
     return runs?.find(r => r.scanned > 0)
 }
 
+/** Newest run of any kind — empty ticks still prove the sweeper is alive. */
+export function pickLatestRun(
+    runs: ReconcileRun[] | undefined,
+    lastCheck?: ReconcileRun | null,
+): ReconcileRun | undefined {
+    if (lastCheck) return lastCheck
+    return runs?.[0]
+}
+
 export function checkNowToast(
-    res: { skipped?: boolean; run?: Pick<ReconcileRun, 'scanned' | 'findings' | 'actions'> | null },
+    res: {
+        skipped?: boolean
+        run?: Pick<ReconcileRun, 'scanned' | 'findings' | 'actions' | 'bySkip'> | null
+    },
     fleetTotal?: number | null,
 ): string {
     if (res.skipped) return 'A sweep is already running.'

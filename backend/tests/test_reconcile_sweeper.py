@@ -237,14 +237,73 @@ async def _state(factory, ds_id="ds_1"):
 # ── Structural guarantee ────────────────────────────────────────────────
 
 
-def test_sweeper_cannot_reach_a_graph_provider():
-    """It takes a session factory and a service getter — no registry. This is
-    the structural reason it can never make a graph call, and it should stay
-    true by construction rather than by discipline."""
+def test_sweeper_auto_path_has_no_provider_registry():
+    """Auto ticks must stay SQL-only. Live observe goes through the
+    aggregation service's registry when present — not a constructor arg."""
     import inspect
 
     params = inspect.signature(ReconciliationSweeper.__init__).parameters
     assert set(params) == {"self", "session_factory", "service_getter"}
+    assert not hasattr(ReconciliationSweeper(lambda: None), "_registry")
+
+
+@pytest.mark.asyncio
+async def test_manual_live_observe_finds_raw_drift(session_factory, monkeypatch):
+    """Check now refreshes counts before evaluate — a delete shows up."""
+    await _seed(session_factory, checked_at=_ago(seconds=30))
+
+    async def _fake_live(self, ctx, targets):
+        for ds_id, _ws in targets:
+            # One fewer node than the seeded baseline fingerprint.
+            from backend.app.services.aggregation.fingerprint import (
+                raw_fingerprint_from_counts,
+            )
+            entity = {"Table": 99}
+            edges = {"FLOWS_TO": 200, "AGGREGATED": 500}
+            fp, observed_agg, raw_edges = raw_fingerprint_from_counts(entity, edges)
+            ctx.setdefault(ds_id, {}).update(
+                has_stats=True, stats_age_secs=0,
+                stats_as_of=_ago(seconds=0),
+                stats_updated=datetime.now(timezone.utc),
+                node_count=99, observed_aggregated=observed_agg,
+                observed_raw_fingerprint=fp, observed_raw_edge_total=raw_edges,
+                live_observed=True,
+            )
+
+    monkeypatch.setattr(
+        ReconciliationSweeper, "_live_observe_counts", _fake_live,
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep(
+        mode="manual",
+    )
+    assert result is not None
+    assert result.scanned == 1
+    assert result.findings == 1
+    assert result.by_reason.get("raw_drift") == 1
+    st = await _state(session_factory)
+    assert st.drift_state == "drifting"
+
+
+@pytest.mark.asyncio
+async def test_stats_stale_does_not_stamp_in_sync(session_factory):
+    """An unevaluated skip must not claim the overlay is healthy."""
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        stats_age_secs=3_600,
+        last_aggregated_ago_secs=60,
+    )
+    # Prior finding stamp — must survive a stats_stale skip.
+    async with session_factory() as s:
+        st = await s.get(AggregationDataSourceStateORM, "ds_1")
+        st.drift_state = "overlayMissing"
+        await s.commit()
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert result.by_skip == {"stats_stale": 1}
+    assert (await _state(session_factory)).drift_state == "overlayMissing"
 
 
 # ── The first-sweep storm regression ────────────────────────────────────

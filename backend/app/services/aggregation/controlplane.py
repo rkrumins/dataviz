@@ -742,6 +742,8 @@ def _run_model_cp(result):
         findings=result.findings, actions=result.actions,
         errors=result.errors, by_reason=result.by_reason,
         by_skip=result.by_skip,
+        started_at=getattr(result, "started_at", None),
+        finished_at=getattr(result, "finished_at", None),
     )
 
 

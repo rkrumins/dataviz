@@ -19,7 +19,8 @@ import {
 } from './useFreshness'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-    DRIFT_WINDOWS, checkNowToast, parseDriftWindow, pickLastPassRun, windowDriftCounts, windowPhrase,
+    DRIFT_WINDOWS, checkNowToast, parseDriftWindow, pickLastPassRun, pickLatestRun,
+    windowDriftCounts, windowPhrase,
     type DriftWindow,
 } from './reconcileHealth'
 
@@ -56,6 +57,8 @@ export function OverlayIntegrity({
             onSuccess: (res) => {
                 if (res.run) setLastCheck(res.run)
                 void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.activityPrefix })
+                void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
+                void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.reconciliation })
                 showToast('success', checkNowToast(res, summary?.total))
             },
             onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
@@ -109,7 +112,7 @@ export function OverlayIntegrity({
                 <IntegrityPulse
                     summary={summary}
                     policy={recon.data?.policy}
-                    latestRun={lastCheck ?? recon.data?.runs[0]}
+                    latestRun={pickLatestRun(recon.data?.runs, lastCheck)}
                     lastPassRun={pickLastPassRun(recon.data?.runs, lastCheck)}
                     isError={recon.isError}
                     isLoading={recon.isLoading}

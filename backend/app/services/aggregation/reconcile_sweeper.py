@@ -1,10 +1,11 @@
 """ReconciliationSweeper — the scheduled drift / overlay-integrity sweep.
 
 Detects data sources whose ``:AGGREGATED`` overlay has fallen out of step
-with their raw graph and queues a rebuild, using ONLY the counts the stats
-service already collects. **This class takes no provider registry**, which
-is the structural guarantee — asserted in the tests — that it can never make
-a graph call of its own.
+with their raw graph and queues a rebuild. Auto ticks use ONLY the counts
+the stats service already collects — no graph call. Operator Check now /
+Preview refresh those counts from the live graph (via the aggregation
+service's provider registry) before evaluating, then never hold a DB
+session across that network call.
 
 Not to be confused with two neighbours that also say "reconcile":
 
@@ -20,6 +21,8 @@ outbound network call:
   Phase A — lock held, pure SQL, no network. Read candidates, evaluate,
             write ``last_reconcile_checked_at`` / seeded baselines / the run
             header, commit (releasing the lock). Emits an action list.
+            Operator modes insert a live-count refresh between two short
+            locked sections so the network call never sits under the lock.
   Phase B — no lock. Dispatch each action on its own short session, then
             record outcomes.
 
@@ -56,6 +59,10 @@ _SWEEP_TICK_SECS = 60.0
 # remainder is picked up next tick (ordering is oldest-checked-first, so
 # nothing starves).
 _SCAN_CAP = 200
+
+# Operator Check now may live-refresh this many sources at once.
+_LIVE_OBS_CONCURRENCY = 8
+_LIVE_OBS_TIMEOUT_S = 5.0
 
 # Cold-start guard, separate from the general action cap. A fresh install
 # with 200 never-aggregated sources drains at one first build per sweep
@@ -119,6 +126,8 @@ class SweepResult:
     pending: List[_Action] = field(default_factory=list)
     # Compact per-finding rows persisted on the run (acted and held).
     finding_rows: List[Dict] = field(default_factory=list)
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
 
     def detail_json(self) -> str:
         findings = self.finding_rows[:_SCAN_CAP]
@@ -208,6 +217,7 @@ class ReconciliationSweeper:
         Returns ``None`` when another replica holds the sweep lock.
         """
         result = SweepResult(run_id=f"rcn_{uuid.uuid4().hex[:12]}", mode=mode)
+        started = _now_iso()
 
         phase_a = await self._phase_a(result, data_source_ids, dry_run)
         if phase_a is None:
@@ -222,6 +232,8 @@ class ReconciliationSweeper:
         else:
             result.pending = actions
 
+        result.started_at = started
+        result.finished_at = _now_iso()
         if record:
             await self._record_run(result, actor)
         return result
@@ -297,6 +309,33 @@ class ReconciliationSweeper:
 
             ds_ids = [s.data_source_id for s in states]
             ctx = await self._batch_context(session, ds_ids, versioned)
+            # Drop the lock before any live graph call. Operator modes refresh
+            # counts; auto ticks evaluate against the SQL snapshot alone.
+            await session.commit()
+
+        if full_scan:
+            live_targets = [
+                (s.data_source_id, s.workspace_id)
+                for s in states
+                if not ctx.get(s.data_source_id, {}).get("platform_mastered")
+                and not ctx.get(s.data_source_id, {}).get("deleted")
+            ]
+            await self._live_observe_counts(ctx, live_targets)
+
+        async with self._session_factory() as session:
+            if not await self._claim_lock(session):
+                return None
+
+            # Re-load state rows under the new lock — the previous instances
+            # were bound to the committed session above.
+            states = (await session.execute(
+                select(AggregationDataSourceStateORM).where(
+                    AggregationDataSourceStateORM.data_source_id.in_(ds_ids)
+                )
+            )).scalars().all()
+            by_id = {s.data_source_id: s for s in states}
+            # Preserve the original oldest-checked-first order.
+            states = [by_id[i] for i in ds_ids if i in by_id]
 
             first_builds = 0
             for state in states:
@@ -331,7 +370,9 @@ class ReconciliationSweeper:
                 now = _now_iso()
                 prev_drift = state.drift_state
                 state.last_reconcile_checked_at = now
-                state.drift_state = verdict.drift_state
+                # Unevaluated skips leave drift_state None — keep the prior stamp.
+                if verdict.drift_state is not None:
+                    state.drift_state = verdict.drift_state
                 if (
                     not dry_run
                     and verdict.skip == "suspended"
@@ -428,7 +469,9 @@ class ReconciliationSweeper:
                 self._adopt(state, obs)
                 state.last_reconciled_at = now
                 state.last_reconcile_reason = verdict.reason
-                state.last_reconcile_mode = "manual" if data_source_ids else "auto"
+                state.last_reconcile_mode = (
+                    "manual" if (data_source_ids or full_scan) else "auto"
+                )
                 state.reconcile_consecutive_actions = (
                     state.reconcile_consecutive_actions or 0
                 ) + 1
@@ -445,6 +488,80 @@ class ReconciliationSweeper:
 
             await session.commit()  # releases the advisory lock
         return actions, nudges
+
+    async def _live_observe_counts(
+        self, ctx: Dict[str, Dict], targets: List[tuple],
+    ) -> None:
+        """Refresh ctx counts from the live graph for an operator pass.
+
+        Uses ``provider.get_stats`` (cheap per-type counts), never
+        ``get_schema_stats``. Failures leave the SQL snapshot in place so
+        evaluate still has a named skip path. No DB session is held across
+        the graph call.
+        """
+        if not targets:
+            return
+        svc = self._service_getter()
+        registry = getattr(svc, "_registry", None) if svc else None
+        if registry is None:
+            return
+
+        from .fingerprint import raw_fingerprint_from_counts
+
+        sem = asyncio.Semaphore(_LIVE_OBS_CONCURRENCY)
+
+        async def _one(ds_id: str, workspace_id: Optional[str]) -> None:
+            if not workspace_id:
+                return
+            async with sem:
+                try:
+                    async with self._session_factory() as session:
+                        provider = await asyncio.wait_for(
+                            registry.get_provider_for_workspace(
+                                workspace_id, session, data_source_id=ds_id,
+                            ),
+                            timeout=_LIVE_OBS_TIMEOUT_S,
+                        )
+                    try:
+                        raw = await asyncio.wait_for(
+                            provider.get_stats(bypass_cache=True),
+                            timeout=_LIVE_OBS_TIMEOUT_S,
+                        )
+                    except TypeError:
+                        raw = await asyncio.wait_for(
+                            provider.get_stats(),
+                            timeout=_LIVE_OBS_TIMEOUT_S,
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.debug(
+                        "reconcile sweep: live observe failed for %s: %s",
+                        ds_id, exc,
+                    )
+                    return
+
+                entity = raw.get("entityTypeCounts") or {}
+                edges = raw.get("edgeTypeCounts") or {}
+                fp, observed_agg, raw_edges = raw_fingerprint_from_counts(
+                    entity, edges,
+                )
+                entry = ctx.setdefault(ds_id, {})
+                entry.update(
+                    has_stats=True,
+                    stats_age_secs=0,
+                    stats_as_of=_now_iso(),
+                    stats_updated=datetime.now(timezone.utc),
+                    node_count=int(raw.get("nodeCount") or 0),
+                    observed_aggregated=observed_agg,
+                    observed_raw_fingerprint=fp,
+                    observed_raw_edge_total=raw_edges,
+                    live_observed=True,
+                )
+
+        await asyncio.gather(*[
+            _one(ds_id, ws_id) for ds_id, ws_id in targets
+        ])
 
     async def _claim_lock(self, session) -> bool:
         """Transaction-scoped advisory lock, distinct from the stuck-job
@@ -717,6 +834,7 @@ class ReconciliationSweeper:
             in_cooldown=in_cooldown,
             recently_failed=recently_failed,
             overlay_observable=c.get("overlay_observable", True),
+            live_observed=bool(c.get("live_observed")),
             reconcile_enabled=reconcile_enabled,
         )
 
@@ -849,8 +967,8 @@ class ReconciliationSweeper:
             async with self._session_factory() as session:
                 session.add(ReconcileRunORM(
                     id=result.run_id,
-                    started_at=_now_iso(),
-                    finished_at=_now_iso(),
+                    started_at=result.started_at or _now_iso(),
+                    finished_at=result.finished_at or _now_iso(),
                     mode=result.mode,
                     actor=actor,
                     scanned=result.scanned,

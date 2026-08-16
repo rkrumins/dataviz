@@ -22,9 +22,9 @@ export function IntegrityPulse({
 }: {
     summary: FreshnessSummary | null | undefined
     policy: ReconcilePolicy | undefined
-    /** Newest run — drives "last / next" liveness, including empty auto ticks. */
+    /** Newest run of any kind — empty ticks prove the sweeper is alive. */
     latestRun: ReconcileRun | undefined
-    /** Run described by "last pass …". Omit the sentence when undefined. */
+    /** Last run that scanned someone — drives "last / next" and the pass line. */
     lastPassRun?: ReconcileRun | undefined
     isError: boolean
     isLoading: boolean
@@ -37,9 +37,11 @@ export function IntegrityPulse({
 }) {
     const enabled = policy?.enabled ?? policy?.envEnabled ?? true
     const interval = policy?.checkIntervalSecs ?? policy?.envCheckIntervalSecs ?? 3600
-    const lastAt = latestRun?.startedAt
-    const stopped = enabled && sweepsHaveStopped(lastAt, interval)
-    const next = nextCheckAt(lastAt, interval)
+    // Liveness (stopped?) uses any tick; "next in" uses the last real pass.
+    const aliveAt = latestRun?.startedAt
+    const passAt = lastPassRun?.startedAt ?? aliveAt
+    const stopped = enabled && sweepsHaveStopped(aliveAt, interval)
+    const next = nextCheckAt(passAt, interval)
     const nextMs = next ? next.getTime() - Date.now() : null
     const drifting = summary?.drifting ?? 0
     const suspended = summary?.suspended ?? 0
@@ -73,10 +75,10 @@ export function IntegrityPulse({
                 )} />
                 <p className="text-sm font-semibold text-ink">
                     {word}
-                    {lastAt ? (
+                    {passAt ? (
                         <>
                             <span className="font-normal text-ink-muted"> · last </span>
-                            <TimeStamp at={lastAt} icon={null} colorByAge={false} />
+                            <TimeStamp at={passAt} icon={null} colorByAge={false} />
                         </>
                     ) : (
                         <span className="font-normal text-ink-muted"> · not yet run</span>
@@ -93,7 +95,7 @@ export function IntegrityPulse({
                         <AlertTriangle className="w-3 h-3 shrink-0" /> Sweeps have stopped
                     </span>
                 )}
-                {enabled && !lastAt && !isLoading && (
+                {enabled && !passAt && !isLoading && (
                     <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20">
                         <CircleDashed className="w-3 h-3 shrink-0" /> Not yet run
                     </span>

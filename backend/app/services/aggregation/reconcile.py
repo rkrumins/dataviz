@@ -141,6 +141,9 @@ class Observation:
     # projection_mode == 'dedicated' ⇒ the overlay lives in ANOTHER graph
     # that get_stats() never scans, so observed_aggregated is meaningless.
     overlay_observable: bool = True
+    # Operator Check now / Preview refreshed counts from the live graph —
+    # the stats_stale guard must not block a verdict we just observed.
+    live_observed: bool = False
 
     # ── resolved policy ───────────────────────────────────────────────
     reconcile_enabled: bool = True
@@ -178,12 +181,16 @@ class Verdict:
     A clean finding has ``reason`` and no ``skip``. An absolute skip has
     ``skip`` and no ``reason``. A *hold* has both: the drift is real, but
     we refuse to act (cooldown, automation off, breaker).
+
+    ``drift_state`` is ``None`` when this pass did not evaluate the overlay
+    (stats stale, no stats, …) — the sweeper must leave the prior stamp alone
+    rather than claiming ``inSync``.
     """
     data_source_id: str
     reason: Optional[str] = None
     skip: Optional[str] = None
     seed: bool = False
-    drift_state: str = "inSync"
+    drift_state: Optional[str] = "inSync"
     evidence: Dict = field(default_factory=dict)
 
     @property
@@ -198,7 +205,8 @@ def evaluate(obs: Observation, policy: Policy) -> Verdict:
         return Verdict(
             data_source_id=obs.data_source_id,
             skip=skip,
-            drift_state=_SKIP_STATE.get(skip, _idle_state(obs)),
+            # Named skip states only — everything else preserves the prior stamp.
+            drift_state=_SKIP_STATE.get(skip),
         )
 
     for detector in (
@@ -283,16 +291,23 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
         # so acting would just log an error once an hour, forever. Surfaced
         # as 'blocked' in the UI — a genuinely useful signal on its own.
         return "no_ontology"
-    if not obs.has_stats:
+    if not obs.has_stats and not obs.live_observed:
         return "no_stats"
     if not obs.stats_polling_enabled or obs.stats_last_status == "error":
-        return "stats_unhealthy"
+        # Live observe already proved the graph is reachable — a broken poll
+        # config must not block an operator Check now.
+        if not obs.live_observed:
+            return "stats_unhealthy"
     if (
-        obs.stats_age_secs is None
-        or obs.stats_age_secs > policy.stats_max_age_secs
+        not obs.live_observed
+        and (
+            obs.stats_age_secs is None
+            or obs.stats_age_secs > policy.stats_max_age_secs
+        )
     ):
         # Acting on stale counts is how a false positive rebuilds a
         # multi-million-node graph. The sweeper nudges the stats poll instead.
+        # Operator Check now / Preview refresh counts first (live_observed).
         return "stats_stale"
     if obs.job_in_flight:
         return "in_flight"
