@@ -12,7 +12,7 @@ redis>=8.1.0
 sqlalchemy>=2.0.52
 asyncpg>=0.31.0          # PostgreSQL async driver — runtime
 psycopg2-binary>=2.9.9   # PostgreSQL sync driver — Alembic migrations
-alembic>=1.18.5          # Schema migrations
+alembic>=1.19.1          # Schema migrations
 
 # Security (credential encryption + authentication)
 cryptography>=48.0.1     # >=48.0.1: GHSA-537c-gmf6-5ccf + prior OpenSSL-bundle advisories
