@@ -30,7 +30,7 @@ import { OverlayIntegrityMeter } from './OverlayIntegrityMeter'
 import { EvidencePair, reconcileEvidenceRows } from './reconcileEvidence'
 import { useActiveJobs } from './useActiveJobs'
 import { AggStatusPill, FreshnessBadges, timeUntil } from './FreshnessRow'
-import { activityFromEvent } from './lastActivity'
+import { activityFromEvent, recentActivityEvents } from './lastActivity'
 import type {
     FailureCategory, FreshnessDoc, RefreshEventSummary,
 } from '@/services/freshnessService'
@@ -416,12 +416,8 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
     const evidence = event.evidence as Record<string, unknown> | null | undefined
     const hasEvidence = !!evidence && Object.keys(evidence).length > 0
     const activity = activityFromEvent(event)
-    // A queued rebuild still carries the detector reason — that is why it
-    // fired. The table Last Activity column names the action instead.
-    const primary = event.reason && REASON_LABEL[event.reason]
-        ? REASON_LABEL[event.reason]
-        : activity.label
     const automatic = event.mode === 'automatic'
+    const showMode = event.mode === 'automatic' || event.mode === 'manual'
 
     // Shared with Job History's ReconcileWhy — the two surfaces reach the same
     // fact from opposite ends and must never disagree about what it says.
@@ -439,12 +435,13 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
                 )}
             >
                 <span className="min-w-0 flex items-center gap-1.5">
-                    <span className="text-ink truncate">{primary}</span>
-                    {activity.originLabel && (
+                    <span className="text-ink truncate">{activity.label}</span>
+                    {activity.originLabel && !activity.label.toLowerCase().includes(activity.originLabel.toLowerCase()) && (
                         <span className="text-[10px] text-ink-muted shrink-0">
                             · {activity.originLabel}
                         </span>
                     )}
+                    {showMode && (
                     <span
                         title={automatic
                             ? 'Started by automatic reconciliation'
@@ -458,6 +455,7 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
                     >
                         {automatic ? 'Auto' : 'Manual'}
                     </span>
+                    )}
                 </span>
                 <TimeStamp at={event.ts} icon={null} colorByAge={false} />
             </button>
@@ -701,6 +699,7 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
     const [retryOpen, setRetryOpen] = useState(false)
 
     const { data: doc, isLoading, isFetching, error } = useSourceFreshness(dsId, probe, isOpen)
+    const activityFeed = recentActivityEvents(doc?.events ?? [], doc?.lastCheckedAt)
     const probing = probe && isFetching
     const { byDataSource } = useActiveJobs()
 
@@ -869,12 +868,12 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                         <div className="flex items-center gap-1.5 text-sm font-semibold text-ink mb-2">
                                             <Activity className="w-4 h-4 text-ink-muted" /> Recent activity
                                         </div>
-                                        {doc.events.length === 0 ? (
+                                        {activityFeed.length === 0 ? (
                                             <p className="text-[11px] text-ink-muted">No refresh activity recorded yet.</p>
                                         ) : (
                                             <ul className="space-y-1">
-                                                {doc.events.map((e, i) => (
-                                                    <ActivityRow key={i} event={e} />
+                                                {activityFeed.map((e, i) => (
+                                                    <ActivityRow key={`${e.ts}-${e.origin}-${i}`} event={e} />
                                                 ))}
                                             </ul>
                                         )}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { activityFromEvent, resolveLastActivity } from './lastActivity'
+import { activityFromEvent, recentActivityEvents, resolveLastActivity } from './lastActivity'
 import type { FreshnessRow } from '@/services/freshnessService'
 
 const row = (over: Partial<FreshnessRow>): Pick<
@@ -92,6 +92,26 @@ describe('resolveLastActivity', () => {
             at: checked,
             source: 'check',
         })
+    })
+})
+
+describe('recentActivityEvents', () => {
+    it('prepends a check that is newer than the latest refresh event', () => {
+        const checked = new Date().toISOString()
+        const older = new Date(Date.now() - 2 * 3600_000).toISOString()
+        const events = recentActivityEvents(
+            [{ origin: 'reconcile-sweep', outcome: 'accepted', ts: older, reason: 'raw_drift' }],
+            checked,
+        )
+        expect(events[0]).toMatchObject({ origin: 'reconcile-sweep', outcome: 'noop', ts: checked })
+        expect(events).toHaveLength(2)
+    })
+
+    it('does not duplicate a check that is older than the latest event', () => {
+        const newer = new Date().toISOString()
+        const olderCheck = new Date(Date.now() - 3600_000).toISOString()
+        const events = [{ origin: 'api', outcome: 'completed', ts: newer }]
+        expect(recentActivityEvents(events, olderCheck)).toEqual(events)
     })
 })
 

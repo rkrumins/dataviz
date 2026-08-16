@@ -105,3 +105,24 @@ export function resolveLastActivity(row: Pick<
     if (row.lastCheckedAt) return reconcileCheck(row.lastCheckedAt)
     return null
 }
+
+/**
+ * Drawer feed: the same newest-first list as Last Activity. A check that
+ * never wrote a refresh_event is prepended so the table and the drawer
+ * cannot disagree about what last happened.
+ */
+export function recentActivityEvents(
+    events: RefreshEventSummary[],
+    lastCheckedAt?: string | null,
+): RefreshEventSummary[] {
+    if (!lastCheckedAt) return events
+    const newestEvent = events.reduce(
+        (max, ev) => Math.max(max, ms(ev.ts)),
+        Number.NEGATIVE_INFINITY,
+    )
+    if (ms(lastCheckedAt) <= newestEvent) return events
+    return [
+        { origin: 'reconcile-sweep', outcome: 'noop', ts: lastCheckedAt },
+        ...events,
+    ]
+}
