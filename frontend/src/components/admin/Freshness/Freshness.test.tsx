@@ -229,8 +229,8 @@ describe('Freshness cockpit', () => {
         expect(screen.queryByRole('button', { name: /more actions for customers graph/i })).not.toBeInTheDocument()
     })
 
-    // ── R5.1 — stat band counts + tile filtering ─────────────────────
-    it('renders summary counts on the stat band and filters rows by tile', async () => {
+    // ── R5.1 — filter bar facets (stat band removed) ─────────────────
+    it('filters rows from the status segment on the filter bar', async () => {
         const user = userEvent.setup()
         listFleet.mockResolvedValue({
             ...fleet,
@@ -238,22 +238,22 @@ describe('Freshness cockpit', () => {
         })
         renderTab('/?tab=freshness')
 
-        const band = await screen.findByRole('group', { name: /fleet summary/i })
-        expect(within(band).getByRole('button', { name: /total sources/i })).toHaveTextContent('2')
-        expect(within(band).getByRole('button', { name: /needs attention/i })).toHaveTextContent('1')
+        const bar = await screen.findByRole('group', { name: /filter by status/i })
+        expect(within(bar).getByRole('button', { name: /^Needs attention$/i })).toBeInTheDocument()
+        await waitFor(() => {
+            expect(screen.getByText(/2\/2 cached/)).toBeInTheDocument()
+        })
 
         // Both rows visible before filtering.
         expect(screen.getByText('Orders Graph')).toBeInTheDocument()
         expect(screen.getByText('Customers Graph')).toBeInTheDocument()
 
-        // Clicking the "Needs attention" tile keeps only the stale row.
-        await user.click(within(band).getByRole('button', { name: /needs attention/i }))
+        await user.click(within(bar).getByRole('button', { name: /^Needs attention$/i }))
         await waitFor(() => expect(screen.queryByText('Customers Graph')).not.toBeInTheDocument())
         expect(screen.getByText('Orders Graph')).toBeInTheDocument()
         expect(probe.search).toContain('fstatus=needsAttention')
 
-        // Clicking "Total sources" clears the facet.
-        await user.click(within(band).getByRole('button', { name: /total sources/i }))
+        await user.click(within(bar).getByRole('button', { name: /^All$/i }))
         await waitFor(() => expect(screen.getByText('Customers Graph')).toBeInTheDocument())
         expect(probe.search).not.toContain('fstatus')
     })

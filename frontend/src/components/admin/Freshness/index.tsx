@@ -1,16 +1,14 @@
 /**
  * Freshness — the Ingestion → Freshness triage cockpit.
  *
- * A cross-workspace operator view of every data source's aggregation/cache
- * freshness. The stat band doubles as the status filter; a sticky faceted bar
- * (provider/workspace multi-select, status segment, name search) refines the
- * fleet; the table groups by provider, orders by severity, and collapses the
- * healthy groups into one-line rollups so attention items float to the top.
+ * Overlay integrity briefs the schedule and live verdict; Start here guides
+ * attention; a sticky faceted bar (status, provider, workspace, search) is the
+ * triage filter; the table groups by provider and orders by severity.
  *
  * All facet state lives in the URL search params (shared with Ingestion's
  * ``?tab=``), so reload and back/forward restore the view. Provider/workspace
- * facets filter client-side over the fetched page (≤200 rows); the tile counts
- * come from the server ``summary``. Reads never trigger a rebuild.
+ * facets filter client-side over the fetched page (≤200 rows). Reads never
+ * trigger a rebuild.
  */
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
@@ -27,7 +25,6 @@ import { FreshnessRow } from './FreshnessRow'
 import { FreshnessDrawer } from './FreshnessDrawer'
 import { ProviderRefreshDialog } from './ProviderRefreshDialog'
 import { FleetRefreshDialog } from './FleetRefreshDialog'
-import { FreshnessStatBand } from './FreshnessStatBand'
 import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
 import { CadenceSettingsDialog } from './CadenceSettingsDialog'
@@ -368,14 +365,7 @@ export function Freshness() {
                 onClear={() => patchParams({ fstatus: null, ffail: null })}
             />
 
-            {/* Stat band — scrolls away; the tiles are the status filter. */}
-            <FreshnessStatBand
-                summary={summary}
-                activeFacet={fstatus}
-                onToggle={(facet) => patchParams({ fstatus: facet || null })}
-            />
-
-            {/* Sticky faceted filter bar */}
+            {/* Sticky faceted filter bar — the triage path (tiles removed). */}
             <div ref={stickyRef} className="sticky top-0 z-20 -mt-1 bg-canvas border-b border-glass-border py-2.5">
                 <FreshnessFilterBar
                     providerOptions={providerOptions}
@@ -391,6 +381,7 @@ export function Freshness() {
                     search={searchInput}
                     onSearchChange={setSearchInput}
                     onClearAll={clearAll}
+                    summary={summary}
                 />
             </div>
 

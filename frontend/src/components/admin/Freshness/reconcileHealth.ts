@@ -188,6 +188,66 @@ export function formatHorizon(ms: number): string {
     return `${Math.round(hours / 24)}d`
 }
 
+/** Human cadence for the schedule sentence — "5 minutes", "1 hour". */
+export function formatCheckInterval(secs: number | null | undefined): string {
+    const s = secs && secs > 0 ? secs : 3600
+    const mins = Math.max(1, Math.round(s / 60))
+    if (mins < 60) return mins === 1 ? '1 minute' : `${mins} minutes`
+    const hours = Math.round(mins / 60)
+    return hours === 1 ? '1 hour' : `${hours} hours`
+}
+
+/** Local clock for "Next at 14:39". */
+export function formatClockTime(d: Date): string {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+/**
+ * Land receipt — short enough not to fight "0 drifting now".
+ * Full ``lastPassLabel`` stays on Preview / toast. Returns null when the
+ * last check found nobody drifting (healthy + watching).
+ */
+export function lastPassBrief(
+    run: Pick<ReconcileRun, 'scanned' | 'findings'>,
+): string | null {
+    if (run.scanned === 0) return 'no sources were due this tick'
+    if (run.findings === 0) return null
+    return (
+        `${run.scanned.toLocaleString()} checked · ` +
+        `last check found ${run.findings.toLocaleString()}`
+    )
+}
+
+export interface RepeatOffender {
+    dataSourceId: string
+    name: string
+    rebuilt: number
+    findings: number
+}
+
+/**
+ * Sources that kept showing up in the week of activity, ranked by rebuilds.
+ * A "repeat" needs at least two findings (or two rebuilds).
+ */
+export function rankRepeatOffenders(items: ReconcileActivityItem[]): RepeatOffender[] {
+    const map = new Map<string, RepeatOffender>()
+    for (const item of items) {
+        const cur = map.get(item.dataSourceId) ?? {
+            dataSourceId: item.dataSourceId,
+            name: item.name || item.dataSourceId,
+            rebuilt: 0,
+            findings: 0,
+        }
+        cur.findings += 1
+        if (item.outcome === 'rebuilt') cur.rebuilt += 1
+        if (item.name) cur.name = item.name
+        map.set(item.dataSourceId, cur)
+    }
+    return [...map.values()]
+        .filter(o => o.rebuilt >= 2 || o.findings >= 2)
+        .sort((a, b) => b.rebuilt - a.rebuilt || b.findings - a.findings || a.name.localeCompare(b.name))
+}
+
 export function policyWord(
     enabled: boolean | null | undefined,
     envEnabled: boolean,

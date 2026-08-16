@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { IntegrityPulse } from './IntegrityPulse'
-import { checkNowToast, itemsInWindow, lastDriftAt, lastPassLabel, parseDriftWindow, pickLastPassRun, sweepsHaveStopped } from './reconcileHealth'
+import { checkNowToast, itemsInWindow, lastDriftAt, lastPassBrief, lastPassLabel, parseDriftWindow, pickLastPassRun, rankRepeatOffenders, sweepsHaveStopped } from './reconcileHealth'
 import type { FreshnessSummary, ReconcileActivityItem, ReconcilePolicy, ReconcileRun } from '@/services/freshnessService'
 
 const POLICY: ReconcilePolicy = {
@@ -82,7 +82,7 @@ describe('pickLastPassRun', () => {
 })
 
 describe('IntegrityPulse clock', () => {
-    it('bases next-in on the last scanned pass, not an empty tick', () => {
+    it('bases next-at on the last scanned pass, not an empty tick', () => {
         const empty: ReconcileRun = {
             id: 'empty', mode: 'auto', scanned: 0, skipped: 0, seeded: 0,
             findings: 0, actions: 0, errors: 0, byReason: {}, bySkip: {},
@@ -110,8 +110,86 @@ describe('IntegrityPulse clock', () => {
                 activeFacet=""
             />,
         )
-        expect(screen.getByText(/next in 30m/)).toBeInTheDocument()
-        expect(screen.getByText(/last pass 5 of 10 checked · 5 in sync · 0 drifted/)).toBeInTheDocument()
+        expect(screen.getByText(/Checks/)).toBeInTheDocument()
+        expect(screen.getByText(/every 1 hour/)).toBeInTheDocument()
+        expect(screen.getByText(/\(in 30m\)/)).toBeInTheDocument()
+        // Healthy last check (0 drifted) is omitted from the land line.
+        expect(screen.queryByText(/last check found/)).not.toBeInTheDocument()
+        expect(screen.queryByText(/5 of 10 checked/)).not.toBeInTheDocument()
+    })
+
+    it('opens Cadence from the every-N control for admins', async () => {
+        const user = userEvent.setup()
+        const onCadence = vi.fn()
+        const pass: ReconcileRun = {
+            id: 'pass', mode: 'auto', scanned: 5, skipped: 3, seeded: 0,
+            findings: 2, actions: 1, errors: 0, byReason: {}, bySkip: { in_sync: 3 },
+            startedAt: new Date(Date.now() - 30 * 60_000).toISOString(),
+        }
+        render(
+            <IntegrityPulse
+                summary={SUMMARY}
+                policy={{ ...POLICY, checkIntervalSecs: 300 }}
+                latestRun={pass}
+                lastPassRun={pass}
+                isError={false}
+                isLoading={false}
+                isAdmin
+                onCheckNow={() => {}}
+                checking={false}
+                onPreview={() => {}}
+                onFacet={() => {}}
+                activeFacet=""
+                onOpenCadence={onCadence}
+            />,
+        )
+        expect(screen.getByText(/every 5 minutes/)).toBeInTheDocument()
+        expect(screen.getByText(/5 checked · last check found 2/)).toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: /every 5 minutes/i }))
+        expect(onCadence).toHaveBeenCalled()
+    })
+})
+
+describe('lastPassBrief / rankRepeatOffenders', () => {
+    it('omits a healthy last check and compresses a drifted one', () => {
+        expect(lastPassBrief({ scanned: 70, findings: 0 })).toBeNull()
+        expect(lastPassBrief({ scanned: 70, findings: 2 }))
+            .toBe('70 checked · last check found 2')
+        expect(lastPassBrief({ scanned: 0, findings: 0 }))
+            .toBe('no sources were due this tick')
+    })
+
+    it('ranks sources with repeat findings by rebuild count', () => {
+        const items: ReconcileActivityItem[] = [
+            {
+                runId: 'a', dataSourceId: 'ds-1', name: 'Physical Lineage 5',
+                mode: 'auto', outcome: 'rebuilt', evidence: {},
+            },
+            {
+                runId: 'b', dataSourceId: 'ds-1', name: 'Physical Lineage 5',
+                mode: 'auto', outcome: 'rebuilt', evidence: {},
+            },
+            {
+                runId: 'c', dataSourceId: 'ds-1', name: 'Physical Lineage 5',
+                mode: 'auto', outcome: 'rebuilt', evidence: {},
+            },
+            {
+                runId: 'd', dataSourceId: 'ds-2', name: 'Resync',
+                mode: 'manual', outcome: 'rebuilt', evidence: {},
+            },
+            {
+                runId: 'e', dataSourceId: 'ds-2', name: 'Resync',
+                mode: 'manual', outcome: 'held', evidence: {},
+            },
+            {
+                runId: 'f', dataSourceId: 'ds-3', name: 'Once',
+                mode: 'auto', outcome: 'rebuilt', evidence: {},
+            },
+        ]
+        const ranked = rankRepeatOffenders(items)
+        expect(ranked.map(r => r.dataSourceId)).toEqual(['ds-1', 'ds-2'])
+        expect(ranked[0].rebuilt).toBe(3)
+        expect(ranked[1].findings).toBe(2)
     })
 })
 
@@ -273,12 +351,13 @@ describe('IntegrityPulse', () => {
             />,
         )
         expect(screen.getByText('Sweeps have stopped')).toBeInTheDocument()
-        expect(screen.getByText(/2 drifting/)).toBeInTheDocument()
+        expect(screen.getByText(/2 drifting now/)).toBeInTheDocument()
         expect(screen.getByText(/1 held by the breaker/)).toBeInTheDocument()
-        expect(screen.getByText(/last pass 12 of 12 checked · 10 in sync · 2 drifted · 2 queued/)).toBeInTheDocument()
+        expect(screen.getByText(/12 checked · last check found 2/)).toBeInTheDocument()
+        expect(screen.queryByText(/10 in sync/)).not.toBeInTheDocument()
     })
 
-    it('omits last pass when no meaningful run exists', () => {
+    it('omits last-pass brief when no meaningful run exists', () => {
         const empty: ReconcileRun = {
             id: 'r0', mode: 'auto', scanned: 0, skipped: 0, seeded: 0,
             findings: 0, actions: 0, errors: 0, byReason: {}, bySkip: {},
@@ -300,7 +379,8 @@ describe('IntegrityPulse', () => {
                 activeFacet=""
             />,
         )
-        expect(screen.queryByText(/last pass/)).not.toBeInTheDocument()
+        expect(screen.queryByText(/last check found/)).not.toBeInTheDocument()
+        expect(screen.queryByText(/checked ·/)).not.toBeInTheDocument()
     })
 
     it('renders a recon error instead of looking healthy', () => {

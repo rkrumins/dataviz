@@ -1,8 +1,9 @@
 /**
  * OverlayIntegrity — the Freshness command center's identity card.
  *
- * Integrity Pulse owns the land view. Overnight history sits behind one
- * recency control on the pulse; Cadence and Reload live in the header.
+ * Integrity Pulse owns the land briefing. Overnight history sits behind one
+ * recency control. Cadence also opens from the schedule sentence; the header
+ * keeps the explicit Cadence / Refresh all / Reload controls.
  */
 import { useState } from 'react'
 import { Clock, RefreshCw, Zap } from 'lucide-react'
@@ -20,7 +21,8 @@ import {
 import { useQueryClient } from '@tanstack/react-query'
 import {
     ACTIVITY_HORIZON, DRIFT_WINDOWS, checkNowToast, itemsInWindow, lastDriftAt,
-    parseDriftWindow, pickLastPassRun, pickLatestRun, windowDriftCounts, windowPhrase,
+    parseDriftWindow, pickLastPassRun, pickLatestRun, rankRepeatOffenders,
+    windowDriftCounts, windowPhrase,
     type DriftWindow,
 } from './reconcileHealth'
 
@@ -55,6 +57,7 @@ export function OverlayIntegrity({
     const items = itemsInWindow(weekItems, driftWindow)
     const windowCounts = windowDriftCounts(items)
     const newestFinding = lastDriftAt(weekItems)
+    const offenders = rankRepeatOffenders(weekItems)
 
     const runNow = () => {
         reconcileNow.mutate({}, {
@@ -127,7 +130,8 @@ export function OverlayIntegrity({
                 <div className="min-w-0 flex-1">
                     <h2 className="text-sm font-semibold text-ink">Overlay integrity</h2>
                     <p className="text-[12px] text-ink-muted mt-0.5">
-                        Rolled-up lineage that a source reload can wipe.
+                        This page watches whether rolled-up lineage still matches each source.
+                        Watching rebuilds drift on a schedule. The table is what still needs a person.
                     </p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
@@ -178,10 +182,13 @@ export function OverlayIntegrity({
                     onPreview={() => setPreviewOpen(true)}
                     onFacet={onFacet}
                     activeFacet={activeFacet}
+                    onOpenCadence={isAdmin ? onOpenCadence : undefined}
                     lastDriftAt={newestFinding}
                     historyOpen={historyOpen}
                     onToggleHistory={() => setHistoryOpen(v => !v)}
                     historyPanel={historyPanel}
+                    offenders={offenders}
+                    onOpenSource={onOpenSource}
                 />
             </div>
 

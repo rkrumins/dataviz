@@ -1,21 +1,16 @@
 /**
- * FreshnessFilterBar — the sticky triage controls: a status segmented control
- * (mirroring the stat tiles), Provider and Workspace multi-selects, a debounced
- * name search, and removable active-filter chips with Clear all.
- *
- * Fully controlled: every facet lives in the URL (the parent owns the search
- * params), so this component only renders state and dispatches changes. The
- * status segment and the stat-band tiles drive the same ``status`` facet — the
- * segment exposes the four common states; the tiles add the rest.
+ * FreshnessFilterBar — the sticky triage controls: status facets, Provider /
+ * Workspace multi-selects, search, and cache coverage. Fully controlled via
+ * URL-owned state in the parent.
  */
 import { Server, Layers, Search, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { FilterDropdown, type FilterOption } from '@/components/explorer/FilterDropdown'
 import type { FailureFacet, StatusFacet } from './freshnessTriage'
 import { FAILURE_CATEGORY_LABEL } from './failureGuidance'
+import type { FreshnessSummary } from '@/services/freshnessService'
 
-/** The four states the segmented control exposes (the tiles cover pending /
- *  cache coverage). ``''`` = All. */
+/** The states the segmented control exposes. ``''`` = All. */
 const SEGMENTS: { key: StatusFacet; label: string }[] = [
     { key: '', label: 'All' },
     { key: 'needsAttention', label: 'Needs attention' },
@@ -49,6 +44,7 @@ interface Props {
     search: string
     onSearchChange: (v: string) => void
     onClearAll: () => void
+    summary?: FreshnessSummary | null
 }
 
 function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
@@ -71,7 +67,7 @@ export function FreshnessFilterBar({
     providerOptions, selectedProviders, onProvidersChange,
     workspaceOptions, selectedWorkspaces, onWorkspacesChange,
     status, onStatusChange, failureFacet = '', onFailureChange,
-    search, onSearchChange, onClearAll,
+    search, onSearchChange, onClearAll, summary,
 }: Props) {
     const providerLabel = (id: string) => providerOptions.find(o => o.id === id)?.label ?? id
     const workspaceLabel = (id: string) => workspaceOptions.find(o => o.id === id)?.label ?? id
@@ -79,10 +75,15 @@ export function FreshnessFilterBar({
     const hasFilters = selectedProviders.length > 0 || selectedWorkspaces.length > 0
         || status !== '' || failureFacet !== '' || search.trim() !== ''
 
+    const cached = summary?.cacheStamped
+    const total = summary?.total
+    const coverageLabel = cached != null && total != null && total > 0
+        ? `${cached.toLocaleString()}/${total.toLocaleString()} cached`
+        : null
+
     return (
         <div className="space-y-2.5">
             <div className="flex flex-wrap items-center gap-2">
-                {/* Status segmented control — mirrors the tiles */}
                 <div role="group" aria-label="Filter by status" className="inline-flex items-center rounded-lg border border-glass-border p-0.5">
                     {SEGMENTS.map(({ key, label }) => {
                         const active = status === key
@@ -126,6 +127,12 @@ export function FreshnessFilterBar({
                     emptyMessage="No workspaces"
                 />
 
+                {coverageLabel && (
+                    <span className="text-[11px] text-ink-muted tabular-nums">
+                        {coverageLabel}
+                    </span>
+                )}
+
                 <div className="relative ml-auto">
                     <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted/60 pointer-events-none" />
                     <input
@@ -140,7 +147,6 @@ export function FreshnessFilterBar({
                 </div>
             </div>
 
-            {/* Active-filter chips */}
             {hasFilters && (
                 <div className="flex flex-wrap items-center gap-1.5">
                     {status !== '' && (

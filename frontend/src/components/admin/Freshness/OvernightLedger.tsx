@@ -203,8 +203,6 @@ function EarlierTimeline({
     const [openRunId, setOpenRunId] = useState<string | null>(null)
     const n = groups.length
     const rebuilt = groups.reduce((sum, g) => sum + tallyCounts(g.items).rebuilt, 0)
-    const newest = groups[0]?.startedAt
-    const oldest = groups[groups.length - 1]?.startedAt
 
     return (
         <div>
@@ -230,21 +228,9 @@ function EarlierTimeline({
                         · {rebuilt.toLocaleString()} rebuilt
                     </span>
                 )}
-                {newest && oldest && (
-                    <span className="ml-auto text-[11px] text-ink-muted tabular-nums hidden sm:inline">
-                        <TimeStamp at={oldest} icon={null} colorByAge={false} />
-                        {newest !== oldest && (
-                            <>
-                                {' – '}
-                                <TimeStamp at={newest} icon={null} colorByAge={false} />
-                            </>
-                        )}
-                    </span>
-                )}
                 <ChevronDown
                     className={cn(
-                        'w-3.5 h-3.5 text-ink-muted shrink-0 transition-transform duration-200 motion-reduce:transition-none',
-                        !newest && 'ml-auto',
+                        'w-3.5 h-3.5 text-ink-muted shrink-0 ml-auto transition-transform duration-200 motion-reduce:transition-none',
                         !archiveOpen && '-rotate-90',
                     )}
                     aria-hidden="true"

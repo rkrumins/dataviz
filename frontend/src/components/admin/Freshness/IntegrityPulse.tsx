@@ -1,10 +1,10 @@
 /**
- * IntegrityPulse — the Freshness tab's identity: are the overlays intact,
- * is the sweep alive, and what still needs a person.
+ * IntegrityPulse — the Freshness tab's briefing: is watching alive, what is
+ * the schedule, does anyone need to act, and when did drift last happen.
  *
- * Distinctiveness is structure, not a new palette. The whole card goes
- * amber when sweeps have stopped, because a frozen verdict looks current.
- * Overnight history is one sentence here — the blotter opens on click.
+ * The whole card goes amber when sweeps have stopped, because a frozen
+ * verdict looks current. Overnight history is one sentence — the blotter
+ * opens on click. Cadence opens from the spoken "every N minutes".
  */
 import type { ReactNode } from 'react'
 import {
@@ -15,13 +15,16 @@ import { TimeStamp } from '@/components/ui/TimeStamp'
 import type { FreshnessSummary, ReconcilePolicy, ReconcileRun } from '@/services/freshnessService'
 import type { StatusFacet } from './freshnessTriage'
 import {
-    formatHorizon, lastPassLabel, nextCheckAt, policyWord, sweepsHaveStopped,
+    formatCheckInterval, formatClockTime, formatHorizon, lastPassBrief,
+    nextCheckAt, policyWord, sweepsHaveStopped,
+    type RepeatOffender,
 } from './reconcileHealth'
 
 export function IntegrityPulse({
     summary, policy, latestRun, lastPassRun, isError, isLoading, isAdmin,
-    onCheckNow, checking, onPreview, onFacet, activeFacet,
+    onCheckNow, checking, onPreview, onFacet, activeFacet, onOpenCadence,
     lastDriftAt: lastDriftIso, historyOpen, onToggleHistory, historyPanel,
+    offenders, onOpenSource,
 }: {
     summary: FreshnessSummary | null | undefined
     policy: ReconcilePolicy | undefined
@@ -37,12 +40,17 @@ export function IntegrityPulse({
     onPreview: () => void
     onFacet: (facet: StatusFacet) => void
     activeFacet: StatusFacet
+    /** Opens Cadence — only for admins; the schedule sentence is still visible. */
+    onOpenCadence?: () => void
     /** Newest finding in the week, or null when none. */
     lastDriftAt?: string | null
     historyOpen?: boolean
     onToggleHistory?: () => void
     /** Expanded blotter — rendered under the recency line when open. */
     historyPanel?: ReactNode
+    /** Repeat rebuilds this week — shown only while history is closed. */
+    offenders?: RepeatOffender[]
+    onOpenSource?: (id: string) => void
 }) {
     const enabled = policy?.enabled ?? policy?.envEnabled ?? true
     const interval = policy?.checkIntervalSecs ?? policy?.envCheckIntervalSecs ?? 3600
@@ -55,6 +63,11 @@ export function IntegrityPulse({
     const drifting = summary?.drifting ?? 0
     const suspended = summary?.suspended ?? 0
     const word = policyWord(policy?.enabled, policy?.envEnabled ?? true)
+    const intervalLabel = formatCheckInterval(interval)
+    const brief = lastPassRun ? lastPassBrief(lastPassRun) : null
+    const showOffenders = !historyOpen && (offenders?.length ?? 0) > 0
+    const topOffenders = (offenders ?? []).slice(0, 2)
+    const moreOffenders = Math.max(0, (offenders?.length ?? 0) - topOffenders.length)
 
     if (isError) {
         return (
@@ -76,28 +89,58 @@ export function IntegrityPulse({
                     : 'border-glass-border/80 bg-canvas',
             )}
         >
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
                 <ShieldCheck className={cn(
-                    'w-4 h-4 shrink-0',
+                    'w-4 h-4 shrink-0 mt-0.5',
                     stopped ? 'text-amber-600 dark:text-amber-400'
                         : enabled ? 'text-emerald-500' : 'text-slate-400',
                 )} />
-                <p className="text-sm font-semibold text-ink">
-                    {word}
-                    {passAt ? (
-                        <>
-                            <span className="font-normal text-ink-muted"> · last </span>
-                            <TimeStamp at={passAt} icon={null} colorByAge={false} />
-                        </>
+                <div className="min-w-0 flex-1 space-y-1">
+                    <p className="text-sm font-semibold text-ink">{word}</p>
+                    {enabled ? (
+                        <p className="text-[13px] text-ink-secondary leading-snug">
+                            Checks{' '}
+                            {onOpenCadence ? (
+                                <button
+                                    type="button"
+                                    onClick={onOpenCadence}
+                                    className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 rounded"
+                                >
+                                    every {intervalLabel}
+                                </button>
+                            ) : (
+                                <span className="font-semibold text-ink">every {intervalLabel}</span>
+                            )}
+                            .
+                            {passAt ? (
+                                <>
+                                    {' '}Last check{' '}
+                                    <TimeStamp at={passAt} icon={null} colorByAge={false} className="text-[13px] text-ink-secondary" />
+                                    .
+                                </>
+                            ) : (
+                                <> Not yet run.</>
+                            )}
+                            {next && nextMs != null && nextMs > 0 && !stopped && (
+                                <>
+                                    {' '}Next at {formatClockTime(next)}{' '}
+                                    <span className="text-ink-muted">(in {formatHorizon(nextMs)})</span>.
+                                </>
+                            )}
+                        </p>
                     ) : (
-                        <span className="font-normal text-ink-muted"> · not yet run</span>
+                        <p className="text-[13px] text-ink-secondary leading-snug">
+                            Not watching. Drift is still detected; nothing is rebuilt automatically.
+                            {passAt && (
+                                <>
+                                    {' '}Last check{' '}
+                                    <TimeStamp at={passAt} icon={null} colorByAge={false} className="text-[13px] text-ink-secondary" />
+                                    .
+                                </>
+                            )}
+                        </p>
                     )}
-                    {enabled && nextMs != null && nextMs > 0 && !stopped && (
-                        <span className="font-normal text-ink-muted">
-                            {' '}· next in {formatHorizon(nextMs)}
-                        </span>
-                    )}
-                </p>
+                </div>
 
                 {stopped && (
                     <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30">
@@ -146,7 +189,7 @@ export function IntegrityPulse({
                         activeFacet === 'drifting' && 'underline',
                     )}
                 >
-                    {drifting.toLocaleString()} drifting
+                    {drifting.toLocaleString()} drifting now
                 </button>
                 <button
                     type="button"
@@ -160,10 +203,8 @@ export function IntegrityPulse({
                 >
                     {suspended.toLocaleString()} held by the breaker
                 </button>
-                {lastPassRun && (
-                    <span className="text-ink-muted tabular-nums">
-                        last pass {lastPassLabel(lastPassRun, summary?.total)}
-                    </span>
+                {brief && (
+                    <span className="text-ink-muted tabular-nums">{brief}</span>
                 )}
             </div>
 
@@ -197,6 +238,37 @@ export function IntegrityPulse({
                             aria-hidden="true"
                         />
                     </button>
+                    {showOffenders && (
+                        <p className="mt-1.5 text-[12px] text-ink-muted leading-snug px-1">
+                            {topOffenders.map((o, i) => (
+                                <span key={o.dataSourceId}>
+                                    {i > 0 && <span className="text-ink-muted/50"> · </span>}
+                                    <button
+                                        type="button"
+                                        onClick={() => onOpenSource?.(o.dataSourceId)}
+                                        className="font-semibold text-ink hover:text-indigo-600 dark:hover:text-indigo-400 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 rounded"
+                                    >
+                                        {o.name}
+                                    </button>
+                                    {i === 0 && o.rebuilt >= 2 && (
+                                        <span> rebuilt {o.rebuilt.toLocaleString()} times this week</span>
+                                    )}
+                                </span>
+                            ))}
+                            {moreOffenders > 0 && onToggleHistory && (
+                                <>
+                                    <span className="text-ink-muted/50"> · </span>
+                                    <button
+                                        type="button"
+                                        onClick={onToggleHistory}
+                                        className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 rounded"
+                                    >
+                                        {moreOffenders.toLocaleString()} more
+                                    </button>
+                                </>
+                            )}
+                        </p>
+                    )}
                     {historyOpen && historyPanel != null && (
                         <div
                             id="drift-history-panel"
