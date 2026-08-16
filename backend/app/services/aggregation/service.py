@@ -2248,6 +2248,7 @@ class AggregationService:
             else "default"
         )
         observed_agg, stats_as_of = await _observed_overlay(session, ds.id)
+        versioned = await _platform_mastered_ids()
 
         return FreshnessDoc(
             **_freshness_row_kwargs(
@@ -2259,6 +2260,7 @@ class AggregationService:
                 reconcile_enabled_global=cadence.reconcile_enabled,
                 last_failure_reason=last_failure_reason,
                 last_failure_category=last_failure_category,
+                platform_mastered=ds.id in versioned,
             ),
             lkg_count=lkg_count,
             lkg_oldest_age_secs=lkg_oldest_age,
@@ -2751,6 +2753,19 @@ def _rebuild_cooldown_until(
     return until.isoformat()
 
 
+async def _platform_mastered_ids() -> frozenset:
+    """Live versioned-graph set. Empty on a cold lookup failure so a
+    freshness read never 500s because graphver is down."""
+    try:
+        from backend.app.services.versioned_sources import (
+            versioned_data_source_ids,
+        )
+        return await versioned_data_source_ids()
+    except Exception as exc:
+        logger.warning("versioned-source lookup failed for freshness: %s", exc)
+        return frozenset()
+
+
 def _freshness_row_kwargs(
     ds, *, provider_name, signals, running_job_id, last_event, drifted=None,
     cooldown_interval_secs: int = AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
@@ -2758,6 +2773,7 @@ def _freshness_row_kwargs(
     reconcile_enabled_global: Optional[bool] = None,
     last_failure_reason: Optional[str] = None,
     last_failure_category: Optional[str] = None,
+    platform_mastered: bool = False,
 ) -> dict:
     """Map one workspace_data_sources row + its cache signals into the
     snake_case kwargs shared by ``FreshnessRow`` and ``FreshnessDoc``.
@@ -2803,6 +2819,7 @@ def _freshness_row_kwargs(
         last_reconcile_mode=st.get("last_reconcile_mode"),
         last_failure_reason=last_failure_reason,
         last_failure_category=last_failure_category,
+        platform_mastered=platform_mastered or st.get("drift_state") == "managed",
     )
 
 
@@ -3101,6 +3118,7 @@ async def assemble_fleet_freshness(
         ds.id for ds in ds_list if ds.aggregation_status == "failed"
     ]
     failures = await _latest_failure_map(session, failed_ids)
+    versioned = await _platform_mastered_ids()
 
     rows = [
         FreshnessRow(**_freshness_row_kwargs(
@@ -3119,6 +3137,7 @@ async def assemble_fleet_freshness(
             reconcile_enabled_global=cadence.reconcile_enabled,
             last_failure_reason=(failures.get(ds.id) or {}).get("reason"),
             last_failure_category=(failures.get(ds.id) or {}).get("category"),
+            platform_mastered=ds.id in versioned,
         ))
         for ds in ds_list
     ]

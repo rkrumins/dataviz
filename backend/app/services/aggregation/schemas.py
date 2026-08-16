@@ -575,6 +575,10 @@ class FreshnessRow(BaseModel):
     # second round-trip. Best-effort; never raises.
     last_failure_reason: Optional[str] = Field(None, alias="lastFailureReason")
     last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
+    # True when a live graphver.graphs row exists — this source is mastered
+    # here. Distinct from drift_state == managed, which is only stamped after
+    # a reconcile check. Fail-open False when the versioned lookup is down.
+    platform_mastered: bool = Field(False, alias="platformMastered")
 
     class Config:
         populate_by_name = True

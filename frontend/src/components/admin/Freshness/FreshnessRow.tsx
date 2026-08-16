@@ -19,7 +19,7 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Link } from 'react-router-dom'
 import {
-    Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Clock, Database, Eraser, Loader2,
+    Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Clock, Database, Eraser, GitBranch, Loader2,
     Minus, MoreHorizontal, RefreshCw, RotateCcw, Sparkles, StopCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -30,7 +30,7 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { PHASE_LABELS, PhaseStepper, jobHistoryPath, phaseLabel } from '../job-history/shared'
-import { freshnessState, isDrifting, isReconcileSuspended } from './freshnessTriage'
+import { freshnessState, isDrifting, isPlatformMastered, isReconcileSuspended } from './freshnessTriage'
 import type { FreshnessState } from './freshnessTriage'
 import {
     AutoReconcileOffBadge, DriftStateBadge,
@@ -84,6 +84,28 @@ const STATUS_STYLE: Record<string, { label: string; tone: string; Icon: typeof C
     pending: { label: 'Pending', tone: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20', Icon: Clock },
     failed: { label: 'Failed', tone: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20', Icon: AlertTriangle },
     skipped: { label: 'Skipped', tone: 'bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20', Icon: Minus },
+}
+
+export function MasteryTag({ mastered }: { mastered: boolean }) {
+    return mastered
+        ? (
+            <span
+                title="This graph is mastered here and stored in Postgres. Version control maintains its rollups on every publish."
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold shrink-0 bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20"
+            >
+                <GitBranch className="w-3 h-3 shrink-0" />
+                Versioned
+            </span>
+        )
+        : (
+            <span
+                title="This graph is mastered by an external system. Reconciliation watches its overlay for drift."
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold shrink-0 bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20"
+            >
+                <Database className="w-3 h-3 shrink-0" />
+                External
+            </span>
+        )
 }
 
 export function CacheStatusPill({ cached }: { cached: boolean }) {
@@ -439,8 +461,11 @@ export function FreshnessRow({
                     onClick={() => onOpenDrawer(row.dataSourceId)}
                     className="text-left group outline-none min-w-0"
                 >
-                    <span className="text-sm font-semibold text-ink group-hover:text-indigo-600 dark:group-hover:text-indigo-400 group-focus-visible:underline">
-                        {row.name || row.dataSourceId}
+                    <span className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-sm font-semibold text-ink truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 group-focus-visible:underline">
+                            {row.name || row.dataSourceId}
+                        </span>
+                        <MasteryTag mastered={isPlatformMastered(row)} />
                     </span>
                     <span className="block text-[11px] text-ink-muted">
                         {row.providerName || 'Unknown provider'}

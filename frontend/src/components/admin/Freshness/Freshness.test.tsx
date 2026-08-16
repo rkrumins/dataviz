@@ -66,7 +66,7 @@ import { Freshness } from './index'
 import { FreshnessRow, primaryAction, overflowActions } from './FreshnessRow'
 import { FreshnessDrawer } from './FreshnessDrawer'
 import {
-    compareSeverity, freshnessState, isDrifting, needsAttention, severityRank,
+    compareSeverity, freshnessState, isDrifting, isPlatformMastered, needsAttention, severityRank,
 } from './freshnessTriage'
 import type { FreshnessRow as FreshnessRowData } from '@/services/freshnessService'
 
@@ -156,6 +156,22 @@ describe('Freshness cockpit', () => {
         // not "Recomputing" (which now means a job is genuinely in flight).
         expect(screen.getAllByText('Queued').length).toBeGreaterThan(0)
         expect(screen.queryByText('Recomputing')).not.toBeInTheDocument()
+        expect(screen.getAllByText('External').length).toBeGreaterThan(0)
+        expect(screen.queryByText('Versioned')).not.toBeInTheDocument()
+    })
+
+    it('tags a version-controlled source in the Source column', async () => {
+        listFleet.mockResolvedValue({
+            ...fleet,
+            rows: [
+                { ...fleet.rows[0], name: 'Versioned Graph', platformMastered: true },
+                { ...fleet.rows[1], name: 'External Graph', platformMastered: false },
+            ],
+        })
+        renderTab()
+        await waitFor(() => expect(screen.getByText('Versioned Graph')).toBeInTheDocument())
+        expect(screen.getByText('Versioned')).toBeInTheDocument()
+        expect(screen.getByText('External')).toBeInTheDocument()
     })
 
     it('fires read-caches immediately from the row action menu', async () => {
@@ -365,6 +381,9 @@ describe('Freshness cockpit', () => {
         expect(isDrifting(managed)).toBe(false)
         expect(needsAttention(managed)).toBe(false)
         expect(severityRank(managed)).toBe(severityRank(ready))
+        expect(isPlatformMastered(managed)).toBe(true)
+        expect(isPlatformMastered(mk({ platformMastered: true, driftState: 'inSync' }))).toBe(true)
+        expect(isPlatformMastered(mk({ platformMastered: false, driftState: 'managed' }))).toBe(false)
 
         const suspended = mk({ name: 'suspended', aggregationStatus: 'ready', driftState: 'suspended' })
         expect(needsAttention(suspended)).toBe(true)

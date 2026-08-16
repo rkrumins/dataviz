@@ -29,7 +29,8 @@ import { DRIFT_SPEC, DriftStateBadge, REASON_LABEL, type DriftState } from './Dr
 import { OverlayIntegrityMeter } from './OverlayIntegrityMeter'
 import { EvidencePair, reconcileEvidenceRows } from './reconcileEvidence'
 import { useActiveJobs } from './useActiveJobs'
-import { AggStatusPill, FreshnessBadges, timeUntil } from './FreshnessRow'
+import { AggStatusPill, FreshnessBadges, MasteryTag, timeUntil } from './FreshnessRow'
+import { isPlatformMastered } from './freshnessTriage'
 import { activityFromEvent, recentActivityEvents } from './lastActivity'
 import type {
     FailureCategory, FreshnessDoc, RefreshEventSummary,
@@ -784,6 +785,7 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                     {/* Status + badges */}
                                     <div className="flex flex-wrap items-center gap-2">
                                         <AggStatusPill status={doc.aggregationStatus} />
+                                        <MasteryTag mastered={isPlatformMastered(doc)} />
                                         <FreshnessBadges row={doc} job={byDataSource.get(dsId ?? '')} />
                                     </div>
 

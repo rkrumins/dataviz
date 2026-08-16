@@ -38,6 +38,14 @@ export function isReconcileSuspended(row: FreshnessRow): boolean {
     return row.driftState === 'suspended'
 }
 
+/** Mastered here (live versioned graph), not an external provider graph.
+ *  Prefer the fleet ``platformMastered`` bit; fall back to the sweep stamp. */
+export function isPlatformMastered(row: FreshnessRow): boolean {
+    if (row.platformMastered === true) return true
+    if (row.platformMastered === false) return false
+    return row.driftState === 'managed'
+}
+
 /** A source that has never produced an aggregation: no state row, or an
  *  explicit ``none``/``skipped``. Mirrors the summary's ``notBuilt`` count. */
 export function isNeverBuilt(row: FreshnessRow): boolean {

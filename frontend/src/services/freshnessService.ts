@@ -89,6 +89,8 @@ export interface FreshnessRow {
      *  name the cause without opening the drawer. */
     lastFailureReason?: string | null
     lastFailureCategory?: FailureCategory | null
+    /** True when a live versioned graph exists — mastered here, not external. */
+    platformMastered?: boolean | null
 }
 
 export interface FreshnessDoc extends FreshnessRow {
