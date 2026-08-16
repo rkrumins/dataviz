@@ -722,6 +722,7 @@ describe('Freshness cockpit', () => {
 
         await user.click(await screen.findByRole('button', { name: /probe now/i }))
         expect(await screen.findByText(/live graph does not match the last aggregation/i)).toBeInTheDocument()
+        expect(screen.getByText(/counts were refreshed/i)).toBeInTheDocument()
         expect(screen.getByRole('button', { name: /rebuild lineage now/i })).toBeInTheDocument()
         expect(screen.getByRole('button', { name: /reconcile this source/i })).toBeInTheDocument()
 

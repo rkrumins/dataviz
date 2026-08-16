@@ -361,7 +361,10 @@ class ReconciliationSweeper:
                 if (
                     data_source_ids is None
                     and not full_scan
-                    and not self._is_due(state, interval)
+                    and not self._is_due(
+                        state, interval,
+                        stats_updated=ctx_row.get("stats_updated"),
+                    )
                 ):
                     continue
 
@@ -546,18 +549,41 @@ class ReconciliationSweeper:
                 fp, observed_agg, raw_edges = raw_fingerprint_from_counts(
                     entity, edges,
                 )
+                node_count = int(raw.get("nodeCount") or 0)
+                edge_count = int(raw.get("edgeCount") or 0)
                 entry = ctx.setdefault(ds_id, {})
                 entry.update(
                     has_stats=True,
                     stats_age_secs=0,
                     stats_as_of=_now_iso(),
                     stats_updated=datetime.now(timezone.utc),
-                    node_count=int(raw.get("nodeCount") or 0),
+                    node_count=node_count,
                     observed_aggregated=observed_agg,
                     observed_raw_fingerprint=fp,
                     observed_raw_edge_total=raw_edges,
                     live_observed=True,
                 )
+                # Persist so Check now and the idle poll share one row.
+                # Failure leaves the in-memory observation (evaluate still runs).
+                try:
+                    from backend.app.db.repositories.stats_repo import (
+                        upsert_data_source_stats_counts,
+                    )
+                    async with self._session_factory() as session:
+                        await upsert_data_source_stats_counts(
+                            session,
+                            ds_id=ds_id,
+                            node_count=node_count,
+                            edge_count=edge_count,
+                            entity_type_counts=json.dumps(entity),
+                            edge_type_counts=json.dumps(edges),
+                        )
+                        await session.commit()
+                except Exception as exc:
+                    logger.debug(
+                        "reconcile sweep: live observe persist failed for %s: %s",
+                        ds_id, exc,
+                    )
 
         await asyncio.gather(*[
             _one(ds_id, ws_id) for ds_id, ws_id in targets
@@ -582,7 +608,13 @@ class ReconciliationSweeper:
         self, session, data_source_ids, global_interval, *, full_scan=False,
     ):
         """Bounded, oldest-checked-first. Explicit ids and operator
-        manual/preview passes bypass due-ness; auto ticks do not."""
+        manual/preview passes bypass due-ness; auto ticks do not.
+
+        Auto also loads sources whose stats row is newer than the last
+        verdict — a counts poll (or Probe write-back) must not wait for
+        the check interval before evaluate runs.
+        """
+        from backend.app.db.models import DataSourceStatsORM
         from .models import AggregationDataSourceStateORM as S
 
         stmt = select(S)
@@ -600,12 +632,27 @@ class ReconciliationSweeper:
             cutoff = (
                 datetime.now(timezone.utc) - timedelta(seconds=interval)
             ).isoformat()
-            stmt = stmt.where(
-                (S.last_reconcile_checked_at.is_(None))
-                | (S.last_reconcile_checked_at < cutoff)
-            ).order_by(
-                S.last_reconcile_checked_at.asc().nullsfirst()
-            ).limit(_SCAN_CAP)
+            stmt = (
+                select(S)
+                .outerjoin(
+                    DataSourceStatsORM,
+                    DataSourceStatsORM.data_source_id == S.data_source_id,
+                )
+                .where(
+                    (S.last_reconcile_checked_at.is_(None))
+                    | (S.last_reconcile_checked_at < cutoff)
+                    | (
+                        DataSourceStatsORM.updated_at.isnot(None)
+                        & S.last_reconcile_checked_at.isnot(None)
+                        & (
+                            DataSourceStatsORM.updated_at
+                            > S.last_reconcile_checked_at
+                        )
+                    )
+                )
+                .order_by(S.last_reconcile_checked_at.asc().nullsfirst())
+                .limit(_SCAN_CAP)
+            )
         return list((await session.execute(stmt)).scalars().all())
 
     async def _batch_context(self, session, ds_ids, versioned) -> Dict[str, Dict]:
@@ -839,11 +886,15 @@ class ReconciliationSweeper:
         )
 
     @staticmethod
-    def _is_due(state, interval_secs: int) -> bool:
+    def _is_due(state, interval_secs: int, *, stats_updated=None) -> bool:
+        """Due when the check interval elapsed, or when observation moved
+        after the last verdict (counts poll / Probe / Check now write)."""
         if interval_secs <= 0:
             return True
         last = _parse_iso(state.last_reconcile_checked_at)
         if last is None:
+            return True
+        if stats_updated is not None and stats_updated > last:
             return True
         elapsed = (datetime.now(timezone.utc) - last).total_seconds()
         return elapsed >= interval_secs

@@ -2237,7 +2237,7 @@ class AggregationService:
 
         # Reconciliation detail. The check-cadence trio mirrors the rebuild
         # trio above; ``observed`` comes from the stats service's cached
-        # counts, so this stays a pure DB read (no provider call).
+        # counts (refreshed above when Probe wrote the counts facet).
         recon_override = state_row.get("reconcile_check_interval_secs")
         recon_interval = resolve_reconcile_interval(
             recon_override, cadence.reconcile_check_interval_secs,
@@ -2299,7 +2299,13 @@ class AggregationService:
         """ONE ``get_schema_stats`` probe → ``(live_fingerprint,
         node_count, edge_count)``. Bounded by ``SCHEDULER_DRIFT_CHECK_TIMEOUT``;
         any failure or timeout degrades to ``(None, None, None)`` — the
-        freshness read must never fail because a provider is slow or down."""
+        freshness read must never fail because a provider is slow or down.
+
+        On success, also writes the cheap counts facet into
+        ``data_source_stats`` so the idle poll, auto sweeper, and meter
+        share the observation Probe already paid for. Write failure never
+        fails the doc.
+        """
         from .fingerprint import fingerprint_from_stats
 
         timeout = float(
@@ -2321,11 +2327,53 @@ class AggregationService:
                 ds_id, exc,
             )
             return (None, None, None)
+
+        await self._persist_probe_counts(ds_id, stats, session)
         return (
             fingerprint_from_stats(stats),
             getattr(stats, "total_nodes", None),
             getattr(stats, "total_edges", None),
         )
+
+    async def _persist_probe_counts(
+        self, ds_id: str, stats: Any, request_session: AsyncSession,
+    ) -> None:
+        """Best-effort counts-facet write from a successful Probe."""
+        from backend.app.db.repositories.stats_repo import (
+            upsert_data_source_stats_counts,
+        )
+
+        try:
+            entity = {
+                str(s.id): int(s.count)
+                for s in (getattr(stats, "entity_type_stats", None) or [])
+            }
+            edges = {
+                str(s.id): int(s.count)
+                for s in (getattr(stats, "edge_type_stats", None) or [])
+            }
+            kwargs = dict(
+                ds_id=ds_id,
+                node_count=int(getattr(stats, "total_nodes", 0) or 0),
+                edge_count=int(getattr(stats, "total_edges", 0) or 0),
+                entity_type_counts=json.dumps(entity),
+                edge_type_counts=json.dumps(edges),
+            )
+            factory = self._session_factory
+            if factory is not None:
+                async with factory() as session:
+                    await upsert_data_source_stats_counts(session, **kwargs)
+                    await session.commit()
+            else:
+                await upsert_data_source_stats_counts(request_session, **kwargs)
+                flush = getattr(request_session, "flush", None)
+                if flush is not None:
+                    await flush()
+        except Exception as exc:
+            logger.warning(
+                "assemble_source_freshness: probe counts write failed for %s: %s",
+                ds_id, exc,
+            )
 
     # ── Startup Recovery (CRIT-4: lives here, NOT on Worker) ─────────
 

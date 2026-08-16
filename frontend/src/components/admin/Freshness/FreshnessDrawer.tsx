@@ -6,9 +6,10 @@
  * re-fetches with ``probe=true`` — one bounded provider call — and reveals the
  * live fingerprint/counts and the drift verdict.
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
     Activity, AlertTriangle, ArrowUpRight, CheckCircle2, ChevronRight, Clock, Database, Eraser, ShieldCheck,
@@ -23,6 +24,7 @@ import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { jobHistoryPath } from '../job-history/shared'
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
 import {
+    FRESHNESS_KEYS,
     useReconcileNow, useRefreshSource, useSetFreshnessSettings, useSourceFreshness,
 } from './useFreshness'
 import { checkNowToast } from './reconcileHealth'
@@ -699,6 +701,14 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
     const activityFeed = recentActivityEvents(doc?.events ?? [], doc?.lastCheckedAt)
     const probing = probe && isFetching
     const { byDataSource } = useActiveJobs()
+    const qc = useQueryClient()
+
+    // Probe writes the counts facet — fleet meter + recon due-ness share it.
+    useEffect(() => {
+        if (!probe || probing || error || !doc?.liveFingerprint) return
+        void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
+        void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.reconciliation })
+    }, [probe, probing, error, doc?.liveFingerprint, qc])
 
     const { showToast } = useToast()
     const canManage = usePermission('workspace:datasource:manage', doc?.workspaceId ?? undefined)
@@ -898,7 +908,7 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                                         <div className="flex items-start gap-1.5 text-xs font-semibold text-amber-600 dark:text-amber-400">
                                                             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                                                             <span>
-                                                                The live graph does not match the last aggregation. Auto rebuild runs only after a Check now / sweep that sees current counts — Probe does not queue one.
+                                                                The live graph does not match the last aggregation. Counts were refreshed — if Watching is on, overlay integrity will evaluate and rebuild on the next sweep (within a minute). Probe does not queue a rebuild itself.
                                                             </span>
                                                         </div>
                                                         <div className="flex flex-wrap items-center gap-2">
@@ -928,8 +938,13 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                                     </div>
                                                 )}
                                                 {doc.drifted === false && (
-                                                    <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
-                                                        <CheckCircle2 className="w-3.5 h-3.5" /> In sync — the live fingerprint matches the last aggregation.
+                                                    <div className="space-y-1.5">
+                                                        <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                                                            <CheckCircle2 className="w-3.5 h-3.5" /> In sync — the live fingerprint matches the last aggregation.
+                                                        </div>
+                                                        <p className="text-[11px] text-ink-muted">
+                                                            Counts were refreshed for this source.
+                                                        </p>
                                                     </div>
                                                 )}
                                                 <div className="grid grid-cols-2 gap-x-4 gap-y-2 pt-1">

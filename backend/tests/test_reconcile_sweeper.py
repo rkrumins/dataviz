@@ -698,6 +698,80 @@ async def test_a_source_checked_recently_is_not_re_evaluated(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_auto_due_when_stats_newer_than_last_check_queues_raw_drift(
+    session_factory,
+):
+    """Closed loop: a counts write after the last verdict makes auto due —
+    no Probe / Check now required."""
+    await _seed(
+        session_factory,
+        checked_at=_ago(seconds=300),
+        stats_age_secs=60,
+        raw_fingerprint="aaa",
+        entity_counts={"Table": 100},
+        edge_counts={"FLOWS_TO": 200, "AGGREGATED": 500},
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.scanned == 1
+    assert result.findings == 1
+    assert result.by_reason == {"raw_drift": 1}
+    assert result.actions == 1
+    assert (await _state(session_factory)).drift_state == "drifting"
+    assert len(svc.signals) == 1
+
+
+@pytest.mark.asyncio
+async def test_recent_check_with_unchanged_stats_is_not_due(session_factory):
+    """Stats older than the last check must not wake a source early."""
+    await _seed(
+        session_factory,
+        checked_at=_ago(seconds=60),
+        stats_age_secs=300,
+        raw_fingerprint="aaa",
+        entity_counts={"Table": 100},
+        edge_counts={"FLOWS_TO": 200, "AGGREGATED": 500},
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert result.scanned == 0
+    assert svc.signals == []
+
+
+@pytest.mark.asyncio
+async def test_manual_live_observe_persists_counts(session_factory, monkeypatch):
+    """Operator live observe writes the counts facet for other consumers."""
+    await _seed(session_factory, checked_at=_ago(seconds=30))
+
+    class _Prov:
+        async def get_stats(self, bypass_cache=True):
+            return {
+                "nodeCount": 99,
+                "edgeCount": 700,
+                "entityTypeCounts": {"Table": 99},
+                "edgeTypeCounts": {"FLOWS_TO": 200, "AGGREGATED": 500},
+            }
+
+    class _Reg:
+        async def get_provider_for_workspace(self, *a, **k):
+            return _Prov()
+
+    class _Svc(_FakeService):
+        _registry = _Reg()
+
+    svc = _Svc()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep(
+        mode="manual",
+    )
+    assert result is not None
+    async with session_factory() as s:
+        row = await s.get(DataSourceStatsORM, "ds_1")
+        assert row is not None
+        assert row.node_count == 99
+        assert json.loads(row.entity_type_counts) == {"Table": 99}
+
+@pytest.mark.asyncio
 async def test_manual_sweep_re_evaluates_a_recently_checked_source(session_factory):
     """Check now is a full-fleet pass, not an early hourly tick."""
     await _seed(

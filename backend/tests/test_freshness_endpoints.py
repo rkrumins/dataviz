@@ -846,6 +846,56 @@ def test_source_probe_failure_degrades_without_raising(monkeypatch):
     assert doc.drifted is None  # probe failed → unknown, not a crash
 
 
+def test_source_probe_persists_counts_facet(monkeypatch):
+    """Probe writes the counts it already fetched — does not stamp drift_state."""
+    writes: list = []
+
+    async def _fake_upsert(session, **kw):
+        writes.append(kw)
+
+    monkeypatch.setattr(
+        "backend.app.db.repositories.stats_repo.upsert_data_source_stats_counts",
+        _fake_upsert,
+    )
+    stats = _stats(nodes=42, edges=11)
+    provider = _OneShotProvider(stats)
+    svc = _svc(_FakeRegistry(provider))
+    _patch_source_collaborators(monkeypatch)
+    session = _FakeSession([_FakeResult(rows=[(_ds(fp="DIFFERENT"), "Prov A")])])
+
+    doc = _run(svc.assemble_source_freshness("ds-1", session, probe=True))
+    assert doc.drifted is True
+    assert len(writes) == 1
+    assert writes[0]["ds_id"] == "ds-1"
+    assert writes[0]["node_count"] == 42
+    assert writes[0]["edge_count"] == 11
+    assert '"Entity"' in writes[0]["entity_type_counts"]
+    # Probe must not mutate drift_state on the aggregation state row.
+    assert not any("drift_state" in str(w) for w in writes)
+
+
+def test_source_probe_failure_does_not_write_counts(monkeypatch):
+    writes: list = []
+
+    async def _fake_upsert(session, **kw):
+        writes.append(kw)
+
+    monkeypatch.setattr(
+        "backend.app.db.repositories.stats_repo.upsert_data_source_stats_counts",
+        _fake_upsert,
+    )
+
+    class _Boom:
+        async def get_schema_stats(self):
+            raise RuntimeError("provider down")
+
+    svc = _svc(_FakeRegistry(_Boom()))
+    _patch_source_collaborators(monkeypatch)
+    session = _FakeSession([_FakeResult(rows=[(_ds(), "Prov A")])])
+    _run(svc.assemble_source_freshness("ds-1", session, probe=True))
+    assert writes == []
+
+
 # ── classify_failure: category classifier, order matters (H1, spec §9c) ─
 
 
