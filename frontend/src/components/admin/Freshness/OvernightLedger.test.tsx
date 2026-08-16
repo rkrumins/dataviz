@@ -35,7 +35,7 @@ describe('groupLedgerBySweep', () => {
 })
 
 describe('OvernightLedger', () => {
-    it('groups by sweep and links a rebuilt finding to its job', async () => {
+    it('always shows the last pass as a report and links a rebuilt finding to its job', async () => {
         const user = userEvent.setup()
         const onOpen = vi.fn()
         render(
@@ -54,6 +54,7 @@ describe('OvernightLedger', () => {
                 />
             </MemoryRouter>,
         )
+        expect(screen.getByRole('heading', { name: 'Last pass' })).toBeInTheDocument()
         expect(screen.getByText('Sol Xlarge')).toBeInTheDocument()
         expect(screen.getByText('Payments')).toBeInTheDocument()
         expect(screen.getByText('Held (Cap)')).toBeInTheDocument()
@@ -62,6 +63,35 @@ describe('OvernightLedger', () => {
         )
         await user.click(screen.getByText('Sol Xlarge'))
         expect(onOpen).toHaveBeenCalledWith('ds-1')
+    })
+
+    it('keeps earlier passes behind one control and does not hide the last pass', async () => {
+        const user = userEvent.setup()
+        render(
+            <MemoryRouter>
+                <OvernightLedger
+                    items={[
+                        item({}),
+                        item({
+                            runId: 'rcn_old',
+                            runStartedAt: '2026-08-15T00:00:00Z',
+                            dataSourceId: 'ds-old',
+                            name: 'Older source',
+                        }),
+                    ]}
+                    isError={false}
+                    isLoading={false}
+                    onOpenSource={() => {}}
+                />
+            </MemoryRouter>,
+        )
+        expect(screen.getByText('Sol Xlarge')).toBeInTheDocument()
+        expect(screen.queryByText('Older source')).not.toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: /1 earlier pass/i }))
+        expect(screen.getByText('Sol Xlarge')).toBeInTheDocument()
+        expect(screen.queryByText('Older source')).not.toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: /^Earlier pass/ }))
+        expect(screen.getByText('Older source')).toBeInTheDocument()
     })
 
     it('uses the horizon empty copy', () => {

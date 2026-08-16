@@ -6,6 +6,7 @@
  * own staleness rule. One missed sweep is a hiccup; three is an outage.
  */
 import type { ReconcileActivityItem, ReconcileRun } from '@/services/freshnessService'
+import { toUtcDate } from '@/lib/timeAgo'
 
 /** Matches the sweeper ``_SCAN_CAP`` — a manual pass will not exceed this. */
 export const RECONCILE_SCAN_CAP = 200
@@ -34,6 +35,52 @@ export function parseDriftWindow(raw: string | null | undefined): DriftWindow {
 
 export function windowPhrase(window: DriftWindow): string {
     return WINDOW_PHRASE[window]
+}
+
+/** Always fetch the week; chips filter client-side so recency never follows fwin. */
+export const ACTIVITY_HORIZON: DriftWindow = '7d'
+
+const WINDOW_MS: Record<DriftWindow, number> = {
+    '1h': 1 * 60 * 60 * 1000,
+    '3h': 3 * 60 * 60 * 1000,
+    '12h': 12 * 60 * 60 * 1000,
+    '24h': 24 * 60 * 60 * 1000,
+    '7d': 7 * 24 * 60 * 60 * 1000,
+}
+
+/** Finding instant for recency — prefer the event ts, else the sweep start. */
+export function findingAt(item: ReconcileActivityItem): string | null {
+    return item.ts ?? item.runStartedAt ?? null
+}
+
+/** Newest finding across the activity payload, or null when the week is empty. */
+export function lastDriftAt(items: ReconcileActivityItem[]): string | null {
+    let newest: string | null = null
+    let newestMs = -Infinity
+    for (const item of items) {
+        const at = findingAt(item)
+        const d = toUtcDate(at)
+        if (!d) continue
+        const ms = d.getTime()
+        if (ms > newestMs) {
+            newestMs = ms
+            newest = at
+        }
+    }
+    return newest
+}
+
+/** Slice the week-long activity payload down to the selected chip window. */
+export function itemsInWindow(
+    items: ReconcileActivityItem[],
+    window: DriftWindow,
+    nowMs: number = Date.now(),
+): ReconcileActivityItem[] {
+    const cutoff = nowMs - WINDOW_MS[window]
+    return items.filter(item => {
+        const d = toUtcDate(findingAt(item))
+        return d != null && d.getTime() >= cutoff
+    })
 }
 
 export function lastPassLabel(

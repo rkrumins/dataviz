@@ -1,8 +1,8 @@
 /**
  * OverlayIntegrity — the Freshness command center's identity card.
  *
- * Integrity Pulse + windowed blotter. Cadence and Reload live here, not
- * in a right-aligned button row above seven generic tiles.
+ * Integrity Pulse owns the land view. Overnight history sits behind one
+ * recency control on the pulse; Cadence and Reload live in the header.
  */
 import { useState } from 'react'
 import { Clock, RefreshCw, Zap } from 'lucide-react'
@@ -19,8 +19,8 @@ import {
 } from './useFreshness'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-    DRIFT_WINDOWS, checkNowToast, parseDriftWindow, pickLastPassRun, pickLatestRun,
-    windowDriftCounts, windowPhrase,
+    ACTIVITY_HORIZON, DRIFT_WINDOWS, checkNowToast, itemsInWindow, lastDriftAt,
+    parseDriftWindow, pickLastPassRun, pickLatestRun, windowDriftCounts, windowPhrase,
     type DriftWindow,
 } from './reconcileHealth'
 
@@ -44,13 +44,17 @@ export function OverlayIntegrity({
     const qc = useQueryClient()
     const recon = useReconciliation()
     const driftWindow = parseDriftWindow(windowProp)
-    const activity = useReconcileActivity(driftWindow)
+    // One week fetch; chips filter client-side so the recency line never follows fwin.
+    const activity = useReconcileActivity(ACTIVITY_HORIZON)
     const reconcileNow = useReconcileNow()
     const [previewOpen, setPreviewOpen] = useState(false)
+    const [historyOpen, setHistoryOpen] = useState(false)
     const [lastCheck, setLastCheck] = useState<ReconcileRun | null>(null)
 
-    const items = activity.data?.items ?? []
+    const weekItems = activity.data?.items ?? []
+    const items = itemsInWindow(weekItems, driftWindow)
     const windowCounts = windowDriftCounts(items)
+    const newestFinding = lastDriftAt(weekItems)
 
     const runNow = () => {
         reconcileNow.mutate({}, {
@@ -64,6 +68,58 @@ export function OverlayIntegrity({
             onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
         })
     }
+
+    const historyPanel = (
+        <div className="rounded-xl border border-glass-border/80 bg-canvas-elevated overflow-hidden">
+            <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+                <h3 className="text-[10px] uppercase tracking-wide text-ink-muted">
+                    Drift in this window
+                </h3>
+                <div
+                    role="group"
+                    aria-label="Drift window"
+                    className="inline-flex items-center rounded-lg border border-glass-border p-0.5"
+                >
+                    {DRIFT_WINDOWS.map(({ key, label }) => {
+                        const active = driftWindow === key
+                        return (
+                            <button
+                                key={key}
+                                type="button"
+                                aria-pressed={active}
+                                onClick={() => onWindowChange?.(key)}
+                                className={cn(
+                                    'h-6 px-1.5 rounded-md text-[10px] font-semibold tabular-nums transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                    active
+                                        ? 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400'
+                                        : 'text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
+                                )}
+                            >
+                                {label}
+                            </button>
+                        )
+                    })}
+                </div>
+                {items.length > 0 && (
+                    <span className="text-[11px] text-ink-muted tabular-nums ml-auto">
+                        {windowCounts.drifted.toLocaleString()} drifted
+                        {windowCounts.rebuilt > 0 && (
+                            <> · {windowCounts.rebuilt.toLocaleString()} rebuilt</>
+                        )}
+                    </span>
+                )}
+            </div>
+            <div className="px-3 pb-3">
+                <OvernightLedger
+                    items={items}
+                    isError={activity.isError}
+                    isLoading={activity.isLoading}
+                    onOpenSource={onOpenSource}
+                    emptyLabel={`No drift findings in ${windowPhrase(driftWindow)}.`}
+                />
+            </div>
+        </div>
+    )
 
     return (
         <section className="rounded-xl border border-glass-border bg-canvas-elevated overflow-hidden">
@@ -108,7 +164,7 @@ export function OverlayIntegrity({
                 </div>
             </header>
 
-            <div className="px-4 pb-4 space-y-3">
+            <div className="px-4 pb-4">
                 <IntegrityPulse
                     summary={summary}
                     policy={recon.data?.policy}
@@ -122,54 +178,11 @@ export function OverlayIntegrity({
                     onPreview={() => setPreviewOpen(true)}
                     onFacet={onFacet}
                     activeFacet={activeFacet}
+                    lastDriftAt={newestFinding}
+                    historyOpen={historyOpen}
+                    onToggleHistory={() => setHistoryOpen(v => !v)}
+                    historyPanel={historyPanel}
                 />
-                <div>
-                    <div className="flex flex-wrap items-center gap-2 mb-1.5">
-                        <h3 className="text-[10px] uppercase tracking-wide text-ink-muted">
-                            Drift in this window
-                        </h3>
-                        <div
-                            role="group"
-                            aria-label="Drift window"
-                            className="inline-flex items-center rounded-lg border border-glass-border p-0.5"
-                        >
-                            {DRIFT_WINDOWS.map(({ key, label }) => {
-                                const active = driftWindow === key
-                                return (
-                                    <button
-                                        key={key}
-                                        type="button"
-                                        aria-pressed={active}
-                                        onClick={() => onWindowChange?.(key)}
-                                        className={cn(
-                                            'h-6 px-1.5 rounded-md text-[10px] font-semibold tabular-nums transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
-                                            active
-                                                ? 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400'
-                                                : 'text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
-                                        )}
-                                    >
-                                        {label}
-                                    </button>
-                                )
-                            })}
-                        </div>
-                        {items.length > 0 && (
-                            <span className="text-[11px] text-ink-muted tabular-nums ml-auto">
-                                {windowCounts.drifted.toLocaleString()} drifted
-                                {windowCounts.rebuilt > 0 && (
-                                    <> · {windowCounts.rebuilt.toLocaleString()} rebuilt</>
-                                )}
-                            </span>
-                        )}
-                    </div>
-                    <OvernightLedger
-                        items={items}
-                        isError={activity.isError}
-                        isLoading={activity.isLoading}
-                        onOpenSource={onOpenSource}
-                        emptyLabel={`No drift findings in ${windowPhrase(driftWindow)}.`}
-                    />
-                </div>
             </div>
 
             <ReconcilePreviewDialog

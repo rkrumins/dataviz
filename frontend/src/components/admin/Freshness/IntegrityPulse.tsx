@@ -4,9 +4,11 @@
  *
  * Distinctiveness is structure, not a new palette. The whole card goes
  * amber when sweeps have stopped, because a frozen verdict looks current.
+ * Overnight history is one sentence here — the blotter opens on click.
  */
+import type { ReactNode } from 'react'
 import {
-    AlertTriangle, CircleDashed, Eye, Loader2, RefreshCw, ShieldCheck,
+    AlertTriangle, ChevronRight, CircleDashed, Eye, Loader2, RefreshCw, ShieldCheck,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { TimeStamp } from '@/components/ui/TimeStamp'
@@ -19,6 +21,7 @@ import {
 export function IntegrityPulse({
     summary, policy, latestRun, lastPassRun, isError, isLoading, isAdmin,
     onCheckNow, checking, onPreview, onFacet, activeFacet,
+    lastDriftAt: lastDriftIso, historyOpen, onToggleHistory, historyPanel,
 }: {
     summary: FreshnessSummary | null | undefined
     policy: ReconcilePolicy | undefined
@@ -34,6 +37,12 @@ export function IntegrityPulse({
     onPreview: () => void
     onFacet: (facet: StatusFacet) => void
     activeFacet: StatusFacet
+    /** Newest finding in the week, or null when none. */
+    lastDriftAt?: string | null
+    historyOpen?: boolean
+    onToggleHistory?: () => void
+    /** Expanded blotter — rendered under the recency line when open. */
+    historyPanel?: ReactNode
 }) {
     const enabled = policy?.enabled ?? policy?.envEnabled ?? true
     const interval = policy?.checkIntervalSecs ?? policy?.envCheckIntervalSecs ?? 3600
@@ -157,6 +166,47 @@ export function IntegrityPulse({
                     </span>
                 )}
             </div>
+
+            {onToggleHistory && (
+                <div className="mt-2.5">
+                    <button
+                        type="button"
+                        aria-expanded={historyOpen ?? false}
+                        aria-controls="drift-history-panel"
+                        onClick={onToggleHistory}
+                        className={cn(
+                            'inline-flex items-center gap-1 rounded-md px-1 -mx-1 text-[13px]',
+                            'text-indigo-600 dark:text-indigo-400 font-medium',
+                            'outline-none hover:underline',
+                            'focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                        )}
+                    >
+                        {lastDriftIso ? (
+                            <>
+                                Last drift{' '}
+                                <TimeStamp at={lastDriftIso} icon={null} colorByAge={false} className="text-[13px] font-medium text-indigo-600 dark:text-indigo-400" />
+                            </>
+                        ) : (
+                            'No drift in 7 days'
+                        )}
+                        <ChevronRight
+                            className={cn(
+                                'w-3.5 h-3.5 shrink-0 transition-transform duration-200 motion-reduce:transition-none',
+                                historyOpen && 'rotate-90',
+                            )}
+                            aria-hidden="true"
+                        />
+                    </button>
+                    {historyOpen && historyPanel != null && (
+                        <div
+                            id="drift-history-panel"
+                            className="mt-2.5 motion-reduce:animate-none animate-in fade-in slide-in-from-top-1 duration-100"
+                        >
+                            {historyPanel}
+                        </div>
+                    )}
+                </div>
+            )}
         </div>
     )
 }

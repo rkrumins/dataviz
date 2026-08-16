@@ -1,8 +1,9 @@
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, vi } from 'vitest'
 import { IntegrityPulse } from './IntegrityPulse'
-import { checkNowToast, lastPassLabel, parseDriftWindow, pickLastPassRun, sweepsHaveStopped } from './reconcileHealth'
-import type { FreshnessSummary, ReconcilePolicy, ReconcileRun } from '@/services/freshnessService'
+import { checkNowToast, itemsInWindow, lastDriftAt, lastPassLabel, parseDriftWindow, pickLastPassRun, sweepsHaveStopped } from './reconcileHealth'
+import type { FreshnessSummary, ReconcileActivityItem, ReconcilePolicy, ReconcileRun } from '@/services/freshnessService'
 
 const POLICY: ReconcilePolicy = {
     enabled: true, checkIntervalSecs: 3600,
@@ -111,6 +112,139 @@ describe('IntegrityPulse clock', () => {
         )
         expect(screen.getByText(/next in 30m/)).toBeInTheDocument()
         expect(screen.getByText(/last pass 5 of 10 checked · 5 in sync · 0 drifted/)).toBeInTheDocument()
+    })
+})
+
+describe('lastDriftAt / itemsInWindow', () => {
+    const finding = (over: Partial<ReconcileActivityItem>): ReconcileActivityItem => ({
+        runId: 'rcn_a',
+        runStartedAt: '2026-08-15T02:00:00Z',
+        ts: '2026-08-15T02:00:00Z',
+        dataSourceId: 'ds-1',
+        name: 'A',
+        reason: 'raw_drift',
+        mode: 'auto',
+        outcome: 'rebuilt',
+        jobId: 'j1',
+        evidence: {},
+        ...over,
+    })
+
+    it('picks the newest finding time, preferring ts over runStartedAt', () => {
+        const older = finding({
+            ts: new Date(Date.now() - 8 * 3600_000).toISOString(),
+            runStartedAt: new Date(Date.now() - 9 * 3600_000).toISOString(),
+        })
+        const newerTs = new Date(Date.now() - 2 * 3600_000).toISOString()
+        const newer = finding({
+            dataSourceId: 'ds-2',
+            ts: newerTs,
+            runStartedAt: new Date(Date.now() - 3 * 3600_000).toISOString(),
+        })
+        expect(lastDriftAt([older, newer])).toBe(newerTs)
+        expect(lastDriftAt([])).toBeNull()
+    })
+
+    it('filters the week payload by chip window without changing recency source', () => {
+        const now = Date.now()
+        const in1h = finding({
+            dataSourceId: 'recent',
+            ts: new Date(now - 30 * 60_000).toISOString(),
+        })
+        const in12h = finding({
+            dataSourceId: 'mid',
+            ts: new Date(now - 6 * 3600_000).toISOString(),
+        })
+        const in7d = finding({
+            dataSourceId: 'old',
+            ts: new Date(now - 3 * 24 * 3600_000).toISOString(),
+        })
+        const week = [in1h, in12h, in7d]
+        expect(itemsInWindow(week, '1h', now).map(i => i.dataSourceId)).toEqual(['recent'])
+        expect(itemsInWindow(week, '12h', now).map(i => i.dataSourceId)).toEqual(['recent', 'mid'])
+        expect(itemsInWindow(week, '7d', now).map(i => i.dataSourceId)).toEqual(['recent', 'mid', 'old'])
+        // Recency still sees the whole week even when the chip is 1h.
+        expect(lastDriftAt(week)).toBe(in1h.ts)
+    })
+})
+
+describe('IntegrityPulse history disclosure', () => {
+    it('shows Last drift with TimeStamp and expands the panel on click', async () => {
+        const user = userEvent.setup()
+        const onToggle = vi.fn()
+        const sevenHoursAgo = new Date(Date.now() - 7 * 3600_000).toISOString()
+        const { rerender } = render(
+            <IntegrityPulse
+                summary={SUMMARY}
+                policy={POLICY}
+                latestRun={undefined}
+                isError={false}
+                isLoading={false}
+                isAdmin={false}
+                onCheckNow={() => {}}
+                checking={false}
+                onPreview={() => {}}
+                onFacet={() => {}}
+                activeFacet=""
+                lastDriftAt={sevenHoursAgo}
+                historyOpen={false}
+                onToggleHistory={onToggle}
+                historyPanel={<div>Blotter body</div>}
+            />,
+        )
+        const control = screen.getByRole('button', { name: /Last drift/i })
+        expect(control).toHaveAttribute('aria-expanded', 'false')
+        expect(screen.queryByText('Blotter body')).not.toBeInTheDocument()
+        expect(screen.queryByText('Drift in this window')).not.toBeInTheDocument()
+        await user.click(control)
+        expect(onToggle).toHaveBeenCalled()
+
+        rerender(
+            <IntegrityPulse
+                summary={SUMMARY}
+                policy={POLICY}
+                latestRun={undefined}
+                isError={false}
+                isLoading={false}
+                isAdmin={false}
+                onCheckNow={() => {}}
+                checking={false}
+                onPreview={() => {}}
+                onFacet={() => {}}
+                activeFacet=""
+                lastDriftAt={sevenHoursAgo}
+                historyOpen
+                onToggleHistory={onToggle}
+                historyPanel={<div>Blotter body</div>}
+            />,
+        )
+        expect(screen.getByRole('button', { name: /Last drift/i })).toHaveAttribute(
+            'aria-expanded', 'true',
+        )
+        expect(screen.getByText('Blotter body')).toBeInTheDocument()
+    })
+
+    it('names an empty week without looking like an alarm', () => {
+        render(
+            <IntegrityPulse
+                summary={SUMMARY}
+                policy={POLICY}
+                latestRun={undefined}
+                isError={false}
+                isLoading={false}
+                isAdmin={false}
+                onCheckNow={() => {}}
+                checking={false}
+                onPreview={() => {}}
+                onFacet={() => {}}
+                activeFacet=""
+                lastDriftAt={null}
+                historyOpen={false}
+                onToggleHistory={() => {}}
+                historyPanel={null}
+            />,
+        )
+        expect(screen.getByRole('button', { name: /No drift in 7 days/i })).toBeInTheDocument()
     })
 })
 
