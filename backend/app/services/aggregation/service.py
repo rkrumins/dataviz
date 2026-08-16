@@ -1537,6 +1537,7 @@ class AggregationService:
         audit_reason: Optional[str] = None,
         evidence: Optional[dict] = None,
         trigger_source: str = "api",
+        run_id: Optional[str] = None,
     ) -> SourceChangedResponse:
         """Convergence entry point after a DIRECT write to a source's graph.
 
@@ -1623,7 +1624,7 @@ class AggregationService:
             event_id = await self._emit_signal_event(
                 workspace_id=workspace_id, ds_id=ds_id, origin=origin,
                 actor=actor, gate="unchanged", actions={}, outcome="noop",
-                audit_reason=audit_reason, evidence=evidence,
+                audit_reason=audit_reason, evidence=evidence, run_id=run_id,
             )
             return SourceChangedResponse(
                 changed=False,
@@ -1782,6 +1783,7 @@ class AggregationService:
             actor=actor, gate=("forced" if force else "changed"),
             actions=actions, outcome=outcome, detail=trigger_detail,
             audit_reason=audit_reason, evidence=evidence, job_id=job_id,
+            run_id=run_id,
         )
 
         return SourceChangedResponse(
@@ -1797,6 +1799,7 @@ class AggregationService:
     async def _emit_signal_event(
         self, *, workspace_id, ds_id, origin, actor, gate, actions, outcome,
         detail=None, audit_reason=None, evidence=None, job_id=None,
+        run_id=None,
     ) -> Optional[str]:
         """Best-effort audit emit for one ``signal_source_changed`` outcome.
 
@@ -1821,6 +1824,7 @@ class AggregationService:
                 reason=audit_reason,
                 evidence=evidence,
                 job_id=job_id,
+                run_id=run_id,
             )
         except Exception as exc:
             logger.warning(
@@ -2233,7 +2237,7 @@ class AggregationService:
 
         # Reconciliation detail. The check-cadence trio mirrors the rebuild
         # trio above; ``observed`` comes from the stats service's cached
-        # counts, so this stays a pure DB read (no provider call).
+        # counts (refreshed above when Probe wrote the counts facet).
         recon_override = state_row.get("reconcile_check_interval_secs")
         recon_interval = resolve_reconcile_interval(
             recon_override, cadence.reconcile_check_interval_secs,
@@ -2244,6 +2248,7 @@ class AggregationService:
             else "default"
         )
         observed_agg, stats_as_of = await _observed_overlay(session, ds.id)
+        versioned = await _platform_mastered_ids()
 
         return FreshnessDoc(
             **_freshness_row_kwargs(
@@ -2253,13 +2258,14 @@ class AggregationService:
                 cooldown_interval_secs=cooldown_interval_secs,
                 state_row=state_row,
                 reconcile_enabled_global=cadence.reconcile_enabled,
+                last_failure_reason=last_failure_reason,
+                last_failure_category=last_failure_category,
+                platform_mastered=ds.id in versioned,
             ),
             lkg_count=lkg_count,
             lkg_oldest_age_secs=lkg_oldest_age,
             cache_key_count=cache_key_count,
             cache_key_count_by_endpoint=cache_key_count_by_endpoint,
-            last_failure_reason=last_failure_reason,
-            last_failure_category=last_failure_category,
             retry_count=retry_count,
             live_fingerprint=live_fingerprint,
             live_node_count=live_node_count,
@@ -2293,7 +2299,13 @@ class AggregationService:
         """ONE ``get_schema_stats`` probe → ``(live_fingerprint,
         node_count, edge_count)``. Bounded by ``SCHEDULER_DRIFT_CHECK_TIMEOUT``;
         any failure or timeout degrades to ``(None, None, None)`` — the
-        freshness read must never fail because a provider is slow or down."""
+        freshness read must never fail because a provider is slow or down.
+
+        On success, also writes the cheap counts facet into
+        ``data_source_stats`` so the idle poll, auto sweeper, and meter
+        share the observation Probe already paid for. Write failure never
+        fails the doc.
+        """
         from .fingerprint import fingerprint_from_stats
 
         timeout = float(
@@ -2315,11 +2327,53 @@ class AggregationService:
                 ds_id, exc,
             )
             return (None, None, None)
+
+        await self._persist_probe_counts(ds_id, stats, session)
         return (
             fingerprint_from_stats(stats),
             getattr(stats, "total_nodes", None),
             getattr(stats, "total_edges", None),
         )
+
+    async def _persist_probe_counts(
+        self, ds_id: str, stats: Any, request_session: AsyncSession,
+    ) -> None:
+        """Best-effort counts-facet write from a successful Probe."""
+        from backend.app.db.repositories.stats_repo import (
+            upsert_data_source_stats_counts,
+        )
+
+        try:
+            entity = {
+                str(s.id): int(s.count)
+                for s in (getattr(stats, "entity_type_stats", None) or [])
+            }
+            edges = {
+                str(s.id): int(s.count)
+                for s in (getattr(stats, "edge_type_stats", None) or [])
+            }
+            kwargs = dict(
+                ds_id=ds_id,
+                node_count=int(getattr(stats, "total_nodes", 0) or 0),
+                edge_count=int(getattr(stats, "total_edges", 0) or 0),
+                entity_type_counts=json.dumps(entity),
+                edge_type_counts=json.dumps(edges),
+            )
+            factory = self._session_factory
+            if factory is not None:
+                async with factory() as session:
+                    await upsert_data_source_stats_counts(session, **kwargs)
+                    await session.commit()
+            else:
+                await upsert_data_source_stats_counts(request_session, **kwargs)
+                flush = getattr(request_session, "flush", None)
+                if flush is not None:
+                    await flush()
+        except Exception as exc:
+            logger.warning(
+                "assemble_source_freshness: probe counts write failed for %s: %s",
+                ds_id, exc,
+            )
 
     # ── Startup Recovery (CRIT-4: lives here, NOT on Worker) ─────────
 
@@ -2747,11 +2801,27 @@ def _rebuild_cooldown_until(
     return until.isoformat()
 
 
+async def _platform_mastered_ids() -> frozenset:
+    """Live versioned-graph set. Empty on a cold lookup failure so a
+    freshness read never 500s because graphver is down."""
+    try:
+        from backend.app.services.versioned_sources import (
+            versioned_data_source_ids,
+        )
+        return await versioned_data_source_ids()
+    except Exception as exc:
+        logger.warning("versioned-source lookup failed for freshness: %s", exc)
+        return frozenset()
+
+
 def _freshness_row_kwargs(
     ds, *, provider_name, signals, running_job_id, last_event, drifted=None,
     cooldown_interval_secs: int = AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
     state_row: Optional[dict] = None,
     reconcile_enabled_global: Optional[bool] = None,
+    last_failure_reason: Optional[str] = None,
+    last_failure_category: Optional[str] = None,
+    platform_mastered: bool = False,
 ) -> dict:
     """Map one workspace_data_sources row + its cache signals into the
     snake_case kwargs shared by ``FreshnessRow`` and ``FreshnessDoc``.
@@ -2795,6 +2865,9 @@ def _freshness_row_kwargs(
         last_reconciled_at=st.get("last_reconciled_at"),
         last_reconcile_reason=st.get("last_reconcile_reason"),
         last_reconcile_mode=st.get("last_reconcile_mode"),
+        last_failure_reason=last_failure_reason,
+        last_failure_category=last_failure_category,
+        platform_mastered=platform_mastered or st.get("drift_state") == "managed",
     )
 
 
@@ -2865,6 +2938,49 @@ async def _running_job_map(
     for ds_id, job_id in rows:
         out.setdefault(ds_id, job_id)  # first per ds = newest (ordered)
     return out
+
+
+async def _latest_failure_map(
+    session: AsyncSession, ds_ids: List[str],
+) -> dict[str, dict]:
+    """``{ds_id: {reason, category}}`` for sources whose *latest* job failed.
+
+    One bounded query over the page's failed-status sources — the fleet
+    table needs the cause without a per-row round-trip. Same classifier as
+    the drawer. Best-effort: a query error returns ``{}``, never raises.
+    """
+    if not ds_ids:
+        return {}
+    try:
+        rows = (await session.execute(
+            select(
+                AggregationJobORM.data_source_id,
+                AggregationJobORM.status,
+                AggregationJobORM.error_message,
+            )
+            .where(AggregationJobORM.data_source_id.in_(ds_ids))
+            .order_by(
+                AggregationJobORM.data_source_id,
+                AggregationJobORM.updated_at.desc().nullslast(),
+            )
+        )).all()
+    except Exception as exc:
+        logger.warning("latest-failure map failed: %s", exc)
+        return {}
+
+    out: dict[str, dict] = {}
+    for ds_id, status, error in rows:
+        if ds_id in out:
+            continue  # first per ds = newest
+        if status != "failed":
+            out[ds_id] = {}  # mark seen so an older failed job cannot win
+            continue
+        out[ds_id] = {
+            "reason": error,
+            "category": classify_failure(error),
+        }
+    # Drop the "seen but not failed" placeholders.
+    return {k: v for k, v in out.items() if v}
 
 
 async def _reconcile_reason_map(session, jobs) -> Dict[str, Dict]:
@@ -3046,6 +3162,11 @@ async def assemble_fleet_freshness(
     # ``cooldownUntil`` badge honors both without any per-row reads.
     cadence = await read_global_cadence(session)
     states = await _state_map(session, ds_ids)
+    failed_ids = [
+        ds.id for ds in ds_list if ds.aggregation_status == "failed"
+    ]
+    failures = await _latest_failure_map(session, failed_ids)
+    versioned = await _platform_mastered_ids()
 
     rows = [
         FreshnessRow(**_freshness_row_kwargs(
@@ -3062,6 +3183,9 @@ async def assemble_fleet_freshness(
             ),
             state_row=states.get(ds.id),
             reconcile_enabled_global=cadence.reconcile_enabled,
+            last_failure_reason=(failures.get(ds.id) or {}).get("reason"),
+            last_failure_category=(failures.get(ds.id) or {}).get("category"),
+            platform_mastered=ds.id in versioned,
         ))
         for ds in ds_list
     ]
@@ -3189,12 +3313,16 @@ async def _assemble_fleet_summary(
         ds_id for ds_id, st in full_states.items()
         if st.get("drift_state") in _DRIFTING_STATES
     }
+    suspended_ids = {
+        ds_id for ds_id, st in full_states.items()
+        if st.get("drift_state") == "suspended"
+    }
 
     summary = _summarize_freshness(
-        full_rows, full_signals, full_running, drifting_ids,
+        full_rows, full_signals, full_running, drifting_ids, suspended_ids,
     )
     provider_summaries = _summarize_by_provider(
-        full_rows, full_signals, full_running, drifting_ids,
+        full_rows, full_signals, full_running, drifting_ids, suspended_ids,
     )
     return summary, provider_summaries
 
@@ -3207,20 +3335,22 @@ _DRIFTING_STATES = frozenset({"drifting", "overlayMissing"})
 def _summarize_freshness(
     full_rows: list, signals: dict, running: dict,
     drifting_ids: Optional[set] = None,
+    suspended_ids: Optional[set] = None,
 ) -> FreshnessSummary:
     """Reduce ``(ds_id, workspace_id, aggregation_status, ...)`` rows +
     their Redis signals + running-job map into the fleet summary counts
     (only the first 3 columns are read here; trailing provider columns,
     when present, are for ``_summarize_by_provider``).
-    ``needs_attention`` is a per-row OR (marker present or failed), not a
-    sum of the two buckets — a row that is both failed and marked stale
-    counts once. ``pending`` counts rows with a live job (see
-    ``_assemble_fleet_summary`` docstring), independent of
+    ``needs_attention`` is a per-row OR (marker, failed, drifting, or
+    suspended), not a sum of those buckets — a row that is both failed
+    and marked stale counts once. ``pending`` counts rows with a live job
+    (see ``_assemble_fleet_summary`` docstring), independent of
     ``aggregation_status`` — a row can be both ``ready`` (from its last
     completed run) and ``pending`` (a new rebuild already in flight)."""
     drifting_ids = drifting_ids or set()
+    suspended_ids = suspended_ids or set()
     ready = pending = failed = not_built = 0
-    recomputing = needs_attention = cache_stamped = drifting = 0
+    recomputing = needs_attention = cache_stamped = drifting = suspended = 0
     for row in full_rows:
         ds_id, ws_id, status = row[0], row[1], row[2]
         if status == "ready":
@@ -3240,9 +3370,13 @@ def _summarize_freshness(
         is_drifting = ds_id in drifting_ids
         if is_drifting:
             drifting += 1
-        # A drifting source is serving data that no longer matches its graph,
-        # so it belongs in the same triage bucket as a failed or marked one.
-        if marker or status == "failed" or is_drifting:
+        is_suspended = ds_id in suspended_ids
+        if is_suspended:
+            suspended += 1
+        # A drifting or suspended source is serving data that no longer
+        # matches its graph, so it belongs in the same triage bucket as a
+        # failed or marked one. Suspended is the case that needs a person.
+        if marker or status == "failed" or is_drifting or is_suspended:
             needs_attention += 1
         if cache_as_of:
             cache_stamped += 1
@@ -3256,12 +3390,14 @@ def _summarize_freshness(
         needs_attention=needs_attention,
         cache_stamped=cache_stamped,
         drifting=drifting,
+        suspended=suspended,
     )
 
 
 def _summarize_by_provider(
     full_rows: list, signals: dict, running: dict,
     drifting_ids: Optional[set] = None,
+    suspended_ids: Optional[set] = None,
 ) -> list[ProviderFreshnessSummary]:
     """Per-provider breakdown of the SAME rows ``_summarize_freshness``
     reduces, grouped by ``(provider_id, provider_name)`` (row columns 4
@@ -3274,13 +3410,16 @@ def _summarize_by_provider(
 
     result = []
     for (provider_id, provider_name), rows in groups.items():
-        s = _summarize_freshness(rows, signals, running, drifting_ids)
+        s = _summarize_freshness(
+            rows, signals, running, drifting_ids, suspended_ids,
+        )
         result.append(ProviderFreshnessSummary(
             provider_id=provider_id,
             provider_name=provider_name,
             total=s.total, ready=s.ready, pending=s.pending, failed=s.failed,
             not_built=s.not_built, needs_attention=s.needs_attention,
             cache_stamped=s.cache_stamped, drifting=s.drifting,
+            suspended=s.suspended,
         ))
     result.sort(key=lambda ps: (ps.provider_name is None, ps.provider_name or ""))
     return result
@@ -3358,6 +3497,115 @@ async def assemble_reconcile_overview(
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Reconcile run history read failed: %s", exc)
     return ReconcileOverviewResponse(policy=_policy_response(cadence), runs=runs)
+
+
+def parse_activity_since(raw: Optional[str]) -> datetime:
+    """``since`` query: ISO timestamp, or a duration like ``24h``. Default
+    is the last 24 hours."""
+    now = datetime.now(timezone.utc)
+    if not raw:
+        return now - timedelta(hours=24)
+    text = raw.strip()
+    if len(text) > 1 and text[-1] in ("h", "d") and text[:-1].isdigit():
+        n = int(text[:-1])
+        return now - (timedelta(hours=n) if text[-1] == "h" else timedelta(days=n))
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            "since must be an ISO timestamp or a duration like 24h or 7d",
+        ) from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _activity_outcome(finding: dict, event) -> str:
+    if not finding.get("acted"):
+        return "held"
+    if event is not None and event.outcome in ("error", "failed"):
+        return "failed"
+    return "rebuilt"
+
+
+async def assemble_reconcile_activity(
+    session: AsyncSession, *, since: Optional[datetime] = None,
+) -> "ReconcileActivityResponse":
+    """Overnight blotter: findings persisted on ``reconcile_runs`` joined
+    to ``refresh_events`` by ``run_id``. Preview passes are excluded —
+    they evaluate and record, they do not change anything overnight.
+
+    Never raises: a missing table degrades to an empty ledger rather than
+    500ing the cockpit."""
+    from backend.app.db.models import RefreshEventORM
+    from .models import ReconcileRunORM
+    from .schemas import ReconcileActivityItem, ReconcileActivityResponse
+
+    cutoff = since or (datetime.now(timezone.utc) - timedelta(hours=24))
+    cutoff_iso = cutoff.isoformat()
+    items: list = []
+    try:
+        runs = (await session.execute(
+            select(ReconcileRunORM)
+            .where(ReconcileRunORM.mode != "preview")
+            .where(ReconcileRunORM.started_at >= cutoff_iso)
+            .order_by(ReconcileRunORM.started_at.desc())
+        )).scalars().all()
+        run_ids = [r.id for r in runs]
+        events_by_key: dict[tuple, object] = {}
+        if run_ids:
+            event_rows = (await session.execute(
+                select(RefreshEventORM)
+                .where(RefreshEventORM.origin == "reconcile-sweep")
+                .where(RefreshEventORM.run_id.in_(run_ids))
+                .order_by(RefreshEventORM.ts.desc())
+            )).scalars().all()
+            for ev in event_rows:
+                key = (ev.run_id, ev.data_source_id)
+                events_by_key.setdefault(key, ev)
+
+        for run in runs:
+            detail = {}
+            if run.detail:
+                try:
+                    detail = json.loads(run.detail)
+                except (TypeError, ValueError):
+                    detail = {}
+            findings = detail.get("findings") or []
+            mode = run.mode if run.mode in ("auto", "manual") else "auto"
+            for finding in findings:
+                ds_id = finding.get("dataSourceId")
+                if not ds_id:
+                    continue
+                event = events_by_key.get((run.id, ds_id))
+                evidence = finding.get("evidence") or {}
+                if event and event.evidence:
+                    try:
+                        evidence = json.loads(event.evidence) or evidence
+                    except (TypeError, ValueError):
+                        pass
+                items.append(ReconcileActivityItem(
+                    run_id=run.id,
+                    run_started_at=run.started_at,
+                    ts=(event.ts if event else run.started_at),
+                    data_source_id=ds_id,
+                    name=finding.get("name"),
+                    workspace_id=finding.get("workspaceId"),
+                    provider_id=finding.get("providerId"),
+                    provider_name=finding.get("providerName"),
+                    reason=finding.get("reason") or (
+                        event.reason if event else None
+                    ),
+                    mode=mode,
+                    outcome=_activity_outcome(finding, event),
+                    skip=finding.get("skip"),
+                    job_id=event.job_id if event else None,
+                    evidence=evidence if isinstance(evidence, dict) else {},
+                ))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Reconcile activity read failed: %s", exc)
+
+    return ReconcileActivityResponse(since=cutoff_iso, items=items)
 
 
 async def save_reconcile_policy(

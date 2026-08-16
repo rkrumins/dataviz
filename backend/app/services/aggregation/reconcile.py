@@ -141,6 +141,9 @@ class Observation:
     # projection_mode == 'dedicated' ⇒ the overlay lives in ANOTHER graph
     # that get_stats() never scans, so observed_aggregated is meaningless.
     overlay_observable: bool = True
+    # Operator Check now / Preview refreshed counts from the live graph —
+    # the stats_stale guard must not block a verdict we just observed.
+    live_observed: bool = False
 
     # ── resolved policy ───────────────────────────────────────────────
     reconcile_enabled: bool = True
@@ -163,23 +166,36 @@ class Policy:
         return reason in self.detectors
 
 
+# Holds: the condition is real, but we refuse to queue a rebuild. Detectors
+# still run so the cockpit has a reason and the counts behind it. Distinct
+# from absolute guards (deleted, no stats, …) which cannot evaluate at all.
+_HOLD_SKIPS: Tuple[str, ...] = (
+    "cooldown", "failed_backoff", "disabled", "suspended",
+)
+
+
 @dataclass(frozen=True)
 class Verdict:
     """The outcome of evaluating one source.
 
-    Exactly one of ``reason`` / ``skip`` is set. ``seed`` marks the
-    first-sight case: the sweeper writes the baseline and acts on nothing.
+    A clean finding has ``reason`` and no ``skip``. An absolute skip has
+    ``skip`` and no ``reason``. A *hold* has both: the drift is real, but
+    we refuse to act (cooldown, automation off, breaker).
+
+    ``drift_state`` is ``None`` when this pass did not evaluate the overlay
+    (stats stale, no stats, …) — the sweeper must leave the prior stamp alone
+    rather than claiming ``inSync``.
     """
     data_source_id: str
     reason: Optional[str] = None
     skip: Optional[str] = None
     seed: bool = False
-    drift_state: str = "inSync"
+    drift_state: Optional[str] = "inSync"
     evidence: Dict = field(default_factory=dict)
 
     @property
     def should_act(self) -> bool:
-        return self.reason is not None
+        return self.reason is not None and self.skip is None
 
 
 def evaluate(obs: Observation, policy: Policy) -> Verdict:
@@ -189,7 +205,8 @@ def evaluate(obs: Observation, policy: Policy) -> Verdict:
         return Verdict(
             data_source_id=obs.data_source_id,
             skip=skip,
-            drift_state=_SKIP_STATE.get(skip, _idle_state(obs)),
+            # Named skip states only — everything else preserves the prior stamp.
+            drift_state=_SKIP_STATE.get(skip),
         )
 
     for detector in (
@@ -198,6 +215,7 @@ def evaluate(obs: Observation, policy: Policy) -> Verdict:
         reason, evidence = detector(obs, policy)
         if reason is None:
             continue
+        packed = {**_base_evidence(obs), **evidence}
         if not policy.allows(reason):
             # The condition holds but this detector is switched off. Report
             # the drift state anyway — the UI still shows the truth, we just
@@ -206,13 +224,25 @@ def evaluate(obs: Observation, policy: Policy) -> Verdict:
                 data_source_id=obs.data_source_id,
                 skip="disabled",
                 drift_state=_REASON_STATE[reason],
-                evidence=evidence,
+                evidence=packed,
+            )
+        hold = _hold(obs, policy)
+        if hold is not None:
+            return Verdict(
+                data_source_id=obs.data_source_id,
+                reason=reason,
+                skip=hold,
+                drift_state=(
+                    "suspended" if hold == "suspended"
+                    else _REASON_STATE[reason]
+                ),
+                evidence=packed,
             )
         return Verdict(
             data_source_id=obs.data_source_id,
             reason=reason,
             drift_state=_REASON_STATE[reason],
-            evidence={**_base_evidence(obs), **evidence},
+            evidence=packed,
         )
 
     # Nothing wrong. A source with no baseline yet still needs one written.
@@ -261,16 +291,23 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
         # so acting would just log an error once an hour, forever. Surfaced
         # as 'blocked' in the UI — a genuinely useful signal on its own.
         return "no_ontology"
-    if not obs.has_stats:
+    if not obs.has_stats and not obs.live_observed:
         return "no_stats"
     if not obs.stats_polling_enabled or obs.stats_last_status == "error":
-        return "stats_unhealthy"
+        # Live observe already proved the graph is reachable — a broken poll
+        # config must not block an operator Check now.
+        if not obs.live_observed:
+            return "stats_unhealthy"
     if (
-        obs.stats_age_secs is None
-        or obs.stats_age_secs > policy.stats_max_age_secs
+        not obs.live_observed
+        and (
+            obs.stats_age_secs is None
+            or obs.stats_age_secs > policy.stats_max_age_secs
+        )
     ):
         # Acting on stale counts is how a false positive rebuilds a
         # multi-million-node graph. The sweeper nudges the stats poll instead.
+        # Operator Check now / Preview refresh counts first (live_observed).
         return "stats_stale"
     if obs.job_in_flight:
         return "in_flight"
@@ -279,6 +316,12 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
         # reconciler in scheduler.py owns its retry cadence. Two mechanisms
         # must never both retry the same rebuild.
         return "already_marked"
+    return None
+
+
+def _hold(obs: Observation, policy: Policy) -> Optional[str]:
+    """Post-detector refusal to act. Unlike ``_guard``, these run AFTER the
+    detectors so a held source still carries a reason and evidence."""
     if obs.in_cooldown:
         return "cooldown"
     if obs.recently_failed:
@@ -286,9 +329,6 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
     if not obs.reconcile_enabled:
         return "disabled"
     if obs.consecutive_actions >= policy.breaker_cap:
-        # The breaker: something about this source makes the finding
-        # un-clearable, and we have already rebuilt it breaker_cap times.
-        # Stop, and surface it as needing a human.
         return "suspended"
     return None
 

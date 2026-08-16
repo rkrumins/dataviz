@@ -1328,6 +1328,79 @@ async def probe_stats_polling() -> Optional[dict]:
     return {"byStatus": by_status, "overdue": overdue, "recentErrors": errors[:5]}
 
 
+async def probe_reconciliation() -> Optional[dict]:
+    """Sweep liveness + fleet breaker count.
+
+    ``stopped`` matches the Freshness pulse: last non-preview run older
+    than three resolved check intervals, and only while automation is on.
+    A missing first run is ``notYetRun``, not an outage.
+    """
+    from sqlalchemy import func, select
+
+    from backend.app.db.engine import PoolRole, get_session_factory
+    from backend.app.services.aggregation.models import (
+        AggregationDataSourceStateORM,
+        ReconcileRunORM,
+    )
+    from backend.app.services.aggregation.service import (
+        AGGREGATION_RECONCILE_ENABLED,
+        read_global_cadence,
+        resolve_reconcile_interval,
+    )
+
+    try:
+        async with asyncio.timeout(_BUDGET_DB):
+            factory = get_session_factory(PoolRole.READONLY)
+            async with factory() as session:
+                last_started = (await session.execute(
+                    select(ReconcileRunORM.started_at)
+                    .where(ReconcileRunORM.mode != "preview")
+                    .order_by(ReconcileRunORM.started_at.desc())
+                    .limit(1)
+                )).scalar()
+                suspended_count = (await session.execute(
+                    select(func.count())
+                    .select_from(AggregationDataSourceStateORM)
+                    .where(
+                        AggregationDataSourceStateORM.drift_state
+                        == "suspended"
+                    )
+                )).scalar() or 0
+                cadence = await read_global_cadence(session)
+    except Exception as exc:
+        logger.warning("reconciliation probe failed: %s", exc)
+        return None
+
+    interval = resolve_reconcile_interval(
+        None, getattr(cadence, "reconcile_check_interval_secs", None),
+    )
+    enabled = getattr(cadence, "reconcile_enabled", None)
+    if enabled is None:
+        enabled = AGGREGATION_RECONCILE_ENABLED
+
+    last = _parse_iso(last_started)
+    age_secs: Optional[float] = None
+    if last is not None:
+        age_secs = max(
+            0.0, (datetime.now(timezone.utc) - last).total_seconds(),
+        )
+    stopped = bool(
+        enabled
+        and last is not None
+        and interval > 0
+        and age_secs is not None
+        and age_secs >= 3 * interval
+    )
+    return {
+        "enabled": bool(enabled),
+        "intervalSecs": interval,
+        "lastStartedAt": last_started,
+        "stopped": stopped,
+        "notYetRun": last_started is None,
+        "suspendedCount": int(suspended_count),
+    }
+
+
 async def probe_outbox(app_state) -> Optional[dict]:
     """Transactional-outbox backlog — the event-delivery lag signal."""
     from sqlalchemy import func, select

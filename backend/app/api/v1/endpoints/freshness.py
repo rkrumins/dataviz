@@ -50,6 +50,7 @@ from backend.app.services.aggregation.schemas import (
     FreshnessFleetResponse,
     FreshnessSettingsRequest,
     FreshnessSettingsResponse,
+    ReconcileActivityResponse,
     ReconcileOverviewResponse,
     ReconcilePolicyRequest,
     ReconcilePolicyResponse,
@@ -304,6 +305,33 @@ async def get_reconciliation(
     )
 
     return await assemble_reconcile_overview(session, limit=limit)
+
+
+@router.get(
+    "/freshness/reconciliation/activity",
+    response_model=ReconcileActivityResponse,
+    summary="Overnight reconciliation blotter (findings joined to jobs)",
+    dependencies=[Depends(_require_ingestion_read)],
+)
+async def get_reconciliation_activity(
+    session: AsyncSession = Depends(get_readonly_db_session),
+    since: Optional[str] = Query(
+        None,
+        description="ISO timestamp or duration like 24h. Default: last 24 hours.",
+    ),
+):
+    from backend.app.services.aggregation.service import (
+        assemble_reconcile_activity,
+        parse_activity_since,
+    )
+
+    try:
+        cutoff = parse_activity_since(since)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+        ) from exc
+    return await assemble_reconcile_activity(session, since=cutoff)
 
 
 @router.put(

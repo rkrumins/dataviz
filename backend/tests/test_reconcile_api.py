@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -52,6 +53,11 @@ def _dep_fns(route):
 
 def test_reconciliation_read_is_behind_the_ingestion_gate():
     names = _dep_fns(_route("/freshness/reconciliation", "GET"))
+    assert "_require_ingestion_read" in names
+
+
+def test_activity_read_is_behind_the_ingestion_gate():
+    names = _dep_fns(_route("/freshness/reconciliation/activity", "GET"))
     assert "_require_ingestion_read" in names
 
 
@@ -99,10 +105,11 @@ def _patch(**body):
     return FreshnessSettingsRequest(**body)
 
 
-def test_a_reconcile_only_patch_leaves_the_rebuild_interval_alone():
+def test_a_reconcile_only_patch_leaves_the_rebuild_interval_alone(monkeypatch):
     """Sending only ``autoReconcileEnabled`` must not clear the rebuild
     override — which is exactly what would happen if absent fields were
     treated as explicit nulls."""
+    monkeypatch.setattr(fresh_mod, "_PROXY_ENABLED", False)
     svc = _RecordingSvc()
     resp = _run(fresh_mod.patch_freshness_settings(
         "ds_1", _patch(autoReconcileEnabled=False),
@@ -113,7 +120,8 @@ def test_a_reconcile_only_patch_leaves_the_rebuild_interval_alone():
     assert resp.auto_reconcile_enabled is False
 
 
-def test_an_interval_only_patch_leaves_reconcile_settings_alone():
+def test_an_interval_only_patch_leaves_reconcile_settings_alone(monkeypatch):
+    monkeypatch.setattr(fresh_mod, "_PROXY_ENABLED", False)
     svc = _RecordingSvc()
     _run(fresh_mod.patch_freshness_settings(
         "ds_1", _patch(rebuildMinIntervalSecs=1800),
@@ -123,9 +131,10 @@ def test_an_interval_only_patch_leaves_reconcile_settings_alone():
     assert svc.reconcile_calls == []
 
 
-def test_an_explicit_null_clears_that_override():
+def test_an_explicit_null_clears_that_override(monkeypatch):
     """Null is a real value here: it means "stop overriding, inherit the
     global" — so it must reach the service, unlike an absent field."""
+    monkeypatch.setattr(fresh_mod, "_PROXY_ENABLED", False)
     svc = _RecordingSvc()
     _run(fresh_mod.patch_freshness_settings(
         "ds_1", _patch(autoReconcileEnabled=None),
@@ -134,7 +143,8 @@ def test_an_explicit_null_clears_that_override():
     assert svc.reconcile_calls == [{"enabled": None}]
 
 
-def test_both_groups_can_be_patched_together():
+def test_both_groups_can_be_patched_together(monkeypatch):
+    monkeypatch.setattr(fresh_mod, "_PROXY_ENABLED", False)
     svc = _RecordingSvc()
     _run(fresh_mod.patch_freshness_settings(
         "ds_1",
@@ -306,3 +316,36 @@ def test_check_interval_has_a_floor():
 def test_per_source_check_interval_has_the_same_floor():
     with pytest.raises(Exception):
         FreshnessSettingsRequest(reconcileCheckIntervalSecs=10)
+
+
+def test_activity_since_defaults_to_24h():
+    from backend.app.services.aggregation.service import parse_activity_since
+
+    cutoff = parse_activity_since(None)
+    age = (datetime.now(timezone.utc) - cutoff).total_seconds()
+    assert 23 * 3600 < age < 25 * 3600
+
+
+def test_activity_since_accepts_a_duration():
+    from backend.app.services.aggregation.service import parse_activity_since
+
+    cutoff = parse_activity_since("6h")
+    age = (datetime.now(timezone.utc) - cutoff).total_seconds()
+    assert 5.5 * 3600 < age < 6.5 * 3600
+
+
+def test_activity_since_accepts_3h_and_7d():
+    from backend.app.services.aggregation.service import parse_activity_since
+
+    three = parse_activity_since("3h")
+    week = parse_activity_since("7d")
+    now = datetime.now(timezone.utc)
+    assert 2.5 * 3600 < (now - three).total_seconds() < 3.5 * 3600
+    assert 6.5 * 86400 < (now - week).total_seconds() < 7.5 * 86400
+
+
+def test_activity_since_rejects_garbage():
+    from backend.app.services.aggregation.service import parse_activity_since
+
+    with pytest.raises(ValueError, match="ISO timestamp"):
+        parse_activity_since("yesterday")

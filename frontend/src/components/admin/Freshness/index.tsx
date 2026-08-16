@@ -1,24 +1,21 @@
 /**
  * Freshness — the Ingestion → Freshness triage cockpit.
  *
- * A cross-workspace operator view of every data source's aggregation/cache
- * freshness. The stat band doubles as the status filter; a sticky faceted bar
- * (provider/workspace multi-select, status segment, name search) refines the
- * fleet; the table groups by provider, orders by severity, and collapses the
- * healthy groups into one-line rollups so attention items float to the top.
+ * Overlay integrity briefs the schedule and live verdict; Start here guides
+ * attention; a sticky faceted bar (status, provider, workspace, search) is the
+ * triage filter; the table groups by provider and orders by severity.
  *
  * All facet state lives in the URL search params (shared with Ingestion's
  * ``?tab=``), so reload and back/forward restore the view. Provider/workspace
- * facets filter client-side over the fetched page (≤200 rows); the tile counts
- * come from the server ``summary``. Reads never trigger a rebuild.
+ * facets filter client-side over the fetched page (≤200 rows). Reads never
+ * trigger a rebuild.
  */
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Clock, RefreshCw, Zap } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { RefreshCw, Zap } from 'lucide-react'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { usePermission } from '@/store/auth'
+import { usePermission, checkPermission, usePermissionClaims } from '@/store/auth'
 import { useToast } from '@/components/ui/toast'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { workspaceService } from '@/services/workspaceService'
@@ -28,16 +25,21 @@ import { FreshnessRow } from './FreshnessRow'
 import { FreshnessDrawer } from './FreshnessDrawer'
 import { ProviderRefreshDialog } from './ProviderRefreshDialog'
 import { FleetRefreshDialog } from './FleetRefreshDialog'
-import { FreshnessStatBand } from './FreshnessStatBand'
 import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
 import { CadenceSettingsDialog } from './CadenceSettingsDialog'
-import { ReconciliationRunsPanel } from './ReconciliationRunsPanel'
+import { OverlayIntegrity } from './OverlayIntegrity'
 import { useFleetFreshness, useRefreshSource, FRESHNESS_KEYS } from './useFreshness'
 import { useActiveJobs, ACTIVE_JOBS_KEY } from './useActiveJobs'
 import {
-    compareSeverity, isGroupAttention, matchesFacet, type StatusFacet,
+    compareSeverity, freshnessState, isGroupAttention, matchesFacet, matchesFailureFacet,
+    type FailureFacet, type StatusFacet,
 } from './freshnessTriage'
+import { asFailureCategory } from './failureGuidance'
+import { parseDriftWindow } from './reconcileHealth'
+import { StartHereStrip } from './StartHereStrip'
+import { BulkRetryBar } from './BulkRetryBar'
+import { SelectionCheckbox } from './SelectionCheckbox'
 
 const SCOPE_LABEL: Record<RefreshScope, string> = {
     auto: 'Refresh',
@@ -47,12 +49,19 @@ const SCOPE_LABEL: Record<RefreshScope, string> = {
     full: 'Full refresh',
 }
 
-const COLS = 6
+const COLS = 7
 
-const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped', 'drifting']
+const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped', 'drifting', 'suspended']
+const FAILURE_FACETS: readonly FailureFacet[] = [
+    'out_of_memory', 'provider_unavailable', 'ontology', 'timeout', 'conflict', 'unknown',
+]
 
 function parseStatus(raw: string | null): StatusFacet {
     return (raw && (STATUS_FACETS as readonly string[]).includes(raw)) ? (raw as StatusFacet) : ''
+}
+
+function parseFailure(raw: string | null): FailureFacet {
+    return (raw && (FAILURE_FACETS as readonly string[]).includes(raw)) ? (raw as FailureFacet) : ''
 }
 
 function parseList(raw: string | null): string[] {
@@ -70,6 +79,8 @@ export function Freshness() {
     const fprov = useMemo(() => parseList(searchParams.get('fprov')), [searchParams])
     const fws = useMemo(() => parseList(searchParams.get('fws')), [searchParams])
     const fstatus = parseStatus(searchParams.get('fstatus'))
+    const ffail = parseFailure(searchParams.get('ffail'))
+    const fwin = parseDriftWindow(searchParams.get('fwin'))
     const fq = searchParams.get('fq') ?? ''
 
     // Patch specific params, preserving everything else (notably ``tab``).
@@ -124,6 +135,7 @@ export function Freshness() {
     const [cadenceOpen, setCadenceOpen] = useState(false)
     const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({})
     const [expandedRow, setExpandedRow] = useState<string | null>(null)
+    const [selectedIds, setSelectedIds] = useState<string[]>([])
 
     // ── Data ──────────────────────────────────────────────────────────
     // No server-side provider/workspace/stale filter: those are client facets
@@ -215,10 +227,11 @@ export function Freshness() {
     const q = fq.trim().toLowerCase()
     const tableRows = useMemo(() => scopeRows.filter(r =>
         matchesFacet(r, fstatus) &&
+        matchesFailureFacet(r, ffail) &&
         (q === '' ||
             (r.name || r.dataSourceId).toLowerCase().includes(q) ||
             (r.providerName ?? '').toLowerCase().includes(q)),
-    ), [scopeRows, fstatus, q])
+    ), [scopeRows, fstatus, ffail, q])
 
     // ── Grouping: attention groups first, severity-sorted within ──────
     const groups = useMemo(() => {
@@ -257,7 +270,7 @@ export function Freshness() {
         measure()
         window.addEventListener('resize', measure)
         return () => window.removeEventListener('resize', measure)
-    }, [fprov, fws, fstatus, fq])
+    }, [fprov, fws, fstatus, ffail, fq])
 
     // ── Refresh actions ───────────────────────────────────────────────
     const doRefresh = (dsId: string, scope: RefreshScope, firstBuild?: boolean) => {
@@ -286,57 +299,73 @@ export function Freshness() {
 
     const busyDsId = refreshSource.isPending ? refreshSource.variables?.dsId : undefined
     const truncated = (fleet.data?.total ?? 0) > rows.length
-    const hasFilters = fprov.length > 0 || fws.length > 0 || fstatus !== '' || q !== ''
-    const clearAll = () => patchParams({ fprov: null, fws: null, fstatus: null, fq: null })
+    const hasFilters = fprov.length > 0 || fws.length > 0 || fstatus !== '' || ffail !== '' || q !== ''
+    const clearAll = () => patchParams({ fprov: null, fws: null, fstatus: null, ffail: null, fq: null })
     const buildMode = confirm?.firstBuild === true
 
-    return (
-        <div className="space-y-4">
-            {/* Reload — the fleet also auto-refreshes every 30s while mounted. */}
-            <div className="flex items-center justify-end gap-2">
-                {isSystemAdmin && (
-                    <button
-                        onClick={() => setFleetDialogOpen(true)}
-                        className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
-                    >
-                        <Zap className="w-3.5 h-3.5" />
-                        Refresh all sources
-                    </button>
-                )}
-                {isSystemAdmin && (
-                    <button
-                        onClick={() => setCadenceOpen(true)}
-                        className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
-                    >
-                        <Clock className="w-3.5 h-3.5" />
-                        Cadence settings
-                    </button>
-                )}
-                <button
-                    onClick={() => fleet.refetch()}
-                    disabled={fleet.isFetching}
-                    aria-label="Reload freshness"
-                    className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors disabled:opacity-50"
-                >
-                    <RefreshCw className={cn('w-3.5 h-3.5', fleet.isFetching && 'animate-spin')} />
-                    Reload
-                </button>
-            </div>
+    const toggleSelect = useCallback((id: string) => {
+        setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+    }, [])
 
-            {/* Stat band — scrolls away; the tiles are the status filter. */}
-            <FreshnessStatBand
+    const permissionClaims = usePermissionClaims()
+    const selectableIds = useMemo(() => (
+        tableRows
+            .filter(r => freshnessState(r) !== 'recomputing')
+            .filter(r => checkPermission(permissionClaims, 'workspace:datasource:manage', r.workspaceId))
+            .map(r => r.dataSourceId)
+    ), [tableRows, permissionClaims])
+
+    const allSelectableSelected = selectableIds.length > 0
+        && selectableIds.every(id => selectedIds.includes(id))
+    const someSelectableSelected = selectableIds.some(id => selectedIds.includes(id))
+
+    const toggleSelectAll = useCallback(() => {
+        setSelectedIds(prev => {
+            if (selectableIds.length === 0) return prev
+            const allOn = selectableIds.every(id => prev.includes(id))
+            if (allOn) return prev.filter(id => !selectableIds.includes(id))
+            const merged = new Set(prev)
+            for (const id of selectableIds) merged.add(id)
+            return Array.from(merged)
+        })
+    }, [selectableIds])
+
+    // Drop selections that left the visible set (facet change / refetch).
+    useEffect(() => {
+        const visible = new Set(tableRows.map(r => r.dataSourceId))
+        setSelectedIds(prev => prev.filter(id => visible.has(id)))
+    }, [tableRows])
+
+    return (
+        <div className={`space-y-4${selectedIds.length > 0 ? ' pb-24' : ''}`}>
+            <OverlayIntegrity
                 summary={summary}
                 activeFacet={fstatus}
-                onToggle={(facet) => patchParams({ fstatus: facet || null })}
+                onFacet={(facet) => patchParams({ fstatus: facet || null })}
+                onOpenCadence={isSystemAdmin ? () => setCadenceOpen(true) : undefined}
+                onReload={() => { void fleet.refetch() }}
+                reloading={fleet.isFetching}
+                onRefreshAll={isSystemAdmin ? () => setFleetDialogOpen(true) : undefined}
+                onOpenSource={setDrawerDsId}
+                window={fwin}
+                onWindowChange={(w) => patchParams({ fwin: w === '24h' ? null : w })}
             />
 
-            {/* Automatic reconciliation — one line when collapsed: is it on,
-                when did it last check, and what did it find. */}
-            <ReconciliationRunsPanel
-                onOpenSettings={isSystemAdmin ? () => setCadenceOpen(true) : undefined}
+            <StartHereStrip
+                summary={summary}
+                rows={scopeRows}
+                status={fstatus}
+                failureFacet={ffail}
+                onStatus={(facet) => patchParams({ fstatus: facet || null })}
+                onFailure={(facet) => patchParams({
+                    ffail: facet || null,
+                    // Cause filters imply looking at failures.
+                    fstatus: facet ? 'needsAttention' : (fstatus || null),
+                })}
+                onClear={() => patchParams({ fstatus: null, ffail: null })}
             />
 
-            {/* Sticky faceted filter bar */}
+            {/* Sticky faceted filter bar — the triage path (tiles removed). */}
             <div ref={stickyRef} className="sticky top-0 z-20 -mt-1 bg-canvas border-b border-glass-border py-2.5">
                 <FreshnessFilterBar
                     providerOptions={providerOptions}
@@ -346,10 +375,13 @@ export function Freshness() {
                     selectedWorkspaces={fws}
                     onWorkspacesChange={(ids) => patchParams({ fws: ids.join(',') || null })}
                     status={fstatus}
-                    onStatusChange={(s) => patchParams({ fstatus: s || null })}
+                    onStatusChange={(s) => patchParams({ fstatus: s || null, ffail: null })}
+                    failureFacet={ffail}
+                    onFailureChange={(f) => patchParams({ ffail: f || null })}
                     search={searchInput}
                     onSearchChange={setSearchInput}
                     onClearAll={clearAll}
+                    summary={summary}
                 />
             </div>
 
@@ -382,6 +414,20 @@ export function Freshness() {
                     <table className="w-full min-w-[720px] text-left">
                         <thead>
                             <tr className="text-[10px] uppercase tracking-wide text-ink-muted">
+                                <th style={{ top: headerTop }} className="pl-3 pr-1 py-2 w-10 sticky z-10 bg-canvas">
+                                    {selectableIds.length > 0 ? (
+                                        <SelectionCheckbox
+                                            selected={allSelectableSelected}
+                                            indeterminate={someSelectableSelected && !allSelectableSelected}
+                                            onToggle={toggleSelectAll}
+                                            ariaLabel={allSelectableSelected
+                                                ? 'Deselect all sources'
+                                                : 'Select all sources'}
+                                        />
+                                    ) : (
+                                        <span className="inline-block w-[18px]" aria-hidden />
+                                    )}
+                                </th>
                                 {['Source', 'Aggregation', 'Cache', 'Freshness', 'Last activity'].map(h => (
                                     <th key={h} style={{ top: headerTop }} className="px-3 py-2 font-semibold sticky z-10 bg-canvas">{h}</th>
                                 ))}
@@ -418,6 +464,14 @@ export function Freshness() {
                                                 expanded={expandedRow === row.dataSourceId}
                                                 onToggleExpand={(dsId) => setExpandedRow(cur => (cur === dsId ? null : dsId))}
                                                 onCancelJob={onCancelJob}
+                                                peerRows={tableRows}
+                                                onFilterFailure={(cat) => {
+                                                    const facet = asFailureCategory(cat)
+                                                    if (facet) patchParams({ ffail: facet, fstatus: 'needsAttention' })
+                                                }}
+                                                selectable
+                                                selected={selectedIds.includes(row.dataSourceId)}
+                                                onToggleSelect={toggleSelect}
                                             />
                                         ))}
                                     </Fragment>
@@ -427,6 +481,16 @@ export function Freshness() {
                     </table>
                 </div>
             )}
+
+            <BulkRetryBar
+                selectedIds={selectedIds}
+                rows={tableRows}
+                onClear={() => setSelectedIds([])}
+                onDone={() => {
+                    void fleet.refetch()
+                    void qc.invalidateQueries({ queryKey: ACTIVE_JOBS_KEY })
+                }}
+            />
 
             <FreshnessDrawer
                 key={drawerDsId ?? 'closed'}

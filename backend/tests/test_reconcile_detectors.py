@@ -319,17 +319,37 @@ def test_overlay_missing_outranks_raw_drift():
     ({"stats_age_secs": None}, "stats_stale"),
     ({"job_in_flight": True}, "in_flight"),
     ({"stale_marker": True}, "already_marked"),
+])
+def test_each_guard_short_circuits_with_its_own_reason(over, expected):
+    """Every absolute guard fires on a source that would OTHERWISE be a
+    finding, so the test proves the guard suppressed it rather than nothing
+    being wrong. Hold-skips (cooldown / disabled / breaker) run AFTER the
+    detectors so the cockpit still has a reason and evidence."""
+    v = evaluate(_obs(observed_aggregated=0, **over), POLICY)
+    assert v.skip == expected
+    assert v.reason is None
+    assert not v.should_act
+
+
+@pytest.mark.parametrize("over,expected", [
     ({"in_cooldown": True}, "cooldown"),
     ({"recently_failed": True}, "failed_backoff"),
     ({"reconcile_enabled": False}, "disabled"),
     ({"consecutive_actions": 3}, "suspended"),
 ])
-def test_each_guard_short_circuits_with_its_own_reason(over, expected):
-    """Every guard fires on a source that would OTHERWISE be a finding, so
-    the test proves the guard suppressed it rather than nothing being wrong."""
+def test_a_hold_keeps_the_finding_and_refuses_to_act(over, expected):
+    """Automation off, cooldown, backoff and the breaker must not hide the
+    drift: the roster still needs a reason and the counts behind it."""
     v = evaluate(_obs(observed_aggregated=0, **over), POLICY)
     assert v.skip == expected
-    assert v.reason is None
+    assert v.reason == "overlay_missing"
+    assert not v.should_act
+    assert v.evidence["expectedAggregatedEdges"] == 500
+    assert v.evidence["observedAggregatedEdges"] == 0
+    if expected == "suspended":
+        assert v.drift_state == "suspended"
+    else:
+        assert v.drift_state == "overlayMissing"
 
 
 def test_stale_stats_never_trigger_a_rebuild():
@@ -442,14 +462,33 @@ def test_every_verdict_uses_the_published_vocabulary(over):
     v = evaluate(_obs(**over), POLICY)
     assert v.reason is None or v.reason in REASONS
     assert v.skip is None or v.skip in SKIP_REASONS
-    assert v.drift_state in DRIFT_STATES
+    assert v.drift_state is None or v.drift_state in DRIFT_STATES
 
 
-def test_a_verdict_is_either_a_finding_or_a_skip_never_both():
-    for over in ({}, {"observed_aggregated": 0}, {"deleted": True}):
-        v = evaluate(_obs(**over), POLICY)
-        assert (v.reason is None) != (v.skip is None)
-        assert v.should_act == (v.reason is not None)
+def test_acting_requires_a_reason_and_no_hold():
+    """A clean finding acts. A hold keeps the reason but must not queue a
+    rebuild. An absolute skip has no reason."""
+    finding = evaluate(_obs(observed_aggregated=0), POLICY)
+    assert finding.reason == "overlay_missing" and finding.skip is None
+    assert finding.should_act
+
+    held = evaluate(_obs(observed_aggregated=0, reconcile_enabled=False), POLICY)
+    assert held.reason == "overlay_missing" and held.skip == "disabled"
+    assert not held.should_act
+
+    skipped = evaluate(_obs(deleted=True), POLICY)
+    assert skipped.reason is None and skipped.skip == "deleted"
+    assert not skipped.should_act
+
+
+def test_a_healthy_source_past_the_breaker_is_in_sync_not_suspended():
+    """The breaker is a hold on a finding, not a guard that blinds a
+    recovered source. Consecutive actions on a now-clean source must not
+    freeze it as suspended — the sweeper resets the counter on in_sync."""
+    v = evaluate(_obs(consecutive_actions=5), POLICY)
+    assert v.skip == "in_sync"
+    assert v.reason is None
+    assert v.drift_state == "inSync"
 
 
 def test_unparseable_counts_degrade_to_zero_rather_than_raising():

@@ -129,6 +129,7 @@ export function AdminInfrastructure() {
 
     const jobs = data?.aggregationJobs
     const polling = data?.statsPolling
+    const recon = data?.reconciliation
 
     return (
         <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
@@ -200,7 +201,7 @@ export function AdminInfrastructure() {
                     <GraphProvidersPanel providers={data.graphProviders} />
 
                     {/* Workload KPIs — is the work getting done, and how fast */}
-                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
                         <WorkloadTile
                             label="Aggregation success rate"
                             value={jobs?.successRate != null ? `${jobs.successRate}%` : '—'}
@@ -223,6 +224,27 @@ export function AdminInfrastructure() {
                             value={polling ? String(polling.overdue) : '—'}
                             sub="not polled within 2× their interval"
                             tone={(polling?.overdue ?? 0) > 0 ? 'warn' : null}
+                        />
+                        <WorkloadTile
+                            label="Overlay integrity"
+                            value={
+                                recon?.stopped ? 'Stopped'
+                                    : recon?.notYetRun ? 'Not yet run'
+                                        : recon != null ? String(recon.suspendedCount)
+                                            : '—'
+                            }
+                            sub={
+                                recon?.stopped
+                                    ? 'sweeps older than 3× the check interval'
+                                    : (recon?.suspendedCount ?? 0) > 0
+                                        ? 'sources that need a person'
+                                        : 'automatic overlay checks'
+                            }
+                            tone={
+                                recon?.stopped ? 'bad'
+                                    : (recon?.suspendedCount ?? 0) > 0 ? 'warn'
+                                        : null
+                            }
                         />
                     </div>
 

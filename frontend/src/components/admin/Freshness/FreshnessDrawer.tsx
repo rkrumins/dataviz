@@ -6,9 +6,10 @@
  * re-fetches with ``probe=true`` — one bounded provider call — and reveals the
  * live fingerprint/counts and the drift verdict.
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
     Activity, AlertTriangle, ArrowUpRight, CheckCircle2, ChevronRight, Clock, Database, Eraser, ShieldCheck,
@@ -23,13 +24,17 @@ import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { jobHistoryPath } from '../job-history/shared'
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
 import {
+    FRESHNESS_KEYS,
     useReconcileNow, useRefreshSource, useSetFreshnessSettings, useSourceFreshness,
 } from './useFreshness'
+import { checkNowToast } from './reconcileHealth'
 import { DRIFT_SPEC, DriftStateBadge, REASON_LABEL, type DriftState } from './DriftStateBadge'
 import { OverlayIntegrityMeter } from './OverlayIntegrityMeter'
 import { EvidencePair, reconcileEvidenceRows } from './reconcileEvidence'
 import { useActiveJobs } from './useActiveJobs'
-import { AggStatusPill, FreshnessBadges, timeUntil } from './FreshnessRow'
+import { AggStatusPill, FreshnessBadges, MasteryTag, timeUntil } from './FreshnessRow'
+import { isPlatformMastered } from './freshnessTriage'
+import { activityFromEvent, recentActivityEvents } from './lastActivity'
 import type {
     FailureCategory, FreshnessDoc, RefreshEventSummary,
 } from '@/services/freshnessService'
@@ -252,12 +257,7 @@ function ReconciliationSection({ doc }: { doc: FreshnessDoc }) {
         reconcileNow.mutate(
             { dataSourceIds: [doc.dataSourceId] },
             {
-                onSuccess: (res) => showToast(
-                    'success',
-                    res.skipped ? 'A sweep is already running — this source is in it.'
-                        : (res.run?.actions ?? 0) > 0 ? 'Reconciliation started.'
-                            : 'Checked — nothing needed reconciling.',
-                ),
+                onSuccess: (res) => showToast('success', checkNowToast(res)),
                 onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
             },
         )
@@ -395,7 +395,7 @@ function ReconciliationSection({ doc }: { doc: FreshnessDoc }) {
                             className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-xs font-semibold text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 transition-colors disabled:opacity-50"
                         >
                             <RefreshCw className={cn('w-3.5 h-3.5', reconcileNow.isPending && 'animate-spin')} />
-                            {reconcileNow.isPending ? 'Checking…' : 'Check now'}
+                            {reconcileNow.isPending ? 'Reconciling…' : 'Reconcile now'}
                         </button>
                     )}
                 </div>
@@ -414,8 +414,9 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
     const [open, setOpen] = useState(false)
     const evidence = event.evidence as Record<string, unknown> | null | undefined
     const hasEvidence = !!evidence && Object.keys(evidence).length > 0
-    const reasonLabel = event.reason ? REASON_LABEL[event.reason] ?? event.reason : null
+    const activity = activityFromEvent(event)
     const automatic = event.mode === 'automatic'
+    const showMode = event.mode === 'automatic' || event.mode === 'manual'
 
     // Shared with Job History's ReconcileWhy — the two surfaces reach the same
     // fact from opposite ends and must never disagree about what it says.
@@ -433,9 +434,13 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
                 )}
             >
                 <span className="min-w-0 flex items-center gap-1.5">
-                    {reasonLabel
-                        ? <span className="text-ink truncate">{reasonLabel}</span>
-                        : <span className="text-ink-secondary truncate">{event.outcome}</span>}
+                    <span className="text-ink truncate">{activity.label}</span>
+                    {activity.originLabel && !activity.label.toLowerCase().includes(activity.originLabel.toLowerCase()) && (
+                        <span className="text-[10px] text-ink-muted shrink-0">
+                            · {activity.originLabel}
+                        </span>
+                    )}
+                    {showMode && (
                     <span
                         title={automatic
                             ? 'Started by automatic reconciliation'
@@ -449,6 +454,7 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
                     >
                         {automatic ? 'Auto' : 'Manual'}
                     </span>
+                    )}
                 </span>
                 <TimeStamp at={event.ts} icon={null} colorByAge={false} />
             </button>
@@ -692,12 +698,23 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
     const [retryOpen, setRetryOpen] = useState(false)
 
     const { data: doc, isLoading, isFetching, error } = useSourceFreshness(dsId, probe, isOpen)
+    const activityFeed = recentActivityEvents(doc?.events ?? [], doc?.lastCheckedAt)
     const probing = probe && isFetching
     const { byDataSource } = useActiveJobs()
+    const qc = useQueryClient()
+
+    // Probe writes the counts facet — fleet meter + recon due-ness share it.
+    useEffect(() => {
+        if (!probe || probing || error || !doc?.liveFingerprint) return
+        void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
+        void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.reconciliation })
+    }, [probe, probing, error, doc?.liveFingerprint, qc])
 
     const { showToast } = useToast()
     const canManage = usePermission('workspace:datasource:manage', doc?.workspaceId ?? undefined)
+    const isAdmin = usePermission('system:admin')
     const refresh = useRefreshSource()
+    const reconcileNow = useReconcileNow()
     const name = doc?.name || dsId || 'this source'
 
     // Clear cache is the safe reset — no confirm; Retry rebuilds (may fail
@@ -718,9 +735,28 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
         })
         setRetryOpen(false)
     }
+    const doRebuildLineage = () => {
+        if (!dsId) return
+        refresh.mutate({ dsId, scope: 'rollups' }, {
+            onSuccess: () => showToast('success', `Lineage rebuild queued for ${name}.`),
+            onError: (e) => showToast('error', e.message || 'Could not start the rebuild.'),
+        })
+    }
+    const doReconcileThisSource = () => {
+        if (!dsId) return
+        reconcileNow.mutate(
+            { dataSourceIds: [dsId] },
+            {
+                onSuccess: (res) => showToast('success', checkNowToast(res)),
+                onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
+            },
+        )
+    }
     const retryMessage = doc?.lastFailureCategory === 'out_of_memory'
         ? 'Retries the aggregated-lineage rebuild for this source. It may fail again until memory is freed in the graph store.'
         : 'Retries the aggregated-lineage rebuild for this source. This can take a while.'
+
+    const mastered = doc ? isPlatformMastered(doc) : false
 
     return createPortal(
         <>
@@ -776,6 +812,7 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                     {/* Status + badges */}
                                     <div className="flex flex-wrap items-center gap-2">
                                         <AggStatusPill status={doc.aggregationStatus} />
+                                        <MasteryTag mastered={isPlatformMastered(doc)} />
                                         <FreshnessBadges row={doc} job={byDataSource.get(dsId ?? '')} />
                                     </div>
 
@@ -834,16 +871,80 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                                 Compare the last aggregation against the live source. This makes one bounded call to the provider.
                                             </p>
                                         )}
-                                        {probe && !probing && (
+                                        {probe && probing && (
+                                            <p className="text-[11px] text-ink-muted flex items-center gap-1.5">
+                                                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                                Reading live fingerprint…
+                                            </p>
+                                        )}
+                                        {probe && !probing && error && (
+                                            <p className="text-[11px] text-red-600 dark:text-red-400">
+                                                Probe failed — {error.message || 'could not reach the live source.'}
+                                            </p>
+                                        )}
+                                        {probe && !probing && !error && doc && (
                                             <div className="space-y-2">
-                                                {doc.drifted === true && (
-                                                    <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-600 dark:text-amber-400">
-                                                        <AlertTriangle className="w-3.5 h-3.5" /> Drift detected — the live source differs from the last aggregation.
+                                                {doc.drifted === true && mastered && (
+                                                    <div className="space-y-2">
+                                                        <div className="flex items-start gap-1.5 text-xs font-semibold text-amber-600 dark:text-amber-400">
+                                                            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                                                            <span>
+                                                                FalkorDB is a rebuildable copy — the live fingerprint differs from the last aggregation, but version control owns the rollups. Check now will not queue a rebuild for this source.
+                                                            </span>
+                                                        </div>
+                                                        {doc.workspaceId && (
+                                                            <Link
+                                                                to={`/workspaces/${doc.workspaceId}`}
+                                                                className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-600 dark:text-sky-400 hover:underline"
+                                                            >
+                                                                Open version control for this source
+                                                                <ArrowUpRight className="w-3 h-3" />
+                                                            </Link>
+                                                        )}
+                                                    </div>
+                                                )}
+                                                {doc.drifted === true && !mastered && (
+                                                    <div className="space-y-2">
+                                                        <div className="flex items-start gap-1.5 text-xs font-semibold text-amber-600 dark:text-amber-400">
+                                                            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                                                            <span>
+                                                                The live graph does not match the last aggregation. Counts were refreshed — if Watching is on, overlay integrity will evaluate and rebuild on the next sweep (within a minute). Probe does not queue a rebuild itself.
+                                                            </span>
+                                                        </div>
+                                                        <div className="flex flex-wrap items-center gap-2">
+                                                            {canManage && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={doRebuildLineage}
+                                                                    disabled={refresh.isPending}
+                                                                    className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                                                                >
+                                                                    <RotateCcw className={cn('w-3.5 h-3.5', refresh.isPending && 'animate-spin')} />
+                                                                    Rebuild lineage now
+                                                                </button>
+                                                            )}
+                                                            {isAdmin && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={doReconcileThisSource}
+                                                                    disabled={reconcileNow.isPending}
+                                                                    className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-xs font-semibold text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 transition-colors disabled:opacity-50"
+                                                                >
+                                                                    <RefreshCw className={cn('w-3.5 h-3.5', reconcileNow.isPending && 'animate-spin')} />
+                                                                    Reconcile this source
+                                                                </button>
+                                                            )}
+                                                        </div>
                                                     </div>
                                                 )}
                                                 {doc.drifted === false && (
-                                                    <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
-                                                        <CheckCircle2 className="w-3.5 h-3.5" /> In sync — the live source matches the last aggregation.
+                                                    <div className="space-y-1.5">
+                                                        <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                                                            <CheckCircle2 className="w-3.5 h-3.5" /> In sync — the live fingerprint matches the last aggregation.
+                                                        </div>
+                                                        <p className="text-[11px] text-ink-muted">
+                                                            Counts were refreshed for this source.
+                                                        </p>
                                                     </div>
                                                 )}
                                                 <div className="grid grid-cols-2 gap-x-4 gap-y-2 pt-1">
@@ -860,12 +961,12 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                         <div className="flex items-center gap-1.5 text-sm font-semibold text-ink mb-2">
                                             <Activity className="w-4 h-4 text-ink-muted" /> Recent activity
                                         </div>
-                                        {doc.events.length === 0 ? (
+                                        {activityFeed.length === 0 ? (
                                             <p className="text-[11px] text-ink-muted">No refresh activity recorded yet.</p>
                                         ) : (
                                             <ul className="space-y-1">
-                                                {doc.events.map((e, i) => (
-                                                    <ActivityRow key={i} event={e} />
+                                                {activityFeed.map((e, i) => (
+                                                    <ActivityRow key={`${e.ts}-${e.origin}-${i}`} event={e} />
                                                 ))}
                                             </ul>
                                         )}

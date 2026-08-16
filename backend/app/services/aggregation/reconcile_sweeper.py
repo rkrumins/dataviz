@@ -1,10 +1,11 @@
 """ReconciliationSweeper — the scheduled drift / overlay-integrity sweep.
 
 Detects data sources whose ``:AGGREGATED`` overlay has fallen out of step
-with their raw graph and queues a rebuild, using ONLY the counts the stats
-service already collects. **This class takes no provider registry**, which
-is the structural guarantee — asserted in the tests — that it can never make
-a graph call of its own.
+with their raw graph and queues a rebuild. Auto ticks use ONLY the counts
+the stats service already collects — no graph call. Operator Check now /
+Preview refresh those counts from the live graph (via the aggregation
+service's provider registry) before evaluating, then never hold a DB
+session across that network call.
 
 Not to be confused with two neighbours that also say "reconcile":
 
@@ -20,6 +21,8 @@ outbound network call:
   Phase A — lock held, pure SQL, no network. Read candidates, evaluate,
             write ``last_reconcile_checked_at`` / seeded baselines / the run
             header, commit (releasing the lock). Emits an action list.
+            Operator modes insert a live-count refresh between two short
+            locked sections so the network call never sits under the lock.
   Phase B — no lock. Dispatch each action on its own short session, then
             record outcomes.
 
@@ -57,6 +60,10 @@ _SWEEP_TICK_SECS = 60.0
 # nothing starves).
 _SCAN_CAP = 200
 
+# Operator Check now may live-refresh this many sources at once.
+_LIVE_OBS_CONCURRENCY = 8
+_LIVE_OBS_TIMEOUT_S = 5.0
+
 # Cold-start guard, separate from the general action cap. A fresh install
 # with 200 never-aggregated sources drains at one first build per sweep
 # rather than queueing 200 full builds at once.
@@ -92,9 +99,53 @@ class _Action:
     reason: str
     evidence: Dict
     first_build: bool
-    # Display name, carried only so the dry-run preview can list findings a
-    # person recognises. Never used for a decision.
+    # Display fields, carried only so the dry-run preview / run detail can
+    # list findings a person recognises. Never used for a decision.
     name: Optional[str] = None
+    provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
+    skip: Optional[str] = None
+    acted: bool = False
+    # Baseline to adopt AFTER a successful Phase B dispatch — never in
+    # Phase A, or a CP crash between commit and dispatch leaves the source
+    # in rebuild cooldown with no job.
+    adopt_raw_fingerprint: Optional[str] = None
+    adopt_node_count: int = 0
+    adopt_edge_count: int = 0
+
+
+# Skips that mean "we looked and we are done with this source until the
+# next interval / stats change". Holds and deferrals must NOT advance
+# last_reconcile_checked_at or a known finding waits up to an hour.
+_TERMINAL_SKIPS = frozenset({"in_sync", "platform_mastered"})
+
+# Unresolved findings stay due every tick until an action or in_sync —
+# heals rows stamped by the old "advance last_checked on hold" bug.
+_UNRESOLVED_DRIFT = frozenset({"drifting", "overlayMissing", "neverBuilt"})
+
+
+def _is_terminal_skip(verdict: Verdict) -> bool:
+    if verdict.seed:
+        return True
+    return verdict.skip in _TERMINAL_SKIPS and verdict.reason is None
+
+
+def _unresolved_finding_open(state) -> bool:
+    """True when drift is still open and we have not yet acted on it.
+
+    After a successful Phase B finalize, ``last_reconciled_at`` is at least
+    as new as ``last_finding_at``, so the source is not kept due solely by
+    the drifting stamp (the rebuild job / interval owns the next look).
+    """
+    if getattr(state, "drift_state", None) not in _UNRESOLVED_DRIFT:
+        return False
+    last_recon = _parse_iso(getattr(state, "last_reconciled_at", None))
+    if last_recon is None:
+        return True
+    last_finding = _parse_iso(getattr(state, "last_finding_at", None))
+    if last_finding is None:
+        return True
+    return last_finding > last_recon
 
 
 @dataclass
@@ -113,12 +164,20 @@ class SweepResult:
     by_skip: Dict[str, int] = field(default_factory=dict)
     # Populated on preview runs so the UI can show what WOULD be reconciled.
     pending: List[_Action] = field(default_factory=list)
+    # Compact per-finding rows persisted on the run (acted and held).
+    finding_rows: List[Dict] = field(default_factory=list)
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
 
     def detail_json(self) -> str:
+        findings = self.finding_rows[:_SCAN_CAP]
         return json.dumps({
             "byReason": self.by_reason,
             "bySkip": self.by_skip,
-            "sample": [a.data_source_id for a in self.pending[:20]],
+            "findings": findings,
+            # Kept so anything still reading the original sample of ids
+            # does not go blank after this revision.
+            "sample": [f.get("dataSourceId") for f in findings[:20]],
         })
 
 
@@ -198,6 +257,7 @@ class ReconciliationSweeper:
         Returns ``None`` when another replica holds the sweep lock.
         """
         result = SweepResult(run_id=f"rcn_{uuid.uuid4().hex[:12]}", mode=mode)
+        started = _now_iso()
 
         phase_a = await self._phase_a(result, data_source_ids, dry_run)
         if phase_a is None:
@@ -212,6 +272,8 @@ class ReconciliationSweeper:
         else:
             result.pending = actions
 
+        result.started_at = started
+        result.finished_at = _now_iso()
         if record:
             await self._record_run(result, actor)
         return result
@@ -238,6 +300,7 @@ class ReconciliationSweeper:
 
         actions: List[_Action] = []
         nudges: List[tuple] = []
+        suspend_notices: List[dict] = []
 
         # Resolved BEFORE the lock is claimed. The graphver store sits behind
         # its own engine and possibly its own database, and the advisory lock
@@ -273,17 +336,50 @@ class ReconciliationSweeper:
                 from .service import AGGREGATION_RECONCILE_MAX_ACTIONS
                 max_actions = AGGREGATION_RECONCILE_MAX_ACTIONS
 
+            # Check now / Preview are operator-initiated full-fleet passes.
+            # Auto ticks stay cadence-gated so they do not re-scan the whole
+            # set every minute.
+            full_scan = result.mode in ("manual", "preview")
             states = await self._candidates(
                 session, data_source_ids, global_interval,
+                full_scan=full_scan,
             )
             if not states:
                 return actions, nudges
 
             ds_ids = [s.data_source_id for s in states]
             ctx = await self._batch_context(session, ds_ids, versioned)
+            # Drop the lock before any live graph call. Operator modes refresh
+            # counts; auto ticks evaluate against the SQL snapshot alone.
+            await session.commit()
+
+        if full_scan:
+            live_targets = [
+                (s.data_source_id, s.workspace_id)
+                for s in states
+                if not ctx.get(s.data_source_id, {}).get("platform_mastered")
+                and not ctx.get(s.data_source_id, {}).get("deleted")
+            ]
+            await self._live_observe_counts(ctx, live_targets)
+
+        async with self._session_factory() as session:
+            if not await self._claim_lock(session):
+                return None
+
+            # Re-load state rows under the new lock — the previous instances
+            # were bound to the committed session above.
+            states = (await session.execute(
+                select(AggregationDataSourceStateORM).where(
+                    AggregationDataSourceStateORM.data_source_id.in_(ds_ids)
+                )
+            )).scalars().all()
+            by_id = {s.data_source_id: s for s in states}
+            # Preserve the original oldest-checked-first order.
+            states = [by_id[i] for i in ds_ids if i in by_id]
 
             first_builds = 0
             for state in states:
+                ctx_row = ctx.get(state.data_source_id, {})
                 obs = self._observe(
                     state, ctx, policy,
                     reconcile_enabled=resolve_reconcile_enabled(
@@ -297,17 +393,58 @@ class ReconciliationSweeper:
                 # Per-source due-ness: the SQL cutoff is permissive because it
                 # cannot know each source's override, so the exact check is
                 # here. A not-yet-due source is left untouched (no checked_at
-                # write) and reappears on a later tick.
+                # write) and reappears on a later tick. Manual / preview and
+                # explicit ids skip this — the operator asked for a verdict.
                 interval = resolve_reconcile_interval(
                     state.reconcile_check_interval_secs, global_interval,
                 )
-                if data_source_ids is None and not self._is_due(state, interval):
+                if (
+                    data_source_ids is None
+                    and not full_scan
+                    and not self._is_due(
+                        state, interval,
+                        stats_updated=ctx_row.get("stats_updated"),
+                    )
+                ):
                     continue
 
                 result.scanned += 1
                 verdict = evaluate(obs, policy)
-                state.last_reconcile_checked_at = _now_iso()
-                state.drift_state = verdict.drift_state
+                now = _now_iso()
+                prev_drift = state.drift_state
+                # Unevaluated skips leave drift_state None — keep the prior stamp.
+                if verdict.drift_state is not None:
+                    state.drift_state = verdict.drift_state
+                if (
+                    not dry_run
+                    and verdict.skip == "suspended"
+                    and prev_drift != "suspended"
+                ):
+                    suspend_notices.append({
+                        "workspace_id": state.workspace_id,
+                        "data_source_id": state.data_source_id,
+                        "source_name": (
+                            ctx_row.get("name") or state.data_source_id
+                        ),
+                    })
+
+                if verdict.reason:
+                    state.last_finding_at = now
+                    state.last_finding_reason = verdict.reason
+                    try:
+                        state.last_finding_evidence = json.dumps(
+                            verdict.evidence or {},
+                        )
+                    except (TypeError, ValueError):
+                        state.last_finding_evidence = None
+                    result.findings += 1
+                    result.by_reason[verdict.reason] = (
+                        result.by_reason.get(verdict.reason, 0) + 1
+                    )
+                elif verdict.skip == "in_sync":
+                    state.last_finding_at = None
+                    state.last_finding_reason = None
+                    state.last_finding_evidence = None
 
                 if not verdict.should_act:
                     result.skipped += 1
@@ -330,13 +467,18 @@ class ReconciliationSweeper:
                     elif verdict.skip in ("stats_stale", "stats_unhealthy"):
                         if len(nudges) < _NUDGE_CAP:
                             nudges.append((state.data_source_id, state.workspace_id))
+                    # Holds / unevaluated skips leave last_checked alone so
+                    # the source stays due on the next tick.
+                    if _is_terminal_skip(verdict):
+                        state.last_reconcile_checked_at = now
+                    if verdict.reason:
+                        result.finding_rows.append(_finding_row(
+                            state, ctx_row, verdict, acted=False,
+                        ))
                     continue
 
-                result.findings += 1
-                result.by_reason[verdict.reason] = (
-                    result.by_reason.get(verdict.reason, 0) + 1
-                )
-
+                # Deferrals (dry-run listing, action cap, first-build cap)
+                # must not advance last_checked — the finding is still open.
                 if dry_run or len(actions) >= max_actions:
                     if not dry_run and len(actions) >= max_actions:
                         logger.info(
@@ -345,44 +487,139 @@ class ReconciliationSweeper:
                             max_actions, state.data_source_id,
                         )
                     if dry_run:
-                        actions.append(_Action(
-                            data_source_id=state.data_source_id,
-                            workspace_id=state.workspace_id,
-                            reason=verdict.reason,
-                            evidence=verdict.evidence,
-                            first_build=verdict.reason == "never_aggregated",
-                            name=ctx.get(state.data_source_id, {}).get("name"),
+                        actions.append(_action_from(
+                            state, ctx_row, verdict, obs, acted=False,
                         ))
+                    result.finding_rows.append(_finding_row(
+                        state, ctx_row, verdict, acted=False,
+                    ))
                     continue
 
                 first_build = verdict.reason == "never_aggregated"
                 if first_build:
                     if first_builds >= _FIRST_BUILD_CAP:
+                        result.finding_rows.append(_finding_row(
+                            state, ctx_row, verdict, acted=False,
+                            skip="cap",
+                        ))
                         continue
                     first_builds += 1
 
-                actions.append(_Action(
-                    data_source_id=state.data_source_id,
-                    workspace_id=state.workspace_id,
-                    reason=verdict.reason,
-                    evidence=verdict.evidence,
-                    first_build=first_build,
-                    name=ctx.get(state.data_source_id, {}).get("name"),
+                actions.append(_action_from(
+                    state, ctx_row, verdict, obs, acted=True,
                 ))
-                # Advance the baseline AT ACTION TIME so this finding cannot
-                # re-fire every sweep while the rebuild is in flight. If the
-                # rebuild then fails, retry is the stale-marker reconciler's
-                # job — two mechanisms must never both retry one rebuild.
-                self._adopt(state, obs)
-                state.last_reconciled_at = _now_iso()
-                state.last_reconcile_reason = verdict.reason
-                state.last_reconcile_mode = "manual" if data_source_ids else "auto"
-                state.reconcile_consecutive_actions = (
-                    state.reconcile_consecutive_actions or 0
-                ) + 1
+                # Adopt / last_reconciled / breaker / last_checked happen in
+                # Phase B after a successful dispatch — not here.
+                result.finding_rows.append(_finding_row(
+                    state, ctx_row, verdict, acted=True,
+                ))
+
+            if suspend_notices:
+                from backend.app.db.repositories.notification_repo import (
+                    notify_reconcile_suspended,
+                )
+                for notice in suspend_notices:
+                    await notify_reconcile_suspended(session, **notice)
 
             await session.commit()  # releases the advisory lock
         return actions, nudges
+
+    async def _live_observe_counts(
+        self, ctx: Dict[str, Dict], targets: List[tuple],
+    ) -> None:
+        """Refresh ctx counts from the live graph for an operator pass.
+
+        Uses ``provider.get_stats`` (cheap per-type counts), never
+        ``get_schema_stats``. Failures leave the SQL snapshot in place so
+        evaluate still has a named skip path. No DB session is held across
+        the graph call.
+        """
+        if not targets:
+            return
+        svc = self._service_getter()
+        registry = getattr(svc, "_registry", None) if svc else None
+        if registry is None:
+            return
+
+        from .fingerprint import raw_fingerprint_from_counts
+
+        sem = asyncio.Semaphore(_LIVE_OBS_CONCURRENCY)
+
+        async def _one(ds_id: str, workspace_id: Optional[str]) -> None:
+            if not workspace_id:
+                return
+            async with sem:
+                try:
+                    async with self._session_factory() as session:
+                        provider = await asyncio.wait_for(
+                            registry.get_provider_for_workspace(
+                                workspace_id, session, data_source_id=ds_id,
+                            ),
+                            timeout=_LIVE_OBS_TIMEOUT_S,
+                        )
+                    try:
+                        raw = await asyncio.wait_for(
+                            provider.get_stats(bypass_cache=True),
+                            timeout=_LIVE_OBS_TIMEOUT_S,
+                        )
+                    except TypeError:
+                        raw = await asyncio.wait_for(
+                            provider.get_stats(),
+                            timeout=_LIVE_OBS_TIMEOUT_S,
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.debug(
+                        "reconcile sweep: live observe failed for %s: %s",
+                        ds_id, exc,
+                    )
+                    return
+
+                entity = raw.get("entityTypeCounts") or {}
+                edges = raw.get("edgeTypeCounts") or {}
+                fp, observed_agg, raw_edges = raw_fingerprint_from_counts(
+                    entity, edges,
+                )
+                node_count = int(raw.get("nodeCount") or 0)
+                edge_count = int(raw.get("edgeCount") or 0)
+                entry = ctx.setdefault(ds_id, {})
+                entry.update(
+                    has_stats=True,
+                    stats_age_secs=0,
+                    stats_as_of=_now_iso(),
+                    stats_updated=datetime.now(timezone.utc),
+                    node_count=node_count,
+                    observed_aggregated=observed_agg,
+                    observed_raw_fingerprint=fp,
+                    observed_raw_edge_total=raw_edges,
+                    live_observed=True,
+                )
+                # Persist so Check now and the idle poll share one row.
+                # Failure leaves the in-memory observation (evaluate still runs).
+                try:
+                    from backend.app.db.repositories.stats_repo import (
+                        upsert_data_source_stats_counts,
+                    )
+                    async with self._session_factory() as session:
+                        await upsert_data_source_stats_counts(
+                            session,
+                            ds_id=ds_id,
+                            node_count=node_count,
+                            edge_count=edge_count,
+                            entity_type_counts=json.dumps(entity),
+                            edge_type_counts=json.dumps(edges),
+                        )
+                        await session.commit()
+                except Exception as exc:
+                    logger.debug(
+                        "reconcile sweep: live observe persist failed for %s: %s",
+                        ds_id, exc,
+                    )
+
+        await asyncio.gather(*[
+            _one(ds_id, ws_id) for ds_id, ws_id in targets
+        ])
 
     async def _claim_lock(self, session) -> bool:
         """Transaction-scoped advisory lock, distinct from the stuck-job
@@ -399,14 +636,26 @@ class ReconciliationSweeper:
         except Exception:
             return True
 
-    async def _candidates(self, session, data_source_ids, global_interval):
-        """Bounded, oldest-checked-first. Explicit ids bypass due-ness (the
-        on-demand path)."""
+    async def _candidates(
+        self, session, data_source_ids, global_interval, *, full_scan=False,
+    ):
+        """Bounded, oldest-checked-first. Explicit ids and operator
+        manual/preview passes bypass due-ness; auto ticks do not.
+
+        Auto also loads sources whose stats row is newer than the last
+        verdict — a counts poll (or Probe write-back) must not wait for
+        the check interval before evaluate runs.
+        """
+        from backend.app.db.models import DataSourceStatsORM
         from .models import AggregationDataSourceStateORM as S
 
         stmt = select(S)
         if data_source_ids:
             stmt = stmt.where(S.data_source_id.in_(data_source_ids))
+        elif full_scan:
+            stmt = stmt.order_by(
+                S.last_reconcile_checked_at.asc().nullsfirst()
+            ).limit(_SCAN_CAP)
         else:
             interval = min(
                 global_interval or _MIN_CHECK_INTERVAL_SECS,
@@ -415,12 +664,37 @@ class ReconciliationSweeper:
             cutoff = (
                 datetime.now(timezone.utc) - timedelta(seconds=interval)
             ).isoformat()
-            stmt = stmt.where(
-                (S.last_reconcile_checked_at.is_(None))
-                | (S.last_reconcile_checked_at < cutoff)
-            ).order_by(
-                S.last_reconcile_checked_at.asc().nullsfirst()
-            ).limit(_SCAN_CAP)
+            stmt = (
+                select(S)
+                .outerjoin(
+                    DataSourceStatsORM,
+                    DataSourceStatsORM.data_source_id == S.data_source_id,
+                )
+                .where(
+                    (S.last_reconcile_checked_at.is_(None))
+                    | (S.last_reconcile_checked_at < cutoff)
+                    | (
+                        DataSourceStatsORM.updated_at.isnot(None)
+                        & S.last_reconcile_checked_at.isnot(None)
+                        & (
+                            DataSourceStatsORM.updated_at
+                            > S.last_reconcile_checked_at
+                        )
+                    )
+                    | (
+                        S.drift_state.in_(tuple(_UNRESOLVED_DRIFT))
+                        & (
+                            S.last_reconciled_at.is_(None)
+                            | (
+                                S.last_finding_at.isnot(None)
+                                & (S.last_finding_at > S.last_reconciled_at)
+                            )
+                        )
+                    )
+                )
+                .order_by(S.last_reconcile_checked_at.asc().nullsfirst())
+                .limit(_SCAN_CAP)
+            )
         return list((await session.execute(stmt)).scalars().all())
 
     async def _batch_context(self, session, ds_ids, versioned) -> Dict[str, Dict]:
@@ -436,6 +710,7 @@ class ReconciliationSweeper:
         from backend.app.db.models import (
             DataSourcePollingConfigORM,
             DataSourceStatsORM,
+            ProviderORM,
             WorkspaceDataSourceORM,
         )
         from .fingerprint import raw_fingerprint_from_counts
@@ -452,19 +727,26 @@ class ReconciliationSweeper:
                 WorkspaceDataSourceORM.ontology_id,
                 WorkspaceDataSourceORM.provider_id,
                 WorkspaceDataSourceORM.projection_mode,
-                # Only for the preview's finding list. A blast-radius screen
-                # showing raw ``ds_`` ids cannot be read by the person deciding
-                # whether to switch automation on.
                 WorkspaceDataSourceORM.label,
-            ).where(WorkspaceDataSourceORM.id.in_(ds_ids))
+                ProviderORM.name,
+            ).select_from(WorkspaceDataSourceORM)
+            .outerjoin(
+                ProviderORM,
+                ProviderORM.id == WorkspaceDataSourceORM.provider_id,
+            )
+            .where(WorkspaceDataSourceORM.id.in_(ds_ids))
         )).all()
         seen = set()
-        for ds_id, deleted_at, is_active, ontology_id, provider_id, proj, label in rows:
+        for (
+            ds_id, deleted_at, is_active, ontology_id, provider_id, proj,
+            label, provider_name,
+        ) in rows:
             seen.add(ds_id)
             out[ds_id].update(
                 deleted=bool(deleted_at) or is_active is False,
                 ontology_id=ontology_id,
                 provider_id=provider_id,
+                provider_name=provider_name,
                 name=label,
                 # Versioned: Postgres masters the graph and FalkorDB is a
                 # rebuildable read cache, so every count-based signal here is
@@ -641,15 +923,22 @@ class ReconciliationSweeper:
             in_cooldown=in_cooldown,
             recently_failed=recently_failed,
             overlay_observable=c.get("overlay_observable", True),
+            live_observed=bool(c.get("live_observed")),
             reconcile_enabled=reconcile_enabled,
         )
 
     @staticmethod
-    def _is_due(state, interval_secs: int) -> bool:
+    def _is_due(state, interval_secs: int, *, stats_updated=None) -> bool:
+        """Due when the check interval elapsed, observation moved after the
+        last verdict, or an unresolved finding is still open."""
         if interval_secs <= 0:
+            return True
+        if _unresolved_finding_open(state):
             return True
         last = _parse_iso(state.last_reconcile_checked_at)
         if last is None:
+            return True
+        if stats_updated is not None and stats_updated > last:
             return True
         elapsed = (datetime.now(timezone.utc) - last).total_seconds()
         return elapsed >= interval_secs
@@ -680,10 +969,11 @@ class ReconciliationSweeper:
                 async with self._session_factory() as session:
                     if action.first_build:
                         await self._dispatch_first_build(
-                            svc, session, action, actor,
+                            svc, session, action, actor, result.run_id,
                         )
+                        deferred = False
                     else:
-                        await svc.signal_source_changed(
+                        resp = await svc.signal_source_changed(
                             action.data_source_id, session,
                             reason=action.reason,
                             origin="reconcile-sweep",
@@ -694,7 +984,22 @@ class ReconciliationSweeper:
                             # and reads in Job History as a person clicking
                             # Rebuild — indistinguishable from a manual one.
                             trigger_source="reconcile",
+                            run_id=result.run_id,
                         )
+                        deferred = bool(
+                            resp is not None and getattr(resp, "deferred", False)
+                        )
+                    if deferred:
+                        # Cooldown raced the hold — leave last_checked alone
+                        # so the next tick retries once the window opens.
+                        logger.info(
+                            "reconcile sweep: dispatch deferred for %s — "
+                            "staying due",
+                            action.data_source_id,
+                        )
+                        continue
+                    await self._finalize_action(session, action, mode)
+                    await session.commit()
                 result.actions += 1
             except asyncio.CancelledError:
                 raise
@@ -705,7 +1010,33 @@ class ReconciliationSweeper:
                     action.data_source_id, action.reason, exc,
                 )
 
-    async def _dispatch_first_build(self, svc, session, action, actor) -> None:
+    async def _finalize_action(self, session, action: _Action, mode: str) -> None:
+        """Adopt baseline + stamp last_checked after a successful dispatch.
+
+        Kept out of Phase A so a CP crash between evaluate and dispatch cannot
+        put the source into rebuild cooldown with no job queued.
+        """
+        from .models import AggregationDataSourceStateORM
+
+        state = await session.get(
+            AggregationDataSourceStateORM, action.data_source_id,
+        )
+        if state is None:
+            return
+        now = _now_iso()
+        if action.adopt_raw_fingerprint is not None:
+            state.raw_fingerprint = action.adopt_raw_fingerprint
+            state.raw_node_count = action.adopt_node_count
+            state.raw_edge_count = action.adopt_edge_count
+        state.last_reconciled_at = now
+        state.last_reconcile_reason = action.reason
+        state.last_reconcile_mode = "manual" if mode == "manual" else "auto"
+        state.reconcile_consecutive_actions = (
+            state.reconcile_consecutive_actions or 0
+        ) + 1
+        state.last_reconcile_checked_at = now
+
+    async def _dispatch_first_build(self, svc, session, action, actor, run_id) -> None:
         """Queue the very first aggregation for an onboarded source.
 
         Deliberately NOT via ``signal_source_changed``: that path treats a
@@ -747,6 +1078,7 @@ class ReconciliationSweeper:
             reason=action.reason,
             evidence=action.evidence,
             job_id=job.id,
+            run_id=run_id,
         )
 
     async def _nudge_stats(self, ds_id, workspace_id) -> None:
@@ -771,8 +1103,8 @@ class ReconciliationSweeper:
             async with self._session_factory() as session:
                 session.add(ReconcileRunORM(
                     id=result.run_id,
-                    started_at=_now_iso(),
-                    finished_at=_now_iso(),
+                    started_at=result.started_at or _now_iso(),
+                    finished_at=result.finished_at or _now_iso(),
                     mode=result.mode,
                     actor=actor,
                     scanned=result.scanned,
@@ -795,6 +1127,38 @@ class ReconciliationSweeper:
                 await session.commit()
         except Exception as exc:
             logger.warning("reconcile sweep: run record failed: %s", exc)
+
+
+def _action_from(state, ctx_row, verdict, obs, *, acted: bool) -> _Action:
+    return _Action(
+        data_source_id=state.data_source_id,
+        workspace_id=state.workspace_id,
+        reason=verdict.reason,
+        evidence=verdict.evidence,
+        first_build=verdict.reason == "never_aggregated",
+        name=ctx_row.get("name"),
+        provider_id=ctx_row.get("provider_id"),
+        provider_name=ctx_row.get("provider_name"),
+        skip=verdict.skip,
+        acted=acted,
+        adopt_raw_fingerprint=obs.observed_raw_fingerprint,
+        adopt_node_count=obs.node_count,
+        adopt_edge_count=obs.observed_raw_edge_total,
+    )
+
+
+def _finding_row(state, ctx_row, verdict, *, acted: bool, skip=None) -> Dict:
+    return {
+        "dataSourceId": state.data_source_id,
+        "name": ctx_row.get("name"),
+        "workspaceId": state.workspace_id,
+        "providerId": ctx_row.get("provider_id"),
+        "providerName": ctx_row.get("provider_name"),
+        "reason": verdict.reason,
+        "acted": acted,
+        "skip": skip if skip is not None else verdict.skip,
+        "evidence": verdict.evidence or {},
+    }
 
 
 def _within_cooldown(

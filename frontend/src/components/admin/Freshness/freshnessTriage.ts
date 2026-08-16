@@ -10,12 +10,16 @@
  * the triage-first sort — so the two can never drift apart. Each predicate is
  * annotated with the ``_summarize_freshness`` counter it mirrors.
  */
-import type { FreshnessRow } from '@/services/freshnessService'
+import type { FailureCategory, FreshnessRow } from '@/services/freshnessService'
+import { asFailureCategory } from './failureGuidance'
 
 // ── Status facets (tile ⇄ filter) ────────────────────────────────────
 
 /** The status facet carried in the URL (``?fstatus=``). Empty string = all. */
-export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped' | 'drifting'
+export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped' | 'drifting' | 'suspended'
+
+/** Failure-cause facet (``?ffail=``). Empty = any cause. */
+export type FailureFacet = '' | FailureCategory
 
 /** Drift verdicts that mean the rollups no longer match the data. Both count
  *  toward the ``drifting`` tile; the split is only about which detector saw
@@ -32,6 +36,14 @@ export function isDrifting(row: FreshnessRow): boolean {
  *  cleared the problem — it needs a person. */
 export function isReconcileSuspended(row: FreshnessRow): boolean {
     return row.driftState === 'suspended'
+}
+
+/** Mastered here (live versioned graph), not an external provider graph.
+ *  Prefer the fleet ``platformMastered`` bit; fall back to the sweep stamp. */
+export function isPlatformMastered(row: FreshnessRow): boolean {
+    if (row.platformMastered === true) return true
+    if (row.platformMastered === false) return false
+    return row.driftState === 'managed'
 }
 
 /** A source that has never produced an aggregation: no state row, or an
@@ -61,6 +73,7 @@ export function needsAttention(row: FreshnessRow): boolean {
     return hasStaleMarker(row)
         || row.aggregationStatus === 'failed'
         || isDrifting(row)
+        || isReconcileSuspended(row)
 }
 
 /** A cooldown is holding the next rebuild off (``cooldownUntil`` in the future). */
@@ -90,10 +103,22 @@ export function matchesFacet(row: FreshnessRow, facet: StatusFacet): boolean {
             return row.cacheAsOf != null
         case 'drifting':
             return isDrifting(row)
+        case 'suspended':
+            return isReconcileSuspended(row)
         case '':
         default:
             return true
     }
+}
+
+/** Does ``row`` match the failure-cause facet? Healthy rows never match a
+ *  non-empty cause filter. */
+export function matchesFailureFacet(
+    row: FreshnessRow, facet: FailureFacet,
+): boolean {
+    if (!facet) return true
+    if (row.aggregationStatus !== 'failed') return false
+    return (asFailureCategory(row.lastFailureCategory) ?? 'unknown') === facet
 }
 
 // ── Freshness state (the honest freshness-column badge) ───────────────

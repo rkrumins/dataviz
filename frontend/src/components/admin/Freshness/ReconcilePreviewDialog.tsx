@@ -27,9 +27,10 @@ import { MOTION } from '@/lib/motion'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { useToast } from '@/components/ui/toast'
-import type { ReconcileFinding } from '@/services/freshnessService'
+import type { ReconcileFinding, ReconcileRun } from '@/services/freshnessService'
 import { DRIFT_SPEC, REASON_LABEL } from './DriftStateBadge'
 import { EvidencePair, reconcileEvidenceRows } from './reconcileEvidence'
+import { lastPassLabel } from './reconcileHealth'
 import { useReconcileNow } from './useFreshness'
 
 /** Detector code → the drift state it implies, so the preview wears the same
@@ -80,24 +81,37 @@ function FindingRow({ finding }: { finding: ReconcileFinding }) {
     )
 }
 
-export function ReconcilePreviewDialog({ open, onClose }: {
+export function ReconcilePreviewDialog({ open, onClose, fleetTotal }: {
     open: boolean
     onClose: () => void
+    fleetTotal?: number | null
 }) {
     useModalA11y(open, onClose)
     const { showToast } = useToast()
     const preview = useReconcileNow()
     const [findings, setFindings] = useState<ReconcileFinding[] | null>(null)
     const [scanned, setScanned] = useState(0)
+    const [passSummary, setPassSummary] = useState('')
 
     // Run the dry sweep on open, once. Re-opening re-runs it, which is right:
     // a preview of a stale fleet state would be worse than no preview.
     useEffect(() => {
-        if (!open) { setFindings(null); return }
+        if (!open) { setFindings(null); setPassSummary(''); return }
         preview.mutate({ dryRun: true }, {
             onSuccess: (res) => {
-                setFindings(res.findings ?? [])
-                setScanned(res.run?.scanned ?? 0)
+                const next = res.findings ?? []
+                const n = res.run?.scanned ?? 0
+                setFindings(next)
+                setScanned(n)
+                const run = res.run as Pick<ReconcileRun, 'scanned' | 'findings' | 'actions' | 'bySkip'> | undefined
+                setPassSummary(run
+                    ? lastPassLabel({
+                        scanned: run.scanned,
+                        findings: run.findings ?? next.length,
+                        actions: run.actions ?? 0,
+                        bySkip: run.bySkip ?? {},
+                    }, fleetTotal)
+                    : '')
             },
             onError: (e) => {
                 showToast('error', e.message || 'Could not run the preview.')
@@ -163,13 +177,16 @@ export function ReconcilePreviewDialog({ open, onClose }: {
                                 <div className="flex flex-col items-center gap-2 py-10 px-6 text-center">
                                     <CheckCircle2 className="w-8 h-8 text-emerald-500" />
                                     <p className="text-sm font-semibold text-ink">
-                                        Nothing needs reconciling
+                                        {scanned === 0
+                                            ? 'No sources were eligible to check'
+                                            : 'Nothing would rebuild'}
                                     </p>
                                     <p className="text-[11px] text-ink-muted">
-                                        All {scanned.toLocaleString()} source
-                                        {scanned === 1 ? '' : 's'} checked are in step with
-                                        their data. Turning automation on would queue no
-                                        rebuilds right now.
+                                        {scanned === 0
+                                            ? 'Nothing in the reconcile set yet — sources appear here after their first aggregation state is recorded.'
+                                            : passSummary
+                                                ? `${passSummary}. Turning automation on would queue no rebuilds right now.`
+                                                : `All ${scanned.toLocaleString()} source${scanned === 1 ? '' : 's'} checked. Turning automation on would queue no rebuilds right now.`}
                                     </p>
                                 </div>
                             ) : (
@@ -178,14 +195,12 @@ export function ReconcilePreviewDialog({ open, onClose }: {
                                         <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
                                         <p className="text-[11px] text-ink-secondary leading-relaxed">
                                             <span className="font-semibold text-ink">
-                                                {findings.length.toLocaleString()} of{' '}
-                                                {scanned.toLocaleString()} sources
-                                            </span>{' '}
-                                            would be rebuilt. Each rebuild is a full
-                                            aggregation job — on a large graph that is real
-                                            work, and the per-sweep action cap spreads them
-                                            across several checks rather than queueing them
-                                            all at once.
+                                                {passSummary || `${scanned.toLocaleString()} checked · ${findings.length.toLocaleString()} would rebuild`}
+                                            </span>
+                                            . Each rebuild is a full aggregation job — on a
+                                            large graph that is real work, and the per-sweep
+                                            action cap spreads them across several checks
+                                            rather than queueing them all at once.
                                         </p>
                                     </div>
                                     {byReason.length > 1 && (

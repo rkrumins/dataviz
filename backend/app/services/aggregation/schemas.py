@@ -4,7 +4,7 @@ Pydantic request/response schemas for the aggregation API.
 These live inside the aggregation package so the package is self-contained.
 The thin FastAPI adapter (app/api/v1/endpoints/aggregation.py) imports from here.
 """
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -569,6 +569,16 @@ class FreshnessRow(BaseModel):
     last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
     last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
     last_reconcile_mode: Optional[str] = Field(None, alias="lastReconcileMode")
+    # Failure surfacing for the fleet table: populated only when
+    # aggregation_status is failed and the latest job is failed. Same
+    # classifier as the drawer — so the row can name the cause without a
+    # second round-trip. Best-effort; never raises.
+    last_failure_reason: Optional[str] = Field(None, alias="lastFailureReason")
+    last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
+    # True when a live graphver.graphs row exists — this source is mastered
+    # here. Distinct from drift_state == managed, which is only stamped after
+    # a reconcile check. Fail-open False when the versioned lookup is down.
+    platform_mastered: bool = Field(False, alias="platformMastered")
 
     class Config:
         populate_by_name = True
@@ -603,11 +613,7 @@ class FreshnessDoc(FreshnessRow):
     cache_key_count_by_endpoint: Optional[Dict[str, int]] = Field(
         None, alias="cacheKeyCountByEndpoint",
     )
-    # Failure surfacing (spec §9c): populated only when the latest job for
-    # this source is ``failed`` (one bounded query); None otherwise —
-    # doc-only, best-effort, never raises.
-    last_failure_reason: Optional[str] = Field(None, alias="lastFailureReason")
-    last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
+    # Retry count stays doc-only (not needed to scan the fleet table).
     retry_count: Optional[int] = Field(None, alias="retryCount")
 
     # ── Reconciliation detail ─────────────────────────────────────────
@@ -653,10 +659,14 @@ class FreshnessSummary(BaseModel):
     failed: int = Field(0)  # aggregation_status == "failed"
     not_built: int = Field(0, alias="notBuilt")  # status in ("none","skipped") or no state row
     recomputing: int = Field(0)  # stale marker present
-    needs_attention: int = Field(0, alias="needsAttention")  # marker present OR failed
+    needs_attention: int = Field(0, alias="needsAttention")  # marker, failed, drifting, or suspended
     cache_stamped: int = Field(0, alias="cacheStamped")  # cacheAsOf non-null
     # driftState is a drifting/overlayMissing verdict from the last sweep.
     drifting: int = Field(0)
+    # Circuit breaker tripped — automation stopped; a person has to look.
+    # Counted in needsAttention too, but not in drifting (the overlay is
+    # still wrong; the distinction is that the sweep will not retry).
+    suspended: int = Field(0)
 
     class Config:
         populate_by_name = True
@@ -677,6 +687,7 @@ class ProviderFreshnessSummary(BaseModel):
     needs_attention: int = Field(0, alias="needsAttention")
     cache_stamped: int = Field(0, alias="cacheStamped")
     drifting: int = Field(0)
+    suspended: int = Field(0)
 
     class Config:
         populate_by_name = True
@@ -899,6 +910,37 @@ class ReconcileOverviewResponse(BaseModel):
     """GET /freshness/reconciliation — policy plus recent runs."""
     policy: ReconcilePolicyResponse
     runs: List[ReconcileRun] = Field(default_factory=list)
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileActivityItem(BaseModel):
+    """One overnight-ledger row: a finding from a sweep, joined to the
+    refresh_event (and job) it produced when it produced one."""
+    run_id: str = Field(alias="runId")
+    run_started_at: Optional[str] = Field(None, alias="runStartedAt")
+    ts: Optional[str] = None
+    data_source_id: str = Field(alias="dataSourceId")
+    name: Optional[str] = None
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    provider_name: Optional[str] = Field(None, alias="providerName")
+    reason: Optional[str] = None
+    mode: str = "auto"  # auto | manual
+    outcome: str  # rebuilt | held | failed
+    skip: Optional[str] = None
+    job_id: Optional[str] = Field(None, alias="jobId")
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileActivityResponse(BaseModel):
+    """GET /freshness/reconciliation/activity — overnight blotter."""
+    since: str
+    items: List[ReconcileActivityItem] = Field(default_factory=list)
 
     class Config:
         populate_by_name = True
