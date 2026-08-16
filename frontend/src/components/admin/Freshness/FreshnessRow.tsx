@@ -33,10 +33,11 @@ import { PHASE_LABELS, PhaseStepper, jobHistoryPath, phaseLabel } from '../job-h
 import { freshnessState, isDrifting, isReconcileSuspended } from './freshnessTriage'
 import type { FreshnessState } from './freshnessTriage'
 import {
-    AutoReconcileOffBadge, DriftStateBadge, REASON_LABEL,
+    AutoReconcileOffBadge, DriftStateBadge,
 } from './DriftStateBadge'
 import { failureBadgeLabel, failureBadgeWhy, relatedFailureCount } from './failureGuidance'
 import { SelectionCheckbox } from './SelectionCheckbox'
+import { resolveLastActivity, type LastActivityKind } from './lastActivity'
 
 /** A quiet placeholder for an empty cell — muted enough that a never-built
  *  row's blank cells don't read as three shouting dashes. */
@@ -99,6 +100,58 @@ export function CacheStatusPill({ cached }: { cached: boolean }) {
                 Not cached
             </span>
         )
+}
+
+const ACTIVITY_PILL: Record<LastActivityKind, { tone: string; Icon: typeof CheckCircle2 }> = {
+    in_step: {
+        tone: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
+        Icon: CheckCircle2,
+    },
+    verdict: {
+        tone: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+        Icon: AlertTriangle,
+    },
+    rebuild: {
+        tone: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
+        Icon: Activity,
+    },
+    refresh: {
+        tone: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
+        Icon: CheckCircle2,
+    },
+    queued: {
+        tone: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+        Icon: Clock,
+    },
+    failed: {
+        tone: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20',
+        Icon: AlertTriangle,
+    },
+}
+
+export function LastActivityPill({ kind, label, originLabel }: {
+    kind: LastActivityKind
+    label: string
+    originLabel?: string | null
+}) {
+    const { tone, Icon } = ACTIVITY_PILL[kind]
+    return (
+        <span
+            title={originLabel ? `${label} · ${originLabel}` : label}
+            className={cn(
+                'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold',
+                tone,
+            )}
+        >
+            <Icon className="w-3 h-3 shrink-0" />
+            <span className="uppercase tracking-wide">{label}</span>
+            {originLabel && !label.toLowerCase().includes(originLabel.toLowerCase()) && (
+                <span className="font-medium normal-case tracking-normal opacity-70">
+                    · {originLabel}
+                </span>
+            )}
+        </span>
+    )
 }
 
 export function AggStatusPill({ status }: { status?: string | null }) {
@@ -183,21 +236,28 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
                 title="This source's lineage is out of date and needs a rebuild."
             />,
         )
+    } else if (state === 'neverBuilt') {
+        badges.push(
+            <Badge key="neverBuilt"
+                tone="bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20"
+                Icon={Minus} label="Never built"
+                title="Lineage has never been built for this source."
+            />,
+        )
+    } else if (state === 'upToDate' && !isDrifting(row) && !isReconcileSuspended(row)) {
+        badges.push(
+            <Badge key="upToDate"
+                tone="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                Icon={CheckCircle2} label="Up to date"
+                title="Lineage is built and the last reconcile check found the rollups in sync."
+            />,
+        )
     }
 
-    // The reconciliation verdict, stamped by the scheduled sweep. Distinct
-    // from ``drifted`` below, which only ever comes from an explicit probe.
+    // Current overlay verdict — additive on failed/queued rows, and the
+    // primary freshness label when a ready source is drifting.
     if (isDrifting(row) || isReconcileSuspended(row)) {
-        badges.push(
-            <span key="driftState" className="inline-flex items-center gap-1">
-                <DriftStateBadge state={row.driftState} />
-                {row.lastReconcileReason && REASON_LABEL[row.lastReconcileReason] && (
-                    <span className="text-[10px] text-ink-muted">
-                        {REASON_LABEL[row.lastReconcileReason]}
-                    </span>
-                )}
-            </span>,
-        )
+        badges.push(<DriftStateBadge key="driftState" state={row.driftState} />)
     }
 
     // Drift detected by automation, but automation is switched off here — so
@@ -235,11 +295,6 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
     }
 
     if (badges.length === 0) {
-        // "Up to date" is an assertion — only make it for a source that has
-        // actually been built. Never-built sources say so plainly.
-        if (state === 'neverBuilt') {
-            return <span className="text-[11px] text-ink-muted/70">Never built</span>
-        }
         return <span className="text-[11px] text-ink-muted">Up to date</span>
     }
     return <div className="flex flex-wrap items-center gap-1">{badges}</div>
@@ -432,16 +487,24 @@ export function FreshnessRow({
 
             {/* Last activity */}
             <td className="px-3 py-2 align-top">
-                {row.lastEvent
-                    ? (
-                        <div className="flex flex-col gap-0.5">
-                            <span className="text-[11px] text-ink-secondary">
-                                {row.lastEvent.origin} · {row.lastEvent.outcome}
-                            </span>
-                            <TimeStamp at={row.lastEvent.ts} icon={Activity} colorByAge={false} />
+                {(() => {
+                    const activity = resolveLastActivity(row)
+                    if (!activity) return <EmptyCell />
+                    return (
+                        <div className="flex flex-col gap-1">
+                            <LastActivityPill
+                                kind={activity.kind}
+                                label={activity.label}
+                                originLabel={activity.originLabel}
+                            />
+                            <TimeStamp
+                                at={activity.at}
+                                prefix={activity.source === 'check' ? 'checked' : 'updated'}
+                                icon={Activity}
+                            />
                         </div>
                     )
-                    : <EmptyCell />}
+                })()}
             </td>
 
             {/* Actions */}

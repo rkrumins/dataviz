@@ -17,12 +17,15 @@ import {
 } from './reconcileHealth'
 
 export function IntegrityPulse({
-    summary, policy, latestRun, isError, isLoading, isAdmin,
+    summary, policy, latestRun, lastPassRun, isError, isLoading, isAdmin,
     onCheckNow, checking, onPreview, onFacet, activeFacet,
 }: {
     summary: FreshnessSummary | null | undefined
     policy: ReconcilePolicy | undefined
+    /** Newest run — drives "last / next" liveness, including empty auto ticks. */
     latestRun: ReconcileRun | undefined
+    /** Run described by "last pass …". Omit the sentence when undefined. */
+    lastPassRun?: ReconcileRun | undefined
     isError: boolean
     isLoading: boolean
     isAdmin: boolean
@@ -144,11 +147,11 @@ export function IntegrityPulse({
                         activeFacet === 'suspended' && 'underline',
                     )}
                 >
-                    {suspended.toLocaleString()} {suspended === 1 ? 'needs a person' : 'need a person'}
+                    {suspended.toLocaleString()} held by the breaker
                 </button>
-                {latestRun && (
+                {lastPassRun && (
                     <span className="text-ink-muted tabular-nums">
-                        last pass {lastPassLabel(latestRun, summary?.total)}
+                        last pass {lastPassLabel(lastPassRun, summary?.total)}
                     </span>
                 )}
             </div>

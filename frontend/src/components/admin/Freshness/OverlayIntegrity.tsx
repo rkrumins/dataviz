@@ -19,7 +19,7 @@ import {
 } from './useFreshness'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-    DRIFT_WINDOWS, checkNowToast, parseDriftWindow, windowDriftCounts, windowPhrase,
+    DRIFT_WINDOWS, checkNowToast, parseDriftWindow, pickLastPassRun, windowDriftCounts, windowPhrase,
     type DriftWindow,
 } from './reconcileHealth'
 
@@ -110,6 +110,7 @@ export function OverlayIntegrity({
                     summary={summary}
                     policy={recon.data?.policy}
                     latestRun={lastCheck ?? recon.data?.runs[0]}
+                    lastPassRun={pickLastPassRun(recon.data?.runs, lastCheck)}
                     isError={recon.isError}
                     isLoading={recon.isLoading}
                     isAdmin={isAdmin}

@@ -149,9 +149,12 @@ describe('Freshness cockpit', () => {
         expect(screen.getByText('Customers Graph')).toBeInTheDocument()
         expect(screen.getAllByText('Cached').length).toBeGreaterThan(0)
         expect(screen.getAllByText(/updated/i).length).toBeGreaterThan(0)
+        // Last activity is a human pill, never raw "api · completed".
+        expect(screen.getByText(/Refresh queued/i)).toBeInTheDocument()
+        expect(screen.queryByText(/api ·/i)).not.toBeInTheDocument()
         // The source_changed row has a marker but NO running job → "Queued",
         // not "Recomputing" (which now means a job is genuinely in flight).
-        expect(screen.getByText('Queued')).toBeInTheDocument()
+        expect(screen.getAllByText('Queued').length).toBeGreaterThan(0)
         expect(screen.queryByText('Recomputing')).not.toBeInTheDocument()
     })
 
@@ -257,7 +260,7 @@ describe('Freshness cockpit', () => {
 
         await waitFor(() => expect(screen.getByText('Held Source')).toBeInTheDocument())
         // Pulse count — prefer the aria-pressed control over Start here chips.
-        const pulse = screen.getAllByRole('button', { name: /needs a person/i })
+        const pulse = screen.getAllByRole('button', { name: /held by the breaker/i })
             .find(el => el.getAttribute('aria-pressed') != null)
         expect(pulse).toBeTruthy()
         await user.click(pulse!)

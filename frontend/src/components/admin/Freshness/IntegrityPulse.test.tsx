@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { IntegrityPulse } from './IntegrityPulse'
-import { checkNowToast, lastPassLabel, parseDriftWindow, sweepsHaveStopped } from './reconcileHealth'
+import { checkNowToast, lastPassLabel, parseDriftWindow, pickLastPassRun, sweepsHaveStopped } from './reconcileHealth'
 import type { FreshnessSummary, ReconcilePolicy, ReconcileRun } from '@/services/freshnessService'
 
 const POLICY: ReconcilePolicy = {
@@ -33,14 +33,14 @@ describe('sweepsHaveStopped', () => {
 })
 
 describe('lastPassLabel', () => {
-    it('names checked, in step, drifted, and queued', () => {
+    it('names checked, in sync, drifted, and queued', () => {
         expect(lastPassLabel({ scanned: 47, findings: 2, actions: 1 }, 47))
-            .toBe('47 of 47 checked · 45 in step · 2 drifted · 1 queued')
+            .toBe('47 of 47 checked · 45 in sync · 2 drifted · 1 queued')
     })
 
-    it('does not claim a clean bill of health when nothing was scanned', () => {
+    it('names an empty auto tick as nobody due, not an empty set', () => {
         expect(lastPassLabel({ scanned: 0, findings: 0, actions: 0 }, 12))
-            .toBe('no sources in the reconcile set')
+            .toBe('no sources were due this tick')
         expect(checkNowToast({ skipped: false, run: { scanned: 0, findings: 0, actions: 0 } }))
             .toBe('No sources in the reconcile set yet.')
     })
@@ -49,6 +49,24 @@ describe('lastPassLabel', () => {
         expect(parseDriftWindow(null)).toBe('24h')
         expect(parseDriftWindow('3h')).toBe('3h')
         expect(parseDriftWindow('7d')).toBe('7d')
+    })
+})
+
+describe('pickLastPassRun', () => {
+    it('prefers lastCheck, then the newest run that scanned someone', () => {
+        const empty: ReconcileRun = {
+            id: 'empty', mode: 'auto', scanned: 0, skipped: 0, seeded: 0,
+            findings: 0, actions: 0, errors: 0, byReason: {}, bySkip: {},
+            startedAt: new Date().toISOString(),
+        }
+        const meaningful: ReconcileRun = {
+            id: 'm', mode: 'manual', scanned: 12, skipped: 10, seeded: 0,
+            findings: 2, actions: 2, errors: 0, byReason: {}, bySkip: {},
+            startedAt: new Date(Date.now() - 60_000).toISOString(),
+        }
+        expect(pickLastPassRun([empty, meaningful])).toEqual(meaningful)
+        expect(pickLastPassRun([empty, meaningful], empty)).toEqual(empty)
+        expect(pickLastPassRun([empty])).toBeUndefined()
     })
 })
 
@@ -65,6 +83,7 @@ describe('IntegrityPulse', () => {
                 summary={SUMMARY}
                 policy={POLICY}
                 latestRun={run}
+                lastPassRun={run}
                 isError={false}
                 isLoading={false}
                 isAdmin={false}
@@ -77,8 +96,33 @@ describe('IntegrityPulse', () => {
         )
         expect(screen.getByText('Sweeps have stopped')).toBeInTheDocument()
         expect(screen.getByText(/2 drifting/)).toBeInTheDocument()
-        expect(screen.getByText(/1 needs a person/)).toBeInTheDocument()
-        expect(screen.getByText(/last pass 12 of 12 checked · 10 in step · 2 drifted · 2 queued/)).toBeInTheDocument()
+        expect(screen.getByText(/1 held by the breaker/)).toBeInTheDocument()
+        expect(screen.getByText(/last pass 12 of 12 checked · 10 in sync · 2 drifted · 2 queued/)).toBeInTheDocument()
+    })
+
+    it('omits last pass when no meaningful run exists', () => {
+        const empty: ReconcileRun = {
+            id: 'r0', mode: 'auto', scanned: 0, skipped: 0, seeded: 0,
+            findings: 0, actions: 0, errors: 0, byReason: {}, bySkip: {},
+            startedAt: new Date().toISOString(),
+        }
+        render(
+            <IntegrityPulse
+                summary={SUMMARY}
+                policy={POLICY}
+                latestRun={empty}
+                lastPassRun={undefined}
+                isError={false}
+                isLoading={false}
+                isAdmin={false}
+                onCheckNow={() => {}}
+                checking={false}
+                onPreview={() => {}}
+                onFacet={() => {}}
+                activeFacet=""
+            />,
+        )
+        expect(screen.queryByText(/last pass/)).not.toBeInTheDocument()
     })
 
     it('renders a recon error instead of looking healthy', () => {

@@ -44,13 +44,28 @@ export function lastPassLabel(
     const drifted = run.findings
     const inStep = Math.max(0, scanned - drifted)
     const total = fleetTotal ?? scanned
-    if (scanned === 0) return 'no sources in the reconcile set'
+    // An auto tick with nobody due still records a run — that is not
+    // "the reconcile set is empty"; it is "nothing was due this tick".
+    if (scanned === 0) return 'no sources were due this tick'
     const checked = total > RECONCILE_SCAN_CAP && scanned < total
         ? `${scanned.toLocaleString()} of ${total.toLocaleString()} checked — oldest first`
         : `${scanned.toLocaleString()} of ${Math.max(scanned, total).toLocaleString()} checked`
-    const parts = [checked, `${inStep.toLocaleString()} in step`, `${drifted.toLocaleString()} drifted`]
+    const parts = [checked, `${inStep.toLocaleString()} in sync`, `${drifted.toLocaleString()} drifted`]
     if (run.actions > 0) parts.push(`${run.actions.toLocaleString()} queued`)
     return parts.join(' · ')
+}
+
+/**
+ * The run the pulse should describe as "last pass". Prefer an explicit
+ * Check now result; otherwise the newest run that actually scanned someone.
+ * Empty auto ticks prove liveness elsewhere — they are not a meaningful pass.
+ */
+export function pickLastPassRun(
+    runs: ReconcileRun[] | undefined,
+    lastCheck?: ReconcileRun | null,
+): ReconcileRun | undefined {
+    if (lastCheck) return lastCheck
+    return runs?.find(r => r.scanned > 0)
 }
 
 export function checkNowToast(

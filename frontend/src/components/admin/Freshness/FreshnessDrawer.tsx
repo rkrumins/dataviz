@@ -30,6 +30,7 @@ import { OverlayIntegrityMeter } from './OverlayIntegrityMeter'
 import { EvidencePair, reconcileEvidenceRows } from './reconcileEvidence'
 import { useActiveJobs } from './useActiveJobs'
 import { AggStatusPill, FreshnessBadges, timeUntil } from './FreshnessRow'
+import { activityFromEvent } from './lastActivity'
 import type {
     FailureCategory, FreshnessDoc, RefreshEventSummary,
 } from '@/services/freshnessService'
@@ -414,7 +415,12 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
     const [open, setOpen] = useState(false)
     const evidence = event.evidence as Record<string, unknown> | null | undefined
     const hasEvidence = !!evidence && Object.keys(evidence).length > 0
-    const reasonLabel = event.reason ? REASON_LABEL[event.reason] ?? event.reason : null
+    const activity = activityFromEvent(event)
+    // A queued rebuild still carries the detector reason — that is why it
+    // fired. The table Last Activity column names the action instead.
+    const primary = event.reason && REASON_LABEL[event.reason]
+        ? REASON_LABEL[event.reason]
+        : activity.label
     const automatic = event.mode === 'automatic'
 
     // Shared with Job History's ReconcileWhy — the two surfaces reach the same
@@ -433,9 +439,12 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
                 )}
             >
                 <span className="min-w-0 flex items-center gap-1.5">
-                    {reasonLabel
-                        ? <span className="text-ink truncate">{reasonLabel}</span>
-                        : <span className="text-ink-secondary truncate">{event.outcome}</span>}
+                    <span className="text-ink truncate">{primary}</span>
+                    {activity.originLabel && (
+                        <span className="text-[10px] text-ink-muted shrink-0">
+                            · {activity.originLabel}
+                        </span>
+                    )}
                     <span
                         title={automatic
                             ? 'Started by automatic reconciliation'

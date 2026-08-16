@@ -170,12 +170,12 @@ export function ReconcilePreviewDialog({ open, onClose, fleetTotal }: {
                                     <p className="text-sm font-semibold text-ink">
                                         {scanned === 0
                                             ? 'No sources were eligible to check'
-                                            : 'All sources checked are in step'}
+                                            : 'All sources checked are in sync'}
                                     </p>
                                     <p className="text-[11px] text-ink-muted">
                                         {scanned === 0
                                             ? 'Nothing in the reconcile set yet — sources appear here after their first aggregation state is recorded.'
-                                            : `All ${scanned.toLocaleString()} source${scanned === 1 ? '' : 's'} checked are in step with their data. Turning automation on would queue no rebuilds right now.`}
+                                            : `All ${scanned.toLocaleString()} source${scanned === 1 ? '' : 's'} checked match their data. Turning automation on would queue no rebuilds right now.`}
                                     </p>
                                 </div>
                             ) : (
@@ -188,7 +188,7 @@ export function ReconcilePreviewDialog({ open, onClose, fleetTotal }: {
                                                 {fleetTotal && fleetTotal > scanned
                                                     ? ` of ${fleetTotal.toLocaleString()}`
                                                     : ''} checked
-                                                {' · '}{inStep.toLocaleString()} in step
+                                                {' · '}{inStep.toLocaleString()} in sync
                                                 {' · '}{findings.length.toLocaleString()} would rebuild
                                             </span>
                                             . Each rebuild is a full aggregation job — on a
