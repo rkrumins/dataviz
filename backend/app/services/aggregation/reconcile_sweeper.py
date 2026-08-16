@@ -106,6 +106,46 @@ class _Action:
     provider_name: Optional[str] = None
     skip: Optional[str] = None
     acted: bool = False
+    # Baseline to adopt AFTER a successful Phase B dispatch — never in
+    # Phase A, or a CP crash between commit and dispatch leaves the source
+    # in rebuild cooldown with no job.
+    adopt_raw_fingerprint: Optional[str] = None
+    adopt_node_count: int = 0
+    adopt_edge_count: int = 0
+
+
+# Skips that mean "we looked and we are done with this source until the
+# next interval / stats change". Holds and deferrals must NOT advance
+# last_reconcile_checked_at or a known finding waits up to an hour.
+_TERMINAL_SKIPS = frozenset({"in_sync", "platform_mastered"})
+
+# Unresolved findings stay due every tick until an action or in_sync —
+# heals rows stamped by the old "advance last_checked on hold" bug.
+_UNRESOLVED_DRIFT = frozenset({"drifting", "overlayMissing", "neverBuilt"})
+
+
+def _is_terminal_skip(verdict: Verdict) -> bool:
+    if verdict.seed:
+        return True
+    return verdict.skip in _TERMINAL_SKIPS and verdict.reason is None
+
+
+def _unresolved_finding_open(state) -> bool:
+    """True when drift is still open and we have not yet acted on it.
+
+    After a successful Phase B finalize, ``last_reconciled_at`` is at least
+    as new as ``last_finding_at``, so the source is not kept due solely by
+    the drifting stamp (the rebuild job / interval owns the next look).
+    """
+    if getattr(state, "drift_state", None) not in _UNRESOLVED_DRIFT:
+        return False
+    last_recon = _parse_iso(getattr(state, "last_reconciled_at", None))
+    if last_recon is None:
+        return True
+    last_finding = _parse_iso(getattr(state, "last_finding_at", None))
+    if last_finding is None:
+        return True
+    return last_finding > last_recon
 
 
 @dataclass
@@ -372,7 +412,6 @@ class ReconciliationSweeper:
                 verdict = evaluate(obs, policy)
                 now = _now_iso()
                 prev_drift = state.drift_state
-                state.last_reconcile_checked_at = now
                 # Unevaluated skips leave drift_state None — keep the prior stamp.
                 if verdict.drift_state is not None:
                     state.drift_state = verdict.drift_state
@@ -428,13 +467,18 @@ class ReconciliationSweeper:
                     elif verdict.skip in ("stats_stale", "stats_unhealthy"):
                         if len(nudges) < _NUDGE_CAP:
                             nudges.append((state.data_source_id, state.workspace_id))
+                    # Holds / unevaluated skips leave last_checked alone so
+                    # the source stays due on the next tick.
+                    if _is_terminal_skip(verdict):
+                        state.last_reconcile_checked_at = now
                     if verdict.reason:
                         result.finding_rows.append(_finding_row(
                             state, ctx_row, verdict, acted=False,
                         ))
                     continue
 
-                acted = False
+                # Deferrals (dry-run listing, action cap, first-build cap)
+                # must not advance last_checked — the finding is still open.
                 if dry_run or len(actions) >= max_actions:
                     if not dry_run and len(actions) >= max_actions:
                         logger.info(
@@ -444,7 +488,7 @@ class ReconciliationSweeper:
                         )
                     if dry_run:
                         actions.append(_action_from(
-                            state, ctx_row, verdict, acted=False,
+                            state, ctx_row, verdict, obs, acted=False,
                         ))
                     result.finding_rows.append(_finding_row(
                         state, ctx_row, verdict, acted=False,
@@ -462,24 +506,12 @@ class ReconciliationSweeper:
                     first_builds += 1
 
                 actions.append(_action_from(
-                    state, ctx_row, verdict, acted=True,
+                    state, ctx_row, verdict, obs, acted=True,
                 ))
-                acted = True
-                # Advance the baseline AT ACTION TIME so this finding cannot
-                # re-fire every sweep while the rebuild is in flight. If the
-                # rebuild then fails, retry is the stale-marker reconciler's
-                # job — two mechanisms must never both retry one rebuild.
-                self._adopt(state, obs)
-                state.last_reconciled_at = now
-                state.last_reconcile_reason = verdict.reason
-                state.last_reconcile_mode = (
-                    "manual" if (data_source_ids or full_scan) else "auto"
-                )
-                state.reconcile_consecutive_actions = (
-                    state.reconcile_consecutive_actions or 0
-                ) + 1
+                # Adopt / last_reconciled / breaker / last_checked happen in
+                # Phase B after a successful dispatch — not here.
                 result.finding_rows.append(_finding_row(
-                    state, ctx_row, verdict, acted=acted,
+                    state, ctx_row, verdict, acted=True,
                 ))
 
             if suspend_notices:
@@ -647,6 +679,16 @@ class ReconciliationSweeper:
                         & (
                             DataSourceStatsORM.updated_at
                             > S.last_reconcile_checked_at
+                        )
+                    )
+                    | (
+                        S.drift_state.in_(tuple(_UNRESOLVED_DRIFT))
+                        & (
+                            S.last_reconciled_at.is_(None)
+                            | (
+                                S.last_finding_at.isnot(None)
+                                & (S.last_finding_at > S.last_reconciled_at)
+                            )
                         )
                     )
                 )
@@ -887,9 +929,11 @@ class ReconciliationSweeper:
 
     @staticmethod
     def _is_due(state, interval_secs: int, *, stats_updated=None) -> bool:
-        """Due when the check interval elapsed, or when observation moved
-        after the last verdict (counts poll / Probe / Check now write)."""
+        """Due when the check interval elapsed, observation moved after the
+        last verdict, or an unresolved finding is still open."""
         if interval_secs <= 0:
+            return True
+        if _unresolved_finding_open(state):
             return True
         last = _parse_iso(state.last_reconcile_checked_at)
         if last is None:
@@ -927,8 +971,9 @@ class ReconciliationSweeper:
                         await self._dispatch_first_build(
                             svc, session, action, actor, result.run_id,
                         )
+                        deferred = False
                     else:
-                        await svc.signal_source_changed(
+                        resp = await svc.signal_source_changed(
                             action.data_source_id, session,
                             reason=action.reason,
                             origin="reconcile-sweep",
@@ -941,6 +986,20 @@ class ReconciliationSweeper:
                             trigger_source="reconcile",
                             run_id=result.run_id,
                         )
+                        deferred = bool(
+                            resp is not None and getattr(resp, "deferred", False)
+                        )
+                    if deferred:
+                        # Cooldown raced the hold — leave last_checked alone
+                        # so the next tick retries once the window opens.
+                        logger.info(
+                            "reconcile sweep: dispatch deferred for %s — "
+                            "staying due",
+                            action.data_source_id,
+                        )
+                        continue
+                    await self._finalize_action(session, action, mode)
+                    await session.commit()
                 result.actions += 1
             except asyncio.CancelledError:
                 raise
@@ -950,6 +1009,32 @@ class ReconciliationSweeper:
                     "reconcile sweep: dispatch failed for %s (%s): %s",
                     action.data_source_id, action.reason, exc,
                 )
+
+    async def _finalize_action(self, session, action: _Action, mode: str) -> None:
+        """Adopt baseline + stamp last_checked after a successful dispatch.
+
+        Kept out of Phase A so a CP crash between evaluate and dispatch cannot
+        put the source into rebuild cooldown with no job queued.
+        """
+        from .models import AggregationDataSourceStateORM
+
+        state = await session.get(
+            AggregationDataSourceStateORM, action.data_source_id,
+        )
+        if state is None:
+            return
+        now = _now_iso()
+        if action.adopt_raw_fingerprint is not None:
+            state.raw_fingerprint = action.adopt_raw_fingerprint
+            state.raw_node_count = action.adopt_node_count
+            state.raw_edge_count = action.adopt_edge_count
+        state.last_reconciled_at = now
+        state.last_reconcile_reason = action.reason
+        state.last_reconcile_mode = "manual" if mode == "manual" else "auto"
+        state.reconcile_consecutive_actions = (
+            state.reconcile_consecutive_actions or 0
+        ) + 1
+        state.last_reconcile_checked_at = now
 
     async def _dispatch_first_build(self, svc, session, action, actor, run_id) -> None:
         """Queue the very first aggregation for an onboarded source.
@@ -1044,7 +1129,7 @@ class ReconciliationSweeper:
             logger.warning("reconcile sweep: run record failed: %s", exc)
 
 
-def _action_from(state, ctx_row, verdict, *, acted: bool) -> _Action:
+def _action_from(state, ctx_row, verdict, obs, *, acted: bool) -> _Action:
     return _Action(
         data_source_id=state.data_source_id,
         workspace_id=state.workspace_id,
@@ -1056,6 +1141,9 @@ def _action_from(state, ctx_row, verdict, *, acted: bool) -> _Action:
         provider_name=ctx_row.get("provider_name"),
         skip=verdict.skip,
         acted=acted,
+        adopt_raw_fingerprint=obs.observed_raw_fingerprint,
+        adopt_node_count=obs.node_count,
+        adopt_edge_count=obs.observed_raw_edge_total,
     )
 
 

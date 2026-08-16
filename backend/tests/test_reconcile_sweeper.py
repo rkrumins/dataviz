@@ -559,6 +559,92 @@ async def test_a_source_in_rebuild_cooldown_is_deferred(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_cooldown_hold_does_not_advance_last_checked(session_factory):
+    """A hold must leave the source due — otherwise rebuild waits an hour."""
+    checked = _ago(seconds=300)
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        last_aggregated_ago_secs=60,
+        stats_age_secs=30,
+        checked_at=checked,
+        raw_fingerprint="aaa",
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert result.by_skip == {"cooldown": 1}
+    st = await _state(session_factory)
+    assert st.drift_state == "overlayMissing"
+    assert st.last_reconcile_checked_at == checked  # unchanged
+
+    # Still due on the next tick (unresolved finding newer than last act).
+    result2 = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert result2.scanned == 1
+    assert result2.by_skip == {"cooldown": 1}
+
+
+@pytest.mark.asyncio
+async def test_action_cap_deferred_source_retries_next_tick(session_factory):
+    """Sources past the action cap must not wait for the check interval."""
+    for i in range(12):
+        await _seed(
+            session_factory, ds_id=f"ds_{i}",
+            edge_counts={"FLOWS_TO": 200},
+            checked_at=_ago(seconds=30),
+            stats_age_secs=10,
+            raw_fingerprint="old",
+        )
+    svc = _FakeService()
+    first = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert first.findings == 12
+    assert first.actions == 10
+    assert len(svc.signals) == 10
+
+    # The two deferred sources still have the old last_checked and an open
+    # finding — the next auto tick must pick them up.
+    second = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert second.actions == 2
+    assert len(svc.signals) == 12
+
+
+@pytest.mark.asyncio
+async def test_in_sync_still_advances_last_checked(session_factory):
+    await _seed(session_factory, checked_at=_ago(hours=2))
+    before = (await _state(session_factory)).last_reconcile_checked_at
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert result.by_skip.get("in_sync") == 1
+    after = (await _state(session_factory)).last_reconcile_checked_at
+    assert after is not None and after != before
+
+
+@pytest.mark.asyncio
+async def test_phase_a_without_phase_b_does_not_set_last_reconciled(
+    session_factory, monkeypatch,
+):
+    """CP crash between evaluate and dispatch must not enter cooldown."""
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        raw_fingerprint="old",
+    )
+    svc = _FakeService()
+
+    async def _boom_phase_b(self, actions, result, mode, actor):
+        raise RuntimeError("cp died")
+
+    monkeypatch.setattr(ReconciliationSweeper, "_phase_b", _boom_phase_b)
+    with pytest.raises(RuntimeError, match="cp died"):
+        await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    st = await _state(session_factory)
+    assert st.drift_state == "overlayMissing"
+    assert st.last_reconciled_at is None
+    assert st.last_reconcile_checked_at is None  # not terminal, not finalized
+    assert st.raw_fingerprint == "old"  # not adopted
+
+
+@pytest.mark.asyncio
 async def test_a_recently_failed_rebuild_backs_off(session_factory):
     await _seed(
         session_factory,
