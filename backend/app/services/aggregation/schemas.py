@@ -643,6 +643,17 @@ class FreshnessDoc(FreshnessRow):
     # (no ontology, suspended by the breaker, overlay not observable…).
     blocked_reason: Optional[str] = Field(None, alias="blockedReason")
 
+    # The live detector finding, stamped on EVERY evaluation including holds
+    # (migration 20260815_1200_recon_ops). Distinct from last_reconcile_*,
+    # which records the last rebuild we queued: a source can have an open
+    # finding it is deliberately not acting on, and the drawer must be able
+    # to explain that rather than showing a bare verdict word.
+    last_finding_at: Optional[str] = Field(None, alias="lastFindingAt")
+    last_finding_reason: Optional[str] = Field(None, alias="lastFindingReason")
+    last_finding_evidence: Optional[dict] = Field(
+        None, alias="lastFindingEvidence",
+    )
+
     class Config:
         populate_by_name = True
 

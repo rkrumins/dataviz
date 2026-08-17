@@ -2909,6 +2909,9 @@ def _freshness_row_kwargs(
         last_reconciled_at=st.get("last_reconciled_at"),
         last_reconcile_reason=st.get("last_reconcile_reason"),
         last_reconcile_mode=st.get("last_reconcile_mode"),
+        last_finding_at=st.get("last_finding_at"),
+        last_finding_reason=st.get("last_finding_reason"),
+        last_finding_evidence=st.get("last_finding_evidence"),
         last_failure_reason=last_failure_reason,
         last_failure_category=last_failure_category,
         platform_mastered=platform_mastered or st.get("drift_state") == "managed",
@@ -3101,6 +3104,9 @@ async def _state_map(
                 S.last_reconciled_at,
                 S.last_reconcile_reason,
                 S.last_reconcile_mode,
+                S.last_finding_at,
+                S.last_finding_reason,
+                S.last_finding_evidence,
             ).where(S.data_source_id.in_(ds_ids))
         )).all()
     except Exception as exc:  # pragma: no cover - defensive, never fail a read
@@ -3116,9 +3122,25 @@ async def _state_map(
             "last_reconciled_at": r[6],
             "last_reconcile_reason": r[7],
             "last_reconcile_mode": r[8],
+            "last_finding_at": r[9],
+            "last_finding_reason": r[10],
+            # Stored as a JSON string. A malformed blob degrades to None
+            # rather than failing the whole freshness read.
+            "last_finding_evidence": _safe_json(r[11]),
         }
         for r in rows
     }
+
+
+def _safe_json(raw: Optional[str]) -> Optional[dict]:
+    """Parse a stored JSON column; None on absent or malformed content."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 # Fleet summary is skipped (returned as None) once the workspace/provider-
