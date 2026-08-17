@@ -167,7 +167,11 @@ def test_top_level_orders_without_tostring():
         root_entity_types=["Roots"], entity_types=["Roots", "Node"], limit=10,
     ))
     page = p.recorded[0]
-    assert "ORDER BY n.displayName ASC" in page
+    # Backtick-quoted because the display property is rendered from the
+    # source's mapping now. What this test guards is the absence of the
+    # toString() wrapper, which defeated the index.
+    assert "ORDER BY n.`displayName` ASC" in page
+    assert "toString(n.`displayName`) ASC" not in page
     assert "toString(n.displayName) ASC" not in page
     assert "MATCH (n:Roots)" in page and "MATCH (n:Node)" in page  # label union
 

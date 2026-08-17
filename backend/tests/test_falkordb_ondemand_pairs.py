@@ -38,11 +38,11 @@ class _Result:
         self.result_set = result_set or []
 
 
-_CLASSIFY_RE = re.compile(r"MATCH \(n:(\w+)\) WHERE n\.urn IN \$urns")
-_RESOLVE_UP_RE = re.compile(r"RETURN (?:DISTINCT )?c\.urn, a\.urn")
-_Q1_RE = re.compile(r"MATCH \(x(?::\w+)?\)-\[r:[\w|]+\]->\(t\) WHERE x\.urn IN \$xs")
-_Q2_RE = re.compile(r"MATCH \(s\)-\[r:[\w|]+\]->\(y(?::\w+)?\) WHERE y\.urn IN \$ys")
-_RAW_RE = re.compile(r"MATCH \(s(?::\w+)?\)-\[r(?::[\w|]+)?\]->\(t\) WHERE s\.urn IN \$sourceUrns")
+_CLASSIFY_RE = re.compile(r"MATCH \(n:(\w+)\) WHERE n\.`?\w+`? IN \$urns")
+_RESOLVE_UP_RE = re.compile(r"RETURN (?:DISTINCT )?c\.`?\w+`?, a\.`?\w+`?")
+_Q1_RE = re.compile(r"MATCH \(x(?::\w+)?\)-\[r:[\w|]+\]->\(t\) WHERE x\.`?\w+`? IN \$xs")
+_Q2_RE = re.compile(r"MATCH \(s\)-\[r:[\w|]+\]->\(y(?::\w+)?\) WHERE y\.`?\w+`? IN \$ys")
+_RAW_RE = re.compile(r"MATCH \(s(?::\w+)?\)-\[r(?::[\w|]+)?\]->\(t\) WHERE s\.`?\w+`? IN \$sourceUrns")
 
 
 def _pattern_types(cypher):
@@ -226,7 +226,7 @@ class _FakeGraph:
                 for eid, s, t, et in self.lineage:
                     if s != x or et not in lt:
                         continue
-                    if "t.urn <> x.urn" in cypher and t == x:
+                    if re.search(r"t\.`?\w+`? <> x\.`?\w+`?", cypher) and t == x:
                         continue
                     eids, types = cells.setdefault((x, t), (set(), []))
                     eids.add(eid)

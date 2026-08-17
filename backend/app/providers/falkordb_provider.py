@@ -2456,7 +2456,7 @@ class FalkorDBProvider(GraphDataProvider):
             f"OPTIONAL MATCH (focus)<-[c:{c_alt}*1..{max_depth}]-(anc) "
             "WITH focus, anc, size(c) AS depth "
             "ORDER BY depth DESC LIMIT 1 "
-            "RETURN COALESCE(anc.urn, focus.urn) AS urn, "
+            f"RETURN COALESCE({self._ident('anc')}, {self._ident('focus')}) AS urn, "
             "       COALESCE(anc.level, focus.level, -1) AS level"
         )
         try:
@@ -2649,6 +2649,17 @@ class FalkorDBProvider(GraphDataProvider):
         from backend.common.providers.identity import quote_property
 
         return quote_property(self._map.identity_property)
+
+    def _proj_ident(self, var: str = "n") -> str:
+        """Identity on ``var`` for a read against the PROJECTION graph — the
+        property-access counterpart of :meth:`_proj_ident_key`, with the same
+        mode-dependent rule and the same reason."""
+        if getattr(self, "_projection_mode", None) == "dedicated":
+            from backend.common.providers.identity import (
+                DEFAULT_IDENTITY_PROPERTY, quote_property,
+            )
+            return f"{var}.{quote_property(DEFAULT_IDENTITY_PROPERTY)}"
+        return self._ident(var)
 
     def _proj_ident_key(self) -> str:
         """The identity property to key on in the PROJECTION graph.
@@ -3464,7 +3475,8 @@ class FalkorDBProvider(GraphDataProvider):
                 try:
                     res = await self._ro_query(
                         f"{pattern} WHERE {where} "
-                        "RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, "
+                        f"RETURN {self._ident('a')} AS src, {self._ident('b')} AS tgt, "
+                        "type(r) AS relType, "
                         "properties(r) AS rprops LIMIT $limit",
                         params={**params, "anchorUrns": bucket},
                         timeout=timeout, op=op,
@@ -3504,7 +3516,10 @@ class FalkorDBProvider(GraphDataProvider):
             cypher += " WHERE " + " AND ".join(conditions)
         params["skip"] = offset
         params["limit"] = limit
-        cypher += " RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, properties(r) AS rprops SKIP $skip LIMIT $limit"
+        cypher += (
+            f" RETURN {self._ident('a')} AS src, {self._ident('b')} AS tgt, "
+            "type(r) AS relType, properties(r) AS rprops SKIP $skip LIMIT $limit"
+        )
 
         result = await self._ro_query(cypher, params=params, timeout=timeout, op=op)
         edges = []
@@ -3778,8 +3793,10 @@ class FalkorDBProvider(GraphDataProvider):
                 try:
                     res = await self._ro_query(
                         f"MATCH {a_anchor}-{lr_pattern}->(b) "
-                        f"WHERE a.urn IN $bucketUrns AND b.urn IN $pageUrns {lineage_where}"
-                        f"RETURN a.urn, b.urn, type(lr), properties(lr)",
+                        f"WHERE {self._ident('a')} IN $bucketUrns "
+                        f"AND {self._ident('b')} IN $pageUrns {lineage_where}"
+                        f"RETURN {self._ident('a')}, {self._ident('b')}, "
+                        "type(lr), properties(lr)",
                         params={**lineage_params, "bucketUrns": bucket},
                         timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
                         op="children.lineage",
@@ -3979,7 +3996,8 @@ class FalkorDBProvider(GraphDataProvider):
         if include_child_count and containment_rel_types:
             page_cypher = (
                 _build_match(page_filters)
-                + f" WITH n ORDER BY n.displayName {dir_kw}, n.urn {dir_kw} LIMIT $limit"
+                + f" WITH n ORDER BY {self._map.name()} {dir_kw}, "
+                  f"{self._ident()} {dir_kw} LIMIT $limit"
                 + f" OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)"
                 # Re-project through a non-aggregating WITH before ORDER BY:
                 # FalkorDB discards an ORDER BY that sits directly on an
@@ -3987,13 +4005,15 @@ class FalkorDBProvider(GraphDataProvider):
                 # so the pre-aggregation window order is lost. Materializing the
                 # count into a WITH first, then ordering that WITH, restores the
                 # displayName-ordered output the keyset cursor depends on.
-                + f" WITH n, count(child) as childCount ORDER BY n.displayName {dir_kw}, n.urn {dir_kw}"
+                + f" WITH n, count(child) as childCount ORDER BY "
+                  f"{self._map.name()} {dir_kw}, {self._ident()} {dir_kw}"
                 + " RETURN n, childCount"
             )
         else:
             page_cypher = (
                 _build_match(page_filters)
-                + f" WITH n ORDER BY n.displayName {dir_kw}, n.urn {dir_kw} LIMIT $limit"
+                + f" WITH n ORDER BY {self._map.name()} {dir_kw}, "
+                  f"{self._ident()} {dir_kw} LIMIT $limit"
                 + " RETURN n, 0 as childCount"
             )
 
@@ -4136,19 +4156,19 @@ class FalkorDBProvider(GraphDataProvider):
 
         if direction == "upstream":
             cypher = (
-                f"MATCH (start) WHERE start.urn = $startUrn "
+                f"MATCH (start) WHERE {self._ident('start')} = $startUrn "
                 f"MATCH path = (neighbor)-[*1..{safe_depth}]->(start) "
                 f"WHERE ALL(r IN relationships(path) WHERE NOT type(r) IN $containmentTypes) "
                 f"{type_clause}"
-                f"RETURN DISTINCT neighbor.urn AS urn"
+                f"RETURN DISTINCT {self._ident('neighbor')} AS urn"
             )
         else:
             cypher = (
-                f"MATCH (start) WHERE start.urn = $startUrn "
+                f"MATCH (start) WHERE {self._ident('start')} = $startUrn "
                 f"MATCH path = (start)-[*1..{safe_depth}]->(neighbor) "
                 f"WHERE ALL(r IN relationships(path) WHERE NOT type(r) IN $containmentTypes) "
                 f"{type_clause}"
-                f"RETURN DISTINCT neighbor.urn AS urn"
+                f"RETURN DISTINCT {self._ident('neighbor')} AS urn"
             )
 
         result = await self._ro_query(cypher, params=params)
@@ -5030,9 +5050,9 @@ class FalkorDBProvider(GraphDataProvider):
             prio_count = 0
             for prio_cypher in (
                 f"MATCH (s)-[r:AGGREGATED]->() "
-                f"RETURN DISTINCT s.urn, labels(s)[0] LIMIT {per_label_cap}",
+                f"RETURN DISTINCT {self._ident('s')}, labels(s)[0] LIMIT {per_label_cap}",
                 f"MATCH ()-[r:AGGREGATED]->(t) "
-                f"RETURN DISTINCT t.urn, labels(t)[0] LIMIT {per_label_cap}",
+                f"RETURN DISTINCT {self._ident('t')}, labels(t)[0] LIMIT {per_label_cap}",
             ):
                 pr = await asyncio.wait_for(
                     self._proj.ro_query(prio_cypher, {}),
@@ -5069,7 +5089,7 @@ class FalkorDBProvider(GraphDataProvider):
                 try:
                     lr = await asyncio.wait_for(
                         self._proj.ro_query(
-                            f"MATCH (n:{safe}) RETURN n.urn LIMIT {remaining}",
+                            f"MATCH (n:{safe}) RETURN {self._ident()} LIMIT {remaining}",
                             {},
                         ),
                         timeout=per_label_timeout,
@@ -5977,7 +5997,7 @@ class FalkorDBProvider(GraphDataProvider):
             return (
                 f"MATCH {anchor}-[r:AGGREGATED]->(t) "
                 f"WHERE {' AND '.join(where)} "
-                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                f"RETURN {self._proj_ident('s')} AS sUrn, {self._proj_ident('t')} AS tUrn, "
                 # coalesce, not a bare r.weight: a null weight compares as
                 # null against every integer, so `weight < $lastWeight` would
                 # be null for those rows and every page after the first would
@@ -6352,8 +6372,8 @@ class FalkorDBProvider(GraphDataProvider):
                 for i in range(0, len(x_bucket), batch):
                     q1_far.extend(await _run(
                         f"MATCH {x_anchor}-[r:{l_pattern}]->(t) "
-                        f"WHERE x.urn IN $xs "
-                        f"RETURN x.urn, t.urn, count(r), "
+                        f"WHERE {self._proj_ident('x')} IN $xs "
+                        f"RETURN {self._proj_ident('x')}, {self._proj_ident('t')}, count(r), "
                         f"collect(DISTINCT type(r)) LIMIT {cap}",
                         {"xs": x_bucket[i:i + batch]},
                     ))
@@ -6379,8 +6399,8 @@ class FalkorDBProvider(GraphDataProvider):
                     for i in range(0, len(y_bucket), batch):
                         q2_far.extend(await _run(
                             f"MATCH (s)-[r:{l_pattern}]->{y_anchor} "
-                            f"WHERE y.urn IN $ys "
-                            f"RETURN y.urn, s.urn, count(r), "
+                            f"WHERE {self._proj_ident('y')} IN $ys "
+                            f"RETURN {self._proj_ident('y')}, {self._proj_ident('s')}, count(r), "
                             f"collect(DISTINCT type(r)) LIMIT {cap}",
                             {"ys": y_bucket[i:i + batch]},
                         ))
@@ -6416,8 +6436,10 @@ class FalkorDBProvider(GraphDataProvider):
                 for i in range(0, len(x_bucket), batch):
                     rows.extend(await _run(
                         f"MATCH {x_anchor}-[r:{l_pattern}]->(t) "
-                        f"WHERE x.urn IN $xs AND t.urn <> x.urn "
-                        f"RETURN x.urn AS sUrn, t.urn AS tUrn, "
+                        f"WHERE {self._proj_ident('x')} IN $xs "
+                        f"AND {self._proj_ident('t')} <> {self._proj_ident('x')} "
+                        f"RETURN {self._proj_ident('x')} AS sUrn, "
+                        f"{self._proj_ident('t')} AS tUrn, "
                         f"count(r) AS weight, "
                         f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
                         {"xs": x_bucket[i:i + batch]},
@@ -6493,8 +6515,10 @@ class FalkorDBProvider(GraphDataProvider):
                 for i in range(0, len(x_bucket), batch):
                     fanout.extend(await run_proj(
                         f"MATCH {x_anchor}-[r:AGGREGATED]->(t2) "
-                        f"WHERE x.urn IN $xs AND r.targetDepth <= r.sourceDepth "
-                        f"RETURN x.urn, t2.urn, r.weight, r.sourceEdgeTypes "
+                        f"WHERE {self._proj_ident('x')} IN $xs "
+                        "AND r.targetDepth <= r.sourceDepth "
+                        f"RETURN {self._proj_ident('x')}, {self._proj_ident('t2')}, "
+                        "r.weight, r.sourceEdgeTypes "
                         f"LIMIT {cap}",
                         {"xs": x_bucket[i:i + batch]},
                     ))
@@ -6518,8 +6542,10 @@ class FalkorDBProvider(GraphDataProvider):
                 for i in range(0, len(y_bucket), batch):
                     fanin.extend(await run_proj(
                         f"MATCH (s2)-[r:AGGREGATED]->{y_anchor} "
-                        f"WHERE y.urn IN $ys AND r.sourceDepth <= r.targetDepth "
-                        f"RETURN y.urn, s2.urn, r.weight, r.sourceEdgeTypes "
+                        f"WHERE {self._proj_ident('y')} IN $ys "
+                        "AND r.sourceDepth <= r.targetDepth "
+                        f"RETURN {self._proj_ident('y')}, {self._proj_ident('s2')}, "
+                        "r.weight, r.sourceEdgeTypes "
                         f"LIMIT {cap}",
                         {"ys": y_bucket[i:i + batch]},
                     ))
@@ -6564,16 +6590,17 @@ class FalkorDBProvider(GraphDataProvider):
             if target_urns:
                 return (
                     f"MATCH {anchor}-[r]->(t) "
-                    "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
+                    f"WHERE {self._ident('s')} IN $sourceUrns "
+                    f"AND {self._ident('t')} IN $targetUrns "
                     "AND type(r) IN $ltypes AND s.urn <> t.urn "
-                    "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                    f"RETURN {self._proj_ident('s')} AS sUrn, {self._proj_ident('t')} AS tUrn, "
                     "count(r) AS weight, collect(DISTINCT type(r)) AS types"
                 )
             return (
                 f"MATCH {anchor}-[r]->(t) "
-                "WHERE s.urn IN $sourceUrns "
+                f"WHERE {self._proj_ident('s')} IN $sourceUrns "
                 "AND type(r) IN $ltypes AND s.urn <> t.urn "
-                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                f"RETURN {self._proj_ident('s')} AS sUrn, {self._proj_ident('t')} AS tUrn, "
                 "count(r) AS weight, collect(DISTINCT type(r)) AS types"
             )
 
@@ -6680,7 +6707,7 @@ class FalkorDBProvider(GraphDataProvider):
             cypher_kids = (
                 f"MATCH (p)-[r]->(c) "
                 f"WHERE {self._ident('p')} = $urn AND type(r) IN $containment "
-                f"RETURN c.urn"
+                f"RETURN {self._ident('c')}"
             )
             res_kids = await self._ro_query(
                 cypher_kids, 
@@ -6717,7 +6744,7 @@ class FalkorDBProvider(GraphDataProvider):
                 # Find all nodes that flow INTO the current frontier
                 cypher_up = (
                     "MATCH (src)-[r]->(tgt) "
-                    "WHERE tgt.urn IN $frontier AND type(r) IN $lineage "
+                    f"WHERE {self._ident('tgt')} IN $frontier AND type(r) IN $lineage "
                     "RETURN src, r, tgt"
                 )
                 dir_queries.append(("upstream", cypher_up))
@@ -6725,7 +6752,7 @@ class FalkorDBProvider(GraphDataProvider):
                 # Find all nodes that flow OUT of the current frontier
                 cypher_down = (
                     "MATCH (src)-[r]->(tgt) "
-                    "WHERE src.urn IN $frontier AND type(r) IN $lineage "
+                    f"WHERE {self._ident('src')} IN $frontier AND type(r) IN $lineage "
                     "RETURN src, r, tgt"
                 )
                 dir_queries.append(("downstream", cypher_down))
@@ -6791,7 +6818,7 @@ class FalkorDBProvider(GraphDataProvider):
              
              cypher_structure = (
                  f"MATCH (parent)-[r]->(child) "
-                 f"WHERE child.urn IN $urns AND type(r) IN $containment "
+                 f"WHERE {self._ident('child')} IN $urns AND type(r) IN $containment "
                  f"RETURN parent, r, child"
              )
              
@@ -7562,7 +7589,7 @@ class FalkorDBProvider(GraphDataProvider):
             f"MATCH {f_anchor} "
             f"OPTIONAL MATCH path = (focus)<-[c:{c_alt}*0..{max_depth}]-(anc) "
             "WHERE labels(anc)[0] IN $types "
-            "RETURN coalesce(anc.urn, focus.urn) AS anchorUrn "
+            f"RETURN coalesce({self._ident('anc')}, {self._ident('focus')}) AS anchorUrn "
             "ORDER BY length(path) ASC LIMIT 1"
         )
         try:
@@ -7680,7 +7707,7 @@ class FalkorDBProvider(GraphDataProvider):
             "WITH parent, length(c) AS depth "
             "ORDER BY depth ASC LIMIT 5 "
             f"WITH parent, depth WHERE (parent)-[:{rel_alt}]-() "
-            "RETURN parent.urn AS urn "
+            f"RETURN {self._ident('parent')} AS urn "
             "ORDER BY depth ASC LIMIT 1"
         )
         params = {"anchor": anchor_urn, "types": types}
@@ -8022,7 +8049,7 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             res = await self._proj_ro_query(
                 "MATCH (s)-[r:AGGREGATED]->(t) "
-                "WHERE s.urn = $s AND t.urn = $t "
+                f"WHERE {self._ident('s')} = $s AND {self._ident('t')} = $t "
                 "AND r.sourceDepth IS NOT NULL AND r.targetDepth IS NOT NULL "
                 "RETURN r.sourceDepth, r.targetDepth LIMIT 1",
                 params={"s": source_urn, "t": target_urn},
@@ -8061,12 +8088,14 @@ class FalkorDBProvider(GraphDataProvider):
             f_anchor = f"(f:{f_label})" if f_label else "(f)"
             tasks.append(_probe(
                 f"MATCH {f_anchor}-[r:AGGREGATED]->() "
-                "WHERE f.urn IN $urns AND r.sourceDepth IS NOT NULL "
-                "RETURN f.urn, max(r.sourceDepth)", bucket, "out"))
+                f"WHERE {self._proj_ident('f')} IN $urns "
+                "AND r.sourceDepth IS NOT NULL "
+                f"RETURN {self._proj_ident('f')}, max(r.sourceDepth)", bucket, "out"))
             tasks.append(_probe(
                 f"MATCH ()-[r:AGGREGATED]->{f_anchor} "
-                "WHERE f.urn IN $urns AND r.targetDepth IS NOT NULL "
-                "RETURN f.urn, max(r.targetDepth)", bucket, "in"))
+                f"WHERE {self._proj_ident('f')} IN $urns "
+                "AND r.targetDepth IS NOT NULL "
+                f"RETURN {self._proj_ident('f')}, max(r.targetDepth)", bucket, "in"))
         for rows in await asyncio.gather(*tasks):
             for row in rows:
                 if row and row[0] is not None and row[1] is not None:
@@ -8091,13 +8120,13 @@ class FalkorDBProvider(GraphDataProvider):
         cypher = (
             f"MATCH (a {{{self._ident_key()}: $source}})-[c]->(child) "
             "WHERE type(c) IN $ctypes "
-            "WITH DISTINCT child.urn AS urn "
+            f"WITH DISTINCT {self._ident('child')} AS urn "
             "LIMIT $limit "
             "RETURN 's' AS side, collect(urn) AS urns "
             "UNION "
             f"MATCH (b {{{self._ident_key()}: $target}})-[c]->(child) "
             "WHERE type(c) IN $ctypes "
-            "WITH DISTINCT child.urn AS urn "
+            f"WITH DISTINCT {self._ident('child')} AS urn "
             "LIMIT $limit "
             "RETURN 't' AS side, collect(urn) AS urns"
         )
@@ -8190,7 +8219,7 @@ class FalkorDBProvider(GraphDataProvider):
                 f"MATCH (a {{{self._ident_key()}: $source}})-[c*1..{max_depth}]->(child) "
                 "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
                 "  AND labels(child)[0] IN $types "
-                "WITH DISTINCT child.urn AS urn "
+                f"WITH DISTINCT {self._ident('child')} AS urn "
                 "LIMIT $limit "
                 "RETURN 's' AS side, collect(urn) AS urns "
                 "UNION "
@@ -8203,7 +8232,7 @@ class FalkorDBProvider(GraphDataProvider):
                 f"MATCH (b {{{self._ident_key()}: $target}})-[c*1..{max_depth}]->(child) "
                 "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
                 "  AND labels(child)[0] IN $types "
-                "WITH DISTINCT child.urn AS urn "
+                f"WITH DISTINCT {self._ident('child')} AS urn "
                 "LIMIT $limit "
                 "RETURN 't' AS side, collect(urn) AS urns"
             )
@@ -8282,9 +8311,10 @@ class FalkorDBProvider(GraphDataProvider):
                 return []
             cypher = (
                 "MATCH (s)-[r]->(t) "
-                "WHERE s.urn IN $sUrns AND t.urn IN $tUrns "
+                f"WHERE {self._ident('s')} IN $sUrns AND {self._ident('t')} IN $tUrns "
                 "  AND type(r) IN $ltypes "
-                "RETURN s.urn AS sUrn, t.urn AS tUrn, type(r) AS edgeType, "
+                f"RETURN {self._ident('s')} AS sUrn, {self._ident('t')} AS tUrn, "
+                "type(r) AS edgeType, "
                 "id(r) AS edgeId, properties(r) AS props "
                 "LIMIT $limit"
             )
@@ -8293,9 +8323,11 @@ class FalkorDBProvider(GraphDataProvider):
         else:
             cypher = (
                 "MATCH (s)-[r:AGGREGATED]->(t) "
-                "WHERE s.urn IN $sUrns AND t.urn IN $tUrns "
+                f"WHERE {self._proj_ident('s')} IN $sUrns "
+                f"AND {self._proj_ident('t')} IN $tUrns "
                 + ("AND any(et IN r.sourceEdgeTypes WHERE et IN $ltypes) " if ltypes else "")
-                + "RETURN s.urn AS sUrn, t.urn AS tUrn, 'AGGREGATED' AS edgeType, "
+                + f"RETURN {self._proj_ident('s')} AS sUrn, "
+                  f"{self._proj_ident('t')} AS tUrn, 'AGGREGATED' AS edgeType, "
                 "id(r) AS edgeId, "
                 "{sourceEdgeTypes: r.sourceEdgeTypes, weight: r.weight} AS props "
                 "LIMIT $limit"
@@ -8387,7 +8419,7 @@ class FalkorDBProvider(GraphDataProvider):
             cypher = (
                 f"MATCH (s)-[r:{rel_alt}]->(t) "
                 "WHERE s.urn IN $sUrns AND t.urn IN $tUrns "
-                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                f"RETURN {self._proj_ident('s')} AS sUrn, {self._proj_ident('t')} AS tUrn, "
                 "type(r) AS edgeType, id(r) AS edgeId"
             )
             try:
@@ -8408,8 +8440,8 @@ class FalkorDBProvider(GraphDataProvider):
             # full edge scan of the legacy query).
             cypher = (
                 f"MATCH (s)-[r:{rel_alt}]->(t) "
-                "WHERE s.urn IN $urns AND t.urn IN $urns "
-                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                f"WHERE {self._ident('s')} IN $urns AND {self._ident('t')} IN $urns "
+                f"RETURN {self._proj_ident('s')} AS sUrn, {self._proj_ident('t')} AS tUrn, "
                 "type(r) AS edgeType, id(r) AS edgeId"
             )
             try:
@@ -9053,7 +9085,7 @@ class FalkorDBProvider(GraphDataProvider):
             skip_clause = " SKIP $skip"
 
         where = " WHERE " + " AND ".join(filters)
-        order = f" ORDER BY n.displayName {dir_kw}, n.urn {dir_kw}"
+        order = f" ORDER BY {self._map.name()} {dir_kw}, {self._ident()} {dir_kw}"
 
         vocabulary = getattr(self, "_indexed_entity_type_ids", None)
         if vocabulary:
@@ -9480,7 +9512,8 @@ class FalkorDBProvider(GraphDataProvider):
             result = await self._query(
                 "MATCH (a)-[r]->(b) WHERE r.id = $eid "
                 "SET r.properties = $props "
-                "RETURN a.urn, b.urn, type(r), properties(r)",
+                f"RETURN {self._ident('a')}, {self._ident('b')}, "
+                "type(r), properties(r)",
                 params={"eid": edge_id, "props": json.dumps(properties)},
             )
             if not result.result_set:
