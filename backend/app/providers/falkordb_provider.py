@@ -508,6 +508,11 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
     "entityId", "searchableText",
     "properties",      # legacy blob — read path no longer hydrates from it
     "propertiesRaw",   # native escape hatch for non-scalar property values
+    # Provenance written by the conformance stamp: which SOURCE property each
+    # canonical value was filled from. They are what lets a re-pointed mapping
+    # rewrite its own previous work without ever touching a node that carried a
+    # native urn / displayName. Provider-owned bookkeeping, not user data.
+    "urnSource", "nameSource",
 })
 
 
@@ -2023,10 +2028,19 @@ class FalkorDBProvider(GraphDataProvider):
         * ``displayName`` ← ``name_property``  (piggybacks on the urn pass, or runs standalone only
           for a CUSTOM name property — a fully conforming source stays a complete no-op)
 
+        Each stamped value records WHICH property it came from, in ``urnSource`` / ``nameSource``.
+        That provenance is what makes the mapping editable rather than write-once: a fill-only pass
+        can never rewrite a node it already stamped, so re-pointing a source from ``id`` to ``uuid``
+        used to leave every existing node on the OLD identity forever, with no error and no way to
+        tell from the graph which nodes were wrong. A node whose marker disagrees with the current
+        mapping is now re-stamped from the new property.
+
         Safe: in-source projection only (never mutates a possibly read-only source behind a
-        dedicated projection); ``coalesce`` SETs only fill a MISSING value, never overwrite; batched
-        by internal ID range (no property index needed); best-effort per batch. Idempotent — a
-        re-run only touches nodes added since the last run. Returns nodes stamped.
+        dedicated projection); a node with NO marker carried its own native ``urn`` /
+        ``displayName`` and is never touched, so this can only ever overwrite values it wrote
+        itself; batched by internal ID range (no property index needed); best-effort per batch.
+        Idempotent — a re-run with an unchanged mapping only touches nodes added since the last
+        one. Returns properties stamped.
         """
         ident = str(getattr(self, "_node_identity_property", None) or "urn").replace("`", "")
         name_prop = str(getattr(self, "_name_property", None) or "name").replace("`", "")
@@ -2052,13 +2066,39 @@ class FalkorDBProvider(GraphDataProvider):
         if max_id < 0:
             return 0
 
+        # Two cases per property:
+        #   FILL     — the canonical value is missing, so take it from the source property;
+        #   RE-POINT — we filled it before from a DIFFERENT property (the marker says so),
+        #              so the mapping changed under us and the old value is stale.
+        # A node with no marker and a value present is native data: excluded by both.
+        #
+        # The two properties are stamped in ONE pass (these are full scans; two passes would
+        # double the cost on a multi-million-node graph), which means the WHERE matches a node
+        # that qualifies for EITHER. Each SET is therefore guarded by its OWN condition — an
+        # unguarded pair would let a node that only needed a displayName fill also have its
+        # native urn overwritten.
         sets, wheres = [], []
         if stamp_urn:
-            sets.append(f"n.`urn` = coalesce(n.`urn`, n.`{ident}`)")
-            wheres.append(f"(n.`urn` IS NULL AND n.`{ident}` IS NOT NULL)")
+            urn_cond = (
+                f"((n.`urn` IS NULL OR (n.`urnSource` IS NOT NULL AND n.`urnSource` <> $ident)) "
+                f"AND n.`{ident}` IS NOT NULL)"
+            )
+            sets.append(
+                f"n.`urn` = CASE WHEN {urn_cond} THEN n.`{ident}` ELSE n.`urn` END, "
+                f"n.`urnSource` = CASE WHEN {urn_cond} THEN $ident ELSE n.`urnSource` END"
+            )
+            wheres.append(urn_cond)
         if stamp_name:
-            sets.append(f"n.`displayName` = coalesce(n.`displayName`, n.`{name_prop}`)")
-            wheres.append(f"(n.`displayName` IS NULL AND n.`{name_prop}` IS NOT NULL)")
+            name_cond = (
+                f"((n.`displayName` IS NULL OR (n.`nameSource` IS NOT NULL "
+                f"AND n.`nameSource` <> $nameProp)) AND n.`{name_prop}` IS NOT NULL)"
+            )
+            sets.append(
+                f"n.`displayName` = CASE WHEN {name_cond} THEN n.`{name_prop}` "
+                f"ELSE n.`displayName` END, "
+                f"n.`nameSource` = CASE WHEN {name_cond} THEN $nameProp ELSE n.`nameSource` END"
+            )
+            wheres.append(name_cond)
         set_clause = ", ".join(sets)
         where_clause = " OR ".join(wheres)
 
@@ -2071,7 +2111,10 @@ class FalkorDBProvider(GraphDataProvider):
                 r = await self._query(
                     f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND ({where_clause}) "
                     f"SET {set_clause}",
-                    params={"lo": lo, "hi": hi}, op="identity.stamp",
+                    params={
+                        "lo": lo, "hi": hi, "ident": ident, "nameProp": name_prop,
+                    },
+                    op="identity.stamp",
                 )
                 stamped += int(getattr(r, "properties_set", 0) or 0)
             except Exception as exc:

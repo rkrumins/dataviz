@@ -34,6 +34,11 @@ from backend.app.db.repositories import (
     binding_repo, role_repo, user_repo,
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
+from backend.app.services.node_identity import (
+    invalidate_node_identity,
+    load_node_identity,
+    scopes_resolving_through,
+)
 from backend.app.services.permission_service import (
     PermissionClaims,
     has_permission,
@@ -197,9 +202,26 @@ async def update_workspace(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Update workspace metadata (name, description, is_active)."""
+    old_ws = await session.get(WorkspaceORM, workspace_id)
+    old_identity = (
+        getattr(old_ws, "identity_property", None),
+        getattr(old_ws, "name_property", None),
+    )
     ws = await workspace_repo.update_workspace(session, workspace_id, req)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
+
+    # A workspace-level mapping change re-resolves every source in the
+    # workspace that doesn't override it — mark those stale so the UI prompts a
+    # re-run, but never enqueue the work here (see invalidate_node_identity).
+    if (
+        req.identity_property is not None or req.name_property is not None
+    ) and old_identity != (ws.identity_property, ws.name_property):
+        await invalidate_node_identity(
+            session,
+            await scopes_resolving_through(session, workspace_id=workspace_id),
+            "workspace_identity_changed",
+        )
 
     # Phase 9: lifecycle audit. ``changes`` keys only carries the
     # fields the request actually set so the event payload doesn't
@@ -538,24 +560,14 @@ async def update_data_source(
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
         raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
 
-    # A change to the URN-equivalent node-identity property makes the existing
-    # materialization stale (edges were resolved under the old identity) — and
-    # the urn stamp is NULL-only idempotent, so a re-run is REQUIRED, not
-    # optional. Detect the real change so we can flag it stale + force a re-run.
-    identity_changed = (
-        req.identity_property is not None
-        and (getattr(old_ds, "identity_property", None) or "urn")
-        != ((req.identity_property or "").strip() or "urn")
-    )
-
-    # Track whether schema-invalidating fields changed so we know whether
-    # to re-seed the stats cache below.
-    schema_invalidating_change = (
-        req.projection_mode is not None
-        or req.dedicated_graph_name is not None
-        or req.ontology_id is not None
-        or identity_changed
-    )
+    # A change to either node-identity property makes the existing
+    # materialization stale (edges were resolved under the old identity, and the
+    # conformance stamp wrote the old values onto the nodes), so a re-run is
+    # REQUIRED, not optional. Snapshot the RESOLVED mapping either side of the
+    # write rather than diffing the request against the column: with a provider
+    # or workspace default underneath, CLEARING this source's override is a real
+    # change, and setting it to the value it already inherited is not one.
+    old_identity = await load_node_identity(session, old_ds)
 
     # Evict old cache entry if provider/graph config changed
     if req.projection_mode is not None or req.dedicated_graph_name is not None:
@@ -564,6 +576,21 @@ async def update_data_source(
     ds = await data_source_repo.update_data_source(session, ds_id, req)
     if not ds:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found")
+
+    new_identity = await load_node_identity(session, ds_id)
+    mapping_changed = (
+        old_identity.identity_property != new_identity.identity_property
+        or old_identity.name_property != new_identity.name_property
+    )
+
+    # Track whether schema-invalidating fields changed so we know whether
+    # to re-seed the stats cache below.
+    schema_invalidating_change = (
+        req.projection_mode is not None
+        or req.dedicated_graph_name is not None
+        or req.ontology_id is not None
+        or mapping_changed
+    )
 
     # Re-seed cache on schema-invalidating changes so the next read
     # doesn't serve stale schema/ontology. Commit first so the worker's
@@ -583,35 +610,12 @@ async def update_data_source(
         from backend.app.services.resolved_ontology_cache import bump_ontology_generation
         await bump_ontology_generation(workspace_id, ds_id)
 
-    # An identity change makes the materialized AGGREGATED edges stale. Force a
-    # re-run to be required, not optional: (1) clear the replay guard so the next
-    # trigger can't short-circuit onto the stale job, and (2) stamp a sentinel
-    # onto the aggregation-owned drift fingerprint so readiness reports drift and
-    # the UI prompts re-aggregation. Best-effort + guarded — the aggregation
-    # schema isn't loaded in every context (e.g. some tests).
-    if identity_changed:
-        try:
-            from sqlalchemy import update as _sa_update
-            from backend.app.services.aggregation.models import (
-                AggregationJobORM, AggregationDataSourceStateORM,
-            )
-            await session.execute(
-                _sa_update(AggregationJobORM)
-                .where(AggregationJobORM.data_source_id == ds_id)
-                .where(AggregationJobORM.ontology_fingerprint.isnot(None))
-                .values(ontology_fingerprint=None)
-            )
-            await session.execute(
-                _sa_update(AggregationDataSourceStateORM)
-                .where(AggregationDataSourceStateORM.data_source_id == ds_id)
-                .values(graph_fingerprint="stale:identity_property_changed")
-            )
-            await session.commit()
-        except Exception as exc:
-            logger.warning(
-                "Data source %s: aggregation invalidation after identity change "
-                "skipped (%s)", ds_id, exc,
-            )
+    # A mapping change makes the materialized AGGREGATED edges stale, and the
+    # stamp's NULL-only fill means a re-run is required to rewrite them.
+    if mapping_changed:
+        await invalidate_node_identity(
+            session, [(workspace_id, ds_id)], "identity_property_changed",
+        )
 
     return ds
 

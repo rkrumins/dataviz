@@ -282,6 +282,112 @@ async def read_global_defaults(session) -> PlatformNodeIdentityDefaults:
     return defaults
 
 
+async def scopes_resolving_through(
+    session, *, provider_id: str = None, workspace_id: str = None,
+) -> list:
+    """``[(workspace_id, data_source_id), …]`` for the sources a change at this
+    scope actually reaches.
+
+    Sources that override the property themselves are EXCLUDED — their resolved
+    value did not move, so marking them stale would demand a re-aggregation that
+    changes nothing. Pass neither argument to get every source (a platform
+    default changed).
+
+    Deliberately over-selects in one direction: a source is included when it
+    overrides only ONE of the two properties, because the other one did move.
+    """
+    from sqlalchemy import or_, select
+
+    from backend.app.db.models import WorkspaceDataSourceORM
+
+    stmt = select(
+        WorkspaceDataSourceORM.workspace_id, WorkspaceDataSourceORM.id,
+    ).where(
+        or_(
+            WorkspaceDataSourceORM.identity_property.is_(None),
+            WorkspaceDataSourceORM.name_property.is_(None),
+        )
+    )
+    if provider_id:
+        stmt = stmt.where(WorkspaceDataSourceORM.provider_id == provider_id)
+    if workspace_id:
+        stmt = stmt.where(WorkspaceDataSourceORM.workspace_id == workspace_id)
+    return [(ws, ds) for (ws, ds) in (await session.execute(stmt)).all() if ws and ds]
+
+
+async def invalidate_node_identity(session, scopes, reason: str) -> None:
+    """Mark every data source in ``scopes`` as needing re-aggregation, and drop
+    the caches that would otherwise serve the old mapping.
+
+    A mapping change invalidates more than it looks like it should. The
+    materialized ``:AGGREGATED`` edges were resolved under the OLD identity, the
+    conformance stamp has written the old values onto the nodes, and the
+    resolved-ontology cache is holding the old mapping on every pod. So:
+
+    * the aggregation drift fingerprint gets a sentinel, which is what makes the
+      UI report drift and prompt for a re-run;
+    * the replay guard is cleared, so the next trigger cannot short-circuit onto
+      the now-stale job;
+    * the resolved-ontology generation is bumped (every pod re-resolves on its
+      next read), the persisted schema facet is reset, and the hot aggregated-read
+      generation is bumped.
+
+    Deliberately does NOT trigger the re-aggregation. One edit at provider or
+    platform scope can reach hundreds of sources, and quietly enqueueing that
+    much work is not a decision this function gets to make — it makes the state
+    visible and lets an operator choose.
+
+    Best-effort throughout: cache plumbing must never fail the mutation that
+    caused it. ``scopes`` is enumerated once and reused by every step.
+    """
+    if not scopes:
+        return
+    ds_ids = [ds for (_ws, ds) in scopes]
+
+    try:
+        from sqlalchemy import update as _sa_update
+
+        from backend.app.services.aggregation.models import (
+            AggregationDataSourceStateORM, AggregationJobORM,
+        )
+        await session.execute(
+            _sa_update(AggregationJobORM)
+            .where(AggregationJobORM.data_source_id.in_(ds_ids))
+            .where(AggregationJobORM.ontology_fingerprint.isnot(None))
+            .values(ontology_fingerprint=None)
+        )
+        await session.execute(
+            _sa_update(AggregationDataSourceStateORM)
+            .where(AggregationDataSourceStateORM.data_source_id.in_(ds_ids))
+            .values(graph_fingerprint=f"stale:{reason}")
+        )
+        await session.commit()
+    except Exception as exc:
+        logger.warning(
+            "node-identity aggregation invalidation skipped for %d source(s) (%s): %s",
+            len(ds_ids), reason, exc,
+        )
+
+    try:
+        from backend.app.db.repositories.stats_repo import invalidate_schema_facets
+        await invalidate_schema_facets(session, ds_ids)
+        await session.commit()
+    except Exception as exc:
+        logger.warning("node-identity schema-facet invalidation failed (%s): %s", reason, exc)
+
+    try:
+        from backend.app.services.resolved_ontology_cache import bump_scopes
+        await bump_scopes(scopes)
+    except Exception as exc:
+        logger.warning("node-identity generation bump failed (%s): %s", reason, exc)
+
+    try:
+        from backend.app.services.graph_cache import bump_aggregated_generations
+        await bump_aggregated_generations(scopes)
+    except Exception as exc:
+        logger.warning("node-identity graph-cache bump failed (%s): %s", reason, exc)
+
+
 async def load_node_identity(session, data_source: Any) -> ResolvedNodeIdentity:
     """Resolve the mapping for ``data_source`` (an ORM row or its id).
 
