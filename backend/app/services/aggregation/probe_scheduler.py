@@ -91,9 +91,19 @@ class ProbeScheduler:
             # Cheap pre-filter. It cannot know each source's override, so it is
             # deliberately permissive on the interval and the exact test runs
             # in Python below — the same split the reconcile sweep uses.
-            widest = resolve_probe_interval(None, global_interval)
+            #
+            # "Permissive" means the NARROWEST interval any source could
+            # resolve to, not the global one. A source overridden FASTER than
+            # the fleet is due before the global cutoff, so a global-width
+            # cutoff would never load its row and the Python check that honours
+            # the override would never run — the override would be reported in
+            # the drawer and silently do nothing.
+            fastest = await self._fastest_override(session)
+            narrowest = resolve_probe_interval(None, global_interval)
+            if fastest is not None:
+                narrowest = min(narrowest, fastest)
             cutoff = (
-                datetime.now(timezone.utc) - timedelta(seconds=widest)
+                datetime.now(timezone.utc) - timedelta(seconds=narrowest)
             ).isoformat()
             rows = await self._due_rows(session, cutoff)
 
@@ -131,6 +141,19 @@ class ProbeScheduler:
                 summary.coalesced, summary.errors,
             )
         return summary
+
+    @staticmethod
+    async def _fastest_override(session) -> Optional[int]:
+        """The narrowest per-source probe interval anyone has set, or None when
+        nobody overrides. One scalar read over a table with one row per source,
+        and it is what keeps the SQL pre-filter a superset of ``_is_due``."""
+        from sqlalchemy import func
+
+        from .models import AggregationDataSourceStateORM as S
+
+        return (await session.execute(
+            select(func.min(S.probe_interval_secs))
+        )).scalar()
 
     async def _due_rows(self, session, cutoff: str):
         """Sources whose counts are old enough to be worth re-reading.

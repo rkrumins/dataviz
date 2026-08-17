@@ -162,6 +162,28 @@ async def test_per_source_interval_overrides_the_global(session_factory, _enqueu
 
 
 @pytest.mark.asyncio
+async def test_a_faster_override_beats_a_slow_global(
+    session_factory, _enqueued, monkeypatch,
+):
+    """The mirror of the test above, and the one that actually bites: the SQL
+    pre-filter's cutoff must be the narrowest interval any source could resolve
+    to. Derived from the GLOBAL, a source overridden faster than the fleet is
+    never even loaded, so the Python check that honours its override never runs
+    — the drawer reports the override while nothing acts on it."""
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.service"
+        ".AGGREGATION_PROBE_INTERVAL_SECS", 3600,
+    )
+    await _seed(
+        session_factory, "ds_1",
+        last_probed_at=_ago(seconds=300), probe_interval_secs=30,
+    )
+    summary = await ProbeScheduler(session_factory).tick()
+    assert (summary.seen, summary.due, summary.enqueued) == (1, 1, 1)
+    assert _enqueued == ["ds_1"]
+
+
+@pytest.mark.asyncio
 async def test_deleted_source_is_never_probed(session_factory, _enqueued):
     """Liveness is deleted_at, not is_active — a tombstone that kept its
     active flag would otherwise be probed forever."""
