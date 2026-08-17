@@ -434,6 +434,8 @@ export function LineageLens({
   const setLensViewMode = usePreferencesStore((s) => s.setLensViewMode)
   const lensFrameChildren = usePreferencesStore((s) => s.lensFrameChildren)
   const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
+  const condenseSteps = usePreferencesStore((s) => s.lensCondenseSteps)
+  const setCondenseSteps = usePreferencesStore((s) => s.setLensCondenseSteps)
   const lensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
 
@@ -504,10 +506,16 @@ export function LineageLens({
   }), [sg, view, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter])
 
   // T23 R2 — pass-through condensation, a pure re-projection over the
-  // built layout (never touches population/grain/rank).
+  // built layout (never touches population/grain/rank). OFF unless the
+  // reader asks for it (the "Steps" control in the header): the default
+  // is the full end-to-end flow, every hop its own card, per the user's
+  // own ruling. Skipping the stage entirely rather than passing an
+  // all-open set keeps the un-condensed board byte-identical to the
+  // layout — no connector edges, no re-condense controls, nothing for a
+  // chip to be drawn over.
   const condensed = useMemo(
-    () => applyCondensation(layout, view.condensedOpen),
-    [layout, view.condensedOpen],
+    () => (condenseSteps ? applyCondensation(layout, view.condensedOpen) : layout),
+    [condenseSteps, layout, view.condensedOpen],
   )
   // T26 R2 — the invariant stage: the focal card is drawn (a), the board
   // is never empty while `layout` still has the focus (b — T17-A's
@@ -1466,6 +1474,49 @@ export function LineageLens({
                       className={cn(
                         'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                         lensFrameChildren === mode
+                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                          : 'text-ink-muted hover:text-ink',
+                      )}
+                    >
+                      <Icon className="w-3 h-3" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Steps — how much of a long path draws. "Every step" is
+                  the default and the honest picture: one card per hop,
+                  all the way out, however far the reader walks.
+                  "Condensed" trades that for a shorter board on very
+                  long chains, folding runs of single pass-through steps
+                  into one "via N steps" connector. Visible rather than
+                  automatic because a folded run has no card to click,
+                  and a reader who never chose it reads the fold as the
+                  lineage having stopped. */}
+              {lensViewMode === 'graph' && (
+                <div
+                  role="group"
+                  aria-label="How much of a long path to show"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
+                    Steps
+                  </span>
+                  {([
+                    { on: false, Icon: LucideIcons.UnfoldHorizontal, label: 'Every step',
+                      title: 'Show the full end-to-end flow — every hop on the path is its own card' },
+                    { on: true, Icon: LucideIcons.FoldHorizontal, label: 'Condensed',
+                      title: 'Fold long runs of single pass-through steps into one "via N steps" connector — click a connector to open that run' },
+                  ] as const).map(({ on, Icon, label, title }) => (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => setCondenseSteps(on)}
+                      title={title}
+                      aria-pressed={condenseSteps === on}
+                      className={cn(
+                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                        condenseSteps === on
                           ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
                           : 'text-ink-muted hover:text-ink',
                       )}

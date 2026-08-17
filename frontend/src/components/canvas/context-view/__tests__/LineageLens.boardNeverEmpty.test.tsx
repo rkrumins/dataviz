@@ -52,7 +52,10 @@ describe('the rendered board is never empty while the model has the focus (T25 C
   afterEach(() => cleanup())
 
   it('recovers the focal card even when the window pass itself returns an empty (focal-excluded) graph', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    // The condensation stage only runs when the reader has asked for it
+    // (the header's "Steps" control, off by default), and this test's
+    // whole subject is recovering from THAT stage's output.
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensCondenseSteps: true })
     const walk: WalkEntry = {
       model: walkModel('F', {
         nodes: [wnode('F', 'dataset', 'shipments'), wnode('U', 'dataset', 'sensor_feed')],

@@ -325,7 +325,7 @@ describe('T26 R4 — the journey acceptance suite (walkSharedPlatform)', () => {
 describe('T26 R4 — follow from every control kind × state (walkWideHub / walkLongChain)', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>
   beforeEach(() => {
-    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 3 })
+    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 3, lensCondenseSteps: false })
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
   afterEach(() => { cleanup(); errorSpy.mockRestore(); usePreferencesStore.setState({ lensInitialDepth: 1 }) })
@@ -396,17 +396,15 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
    * no directional bias, and `branchB` mirrors `branchA` exactly in the
    * fixture).
    *
-   * NOTE on what this does NOT assert: condensation (T23 R2, KEPT by
-   * the user's own ruling) is free to fold a run of interior chain
-   * cards into one connector as it grows past `MIN_CONDENSE_RUN` — by
-   * design, verified directly in the same debug pass — stage_up_09/08/
-   * 07 fold away behind their own "— via N steps —▶" connector well
-   * before the click this test cares about. That is the SURVIVING
-   * feature working correctly, not the deleted window. This test's own
-   * claim is narrower and exact: the JUST-DELIVERED card (the one the
-   * click promised) is ALWAYS its own visible top-level card the
-   * instant it arrives — nothing folds the delivery itself, and the
-   * deleted chip's own text can never appear.
+   * NOTE on what this does NOT assert: condensation (T23 R2) is free to
+   * fold a run of interior chain cards into one connector as it grows
+   * past `MIN_CONDENSE_RUN` — but only when the reader has asked for it
+   * on the header's "Steps" control, which defaults to every step drawn
+   * (see `STEPS — the full end-to-end flow is the default` below). This
+   * test runs at that default, so nothing folds behind it either way.
+   * Its own claim is narrower and exact: the JUST-DELIVERED card (the
+   * one the click promised) is ALWAYS its own visible top-level card
+   * the instant it arrives.
    */
   it('R4 REPRO-FIRST — a click past the old window edge delivers the card directly, no chip, ever (upstream)', () => {
     renderLens(['F'], doneWalk(WALK_FIXTURES.walkLongChain.model, 3))
@@ -494,6 +492,45 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
     expect(reached).toEqual([
       'stage_up_08', 'stage_up_07', 'stage_up_06', 'stage_up_05', 'stage_up_04', 'stage_up_03', 'stage_up_02',
     ])
+    assertStrataCoherent(errorSpy)
+  })
+
+  /**
+   * STEPS — the full end-to-end flow is the DEFAULT, and folding it is
+   * a visible choice (user, 2026-08-17): "I want to ensure that this is
+   * a toggle that user can see and we show full, end to end flow rather
+   * than saying skipping 2 steps and not showing it individually."
+   *
+   * Folding was automatic before this, which is how a reader who never
+   * asked for it met a "via N steps" connector mid-wire where a card
+   * should have been — with no card to click onward from, and (drawn at
+   * the midpoint of a wire that crosses a frame) sometimes nothing
+   * clickable at all.
+   */
+  it('STEPS — every hop is its own card by default; the header control folds and unfolds the run', () => {
+    renderLens(['F'], doneWalk(WALK_FIXTURES.walkLongChain.model, 3))
+    // Walk out far enough that a run of pass-through cards exists to
+    // fold at all (three interior cards, past MIN_CONDENSE_RUN).
+    for (let i = 9; i >= 6; i--) {
+      fireEvent.click(screen.getByTitle(new RegExp(`Shows the next hop upstream of stage_up_${String(i).padStart(2, '0')} only`)))
+    }
+    // DEFAULT — every step drawn, nothing skipped.
+    const interior = ['stage_up_09', 'stage_up_08', 'stage_up_07', 'stage_up_06']
+    for (const stage of [...interior, 'stage_up_05']) assertBoardShows(stage)
+
+    // The reader asks for the short view: the run folds, and its
+    // interior steps leave the board — only the boundaries stay.
+    // (The connector chip itself is EdgeLabelRenderer geometry, which
+    // jsdom has no layout for; what the fold MEANS is the drawn set,
+    // and that is what this asserts.)
+    fireEvent.click(screen.getByTitle(/Fold long runs of single pass-through steps/))
+    for (const stage of interior) expect(onBoard(stage)).toBe(false)
+    assertBoardShows('ledger_snapshot')
+    assertBoardShows('stage_up_05')
+
+    // And back — the same control, the other way, nothing lost.
+    fireEvent.click(screen.getByTitle(/Show the full end-to-end flow/))
+    for (const stage of [...interior, 'stage_up_05']) assertBoardShows(stage)
     assertStrataCoherent(errorSpy)
   })
 })

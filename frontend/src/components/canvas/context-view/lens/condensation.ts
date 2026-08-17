@@ -23,11 +23,20 @@ export const MIN_CONDENSE_RUN = 2
 
 const connectorId = (a: string, b: string): string => `condense:${a}>${b}`
 
-/** Eligible to be swallowed into a run: an ordinary entity card, never
- *  the focal (the thing being asked about is never chrome) and never a
- *  row-holding card (a frame's rows are its own answer, not a corridor
- *  to fold past). */
-const eligible = (c: FocusCard): boolean => c.kind === 'entity' && !holdsRows(c)
+/** Eligible to be swallowed into a run: a FREE-STANDING ordinary entity
+ *  card — never the focal (the thing being asked about is never chrome),
+ *  never a row-holding card (a frame's rows are its own answer, not a
+ *  corridor to fold past), and never a card that lives INSIDE a frame.
+ *
+ *  That last one is not symmetry: a frame is drawn from its rows, so
+ *  folding its only row away leaves the frame itself on the board with
+ *  an empty body under a header still claiming "1 on this lineage · of
+ *  12" — reported live, and with no card left to click, the connector
+ *  chip (which lands mid-wire, inside whatever frame the wire crosses)
+ *  became the only way onward. A run of corridors between top-level
+ *  cards is what this fold was for. */
+const eligible = (c: FocusCard): boolean =>
+  c.kind === 'entity' && !holdsRows(c) && c.frameId === null
 
 /**
  * Collapse every maximal run of degree-1 pass-through cards not

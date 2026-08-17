@@ -100,6 +100,26 @@ describe('condensation — applyCondensation', () => {
         expect(condensed?.target).toBe('D')
     })
 
+    it('never folds a card that lives INSIDE a frame — a frame drawn from its rows would be left empty', () => {
+        // A -> r1 -> r2 -> D, where r1 and r2 are the only ROWS of two
+        // open frames. Folding them hides them from their frames, and a
+        // frame is nothing but its rows: the board keeps a box whose
+        // header still says "1 on this lineage · of 12" over an empty
+        // body, with no card left to click onward from. Reported live.
+        const g = graphOf(
+            [
+                card('A'), card('D'),
+                card('F1', { kind: 'frame' }), card('F2', { kind: 'frame' }),
+                card('r1', { frameId: 'F1' }), card('r2', { frameId: 'F2' }),
+            ],
+            [edge('e1', 'A', 'r1'), edge('e2', 'r1', 'r2'), edge('e3', 'r2', 'D')],
+        )
+        const out = applyCondensation(g, new Set())
+        expect(out).toBe(g)   // nothing foldable: identity, untouched
+        expect(out.cards.map(c => c.id)).toContain('r1')
+        expect(out.cards.map(c => c.id)).toContain('r2')
+    })
+
     it('an explicitly unfolded run (condensedOpen) stays fully drawn, with a re-condense marker on its boundary', () => {
         const g = straightRun()
         const out = applyCondensation(g, new Set(['condense:A>E']))

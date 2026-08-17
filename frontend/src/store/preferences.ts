@@ -184,6 +184,19 @@ interface PreferencesState {
   lensFrameChildren: 'connected' | 'all'
   setLensFrameChildren: (mode: 'connected' | 'all') => void
 
+  /** Whether long runs of single pass-through steps fold into one
+   *  "— via N steps —▶" connector.
+   *
+   *  OFF by default, and the user's own ruling: "show full, end-to-end
+   *  flow rather than saying skipping 2 steps and not showing it
+   *  individually". A folded run also has no card to click, so the
+   *  connector chip was the only way onward — and it lands mid-wire,
+   *  which is how it ended up drawn over a frame and unclickable. The
+   *  folding is kept for readers who want the long view of a very long
+   *  chain, but nothing folds unless they ask for it. */
+  lensCondenseSteps: boolean
+  setLensCondenseSteps: (on: boolean) => void
+
   /** How many hops each direction the Lens fetches when it opens on a
    *  NEW entity. One is the answer to "what feeds this", which is what
    *  people open the lens for — the only value a fresh focal is ever
@@ -367,6 +380,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       setLensViewMode: (lensViewMode) => set({ lensViewMode }),
       lensFrameChildren: 'connected',
       setLensFrameChildren: (lensFrameChildren) => set({ lensFrameChildren }),
+      lensCondenseSteps: false,
+      setLensCondenseSteps: (lensCondenseSteps) => set({ lensCondenseSteps }),
       lensInitialDepth: 1,
 
       // Icon picker recents
