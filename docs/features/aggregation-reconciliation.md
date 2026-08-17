@@ -62,7 +62,10 @@ Two corrections are load-bearing, both verified against a live engine:
   invisible to per-label counts and `get_stats` buckets them under
   `labels(n)[0] or "unknown"`. If the label sum comes out *above* the total the
   graph has multi-label nodes, per-label counting is no longer equivalent, and
-  the probe returns `None` so the caller falls back to the scan.
+  the probe returns `None`. There is no scan fallback in the probe lane — the
+  attempt stamps only the probe clock (so the source retries once per probe
+  interval instead of every scheduler tick) and the scheduled stats poll
+  remains the source of counts for that graph.
 
 Scheduling and execution are split deliberately. `ProbeScheduler` (Control
 Plane) resolves policy and enqueues; the stats service executes, because every
@@ -73,8 +76,12 @@ for one source inside the claim window buy exactly one probe.
 ## The design
 
 A scheduled sweep decides everything from Postgres. **`ReconciliationSweeper`
-takes no provider registry**, which is the structural guarantee — asserted in
-the tests — that it cannot make a graph call even by accident.
+takes no provider registry**, so an *auto* tick cannot make a graph call. The
+one exception is deliberate and operator-shaped: a manual Check now / Preview
+refreshes counts live (`_live_observe_counts`, reached through the service's
+registry) — counter reads first, the full `get_stats` only where counters
+cannot answer, the whole pass under a 30-second budget. Sources not reached in
+time evaluate from stored counts through the named skip paths.
 
 ```
 tick (60s)  → is any source due?  (counts moved, or per-source interval)
@@ -86,9 +93,13 @@ tick (60s)  → is any source due?  (counts moved, or per-source interval)
 ```
 
 Two phases because the advisory lock is transaction-scoped and `engine.py`
-forbids holding a session across an outbound network call. The
-`last_reconcile_checked_at` write inside Phase A *is* the cross-replica mutual
-exclusion: a replica that loses the race finds no due candidates.
+forbids holding a session across an outbound network call. Cross-replica
+safety is layered: the advisory lock serialises auto ticks (and fails
+*closed* — a Postgres error skips the tick rather than double-acting), every
+evaluated source advances `last_reconcile_checked_at` so a losing replica
+finds it no longer at the head of the window, and the residual Phase-A/Phase-B
+gap is collapsed by the trigger idempotency keys — a duplicate dispatch lands
+as a conflict no-op that neither adopts the baseline nor counts as an action.
 
 ### The baseline
 
@@ -124,8 +135,12 @@ collide with the schema digest for a source that happens to have no overlay.
 
 Three conditions produce a finding that is **recorded and surfaced but not acted
 on**, so the cockpit stays honest about drift even where automation is off:
-`policy_disabled`, `paused` (an operator snooze, held in the state row's
-`paused_until` until it lapses) and `cooldown` / `failed_backoff`.
+`disabled`, `paused` (an operator snooze, held in the state row's
+`paused_until` until it lapses — future-only and at most 90 days out) and
+`cooldown` / `failed_backoff`. (The guard names above describe conditions; the
+per-sweep tally uses the `SKIP_REASONS` tokens in `reconcile.py`, and holds
+advance the fairness clock while staying due through the unresolved-drift
+clause.)
 
 ### Caps
 
@@ -136,7 +151,7 @@ re-polls · breaker cap 3.
 
 ### First builds
 
-Detector 3 calls `svc.trigger(..., trigger_source="schedule")` **directly**, not
+Detector 3 calls `svc.trigger(..., trigger_source="reconcile")` **directly**, not
 `signal_source_changed` — that path treats a `none` status as not-applicable by
 design, and that remains true. `trigger()` applies the stored global tuning
 defaults, so an auto-queued job inherits the configuration that clears a
@@ -220,6 +235,9 @@ cadence — the same store, the same 30-second cache, the same dialog.
 | `probeIntervalSecs` | `AGGREGATION_PROBE_INTERVAL_SECS` | `60` (floor 15) |
 | — | `AGGREGATION_PROBE_BATCH_CAP` | `200` |
 | — | `STATS_PROBE_CONCURRENCY` (stats-service lane) | `4` |
+| — | `STATS_PROBE_TIMEOUT_SECS` (stats-service lane) | `20` |
+| — | `STATS_PROBE_DEDUP_TTL_SECS` (enqueue claim) | `90` |
+| — | `AGGREGATION_PROBE_SCAN_CAP` (code constant, not env) | `1000` due rows per tick |
 
 Per-source overrides are columns on `aggregation.data_source_state`:
 `reconcile_enabled` (the per-source feature flag — it cannot live in
@@ -457,8 +475,10 @@ seven states.
 - **The first sweep seeds and acts on nothing** for drift; detectors 1 and 3 can
   fire on it, which is the point.
 - **A source stuck at "Reconcile suspended"** hit the breaker: it was rebuilt
-  repeatedly without the finding clearing. Look at why the rollups keep
-  disappearing before clearing it with a manual check.
+  repeatedly without the finding clearing. Fix why the rollups keep
+  disappearing first — the breaker resets only when a later evaluation finds
+  the source `in_sync` (a manual check *after* the underlying cause is fixed
+  does it; while the finding persists, checks re-confirm the suspension).
 - **Turning a detector off** stops rebuilds for it. The problem is still
   detected and still shown.
 
