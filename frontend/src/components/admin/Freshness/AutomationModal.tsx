@@ -396,7 +396,16 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
             showToast('success', 'Automation saved. Takes effect within a minute.')
             onClose()
         },
-        onError: (e: Error) => showToast('error', e.message || 'Could not save the cadence.'),
+        // The policy PUT that precedes this one has already landed (see
+        // onSave), so a generic "could not save" would be a lie about half
+        // the form. Say exactly which half failed; Save again re-sends the
+        // policy with identical values (harmless) and retries the cadence.
+        onError: (e: Error) => showToast(
+            'error',
+            `Watch policy saved, but the Detect and Act settings did not save: ${
+                e.message || 'unknown error'
+            }. Save again to retry them.`,
+        ),
     })
     const saveRecon = useSetReconciliationPolicy()
 

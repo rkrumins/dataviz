@@ -129,6 +129,9 @@ export function Freshness() {
         (id: string | null) => patchParams({ fds: id }),
         [patchParams],
     )
+    // Stable for the same reason as closeAutomation below: it feeds the
+    // drawer's focus effect.
+    const closeDrawer = useCallback(() => setDrawerDsId(null), [setDrawerDsId])
 
     // The Automation modal opens from the URL for the same reason the drawer
     // does: "here is how the schedule is configured" is a link someone sends.
@@ -515,7 +518,7 @@ export function Freshness() {
                 key={drawerDsId ?? 'closed'}
                 dsId={drawerDsId}
                 isOpen={drawerDsId != null}
-                onClose={() => setDrawerDsId(null)}
+                onClose={closeDrawer}
                 workspaceName={
                     drawerDsId
                         ? workspaceName.get(rows.find(r => r.dataSourceId === drawerDsId)?.workspaceId ?? '')

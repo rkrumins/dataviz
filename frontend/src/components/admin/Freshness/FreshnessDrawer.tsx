@@ -16,6 +16,7 @@ import {
     RefreshCw, Radar, RotateCcw, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useModalA11y } from '@/hooks/useModalA11y'
 import { usePermission } from '@/store/auth'
 import { useToast } from '@/components/ui/toast'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -927,7 +928,7 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
     const [probe, setProbe] = useState(false)
     const [retryOpen, setRetryOpen] = useState(false)
 
-    const { data: doc, isLoading, isFetching, error } = useSourceFreshness(dsId, probe, isOpen)
+    const { data: doc, isLoading, isFetching, error, refetch } = useSourceFreshness(dsId, probe, isOpen)
     const activityFeed = recentActivityEvents(doc?.events ?? [], doc?.lastCheckedAt)
     const probing = probe && isFetching
     const { byDataSource } = useActiveJobs()
@@ -988,6 +989,11 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
 
     const mastered = doc ? isPlatformMastered(doc) : false
 
+    // Suspended while the retry ConfirmDialog is up, so Escape dismisses the
+    // confirm rather than closing the drawer underneath it. This drawer
+    // PATCHes fleet automation, so it owes the full keyboard contract.
+    const dialogRef = useModalA11y(isOpen && !!dsId && !retryOpen, onClose)
+
     return createPortal(
         <>
             <Backdrop open={isOpen && !!dsId} onClick={onClose} />
@@ -995,7 +1001,10 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
             <>
                 {isOpen && dsId && (
                     <motion.div
-                        role="dialog" aria-label="Data source freshness"
+                        ref={dialogRef}
+                        tabIndex={-1}
+                        role="dialog" aria-modal="true"
+                        aria-label="Data source freshness"
                         initial={{ x: '100%' }} animate={{ x: 0 }}
                         transition={{ type: 'spring', stiffness: 400, damping: 40 }}
                         className="fixed right-0 top-0 z-50 h-full w-full max-w-xl overflow-y-auto bg-canvas border-l border-glass-border shadow-2xl"
@@ -1095,7 +1104,12 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                                 <Radar className="w-4 h-4 text-indigo-500" /> Live check
                                             </div>
                                             <button
-                                                onClick={() => setProbe(true)}
+                                                // Once probe is on, the same
+                                                // boolean is a no-op — re-run
+                                                // the live read instead, which
+                                                // is also the retry after a
+                                                // failed probe.
+                                                onClick={() => { if (probe) void refetch(); else setProbe(true) }}
                                                 disabled={probing}
                                                 className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 transition-colors disabled:opacity-50"
                                             >

@@ -488,6 +488,42 @@ describe('admin automation save', () => {
         ))
     })
 
+    it('a cadence failure after the policy landed says exactly which half saved', async () => {
+        const onClose = vi.fn()
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        putAggregationCadence.mockRejectedValue(new Error('control plane unreachable'))
+        wrap(<AutomationModal open onClose={onClose} isAdmin summary={null} />)
+
+        await screen.findByRole('button', { name: 'Save' })
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        await waitFor(() => expect(putAggregationCadence).toHaveBeenCalled())
+        // The policy PUT already committed fleet-wide; a generic "could not
+        // save" would be a lie about half the form.
+        const { useToastStore } = await import('@/components/ui/toast')
+        await waitFor(() => expect(
+            useToastStore.getState().toasts.some(t =>
+                /watch policy saved, but/i.test(t.message)),
+        ).toBe(true))
+        // The modal stays open and dirty-guarded for the retry.
+        expect(onClose).not.toHaveBeenCalled()
+        expect(screen.getByRole('dialog')).toBeInTheDocument()
+    })
+
+    it('a policy failure saves nothing and the cadence PUT never fires', async () => {
+        const onClose = vi.fn()
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        putReconciliation.mockRejectedValue(new Error('nope'))
+        wrap(<AutomationModal open onClose={onClose} isAdmin summary={null} />)
+
+        await screen.findByRole('button', { name: 'Save' })
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalled())
+        expect(putAggregationCadence).not.toHaveBeenCalled()
+        expect(onClose).not.toHaveBeenCalled()
+    })
+
     it('refuses a shrink allowance outside 0–100 rather than letting the server 422', async () => {
         getAggregationSettings.mockResolvedValue(SETTINGS)
         putAggregationCadence.mockResolvedValue({ tuning: null, cadence: null })

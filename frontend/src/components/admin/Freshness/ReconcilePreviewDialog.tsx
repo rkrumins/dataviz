@@ -86,7 +86,7 @@ export function ReconcilePreviewDialog({ open, onClose, fleetTotal }: {
     onClose: () => void
     fleetTotal?: number | null
 }) {
-    useModalA11y(open, onClose)
+    const dialogRef = useModalA11y(open, onClose)
     const { showToast } = useToast()
     const preview = useReconcileNow()
     const [findings, setFindings] = useState<ReconcileFinding[] | null>(null)
@@ -138,6 +138,8 @@ export function ReconcilePreviewDialog({ open, onClose, fleetTotal }: {
                 <div className="fixed inset-0 z-[61] flex items-center justify-center p-4 pointer-events-none">
                     <motion.div
                         {...MOTION.cardEntry}
+                        ref={dialogRef}
+                        tabIndex={-1}
                         role="dialog"
                         aria-modal="true"
                         aria-label="Reconciliation preview"
