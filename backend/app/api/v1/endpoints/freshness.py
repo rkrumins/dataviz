@@ -222,7 +222,7 @@ async def refresh_data_source(
 @router.patch(
     "/data-sources/{ds_id}/freshness-settings",
     response_model=FreshnessSettingsResponse,
-    summary="Set or clear a data source's rebuild cadence and reconciliation overrides",
+    summary="Set or clear a data source's rebuild cadence, reconciliation, and drift-probe overrides",
     dependencies=[Depends(_REQUIRE_DS_MANAGE)],
 )
 async def patch_freshness_settings(
@@ -271,6 +271,16 @@ async def patch_freshness_settings(
             recon = await svc.set_source_reconcile_settings(
                 ds_id, session, **kwargs,
             )
+        probe = {}
+        if {"probe_enabled", "probe_interval_secs"} & sent:
+            kwargs = {}
+            if "probe_enabled" in sent:
+                kwargs["enabled"] = body.probe_enabled
+            if "probe_interval_secs" in sent:
+                kwargs["interval_secs"] = body.probe_interval_secs
+            probe = await svc.set_source_probe_settings(
+                ds_id, session, **kwargs,
+            )
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     return FreshnessSettingsResponse(
@@ -278,6 +288,8 @@ async def patch_freshness_settings(
         rebuild_min_interval_secs=stored_interval,
         auto_reconcile_enabled=recon.get("reconcile_enabled"),
         reconcile_check_interval_secs=recon.get("reconcile_check_interval_secs"),
+        probe_enabled=probe.get("probe_enabled"),
+        probe_interval_secs=probe.get("probe_interval_secs"),
     )
 
 

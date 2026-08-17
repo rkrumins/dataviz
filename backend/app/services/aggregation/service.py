@@ -1526,6 +1526,49 @@ class AggregationService:
             "reconcile_check_interval_secs": state.reconcile_check_interval_secs,
         }
 
+    async def set_source_probe_settings(
+        self, ds_id: str, session: AsyncSession, *,
+        enabled: Any = _UNSET, interval_secs: Any = _UNSET,
+    ) -> dict:
+        """Set or clear the per-source drift-probe overrides.
+
+        UPSERTS for the same reason ``set_source_reconcile_settings`` does: a
+        never-aggregated source has no state row, and that is exactly the
+        source an operator may want to exclude from probing.
+
+        Only fields explicitly passed are written. ``None`` clears an
+        override; ``False`` is a real value and is stored as one.
+        """
+        from .models import AggregationDataSourceStateORM
+
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if state is None:
+            from backend.app.db.models import WorkspaceDataSourceORM
+
+            ds = await session.get(WorkspaceDataSourceORM, ds_id)
+            if ds is None or ds.deleted_at is not None:
+                raise NotFoundError(f"Data source {ds_id} not found")
+            state = AggregationDataSourceStateORM(
+                data_source_id=ds_id,
+                workspace_id=ds.workspace_id,
+                aggregation_status="none",
+            )
+            session.add(state)
+
+        if enabled is not self._UNSET:
+            state.probe_enabled = enabled
+        if interval_secs is not self._UNSET:
+            state.probe_interval_secs = interval_secs
+        await session.commit()
+        logger.info(
+            "Probe settings for data source %s: enabled=%s interval=%s",
+            ds_id, state.probe_enabled, state.probe_interval_secs,
+        )
+        return {
+            "probe_enabled": state.probe_enabled,
+            "probe_interval_secs": state.probe_interval_secs,
+        }
+
     # ── Change Detection ──────────────────────────────────────────────
 
     async def check_drift(
@@ -2291,6 +2334,18 @@ class AggregationService:
             else "global" if cadence.reconcile_check_interval_secs is not None
             else "default"
         )
+        # Detect (drift-probe) cadence trio — same shape, distinct vocabulary
+        # ("override"/"global"/"env") to match the global cadence's own field
+        # names (probe_enabled/probe_interval_secs use "env", not "default").
+        probe_override = state_row.get("probe_interval_secs")
+        probe_interval = resolve_probe_interval(
+            probe_override, cadence.probe_interval_secs,
+        )
+        probe_source = (
+            "override" if probe_override is not None
+            else "global" if cadence.probe_interval_secs is not None
+            else "env"
+        )
         observed_agg, stats_as_of = await _observed_overlay(session, ds.id)
         versioned = await _platform_mastered_ids()
 
@@ -2326,6 +2381,12 @@ class AggregationService:
             reconcile_interval_override_secs=recon_override,
             resolved_reconcile_interval_secs=recon_interval,
             reconcile_interval_source=recon_source,
+            probe_enabled=resolve_probe_enabled(
+                state_row.get("probe_enabled"), cadence.probe_enabled,
+            ),
+            probe_interval_secs=probe_override,
+            resolved_probe_interval_secs=probe_interval,
+            probe_interval_source=probe_source,
             next_check_at=_next_check_at(
                 state_row.get("last_reconcile_checked_at"), recon_interval,
             ),
@@ -3107,6 +3168,8 @@ async def _state_map(
                 S.last_finding_at,
                 S.last_finding_reason,
                 S.last_finding_evidence,
+                S.probe_enabled,
+                S.probe_interval_secs,
             ).where(S.data_source_id.in_(ds_ids))
         )).all()
     except Exception as exc:  # pragma: no cover - defensive, never fail a read
@@ -3127,6 +3190,8 @@ async def _state_map(
             # Stored as a JSON string. A malformed blob degrades to None
             # rather than failing the whole freshness read.
             "last_finding_evidence": _safe_json(r[11]),
+            "probe_enabled": r[12],
+            "probe_interval_secs": r[13],
         }
         for r in rows
     }

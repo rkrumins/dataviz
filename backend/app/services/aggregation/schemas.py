@@ -638,6 +638,17 @@ class FreshnessDoc(FreshnessRow):
     reconcile_interval_source: Optional[str] = Field(
         None, alias="reconcileIntervalSource",
     )
+    # ① Detect — the per-source probe override, its resolved value, and where
+    # that value came from. Mirrors the reconcile_*/rebuild_* triples exactly
+    # so the drawer can render "Using default" vs "Overridden" uniformly.
+    probe_enabled: Optional[bool] = Field(None, alias="probeEnabled")
+    probe_interval_secs: Optional[int] = Field(None, alias="probeIntervalSecs")
+    resolved_probe_interval_secs: Optional[int] = Field(
+        None, alias="resolvedProbeIntervalSecs",
+    )
+    probe_interval_source: Optional[str] = Field(
+        None, alias="probeIntervalSource",
+    )
     next_check_at: Optional[str] = Field(None, alias="nextCheckAt")
     # Non-null when the sweep is deliberately not acting on this source
     # (no ontology, suspended by the breaker, overlay not observable…).
@@ -855,8 +866,18 @@ class FreshnessSettingsRequest(BaseModel):
                     "the global setting.",
     )
     reconcile_check_interval_secs: Optional[int] = Field(
-        None, alias="reconcileCheckIntervalSecs", ge=300, le=86400,
+        None, alias="reconcileCheckIntervalSecs", ge=30, le=86400,
         description="How often this source is checked for drift. Null "
+                    "inherits the global cadence.",
+    )
+    probe_enabled: Optional[bool] = Field(
+        None, alias="probeEnabled",
+        description="Per-source change-detection flag. Null inherits the "
+                    "global setting.",
+    )
+    probe_interval_secs: Optional[int] = Field(
+        None, alias="probeIntervalSecs", ge=15, le=86400,
+        description="How often this source's counts are re-read. Null "
                     "inherits the global cadence.",
     )
 
@@ -877,6 +898,8 @@ class FreshnessSettingsResponse(BaseModel):
     reconcile_check_interval_secs: Optional[int] = Field(
         None, alias="reconcileCheckIntervalSecs",
     )
+    probe_enabled: Optional[bool] = Field(None, alias="probeEnabled")
+    probe_interval_secs: Optional[int] = Field(None, alias="probeIntervalSecs")
 
     class Config:
         populate_by_name = True
