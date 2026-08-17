@@ -90,10 +90,7 @@ type AutomationRow = Pick<
  * those applies does a snooze get to surface, and only while it is
  * actually holding back a real drift verdict — pausing a source that never
  * drifts looks identical to automation working normally, so it stays as
- * quiet as any healthy row. The cooldown comes last for the same reason it
- * comes last on the server: a snooze is deliberate and a cooldown is just
- * the throttle doing its job, so naming the deliberate hold is more useful
- * when both apply.
+ * quiet as any healthy row.
  */
 export function automationChip(row: AutomationRow): {
     label: string
@@ -614,10 +611,9 @@ export function FreshnessRow({
                     {(() => {
                         const chip = automationChip(row)
                         if (!chip) return null
-                        // Icon and title travel WITH the decision: two chips
-                        // now share the 'drifting' facet (Paused and the
-                        // cooldown hold), so the facet alone can no longer
-                        // say which words and which shape belong to a row.
+                        // Icon and title travel WITH the decision rather than
+                        // being re-derived from the facet here: the facet is a
+                        // filter target, and several states can share one.
                         const { Icon, title } = chip
                         const chipClass = cn(
                             'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold',

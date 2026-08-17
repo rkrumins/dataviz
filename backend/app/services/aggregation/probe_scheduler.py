@@ -208,6 +208,13 @@ class ProbeScheduler:
                 | (DataSourceStatsORM.last_probed_at < cutoff)
             )
             .order_by(DataSourceStatsORM.last_probed_at.asc().nullsfirst())
+            # KNOWN BOUND: oldest-probed-first is the right fairness rule, but
+            # it works against a fast per-source override. One narrow override
+            # drags ``cutoff`` down for everyone, so most of the fleet matches
+            # — and the override's own source, being the most recently probed,
+            # sorts LAST. Above the cap it is the row this LIMIT truncates.
+            # Harmless below AGGREGATION_PROBE_SCAN_CAP sources (raise it, or
+            # make due-ness per-row in SQL, if that stops being true).
             .limit(AGGREGATION_PROBE_SCAN_CAP)
         )
         return list((await session.execute(stmt)).all())
