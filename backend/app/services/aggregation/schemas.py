@@ -1021,8 +1021,13 @@ class ReconcilePolicyRequest(BaseModel):
     """PUT /freshness/reconciliation. Partial-update semantics, same as the
     per-source PATCH: only explicitly-sent keys are written."""
     enabled: Optional[bool] = None
+    # ``ge=30`` matches the two other writers of this same stored value
+    # (``AggregationTuningRequest.reconcile_check_interval_secs`` and the
+    # per-source PATCH). It was 300 here alone, so a 60-299s interval passed
+    # the client's own floor and then 422'd against the only endpoint the
+    # Automation modal writes through.
     check_interval_secs: Optional[int] = Field(
-        None, alias="checkIntervalSecs", ge=300, le=86400,
+        None, alias="checkIntervalSecs", ge=30, le=86400,
     )
     max_actions_per_run: Optional[int] = Field(
         None, alias="maxActionsPerRun", ge=0, le=200,

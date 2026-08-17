@@ -318,6 +318,21 @@ def test_per_source_check_interval_has_the_same_floor():
         FreshnessSettingsRequest(reconcileCheckIntervalSecs=10)
 
 
+def test_check_interval_floor_is_the_same_number_in_both_requests():
+    """One stored value, several writers, one floor.
+
+    The global request said 300 while every sibling said 30, so a 60s interval
+    passed the UI's own minimum and then 422'd against the only endpoint the
+    Automation modal writes the global policy through — a value the per-source
+    endpoint accepted happily the whole time.
+    """
+    assert ReconcilePolicyRequest(checkIntervalSecs=60).check_interval_secs == 60
+    assert (
+        FreshnessSettingsRequest(reconcileCheckIntervalSecs=60)
+        .reconcile_check_interval_secs == 60
+    )
+
+
 def test_activity_since_defaults_to_24h():
     from backend.app.services.aggregation.service import parse_activity_since
 
