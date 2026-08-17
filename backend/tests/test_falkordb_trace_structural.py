@@ -587,9 +587,15 @@ def test_expand_raw_lineage_set_never_filters_far_endpoints_in_the_db():
     assert all("$exclude" not in c for c in seen)
 
 
-def test_collect_lineage_seed_exclude_keeps_focus_row():
-    """`exclude` drops a descendant seed row but never the focus's own
-    row, even when the focus urn is itself listed in `exclude`."""
+def test_collect_lineage_seed_takes_every_lineage_bearing_participant():
+    """The seed is the focus's own row plus every lineage-bearing
+    descendant — and nothing subtracts from it.
+
+    The caller's `exclude_urns` used to drop matching seed rows here, on
+    the reasoning that a node the client holds needs no re-walking. It
+    does: what the client holds is the NODE, never the hops it has not
+    asked about yet, and starting from an empty seed is how an expand
+    came back with nothing at all (see `trace_closure`'s `wanted`)."""
     fake = _TraceFake()
     fake.contain("dom", "leaf_a")
     fake.contain("dom", "leaf_b")
@@ -598,12 +604,9 @@ def test_collect_lineage_seed_exclude_keeps_focus_row():
 
     seed, capped = _run(p._collect_lineage_seed(
         "dom", "Domain", ["FLOWS"], ["HAS"], cap=10, timeout_secs=2.0,
-        exclude={"leaf_a", "dom"},
     ))
     urns = {u for u, _ in seed}
-    assert "leaf_a" not in urns
-    assert "dom" in urns
-    assert "leaf_b" in urns
+    assert urns == {"dom", "leaf_a", "leaf_b"}
     assert capped is False
 
 
@@ -868,9 +871,14 @@ def test_trace_closure_max_nodes_cut_names_the_hub_and_orphans_no_edge():
 
 def test_trace_closure_seed_urns_skip_the_container_seed_walk():
     """`seed_urns` = a walk CONTINUATION: the caller already knows which nodes
-    carry the lineage, so neither seed query fires. The focus is never dropped
-    by `exclude_urns` — a client that lists everything it holds still gets its
-    own focus walked."""
+    carry the lineage, so neither seed query fires.
+
+    And EVERY named seed walks. A seed is an instruction, not a candidate:
+    `exclude_urns` governs what is re-SHIPPED, never where the walk starts.
+    This request is the real client's own shape — the card being expanded
+    and every leaf under it are nodes it already holds, so they are all in
+    `exclude_urns` too — and dropping them left the walk with an empty seed
+    and the reader with a click that did nothing."""
     fake = _TraceFake()
     fake.contain("dom", "leaf_a")
     fake.lineage = [
@@ -893,14 +901,14 @@ def test_trace_closure_seed_urns_skip_the_container_seed_walk():
         lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
         max_nodes=100, timeout_ms=5000,
         seed_urns=["dom", "leaf_a", "ghost"],
-        exclude_urns=["dom", "ghost"],
+        exclude_urns=["dom", "leaf_a", "ghost"],
     ))
 
     assert all("RETURN DISTINCT d.urn AS urn" not in c for c in seen)
     assert all("RETURN f.urn AS urn, labels(f)[0] AS label" not in c for c in seen)
     got_edges = {(e.source_urn, e.target_urn) for e in result.edges}
-    assert got_edges == {("leaf_a", "leaf_b"), ("dom", "d_out")}
-    assert "g_out" not in result.downstream_urns
+    assert got_edges == {("leaf_a", "leaf_b"), ("dom", "d_out"), ("ghost", "g_out")}
+    assert "g_out" in result.downstream_urns
 
 
 def test_trace_closure_exclude_urns_keep_the_seam_edge_not_the_node():

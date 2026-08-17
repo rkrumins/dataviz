@@ -7226,7 +7226,12 @@ class FalkorDBProvider(GraphDataProvider):
         ``exclude_urns`` nodes the client already holds. They are never
                          re-shipped in ``nodes``, but an EDGE into one still
                          is — that seam edge is what stitches this step onto
-                         the graph the client already has.
+                         the graph the client already has. It says nothing
+                         about where the walk may START: a node named in
+                         ``seed_urns`` is walked from (and hydrated with the
+                         rest of the working set) whether or not it is also
+                         excluded, which is the only shape a real client
+                         ever sends.
         ``after_cursor`` page ONE node's adjacency in ONE direction instead of
                          walking: the fallback for a hub with more lineage than
                          a hop can carry. ``e:<edge id>`` names the NEXT id to
@@ -7347,10 +7352,20 @@ class FalkorDBProvider(GraphDataProvider):
                 # walk is deliberately skipped: re-deriving a seed from the
                 # focus's containment would cost a round-trip and re-anchor the
                 # walk on a focus the client has already moved past.
-                wanted = [
-                    u for u in dict.fromkeys(seed_urns)
-                    if u == urn or u not in excluded
-                ]
+                # A SEED IS AN INSTRUCTION, NOT A CANDIDATE. ``exclude_urns``
+                # says what must not be re-SHIPPED; it never says where the
+                # walk may START. The two got conflated here, and the cost
+                # was total: a client's seeds are BY CONSTRUCTION nodes it
+                # already holds (the lineage leaves under the card whose ⊕
+                # was clicked), so every seed was also excluded — and every
+                # expand of a card whose CHILDREN carry the lineage, rather
+                # than the card itself, walked from an empty seed and
+                # returned nothing. Measured live on a 14-column table: 0
+                # edges and 0 frontier entries, against 14 of each for the
+                # identical request with the seeds kept out of the exclude
+                # set. Every test in the live gate had carefully subtracted
+                # its seeds from its excludes; the client never could.
+                wanted = list(dict.fromkeys(seed_urns))
                 labels = await self._resolve_urn_labels_bulk(wanted) if wanted else {}
                 seed = [(u, labels.get(u) or "") for u in wanted]
                 seed_capped = False
@@ -7364,7 +7379,6 @@ class FalkorDBProvider(GraphDataProvider):
                 seed_limit = max(1, max_nodes // 2)
                 seed, seed_capped = await self._collect_lineage_seed(
                     urn, focus_label, ltypes, ctypes, seed_limit, seed_timeout,
-                    exclude=excluded,
                 )
             # A capped seed makes the response partial, but it must NOT stop the
             # walk: the flag is folded into truncation_reason at the return, not
@@ -8407,7 +8421,6 @@ class FalkorDBProvider(GraphDataProvider):
         ctypes: List[str],
         cap: int,
         timeout_secs: float,
-        exclude: Optional[Set[str]] = None,
     ) -> Tuple[List[Tuple[str, str]], bool]:
         """The nodes to START the closure BFS from.
 
@@ -8426,9 +8439,13 @@ class FalkorDBProvider(GraphDataProvider):
         index-seeking sub-queries — no extra label lookup) and
         ``seed_capped`` is True when the descendants query returned exactly
         its ``cap`` LIMIT (more lineage-bearing descendants may exist than
-        were returned — the caller reports ``seedTruncated``). ``exclude``
-        drops matching seed rows EXCEPT the focus's own row, which is never
-        excluded from its own walk.
+        were returned — the caller reports ``seedTruncated``).
+
+        The caller's ``exclude_urns`` deliberately plays NO part here: it
+        governs what is re-SHIPPED, never where the walk STARTS. Dropping a
+        held node from the seed only means never re-deriving the hops it
+        has not been asked about yet — see the ``wanted`` comment in
+        ``trace_closure``, which is the same rule on the explicit-seed path.
         """
         if not ltypes:
             return [(focus_urn, focus_label)], False
@@ -8491,8 +8508,6 @@ class FalkorDBProvider(GraphDataProvider):
             for row in (result.result_set or []):
                 u = row[0]
                 if not u or u in seen:
-                    continue
-                if exclude and u in exclude and u != focus_urn:
                     continue
                 seen.add(u)
                 seed.append((u, (row[1] if len(row) > 1 else None) or ""))

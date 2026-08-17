@@ -323,8 +323,9 @@ async def test_the_walk_sequence_covers_what_one_deep_closure_would(estate):
 
     # ── (b) the continuation: expand the leaves under the returned boxes ──
     # The client seeds from the frontier leaves it wants opened and excludes
-    # everything else it already holds. Seeds are deliberately NOT excluded:
-    # an excluded seed is dropped from the walk.
+    # everything else it already holds. (Excluding the seeds TOO is the real
+    # client's own shape and works identically — see
+    # ``test_a_seed_the_client_already_holds_still_walks``.)
     seeds = ["a", "c"]
     second = await p.trace_closure(
         urn="b", upstream_depth=1, downstream_depth=1,
@@ -362,6 +363,76 @@ async def test_the_walk_sequence_covers_what_one_deep_closure_would(estate):
         {e.id for e in first.edges} | {e.id for e in second.edges}
         == {e.id for e in direct.edges}
     ), "the walk lost an edge the one-shot depth-2 closure shows"
+
+
+async def test_a_seed_the_client_already_holds_still_walks(estate):
+    """A SEED IS AN INSTRUCTION, NOT A CANDIDATE — ``exclude_urns`` says what
+    must not be re-SHIPPED, never where the walk may START.
+
+    This is the real client's own request shape, and nothing else's:
+    ``seed_urns`` are BY CONSTRUCTION nodes it already holds (the lineage
+    leaves under the card whose ⊕ was clicked), so every seed is also in
+    ``exclude_urns`` — which every other test in this file carefully
+    subtracts, and the frontend never can. Dropping an excluded seed made
+    the walk start from nothing and return an empty response: the click did
+    nothing, at every card whose CHILDREN carry the lineage rather than the
+    card itself. Measured live before the fix: expanding a 14-column table
+    returned 0 edges and 0 frontier entries; the same request with the seeds
+    kept out of the exclude set returned all 14. That is what "after about
+    three hops it just stops and I have to re-focus to go further" was.
+    """
+    p = await estate("held_seed", WALK_SEED)
+
+    first = await p.trace_closure(
+        urn="d", upstream_depth=1, downstream_depth=1,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=1000, timeout_ms=15000,
+    )
+    held = set(_urns(first))
+    assert "c" in held and "kc" in held
+
+    # THREE CHAINED CLICKS on BOX cards — the ⊕ on kc, then kb, then ka.
+    # Each card is a container; each seed is the leaf inside it that
+    # carries the lineage; the client holds both, so both are excluded.
+    # Exactly what `useLensWalk.extend` sends, three hops running.
+    reached = []
+    for box, leaf, expected in (("kc", "c", "b"), ("kb", "b", "a"), ("ka", "a", "z")):
+        step = await p.trace_closure(
+            urn=box, upstream_depth=1, downstream_depth=0,
+            lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+            max_nodes=1000, timeout_ms=15000,
+            seed_urns=[leaf], exclude_urns=sorted(held),
+        )
+        assert (expected, leaf, "FLOWS_TO") in _hops(step), (
+            f"the ⊕ on {box} delivered nothing — an excluded seed was "
+            f"dropped from the walk"
+        )
+        assert sorted(step.upstream_urns) == [expected]
+        held |= set(_urns(step))
+        reached.append(expected)
+
+    assert reached == ["b", "a", "z"]
+    # The head of the chain has nothing above it, and says so by ABSENCE:
+    # no frontier entry at all is the honest dead end, not a walk that quit.
+    last = await p.trace_closure(
+        urn="kz", upstream_depth=1, downstream_depth=0,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=1000, timeout_ms=15000,
+        seed_urns=["z"], exclude_urns=sorted(held),
+    )
+    assert last.frontier_up == []
+    assert not [e for e in last.edges if e.target_urn == "z"]
+
+    # The same click on the LEAF itself (the anchor IS the seed) always
+    # worked — the two shapes must now agree, or the walk still depends on
+    # which grain the reader happened to click.
+    leaf_anchored = await p.trace_closure(
+        urn="c", upstream_depth=1, downstream_depth=0,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=1000, timeout_ms=15000,
+        seed_urns=["c"], exclude_urns=sorted(set(_urns(first))),
+    )
+    assert ("b", "c", "FLOWS_TO") in _hops(leaf_anchored)
 
 
 # ── Estate: a diamond ─────────────────────────────────────────────────
