@@ -22,6 +22,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from .providers.manager import provider_manager
 from backend.app.common.sse_registry import is_sse_path
+from backend.app.observability.request_metrics import RequestMetricsMiddleware
 from backend.auth_service.csrf import CSRFMiddleware
 from backend.auth_service.cookies import (
     ACCESS_COOKIE_NAME as _ACCESS_COOKIE_NAME,
@@ -1815,6 +1816,12 @@ class _TimeoutMiddleware:
         "/api/v1/health/live",
         "/health",            # alias for /health/live
         "/api/v1/health",     # alias for /health/live
+        # Metrics answer while the app is still coming up, or stuck
+        # coming up. Observability that disappears exactly when the
+        # process is unwell is not observability — a degraded start is
+        # the moment you most want to see pool and request numbers, and
+        # gating them behind readiness makes that window invisible.
+        "/internal/metrics",
     )
 
     @staticmethod
@@ -1971,6 +1978,24 @@ app.add_middleware(SecurityHeadersMiddleware)
 # that browser preflight checks succeed before we enforce the CSRF rule.
 app.add_middleware(CSRFMiddleware)
 
+# Request counters. Added LAST, which makes it the OUTERMOST layer —
+# ``add_middleware`` inserts at position 0 and the stack is built in
+# reverse, so the last one added is the first one entered. (Worth
+# checking against, rather than trusting, the "outermost → innermost"
+# banner above: registration order is the opposite of entry order.)
+#
+# Outermost is deliberate: it is the only position that sees requests
+# the layers below refuse — a CSRF rejection, a 503 from the readiness
+# gate during a bad deploy. Those are exactly the requests worth
+# counting, and a middleware placed nearer the router would show a
+# fleet under load as quiet.
+#
+# The route-template label still resolves from here because the ASGI
+# scope is one dict passed down the chain; the router writes
+# ``scope["route"]`` into it, and this layer reads the label after the
+# inner app has returned.
+app.add_middleware(RequestMetricsMiddleware)
+
 # ------------------------------------------------------------------ #
 # Routers                                                              #
 # ------------------------------------------------------------------ #
@@ -1981,6 +2006,12 @@ app.include_router(api_router, prefix="/api/v1")
 # INTERNAL_METRICS_ENABLED=true. Restrict at ingress in production.
 from .middleware.db_metrics import router as db_metrics_router  # noqa: E402
 app.include_router(db_metrics_router)
+
+# Prometheus scrape target, same opt-in switch. Sits beside the JSON
+# endpoint above rather than replacing it: that one is what an operator
+# curls during an incident, this one is what a scraper polls.
+from .observability.endpoint import router as prometheus_router  # noqa: E402
+app.include_router(prometheus_router)
 
 
 # ------------------------------------------------------------------ #

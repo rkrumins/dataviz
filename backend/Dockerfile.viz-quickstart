@@ -37,6 +37,7 @@ HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
 
 # Gunicorn with Uvicorn async workers
 CMD ["gunicorn", "backend.app.main:app", \
+     "--config", "/app/backend/gunicorn_conf.py", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--workers", "2", \
      "--bind", "0.0.0.0:8000", \

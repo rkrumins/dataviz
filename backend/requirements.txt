@@ -21,6 +21,7 @@ PyJWT>=2.13.0            # Stateless JWT token creation / verification; >=2.13.0
 Authlib>=1.6.12          # OIDC ID-token verification (JWKS) + OAuth client; >=1.6.12: algorithm confusion, JWS crit bypass, JWE decompression bomb (PYSEC-2024-52 et al.)
 zxcvbn>=4.5.0           # Server-side password strength validation (maintained fork; zxcvbn-python no longer builds on modern pip)
 slowapi>=0.1.10           # Rate limiting for auth endpoints
+prometheus-client>=0.20.0 # /internal/metrics scrape target. No required deps of its own; multiprocess mode aggregates across gunicorn workers via PROMETHEUS_MULTIPROC_DIR.
 
 # SAML 2.0 SP. Only the viz-service mounts the auth routes that need
 # it; other Dockerfiles skip this to avoid the libxmlsec1 system-dep

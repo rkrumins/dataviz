@@ -269,6 +269,7 @@ def get_engine(role: PoolRole = PoolRole.WEB) -> AsyncEngine:
         **kw,
     )
     _engines[role] = engine
+    _count_queries_on(engine, role.value)
     # Self-documenting startup line so deployments can verify the
     # effective config without grepping env vars in the host.
     logger.info(
@@ -766,6 +767,41 @@ async def close_db() -> None:
             logger.warning("Engine[%s] dispose warning: %s", role.value, exc)
     _engines.clear()
     _session_factories.clear()
+
+
+def _count_queries_on(engine, role_name: str) -> None:
+    """Count every statement this engine executes, labelled by pool role.
+
+    Queries-per-request is the number that makes the per-request taxes
+    visible. Two of them — the identity lookup on every authenticated
+    request, and the context-engine resolution before every graph
+    request — cost nothing in request count and several queries each, so
+    request metrics alone would show a change that removes them as
+    having done nothing at all.
+
+    Attached to the sync engine underneath because that is where
+    SQLAlchemy emits cursor events; ``before_cursor_execute`` fires once
+    per statement, which is exactly the granularity wanted (an
+    ``executemany`` is one round trip and counts once).
+
+    Best-effort and never fatal: instrumentation must not be able to
+    stop a database engine from being created.
+    """
+    try:
+        from sqlalchemy import event
+
+        from backend.app.observability.metrics import db_queries_total
+
+        counter = db_queries_total.labels(role=role_name)
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def _on_execute(conn, cursor, statement, parameters, context, executemany):
+            counter.inc()
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Query metrics not attached for engine[%s]: %s", role_name, exc,
+        )
 
 
 def pool_status() -> dict[str, dict[str, int | None]]:

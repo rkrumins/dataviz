@@ -60,6 +60,7 @@ ENV GUNICORN_WORKERS=4 \
     FORWARDED_ALLOW_IPS=127.0.0.1
 
 CMD ["sh", "-c", "exec gunicorn backend.app.main:app \
+    --config /app/backend/gunicorn_conf.py \
     --worker-class uvicorn.workers.UvicornWorker \
     --workers ${GUNICORN_WORKERS} \
     --bind 0.0.0.0:8000 \

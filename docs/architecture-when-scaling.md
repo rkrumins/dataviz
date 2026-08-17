@@ -200,12 +200,21 @@ Every module-level mutable state moves to Redis or is eliminated:
 
 ## Observability
 
-- New `/internal/metrics` endpoint (Prometheus exposition format, admin-auth gated). Exposes:
-  - DB pool stats per tier (today: shipped via [db_metrics.py](../backend/app/middleware/db_metrics.py)).
-  - Redis stream lag (`XLEN` vs. consumer-group last-id) on `aggregation.jobs`.
-  - Outbox backlog size.
-  - Active aggregation jobs by status.
-  - Per-tier role identifier for routing dashboards.
+- `/internal/metrics` endpoint (Prometheus exposition format). **Shipped**, gated by
+  `INTERNAL_METRICS_ENABLED` rather than admin auth — a scrape target has no user to
+  authenticate as, so the access control belongs at the ingress. Set
+  `PROMETHEUS_MULTIPROC_DIR` under gunicorn or a scrape reads one worker at random and
+  under-reports by the worker count; `backend/gunicorn_conf.py` retires a dead worker's
+  files so live gauges don't accumulate across restarts. Exposes:
+  - Requests by route template and status; DB statements by pool role — the
+    queries-per-request ratio is what makes a per-request tax visible.
+  - Held change-feed connections across the fleet.
+  - DB pool utilisation per tier (also served as JSON by [db_metrics.py](../backend/app/middleware/db_metrics.py)).
+  - Still to add:
+    - Redis stream lag (`XLEN` vs. consumer-group last-id) on `aggregation.jobs`.
+    - Outbox backlog size.
+    - Active aggregation jobs by status.
+    - Per-tier role identifier for routing dashboards.
 - K8s probes: `/health/live` (process responsive), `/health/ready` (DB + Redis reachable, Alembic head matches schema-ready key).
 
 ## Breaking changes (operator-visible)

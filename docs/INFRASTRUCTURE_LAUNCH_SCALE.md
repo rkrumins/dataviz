@@ -378,7 +378,7 @@ Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monito
 | Memorystore | memory, evictions (cache) / rejected-writes (coord) | coord evictions **any**; cache OOM |
 | GKE | pod restarts (falkordb pool), PDB violations, HPA at ceiling | any / sustained-at-max |
 
-> **The single most important gap to close first** (see [TECHNICAL_DEBT §6.2](./TECHNICAL_DEBT.md)): the app currently *collects* these counters but has **no `/metrics` scrape endpoint**. Wire Prometheus/GCP Managed Prometheus export before this topology goes live — resilience you can't observe fails silently.
+> **Partly closed** (see [TECHNICAL_DEBT §6.2](./TECHNICAL_DEBT.md)). `GET /internal/metrics` now serves Prometheus exposition format, gated behind `INTERNAL_METRICS_ENABLED` and aggregated across gunicorn workers when `PROMETHEUS_MULTIPROC_DIR` is set. It covers request rate by route template, DB statements by pool role, pool utilisation, and held change-feed connections — enough to measure the read-path and polling work, not yet the stream lag, outbox backlog, or event-loop lag rows above. Point Managed Prometheus at it and restrict `/internal/` at the ingress; the remaining rows still need wiring before this topology goes live, because resilience you can't observe fails silently.
 
 ---
 
