@@ -255,8 +255,10 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
                     graphName: rowState.graphName,
                     ontologyId: rowState.ontologyId || undefined,
                     label: rowState.label || undefined,
-                    // Sent verbatim (incl. '' to clear back to default 'urn');
-                    // the edit form pre-fills it, so unchanged rows are a no-op.
+                    // Sent verbatim, including '' — that is how an override is
+                    // CLEARED so the source inherits again. The form seeds from
+                    // this row's own value, so an inheriting row stays blank and
+                    // an unchanged save is a no-op.
                     identityProperty: rowState.identityProperty,
                     nameProperty: rowState.nameProperty,
                 }
@@ -291,10 +293,16 @@ const DataSourceList: FC<DataSourceListProps> = ({ workspace, onRefresh, provide
             graphName: ds.graphName || '',
             ontologyId: ds.ontologyId || '',
             label: ds.label || '',
-            // Server always echoes "urn"/"name" by default; keep verbatim so a
-            // no-op save doesn't accidentally reset a real mapping.
-            identityProperty: ds.identityProperty || 'urn',
-            nameProperty: ds.nameProperty || 'name',
+            // Seed from this source's OWN mapping, not the resolved one. The
+            // server echoes the value in force, which may have been inherited
+            // from the provider or workspace — pre-filling that and saving
+            // verbatim would silently turn an inherited value into a permanent
+            // override on this row, and it would stop tracking the scope it
+            // came from. Blank means "inherits", which is what it is.
+            identityProperty: ds.identityPropertySource === 'data_source'
+                ? (ds.identityProperty || '') : '',
+            nameProperty: ds.namePropertySource === 'data_source'
+                ? (ds.nameProperty || '') : '',
         })
         setAdding(false) // make sure adding is off
         setError(null)

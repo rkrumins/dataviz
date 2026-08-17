@@ -179,8 +179,10 @@ export function DataSourceDetailPanel({
     //    reloads that would unmount this drawer mid-interaction.
     const originalMode = ds?.projectionMode ?? ''
     const originalDedicatedName = ds?.dedicatedGraphName ?? ''
-    // Node-identity property (URN-equivalent). Server always echoes "urn" by
-    // default, so a missing value on legacy responses folds to "urn" too.
+    // The mapping in FORCE for this source — resolved server-side across all
+    // four scopes, so it may have been inherited rather than set here. The
+    // panel shows what applies; `identityPropertySource` says where it came
+    // from, and the field renders the difference.
     const originalIdentityProperty = ds?.identityProperty || 'urn'
     const originalNameProperty = ds?.nameProperty || 'name'
     const [pendingMode, setPendingMode] = useState(originalMode)
@@ -199,9 +201,13 @@ export function DataSourceDetailPanel({
         setIsSaving(false)
     }, [ds?.id, originalMode, originalDedicatedName, originalIdentityProperty, originalNameProperty])
 
-    // Normalise for comparison/save: trim, and treat empty as the default.
-    const normalizedIdentityProperty = pendingIdentityProperty.trim() || 'urn'
-    const normalizedNameProperty = pendingNameProperty.trim() || 'name'
+    // Trim only. Empty must stay empty: it is how "stop overriding, inherit
+    // again" is expressed, and the API stores it as NULL so the source falls
+    // through to its provider / workspace / the platform default. Folding it to
+    // 'urn' here would send an explicit default instead, pinning the source to
+    // it forever — the one edit the inherit chain makes it impossible to undo.
+    const normalizedIdentityProperty = pendingIdentityProperty.trim()
+    const normalizedNameProperty = pendingNameProperty.trim()
     const isDirty =
         pendingMode !== originalMode ||
         pendingDedicatedName !== originalDedicatedName ||
@@ -515,6 +521,8 @@ export function DataSourceDetailPanel({
                                         graphName={ds.graphName}
                                         nameValue={pendingNameProperty}
                                         onNameChange={setPendingNameProperty}
+                                        identitySource={ds.identityPropertySource}
+                                        nameSource={ds.namePropertySource}
                                     />
 
                                     {/* Save / Discard bar — sticky feel, only when dirty */}
