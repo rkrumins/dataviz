@@ -4,7 +4,7 @@
  * it speaks. The save tests came verbatim from CadenceControls' popover block:
  * the panel writes the same two records in the same order.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -62,11 +62,29 @@ import { AutomationPanel } from './AutomationPanel'
 
 function wrap(node: React.ReactNode) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    return render(
-        <QueryClientProvider client={qc}>
-            <MemoryRouter>{node}</MemoryRouter>
-        </QueryClientProvider>,
-    )
+    return {
+        qc,
+        ...render(
+            <QueryClientProvider client={qc}>
+                <MemoryRouter>{node}</MemoryRouter>
+            </QueryClientProvider>,
+        ),
+    }
+}
+
+/** A deploy with everything on, so the tests below vary one thing at a time. */
+const SETTINGS = {
+    tuning: null, cadence: null,
+    envRebuildMinIntervalSecs: 900, envDriftAutoRebuild: true,
+    envProbeEnabled: true, envProbeIntervalSecs: 60,
+}
+
+/** Force the mounted reconciliation query to refetch — stands in for the 60s
+ *  poll landing a payload another admin just wrote. */
+async function repoll(qc: QueryClient) {
+    await act(async () => {
+        await qc.invalidateQueries({ queryKey: ['freshness', 'reconciliation'] })
+    })
 }
 
 beforeEach(() => {
@@ -112,6 +130,12 @@ describe('automationWarnings', () => {
             { probeEnabled: true },
         )
         expect(w.map(x => x.id)).toContain('cap-zero')
+        // The three stage names are a fixed vocabulary. Spending one of them
+        // on a plain verb here put a second "Detect" on the page meaning
+        // something else, and made /Detect/ ambiguous for anyone querying it.
+        expect(w.find(x => x.id === 'cap-zero')?.text).toBe(
+            'Report only — no rebuilds will be queued.',
+        )
     })
 
     it('is silent on a healthy policy', () => {
@@ -131,6 +155,58 @@ describe('AutomationPanel', () => {
         // The cadence record is admin-only to READ, so a non-admin must not
         // fire a request that can only 403.
         expect(getAggregationSettings).not.toHaveBeenCalled()
+    })
+
+    it('offers nothing to save when the settings cannot be read', async () => {
+        // Both queries stop loading on an error, so "not loading" is not
+        // "ready". Rendering the form anyway would put a live Save over state
+        // that still says `detectors: []` — one click, every detector off.
+        getReconciliation.mockRejectedValue(new Error('nope'))
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        wrap(<AutomationPanel open onToggle={() => {}} isAdmin summary={null} />)
+
+        // `useReconciliation` sets its own `retry: 1`, which the client-level
+        // `retry: false` does not override, so the error state lands one
+        // backoff later than a default-configured query would.
+        expect(await screen.findByRole('alert', {}, { timeout: 4000 }))
+            .toHaveTextContent(/could not read the automation settings/i)
+        expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
+        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+    })
+
+    it('adopts a policy someone else changed while nothing is being edited', async () => {
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        const { qc } = wrap(<AutomationPanel open onToggle={() => {}} isAdmin summary={null} />)
+
+        // `detectors: null` seeds every box ticked.
+        expect(await screen.findByLabelText(/Rollups went missing/)).toBeChecked()
+
+        getReconciliation.mockResolvedValue({
+            policy: { ...RECON_POLICY, detectors: ['raw_drift'] }, runs: [],
+        })
+        await repoll(qc)
+
+        await waitFor(() => expect(screen.getByLabelText(/Rollups went missing/)).not.toBeChecked())
+    })
+
+    it('stops adopting once you edit, and says the settings moved under you', async () => {
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        const { qc } = wrap(<AutomationPanel open onToggle={() => {}} isAdmin summary={null} />)
+
+        const capBox = await screen.findByLabelText('At most')
+        await userEvent.type(capBox, '3')
+
+        getReconciliation.mockResolvedValue({
+            policy: { ...RECON_POLICY, detectors: ['raw_drift'] }, runs: [],
+        })
+        await repoll(qc)
+
+        expect(capBox).toHaveValue(3)
+        // The edit-in-progress survives — and the reader is told, rather than
+        // discovering it by overwriting a colleague on Save.
+        expect(screen.getByLabelText(/Rollups went missing/)).toBeChecked()
+        expect(await screen.findByRole('status'))
+            .toHaveTextContent(/changed these settings while you were editing/i)
     })
 
     it('collapsed, it speaks one sentence and nothing else', async () => {
@@ -197,6 +273,13 @@ describe('admin automation save', () => {
                 probeEnabled: false, probeIntervalSecs: null,
             },
         ))
+        // The other half of the same sequenced write. `detectors` is seeded
+        // through `?? allDetectors`, so a Save from unseeded state would send
+        // the initial `[]` — a real configuration meaning "act on nothing"
+        // — and silently disarm every detector fleet-wide.
+        expect(putReconciliation).toHaveBeenCalledWith(
+            expect.objectContaining({ detectors: RECON_POLICY.allDetectors }),
+        )
     })
 
     it('says out loud that a check cannot outrun a detector that is off', async () => {

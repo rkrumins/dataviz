@@ -19,7 +19,7 @@
  * whole explanation, the live counts, and the policy controls disabled — the
  * explanation is the valuable half, and hiding it teaches nobody anything.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ArrowRight, ChevronRight, Loader2 } from 'lucide-react'
 
@@ -100,6 +100,17 @@ function ToggleRow({ label, checked, onChange, disabled }: {
     )
 }
 
+/** Two stages read from the admin-only cadence record, so both have to say the
+ *  same thing in the same words to a reader who cannot see it. Silently
+ *  dropping the controls would read as "this stage has no such setting". */
+function AdminOnlyCadence() {
+    return (
+        <p className="text-[11px] text-ink-muted">
+            Only platform admins can see this cadence.
+        </p>
+    )
+}
+
 /** The seam between two stages. Amber when the stage upstream is off, because
  *  that is the moment the downstream cadence stops meaning what it says. */
 function Connector({ starved }: { starved: boolean }) {
@@ -145,16 +156,35 @@ export function AutomationPanel({ open, onToggle, isAdmin, summary }: {
     const [cap, setCap] = useState('')
     const [detectors, setDetectors] = useState<string[]>([])
 
-    // Seed ONCE per opening. The reconciliation query polls every 60s, so
-    // re-seeding on every payload would silently discard whatever the operator
-    // was in the middle of typing — a modal never stayed open long enough for
-    // that to bite, an in-page panel does.
-    const seeded = useRef(false)
+    // ``seeded`` is STATE, not a ref: nothing editable and no Save may render
+    // before the real values have landed. An effect is passive, so a ref would
+    // still paint one frame of the initial state — and that state says
+    // ``detectors: []``, which is a real configuration meaning "act on
+    // nothing". One click on a Save rendered from it clobbers the fleet.
+    const [seeded, setSeeded] = useState(false)
+    // Set by every control. Until then the panel keeps adopting fresh payloads,
+    // because a panel that sits open for an hour must not show an hour-old
+    // policy; after that it stops, because it must not eat half-typed edits.
+    const [dirty, setDirty] = useState(false)
+    /** What the controls were last seeded from — lets an edit-in-progress say
+     *  "someone else changed this" instead of quietly overwriting them. State
+     *  rather than a ref because it is compared during render. */
+    const [seededSig, setSeededSig] = useState('')
+
+    const remoteSig = JSON.stringify([
+        policy?.enabled, policy?.checkIntervalSecs, policy?.maxActionsPerRun, policy?.detectors,
+        cadence?.probeEnabled, cadence?.probeIntervalSecs,
+        cadence?.driftAutoRebuild, cadence?.rebuildMinIntervalSecs,
+    ])
+
     useEffect(() => {
-        if (!open) seeded.current = false
+        if (open) return
+        setSeeded(false)
+        setDirty(false)
     }, [open])
+
     useEffect(() => {
-        if (!open || seeded.current || !policy) return
+        if (!open || dirty || !policy) return
         if (isAdmin && !settingsQ.data) return
 
         setCheckEnabled(policy.enabled ?? policy.envEnabled)
@@ -175,13 +205,24 @@ export function AutomationPanel({ open, onToggle, isAdmin, summary }: {
             setDriftAuto(cadence?.driftAutoRebuild ?? settingsQ.data.envDriftAutoRebuild ?? true)
             setCooldownSecs(cadence?.rebuildMinIntervalSecs ?? null)
         }
-        seeded.current = true
-    }, [open, policy, settingsQ.data, cadence, isAdmin])
+        setSeededSig(remoteSig)
+        setSeeded(true)
+    }, [open, dirty, policy, settingsQ.data, cadence, isAdmin, remoteSig])
+
+    /** Marks the panel edited before applying the change, so one payload
+     *  arriving mid-edit cannot undo what was just typed. */
+    const edit = <T,>(set: (v: T) => void) => (v: T) => {
+        setDirty(true)
+        set(v)
+    }
 
     const saveCadence = useMutation({
         mutationFn: (body: AggregationCadence) => aggregationService.putAggregationCadence(body),
         onSuccess: () => {
             void qc.invalidateQueries({ queryKey: SETTINGS_KEY })
+            // The controls now hold what the server holds, so the panel may go
+            // back to adopting whatever anyone else writes.
+            setDirty(false)
             showToast('success', 'Automation saved. Takes effect within a minute.')
             onToggle()
         },
@@ -289,7 +330,11 @@ export function AutomationPanel({ open, onToggle, isAdmin, summary }: {
     }
 
     // ── Open ──────────────────────────────────────────────────────────
-    const loading = reconQ.isLoading || (isAdmin && settingsQ.isLoading)
+    // On a failed read both queries stop loading with no data, so "not loading"
+    // is not "ready". Saying so is the only honest option: the alternative is
+    // an editable form full of invented defaults over a live Save.
+    const failed = reconQ.isError || (isAdmin && settingsQ.isError)
+    const changedElsewhere = seeded && dirty && remoteSig !== seededSig
     const warnings = automationWarnings(
         { enabled: checkEnabled, detectors, maxActionsPerRun: cap.trim() === '' ? null : Number(cap) },
         // A non-admin cannot read the probe setting, so we must not claim it
@@ -322,7 +367,16 @@ export function AutomationPanel({ open, onToggle, isAdmin, summary }: {
                     turning one off changes what the ones after it can see.
                 </p>
 
-                {loading ? (
+                {failed ? (
+                    <div
+                        role="alert"
+                        className="rounded-xl border border-amber-500/30 bg-amber-500/[0.07] px-3 py-2.5 text-[12px] text-ink-secondary"
+                    >
+                        Could not read the automation settings, so they cannot be shown or
+                        changed here. Nothing has been altered — the schedule is still
+                        running on whatever it was last saved with.
+                    </div>
+                ) : (!seeded || !policy) ? (
                     <div className="flex items-center gap-2 justify-center py-8 text-sm text-ink-muted">
                         <Loader2 className="w-4 h-4 animate-spin" /> Loading…
                     </div>
@@ -339,13 +393,13 @@ export function AutomationPanel({ open, onToggle, isAdmin, summary }: {
                                         <ToggleRow
                                             label="Watch for changes made outside this app"
                                             checked={probeEnabled}
-                                            onChange={setProbeEnabled}
+                                            onChange={edit(setProbeEnabled)}
                                             disabled={false}
                                         />
                                         <DurationField
                                             label="Look for changes every"
                                             value={probeSecs}
-                                            onChange={setProbeSecs}
+                                            onChange={edit(setProbeSecs)}
                                             presets={DETECT_PRESETS}
                                             defaultSecs={settingsQ.data?.envProbeIntervalSecs ?? 60}
                                             min={MIN_PROBE_SECS}
@@ -353,11 +407,7 @@ export function AutomationPanel({ open, onToggle, isAdmin, summary }: {
                                             disabled={!probeEnabled}
                                         />
                                     </>
-                                ) : (
-                                    <p className="text-[11px] text-ink-muted">
-                                        Only platform admins can see this cadence.
-                                    </p>
-                                )}
+                                ) : <AdminOnlyCadence />}
                             </StageCard>
 
                             <Connector starved={isAdmin && !probeEnabled} />
@@ -371,15 +421,15 @@ export function AutomationPanel({ open, onToggle, isAdmin, summary }: {
                                 <ToggleRow
                                     label="Check every source on a schedule"
                                     checked={checkEnabled}
-                                    onChange={setCheckEnabled}
+                                    onChange={edit(setCheckEnabled)}
                                     disabled={!isAdmin}
                                 />
                                 <DurationField
                                     label="Check every"
                                     value={checkSecs}
-                                    onChange={setCheckSecs}
+                                    onChange={edit(setCheckSecs)}
                                     presets={CHECK_PRESETS}
-                                    defaultSecs={policy?.envCheckIntervalSecs ?? 3600}
+                                    defaultSecs={policy.envCheckIntervalSecs}
                                     min={MIN_CHECK_SECS}
                                     max={MAX_SECS}
                                     disabled={!isAdmin || !checkEnabled}
@@ -394,25 +444,25 @@ export function AutomationPanel({ open, onToggle, isAdmin, summary }: {
                                 muted={isAdmin && driftAuto && !checkEnabled}
                                 stat={actStat}
                             >
-                                {isAdmin && (
+                                {isAdmin ? (
                                     <>
                                         <ToggleRow
                                             label="Automatically rebuild a source when drift is detected"
                                             checked={driftAuto}
-                                            onChange={setDriftAuto}
+                                            onChange={edit(setDriftAuto)}
                                             disabled={false}
                                         />
                                         <DurationField
                                             label="Minimum time between rebuilds"
                                             value={cooldownSecs}
-                                            onChange={setCooldownSecs}
+                                            onChange={edit(setCooldownSecs)}
                                             presets={COOLDOWN_PRESETS}
                                             defaultSecs={settingsQ.data?.envRebuildMinIntervalSecs ?? 900}
                                             min={0}
                                             max={MAX_SECS}
                                         />
                                     </>
-                                )}
+                                ) : <AdminOnlyCadence />}
 
                                 <div className="flex items-center gap-2">
                                     <label className="text-[12px] text-ink-secondary" htmlFor="automation-cap">
@@ -423,8 +473,8 @@ export function AutomationPanel({ open, onToggle, isAdmin, summary }: {
                                         type="number" min={0} max={MAX_CAP} step={1}
                                         value={cap}
                                         disabled={!isAdmin}
-                                        onChange={(e) => setCap(e.target.value)}
-                                        placeholder={`Default (${policy?.envMaxActionsPerRun ?? 10})`}
+                                        onChange={(e) => edit(setCap)(e.target.value)}
+                                        placeholder={`Default (${policy.envMaxActionsPerRun})`}
                                         className="w-24 h-7 px-2 rounded-lg border border-glass-border bg-canvas text-xs text-ink disabled:opacity-50"
                                     />
                                     <span className="text-[12px] text-ink-muted">rebuilds per check</span>
@@ -444,9 +494,12 @@ export function AutomationPanel({ open, onToggle, isAdmin, summary }: {
                                                 type="checkbox"
                                                 checked={detectors.includes(d.key)}
                                                 disabled={!isAdmin}
-                                                onChange={(e) => setDetectors(prev => e.target.checked
-                                                    ? [...prev, d.key]
-                                                    : prev.filter(k => k !== d.key))}
+                                                onChange={(e) => {
+                                                    setDirty(true)
+                                                    setDetectors(prev => e.target.checked
+                                                        ? [...prev, d.key]
+                                                        : prev.filter(k => k !== d.key))
+                                                }}
                                                 className="accent-indigo-500 mt-0.5"
                                             />
                                             <span className="min-w-0">
@@ -458,6 +511,18 @@ export function AutomationPanel({ open, onToggle, isAdmin, summary }: {
                                 </fieldset>
                             </StageCard>
                         </div>
+
+                        {changedElsewhere && (
+                            <p
+                                role="status"
+                                className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] px-2.5 py-1.5 text-[12px] text-ink-secondary leading-snug"
+                            >
+                                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-500" />
+                                Someone else changed these settings while you were editing.
+                                Saving will replace theirs with what is on screen; Cancel keeps
+                                theirs.
+                            </p>
+                        )}
 
                         {warnings.length > 0 && (
                             <ul className="mt-3 space-y-1.5">

@@ -64,8 +64,11 @@ export function automationWarnings(
     }
     if (policy.maxActionsPerRun === 0) {
         out.push({
+            // "Detect" is a stage name in this vocabulary, so it cannot also be
+            // a plain verb here — a page whose whole premise is three fixed
+            // words must not spend one of them on something else.
             id: 'cap-zero',
-            text: 'Detect and report only — no rebuilds will be queued.',
+            text: 'Report only — no rebuilds will be queued.',
         })
     }
     return out
