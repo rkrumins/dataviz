@@ -1,9 +1,10 @@
 /**
- * F9 cadence controls — the per-source override row in the drawer and the
- * platform-admin global cadence popover. The drawer shows the RESOLVED value +
- * its source and its editor fires the freshness-settings PATCH; the popover
- * loads the persisted cadence and its Save fires the settings PUT (cadence
- * only).
+ * F9 cadence controls — the per-source override row in the drawer. It shows
+ * the RESOLVED value + where that value came from, and its editor fires the
+ * freshness-settings PATCH.
+ *
+ * The global editor moved out of a modal and into the page; its tests live in
+ * AutomationPanel.test.tsx.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -27,8 +28,8 @@ const {
     reconcileNow: vi.fn(),
 }))
 
-/** The reconciliation policy shares the dialog and the stored record with the
- *  rebuild cadence, so every cadence test needs it resolvable. */
+/** The drawer resolves each source's automation state against the global
+ *  policy, so every cadence test needs it resolvable. */
 const RECON_POLICY = {
     enabled: true, checkIntervalSecs: null, maxActionsPerRun: null,
     shrinkTolerancePct: null, detectors: null,
@@ -62,7 +63,6 @@ vi.mock('@/services/aggregationService', async () => {
 })
 
 import { FreshnessDrawer } from './FreshnessDrawer'
-import { CadenceSettingsDialog } from './CadenceSettingsDialog'
 
 function wrap(node: React.ReactNode) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -138,58 +138,5 @@ describe('drawer rebuild-cadence row', () => {
         expect(await screen.findByText('Rebuild cadence')).toBeInTheDocument()
         expect(screen.queryByLabelText('Rebuild cadence override (minutes)')).not.toBeInTheDocument()
         expect(screen.getByText(/once this source has been built/i)).toBeInTheDocument()
-    })
-})
-
-describe('admin cadence popover', () => {
-    it('seeds from the persisted cadence and Save fires the cadence PUT', async () => {
-        getAggregationSettings.mockResolvedValue({
-            tuning: null, cadence: { rebuildMinIntervalSecs: 600, driftAutoRebuild: false },
-            envRebuildMinIntervalSecs: 900, envDriftAutoRebuild: true,
-            envProbeEnabled: true, envProbeIntervalSecs: 60,
-        })
-        putAggregationCadence.mockResolvedValue({ tuning: null, cadence: { rebuildMinIntervalSecs: 120, driftAutoRebuild: false } })
-        wrap(<CadenceSettingsDialog isOpen onClose={() => {}} />)
-
-        const input = await screen.findByLabelText('Minimum minutes between automatic rebuilds')
-        // Seeded to 600s → 10 minutes.
-        await waitFor(() => expect(input).toHaveValue(10))
-
-        await userEvent.clear(input)
-        await userEvent.type(input, '2')
-        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
-
-        await waitFor(() => expect(putAggregationCadence).toHaveBeenCalledWith(
-            {
-                rebuildMinIntervalSecs: 120, driftAutoRebuild: false,
-                probeEnabled: true, probeIntervalSecs: null,
-            },
-        ))
-    })
-
-    it('no persisted cadence: a plain Save round-trips the env defaults (no drift clobber)', async () => {
-        // Deploy env has drift-auto and change-detection OFF, and no persisted
-        // cadence. Both toggles must seed from their env default (false), so an
-        // interval-only Save does NOT switch either on fleet-wide. Every toggle
-        // added to this dialog inherits the same hazard, hence both here.
-        getAggregationSettings.mockResolvedValue({
-            tuning: null, cadence: null,
-            envRebuildMinIntervalSecs: 900, envDriftAutoRebuild: false,
-            envProbeEnabled: false, envProbeIntervalSecs: 60,
-        })
-        putAggregationCadence.mockResolvedValue({ tuning: null, cadence: null })
-        wrap(<CadenceSettingsDialog isOpen onClose={() => {}} />)
-
-        const toggle = await screen.findByLabelText(/Automatically rebuild a source when drift is detected/i)
-        await waitFor(() => expect(toggle).not.toBeChecked())
-
-        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
-
-        await waitFor(() => expect(putAggregationCadence).toHaveBeenCalledWith(
-            {
-                rebuildMinIntervalSecs: null, driftAutoRebuild: false,
-                probeEnabled: false, probeIntervalSecs: null,
-            },
-        ))
     })
 })

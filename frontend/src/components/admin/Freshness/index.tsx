@@ -27,7 +27,7 @@ import { ProviderRefreshDialog } from './ProviderRefreshDialog'
 import { FleetRefreshDialog } from './FleetRefreshDialog'
 import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
-import { CadenceSettingsDialog } from './CadenceSettingsDialog'
+import { AutomationPanel } from './AutomationPanel'
 import { OverlayIntegrity } from './OverlayIntegrity'
 import { useFleetFreshness, useRefreshSource, FRESHNESS_KEYS } from './useFreshness'
 import { useActiveJobs, ACTIVE_JOBS_KEY } from './useActiveJobs'
@@ -128,11 +128,18 @@ export function Freshness() {
         [patchParams],
     )
 
+    // The Automation panel opens from the URL for the same reason the drawer
+    // does: "here is how the schedule is configured" is a link someone sends.
+    const automationOpen = searchParams.get('automation') === 'open'
+    const toggleAutomation = useCallback(
+        () => patchParams({ automation: automationOpen ? null : 'open' }),
+        [patchParams, automationOpen],
+    )
+
     // ── Local (non-URL) UI state ──────────────────────────────────────
     const [confirm, setConfirm] = useState<{ dsId: string; scope: RefreshScope; firstBuild?: boolean } | null>(null)
     const [providerDialog, setProviderDialog] = useState<{ id: string; name: string } | null>(null)
     const [fleetDialogOpen, setFleetDialogOpen] = useState(false)
-    const [cadenceOpen, setCadenceOpen] = useState(false)
     const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({})
     const [expandedRow, setExpandedRow] = useState<string | null>(null)
     const [selectedIds, setSelectedIds] = useState<string[]>([])
@@ -342,13 +349,20 @@ export function Freshness() {
                 summary={summary}
                 activeFacet={fstatus}
                 onFacet={(facet) => patchParams({ fstatus: facet || null })}
-                onOpenCadence={isSystemAdmin ? () => setCadenceOpen(true) : undefined}
+                onOpenCadence={isSystemAdmin ? () => patchParams({ automation: 'open' }) : undefined}
                 onReload={() => { void fleet.refetch() }}
                 reloading={fleet.isFetching}
                 onRefreshAll={isSystemAdmin ? () => setFleetDialogOpen(true) : undefined}
                 onOpenSource={setDrawerDsId}
                 window={fwin}
                 onWindowChange={(w) => patchParams({ fwin: w === '24h' ? null : w })}
+            />
+
+            <AutomationPanel
+                open={automationOpen}
+                onToggle={toggleAutomation}
+                isAdmin={isSystemAdmin}
+                summary={summary}
             />
 
             <StartHereStrip
@@ -537,11 +551,6 @@ export function Freshness() {
                 fleetTotal={summary?.total ?? null}
                 isOpen={fleetDialogOpen}
                 onClose={() => setFleetDialogOpen(false)}
-            />
-
-            <CadenceSettingsDialog
-                isOpen={cadenceOpen}
-                onClose={() => setCadenceOpen(false)}
             />
         </div>
     )
