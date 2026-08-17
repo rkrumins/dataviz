@@ -1241,8 +1241,29 @@ describe('the shell around the picture', () => {
   it('offers the picture as an image without throwing', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['b'], simple())
-    const download = screen.getByTitle('Download this lineage as an image (for decks and docs)')
+    const download = screen.getByLabelText('Download this lineage as an image')
     expect(() => fireEvent.click(download)).not.toThrow()
+  })
+
+  // A HOVER LABEL THAT ITS OWN CONTAINER CLIPS IS NO LABEL AT ALL. The
+  // control stack used to carry `overflow-hidden` (to clip the buttons'
+  // corners into its rounded border), which swallowed every one of the
+  // labels positioned just outside their left edges — leaving only the
+  // browser's own `title` box a second later, reported as "massively
+  // delayed and takes ages to appear compared to other sections". The
+  // corners are rounded on the end buttons instead.
+  it('the board control stack does not clip its own hover labels', () => {
+    usePreferencesStore.setState({ lensViewMode: 'graph' })
+    renderLens(['b'], simple())
+    const zoom = screen.getByLabelText('Zoom in')
+    // The label is a sibling of the button it explains...
+    const label = zoom.parentElement!.querySelector('span[role="presentation"]')
+    expect(label?.textContent).toBe('Zoom in')
+    // ...and nothing between it and the board clips it away.
+    for (let el = zoom.parentElement; el; el = el.parentElement) {
+      expect(el.className).not.toMatch(/\boverflow-hidden\b/)
+      if (el.classList.contains('react-flow')) break
+    }
   })
 
   it('offers the walk as JSON and CSV downloads, beside the image export', () => {

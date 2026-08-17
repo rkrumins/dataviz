@@ -3634,29 +3634,37 @@ function LensPeek({ card, host, ctx, onDismiss }: {
             <Kbd>→</Kbd>
           </button>
         )}
+        {/* THESE TWO LEAVE THE LENS. Everything above acts on the board
+            you are reading; these two act on the CANVAS BEHIND it, and a
+            reader has no way to tell that from "Canvas" and "Details"
+            alone. The label says which surface answers the click. */}
         {(ctx.onRevealOnCanvas || ctx.onOpenDetails) && card.nodeId && (
           <div className="flex items-center gap-1 pt-0.5">
             {ctx.onRevealOnCanvas && (
+              <IconTip label={`Find ${card.label} on the canvas behind — not on this board`}>
               <button
                 type="button"
                 onClick={() => void ctx.onRevealOnCanvas?.(card.nodeId!)}
-                title="Reveal on canvas"
-                className={cn(act, 'justify-center text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]')}
+                aria-label={`Find ${card.label} on the canvas behind the lens — this board is unchanged`}
+                className={cn(act, 'peer justify-center text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]')}
               >
                 <LucideIcons.Crosshair className="w-3 h-3" />
                 Canvas
               </button>
+              </IconTip>
             )}
             {ctx.onOpenDetails && (
+              <IconTip label={`Open ${card.label} in the canvas's details panel — not on this board`}>
               <button
                 type="button"
                 onClick={() => ctx.onOpenDetails?.(card.nodeId!)}
-                title="Open details"
-                className={cn(act, 'justify-center text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]')}
+                aria-label={`Open the canvas details panel for ${card.label} — this board is unchanged`}
+                className={cn(act, 'peer justify-center text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]')}
               >
                 <LucideIcons.PanelRight className="w-3 h-3" />
                 Details
               </button>
+              </IconTip>
             )}
           </div>
         )}
@@ -3693,6 +3701,10 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
   const [exporting, setExporting] = useState(false)
   const dur = reducedMotion ? 0 : 200
   const btn = 'w-7 h-7 flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
+  // The two ends of the stack carry the container's own rounding,
+  // now that there is no clip to do it for them.
+  const stackTop = 'rounded-t-[7px]'
+  const stackEnd = 'rounded-b-[7px]'
   const fileStem = `lineage-${(exportName ?? 'focus').replace(/[^\p{L}\p{N}_-]+/gu, '-')}`
 
   const exportJson = () => {
@@ -3755,9 +3767,18 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
     // controls inside a card are covered — a Panel is not a node, and
     // without it a press on Zoom that drifts a pixel pans the board.
     <Panel position="bottom-right" className="!m-3 nopan">
-      <div className="flex flex-col rounded-lg border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-md overflow-hidden divide-y divide-black/[0.06] dark:divide-white/[0.06]">
+      {/* NOT `overflow-hidden`, which is what this used to carry to clip
+          the buttons' own corners into the rounded border. Each button's
+          hover LABEL is absolutely positioned just outside its left
+          edge, and the clip swallowed every one of them — leaving only
+          the browser's own `title` box, a second later, which is exactly
+          the reported "massively delayed and takes ages to appear
+          compared to other sections". The corners are rounded on the
+          first and last buttons instead (`stackTop`/`stackEnd` below),
+          which is the same picture without a clipping context. */}
+      <div className="flex flex-col rounded-lg border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-md divide-y divide-black/[0.06] dark:divide-white/[0.06]">
         <IconTip label="Zoom in" side="left">
-          <button type="button" aria-label="Zoom in" onClick={() => void rf.zoomIn({ duration: dur })} className={cn(btn, 'peer')}>
+          <button type="button" aria-label="Zoom in" onClick={() => void rf.zoomIn({ duration: dur })} className={cn(btn, 'peer', stackTop)}>
             <LucideIcons.Plus className="w-3.5 h-3.5" />
           </button>
         </IconTip>
@@ -3798,7 +3819,6 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
         <IconTip label="Download as an image" side="left">
           <button
             type="button"
-            title="Download this lineage as an image (for decks and docs)"
             aria-label="Download this lineage as an image"
             onClick={(e) => void exportPng(e)}
             className={cn(btn, 'peer')}
@@ -3827,7 +3847,7 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
             type="button"
             aria-label="Export lineage data as CSV"
             onClick={exportCsv}
-            className={cn(btn, 'peer')}
+            className={cn(btn, 'peer', stackEnd)}
           >
             <LucideIcons.FileSpreadsheet className="w-3.5 h-3.5" />
           </button>
