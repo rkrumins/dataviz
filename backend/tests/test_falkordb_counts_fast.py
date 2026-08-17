@@ -255,8 +255,22 @@ async def test_probe_skips_a_provider_that_cannot_count_cheaply(monkeypatch):
     async def _upsert(**kw):
         written.append(kw)
 
+    stamped = []
+
+    class _FakeSessionCtx:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def _stamp(session, ds_id):
+        stamped.append(ds_id)
+
     monkeypatch.setattr(collector, "_open_context", _ctx)
     monkeypatch.setattr(collector, "upsert_data_source_stats_counts", _upsert)
+    monkeypatch.setattr(collector, "get_jobs_session", lambda: _FakeSessionCtx())
+    monkeypatch.setattr(collector, "touch_probe_stamp", _stamp)
 
     await collector.probe_counts(ProbeJobEnvelope(
         data_source_id="ds_1", workspace_id="ws_1",
@@ -265,3 +279,45 @@ async def test_probe_skips_a_provider_that_cannot_count_cheaply(monkeypatch):
 
     assert scanned == [], "probe must not fall back to a full scan"
     assert written == [], "nothing to record when the probe could not answer"
+    # But the attempt IS stamped: a NULL last_probed_at sorts first and would
+    # be re-enqueued every scheduler tick forever, spending the batch cap on
+    # sources that cannot answer.
+    assert stamped == ["ds_1"]
+
+
+@pytest.mark.asyncio
+async def test_probe_stamps_a_provider_with_no_counts_fast(monkeypatch):
+    """A provider without a constant-time path must leave the due-set too —
+    same re-enqueue-forever failure as the refusing graph above."""
+    from backend.insights_service import collector
+    from backend.insights_service.schemas import ProbeJobEnvelope
+    from datetime import datetime, timezone
+
+    class _Provider:  # no get_counts_fast attribute at all
+        pass
+
+    async def _ctx(envelope, *, resolve_ontology):
+        return None, _Provider(), "prov_1", None, None
+
+    stamped = []
+
+    class _FakeSessionCtx:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def _stamp(session, ds_id):
+        stamped.append(ds_id)
+
+    monkeypatch.setattr(collector, "_open_context", _ctx)
+    monkeypatch.setattr(collector, "get_jobs_session", lambda: _FakeSessionCtx())
+    monkeypatch.setattr(collector, "touch_probe_stamp", _stamp)
+
+    await collector.probe_counts(ProbeJobEnvelope(
+        data_source_id="ds_1", workspace_id="ws_1",
+        enqueued_at=datetime.now(timezone.utc),
+    ))
+
+    assert stamped == ["ds_1"]

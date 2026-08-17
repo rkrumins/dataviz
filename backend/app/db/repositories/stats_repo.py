@@ -5,6 +5,7 @@ from typing import List, Optional, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from ..models import DataSourceStatsORM
 
@@ -206,6 +207,29 @@ async def upsert_data_source_stats_counts(
     session.add(new_stats)
     await session.flush()
     return new_stats
+
+
+async def touch_probe_stamp(session: AsyncSession, ds_id: str) -> None:
+    """Stamp ``last_probed_at`` without writing any counts.
+
+    For probe attempts that cannot produce counts (no constant-time path on
+    the provider, or a multi-label graph the counters cannot describe): the
+    stamp takes the source out of the probe due-set for one interval, so it
+    is retried once per interval instead of every scheduler tick — and starts
+    answering the moment the provider can. UPDATE-only: fabricating a
+    zero-count row here could read as a wiped overlay downstream. A source
+    with no stats row stays due until its first poll creates one.
+    """
+    existing = await get_data_source_stats(session, ds_id)
+    if existing is None:
+        return
+    existing.last_probed_at = datetime.now(timezone.utc).isoformat()
+    # Pin the poll clock: ``updated_at`` carries ``onupdate``, and letting it
+    # move on a stamp-only touch would make stale counts look freshly polled
+    # (the stats_stale guard reads it). Explicitly including the current
+    # value in the UPDATE keeps the hook from firing.
+    flag_modified(existing, "updated_at")
+    await session.flush()
 
 
 async def set_top_level_nodes(session: AsyncSession, ds_id: str, payload_json: str) -> None:
