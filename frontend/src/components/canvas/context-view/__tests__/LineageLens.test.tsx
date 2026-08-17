@@ -23,6 +23,7 @@ import { LineageLens, type LensWalkSeed } from '../LineageLens'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
 import { decodeLensShare } from '../lens/shareCodec'
+import { FRAME_CONTENT_W } from '../lens/focus-cards'
 import type { WalkEntry } from '@/hooks/useLensWalk'
 import {
   toLensClosure,
@@ -879,6 +880,45 @@ describe('F1 — the follow pill never blocks the row it sits on', () => {
     // exact count is still what the hover title states in full.
     expect(pill.textContent).toContain('1.2K')
   })
+  // A HOVER THAT MOVES THE CONTROL OUT FROM UNDER THE POINTER FLICKERS
+  // FOREVER. Reported live: "it non stop keeps flicking until mouse is
+  // on the right location as if there is a deadzone". The expansion
+  // pins the pill's REST edge and grows the far edge outward — but the
+  // pinned value assumed the icon-only rest width, while a pill showing
+  // a count rests up to 36px wide. The strip between the two was inside
+  // the rest box and outside the expanded one: enter, expand away,
+  // leave, shrink back under the pointer, enter again.
+  //
+  // The invariant, asserted on the CSS the pill actually carries: the
+  // expanded box's pinned edge is at least the rest box's own outer
+  // edge, so the expanded box always CONTAINS the box the pointer
+  // entered.
+  it('a counted pill expands outward from its OWN rest edge, never from a narrower one', () => {
+    // A pill INSIDE a frame (only those expand outward) that shows a
+    // COUNT at rest (only those rest wider than the icon).
+    renderLens(['F'], doneWalk(walkModel('F', {
+      nodes: [
+        wnode('F', 'dataset', 'stg_orders'),
+        wnode('T', 'dataset', 'raw_orders', { childCount: 1 }),
+        wnode('c1', 'schemaField', 'order_id'),
+        ...Array.from({ length: 40 }, (_, i) => wnode(`s${i}`, 'dataset', `source_${i}`)),
+      ],
+      containmentEdges: [holds('T', 'c1')],
+      lineageEdges: [hop('c1', 'F'), ...Array.from({ length: 40 }, (_, i) => hop(`s${i}`, 'c1'))],
+      upstreamUrns: new Set(['c1', ...Array.from({ length: 40 }, (_, i) => `s${i}`)]),
+    })))
+    const pill = screen.getByTitle(/upstream of order_id/)
+    expect(pill.className).toMatch(/max-w-\[36px\]/)   // it really is a counted rest state
+    const outer = pill.style.getPropertyValue('--pill-outer')
+    expect(outer).not.toBe('')
+    // `--pill-outer` is `cardWidth - restEdge`, so a SMALLER value means
+    // a pinned edge further from the row's left edge. The counted pill's
+    // rest box can reach 40px (left-1 + max-w-[36px]); the pin must be
+    // at least that far out or the strip between them is a dead zone.
+    const cardW = FRAME_CONTENT_W
+    expect(cardW - Number.parseFloat(outer)).toBeGreaterThanOrEqual(40)
+  })
+
 })
 
 // ── F7 — PARENT ⊕ VS ROW ⊕: SCOPE-NAMING + "ALL" TAG ─────────────────
@@ -1292,17 +1332,19 @@ describe('the shell around the picture', () => {
     expect(child!.className).not.toContain('draggable')
   })
 
-  it('reveals every neighbour on the canvas by urn, and closes on the way', () => {
+  // The footer's "Reveal N on canvas" and "Trace from here" buttons were
+  // withdrawn (user, 2026-08-17): both leave the lens to act on the
+  // canvas behind it, which is a different job from walking lineage.
+  // `onLocateAll` stays on the contract for its other callers, and the
+  // per-card "Show on the canvas behind" action still reveals one
+  // entity — which is what the reveal was actually wanted for.
+  it('no longer offers a whole-neighbourhood reveal from the footer', () => {
     usePreferencesStore.setState({ lensViewMode: 'list' })
     const onLocateAll = vi.fn()
-    const onClose = vi.fn()
-    renderLens(['b'], simple(), { onLocateAll, onClose })
-    // T24 F5 — the count is now part of the button's own face ("Reveal
-    // N on canvas"), informed consent for what could be a slow,
-    // one-at-a-time reveal walk for a large set.
-    fireEvent.click(screen.getByText('Reveal 2 on canvas'))
-    expect(onClose).toHaveBeenCalled()
-    expect(onLocateAll).toHaveBeenCalledWith(['a', 'c'])
+    renderLens(['b'], simple(), { onLocateAll })
+    expect(screen.queryByText(/Reveal \d+ on canvas/)).toBeNull()
+    expect(screen.queryByText('Trace from here')).toBeNull()
+    expect(onLocateAll).not.toHaveBeenCalled()
   })
 })
 
@@ -1874,8 +1916,8 @@ describe('what is really inside a container', () => {
     // And no second box speaking for the focus's contents.
     expect(screen.queryByText('Inside')).toBeNull()
     // The focus never offers to re-center on itself.
-    expect(screen.queryByTitle('Focus int_clean_products_t2')).toBeNull()
-    expect(screen.getByTitle('Focus raw_products')).toBeTruthy()
+    expect(screen.queryByLabelText(/Focus on int_clean_products_t2 —/)).toBeNull()
+    expect(screen.getByLabelText(/Focus on raw_products —/)).toBeTruthy()
   })
 
   /**
@@ -2402,7 +2444,10 @@ describe('browsing what is inside — the peek and the keyboard', () => {
     expect(panel.getAttribute('aria-label')).toBe('Preview of order_id')
     // Identity, where it lives, what it says about itself.
     expect(within(panel as HTMLElement).getByText('schemaField')).toBeTruthy()
-    expect(within(panel as HTMLElement).getByText(/in raw_orders/)).toBeTruthy()
+    // WHERE IT LIVES, and a way to GO there: each crumb is its own
+    // control now, so a reader looking at a column can make its table
+    // the subject of the lens without hunting for the table's own card.
+    expect(within(panel as HTMLElement).getByTitle(/Focus on raw_orders —/)).toBeTruthy()
     expect(within(panel as HTMLElement).getByText(/Natural key from the source system/)).toBeTruthy()
     // WHAT IT IS CONNECTED TO — what the wires on this card stand for,
     // PLUS whatever the data source says is still unfetched. Both halves
@@ -2457,6 +2502,20 @@ describe('browsing what is inside — the peek and the keyboard', () => {
     fireEvent.click(within(peek() as HTMLElement).getByText(/Walk further upstream/))
     // ONE CLICK, ONE VISIBLE DELIVERY: the cohort lands on the board.
     expect(onBoard('source_000')).toBe(true)
+  })
+
+  // FOCUS THE PARENT, FROM A ROW (user, 2026-08-17: "shouldn't I be
+  // offered an ability to switch the focus not just only on the column
+  // but also the entire parent entity?"). A CARD could always be
+  // double-clicked or focused from its own header; a ROW could not —
+  // and the peek was already naming its parents in words it would not
+  // let anyone act on.
+  it('the peek\'s breadcrumb focuses the PARENT, not the row', () => {
+    const onRecenter = vi.fn()
+    renderLens(['F'], table(), { onRecenter })
+    fireEvent.click(row('order_id'))
+    fireEvent.click(within(peek() as HTMLElement).getByTitle(/Focus on raw_orders —/))
+    expect(onRecenter).toHaveBeenCalledWith('T')
   })
 
   it('the peek focuses where it is, and opens what it holds', () => {

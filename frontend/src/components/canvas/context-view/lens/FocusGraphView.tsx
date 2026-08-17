@@ -50,7 +50,7 @@
  * The viewport re-frames on FOCAL change only: expanding grows the
  * picture in place instead of yanking it away from what you opened.
  */
-import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react'
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -994,6 +994,13 @@ const gutterPos = (inFrame: boolean, upstream: boolean): string =>
  *  can only travel away from the row (past its own edge, into the
  *  gutter) and never toward the row's content. */
 const GUTTER_REST_EDGE = 24
+/** ...and the same point for a pill that shows a COUNT at rest, which is
+ *  `left-1` (4px) plus its own `max-w-[36px]` cap. The two must be told
+ *  apart: pinning a counted pill's expansion at the icon-only edge left
+ *  a 16px strip where the pointer was inside the rest box and outside
+ *  the expanded one, and a control that moves out from under the pointer
+ *  that is hovering it flickers forever. */
+const GUTTER_REST_COUNTED = 40
 
 /** ...and where it sits VERTICALLY.
  *
@@ -1039,6 +1046,49 @@ const rowDomId = (frameKey: string, urn: string): string =>
  *  after a click on one has to go through an id. */
 const listDomId = (frameKey: string): string => `lens-rows-${domSafe(frameKey)}`
 
+/**
+ * A LABEL FOR AN ICON, on hover — the board is full of 12px glyphs and
+ * a reader should never have to guess, or wait a second for the
+ * browser's own grey `title` box to appear somewhere near the pointer.
+ *
+ * Deliberately CSS-only (`peer-hover`), not the app's Radix
+ * `InfoTooltip`: these labels sit on controls that exist on EVERY card,
+ * and a portal-mounted tooltip root per button would put hundreds of
+ * them on a large board — the exact per-card overhead the isolation and
+ * memo work spent itself removing. One absolutely-positioned span,
+ * shown by its sibling's own hover, costs nothing to render and
+ * nothing to keep.
+ *
+ * The wrapped control must carry `peer` in its own className; the
+ * label is `pointer-events-none` so it can never eat the click it is
+ * explaining.
+ */
+function IconTip({ label, side = 'top', children }: {
+  label: string
+  side?: 'top' | 'left'
+  children: ReactNode
+}) {
+  return (
+    <span className="relative flex items-center">
+      {children}
+      <span
+        role="presentation"
+        className={cn(
+          'pointer-events-none absolute z-50 whitespace-nowrap rounded-md px-1.5 py-0.5',
+          'border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-md',
+          'text-[10px] font-medium text-ink',
+          'opacity-0 transition-opacity duration-100 peer-hover:opacity-100 peer-focus-visible:opacity-100',
+          side === 'top'
+            ? 'bottom-full left-1/2 -translate-x-1/2 mb-1'
+            : 'right-full top-1/2 -translate-y-1/2 mr-1.5',
+        )}
+      >
+        {label}
+      </span>
+    </span>
+  )
+}
+
 /** Hover action cluster shared by entity-ish cards. */
 function CardActions({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   if (!card.nodeId) return null
@@ -1052,33 +1102,39 @@ function CardActions({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
       style={{ right: PILL_ZONE }}
       className="nodrag pointer-events-none absolute -top-2.5 hidden group-hover:flex items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5 z-10"
     >
-      <button
-        type="button"
-        title="Focus here — re-center the lens on this entity"
-        onClick={(e) => { e.stopPropagation(); ctx.onFocus(id) }}
-        className={btn}
-      >
-        <LucideIcons.Focus className="w-3 h-3" />
-      </button>
-      {ctx.onRevealOnCanvas && (
+      <IconTip label={`Focus on ${card.label}`}>
         <button
           type="button"
-          title="Reveal on canvas"
-          onClick={(e) => { e.stopPropagation(); void ctx.onRevealOnCanvas?.(id) }}
-          className={btn}
+          aria-label={`Focus on ${card.label} — re-center the lens here`}
+          onClick={(e) => { e.stopPropagation(); ctx.onFocus(id) }}
+          className={cn(btn, 'peer')}
         >
-          <LucideIcons.Crosshair className="w-3 h-3" />
+          <LucideIcons.Focus className="w-3 h-3" />
         </button>
+      </IconTip>
+      {ctx.onRevealOnCanvas && (
+        <IconTip label="Show on the canvas behind">
+          <button
+            type="button"
+            aria-label="Show this entity on the canvas behind the lens"
+            onClick={(e) => { e.stopPropagation(); void ctx.onRevealOnCanvas?.(id) }}
+            className={cn(btn, 'peer')}
+          >
+            <LucideIcons.Crosshair className="w-3 h-3" />
+          </button>
+        </IconTip>
       )}
       {ctx.onOpenDetails && (
-        <button
-          type="button"
-          title="Open details"
-          onClick={(e) => { e.stopPropagation(); ctx.onOpenDetails?.(id) }}
-          className={btn}
-        >
-          <LucideIcons.PanelRight className="w-3 h-3" />
-        </button>
+        <IconTip label="Open its details panel">
+          <button
+            type="button"
+            aria-label="Open the details panel for this entity"
+            onClick={(e) => { e.stopPropagation(); ctx.onOpenDetails?.(id) }}
+            className={cn(btn, 'peer')}
+          >
+            <LucideIcons.PanelRight className="w-3 h-3" />
+          </button>
+        </IconTip>
       )}
     </span>
   )
@@ -1256,14 +1312,30 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
     if (!card.nodeId) { actOnPill(ctx, pill, dir); return }
     actOnPill(ctx, pill, dir, { cardId: card.id, nodeId: card.nodeId })
   }
-  // F1 — expansion pins the REST edge (GUTTER_REST_EDGE) and lets the
-  // FAR edge move, so a hovered/focused in-frame pill grows outward
-  // (past the row's own edge) rather than inward over row content. A
-  // CSS custom property carries the row-width-dependent offset — the
-  // `right`/`left` Tailwind utility scale has no such value, and only
-  // the EXPANDED state needs it; the rest-state position is untouched
-  // (`pos`, above) so nothing moves unless the pill itself is hovered.
-  const outwardVar = inFrame ? { ['--pill-outer' as string]: `${card.w - GUTTER_REST_EDGE}px` } : undefined
+  // The one number a follow control's REST state may show: a reveal's
+  // card count — a visible arrival, not a flow. Everything else is
+  // icon-only at rest: the shape that let eight stacked "+5" pills happen
+  // is now impossible — there is nothing left to stack but dots.
+  const restCount = pill.kind === 'reveal' ? (pill.groups ?? 1) : null
+
+  // F1 — expansion pins the REST edge and lets the FAR edge move, so a
+  // hovered/focused in-frame pill grows outward (past the row's own
+  // edge) rather than inward over row content. A CSS custom property
+  // carries the row-width-dependent offset — the `right`/`left` Tailwind
+  // utility scale has no such value, and only the EXPANDED state needs
+  // it; the rest-state position is untouched (`pos`, above) so nothing
+  // moves unless the pill itself is hovered.
+  //
+  // THE PINNED EDGE MUST BE THE PILL'S OWN WIDEST REST EDGE, not a
+  // constant that assumes the icon-only shape. Reported live as a pill
+  // that "keeps flicking until the mouse is on the right location":
+  // a counted pill rests up to `GUTTER_REST_COUNTED` wide, so pinning
+  // the expansion at `GUTTER_REST_EDGE` moved the box out from under a
+  // pointer sitting in the strip between them — mouseleave, shrink back
+  // under the pointer, mouseenter, expand away again, forever. The
+  // expanded box has to be a SUPERSET of the box the pointer entered.
+  const restEdge = restCount != null ? GUTTER_REST_COUNTED : GUTTER_REST_EDGE
+  const outwardVar = inFrame ? { ['--pill-outer' as string]: `${card.w - restEdge}px` } : undefined
   const outward = inFrame
     ? (upstream
         ? 'hover:left-auto focus-visible:left-auto hover:right-[var(--pill-outer)] focus-visible:right-[var(--pill-outer)]'
@@ -1304,12 +1376,6 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
   // hovering at all, so the two do not read as the same control.
   const frameLevel = isFrameLevelPill(card, seedCount)
   const title = pillHoverTitle(card, pill, dir, frameLevel, seedCount)
-  // The one number a follow control's REST state may show: a reveal's
-  // card count — a visible arrival, not a flow. Everything else is
-  // icon-only at rest: the shape that let eight stacked "+5" pills happen
-  // is now impossible — there is nothing left to stack but dots.
-  const restCount = pill.kind === 'reveal' ? (pill.groups ?? 1) : null
-
   return (
     <button
       type="button"
@@ -1928,7 +1994,13 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
           </>
         )}
         {!isFocal && (
-        <div className="min-w-0 flex-1">
+        // `overflow-hidden`: the name and the "in CONTAINER" chip both
+        // carry their own minimum widths (a name that elides to nothing
+        // names nothing), so on a tight header this box can be asked for
+        // more room than it has — and what overflowed painted straight
+        // over the controls beside it. Reported live: "in INTERMEDIATE_T2"
+        // running underneath the Connected|All pair.
+        <div className="min-w-0 flex-1 overflow-hidden">
           {/* Name, then where it lives — the levels above it are text,
               never boxes, so the chip is how they are stated at all. */}
           {/* A LONG NAME WRAPS; IT IS NEVER ELLIPSED IN THE MIDDLE.
@@ -2001,26 +2073,26 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
               { all: false, Icon: LucideIcons.Link2, label: 'Only what is on this lineage' },
               { all: true, Icon: LucideIcons.Rows3, label: 'Everything inside, lineage marked' },
             ] as const).map(({ all, Icon, label }) => (
-              <button
-                key={String(all)}
-                type="button"
-                disabled={card.fetch === 'loading'}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  if (all !== card.frameShowingAll) ctx.onToggleFrameAll?.(card.expandKey ?? '')
-                }}
-                title={card.fetch === 'loading' ? 'Looking inside…' : label}
-                aria-label={label}
-                aria-pressed={card.frameShowingAll === all}
-                className={cn(
-                  'p-0.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
-                  card.frameShowingAll === all
-                    ? 'bg-accent-lineage/12 text-accent-lineage'
-                    : 'text-ink-muted hover:text-ink',
-                )}
-              >
-                <Icon className="w-3 h-3" />
-              </button>
+              <IconTip key={String(all)} label={card.fetch === 'loading' ? 'Looking inside…' : label}>
+                <button
+                  type="button"
+                  disabled={card.fetch === 'loading'}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    if (all !== card.frameShowingAll) ctx.onToggleFrameAll?.(card.expandKey ?? '')
+                  }}
+                  aria-label={label}
+                  aria-pressed={card.frameShowingAll === all}
+                  className={cn(
+                    'peer p-0.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
+                    card.frameShowingAll === all
+                      ? 'bg-accent-lineage/12 text-accent-lineage'
+                      : 'text-ink-muted hover:text-ink',
+                  )}
+                >
+                  <Icon className="w-3 h-3" />
+                </button>
+              </IconTip>
             ))}
           </div>
         )}
@@ -2049,29 +2121,33 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
               className="nodrag flex-shrink-0 w-16 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
             />
           ) : (
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); setFindOpen(true) }}
-              aria-label={card.frameShowingAll ? `Search inside ${card.label}` : `Find inside ${card.label}`}
-              title={findTitle(card)}
-              className="nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
-            >
-              <LucideIcons.Search className="w-3 h-3" />
-            </button>
+            <IconTip label={card.frameShowingAll ? `Search inside ${card.label}` : `Find inside ${card.label}`}>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setFindOpen(true) }}
+                aria-label={card.frameShowingAll ? `Search inside ${card.label}` : `Find inside ${card.label}`}
+                title={findTitle(card)}
+                className="peer nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+              >
+                <LucideIcons.Search className="w-3 h-3" />
+              </button>
+            </IconTip>
           )
         )}
         {/* Re-center on this container. The FOCUS is already the centre,
             so it offers no such control — a button that walks you to
             where you are standing is a dead click. */}
         {card.nodeId && !isFocal && (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.nodeId!) }}
-            title={`Focus ${card.label}`}
-            className="nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
-          >
-            <LucideIcons.Focus className="w-3 h-3" />
-          </button>
+          <IconTip label={`Focus on ${card.label}`}>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); ctx.onFocus(card.nodeId!) }}
+              aria-label={`Focus on ${card.label} — make it the subject of this lens`}
+              className="peer nodrag flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+            >
+              <LucideIcons.Focus className="w-3 h-3" />
+            </button>
+          </IconTip>
         )}
         </div>
         {/* ── The focus's own identity, under its control line ── */}
@@ -3377,12 +3453,38 @@ function LensPeek({ card, host, ctx, onDismiss }: {
       </div>
       {/* Where it lives — the same crumb the board draws, so the panel
           never disagrees with the picture it is sitting on. */}
+      {/* WHERE IT LIVES — and a way to go there.
+          A row is a column, and the thing a reader most often wants next
+          is the TABLE it sits in ("shouldn't I be offered an ability to
+          switch the focus not just only on the column but also the
+          entire parent entity?"). A card can be double-clicked or
+          focused from its own header; a ROW had neither, and this panel
+          was already naming its parents in words it would not let anyone
+          act on. Each crumb is now the button it always looked like. */}
       {(card.ancestry.length > 0 || card.parentLabel) && (
-        <p className="mt-1.5 flex items-center gap-1 min-w-0 text-[9.5px] text-ink-muted" title={`in ${card.ancestry.join(' › ')}`}>
+        <p className="mt-1.5 flex items-center gap-1 min-w-0 text-[9.5px] text-ink-muted flex-wrap">
           <LucideIcons.CornerLeftUp className="w-2.5 h-2.5 flex-shrink-0" />
-          <span className="truncate">
-            in {card.ancestry.length > 0 ? card.ancestry.join(' › ') : card.parentLabel}
-          </span>
+          <span className="flex-shrink-0">in</span>
+          {(card.ancestry.length > 0 ? card.ancestry : [card.parentLabel!]).map((name, i, all) => {
+            const id = card.ancestryIds[i] ?? (card.ancestry.length === 0 ? card.parentId : null)
+            return (
+              <span key={`${name}-${i}`} className="flex items-center gap-1 min-w-0">
+                {id
+                  ? (
+                    <button
+                      type="button"
+                      onClick={() => ctx.onFocus(id)}
+                      title={`Focus on ${name} — make it the subject of this lens`}
+                      className="nodrag truncate rounded px-0.5 -mx-0.5 hover:text-accent-lineage hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors"
+                    >
+                      {name}
+                    </button>
+                  )
+                  : <span className="truncate">{name}</span>}
+                {i < all.length - 1 && <span className="flex-shrink-0 text-ink-muted/50" aria-hidden>›</span>}
+              </span>
+            )
+          })}
         </p>
       )}
       {card.description && (
@@ -3626,70 +3728,82 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
     // without it a press on Zoom that drifts a pixel pans the board.
     <Panel position="bottom-right" className="!m-3 nopan">
       <div className="flex flex-col rounded-lg border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-md overflow-hidden divide-y divide-black/[0.06] dark:divide-white/[0.06]">
-        <button type="button" title="Zoom in" onClick={() => void rf.zoomIn({ duration: dur })} className={btn}>
-          <LucideIcons.Plus className="w-3.5 h-3.5" />
-        </button>
-        <button type="button" title="Zoom out" onClick={() => void rf.zoomOut({ duration: dur })} className={btn}>
-          <LucideIcons.Minus className="w-3.5 h-3.5" />
-        </button>
-        <button
-          type="button"
-          title="Fit the lineage in view"
-          onClick={() => void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })}
-          className={btn}
-        >
-          <LucideIcons.Maximize2 className="w-3.5 h-3.5" />
-        </button>
-        {/* Only offered once there is an arrangement to undo. */}
-        {onResetLayout && (
+        <IconTip label="Zoom in" side="left">
+          <button type="button" aria-label="Zoom in" onClick={() => void rf.zoomIn({ duration: dur })} className={cn(btn, 'peer')}>
+            <LucideIcons.Plus className="w-3.5 h-3.5" />
+          </button>
+        </IconTip>
+        <IconTip label="Zoom out" side="left">
+          <button type="button" aria-label="Zoom out" onClick={() => void rf.zoomOut({ duration: dur })} className={cn(btn, 'peer')}>
+            <LucideIcons.Minus className="w-3.5 h-3.5" />
+          </button>
+        </IconTip>
+        <IconTip label="Fit the lineage in view" side="left">
           <button
             type="button"
-            title="Tidy up — put every card back where the lens placed it"
-            aria-label="Reset layout"
-            onClick={() => {
-              onResetLayout()
-              window.setTimeout(
-                () => void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM }),
-                reducedMotion ? 0 : 60,
-              )
-            }}
-            className={cn(btn, 'text-accent-lineage hover:text-accent-lineage')}
+            aria-label="Fit the lineage in view"
+            onClick={() => void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })}
+            className={cn(btn, 'peer')}
           >
-            <LucideIcons.LayoutGrid className="w-3.5 h-3.5" />
+            <LucideIcons.Maximize2 className="w-3.5 h-3.5" />
           </button>
+        </IconTip>
+        {/* Only offered once there is an arrangement to undo. */}
+        {onResetLayout && (
+          <IconTip label="Tidy up — put every card back" side="left">
+            <button
+              type="button"
+              aria-label="Reset layout"
+              onClick={() => {
+                onResetLayout()
+                window.setTimeout(
+                  () => void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM }),
+                  reducedMotion ? 0 : 60,
+                )
+              }}
+              className={cn(btn, 'peer', 'text-accent-lineage hover:text-accent-lineage')}
+            >
+              <LucideIcons.LayoutGrid className="w-3.5 h-3.5" />
+            </button>
+          </IconTip>
         )}
-        <button
-          type="button"
-          title="Download this lineage as an image (for decks and docs)"
-          onClick={(e) => void exportPng(e)}
-          className={btn}
-          disabled={exporting}
-        >
-          {exporting
-            ? <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
-            : <LucideIcons.ImageDown className="w-3.5 h-3.5" />}
-        </button>
+        <IconTip label="Download as an image" side="left">
+          <button
+            type="button"
+            title="Download this lineage as an image (for decks and docs)"
+            aria-label="Download this lineage as an image"
+            onClick={(e) => void exportPng(e)}
+            className={cn(btn, 'peer')}
+            disabled={exporting}
+          >
+            {exporting
+              ? <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
+              : <LucideIcons.ImageDown className="w-3.5 h-3.5" />}
+          </button>
+        </IconTip>
         {/* Data export — the same VISIBLE picture as portable data, no
             server call. Two entries rather than a menu: one click,
             one file, same as the PNG button beside them. */}
-        <button
-          type="button"
-          title="Export this lineage as JSON (for scripts and other tools)"
-          aria-label="Export lineage data as JSON"
-          onClick={exportJson}
-          className={btn}
-        >
-          <LucideIcons.FileJson className="w-3.5 h-3.5" />
-        </button>
-        <button
-          type="button"
-          title="Export this lineage as CSV (for spreadsheets)"
-          aria-label="Export lineage data as CSV"
-          onClick={exportCsv}
-          className={btn}
-        >
-          <LucideIcons.FileSpreadsheet className="w-3.5 h-3.5" />
-        </button>
+        <IconTip label="Export as JSON" side="left">
+          <button
+            type="button"
+            aria-label="Export lineage data as JSON"
+            onClick={exportJson}
+            className={cn(btn, 'peer')}
+          >
+            <LucideIcons.FileJson className="w-3.5 h-3.5" />
+          </button>
+        </IconTip>
+        <IconTip label="Export as CSV" side="left">
+          <button
+            type="button"
+            aria-label="Export lineage data as CSV"
+            onClick={exportCsv}
+            className={cn(btn, 'peer')}
+          >
+            <LucideIcons.FileSpreadsheet className="w-3.5 h-3.5" />
+          </button>
+        </IconTip>
       </div>
     </Panel>
   )

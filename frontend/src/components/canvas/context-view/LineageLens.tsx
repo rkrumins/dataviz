@@ -287,6 +287,9 @@ export interface LineageLensProps {
   /** Open the entity drawer for a node. */
   onOpenDetails?: (nodeId: string) => void
   /** Reveal a set of neighbors and frame them on the canvas (closes the lens). */
+  /** Place a whole set on the canvas behind the lens. Its only footer
+   *  button was withdrawn (see the Footer below); the prop stays on the
+   *  contract so bringing it back needs no re-plumbing. */
   onLocateAll?: (nodeIds: string[]) => void | Promise<void>
   /** Escalate to a full server trace from the focal node (closes the lens). */
   onTrace?: (nodeId: string) => void
@@ -316,7 +319,6 @@ export function LineageLens({
   onClose,
   onRevealOnCanvas,
   onOpenDetails,
-  onLocateAll,
   onTrace,
   externalPreview,
 }: LineageLensProps) {
@@ -2163,40 +2165,17 @@ export function LineageLens({
                 ? 'Click a card to inspect · ⊕ to walk a hop · ▸ to open what is inside · Scroll or ↑↓ inside it · Enter to preview, Shift+Enter to focus · Esc to close'
                 : 'Click a connection to re-center · Esc to close'}
             </p>
-            <div className="ml-auto flex items-center gap-2">
-              {onLocateAll && (() => {
-                // Computed once so the button's own COUNT and the click's
-                // target list can never disagree — T24 F5: showing the
-                // count up front is informed consent for a large reveal
-                // (the virtualizer-aware walk that follows takes real
-                // time per target, one at a time), so no confirm dialog
-                // is needed either.
-                const revealIds = [...new Set([...neighbors.incoming, ...neighbors.outgoing].map(r => r.urn))]
-                return (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onClose()
-                      void onLocateAll(revealIds)
-                    }}
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-                  >
-                    <LucideIcons.Frame className="w-3 h-3" />
-                    Reveal {revealIds.length.toLocaleString()} on canvas
-                  </button>
-                )
-              })()}
-              {onTrace && (
-                <button
-                  type="button"
-                  onClick={() => { onClose(); onTrace(nodeId) }}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-accent-lineage/15 border border-accent-lineage/40 text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/25 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-                >
-                  <LucideIcons.GitBranch className="w-3 h-3" />
-                  Trace from here
-                </button>
-              )}
-            </div>
+            {/* The footer's two actions — "Reveal N on canvas" and "Trace
+                from here" — are withdrawn for now (user, 2026-08-17).
+                Both LEAVE the lens to do something to the canvas behind
+                it, which is a different job from walking lineage, and
+                both sat where a reader's eye lands after a long walk.
+                The per-card "Show on the canvas behind" action still
+                offers the first one for a single entity, which is the
+                shape anyone actually asked for. `onLocateAll`/`onTrace`
+                stay wired for their other callers (the peek, the
+                coarser-grain rows) so bringing these back is a JSX
+                change, not a re-plumb. */}
           </div>
 
           {/* LEAVING THE ROOM. A walk is work — hops fetched one click at
