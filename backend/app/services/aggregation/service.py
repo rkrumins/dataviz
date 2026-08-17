@@ -2360,17 +2360,19 @@ class AggregationService:
             else "global" if cadence.reconcile_check_interval_secs is not None
             else "default"
         )
-        # Detect (drift-probe) cadence trio — same shape, distinct vocabulary
-        # ("override"/"global"/"env") to match the global cadence's own field
-        # names (probe_enabled/probe_interval_secs use "env", not "default").
+        # Detect (drift-probe) cadence trio — same shape AND the same
+        # vocabulary as its two siblings. The drawer renders all three through
+        # one label map, so a private vocabulary here printed the raw token
+        # ("override"/"env") to the operator beside "Custom" and "System
+        # default".
         probe_override = state_row.get("probe_interval_secs")
         probe_interval = resolve_probe_interval(
             probe_override, cadence.probe_interval_secs,
         )
         probe_source = (
-            "override" if probe_override is not None
+            "custom" if probe_override is not None
             else "global" if cadence.probe_interval_secs is not None
-            else "env"
+            else "default"
         )
         observed_agg, stats_as_of = await _observed_overlay(session, ds.id)
         versioned = await _platform_mastered_ids()
