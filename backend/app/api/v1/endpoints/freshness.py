@@ -281,6 +281,11 @@ async def patch_freshness_settings(
             probe = await svc.set_source_probe_settings(
                 ds_id, session, **kwargs,
             )
+        pause = {}
+        if "paused_until" in sent:
+            pause = await svc.set_source_pause(
+                ds_id, session, paused_until=body.paused_until,
+            )
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     return FreshnessSettingsResponse(
@@ -290,6 +295,7 @@ async def patch_freshness_settings(
         reconcile_check_interval_secs=recon.get("reconcile_check_interval_secs"),
         probe_enabled=probe.get("probe_enabled"),
         probe_interval_secs=probe.get("probe_interval_secs"),
+        paused_until=pause.get("paused_until"),
     )
 
 

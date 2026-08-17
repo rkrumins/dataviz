@@ -544,6 +544,26 @@ async def test_a_cold_versioned_lookup_defers_the_whole_sweep(
 
 
 @pytest.mark.asyncio
+async def test_a_paused_source_records_its_finding_but_queues_nothing(
+    session_factory,
+):
+    """The whole point of a hold: the cockpit still knows what is wrong."""
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    async with session_factory() as s:
+        state = await s.get(AggregationDataSourceStateORM, "ds_1")
+        state.paused_until = "2999-01-01T00:00:00+00:00"
+        await s.commit()
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip.get("paused") == 1
+    assert svc.signals == [], "a paused source must not be dispatched"
+    state = await _state(session_factory)
+    assert state.last_finding_reason == "overlay_missing"
+
+
+@pytest.mark.asyncio
 async def test_a_source_in_rebuild_cooldown_is_deferred(session_factory):
     await _seed(
         session_factory,

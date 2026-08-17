@@ -217,6 +217,12 @@ async def init_aggregation_db() -> None:
                 "ADD COLUMN IF NOT EXISTS probe_interval_secs INTEGER NULL",
                 f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
                 "ADD COLUMN IF NOT EXISTS last_seen_counts_digest TEXT NULL",
+                # Operator snooze (2026-08-17), mirrored in alembic
+                # 20260817_1400_recon_pause. A time-boxed hold so a
+                # known-broken source can be excluded from automation without
+                # turning it off forever.
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS paused_until TEXT NULL",
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:

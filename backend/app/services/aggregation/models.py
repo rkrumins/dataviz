@@ -252,6 +252,9 @@ class AggregationDataSourceStateORM(Base):
     # deployment may well want a fast probe and a slow act.
     probe_enabled = Column(Boolean, nullable=True)
     probe_interval_secs = Column(Integer, nullable=True)
+    # Operator snooze (ISO-8601). Automation still evaluates and still records
+    # its finding while this is in the future; it just does not act.
+    paused_until = Column(Text, nullable=True)
     # The ``data_source_stats.counts_digest`` this sweep last evaluated. The
     # candidate query fires on ``IS DISTINCT FROM``, so a re-probe that finds
     # identical counts costs nothing and only a real movement re-opens the

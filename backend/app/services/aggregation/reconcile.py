@@ -56,6 +56,7 @@ SKIP_REASONS: Tuple[str, ...] = (
     "in_flight",          # a rebuild is already pending/running
     "already_marked",     # the stale-marker reconciler owns it
     "cooldown",           # inside the rebuild throttle window
+    "paused",             # snoozed by an operator until a time
     "failed_backoff",     # last attempt failed inside the cadence window
     "opted_out",          # aggregation_status == 'skipped'
     "disabled",           # auto-reconcile turned off for this source
@@ -137,6 +138,10 @@ class Observation:
     has_completed_job: bool = False
     stale_marker: bool = False
     in_cooldown: bool = False
+    # Operator snooze. ISO-8601, or None. A HOLD, never a guard: a paused
+    # source is still evaluated and still reports its finding, so the cockpit
+    # can show what is wrong with something it has been told to leave alone.
+    paused_until: Optional[str] = None
     recently_failed: bool = False
     # projection_mode == 'dedicated' ⇒ the overlay lives in ANOTHER graph
     # that get_stats() never scans, so observed_aggregated is meaningless.
@@ -170,7 +175,7 @@ class Policy:
 # still run so the cockpit has a reason and the counts behind it. Distinct
 # from absolute guards (deleted, no stats, …) which cannot evaluate at all.
 _HOLD_SKIPS: Tuple[str, ...] = (
-    "cooldown", "failed_backoff", "disabled", "suspended",
+    "cooldown", "failed_backoff", "disabled", "suspended", "paused",
 )
 
 
@@ -322,6 +327,8 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
 def _hold(obs: Observation, policy: Policy) -> Optional[str]:
     """Post-detector refusal to act. Unlike ``_guard``, these run AFTER the
     detectors so a held source still carries a reason and evidence."""
+    if _pause_active(obs.paused_until):
+        return "paused"
     if obs.in_cooldown:
         return "cooldown"
     if obs.recently_failed:
@@ -331,6 +338,21 @@ def _hold(obs: Observation, policy: Policy) -> Optional[str]:
     if obs.consecutive_actions >= policy.breaker_cap:
         return "suspended"
     return None
+
+
+def _pause_active(paused_until: Optional[str]) -> bool:
+    """True while a snooze is still in force. An unparseable stamp is treated
+    as expired: a corrupt value must not pause a source forever."""
+    if not paused_until:
+        return False
+    from datetime import datetime, timezone
+    try:
+        until = datetime.fromisoformat(paused_until)
+    except (TypeError, ValueError):
+        return False
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    return until > datetime.now(timezone.utc)
 
 
 def _idle_state(obs: Observation) -> str:

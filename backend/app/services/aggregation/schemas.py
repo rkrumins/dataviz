@@ -565,6 +565,11 @@ class FreshnessRow(BaseModel):
     # read path never recomputes them (it must stay pure SQL + Redis).
     drift_state: Optional[str] = Field(None, alias="driftState")
     auto_reconcile: Optional[bool] = Field(None, alias="autoReconcile")
+    # Operator snooze. A HOLD, not a guard: the row above still carries its
+    # drift_state/finding while this is in the future — only the sweep's
+    # action is suppressed. On FreshnessRow (not just FreshnessDoc) because
+    # the fleet table renders a "Paused" chip straight off this field.
+    paused_until: Optional[str] = Field(None, alias="pausedUntil")
     last_checked_at: Optional[str] = Field(None, alias="lastCheckedAt")
     last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
     last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
@@ -880,6 +885,11 @@ class FreshnessSettingsRequest(BaseModel):
         description="How often this source's counts are re-read. Null "
                     "inherits the global cadence.",
     )
+    paused_until: Optional[str] = Field(
+        None, alias="pausedUntil", max_length=64,
+        description="ISO-8601 instant until which automation is held for this "
+                    "source. Null resumes immediately.",
+    )
 
     class Config:
         populate_by_name = True
@@ -900,6 +910,7 @@ class FreshnessSettingsResponse(BaseModel):
     )
     probe_enabled: Optional[bool] = Field(None, alias="probeEnabled")
     probe_interval_secs: Optional[int] = Field(None, alias="probeIntervalSecs")
+    paused_until: Optional[str] = Field(None, alias="pausedUntil")
 
     class Config:
         populate_by_name = True

@@ -352,6 +352,49 @@ def test_a_hold_keeps_the_finding_and_refuses_to_act(over, expected):
         assert v.drift_state == "overlayMissing"
 
 
+# ── Pause (operator snooze) ─────────────────────────────────────────────
+
+
+def test_paused_holds_the_action_but_keeps_the_finding():
+    """A paused source must still report WHY it is drifting. Suppressing the
+    verdict would make a snoozed source look healthy — the same class of bug
+    as the stale-stats guard."""
+    obs = Observation(
+        data_source_id="ds_1",
+        ontology_id="bp_1",
+        has_stats=True,
+        stats_age_secs=10,
+        aggregation_status="ready",
+        expected_aggregated=500,
+        observed_aggregated=0,
+        has_completed_job=True,
+        paused_until="2999-01-01T00:00:00+00:00",
+    )
+    verdict = evaluate(obs, Policy())
+
+    assert verdict.reason == "overlay_missing"   # still detected
+    assert verdict.skip == "paused"              # but not acted on
+    assert verdict.should_act is False
+    assert verdict.drift_state == "overlayMissing"
+    assert verdict.evidence, "evidence must survive the hold"
+
+
+def test_an_expired_pause_acts_again():
+    obs = Observation(
+        data_source_id="ds_1",
+        ontology_id="bp_1",
+        has_stats=True,
+        stats_age_secs=10,
+        aggregation_status="ready",
+        expected_aggregated=500,
+        observed_aggregated=0,
+        has_completed_job=True,
+        paused_until="2000-01-01T00:00:00+00:00",
+    )
+    verdict = evaluate(obs, Policy())
+    assert verdict.should_act is True
+
+
 def test_stale_stats_never_trigger_a_rebuild():
     """Acting on stale counts is how a false positive rebuilds a
     multi-million-node graph."""

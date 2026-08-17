@@ -970,6 +970,7 @@ class ReconciliationSweeper:
             has_completed_job=c.get("has_completed_job", False),
             stale_marker=c.get("stale_marker", False),
             in_cooldown=in_cooldown,
+            paused_until=state.paused_until,
             recently_failed=recently_failed,
             overlay_observable=c.get("overlay_observable", True),
             live_observed=bool(c.get("live_observed")),

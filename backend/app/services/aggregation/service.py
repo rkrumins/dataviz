@@ -1573,6 +1573,28 @@ class AggregationService:
             "probe_interval_secs": state.probe_interval_secs,
         }
 
+    async def set_source_pause(
+        self, ds_id: str, session: AsyncSession, *, paused_until: Optional[str],
+    ) -> dict:
+        """Set or clear the operator snooze for one source.
+
+        A HOLD, not a guard: automation keeps evaluating and keeps recording
+        the finding while ``paused_until`` is in the future, it just refuses
+        to act (see ``reconcile._hold``). UPSERTS for the same reason
+        ``set_source_probe_settings`` does — a never-aggregated source has no
+        state row, and that is exactly the source an operator may want to
+        snooze.
+        """
+        state = await self._get_or_create_state(ds_id, session)
+
+        state.paused_until = paused_until
+        await session.commit()
+        logger.info(
+            "Pause for data source %s: paused_until=%s",
+            ds_id, state.paused_until,
+        )
+        return {"paused_until": state.paused_until}
+
     # ── Change Detection ──────────────────────────────────────────────
 
     async def check_drift(
@@ -2970,6 +2992,7 @@ def _freshness_row_kwargs(
         auto_reconcile=resolve_reconcile_enabled(
             st.get("reconcile_enabled"), reconcile_enabled_global,
         ),
+        paused_until=st.get("paused_until"),
         last_checked_at=st.get("last_reconcile_checked_at"),
         last_reconciled_at=st.get("last_reconciled_at"),
         last_reconcile_reason=st.get("last_reconcile_reason"),
@@ -3174,6 +3197,7 @@ async def _state_map(
                 S.last_finding_evidence,
                 S.probe_enabled,
                 S.probe_interval_secs,
+                S.paused_until,
             ).where(S.data_source_id.in_(ds_ids))
         )).all()
     except Exception as exc:  # pragma: no cover - defensive, never fail a read
@@ -3196,6 +3220,7 @@ async def _state_map(
             "last_finding_evidence": _safe_json(r[11]),
             "probe_enabled": r[12],
             "probe_interval_secs": r[13],
+            "paused_until": r[14],
         }
         for r in rows
     }
