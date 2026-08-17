@@ -28,7 +28,7 @@ import { ChevronRight } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 
-import { STAGES, STAGE_ACCENT } from './automationCopy'
+import { STAGES, STAGE_ACCENT, hintIdFor } from './automationCopy'
 
 type Stage = keyof typeof STAGES
 
@@ -87,7 +87,16 @@ function StagePill({ stage, on, muted }: { stage: Stage; on: boolean | null; mut
  * cadence stops meaning what it says. The state is carried by the dash pattern
  * and the word as well as the colour, and nothing about it animates on a loop.
  */
-function Connector({ into, starved, muted }: { into: Stage; starved: boolean; muted: boolean }) {
+function Connector({ into, starved, muted, unknown = false }: {
+    into: Stage
+    starved: boolean
+    muted: boolean
+    /** The reader cannot see the upstream stage's switch, so this seam has no
+     *  state to report. It keeps the line — the pipeline's shape is not a claim
+     *  — and says nothing, rather than asserting `feeding` about a setting the
+     *  same screen tells them is hidden from them. */
+    unknown?: boolean
+}) {
     const accent = STAGE_ACCENT[into]
 
     return (
@@ -104,16 +113,18 @@ function Connector({ into, starved, muted }: { into: Stage; starved: boolean; mu
                     CALM,
                 )}
             />
-            <span
-                className={cn(
-                    'text-[10px] leading-none tracking-wide truncate',
-                    starved
-                        ? 'font-semibold text-amber-600 dark:text-amber-400'
-                        : cn('text-ink-muted', muted && 'opacity-60'),
-                )}
-            >
-                {starved ? 'starved' : 'feeding'}
-            </span>
+            {!unknown && (
+                <span
+                    className={cn(
+                        'text-[10px] leading-none tracking-wide truncate',
+                        starved
+                            ? 'font-semibold text-amber-600 dark:text-amber-400'
+                            : cn('text-ink-muted', muted && 'opacity-60'),
+                    )}
+                >
+                    {starved ? 'starved' : 'feeding'}
+                </span>
+            )}
         </div>
     )
 }
@@ -138,7 +149,16 @@ export function PipelineRail({ detect, check, act, starvedIntoCheck, starvedInto
             className="flex items-start min-w-0 overflow-x-auto"
         >
             <StagePill stage="detect" on={detect} muted={false} />
-            <Connector into="check" starved={starvedIntoCheck} muted={false} />
+            {/* ``starvedIntoCheck`` is false for a reader who cannot see the
+                probe setting — correctly, since we must not claim it is off.
+                But that made this seam read `feeding` to exactly the reader the
+                pill beside it tells `hidden`. */}
+            <Connector
+                into="check"
+                starved={starvedIntoCheck}
+                muted={false}
+                unknown={detect == null}
+            />
             <StagePill stage="check" on={check} muted={starvedIntoCheck} />
             <Connector into="act" starved={starvedIntoAct} muted={starvedIntoCheck} />
             <StagePill stage="act" on={act} muted={starvedIntoCheck || starvedIntoAct} />
@@ -240,6 +260,15 @@ export function StageRow({ stage, on, muted = false, stat, children }: {
  * same treatment, so they established no rhythm at all — they were the main
  * reason the whole modal read as one flat grey. A label that sits beside its
  * control does not need to shout to be found.
+ *
+ * A row with BOTH ``htmlFor`` and ``hint`` gives the hint ``hintIdFor(htmlFor)``,
+ * and the control in that row must carry
+ * ``aria-describedby={hintIdFor(htmlFor)}`` — the hint used to live inside the
+ * ``<label>``, so it reached screen readers as part of the name, and moving it
+ * out for a cleaner name took the explanation away from the readers who most
+ * needed it. It is not wired here because the control is opaque: some rows pass
+ * a bare input, others a wrapper holding the input plus its unit, and cloning
+ * would land the attribute on whichever happened to be outermost.
  */
 export function SettingRow({ label, htmlFor, hint, disabled = false, children }: {
     label: string
@@ -265,7 +294,12 @@ export function SettingRow({ label, htmlFor, hint, disabled = false, children }:
                     <span className={words}>{label}</span>
                 )}
                 {hint != null && (
-                    <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">{hint}</p>
+                    <p
+                        id={htmlFor != null ? hintIdFor(htmlFor) : undefined}
+                        className="mt-0.5 text-[11px] text-ink-muted leading-snug"
+                    >
+                        {hint}
+                    </p>
                 )}
             </div>
             <div className="shrink-0 ml-auto">{children}</div>
@@ -298,7 +332,9 @@ export function Advanced({ stage, open, onToggle, children }: {
                 type="button"
                 onClick={onToggle}
                 aria-expanded={open}
-                aria-controls={id}
+                // Only while there IS a panel: pointing at an id that is not in
+                // the document is a dangling reference, not a hint.
+                aria-controls={open ? id : undefined}
                 aria-label={`Advanced ${STAGES[stage].name} settings`}
                 className={cn(
                     'flex items-center gap-1 -ml-0.5 py-2 rounded',

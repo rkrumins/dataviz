@@ -97,6 +97,14 @@ export const DETECTORS: { key: string; label: string; hint: string }[] = [
     },
 ]
 
+/** The id a ``SettingRow`` gives its hint, so the control in that row can point
+ *  at it with ``aria-describedby``. One definition rather than a suffix spelled
+ *  out at each call site, and it lives here because ``StageRow`` exports only
+ *  components — a lone function beside them breaks fast refresh. */
+export function hintIdFor(htmlFor: string): string {
+    return `${htmlFor}-hint`
+}
+
 interface PolicyLike {
     enabled?: boolean | null
     detectors?: string[] | null

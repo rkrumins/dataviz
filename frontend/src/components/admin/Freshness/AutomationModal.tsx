@@ -53,7 +53,7 @@ import { useToast } from '@/components/ui/toast'
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
 import { aggregationService, type AggregationCadence } from '@/services/aggregationService'
 import type { FreshnessSummary } from '@/services/freshnessService'
-import { DETECTORS, automationWarnings } from './automationCopy'
+import { DETECTORS, automationWarnings, hintIdFor } from './automationCopy'
 import { Advanced, PipelineRail, SettingRow, StageRow } from './StageRow'
 import { lastPassBrief, pickLastPassRun } from './reconcileHealth'
 import { useReconcileNow, useReconciliation, useSetReconciliationPolicy } from './useFreshness'
@@ -143,16 +143,50 @@ function Ledger({ children }: { children: React.ReactNode }) {
  * It is a second portalled dialog, which is normally how this codebase has
  * frozen itself; the sanctioned shape avoids it by having NO exit animation
  * and no <AnimatePresence> of its own (``if (!open) return null``), so nothing
- * of it can be stranded over the page. Focus moves to the safe choice.
+ * of it can be stranded over the page.
+ *
+ * It also traps Tab, which the shape it borrows from does not. That wizard's
+ * parent has no focus trap at all, so its confirm could be as loose as it liked;
+ * pairing the same dialog with ``useModalA11y`` created a new interaction —
+ * Shift+Tab reached Save, Tab from Save cycled back into the form, and a
+ * keyboard user could edit fields and SAVE while being asked whether to discard
+ * them. The listener is registered in CAPTURE so it runs before the parent's,
+ * and it pulls focus back in if it ever lands outside.
  */
 function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
     open: boolean
     onCancel: () => void
     onConfirm: () => void
 }) {
+    const panelRef = useRef<HTMLDivElement>(null)
     const keepRef = useRef<HTMLButtonElement>(null)
+
     useEffect(() => {
-        if (open) keepRef.current?.focus()
+        if (!open) return
+        keepRef.current?.focus()
+
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key !== 'Tab' || !panelRef.current) return
+            const stops = panelRef.current.querySelectorAll<HTMLElement>('button:not([disabled])')
+            if (stops.length === 0) return
+            const first = stops[0]
+            const last = stops[stops.length - 1]
+            const active = document.activeElement
+
+            if (!panelRef.current.contains(active)) {
+                e.preventDefault()
+                first.focus()
+            } else if (e.shiftKey && active === first) {
+                e.preventDefault()
+                last.focus()
+            } else if (!e.shiftKey && active === last) {
+                e.preventDefault()
+                first.focus()
+            }
+        }
+
+        document.addEventListener('keydown', onKeyDown, true)
+        return () => document.removeEventListener('keydown', onKeyDown, true)
     }, [open])
 
     if (!open) return null
@@ -162,6 +196,7 @@ function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
             <Backdrop open onClick={onCancel} zClassName="z-[120]" className="bg-black/50" />
             <div className="fixed inset-0 z-[120] flex items-center justify-center px-4 pointer-events-none">
                 <motion.div
+                    ref={panelRef}
                     role="alertdialog"
                     aria-modal="true"
                     aria-labelledby="automation-discard-title"
@@ -278,17 +313,30 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
     // so a dismissal can never read a stale flag.
     const dirtyRef = useRef(dirty)
     useEffect(() => { dirtyRef.current = dirty }, [dirty])
+    const confirmRef = useRef(showCloseConfirm)
+    useEffect(() => { confirmRef.current = showCloseConfirm }, [showCloseConfirm])
+
     /**
      * Escape, the backdrop and the × are dismissal gestures, not decisions:
      * putting a modal in front of this form gave it two brand-new ways to throw
      * away work that the inline panel it replaced did not have. They ask first
      * once something has been typed, and pass straight through when nothing has.
      *
+     * With the prompt already up, a dismissal means "back out of the prompt".
+     * Escape summons it, so Escape is the key a reader will press to leave it —
+     * and without this branch that press set ``showCloseConfirm`` to the value
+     * it already held, React bailed out of the render, and the guard answered
+     * the key that raised it with silence.
+     *
      * Cancel is deliberately NOT routed here. It is a labelled button that says
      * what it does, and confirming an explicit discard is the kind of politeness
      * that trains people to click through dialogs.
      */
     const requestClose = useCallback(() => {
+        if (confirmRef.current) {
+            setShowCloseConfirm(false)
+            return
+        }
         if (dirtyRef.current) {
             setShowCloseConfirm(true)
             return
@@ -297,6 +345,20 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
     }, [onClose])
 
     const dialogRef = useModalA11y(open, requestClose)
+
+    /**
+     * Every way out of the prompt — Keep editing, Escape, its backdrop — unmounts
+     * the button holding focus, so focus falls to <body>. ``useModalA11y``'s trap
+     * only engages when the active element is the panel or one of its end stops,
+     * so from <body> it never engages at all and the next Tab walks into the page
+     * behind the modal. Handled here rather than in each dismissal, because there
+     * are three of them and a fourth would forget.
+     */
+    const wasConfirming = useRef(false)
+    useEffect(() => {
+        if (wasConfirming.current && !showCloseConfirm && open) dialogRef.current?.focus()
+        wasConfirming.current = showCloseConfirm
+    }, [showCloseConfirm, open, dialogRef])
 
     useEffect(() => {
         if (open) return
@@ -481,11 +543,17 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                 child — nested, its onClick never receives the click. This pair
                 is the house fix for the StrictMode click-shield. */}
             <Backdrop open={open} onClick={requestClose} zClassName="z-[60]" className="bg-black/50" />
-            {/* The panel DOES animate out — it is the wrapper that must never be
-                strandable, and that wrapper is pointer-events-none. */}
-            <AnimatePresence>
-                {open && (
-                    <div className="fixed inset-0 z-[61] flex items-start sm:items-center justify-center p-3 sm:p-4 pointer-events-none">
+            {/* The panel animates out; the ``fixed inset-0`` wrapper is OUTSIDE the
+                presence tree, exactly as AssetOnboardingWizard has it, so no exit
+                can ever leave a full-viewport node behind. That is not a live bug in
+                framer-motion 11, but if one ever stranded, both ways out are already
+                gone by then — the Backdrop is opacity-0/pointer-events-none and the
+                Escape listener was torn down at ``open=false`` — leaving a visible,
+                pointer-events-auto, unclosable panel. This repo has shipped that bug
+                three times; keeping the wrapper out of the tree costs nothing. */}
+            <div className="fixed inset-0 z-[61] flex items-start sm:items-center justify-center p-3 sm:p-4 pointer-events-none">
+                <AnimatePresence>
+                    {open && (
                         <motion.div
                             ref={dialogRef}
                             tabIndex={-1}
@@ -655,6 +723,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                                 <span className="flex items-center gap-2">
                                                     <input
                                                         id="automation-shrink"
+                                                        aria-describedby={hintIdFor('automation-shrink')}
                                                         type="number" min={0} max={MAX_SHRINK_PCT} step={1}
                                                         value={shrinkPct}
                                                         disabled={!isAdmin}
@@ -705,6 +774,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                                         >
                                                             <input
                                                                 id={`automation-detector-${d.key}`}
+                                                                aria-describedby={hintIdFor(`automation-detector-${d.key}`)}
                                                                 type="checkbox"
                                                                 checked={detectors.includes(d.key)}
                                                                 disabled={!isAdmin}
@@ -785,6 +855,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                                 <span className="flex items-center gap-2">
                                                     <input
                                                         id="automation-cap"
+                                                        aria-describedby={hintIdFor('automation-cap')}
                                                         type="number" min={0} max={MAX_CAP} step={1}
                                                         value={cap}
                                                         disabled={!isAdmin}
@@ -867,8 +938,15 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                             <footer className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 px-6 sm:px-8 py-5 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] shrink-0">
                                 {isAdmin ? (
                                     <>
-                                        {/* One line, not two competing ones. */}
-                                        <p className="mr-auto text-[12px] text-ink-muted tabular-nums hidden sm:block">
+                                        {/* One line, not two competing ones — and
+                                            shown at every width. It carries the
+                                            modal's only live consequence figure,
+                                            which the two lines it replaced did not
+                                            both do; inheriting the `sm:` gate from
+                                            the one that was merely a reassurance
+                                            hid the number on a phone. The footer
+                                            wraps, so it takes its own row there. */}
+                                        <p className="mr-auto text-[12px] text-ink-muted tabular-nums">
                                             {footerNote}
                                         </p>
                                         {/* Cancel is a labelled button that says what it
@@ -917,9 +995,9 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                             </footer>
                         )}
                         </motion.div>
-                    </div>
-                )}
-            </AnimatePresence>
+                    )}
+                </AnimatePresence>
+            </div>
 
             <ConfirmCloseDialog
                 open={showCloseConfirm}

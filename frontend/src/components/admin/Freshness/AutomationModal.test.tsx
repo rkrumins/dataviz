@@ -306,9 +306,13 @@ describe('AutomationModal', () => {
         expect(onClose).not.toHaveBeenCalled()
         expect(screen.getByRole('alertdialog')).toHaveTextContent(/unsaved changes will be lost/i)
 
-        // Keep editing puts the form back exactly as it was, edit included.
+        // Keep editing puts the form back exactly as it was, edit included —
+        // and hands focus back to the panel. Left on <body>, useModalA11y's
+        // trap never engages again (it only acts from the panel or an end
+        // stop), so the next Tab walks into the page behind the modal.
         await userEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
         expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+        expect(document.activeElement).toBe(screen.getByRole('dialog'))
         expect(screen.getByLabelText('At most, each check')).toHaveValue(5)
 
         // And the × asks too — it is a dismissal gesture, not a decision.
@@ -317,6 +321,78 @@ describe('AutomationModal', () => {
 
         await userEvent.click(screen.getByRole('button', { name: 'Discard' }))
         expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('Escape backs out of the discard prompt it just raised', async () => {
+        // The prompt is summoned BY Escape, so Escape is the key a reader will
+        // reach for to leave it. The parent's document listener is still live
+        // while the prompt is up, so that press routed to `requestClose` and
+        // set `showCloseConfirm` to the value it already held — React bailed
+        // out of the render and the guard answered the key that raised it with
+        // silence.
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        const onClose = vi.fn()
+        wrap(<AutomationModal open onClose={onClose} isAdmin summary={null} />)
+
+        await openAdvanced('Act')
+        await userEvent.type(await screen.findByLabelText('At most, each check'), '5')
+        await userEvent.keyboard('{Escape}')
+        expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+
+        await userEvent.keyboard('{Escape}')
+
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+        // Backing out of the prompt is not closing the modal, and the edit the
+        // whole exchange was about is still there.
+        expect(onClose).not.toHaveBeenCalled()
+        expect(screen.getByLabelText('At most, each check')).toHaveValue(5)
+    })
+
+    it('the discard prompt holds the keyboard, so the form behind it cannot be saved', async () => {
+        // Borrowing ProviderOnboardingWizard's confirm shape was right, but that
+        // wizard's parent has no focus trap; pairing it with useModalA11y made a
+        // NEW interaction, where Shift+Tab reached Save and a keyboard user
+        // could commit the very changes they were being asked about.
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
+
+        await openAdvanced('Act')
+        await userEvent.type(await screen.findByLabelText('At most, each check'), '5')
+        await userEvent.keyboard('{Escape}')
+
+        const keep = screen.getByRole('button', { name: 'Keep editing' })
+        const discard = screen.getByRole('button', { name: 'Discard' })
+        expect(document.activeElement).toBe(keep)
+
+        await userEvent.tab({ shift: true })
+        expect(document.activeElement).toBe(discard)
+
+        await userEvent.tab()
+        expect(document.activeElement).toBe(keep)
+    })
+
+    it('a detector explains itself to a screen reader, not only on screen', async () => {
+        // The hint used to sit INSIDE the <label>, so it reached the accessible
+        // name. Moving it out for a cleaner name silently left screen-reader
+        // users with "Rollups shrank" and no explanation at all.
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
+
+        await openAdvanced('Check')
+
+        expect(await screen.findByLabelText('Rollups shrank'))
+            .toHaveAccessibleDescription(/far fewer rollups than the last build produced/i)
+    })
+
+    it('never tells a reader who cannot see Detect that it is feeding Check', async () => {
+        // `starvedIntoCheck` is false for a non-admin — correctly, since we must
+        // not claim the probe is off. But that made the first seam read
+        // `feeding` to exactly the reader the pill beside it reads `hidden` to.
+        wrap(<AutomationModal open onClose={() => {}} isAdmin={false} summary={null} />)
+
+        await screen.findByRole('heading', { name: 'Detect' })
+        // The seam into Act is still knowable, so exactly one caption remains.
+        expect(screen.getAllByText('feeding')).toHaveLength(1)
     })
 })
 
