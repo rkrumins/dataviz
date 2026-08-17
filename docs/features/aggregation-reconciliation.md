@@ -283,6 +283,11 @@ source per hour — with tallies by reason and by skip code, trimmed to 30 days.
 | `POST /api/v1/admin/freshness/reconcile-now` `{dryRun, dataSourceIds?}` | `system:admin` | proxy |
 | `PATCH /api/v1/admin/data-sources/{id}/freshness-settings` | `ds:manage` | existing |
 
+External systems that want to *push* a change signal rather than wait for the
+probe to find it should read
+[Telling us an external data source changed](external-change-notification.md),
+which documents the supported paths and the constraints on each.
+
 `activity` defaults to the last 24 hours (`since=24h`, or an ISO timestamp).
 Each row is a finding from `reconcile_runs.detail.findings`, joined to
 `refresh_events` by `run_id`, so a rebuilt source carries its `jobId` and a
@@ -305,7 +310,7 @@ collapsible footnote under cache tiles.
 
 The **Integrity Pulse** is the signature: Watching / Detecting only, last and
 next check, drifting count, sources that need a person (`suspended`), last-pass
-tallies, Check now / Preview / Cadence. The whole card goes amber when sweeps
+tallies, Check now / Preview / Automation. The whole card goes amber when sweeps
 have stopped (last run older than three check intervals). A recon fetch error
 renders; it must not look healthy.
 
@@ -347,12 +352,96 @@ from a reconciliation job, a data-source profile, a bell, or a copied address
 lands on that source's detail instead of an unfiltered fleet table.
 
 Ingestion → Freshness: Integrity Pulse + overnight blotter, a "Drifting" stat
-tile and filter facet, a per-row verdict badge with its reason, a Reconciliation
-panel in the source drawer (integrity meter, history sparkline, per-source
-toggle, check-frequency override, last-checked/last-reconciled/why), and the
-policy controls inside the existing **Cadence & reconciliation** dialog. The
-verdict also appears on the data-source profile with a link through to
-`?fds=<this source>`.
+tile and filter facet, a per-row verdict badge with its reason, the per-source
+Detect/Check/Act panel in the source drawer, and the global policy controls
+inside the **Automation** modal. The verdict also appears on the data-source
+profile with a link through to `?fds=<this source>`.
+
+### One vocabulary: ① Detect → ② Check → ③ Act
+
+Automation is a chain, and its characteristic failure is a stage being *starved
+by the one before it*. Turning Detect off does not disable Check — it silently
+makes Check's interval meaningless, because Check can only ever be as fresh as
+the evidence Detect produced. The three stages are named once and used
+everywhere: the Automation modal, the source drawer, the row chips and the run
+history. Each name appears exactly once per surface, so reusing one elsewhere
+would break the signposting.
+
+| Stage | What it does | What it costs | Knob |
+|---|---|---|---|
+| ① **Detect** | Watches each source for data changed by systems outside this app. Reads stored counts, never the data itself. | O(1) counter reads — see [The probe](#the-probe) | `probeEnabled`, `probeIntervalSecs` |
+| ② **Check** | Decides whether the rolled-up lineage still matches the data. | Pure database work; never touches the graph | `reconcileEnabled`, `reconcileCheckIntervalSecs`, `reconcileShrinkTolerancePct`, `reconcileDetectors` |
+| ③ **Act** | Rebuilds the rolled-up lineage when it no longer matches. | Minutes of graph work — capped on purpose | `reconcileMaxActionsPerRun`, `rebuildMinIntervalSecs`, `pausedUntil` |
+
+The detectors belong to **Check**, not Act: they decide what counts as a
+finding, which is Check's job, while the cap decides how many rebuilds follow,
+which is Act's.
+
+### The Automation modal
+
+Opened from the Integrity Pulse's *Automation* button (`system:admin`). Stages
+stack as full-width rows on a continuous spine, so reading order matches run
+order. The spine is the signature, and it is stateful rather than decorative:
+
+- **feeding** — solid, in the downstream stage's accent
+- **starved** — dashed, amber, captioned `starved`, and *everything downstream
+  desaturates*. Turning Detect off visibly greys the rest of the pipeline.
+
+That last behaviour is the point: the operator sees the consequence instead of
+reading a warning they may skip. The warning text still appears — belt and
+braces — but the diagram is the primary signal. State is never carried by colour
+alone (the dash pattern and the caption carry it too), and under
+`prefers-reduced-motion` the transition is instant.
+
+It must not read as a wizard: no checkmarks, no "step 1 of 3", no completion
+semantics. All three stages are simultaneously live and each carries a live
+stat. The numerals encode dependency order, not progress.
+
+Each stage has one `Advanced` disclosure, closed by default — nothing is
+removed, it is ranked. Detect has none (it genuinely has one setting; an empty
+Advanced there would be symmetry for its own sake). Env-only values
+(`statsMaxAgeSecs`, the breaker cap) render as read-only context clearly marked
+as deploy-set, never as disabled inputs pretending to be editable.
+
+Closing with unsaved edits — `Esc`, the close button, or the backdrop — raises a
+discard confirmation rather than silently dropping the work.
+
+> **Non-admins currently cannot reach this modal from the UI at all.** Both
+> entry points are admin-gated, so the read-only rendering inside it is only
+> reachable via `?automation=open`. `GET /aggregation/settings` is
+> `system:admin`-gated, so a non-admin cannot read the cadence even then: the
+> modal shows the stage copy and the reconciliation policy and says "Only
+> platform admins can see this cadence" for the rest, rather than inventing
+> values.
+
+### The source drawer, and the snooze
+
+The drawer's reconciliation panel follows the same ①②③ order: Detect (probe
+toggle + interval override), Check (reconcile toggle + check-interval override,
+last-checked, why), Act (rebuild cadence, last-reconciled, and the snooze).
+
+**A snooze is a hold, never a guard.** `paused_until` refuses *dispatch* only —
+the source is still evaluated every check and still records its finding and
+evidence, so the cockpit can show what is wrong with something it has been told
+to leave alone. This is why the snooze sits in ③ Act: it gates the rebuild, not
+the detection. An unparseable or past stamp is treated as expired, so a corrupt
+value can never pause a source forever.
+
+### Row chips
+
+`automationChip` renders at most one chip per row, in strict precedence:
+**Needs a person** (breaker tripped) → **Automation off** (deliberate opt-out) →
+**Paused** (snooze, and only while it is holding back a real finding). Absence
+is the signal — a healthy automated source shows nothing rather than repeating
+"everything is fine" on every row.
+
+Precedence is not cosmetic. "Automation off" outranks "Paused" because a
+drifting, paused, opted-out source resumes on *nothing* when the snooze lapses,
+and showing "Paused" there would imply otherwise.
+
+There is deliberately **no cooldown chip**: `FreshnessBadges` already renders
+"Next rebuild in Xm" from the same `cooldownUntil` on the same row, so a chip
+would be the same fact twice, one column apart.
 
 Every drift state ships an icon **and** a written label. Light-mode `red-600`
 and `amber-600` measure ΔE 14.4 apart to normal vision — below the 15 floor
