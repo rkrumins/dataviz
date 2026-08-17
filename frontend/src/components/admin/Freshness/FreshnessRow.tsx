@@ -20,7 +20,7 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Link } from 'react-router-dom'
 import {
     Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Clock, Database, Eraser, GitBranch, Loader2,
-    Minus, MoreHorizontal, RefreshCw, RotateCcw, Sparkles, StopCircle,
+    Minus, MoreHorizontal, PauseCircle, RefreshCw, RotateCcw, Sparkles, StopCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -31,9 +31,9 @@ import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { PHASE_LABELS, PhaseStepper, jobHistoryPath, phaseLabel } from '../job-history/shared'
 import { freshnessState, isDrifting, isPlatformMastered, isReconcileSuspended } from './freshnessTriage'
-import type { FreshnessState } from './freshnessTriage'
+import type { FreshnessState, StatusFacet } from './freshnessTriage'
 import {
-    AutoReconcileOffBadge, DriftStateBadge,
+    AutoReconcileOffBadge, DRIFT_SPEC, DriftStateBadge,
 } from './DriftStateBadge'
 import { failureBadgeLabel, failureBadgeWhy, relatedFailureCount } from './failureGuidance'
 import { SelectionCheckbox } from './SelectionCheckbox'
@@ -65,6 +65,46 @@ export function timeUntil(iso?: string | null): string | null {
     const hours = Math.round(mins / 60)
     if (hours < 24) return `${hours}h`
     return `${Math.round(hours / 24)}d`
+}
+
+/** The three reconciliation fields `automationChip` reads off a fleet row —
+ *  a `Pick`, not the full row type, so the decision logic is testable with a
+ *  bare literal (see FreshnessRow.test.tsx) rather than a fabricated row. */
+type AutomationRow = Pick<FreshnessRowData, 'driftState' | 'autoReconcile' | 'pausedUntil'>
+
+/**
+ * The automation-state chip for a fleet row. Absence is the signal: a
+ * healthy, automated source (in sync, not paused) returns null rather than
+ * repeating "everything is fine" on every row — a chip appears only for a
+ * state worth interrupting the scan for.
+ *
+ * Precedence: the breaker (suspended) always wins, even over an active
+ * snooze — a person is needed regardless of whether the source is also
+ * paused. A snooze only surfaces while it is actually holding back a real
+ * drift verdict; pausing a source that never drifts looks identical to
+ * automation working normally, so it stays as quiet as any healthy row. An
+ * opted-out source is reported unconditionally — that is a standing
+ * configuration fact, not a transient condition, so it does not hide just
+ * because the source happens to be in sync right now.
+ */
+export function automationChip(row: AutomationRow): { label: string; tone: string; facet: StatusFacet } | null {
+    const neutralTone = 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20'
+
+    if (row.driftState === 'suspended') {
+        return { label: 'Needs a person', tone: DRIFT_SPEC.suspended.tone, facet: 'suspended' }
+    }
+    const drifting = row.driftState === 'drifting' || row.driftState === 'overlayMissing'
+    if (drifting && timeUntil(row.pausedUntil)) {
+        return { label: 'Paused', tone: neutralTone, facet: 'drifting' }
+    }
+    if (row.autoReconcile === false) {
+        // No StatusFacet filters to "automation off" sources specifically,
+        // so this resolves to '' (the existing "all" facet) — the render
+        // site treats an empty facet as non-interactive rather than wiring
+        // up a click that would silently just clear the status filter.
+        return { label: 'Automation off', tone: neutralTone, facet: '' }
+    }
+    return null
 }
 
 function humanizeReason(reason: string): string {
@@ -124,11 +164,11 @@ export function CacheStatusPill({ cached }: { cached: boolean }) {
         )
 }
 
-const ACTIVITY_PILL: Record<LastActivityKind, { tone: string; Icon: typeof CheckCircle2 }> = {
-    in_step: {
-        tone: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
-        Icon: CheckCircle2,
-    },
+// `in_step` (a routine "checked, nothing to do" outcome) is deliberately
+// absent — it renders as quiet muted text instead of a pill (see the Last
+// activity cell below), so it never competes for attention with Failed or
+// Queued the way an identically-styled pill did.
+const ACTIVITY_PILL: Record<Exclude<LastActivityKind, 'in_step'>, { tone: string; Icon: typeof CheckCircle2 }> = {
     verdict: {
         tone: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
         Icon: AlertTriangle,
@@ -152,7 +192,7 @@ const ACTIVITY_PILL: Record<LastActivityKind, { tone: string; Icon: typeof Check
 }
 
 export function LastActivityPill({ kind, label, originLabel }: {
-    kind: LastActivityKind
+    kind: Exclude<LastActivityKind, 'in_step'>
     label: string
     originLabel?: string | null
 }) {
@@ -338,6 +378,9 @@ interface Props {
     /** All visible rows — used for "N more like this" related-failure links. */
     peerRows?: FreshnessRowData[]
     onFilterFailure?: (category: string) => void
+    /** Lets the automation chip act as a filter, same as the stat band's
+     *  tiles — mirrors `onFilterFailure`'s pattern for the other facet axis. */
+    onFilterStatus?: (facet: StatusFacet) => void
     selected?: boolean
     onToggleSelect?: (dsId: string) => void
     selectable?: boolean
@@ -409,7 +452,7 @@ export function overflowActions(state: FreshnessState): RowAction[] {
 
 export function FreshnessRow({
     row, job, colSpan, workspaceName, onOpenDrawer, onRefresh, busy, expanded,
-    onToggleExpand, onCancelJob, peerRows, onFilterFailure, selected,
+    onToggleExpand, onCancelJob, peerRows, onFilterFailure, onFilterStatus, selected,
     onToggleSelect, selectable,
 }: Props) {
     const state = freshnessState(row)
@@ -512,24 +555,70 @@ export function FreshnessRow({
 
             {/* Last activity */}
             <td className="px-3 py-2 align-top">
-                {(() => {
-                    const activity = resolveLastActivity(row)
-                    if (!activity) return <EmptyCell />
-                    return (
-                        <div className="flex flex-col gap-1">
-                            <LastActivityPill
-                                kind={activity.kind}
-                                label={activity.label}
-                                originLabel={activity.originLabel}
-                            />
-                            <TimeStamp
-                                at={activity.at}
-                                prefix={activity.source === 'check' ? 'checked' : 'updated'}
-                                icon={Activity}
-                            />
-                        </div>
-                    )
-                })()}
+                <div className="flex flex-col gap-1 items-start">
+                    {(() => {
+                        const activity = resolveLastActivity(row)
+                        if (!activity) return <EmptyCell />
+                        // The routine "checked, nothing to do" outcome loses the
+                        // pill entirely — border/fill/uppercase are exactly what
+                        // made it compete with Failed/Queued for attention.
+                        if (activity.kind === 'in_step') {
+                            return (
+                                <TimeStamp
+                                    at={activity.at}
+                                    prefix="checked"
+                                    icon={CheckCircle2}
+                                    colorByAge={false}
+                                />
+                            )
+                        }
+                        return (
+                            <>
+                                <LastActivityPill
+                                    kind={activity.kind}
+                                    label={activity.label}
+                                    originLabel={activity.originLabel}
+                                />
+                                <TimeStamp
+                                    at={activity.at}
+                                    prefix={activity.source === 'check' ? 'checked' : 'updated'}
+                                    icon={Activity}
+                                />
+                            </>
+                        )
+                    })()}
+                    {(() => {
+                        const chip = automationChip(row)
+                        if (!chip) return null
+                        const Icon = chip.facet === 'suspended' ? AlertTriangle
+                            : chip.facet === 'drifting' ? PauseCircle
+                            : Minus
+                        const title = chip.facet === 'suspended' ? DRIFT_SPEC.suspended.title
+                            : chip.facet === 'drifting' ? 'An operator paused automatic reconciliation for this source.'
+                            : 'Automatic reconciliation is turned off for this source. Drift is still detected and shown, but nothing is rebuilt automatically.'
+                        const chipClass = cn(
+                            'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold',
+                            chip.tone,
+                        )
+                        const content = <><Icon className="w-3 h-3 shrink-0" />{chip.label}</>
+                        // Only 'suspended'/'drifting' have a real facet to filter
+                        // to — 'Automation off' resolves to '' (see automationChip)
+                        // and stays a plain label rather than a click that would
+                        // just clear the status filter.
+                        return chip.facet && onFilterStatus ? (
+                            <button
+                                type="button"
+                                title={title}
+                                onClick={() => onFilterStatus(chip.facet)}
+                                className={cn(chipClass, 'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50')}
+                            >
+                                {content}
+                            </button>
+                        ) : (
+                            <span title={title} className={chipClass}>{content}</span>
+                        )
+                    })()}
+                </div>
             </td>
 
             {/* Actions */}

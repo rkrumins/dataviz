@@ -485,6 +485,7 @@ export function Freshness() {
                                                     const facet = asFailureCategory(cat)
                                                     if (facet) patchParams({ ffail: facet, fstatus: 'needsAttention' })
                                                 }}
+                                                onFilterStatus={(facet) => patchParams({ fstatus: facet || null })}
                                                 selectable
                                                 selected={selectedIds.includes(row.dataSourceId)}
                                                 onToggleSelect={toggleSelect}

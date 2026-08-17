@@ -81,6 +81,10 @@ export interface FreshnessRow {
     driftState?: DriftStateValue | null
     /** Resolved per-source → global → env. */
     autoReconcile?: boolean | null
+    /** Operator snooze: an ISO instant until which the sweep's action is
+     *  held. The row's driftState/finding still updates while this is in
+     *  the future — only Act is suppressed, not Detect/Check. */
+    pausedUntil?: string | null
     lastCheckedAt?: string | null
     lastReconciledAt?: string | null
     lastReconcileReason?: ReconcileReason | string | null
