@@ -389,6 +389,31 @@ class InsightsJobConsumer:
     ) -> None:
         """Persist the per-scope error, then decide retry vs DLQ based
         on XPENDING delivery count."""
+        if isinstance(envelope, ProbeJobEnvelope):
+            # MUST precede the StatsJobEnvelope branch below: ProbeJobEnvelope
+            # subclasses it (the same trap _resolve_timeout_and_bucket guards
+            # against), so without this a failed probe runs the STATS poll's
+            # failure path — stamping last_status="error" and last_polled_at=now
+            # on the polling config. The reconcile sweep reads that status as an
+            # absolute "stats unhealthy" guard, and only a successful counts poll
+            # ever clears it, so a probe could disable drift detection for the
+            # source it was meant to accelerate (and push the poll's own due-time
+            # out by up to a full poll interval).
+            #
+            # A probe owns no polling-config lifecycle — see collector.
+            # probe_counts. It logs and drops; the ProbeScheduler re-enqueues on
+            # its next tick, which is seconds away, and the sweep's own check
+            # interval remains the correctness backstop either way. A DLQ entry
+            # for work that is about to be superseded would be noise.
+            logger.warning(
+                "probe.failure scope=%s error=%s — dropping; the probe "
+                "scheduler retries on its next tick",
+                envelope.scope_key, error[:200],
+            )
+            await self._ack(stream_cfg, msg_id)
+            await release_claim(envelope.scope_key, stream=stream_cfg)
+            return
+
         delivery_count = await self._delivery_count(stream_cfg, msg_id)
         max_attempts = self._config.max_delivery_attempts
 

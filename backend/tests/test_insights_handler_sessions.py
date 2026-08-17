@@ -451,6 +451,54 @@ def test_claim_ttl_scales_with_node_count() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failed_probe_never_writes_the_polling_config(monkeypatch) -> None:
+    """A probe failure must not be recorded as a STATS POLL failure.
+
+    ``record_failure`` sets ``last_status="error"`` (which the reconcile sweep
+    treats as an absolute "stats unhealthy" guard, cleared only by a successful
+    counts poll) and ``last_polled_at=now`` (which defers the poll itself).
+    Probes run ~15x more often than polls and a provider restart fails all of
+    them at once, so without an explicit branch a probe wipes out drift
+    detection for the fleet exactly when it is needed most.
+    """
+    from backend.insights_service.redis_streams import PROBE_STREAM
+    from backend.insights_service.schemas import ProbeJobEnvelope
+
+    recorded: list[tuple] = []
+    released: list[str] = []
+    acked: list[str] = []
+
+    async def fake_record_failure(ds_id, error):
+        recorded.append((ds_id, error))
+
+    async def fake_release(scope_key, stream=None):
+        released.append(scope_key)
+
+    async def fake_ack(_cfg, msg_id):
+        acked.append(msg_id)
+
+    monkeypatch.setattr(worker_mod, "stats_record_failure", fake_record_failure)
+    monkeypatch.setattr(worker_mod, "release_claim", fake_release)
+
+    consumer = worker_mod.InsightsJobConsumer(_config())
+    monkeypatch.setattr(consumer, "_ack", fake_ack)
+
+    await consumer._handle_failure(
+        PROBE_STREAM, "1-1",
+        ProbeJobEnvelope(
+            data_source_id="ds-1", workspace_id="ws-1",
+            enqueued_at=datetime.now(timezone.utc),
+        ),
+        "provider unavailable",
+    )
+
+    assert recorded == [], "a probe failure must not touch the polling config"
+    # Logged and dropped — the scheduler re-enqueues on its next tick.
+    assert acked == ["1-1"]
+    assert released == ["ds-1"]
+
+
+@pytest.mark.asyncio
 async def test_probe_gets_a_short_fixed_timeout_not_the_large_graph_budget():
     """A probe is constant-time work, so it must never inherit the
     size-adaptive poll budget.
