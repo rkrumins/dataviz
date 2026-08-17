@@ -5,13 +5,13 @@
  * The three cards are identical in shape on purpose. The dialog this replaces
  * gave each policy its own box, its own vocabulary and its own units, so a
  * reader could not line them up; here the only thing that changes between ①,
- * ② and ③ is the words.
+ * ② and ③ is the words and one accent.
  */
 import type { ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
 
-import { STAGES } from './automationCopy'
+import { STAGES, STAGE_ACCENT } from './automationCopy'
 
 export function StageCard({ stage, on, muted = false, stat, children }: {
     stage: keyof typeof STAGES
@@ -26,20 +26,31 @@ export function StageCard({ stage, on, muted = false, stat, children }: {
     children?: ReactNode
 }) {
     const s = STAGES[stage]
+    const accent = STAGE_ACCENT[stage]
 
     return (
         <section
             aria-label={s.name}
             className={cn(
-                'flex-1 min-w-0 rounded-xl border px-3 py-2.5',
+                'flex-1 min-w-0 rounded-xl border border-l-2 px-3.5 py-3',
                 on === false
                     ? 'border-glass-border/60 bg-glass-base/20'
                     : 'border-glass-border bg-canvas',
+                // Last, because ``cn`` is tailwind-merge and a whole-border
+                // colour listed after a left-border colour would drop it — and
+                // the accent has to survive the "off" surface, which is the
+                // state the reader most needs to place in the sequence.
+                accent.rule,
             )}
         >
-            <header className="flex items-center gap-2">
-                <span aria-hidden className="text-[13px] text-ink-muted">{s.n}</span>
-                <h4 className="text-[13px] font-semibold text-ink">{s.name}</h4>
+            <header className="flex items-center gap-2.5">
+                <span
+                    aria-hidden
+                    className={cn('text-2xl font-bold tabular-nums leading-none', accent.numeral)}
+                >
+                    {s.n}
+                </span>
+                <h4 className="text-sm font-semibold uppercase tracking-wide text-ink">{s.name}</h4>
                 <span
                     aria-hidden
                     className={cn(
@@ -56,13 +67,21 @@ export function StageCard({ stage, on, muted = false, stat, children }: {
                 </span>
             </header>
 
-            <p className="mt-1 text-[12px] text-ink-secondary leading-snug">{s.means}</p>
-            <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">{s.costs}</p>
+            {/* Starved dims what this stage DELIVERS — its promise and its
+                numbers — and never its controls: they still work, and greying
+                a live control would be the lie the dimming exists to expose. */}
+            <div className={cn(muted && 'opacity-60')}>
+                <p className="mt-1.5 text-[13px] text-ink-secondary leading-snug">{s.means}</p>
+                <p className="mt-1 text-[11px] text-ink-muted leading-snug">{s.costs}</p>
+            </div>
 
-            {children != null && <div className="mt-2.5 space-y-2.5">{children}</div>}
+            {children != null && <div className="mt-3 space-y-3">{children}</div>}
 
             {stat != null && (
-                <p className="mt-2.5 pt-2 border-t border-glass-border/60 text-[11px] text-ink-muted tabular-nums">
+                <p className={cn(
+                    'mt-3 pt-2.5 border-t border-glass-border/60 text-[11px] text-ink-muted tabular-nums',
+                    muted && 'opacity-60',
+                )}>
                     {stat}
                 </p>
             )}

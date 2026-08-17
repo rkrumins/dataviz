@@ -1,8 +1,8 @@
 /**
- * The Automation panel — the three-stage pipeline (① Detect → ② Check → ③ Act)
- * that replaced the cadence modal, plus the vocabulary and contradiction rules
- * it speaks. The save tests came verbatim from CadenceControls' popover block:
- * the panel writes the same two records in the same order.
+ * The Automation modal — the three-stage pipeline (① Detect → ② Check → ③ Act)
+ * that replaced the 448px cadence dialog, plus the vocabulary and contradiction
+ * rules it speaks. The save tests came verbatim from CadenceControls' popover
+ * block: it writes the same two records in the same order.
  */
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -25,7 +25,7 @@ const {
     reconcileNow: vi.fn(),
 }))
 
-/** The reconciliation policy shares the panel and the stored record with the
+/** The reconciliation policy shares the modal and the stored record with the
  *  rebuild cadence, so every cadence test needs it resolvable. */
 const RECON_POLICY = {
     enabled: true, checkIntervalSecs: null, maxActionsPerRun: null,
@@ -58,7 +58,7 @@ vi.mock('@/services/aggregationService', async () => {
     }
 })
 
-import { AutomationPanel } from './AutomationPanel'
+import { AutomationModal } from './AutomationModal'
 
 function wrap(node: React.ReactNode) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -146,9 +146,9 @@ describe('automationWarnings', () => {
     })
 })
 
-describe('AutomationPanel', () => {
+describe('AutomationModal', () => {
     it('renders read-only without system:admin', async () => {
-        wrap(<AutomationPanel open onToggle={() => {}} isAdmin={false} summary={null} />)
+        wrap(<AutomationModal open onClose={() => {}} isAdmin={false} summary={null} />)
 
         expect(await screen.findByText(/Detect/)).toBeInTheDocument()
         expect(screen.getByRole('button', { name: '5m' })).toBeDisabled()
@@ -163,7 +163,7 @@ describe('AutomationPanel', () => {
         // that still says `detectors: []` — one click, every detector off.
         getReconciliation.mockRejectedValue(new Error('nope'))
         getAggregationSettings.mockResolvedValue(SETTINGS)
-        wrap(<AutomationPanel open onToggle={() => {}} isAdmin summary={null} />)
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
 
         // `useReconciliation` sets its own `retry: 1`, which the client-level
         // `retry: false` does not override, so the error state lands one
@@ -176,7 +176,7 @@ describe('AutomationPanel', () => {
 
     it('adopts a policy someone else changed while nothing is being edited', async () => {
         getAggregationSettings.mockResolvedValue(SETTINGS)
-        const { qc } = wrap(<AutomationPanel open onToggle={() => {}} isAdmin summary={null} />)
+        const { qc } = wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
 
         // `detectors: null` seeds every box ticked.
         expect(await screen.findByLabelText(/Rollups went missing/)).toBeChecked()
@@ -191,7 +191,7 @@ describe('AutomationPanel', () => {
 
     it('stops adopting once you edit, and says the settings moved under you', async () => {
         getAggregationSettings.mockResolvedValue(SETTINGS)
-        const { qc } = wrap(<AutomationPanel open onToggle={() => {}} isAdmin summary={null} />)
+        const { qc } = wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
 
         const capBox = await screen.findByLabelText('At most')
         await userEvent.type(capBox, '3')
@@ -209,12 +209,49 @@ describe('AutomationPanel', () => {
             .toHaveTextContent(/changed these settings while you were editing/i)
     })
 
-    it('collapsed, it speaks one sentence and nothing else', async () => {
-        wrap(<AutomationPanel open={false} onToggle={() => {}} isAdmin summary={null} />)
+    it('closed, it puts nothing on the page', () => {
+        wrap(<AutomationModal open={false} onClose={() => {}} isAdmin summary={null} />)
 
-        expect(await screen.findByText(/Checking every 1 hour/)).toBeInTheDocument()
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
         expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
-        expect(screen.queryByRole('button', { name: '5m' })).not.toBeInTheDocument()
+        // The cadence record is admin-only and there is nothing to seed yet.
+        expect(getAggregationSettings).not.toHaveBeenCalled()
+    })
+
+    it('keeps the form when a later poll fails, and says so without taking it away', async () => {
+        // query-core marks a query `status: 'error'` when a BACKGROUND refetch
+        // fails, even though the cached policy is still there. Reading that as
+        // "cannot be read" pulled the whole form — including unsaved typing and
+        // the Save button — behind an alert until the next successful poll.
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        const { qc } = wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
+
+        const capBox = await screen.findByLabelText('At most')
+        await userEvent.type(capBox, '7')
+
+        getReconciliation.mockRejectedValue(new Error('gone'))
+        await repoll(qc)
+
+        // `useReconciliation` sets its own `retry: 1`, so the error state lands
+        // one backoff after the invalidation.
+        expect(await screen.findByText(/could not be refreshed just now/i, {}, { timeout: 4000 }))
+            .toBeInTheDocument()
+        expect(capBox).toHaveValue(7)
+        expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+
+    it('the words beside a switch are a click target, not just decoration', async () => {
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
+
+        const label = await screen.findByText('Watch for changes made outside this app')
+        const toggle = screen.getByRole('switch', { name: /Watch for changes made outside this app/ })
+        expect(toggle).toBeChecked()
+
+        await userEvent.click(label)
+
+        await waitFor(() => expect(toggle).not.toBeChecked())
     })
 })
 
@@ -230,7 +267,7 @@ describe('admin automation save', () => {
             envProbeEnabled: true, envProbeIntervalSecs: 60,
         })
         putAggregationCadence.mockResolvedValue({ tuning: null, cadence: { rebuildMinIntervalSecs: 120, driftAutoRebuild: false } })
-        wrap(<AutomationPanel open onToggle={() => {}} isAdmin summary={null} />)
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
 
         const input = await screen.findByLabelText('Minimum time between rebuilds (custom, seconds)')
         // Seeded straight from the stored 600s — no minutes/seconds arithmetic
@@ -260,7 +297,7 @@ describe('admin automation save', () => {
             envProbeEnabled: false, envProbeIntervalSecs: 60,
         })
         putAggregationCadence.mockResolvedValue({ tuning: null, cadence: null })
-        wrap(<AutomationPanel open onToggle={() => {}} isAdmin summary={null} />)
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
 
         const toggle = await screen.findByLabelText(/Automatically rebuild a source when drift is detected/i)
         await waitFor(() => expect(toggle).not.toBeChecked())
@@ -290,8 +327,12 @@ describe('admin automation save', () => {
             envRebuildMinIntervalSecs: 900, envDriftAutoRebuild: true,
             envProbeEnabled: false, envProbeIntervalSecs: 60,
         })
-        wrap(<AutomationPanel open onToggle={() => {}} isAdmin summary={null} />)
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
 
         expect(await screen.findByText(/only see data as fresh as/i)).toBeInTheDocument()
+        // And shows it: the connector into ② Check goes dashed, amber and
+        // labelled. The word is the half of that state a screenshot-blind
+        // reader still gets — colour is never the only carrier.
+        expect(screen.getByText('starved')).toBeInTheDocument()
     })
 })

@@ -2,8 +2,9 @@
  * Freshness — the Ingestion → Freshness triage cockpit.
  *
  * Overlay integrity briefs the schedule and live verdict; Start here guides
- * attention; a sticky faceted bar (status, provider, workspace, search) is the
- * triage filter; the table groups by provider and orders by severity.
+ * attention; the stat band doubles as the status filter; a sticky faceted bar
+ * (status, provider, workspace, search) refines the fleet; the table groups by
+ * provider and orders by severity.
  *
  * All facet state lives in the URL search params (shared with Ingestion's
  * ``?tab=``), so reload and back/forward restore the view. Provider/workspace
@@ -25,9 +26,10 @@ import { FreshnessRow } from './FreshnessRow'
 import { FreshnessDrawer } from './FreshnessDrawer'
 import { ProviderRefreshDialog } from './ProviderRefreshDialog'
 import { FleetRefreshDialog } from './FleetRefreshDialog'
+import { FreshnessStatBand } from './FreshnessStatBand'
 import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
-import { AutomationPanel } from './AutomationPanel'
+import { AutomationModal } from './AutomationModal'
 import { OverlayIntegrity } from './OverlayIntegrity'
 import { useFleetFreshness, useRefreshSource, FRESHNESS_KEYS } from './useFreshness'
 import { useActiveJobs, ACTIVE_JOBS_KEY } from './useActiveJobs'
@@ -128,13 +130,13 @@ export function Freshness() {
         [patchParams],
     )
 
-    // The Automation panel opens from the URL for the same reason the drawer
+    // The Automation modal opens from the URL for the same reason the drawer
     // does: "here is how the schedule is configured" is a link someone sends.
     const automationOpen = searchParams.get('automation') === 'open'
-    const toggleAutomation = useCallback(
-        () => patchParams({ automation: automationOpen ? null : 'open' }),
-        [patchParams, automationOpen],
-    )
+    const openAutomation = useCallback(() => patchParams({ automation: 'open' }), [patchParams])
+    // Stable: it feeds the modal's focus effect, and a fresh identity on every
+    // render of this page would pull focus back to the dialog mid-keystroke.
+    const closeAutomation = useCallback(() => patchParams({ automation: null }), [patchParams])
 
     // ── Local (non-URL) UI state ──────────────────────────────────────
     const [confirm, setConfirm] = useState<{ dsId: string; scope: RefreshScope; firstBuild?: boolean } | null>(null)
@@ -349,20 +351,13 @@ export function Freshness() {
                 summary={summary}
                 activeFacet={fstatus}
                 onFacet={(facet) => patchParams({ fstatus: facet || null })}
-                onOpenCadence={isSystemAdmin ? () => patchParams({ automation: 'open' }) : undefined}
+                onOpenCadence={isSystemAdmin ? openAutomation : undefined}
                 onReload={() => { void fleet.refetch() }}
                 reloading={fleet.isFetching}
                 onRefreshAll={isSystemAdmin ? () => setFleetDialogOpen(true) : undefined}
                 onOpenSource={setDrawerDsId}
                 window={fwin}
                 onWindowChange={(w) => patchParams({ fwin: w === '24h' ? null : w })}
-            />
-
-            <AutomationPanel
-                open={automationOpen}
-                onToggle={toggleAutomation}
-                isAdmin={isSystemAdmin}
-                summary={summary}
             />
 
             <StartHereStrip
@@ -379,7 +374,14 @@ export function Freshness() {
                 onClear={() => patchParams({ fstatus: null, ffail: null })}
             />
 
-            {/* Sticky faceted filter bar — the triage path (tiles removed). */}
+            {/* Stat band — scrolls away; the tiles are the status filter. */}
+            <FreshnessStatBand
+                summary={summary}
+                activeFacet={fstatus}
+                onToggle={(facet) => patchParams({ fstatus: facet || null })}
+            />
+
+            {/* Sticky faceted filter bar */}
             <div ref={stickyRef} className="sticky top-0 z-20 -mt-1 bg-canvas border-b border-glass-border py-2.5">
                 <FreshnessFilterBar
                     providerOptions={providerOptions}
@@ -551,6 +553,13 @@ export function Freshness() {
                 fleetTotal={summary?.total ?? null}
                 isOpen={fleetDialogOpen}
                 onClose={() => setFleetDialogOpen(false)}
+            />
+
+            <AutomationModal
+                open={automationOpen}
+                onClose={closeAutomation}
+                isAdmin={isSystemAdmin}
+                summary={summary}
             />
         </div>
     )

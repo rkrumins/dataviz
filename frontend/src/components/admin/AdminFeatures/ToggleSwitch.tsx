@@ -11,12 +11,16 @@ import { cn } from '@/lib/utils'
  * would be trading a real accessibility guarantee for a cosmetic one.
  */
 export function ToggleSwitch({
+  id,
   checked,
   onChange,
   disabled,
   size = 'md',
   'aria-label': ariaLabel,
 }: {
+  /** Lets a caller point a <label htmlFor> at the switch, so the words next to
+   *  it are a click target too — a button is a labelable element. */
+  id?: string
   checked: boolean
   onChange: (checked: boolean) => void
   disabled?: boolean
@@ -27,6 +31,7 @@ export function ToggleSwitch({
 
   return (
     <button
+      id={id}
       type="button"
       role="switch"
       aria-checked={checked}

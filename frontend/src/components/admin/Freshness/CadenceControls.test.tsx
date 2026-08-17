@@ -3,8 +3,8 @@
  * the RESOLVED value + where that value came from, and its editor fires the
  * freshness-settings PATCH.
  *
- * The global editor moved out of a modal and into the page; its tests live in
- * AutomationPanel.test.tsx.
+ * The global editor is the Automation modal now; its tests live in
+ * AutomationModal.test.tsx.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -14,13 +14,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const {
     getSourceDoc, patchFreshnessSettings, getAggregationSettings,
-    putAggregationCadence, listJobsGlobal, permissionFn,
+    listJobsGlobal, permissionFn,
     getReconciliation, putReconciliation, reconcileNow,
 } = vi.hoisted(() => ({
     getSourceDoc: vi.fn(),
     patchFreshnessSettings: vi.fn(),
     getAggregationSettings: vi.fn(),
-    putAggregationCadence: vi.fn(),
     listJobsGlobal: vi.fn(),
     permissionFn: vi.fn(),
     getReconciliation: vi.fn(),
@@ -58,7 +57,7 @@ vi.mock('@/services/aggregationService', async () => {
     const actual = await vi.importActual<typeof import('@/services/aggregationService')>('@/services/aggregationService')
     return {
         ...actual,
-        aggregationService: { ...actual.aggregationService, getAggregationSettings, putAggregationCadence, listJobsGlobal },
+        aggregationService: { ...actual.aggregationService, getAggregationSettings, listJobsGlobal },
     }
 })
 
