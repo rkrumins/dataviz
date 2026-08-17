@@ -250,3 +250,31 @@ describe('drawer snooze', () => {
         ))
     })
 })
+
+describe('drawer keyboard + live probe', () => {
+    it('Probe now re-probes on every click, not only the first', async () => {
+        getSourceDoc.mockResolvedValue(makeDoc({ liveFingerprint: 'fp' }))
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
+
+        await userEvent.click(await screen.findByRole('button', { name: /probe now/i }))
+        await waitFor(() => expect(getSourceDoc).toHaveBeenCalledWith('ds-1', true))
+        const probes = () => getSourceDoc.mock.calls.filter(c => c[1] === true).length
+        const before = probes()
+
+        // The second click used to be a state no-op: probe was already true,
+        // the query key already cached, and a failed probe had no retry.
+        await userEvent.click(await screen.findByRole('button', { name: /probe now/i }))
+        await waitFor(() => expect(probes()).toBe(before + 1))
+    })
+
+    it('Escape closes the drawer and focus starts inside it', async () => {
+        const onClose = vi.fn()
+        getSourceDoc.mockResolvedValue(makeDoc())
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={onClose} />)
+
+        const dialog = await screen.findByRole('dialog')
+        await waitFor(() => expect(dialog).toHaveFocus())
+        await userEvent.keyboard('{Escape}')
+        expect(onClose).toHaveBeenCalledTimes(1)
+    })
+})

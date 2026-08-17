@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from .reconcile import Observation, Verdict, evaluate
 
@@ -63,6 +63,10 @@ _SCAN_CAP = 200
 # Operator Check now may live-refresh this many sources at once.
 _LIVE_OBS_CONCURRENCY = 8
 _LIVE_OBS_TIMEOUT_S = 5.0
+# Whole-pass ceiling for an operator's Check now / Preview: a 200-source
+# fleet of slow graphs must not hold the HTTP request for minutes. Sources
+# not reached in time evaluate from their stored counts (named skip paths).
+_LIVE_OBS_TOTAL_BUDGET_S = 30.0
 
 # Cold-start guard, separate from the general action cap. A fresh install
 # with 200 never-aggregated sources drains at one first build per sweep
@@ -119,12 +123,17 @@ class _Action:
 
 
 # Skips that mean "we looked and we are done with this source until the
-# next interval / stats change". Holds and deferrals must NOT advance
-# last_reconcile_checked_at or a known finding waits up to an hour.
+# next interval / stats change". Only these adopt last_seen_counts_digest:
+# stamping a hold's digest would silence the tripwire on numbers nobody has
+# acted on. Every evaluated source still advances last_reconcile_checked_at
+# — it is the fairness clock for the oldest-first scan window; a hold that
+# froze it pinned itself to the head of the window and, past _SCAN_CAP held
+# sources, starved the rest of the fleet out of the sweep entirely.
 _TERMINAL_SKIPS = frozenset({"in_sync", "platform_mastered"})
 
 # Unresolved findings stay due every tick until an action or in_sync —
-# heals rows stamped by the old "advance last_checked on hold" bug.
+# this clause, not a frozen checked_at stamp, is what keeps a held or
+# deferred finding due while the fairness clock advances.
 _UNRESOLVED_DRIFT = frozenset({"drifting", "overlayMissing", "neverBuilt"})
 
 
@@ -265,6 +274,12 @@ class ReconciliationSweeper:
 
         phase_a = await self._phase_a(result, data_source_ids, dry_run)
         if phase_a is None:
+            # A lock held by another replica leaves no trace; a recorded
+            # deferral (errors set by _phase_a) must reach the ledger.
+            if result.errors and record:
+                result.started_at = started
+                result.finished_at = _now_iso()
+                await self._record_run(result, actor)
             return None
         actions, nudges = phase_a
 
@@ -323,6 +338,12 @@ class ReconciliationSweeper:
                 "reconcile sweep deferred: cannot determine which data "
                 "sources are versioned (%s) — retrying on the next tick", exc,
             )
+            # Mark the deferral on the result so sweep() records it: with no
+            # run row at all, a persistent graphver outage looks like
+            # "sweeps stopped" only after 3x the check interval — hours of
+            # silence for a subsystem that is effectively down right now.
+            result.errors = 1
+            result.by_skip["versioned_lookup_unavailable"] = 1
             return None
 
         async with self._session_factory() as session:
@@ -471,26 +492,34 @@ class ReconciliationSweeper:
                     elif verdict.skip in ("stats_stale", "stats_unhealthy"):
                         if len(nudges) < _NUDGE_CAP:
                             nudges.append((state.data_source_id, state.workspace_id))
-                    # Holds / unevaluated skips leave last_checked alone so
-                    # the source stays due on the next tick.
+                    # Every evaluated source advances the fairness clock —
+                    # a frozen stamp pinned holds to the head of the oldest-
+                    # first window until, past _SCAN_CAP of them, nothing
+                    # else was ever scanned. A hold stays due through the
+                    # unresolved-drift clause, not through this stamp.
                     if _is_terminal_skip(verdict):
                         state.last_reconcile_checked_at = now
-                        # Same timing as last_checked: record the numbers we
-                        # just accepted, so an identical re-probe is free. A
-                        # hold deliberately leaves this alone and stays due.
+                        # Record the numbers we just accepted, so an
+                        # identical re-probe is free. Terminal-only: a hold's
+                        # digest stays unstamped so the tripwire keeps firing
+                        # on numbers nobody has acted on.
                         state.last_seen_counts_digest = ctx_row.get(
                             "counts_digest"
                         )
+                    elif not dry_run:
+                        state.last_reconcile_checked_at = now
                     if verdict.reason:
                         result.finding_rows.append(_finding_row(
                             state, ctx_row, verdict, acted=False,
                         ))
                     continue
 
-                # Deferrals (dry-run listing, action cap, first-build cap)
-                # must not advance last_checked — the finding is still open.
+                # A cap deferral advances the fairness clock too — the
+                # finding stays open (and due) through the unresolved-drift
+                # clause. A dry run lists without stamping anything.
                 if dry_run or len(actions) >= max_actions:
                     if not dry_run and len(actions) >= max_actions:
+                        state.last_reconcile_checked_at = now
                         logger.info(
                             "reconcile sweep: action cap (%d) reached — %s "
                             "deferred to the next sweep",
@@ -508,6 +537,11 @@ class ReconciliationSweeper:
                 first_build = verdict.reason == "never_aggregated"
                 if first_build:
                     if first_builds >= _FIRST_BUILD_CAP:
+                        # Same fairness stamp as the action cap above: a
+                        # >200-source backlog of never-built sources drained
+                        # at 1/tick must rotate through the window, not camp
+                        # in it.
+                        state.last_reconcile_checked_at = now
                         result.finding_rows.append(_finding_row(
                             state, ctx_row, verdict, acted=False,
                             skip="cap",
@@ -524,14 +558,28 @@ class ReconciliationSweeper:
                     state, ctx_row, verdict, acted=True,
                 ))
 
+            await session.commit()  # releases the advisory lock
+
+            # Notifications AFTER the lock-releasing commit. They are
+            # best-effort fan-out over other domains' tables; inside the
+            # locked transaction a repo failure rolled back — or, on
+            # Postgres, poisoned — every state write of the pass.
             if suspend_notices:
                 from backend.app.db.repositories.notification_repo import (
                     notify_reconcile_suspended,
                 )
-                for notice in suspend_notices:
-                    await notify_reconcile_suspended(session, **notice)
-
-            await session.commit()  # releases the advisory lock
+                try:
+                    for notice in suspend_notices:
+                        await notify_reconcile_suspended(session, **notice)
+                    await session.commit()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "reconcile sweep: suspension notification failed "
+                        "(%s) — the suspended state itself is committed",
+                        exc,
+                    )
         return actions, nudges
 
     async def _live_observe_counts(
@@ -539,10 +587,12 @@ class ReconciliationSweeper:
     ) -> None:
         """Refresh ctx counts from the live graph for an operator pass.
 
-        Uses ``provider.get_stats`` (cheap per-type counts), never
-        ``get_schema_stats``. Failures leave the SQL snapshot in place so
-        evaluate still has a named skip path. No DB session is held across
-        the graph call.
+        Prefers ``provider.get_counts_fast`` (constant-time counter reads)
+        and falls back to ``provider.get_stats`` (two full scans) only when
+        the counters cannot describe the graph; never ``get_schema_stats``.
+        The whole pass carries a total budget. Failures leave the SQL
+        snapshot in place so evaluate still has a named skip path. No DB
+        session is held across the graph call.
         """
         if not targets:
             return
@@ -555,7 +605,10 @@ class ReconciliationSweeper:
 
         sem = asyncio.Semaphore(_LIVE_OBS_CONCURRENCY)
 
+        failures = 0
+
         async def _one(ds_id: str, workspace_id: Optional[str]) -> None:
+            nonlocal failures
             if not workspace_id:
                 return
             async with sem:
@@ -567,19 +620,31 @@ class ReconciliationSweeper:
                             ),
                             timeout=_LIVE_OBS_TIMEOUT_S,
                         )
-                    try:
+                    # Constant-time counters first — same payload shape as
+                    # get_stats; None means the counters cannot describe
+                    # this graph (multi-label), and only then is the
+                    # two-full-scan read worth paying.
+                    raw = None
+                    fast = getattr(provider, "get_counts_fast", None)
+                    if fast is not None:
                         raw = await asyncio.wait_for(
-                            provider.get_stats(bypass_cache=True),
-                            timeout=_LIVE_OBS_TIMEOUT_S,
+                            fast(), timeout=_LIVE_OBS_TIMEOUT_S,
                         )
-                    except TypeError:
-                        raw = await asyncio.wait_for(
-                            provider.get_stats(),
-                            timeout=_LIVE_OBS_TIMEOUT_S,
-                        )
+                    if raw is None:
+                        try:
+                            raw = await asyncio.wait_for(
+                                provider.get_stats(bypass_cache=True),
+                                timeout=_LIVE_OBS_TIMEOUT_S,
+                            )
+                        except TypeError:
+                            raw = await asyncio.wait_for(
+                                provider.get_stats(),
+                                timeout=_LIVE_OBS_TIMEOUT_S,
+                            )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    failures += 1
                     logger.debug(
                         "reconcile sweep: live observe failed for %s: %s",
                         ds_id, exc,
@@ -627,14 +692,41 @@ class ReconciliationSweeper:
                         ds_id, exc,
                     )
 
-        await asyncio.gather(*[
-            _one(ds_id, ws_id) for ds_id, ws_id in targets
-        ])
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*[
+                    _one(ds_id, ws_id) for ds_id, ws_id in targets
+                ]),
+                timeout=_LIVE_OBS_TOTAL_BUDGET_S,
+            )
+        except asyncio.TimeoutError:
+            refreshed = sum(
+                1 for e in ctx.values() if e.get("live_observed")
+            )
+            logger.warning(
+                "reconcile sweep: live observe budget exhausted — %d of %d "
+                "refreshed; the rest evaluate from stored counts",
+                refreshed, len(targets),
+            )
+        if failures:
+            logger.warning(
+                "reconcile sweep: live observe failed for %d of %d source(s)"
+                " — they evaluate from stored counts (details at debug)",
+                failures, len(targets),
+            )
 
     async def _claim_lock(self, session) -> bool:
         """Transaction-scoped advisory lock, distinct from the stuck-job
         reconciler's so the two sweeps never block each other. A non-Postgres
-        backend (unit fakes) simply proceeds — single-instance semantics."""
+        backend (unit fakes, SQLite) simply proceeds — single-instance
+        semantics. On Postgres an error fails CLOSED: skipping one 60s tick
+        is strictly cheaper than two replicas acting on the same sources.
+        (The residual Phase-A/Phase-B window across replicas is collapsed by
+        the trigger idempotency keys — a duplicate dispatch lands as a
+        ConflictError no-op in Phase B.)"""
+        dialect = getattr(getattr(session, "bind", None), "dialect", None)
+        if getattr(dialect, "name", None) != "postgresql":
+            return True
         try:
             got = (await session.execute(text(
                 "SELECT pg_try_advisory_xact_lock("
@@ -643,8 +735,12 @@ class ReconciliationSweeper:
             return got not in (False, 0)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            return True
+        except Exception as exc:
+            logger.warning(
+                "reconcile sweep: could not claim the sweep lock (%s) — "
+                "skipping this tick", exc,
+            )
+            return False
 
     async def _candidates(
         self, session, data_source_ids, global_interval, *, full_scan=False,
@@ -672,6 +768,16 @@ class ReconciliationSweeper:
                 global_interval or _MIN_CHECK_INTERVAL_SECS,
                 _MIN_CHECK_INTERVAL_SECS,
             )
+            # A per-source override faster than the clamp above was never
+            # loaded by the timestamp clause — the exact bug the probe
+            # lane's _fastest_override exists for. One scalar MIN keeps the
+            # cutoff a SUPERSET of every override; _is_due stays the exact
+            # per-source test.
+            fastest = (await session.execute(
+                select(func.min(S.reconcile_check_interval_secs))
+            )).scalar()
+            if fastest is not None:
+                interval = min(interval, int(fastest))
             cutoff = (
                 datetime.now(timezone.utc) - timedelta(seconds=interval)
             ).isoformat()
@@ -760,7 +866,7 @@ class ReconciliationSweeper:
 
         # 1. The data source itself (deleted? which ontology? projection?).
         rows = (await session.execute(
-            select(
+            select(  # noqa: cross-domain (reconcile sweep: read-only batched context for ≤_SCAN_CAP sources; provider NAME labels findings)
                 WorkspaceDataSourceORM.id,
                 WorkspaceDataSourceORM.deleted_at,
                 WorkspaceDataSourceORM.is_active,
@@ -1031,6 +1137,7 @@ class ReconciliationSweeper:
                             svc, session, action, actor, result.run_id,
                         )
                         deferred = False
+                        queued = True
                     else:
                         resp = await svc.signal_source_changed(
                             action.data_source_id, session,
@@ -1048,6 +1155,14 @@ class ReconciliationSweeper:
                         deferred = bool(
                             resp is not None and getattr(resp, "deferred", False)
                         )
+                        # A response without a job id is a no-op (unchanged
+                        # gate, trigger conflict, resolution failure, not
+                        # applicable). None still reads as queued — the unit
+                        # fakes return None.
+                        queued = (
+                            resp is None
+                            or getattr(resp, "job_id", None) is not None
+                        )
                     if deferred:
                         # Cooldown raced the hold — leave last_checked alone
                         # so the next tick retries once the window opens.
@@ -1055,6 +1170,19 @@ class ReconciliationSweeper:
                             "reconcile sweep: dispatch deferred for %s — "
                             "staying due",
                             action.data_source_id,
+                        )
+                        continue
+                    if not queued:
+                        # Nothing was queued, so nothing may adopt the drifted
+                        # fingerprint as the new baseline, advance the breaker,
+                        # or count as an action. The source stays due; the
+                        # retry converges (an unchanged gate resolves once the
+                        # probe refreshes counts, a conflict becomes the
+                        # in_flight guard, a resolution failure a guard skip).
+                        logger.info(
+                            "reconcile sweep: signal queued no job for %s "
+                            "(%s) — leaving it due, not counting an action",
+                            action.data_source_id, action.reason,
                         )
                         continue
                     await self._finalize_action(session, action, mode)
@@ -1171,11 +1299,45 @@ class ReconciliationSweeper:
 
     async def _record_run(self, result: SweepResult, actor) -> None:
         """Persist the pass, and trim old ones. Never raises: losing a run
-        record must not fail the sweep it describes."""
+        record must not fail the sweep it describes.
+
+        An idle auto tick (nothing scanned, found, seeded or done) advances
+        the previous idle row in place instead of inserting — one row per
+        idle stretch, not 1,440 near-empty rows a day drowning the ledger.
+        The row's stamps still move every tick, so liveness reads keep
+        working at any interval. Manual and preview passes always insert.
+        """
         from .models import ReconcileRunORM
 
+        idle = (
+            result.mode == "auto"
+            and result.scanned == 0
+            and result.findings == 0
+            and result.actions == 0
+            and result.seeded == 0
+        )
         try:
             async with self._session_factory() as session:
+                if idle:
+                    prev = (await session.execute(
+                        select(ReconcileRunORM)
+                        .order_by(ReconcileRunORM.started_at.desc())
+                        .limit(1)
+                    )).scalars().first()
+                    if (
+                        prev is not None
+                        and prev.mode == "auto"
+                        and (prev.scanned or 0) == 0
+                        and (prev.findings or 0) == 0
+                        and (prev.actions or 0) == 0
+                        and (prev.seeded or 0) == 0
+                        and (prev.errors or 0) == result.errors
+                    ):
+                        prev.started_at = result.started_at or _now_iso()
+                        prev.finished_at = result.finished_at or _now_iso()
+                        prev.detail = result.detail_json()
+                        await session.commit()
+                        return
                 session.add(ReconcileRunORM(
                     id=result.run_id,
                     started_at=result.started_at or _now_iso(),

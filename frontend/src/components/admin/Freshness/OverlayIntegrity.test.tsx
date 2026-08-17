@@ -75,6 +75,37 @@ describe('OverlayIntegrity drift disclosure', () => {
         reconcileNow.mockResolvedValue({ skipped: false, findings: [], run: null })
     })
 
+    it('shows the Automation entry to a non-admin reader', async () => {
+        // The modal renders read-only for non-admins now (settings READ is
+        // ingestion-read server-side), so the entry point is no longer
+        // admin-gated — hiding it made the read-only rendering unreachable
+        // except by shared URL.
+        getReconciliationActivity.mockResolvedValue({ since: '', items: [] })
+        const onOpenAutomation = vi.fn()
+        const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        render(
+            <QueryClientProvider client={qc}>
+                <MemoryRouter>
+                    <OverlayIntegrity
+                        summary={null}
+                        activeFacet=""
+                        onFacet={() => {}}
+                        onReload={() => {}}
+                        reloading={false}
+                        onOpenSource={() => {}}
+                        window="24h"
+                        onWindowChange={() => {}}
+                        onOpenAutomation={onOpenAutomation}
+                    />
+                </MemoryRouter>
+            </QueryClientProvider>,
+        )
+        await userEvent.click(await screen.findByRole('button', { name: /Automation/ }))
+        expect(onOpenAutomation).toHaveBeenCalled()
+        // The write path stays admin-only: no bulk refresh for this reader.
+        expect(screen.queryByRole('button', { name: /Refresh all sources/ })).not.toBeInTheDocument()
+    })
+
     it('lands collapsed: recency only, no window chips or source names', async () => {
         const sevenHoursAgo = new Date(Date.now() - 7 * 3600_000).toISOString()
         getReconciliationActivity.mockResolvedValue({

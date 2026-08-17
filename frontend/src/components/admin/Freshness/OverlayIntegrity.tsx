@@ -145,7 +145,7 @@ export function OverlayIntegrity({
                             Refresh all sources
                         </button>
                     )}
-                    {isAdmin && onOpenAutomation && (
+                    {onOpenAutomation && (
                         <button
                             type="button"
                             onClick={onOpenAutomation}
@@ -182,7 +182,7 @@ export function OverlayIntegrity({
                     onPreview={() => setPreviewOpen(true)}
                     onFacet={onFacet}
                     activeFacet={activeFacet}
-                    onOpenCadence={isAdmin ? onOpenAutomation : undefined}
+                    onOpenCadence={onOpenAutomation}
                     lastDriftAt={newestFinding}
                     historyOpen={historyOpen}
                     onToggleHistory={() => setHistoryOpen(v => !v)}

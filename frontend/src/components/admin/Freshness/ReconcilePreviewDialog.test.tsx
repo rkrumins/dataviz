@@ -33,7 +33,7 @@ describe('ReconcilePreviewDialog', () => {
         permissionFn.mockReturnValue(true)
         reconcileNow.mockResolvedValue({
             skipped: false,
-            run: { scanned: 4, findings: 1, actions: 0 },
+            run: { scanned: 4, findings: 1, actions: 0, bySkip: { in_sync: 3 } },
             findings: [{
                 dataSourceId: 'ds-1',
                 name: 'Sol Xlarge',
@@ -48,14 +48,15 @@ describe('ReconcilePreviewDialog', () => {
         const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
         render(
             <QueryClientProvider client={qc}>
-                <ReconcilePreviewDialog open onClose={() => {}} />
+                <ReconcilePreviewDialog open onClose={() => {}} fleetTotal={4} />
             </QueryClientProvider>,
         )
         expect(await screen.findByText('Sol Xlarge')).toBeInTheDocument()
         expect(screen.getByText(/Warehouse/)).toBeInTheDocument()
         expect(screen.getByText(/Rollups were missing/)).toBeInTheDocument()
-        expect(screen.getByText(/4 checked/)).toBeInTheDocument()
-        expect(screen.getByText(/would rebuild/)).toBeInTheDocument()
+        expect(screen.getByText(/4 of 4 checked/)).toBeInTheDocument()
+        expect(screen.getByText(/3 in sync/)).toBeInTheDocument()
+        expect(screen.getByText(/1 drifted/)).toBeInTheDocument()
         await waitFor(() => {
             expect(reconcileNow).toHaveBeenCalledWith({ dryRun: true })
         })

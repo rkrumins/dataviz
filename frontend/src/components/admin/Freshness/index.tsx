@@ -129,6 +129,9 @@ export function Freshness() {
         (id: string | null) => patchParams({ fds: id }),
         [patchParams],
     )
+    // Stable for the same reason as closeAutomation below: it feeds the
+    // drawer's focus effect.
+    const closeDrawer = useCallback(() => setDrawerDsId(null), [setDrawerDsId])
 
     // The Automation modal opens from the URL for the same reason the drawer
     // does: "here is how the schedule is configured" is a link someone sends.
@@ -339,19 +342,21 @@ export function Freshness() {
         })
     }, [selectableIds])
 
-    // Drop selections that left the visible set (facet change / refetch).
-    useEffect(() => {
+    // Only visible selections count (facet change / refetch): derived, not
+    // pruned in an effect, so a facet-hidden selection reappears when the
+    // facet is cleared and the bulk bar still only ever acts on visible rows.
+    const visibleSelectedIds = useMemo(() => {
         const visible = new Set(tableRows.map(r => r.dataSourceId))
-        setSelectedIds(prev => prev.filter(id => visible.has(id)))
-    }, [tableRows])
+        return selectedIds.filter(id => visible.has(id))
+    }, [selectedIds, tableRows])
 
     return (
-        <div className={`space-y-4${selectedIds.length > 0 ? ' pb-24' : ''}`}>
+        <div className={`space-y-4${visibleSelectedIds.length > 0 ? ' pb-24' : ''}`}>
             <OverlayIntegrity
                 summary={summary}
                 activeFacet={fstatus}
                 onFacet={(facet) => patchParams({ fstatus: facet || null })}
-                onOpenAutomation={isSystemAdmin ? openAutomation : undefined}
+                onOpenAutomation={openAutomation}
                 onReload={() => { void fleet.refetch() }}
                 reloading={fleet.isFetching}
                 onRefreshAll={isSystemAdmin ? () => setFleetDialogOpen(true) : undefined}
@@ -500,7 +505,7 @@ export function Freshness() {
             )}
 
             <BulkRetryBar
-                selectedIds={selectedIds}
+                selectedIds={visibleSelectedIds}
                 rows={tableRows}
                 onClear={() => setSelectedIds([])}
                 onDone={() => {
@@ -513,7 +518,7 @@ export function Freshness() {
                 key={drawerDsId ?? 'closed'}
                 dsId={drawerDsId}
                 isOpen={drawerDsId != null}
-                onClose={() => setDrawerDsId(null)}
+                onClose={closeDrawer}
                 workspaceName={
                     drawerDsId
                         ? workspaceName.get(rows.find(r => r.dataSourceId === drawerDsId)?.workspaceId ?? '')

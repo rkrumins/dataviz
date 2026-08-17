@@ -166,13 +166,19 @@ class ProbeScheduler:
     async def _fastest_override(session) -> Optional[int]:
         """The narrowest per-source probe interval anyone has set, or None when
         nobody overrides. One scalar read over a table with one row per source,
-        and it is what keeps the SQL pre-filter a superset of ``_is_due``."""
+        and it is what keeps the SQL pre-filter a superset of ``_is_due``.
+
+        Explicitly probe-disabled sources are excluded: their override can
+        never make them due, so letting it widen the cutoff dragged the whole
+        fleet's scan window down for a source that would then be skipped.
+        NULL (inherit) stays included."""
         from sqlalchemy import func
 
         from .models import AggregationDataSourceStateORM as S
 
         return (await session.execute(
             select(func.min(S.probe_interval_secs))
+            .where(S.probe_enabled.isnot(False))
         )).scalar()
 
     async def _due_rows(self, session, cutoff: str):
@@ -187,7 +193,7 @@ class ProbeScheduler:
         from .models import AggregationDataSourceStateORM as S
 
         stmt = (
-            select(
+            select(  # noqa: cross-domain (probe lane: stats.last_probed_at is the probe cadence clock; read-only, bounded by AGGREGATION_PROBE_SCAN_CAP)
                 WorkspaceDataSourceORM.id,
                 WorkspaceDataSourceORM.workspace_id,
                 S.probe_enabled,

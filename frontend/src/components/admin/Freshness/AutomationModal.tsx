@@ -83,17 +83,6 @@ const NUMBER_BOX = cn(
     '[&::-webkit-inner-spin-button]:appearance-none',
 )
 
-/** Two stages read from the admin-only cadence record, so both have to say the
- *  same thing in the same words to a reader who cannot see it. Silently
- *  dropping the controls would read as "this stage has no such setting". */
-function AdminOnlyCadence() {
-    return (
-        <p className="pt-2.5 text-[11px] text-ink-muted">
-            Only platform admins can see this cadence.
-        </p>
-    )
-}
-
 /** A value the deploy owns. Marked, so it is not mistaken for a control that
  *  has been greyed out — those are two very different invitations. */
 function DeployTag() {
@@ -239,12 +228,13 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
     const reconQ = useReconciliation()
     const policy = reconQ.data?.policy
 
-    // The stored cadence is readable by platform admins only, so a non-admin
-    // never fires a request that can only 403.
+    // Readable at ingestion-read server-side (the PUT stays admin), so the
+    // read-only rendering shows non-admins the real Detect and Act state
+    // instead of "hidden" pills.
     const settingsQ = useQuery({
         queryKey: SETTINGS_KEY,
         queryFn: () => aggregationService.getAggregationSettings(),
-        enabled: open && isAdmin,
+        enabled: open,
     })
     const cadence = settingsQ.data?.cadence
 
@@ -353,7 +343,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
 
     useEffect(() => {
         if (!open || dirty || !policy) return
-        if (isAdmin && !settingsQ.data) return
+        if (!settingsQ.data) return
 
         setCheckEnabled(policy.enabled ?? policy.envEnabled)
         setCheckSecs(policy.checkIntervalSecs ?? null)
@@ -364,19 +354,17 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         // must survive as such — never a truthiness test.
         setDetectors(policy.detectors ?? policy.allDetectors)
 
-        if (settingsQ.data) {
-            // Fall back to the EFFECTIVE env default the server reports, never
-            // a hardcoded guess: it means a save that only meant to change one
-            // interval round-trips the real current state of every toggle
-            // instead of flipping it fleet-wide.
-            setProbeEnabled(cadence?.probeEnabled ?? settingsQ.data.envProbeEnabled ?? true)
-            setProbeSecs(cadence?.probeIntervalSecs ?? null)
-            setDriftAuto(cadence?.driftAutoRebuild ?? settingsQ.data.envDriftAutoRebuild ?? true)
-            setCooldownSecs(cadence?.rebuildMinIntervalSecs ?? null)
-        }
+        // Fall back to the EFFECTIVE env default the server reports, never
+        // a hardcoded guess: it means a save that only meant to change one
+        // interval round-trips the real current state of every toggle
+        // instead of flipping it fleet-wide.
+        setProbeEnabled(cadence?.probeEnabled ?? settingsQ.data.envProbeEnabled ?? true)
+        setProbeSecs(cadence?.probeIntervalSecs ?? null)
+        setDriftAuto(cadence?.driftAutoRebuild ?? settingsQ.data.envDriftAutoRebuild ?? true)
+        setCooldownSecs(cadence?.rebuildMinIntervalSecs ?? null)
         setSeededSig(remoteSig)
         setSeeded(true)
-    }, [open, dirty, policy, settingsQ.data, cadence, isAdmin, remoteSig])
+    }, [open, dirty, policy, settingsQ.data, cadence, remoteSig])
 
     /** Marks the form edited before applying the change, so one payload
      *  arriving mid-edit cannot undo what was just typed. */
@@ -396,7 +384,16 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
             showToast('success', 'Automation saved. Takes effect within a minute.')
             onClose()
         },
-        onError: (e: Error) => showToast('error', e.message || 'Could not save the cadence.'),
+        // The policy PUT that precedes this one has already landed (see
+        // onSave), so a generic "could not save" would be a lie about half
+        // the form. Say exactly which half failed; Save again re-sends the
+        // policy with identical values (harmless) and retries the cadence.
+        onError: (e: Error) => showToast(
+            'error',
+            `Watch policy saved, but the Detect and Act settings did not save: ${
+                e.message || 'unknown error'
+            }. Save again to retry them.`,
+        ),
     })
     const saveRecon = useSetReconciliationPolicy()
 
@@ -475,21 +472,17 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
     // 'error'` for a failed BACKGROUND poll even though the cached policy is
     // still there, and pulling the form out from under a half-typed edit for
     // a refresh that will retry in a minute destroys work to report nothing.
-    const readFailed = reconQ.isError || (isAdmin && settingsQ.isError)
+    const readFailed = reconQ.isError || settingsQ.isError
     const ready = seeded && policy != null
     const changedElsewhere = seeded && dirty && remoteSig !== seededSig
     const warnings = automationWarnings(
         { enabled: checkEnabled, detectors, maxActionsPerRun: cap.trim() === '' ? null : Number(cap) },
-        // A non-admin cannot read the probe setting, so we must not claim it
-        // is off — undefined leaves that warning unsaid rather than wrong.
-        { probeEnabled: isAdmin ? probeEnabled : undefined },
+        { probeEnabled },
     )
 
     // Starvation runs DOWNSTREAM: Detect off does not merely dim Check, it dims
     // Act too, because what reaches Act is only as fresh as what reached Check.
-    // A non-admin cannot read the probe setting, so for them the first seam is
-    // never claimed to be starved.
-    const starvedIntoCheck = isAdmin && !probeEnabled
+    const starvedIntoCheck = !probeEnabled
     const starvedIntoAct = !checkEnabled
 
     const pass = pickLastPassRun(reconQ.data?.runs)
@@ -500,13 +493,11 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         ? `${pass.actions.toLocaleString()} rebuilt at the last check`
         : 'Nothing rebuilt yet'
     // No fleet summary means no number — "0 sources watched" is a claim, not a
-    // placeholder. And "watched" is only true while change detection is on,
-    // which a non-admin cannot see either way.
-    const watching = isAdmin ? probeEnabled : null
+    // placeholder.
     const detectStat = summary == null
         ? undefined
         : `${summary.total.toLocaleString()} sources`
-            + (watching === true ? ' watched' : watching === false ? ' — watching is off' : '')
+            + (probeEnabled ? ' watched' : ' — watching is off')
     const dryFindings = dryRun.data?.findings?.length ?? null
     // One footer line, not two competing ones. The dry run is measured against
     // what is STORED, so the sentence says so rather than leaving a second
@@ -587,9 +578,9 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                         {ready && (
                         <div className="px-6 sm:px-8 py-4 bg-black/[0.02] dark:bg-white/[0.02] border-b border-glass-border shrink-0">
                             <PipelineRail
-                                detect={isAdmin ? probeEnabled : null}
+                                detect={probeEnabled}
                                 check={checkEnabled}
-                                act={isAdmin ? driftAuto : null}
+                                act={driftAuto}
                                 starvedIntoCheck={starvedIntoCheck}
                                 starvedIntoAct={starvedIntoAct}
                             />
@@ -623,37 +614,36 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                     <div className="space-y-6">
                                     <StageRow
                                         stage="detect"
-                                        on={isAdmin ? probeEnabled : null}
+                                        on={probeEnabled}
                                         stat={detectStat}
                                     >
-                                        {isAdmin ? (
-                                            <Ledger>
-                                                <SettingRow
-                                                    label="Watch for changes made outside this app"
-                                                    htmlFor="automation-probe"
-                                                >
-                                                    <ToggleSwitch
-                                                        id="automation-probe"
-                                                        size="sm"
-                                                        checked={probeEnabled}
-                                                        onChange={edit(setProbeEnabled)}
-                                                        aria-label="Watch for changes made outside this app"
-                                                    />
-                                                </SettingRow>
-                                                <SettingRow label={CADENCE_LABEL.detect}>
-                                                    <DurationField
-                                                        label={CADENCE_LABEL.detect}
-                                                        value={probeSecs}
-                                                        onChange={edit(setProbeSecs)}
-                                                        presets={DETECT_PRESETS}
-                                                        defaultSecs={settingsQ.data?.envProbeIntervalSecs ?? 60}
-                                                        min={MIN_PROBE_SECS}
-                                                        max={MAX_SECS}
-                                                        disabled={!probeEnabled}
-                                                    />
-                                                </SettingRow>
-                                            </Ledger>
-                                        ) : <AdminOnlyCadence />}
+                                        <Ledger>
+                                            <SettingRow
+                                                label="Watch for changes made outside this app"
+                                                htmlFor="automation-probe"
+                                            >
+                                                <ToggleSwitch
+                                                    id="automation-probe"
+                                                    size="sm"
+                                                    checked={probeEnabled}
+                                                    onChange={edit(setProbeEnabled)}
+                                                    disabled={!isAdmin}
+                                                    aria-label="Watch for changes made outside this app"
+                                                />
+                                            </SettingRow>
+                                            <SettingRow label={CADENCE_LABEL.detect}>
+                                                <DurationField
+                                                    label={CADENCE_LABEL.detect}
+                                                    value={probeSecs}
+                                                    onChange={edit(setProbeSecs)}
+                                                    presets={DETECT_PRESETS}
+                                                    defaultSecs={settingsQ.data?.envProbeIntervalSecs ?? 60}
+                                                    min={MIN_PROBE_SECS}
+                                                    max={MAX_SECS}
+                                                    disabled={!isAdmin || !probeEnabled}
+                                                />
+                                            </SettingRow>
+                                        </Ledger>
                                     </StageRow>
 
                                     <StageRow
@@ -778,50 +768,50 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
 
                                     <StageRow
                                         stage="act"
-                                        on={isAdmin ? driftAuto : null}
+                                        on={driftAuto}
                                         muted={starvedIntoCheck || starvedIntoAct}
                                         stat={actStat}
                                     >
-                                        {isAdmin ? (
-                                            <Ledger>
-                                                <SettingRow
-                                                    label="Automatically rebuild a source when drift is detected"
-                                                    htmlFor="automation-drift-auto"
-                                                >
-                                                    <ToggleSwitch
-                                                        id="automation-drift-auto"
-                                                        size="sm"
-                                                        checked={driftAuto}
-                                                        onChange={edit(setDriftAuto)}
-                                                        aria-label="Automatically rebuild a source when drift is detected"
-                                                    />
-                                                </SettingRow>
-                                                {/* ``0s`` is the most consequential
-                                                    chip on the row and sits in its
-                                                    least conspicuous position, at the
-                                                    head of an ascending ladder that
-                                                    should not be reordered. So it
-                                                    states its consequence once
-                                                    chosen, rather than being dressed
-                                                    up before anyone picks it. */}
-                                                <SettingRow
+                                        <Ledger>
+                                            <SettingRow
+                                                label="Automatically rebuild a source when drift is detected"
+                                                htmlFor="automation-drift-auto"
+                                            >
+                                                <ToggleSwitch
+                                                    id="automation-drift-auto"
+                                                    size="sm"
+                                                    checked={driftAuto}
+                                                    onChange={edit(setDriftAuto)}
+                                                    disabled={!isAdmin}
+                                                    aria-label="Automatically rebuild a source when drift is detected"
+                                                />
+                                            </SettingRow>
+                                            {/* ``0s`` is the most consequential
+                                                chip on the row and sits in its
+                                                least conspicuous position, at the
+                                                head of an ascending ladder that
+                                                should not be reordered. So it
+                                                states its consequence once
+                                                chosen, rather than being dressed
+                                                up before anyone picks it. */}
+                                            <SettingRow
+                                                label={CADENCE_LABEL.act}
+                                                hint={cooldownSecs === 0
+                                                    ? 'No wait at all: a source can be rebuilt again the moment the next check finds drift.'
+                                                    : undefined}
+                                            >
+                                                <DurationField
                                                     label={CADENCE_LABEL.act}
-                                                    hint={cooldownSecs === 0
-                                                        ? 'No wait at all: a source can be rebuilt again the moment the next check finds drift.'
-                                                        : undefined}
-                                                >
-                                                    <DurationField
-                                                        label={CADENCE_LABEL.act}
-                                                        value={cooldownSecs}
-                                                        onChange={edit(setCooldownSecs)}
-                                                        presets={COOLDOWN_PRESETS}
-                                                        defaultSecs={settingsQ.data?.envRebuildMinIntervalSecs ?? 900}
-                                                        min={0}
-                                                        max={MAX_SECS}
-                                                    />
-                                                </SettingRow>
-                                            </Ledger>
-                                        ) : <AdminOnlyCadence />}
+                                                    value={cooldownSecs}
+                                                    onChange={edit(setCooldownSecs)}
+                                                    presets={COOLDOWN_PRESETS}
+                                                    defaultSecs={settingsQ.data?.envRebuildMinIntervalSecs ?? 900}
+                                                    min={0}
+                                                    max={MAX_SECS}
+                                                    disabled={!isAdmin}
+                                                />
+                                            </SettingRow>
+                                        </Ledger>
 
                                         <Advanced
                                             stage="act"

@@ -172,7 +172,7 @@ class _FakeSession:
         self._row = row
         self.committed = False
 
-    async def get(self, _model, _pk):
+    async def get(self, _model, _pk, **_kw):  # with_for_update on Postgres
         return self._row
 
     def add(self, _obj):
@@ -364,3 +364,43 @@ def test_activity_since_rejects_garbage():
 
     with pytest.raises(ValueError, match="ISO timestamp"):
         parse_activity_since("yesterday")
+
+
+def test_detector_names_are_validated_at_the_write_boundary():
+    """A typo is not a bad name, it is a detector that never fires:
+    ["overlay_missng"] read back as a valid policy while disabling every
+    action it was meant to enable. Empty stays valid ("act on nothing")."""
+    import pydantic
+
+    from backend.app.services.aggregation.schemas import (
+        AggregationCadence,
+        AggregationSettingsRequest,
+        ReconcilePolicyRequest,
+    )
+
+    with pytest.raises(pydantic.ValidationError, match="overlay_missng"):
+        ReconcilePolicyRequest(detectors=["overlay_missng"])
+    with pytest.raises(pydantic.ValidationError, match="unknown detector"):
+        AggregationSettingsRequest(
+            cadence=AggregationCadence(reconcileDetectors=["nope"]),
+        )
+    assert ReconcilePolicyRequest(detectors=[]).detectors == []
+    assert ReconcilePolicyRequest(
+        detectors=["overlay_missing", "raw_drift"],
+    ).detectors == ["overlay_missing", "raw_drift"]
+    # Stored cadence_json is parsed by AggregationCadence directly — a
+    # legacy typo there must stay READABLE, only new writes are gated.
+    assert AggregationCadence(
+        reconcileDetectors=["overlay_missng"],
+    ).reconcile_detectors == ["overlay_missng"]
+
+
+def test_activity_since_clamps_to_the_retention_window():
+    """Run rows are trimmed at 30 days, so a wider window only widens the
+    scan (one row per sweep tick), never the result."""
+    from backend.app.services.aggregation.service import parse_activity_since
+
+    now = datetime.now(timezone.utc)
+    for raw in ("9999d", "2000-01-01T00:00:00+00:00"):
+        cutoff = parse_activity_since(raw)
+        assert (now - cutoff).total_seconds() <= 30 * 86400 + 60

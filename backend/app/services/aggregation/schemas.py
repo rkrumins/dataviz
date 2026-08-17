@@ -36,22 +36,54 @@ def _validate_projection_mode(value: Optional[str]) -> Optional[str]:
 
 
 def _validate_paused_until(value: Optional[str]) -> Optional[str]:
-    """Reject a snooze the reader cannot parse.
+    """Reject a snooze the reader cannot parse — or that cannot hold.
 
     ``reconcile._pause_active`` treats an unparseable stamp as expired — the
     right call there, since a corrupt value must not pause a source forever.
     Accepting one here would therefore store a snooze that silently does
-    nothing, so the format is enforced at the boundary instead.
+    nothing, so the format is enforced at the boundary instead. The same
+    goes for a past instant (an already-expired snooze that does nothing)
+    and a far-future one (a permanent hold wearing a time-boxed name — the
+    per-source enable toggle is the honest way to switch a source off).
+    Naive stamps are coerced to UTC, matching how the reader compares them,
+    and the normalized aware form is what gets stored and echoed.
     """
     if value is None:
         return value
-    from datetime import datetime
+    from datetime import datetime, timedelta, timezone
     try:
-        datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
     except (TypeError, ValueError):
         raise ValueError(
             "paused_until must be an ISO-8601 instant (e.g. "
             "2026-08-17T12:00:00+00:00)"
+        )
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    if dt <= now:
+        raise ValueError("paused_until must be in the future")
+    if dt > now + timedelta(days=90):
+        raise ValueError(
+            "paused_until must be within 90 days — to stop watching a "
+            "source indefinitely, disable its automation instead"
+        )
+    return dt.isoformat()
+
+
+def _validate_detector_names(value: List[str]) -> List[str]:
+    """A typo here is not a bad name, it is a detector that never fires —
+    ``["overlay_missng"]`` reads back as a valid policy while disabling
+    everything it was meant to enable. Empty stays valid ("act on
+    nothing"). Applied at the WRITE boundaries only: ``AggregationCadence``
+    itself also parses stored ``cadence_json``, and a validator there would
+    make previously-stored data unreadable."""
+    from .reconcile import REASONS
+    unknown = [d for d in value if d not in REASONS]
+    if unknown:
+        raise ValueError(
+            f"unknown detector(s) {unknown}; valid detectors are "
+            f"{list(REASONS)}"
         )
     return value
 
@@ -843,6 +875,13 @@ class AggregationSettingsRequest(BaseModel):
     tuning: Optional[AggregationTuning] = None
     cadence: Optional[AggregationCadence] = None
 
+    @field_validator("cadence")
+    @classmethod
+    def _detectors_known(cls, v):
+        if v is not None and v.reconcile_detectors is not None:
+            _validate_detector_names(v.reconcile_detectors)
+        return v
+
     class Config:
         populate_by_name = True
 
@@ -1062,6 +1101,13 @@ class ReconcilePolicyRequest(BaseModel):
         None, alias="shrinkTolerancePct", ge=0, le=100,
     )
     detectors: Optional[List[str]] = None
+
+    @field_validator("detectors")
+    @classmethod
+    def _detectors_known(cls, v):
+        if v is None:
+            return v
+        return _validate_detector_names(v)
 
     class Config:
         populate_by_name = True

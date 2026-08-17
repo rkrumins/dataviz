@@ -45,6 +45,7 @@ from backend.app.services.aggregation.models import (
 from backend.app.services.aggregation.reconcile_sweeper import (
     ReconciliationSweeper,
 )
+from backend.app.services.aggregation.schemas import SourceChangedResponse
 
 
 def _iso(dt: datetime) -> str:
@@ -542,6 +543,21 @@ async def test_a_cold_versioned_lookup_defers_the_whole_sweep(
     assert state.drift_state is None
     assert state.last_reconcile_checked_at is None
 
+    # The deferral leaves a trace — without a run row, a persistent graphver
+    # outage reads as "sweeps stopped" only hours later. A second deferred
+    # sweep folds into the same row instead of inserting another.
+    async with session_factory() as s:
+        run = (await s.execute(select(ReconcileRunORM))).scalars().one()
+    assert run.errors == 1
+    assert json.loads(run.detail)["bySkip"] == {
+        "versioned_lookup_unavailable": 1,
+    }
+
+    await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    async with session_factory() as s:
+        runs = (await s.execute(select(ReconcileRunORM))).scalars().all()
+    assert len(runs) == 1
+
 
 @pytest.mark.asyncio
 async def test_a_paused_source_records_its_finding_but_queues_nothing(
@@ -579,8 +595,12 @@ async def test_a_source_in_rebuild_cooldown_is_deferred(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_cooldown_hold_does_not_advance_last_checked(session_factory):
-    """A hold must leave the source due — otherwise rebuild waits an hour."""
+async def test_cooldown_hold_advances_the_fairness_stamp_but_stays_due(
+    session_factory,
+):
+    """A hold advances the fairness clock (so held sources rotate out of the
+    oldest-first window) yet stays due through the unresolved-drift clause —
+    the rebuild still does not wait for the check interval."""
     checked = _ago(seconds=300)
     await _seed(
         session_factory,
@@ -595,7 +615,7 @@ async def test_cooldown_hold_does_not_advance_last_checked(session_factory):
     assert result.by_skip == {"cooldown": 1}
     st = await _state(session_factory)
     assert st.drift_state == "overlayMissing"
-    assert st.last_reconcile_checked_at == checked  # unchanged
+    assert st.last_reconcile_checked_at != checked  # fairness clock moved
 
     # Still due on the next tick (unresolved finding newer than last act).
     result2 = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
@@ -886,6 +906,84 @@ async def test_manual_live_observe_persists_counts(session_factory, monkeypatch)
             {"Table": 99}, {"FLOWS_TO": 200, "AGGREGATED": 500},
         )
 
+
+@pytest.mark.asyncio
+async def test_manual_live_observe_prefers_the_counter_read(session_factory):
+    """A provider with a constant-time path must not pay the two full scans
+    on Check now — a scan-cap of those at once is exactly the load profile
+    the probe lane exists to avoid. get_stats stays the fallback."""
+    await _seed(session_factory, checked_at=_ago(seconds=30))
+
+    scanned = []
+
+    class _Prov:
+        async def get_counts_fast(self):
+            return {
+                "nodeCount": 99,
+                "edgeCount": 700,
+                "entityTypeCounts": {"Table": 99},
+                "edgeTypeCounts": {"FLOWS_TO": 200, "AGGREGATED": 500},
+            }
+
+        async def get_stats(self, bypass_cache=True):
+            scanned.append(True)
+            return {}
+
+    class _Reg:
+        async def get_provider_for_workspace(self, *a, **k):
+            return _Prov()
+
+    class _Svc(_FakeService):
+        _registry = _Reg()
+
+    svc = _Svc()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep(
+        mode="manual",
+    )
+    assert result is not None
+    assert scanned == [], "counter read answered — the scan must not run"
+    async with session_factory() as s:
+        row = await s.get(DataSourceStatsORM, "ds_1")
+        assert row.node_count == 99
+
+
+@pytest.mark.asyncio
+async def test_manual_live_observe_falls_back_when_counters_refuse(
+    session_factory,
+):
+    """None from the counters (multi-label graph) still gets a verdict —
+    through the full read, exactly as before the counter path existed."""
+    await _seed(session_factory, checked_at=_ago(seconds=30))
+
+    class _Prov:
+        async def get_counts_fast(self):
+            return None
+
+        async def get_stats(self, bypass_cache=True):
+            return {
+                "nodeCount": 42,
+                "edgeCount": 700,
+                "entityTypeCounts": {"Table": 42},
+                "edgeTypeCounts": {"FLOWS_TO": 200, "AGGREGATED": 500},
+            }
+
+    class _Reg:
+        async def get_provider_for_workspace(self, *a, **k):
+            return _Prov()
+
+    class _Svc(_FakeService):
+        _registry = _Reg()
+
+    svc = _Svc()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep(
+        mode="manual",
+    )
+    assert result is not None
+    async with session_factory() as s:
+        row = await s.get(DataSourceStatsORM, "ds_1")
+        assert row.node_count == 42
+
+
 @pytest.mark.asyncio
 async def test_manual_sweep_re_evaluates_a_recently_checked_source(session_factory):
     """Check now is a full-fleet pass, not an early hourly tick."""
@@ -969,6 +1067,32 @@ async def test_each_sweep_records_a_run_with_its_tallies(session_factory):
     assert findings[0]["providerName"] == "p"
     assert findings[0]["reason"] == "overlay_missing"
     assert findings[0]["acted"] is True
+
+
+@pytest.mark.asyncio
+async def test_idle_ticks_collapse_into_one_heartbeat_row(session_factory):
+    """An idle fleet is 1,440 auto ticks a day; each must not add a row —
+    the ledger and the activity read drown in near-empty heartbeats."""
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    first = await sweeper.sweep()
+    assert first.scanned == 0
+    async with session_factory() as s:
+        one = (await s.execute(select(ReconcileRunORM))).scalars().one()
+    first_stamp = one.started_at
+
+    second = await sweeper.sweep()
+    assert second.scanned == 0
+    async with session_factory() as s:
+        runs = (await s.execute(select(ReconcileRunORM))).scalars().all()
+    assert len(runs) == 1                     # updated in place
+    assert runs[0].started_at >= first_stamp  # ...and still advancing
+
+    # A pass that scanned something always inserts its own row.
+    await _seed(session_factory, ds_id="ds_1")
+    await sweeper.sweep()
+    async with session_factory() as s:
+        runs = (await s.execute(select(ReconcileRunORM))).scalars().all()
+    assert len(runs) == 2
 
 
 @pytest.mark.asyncio
@@ -1139,6 +1263,35 @@ async def test_transition_into_suspended_notifies_once(
 
     await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_notify_failure_does_not_fail_the_sweep(
+    session_factory, monkeypatch,
+):
+    """The fan-out runs after the locked commit and is best-effort: a
+    notification-repo failure must not roll back (or poison) the pass's
+    state writes."""
+    async def _boom(session, **kw):
+        raise RuntimeError("notification store down")
+
+    monkeypatch.setattr(
+        "backend.app.db.repositories.notification_repo.notify_reconcile_suspended",
+        _boom,
+    )
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        consecutive=3,
+    )
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+    assert result is not None
+    assert result.by_skip == {"suspended": 1}
+    st = await _state(session_factory)
+    assert st.drift_state == "suspended"           # the state write survived
+    assert st.last_reconcile_checked_at is not None
 
 
 @pytest.mark.asyncio
@@ -1352,3 +1505,139 @@ async def test_stale_counts_are_refreshed_by_a_priority_probe(
     # The poll still follows — it owns the deep facet — it is just no longer
     # what the next sweep has to wait on.
     assert polls == ["ds_1"]
+
+
+# ── Dispatch outcomes and the sweep lock ────────────────────────────────
+
+
+class _NoJobService(_FakeService):
+    """signal_source_changed runs but queues nothing — the shape the real
+    service returns on the unchanged gate, a trigger conflict, a resolution
+    failure, or a not-applicable source (job_id=None, deferred=False)."""
+
+    async def signal_source_changed(self, ds_id, session, **kw):
+        await super().signal_source_changed(ds_id, session, **kw)
+        return SourceChangedResponse(
+            changed=True,
+            job_id=None,
+            reason=kw.get("reason", "raw_drift"),
+            current_fingerprint="fp_new",
+            stored_fingerprint="fp_old",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_signal_that_queues_no_job_is_not_an_action(session_factory):
+    """Counting a no-job signal as an action adopted the drifted fingerprint
+    as the new baseline with no rebuild behind it — that drift could never
+    fire again — and walked the breaker toward suspended on nothing."""
+    await _seed(session_factory, raw_fingerprint="fp_old")
+    svc = _NoJobService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert len(svc.signals) == 1
+    assert result.actions == 0
+    assert result.errors == 0
+
+    st = await _state(session_factory)
+    assert st.raw_fingerprint == "fp_old"        # baseline NOT adopted
+    assert st.last_reconciled_at is None         # no action stamped
+    assert (st.reconcile_consecutive_actions or 0) == 0
+
+    # Still due: the next sweep re-evaluates and signals again.
+    await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert len(svc.signals) == 2
+
+
+@pytest.mark.asyncio
+async def test_claim_lock_fails_closed_on_postgres_error():
+    """A Postgres hiccup must cost one tick, not the mutual exclusion."""
+
+    class _Dialect:
+        name = "postgresql"
+
+    class _Bind:
+        dialect = _Dialect()
+
+    class _Session:
+        bind = _Bind()
+
+        async def execute(self, *_a, **_k):
+            raise RuntimeError("connection lost")
+
+    sweeper = ReconciliationSweeper(lambda: None, lambda: None)
+    assert await sweeper._claim_lock(_Session()) is False
+
+
+# ── Fairness: the scan window rotates ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_held_sources_do_not_monopolize_the_scan_window(
+    session_factory, monkeypatch,
+):
+    """Past _SCAN_CAP permanently-held sources, a frozen fairness clock meant
+    nothing else in the fleet was ever scanned again."""
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.reconcile_sweeper._SCAN_CAP", 1,
+    )
+    # Held: drifting but inside the rebuild cooldown, oldest stamp.
+    await _seed(
+        session_factory, ds_id="ds_held",
+        edge_counts={"FLOWS_TO": 200},
+        last_aggregated_ago_secs=60,
+        stats_age_secs=30,
+        checked_at=_ago(hours=3),
+        raw_fingerprint="aaa",
+    )
+    # Healthy and overdue, but with the newer stamp.
+    await _seed(session_factory, ds_id="ds_healthy", checked_at=_ago(hours=2))
+
+    svc = _FakeService()
+    first = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert first.scanned == 1
+    assert first.by_skip == {"cooldown": 1}  # the held source went first
+
+    # The hold advanced the fairness clock, so the next tick reaches the
+    # other source instead of re-confirming the same hold forever.
+    second = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert second.scanned == 1
+    assert second.by_skip == {"in_sync": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_sub_300s_check_override_is_honoured(session_factory):
+    """The SQL cutoff must widen to the fastest per-source override, or a
+    60s override behind the 300s clamp is silently inert."""
+    await _seed(
+        session_factory,
+        checked_at=_ago(seconds=120),
+        stats_age_secs=200,  # older than checked_at: digest clauses stay quiet
+    )
+    async with session_factory() as s:
+        st = await s.get(AggregationDataSourceStateORM, "ds_1")
+        st.reconcile_check_interval_secs = 60
+        await s.commit()
+
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+    assert result.scanned == 1  # 120s since last check > the 60s override
+
+
+@pytest.mark.asyncio
+async def test_a_sub_300s_override_not_yet_elapsed_stays_quiet(session_factory):
+    await _seed(
+        session_factory,
+        checked_at=_ago(seconds=30),
+        stats_age_secs=200,
+    )
+    async with session_factory() as s:
+        st = await s.get(AggregationDataSourceStateORM, "ds_1")
+        st.reconcile_check_interval_secs = 60
+        await s.commit()
+
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+    assert result.scanned == 0

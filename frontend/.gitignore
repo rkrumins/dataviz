@@ -31,3 +31,7 @@ lerna-debug.log*
 # TypeScript
 *.tsbuildinfo
 
+# Agent visual-testing screenshots (generated, never source)
+.harness/
+.superpowers-shots/
+

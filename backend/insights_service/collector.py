@@ -30,6 +30,7 @@ from backend.app.config import resilience
 from backend.app.db.engine import get_jobs_session
 from backend.app.db.models import DataSourcePollingConfigORM, WorkspaceDataSourceORM
 from backend.app.db.repositories.stats_repo import (
+    touch_probe_stamp,
     touch_schema_freshness,
     upsert_data_source_stats,
     upsert_data_source_stats_counts,
@@ -510,6 +511,11 @@ async def probe_counts(envelope: StatsJobEnvelope) -> None:
             "probe: %s has no constant-time counts — leaving it to the poll",
             envelope.data_source_id,
         )
+        # Stamp without counts, or the NULL last_probed_at sorts this source
+        # to the head of the due-set and it is re-enqueued every scheduler
+        # tick forever, spending the batch cap on sources that cannot answer.
+        async with get_jobs_session() as session:
+            await touch_probe_stamp(session, envelope.data_source_id)
         return
 
     async with admission.gate(provider_id, op_kind="probe"):
@@ -520,6 +526,8 @@ async def probe_counts(envelope: StatsJobEnvelope) -> None:
             "probe: %s cannot be counted from counters — leaving it to the poll",
             envelope.data_source_id,
         )
+        async with get_jobs_session() as session:
+            await touch_probe_stamp(session, envelope.data_source_id)
         return
 
     entity_counts = stats.get("entityTypeCounts", {}) or {}

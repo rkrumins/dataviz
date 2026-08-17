@@ -1286,6 +1286,28 @@ def test_refresh_batch_status_requires_ingestion_gate():
     assert any(getattr(f, "__name__", "") == "_require_ingestion_read" for f in fns)
 
 
+def test_settings_read_is_ingestion_read_and_write_stays_admin():
+    """The Automation modal renders read-only for non-admins, so the settings
+    GET opened to ingestion readers — while the PUT must stay system:admin."""
+    from backend.app.api.v1.endpoints import aggregation as agg_mod
+
+    def _agg_route(path, method):
+        for r in agg_mod.router.routes:
+            if r.path == path and method in r.methods:
+                return r
+        raise AssertionError(f"route {method} {path} not found")
+
+    get_fns = _dep_calls(_agg_route("/aggregation/settings", "GET").dependant)
+    assert any(
+        getattr(f, "__name__", "") == "_require_ingestion_read"
+        for f in get_fns
+    )
+    assert agg_mod._REQUIRE_SYSTEM_ADMIN not in get_fns
+
+    put_fns = _dep_calls(_agg_route("/aggregation/settings", "PUT").dependant)
+    assert agg_mod._REQUIRE_SYSTEM_ADMIN in put_fns
+
+
 # ── F9: per-source rebuild-cadence override PATCH ───────────────────────
 
 
@@ -1293,12 +1315,29 @@ class _FakeSettingsSvc:
     def __init__(self, *, raises=None):
         self._raises = raises
         self.called_with = None
+        self.probe_called_with = None
+        self.pause_called_with = None
 
     async def set_source_rebuild_interval(self, ds_id, secs, session):
         self.called_with = (ds_id, secs)
         if self._raises:
             raise self._raises
         return secs
+
+    async def set_source_probe_settings(self, ds_id, session, **kwargs):
+        self.probe_called_with = (ds_id, kwargs)
+        if self._raises:
+            raise self._raises
+        return {
+            "probe_enabled": kwargs.get("enabled"),
+            "probe_interval_secs": kwargs.get("interval_secs"),
+        }
+
+    async def set_source_pause(self, ds_id, session, *, paused_until):
+        self.pause_called_with = (ds_id, paused_until)
+        if self._raises:
+            raise self._raises
+        return {"paused_until": paused_until}
 
 
 def test_freshness_settings_request_validates_bounds():
@@ -1380,6 +1419,31 @@ def test_cp_freshness_settings_twin_delegates():
     out = _run(cp.set_freshness_settings("ds-1", body=body, svc=svc, session=object()))
     assert svc.called_with == ("ds-1", 90)
     assert out.rebuild_min_interval_secs == 90
+
+
+def test_cp_freshness_settings_twin_round_trips_probe_and_pause():
+    """Proxy mode is what every deployed topology runs: a field handled only
+    by the direct-mode route is a silent 200-and-write-nothing in prod. The
+    drawer's Detect toggle, Detect interval and Snooze all go through here."""
+    from datetime import datetime, timedelta, timezone
+
+    from backend.app.services.aggregation import controlplane as cp
+
+    until = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    svc = _FakeSettingsSvc()
+    body = FreshnessSettingsRequest(
+        probeEnabled=False,
+        probeIntervalSecs=120,
+        pausedUntil=until,
+    )
+    out = _run(cp.set_freshness_settings("ds-1", body=body, svc=svc, session=object()))
+    assert svc.probe_called_with == (
+        "ds-1", {"enabled": False, "interval_secs": 120},
+    )
+    assert svc.pause_called_with == ("ds-1", until)
+    assert out.probe_enabled is False
+    assert out.probe_interval_secs == 120
+    assert out.paused_until == until
 
 
 if __name__ == "__main__":
