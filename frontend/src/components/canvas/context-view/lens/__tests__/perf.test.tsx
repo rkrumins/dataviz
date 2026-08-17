@@ -29,6 +29,8 @@ import { ReactFlowProvider } from '@xyflow/react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { FocusGraphView } from '../FocusGraphView'
 import { buildFocusLayout, initialLensViewState } from '../focus-layout'
+import type { LensWalkNode } from '../closure-adapter'
+import { INFRAME_WIRE_CAP } from '../frame-flow'
 import { buildLensSubgraph } from '../lens-subgraph'
 import { applyCondensation } from '../condensation'
 import { WALK_FIXTURES } from '@/harness/lensFixtures'
@@ -353,6 +355,84 @@ describe('P0 — perf harness (Task 20)', () => {
       const max = Math.max(...samples)
       console.log(`[T28-R3] walkLongChain full-width rebuild cards=${warm.cards.length} edges=${warm.edges.length} avgMs=${avg.toFixed(3)} maxMs=${max.toFixed(3)}`)
       expect(avg).toBeGreaterThan(0)
+      expect(avg).toBeLessThan(REGRESSION_CEILING_MS)
+    })
+  })
+
+  /**
+   * IN-FRAME ROUTING — the arrangement and lane passes run inside
+   * `buildFocusLayout`, on a container far denser than anything the
+   * canonical fixtures hold: fifty tables in one warehouse with ~200
+   * flows between them, which is the "expand a database and it shows
+   * numerous edges between tables" case this work exists for.
+   *
+   * Both passes are near-linear (Kahn layering; interval colouring over
+   * row spans), so the point of the number is that they stay that way —
+   * held to T20 P3's own budget verbatim, not to a new one.
+   */
+  describe('(in-frame routing) a dense container rebuild stays inside T20\'s budget', () => {
+    const REGRESSION_CEILING_MS = 50 * 4
+    it('50 tables in one warehouse, repeated rebuild', () => {
+      const TABLES = 50
+      const wnode = (urn: string, type: string): LensWalkNode => ({
+        id: urn, type: 'generic', position: { x: 0, y: 0 },
+        data: { urn, label: urn, type }, urn, displayName: urn, entityType: type,
+      }) as unknown as LensWalkNode
+      const nodes: LensWalkNode[] = [wnode('RPT', 'dataset'), wnode('WH', 'container')]
+      const lineageEdges: Array<{ id: string; sourceUrn: string; targetUrn: string; edgeType: string }> = []
+      const containmentEdges: Array<{ sourceUrn: string; targetUrn: string }> = []
+      const reveal: Array<[string, number]> = [['in:RPT', 1]]
+      for (let i = 0; i < TABLES; i++) {
+        const urn = `t${i}`
+        nodes.push(wnode(urn, 'dataset'))
+        containmentEdges.push({ sourceUrn: 'WH', targetUrn: urn })
+        reveal.push([`in:${urn}`, 1])
+        // A chain plus three shortcut hops per table — the shape a real
+        // warehouse has, and ~4 flows per table rather than 1.
+        for (const k of [1, 2, 3, 5]) {
+          if (i + k < TABLES) lineageEdges.push({ id: `h${i}-${k}`, sourceUrn: urn, targetUrn: `t${i + k}`, edgeType: 'DERIVES_FROM' })
+        }
+      }
+      lineageEdges.push({ id: 'hout', sourceUrn: `t${TABLES - 1}`, targetUrn: 'RPT', edgeType: 'DERIVES_FROM' })
+
+      const sg = buildLensSubgraph({ focusUrn: 'RPT', nodes, lineageEdges, containmentEdges })
+      const base = initialLensViewState(sg)
+      const view = {
+        ...base,
+        revealed: new Map([...base.revealed, ...reveal]),
+        expandedContainment: new Set([...base.expandedContainment, 'WH']),
+      }
+      const input = {
+        sg, view, query: '', hiddenTypes: new Set<string>(),
+        extendStatus: new Map(), childrenAll: new Map(), childrenAllStatus: new Map(),
+        walkStatus: 'done' as const,
+      }
+
+      const warm = buildFocusLayout(input)
+      const frame = warm.cards.find(c => c.nodeId === 'WH')!
+      // The premise: this really is the dense case, and it really did
+      // route it — not a budget met by having nothing to do.
+      //
+      // A frame draws ONE WINDOW of rows however many it holds, so the
+      // wires it can ever draw are bounded by that window even here —
+      // which is why the cap is a number about the window and not about
+      // the container. The passes still SEE all fifty tables' hops
+      // (`internalHopsOf` scans every projected bundle), which is the
+      // part this times.
+      expect(frame.internalFlows).toBeGreaterThan(INFRAME_WIRE_CAP)
+      expect(frame.gutterLanes).toBeGreaterThan(0)
+      expect(warm.edges.filter(e => e.sameAncestorFrame === frame.id).every(e => e.internalQuiet)).toBe(true)
+
+      const N = 20
+      const samples: number[] = []
+      for (let i = 0; i < N; i++) {
+        const start = performance.now()
+        buildFocusLayout(input)
+        samples.push(performance.now() - start)
+      }
+      const avg = samples.reduce((a, b) => a + b, 0) / N
+      const max = Math.max(...samples)
+      console.log(`[in-frame] dense container rebuild flows=${frame.internalFlows} lanes=${frame.gutterLanes} cards=${warm.cards.length} avgMs=${avg.toFixed(3)} maxMs=${max.toFixed(3)}`)
       expect(avg).toBeLessThan(REGRESSION_CEILING_MS)
     })
   })

@@ -1185,6 +1185,85 @@ const walkGrainSeamDeepNesting = (): WalkFixture => ({
   isolatedId: 'n:TXN',
 })
 
+/**
+ * IN-FRAME ROUTING — the reported shape, live (2026-08-17): a GOLD
+ * warehouse whose own tables feed each other, opened. Before the
+ * arrangement and lane passes this drew as straight diagonals from
+ * `dim_customer` (which arrives AFTER its own consumers, so it sat at
+ * the bottom) up and across every card between — the picture in the
+ * report, and the reason "expand a database container" was unreadable.
+ *
+ * Deliberately just under `INFRAME_WIRE_CAP`, so the wires DRAW: this
+ * is the shot that has to show the lanes. `walkDenseContainer` is its
+ * sibling past the cap, where they go quiet instead.
+ */
+const walkContainerFlows = (): WalkFixture => ({
+  title: 'A warehouse whose own tables feed each other',
+  model: walkModel('RPT', {
+    nodes: [
+      wnode('RPT', 'dataset', 'exec_summary'),
+      wnode('GOLD', 'container', 'GOLD'),
+      wnode('dim_customer', 'dataset', 'dim_customer'),
+      wnode('fact_pipeline', 'dataset', 'fact_pipeline'),
+      wnode('fact_support', 'dataset', 'fact_support'),
+      wnode('fact_orders', 'dataset', 'fact_orders'),
+      wnode('fact_ledger', 'dataset', 'fact_ledger'),
+    ],
+    lineageEdges: [
+      hop('dim_customer', 'fact_orders'),
+      hop('dim_customer', 'fact_support'),
+      hop('fact_pipeline', 'fact_orders'),
+      hop('fact_support', 'fact_orders'),
+      hop('fact_orders', 'RPT'),
+      hop('fact_ledger', 'RPT'),
+    ],
+    containmentEdges: [
+      holds('GOLD', 'dim_customer'), holds('GOLD', 'fact_pipeline'),
+      holds('GOLD', 'fact_support'), holds('GOLD', 'fact_orders'),
+      holds('GOLD', 'fact_ledger'),
+    ],
+    upstreamUrns: new Set(['dim_customer', 'fact_pipeline', 'fact_support', 'fact_orders', 'fact_ledger']),
+  }),
+  script: base => scripted(base, {
+    reveal: [['in:RPT', 1], ['in:fact_orders', 1], ['in:fact_support', 1]],
+    expand: ['GOLD'],
+  }),
+})
+
+/**
+ * The same shape PAST the cap: one warehouse, eight tables, every table
+ * feeding the next three. The wires go quiet and the frame says how
+ * many are in there — the alternative being a hairball no routing can
+ * rescue.
+ */
+const walkDenseContainer = (): WalkFixture => {
+  const TABLES = 8
+  const nodes: LensWalkNode[] = [
+    wnode('RPT', 'dataset', 'exec_summary'),
+    wnode('WH', 'container', 'WAREHOUSE'),
+  ]
+  const lineageEdges: ReturnType<typeof hop>[] = []
+  const containmentEdges: ReturnType<typeof holds>[] = []
+  const reveal: Array<[string, number]> = [['in:RPT', 1]]
+  const upstreamUrns = new Set<string>()
+  for (let i = 0; i < TABLES; i++) {
+    const urn = `stage_${String(i).padStart(2, '0')}`
+    nodes.push(wnode(urn, 'dataset', urn))
+    containmentEdges.push(holds('WH', urn))
+    reveal.push([`in:${urn}`, 1])
+    upstreamUrns.add(urn)
+    for (const k of [1, 2, 3]) {
+      if (i + k < TABLES) lineageEdges.push(hop(urn, `stage_${String(i + k).padStart(2, '0')}`))
+    }
+  }
+  lineageEdges.push(hop(`stage_${String(TABLES - 1).padStart(2, '0')}`, 'RPT'))
+  return {
+    title: 'Past the cap — the flows go quiet and the frame says how many',
+    model: walkModel('RPT', { nodes, lineageEdges, containmentEdges, upstreamUrns }),
+    script: base => scripted(base, { reveal, expand: ['WH'] }),
+  }
+}
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkCollaterals: walkCollaterals(),
   walkIsolatedCone: walkIsolatedCone(),
@@ -1211,4 +1290,6 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkGrainSeam: walkGrainSeam(),
   walkGrainSeamUnderclaim: walkGrainSeamUnderclaim(),
   walkGrainSeamDeepNesting: walkGrainSeamDeepNesting(),
+  walkContainerFlows: walkContainerFlows(),
+  walkDenseContainer: walkDenseContainer(),
 }

@@ -129,6 +129,8 @@ export function applyCondensation(
       labelT: 0.5,
       grainCoarse: false,
       sameAncestorFrame: null,
+      inFrameLane: null,
+      internalQuiet: false,
       seamSlotted: false,
       condensed: { connectorId: id, steps: run.interior.length },
     })

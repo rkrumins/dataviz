@@ -46,6 +46,15 @@ import {
 } from './lens-subgraph'
 import type { LensWalkNode } from './closure-adapter'
 import {
+    assignLanes,
+    flowOrder,
+    gutterWidth,
+    INFRAME_WIRE_CAP,
+    LANE_GAP,
+    LANE_W,
+    type InternalEdgeRef,
+} from './frame-flow'
+import {
     labelOf,
     layoutBands,
     rowHeight,
@@ -56,6 +65,7 @@ import {
     CHILD_ROW_H,
     DIVIDER_ROW_H,
     FOCAL_H,
+    FRAME_PAD,
     FRAME_WINDOW,
     FRAME_WINDOW_ALL,
     NO_FRAME_ROWS,
@@ -988,6 +998,53 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         return card.id
     }
 
+    /**
+     * WHICH ROW OF `frameUrn` SPEAKS FOR THIS ENDPOINT — the child of
+     * that container the endpoint is, or sits inside. Null when the
+     * endpoint is outside it entirely.
+     *
+     * A hop inside an opened warehouse can name a COLUMN two levels
+     * down; the frame's own arrangement is about its rows, so the hop is
+     * asked which row it enters and leaves by, never at what depth.
+     */
+    const rowUnder = (frameUrn: string, endpoint: string): string | null => {
+        let cursor: string | null = endpoint
+        const guard = new Set<string>()
+        while (cursor && !guard.has(cursor)) {
+            const parent: string | null = model.get(cursor)?.parent ?? null
+            if (parent === frameUrn) return cursor
+            guard.add(cursor)
+            cursor = parent
+        }
+        return null
+    }
+
+    /**
+     * The lineage that stays INSIDE a container, stated in its own rows —
+     * what `frame-flow` arranges the rows by and routes through the
+     * gutter. Deduped by row pair: two columns of one table feeding two
+     * columns of another is ONE flow between those two rows, which is
+     * what the reader sees and what the lane allocator must budget for.
+     */
+    const internalHopsCache = new Map<string, InternalEdgeRef[]>()
+    const internalHopsOf = (frameUrn: string): InternalEdgeRef[] => {
+        const hit = internalHopsCache.get(frameUrn)
+        if (hit) return hit
+        const out: InternalEdgeRef[] = []
+        const seen = new Set<string>()
+        for (const hop of projected) {
+            const s = rowUnder(frameUrn, hop.sourceUrn)
+            const t = rowUnder(frameUrn, hop.targetUrn)
+            if (!s || !t || s === t) continue
+            const id = `${s}>${t}`
+            if (seen.has(id)) continue
+            seen.add(id)
+            out.push({ id, source: s, target: t })
+        }
+        internalHopsCache.set(frameUrn, out)
+        return out
+    }
+
     const needle = query.trim().toLowerCase()
     const matches = (label: string): boolean => needle === '' || label.toLowerCase().includes(needle)
 
@@ -1195,6 +1252,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         frameId: null, depth: 0,
         ancestry: EMPTY_STRINGS, ancestryIds: EMPTY_STRINGS,
         frameEmpty: false,
+        gutterLanes: 0, internalFlows: 0, internalQuiet: false, internalIn: 0, internalOut: 0,
         connected: true, frameShowingAll: false, frameConnectedCount: 0,
         frameLoaded: 0, frameTotal: -1, frameHasMore: false,
         frameSearchedCount: 0, frameSearchedExact: true,
@@ -1315,7 +1373,10 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
          *  a row removed by a search is a row you cannot see is there. */
         hostQuery = '',
     ) => {
-        const kids = rankCards((nodeOf(urn)?.children ?? []).filter(c => visible.has(c)))
+        const kids = flowOrder(
+            rankCards((nodeOf(urn)?.children ?? []).filter(c => visible.has(c))),
+            internalHopsOf(urn),
+        )
         const showAll = view.frameShowAll.has(urn)
         const isFocus = urn === sg.focusUrn
         const label = labelFor(urn)
@@ -1854,6 +1915,10 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             grainCoarse: bundleCoarse,
             // Filled in just below, once every card's `frameId` is fixed.
             sameAncestorFrame: null,
+            // Filled in by the in-frame routing pass below (the lane's own
+            // `x` needs geometry, so it lands after `layoutBands`).
+            inFrameLane: null,
+            internalQuiet: false,
             // Filled in by the badge-placement pass, below `layoutBands`.
             seamSlotted: false,
         })
@@ -1884,6 +1949,88 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         for (const host of frameChain(edge.source)) {
             if (targetChain.has(host)) { edge.sameAncestorFrame = host; break }
         }
+    }
+
+    /**
+     * IN-FRAME LANES — the routing half of "internal flow is vertical".
+     *
+     * A same-frame wire used to be a STRAIGHT LINE between two ports
+     * (T22 R2, which fixed a bezier bowing outside the frame). A straight
+     * line between two rows of a vertical list crosses every card between
+     * them, and with the rows ordered by busy-ness rather than by flow it
+     * crossed most of the frame to do it — reported live on a warehouse
+     * frame whose one opened table fed two tables at the opposite end of
+     * the stack.
+     *
+     * `flowOrder` above already put producers over consumers; here each
+     * surviving wire claims a vertical lane in its frame's own left
+     * gutter, so parallel runs never sit on top of each other and no wire
+     * is ever drawn over a card again. The lane's own `x` needs the frame
+     * to have a position, so it is resolved after `layoutBands`.
+     */
+    const rowsOfFrame = new Map<string, string[]>()
+    for (const c of cards) {
+        if (!c.frameId) continue
+        const list = rowsOfFrame.get(c.frameId)
+        if (list) list.push(c.id)
+        else rowsOfFrame.set(c.frameId, [c.id])
+    }
+    /** Which ROW of `frameId` this card is, or sits inside — the card-space
+     *  twin of `rowUnder`, since a lane is measured in row positions. */
+    const rowCardUnder = (frameId: string, cardId: string): string | null => {
+        let cursor: string | null = cardId
+        let guard = 0
+        while (cursor && guard++ < 32) {
+            const host: string | null = byId.get(cursor)?.frameId ?? null
+            if (host === frameId) return cursor
+            cursor = host
+        }
+        return null
+    }
+    const internalByFrame = new Map<string, FocusEdge[]>()
+    for (const edge of edges) {
+        if (!edge.sameAncestorFrame) continue
+        const list = internalByFrame.get(edge.sameAncestorFrame)
+        if (list) list.push(edge)
+        else internalByFrame.set(edge.sameAncestorFrame, [edge])
+    }
+    for (const [frameId, group] of internalByFrame) {
+        const frame = byId.get(frameId)
+        const order = rowsOfFrame.get(frameId)
+        if (!frame || !order) continue
+        const refs: InternalEdgeRef[] = []
+        for (const edge of group) {
+            const source = rowCardUnder(frameId, edge.source)
+            const target = rowCardUnder(frameId, edge.target)
+            if (!source || !target || source === target) continue
+            refs.push({ id: edge.id, source, target })
+            // The fact the wires carry, kept on the cards so it survives
+            // them going quiet.
+            const sc = byId.get(source)
+            const tc = byId.get(target)
+            if (sc) sc.internalOut += 1
+            if (tc) tc.internalIn += 1
+        }
+        if (refs.length === 0) continue
+        frame.internalFlows = refs.length
+        const lanes = assignLanes(order, refs)
+        // QUIET WHEN THE PICTURE CANNOT CARRY THEM — either more flows
+        // than one frame can show legibly at all, or more overlapping
+        // runs than a gutter has lanes for. The second half matters: a
+        // wire that missed a lane has nowhere to go but straight across
+        // the cards, which is the exact drawing this work removes, so
+        // the frame goes quiet rather than drawing one of them anyway.
+        const quiet = refs.length > INFRAME_WIRE_CAP || lanes.size < refs.length
+        frame.internalQuiet = quiet
+        let used = 0
+        for (const edge of group) {
+            edge.internalQuiet = quiet
+            const index = lanes.get(edge.id)
+            if (index === undefined) continue
+            edge.inFrameLane = { index, x: 0 }
+            used = Math.max(used, index + 1)
+        }
+        frame.gutterLanes = used
     }
 
     // THE OTHER HALF OF R4: a wire whose two ends can reach each other
@@ -1942,6 +2089,20 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // ── 5. GEOMETRY ──────────────────────────────────────────────────
 
     layoutBands(cards)
+
+    // The lanes now have somewhere to be: their frame has a position, so
+    // each one's absolute centre is the frame's own left padding plus its
+    // slot. Innermost (index 0) hugs the rows.
+    for (const edge of edges) {
+        const lane = edge.inFrameLane
+        if (!lane) continue
+        const frame = edge.sameAncestorFrame ? byId.get(edge.sameAncestorFrame) : undefined
+        if (!frame) { edge.inFrameLane = null; continue }
+        edge.inFrameLane = {
+            index: lane.index,
+            x: frame.x + FRAME_PAD + gutterWidth(frame.gutterLanes) - LANE_GAP - (lane.index + 0.5) * LANE_W,
+        }
+    }
 
     // A ×N badge belongs to a wire, so it may only render where the wire
     // can hold one: long enough for a pill, and with nothing already

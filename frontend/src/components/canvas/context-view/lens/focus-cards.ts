@@ -14,6 +14,7 @@
  */
 import type { LineageNode } from '@/store/canvas'
 import { relationshipLabel } from '@/lib/relationshipLabel'
+import { gutterWidth } from './frame-flow'
 
 /** Ontology wording for edge types, keyed by UPPERCASE id: the
  *  schema's display name + description when defined. */
@@ -397,6 +398,25 @@ export interface FocusCard {
   depth: number
   /** Frame cards only — opened, and nothing inside connects to the focal. */
   frameEmpty: boolean
+  /** Frame cards only — how many vertical lanes its left gutter has to
+   *  reserve for the lineage that stays INSIDE it. 0 for every frame
+   *  whose contents don't feed each other, which costs it nothing. */
+  gutterLanes: number
+  /** Frame cards only — how many flows run between its own children.
+   *  Stated on the header ("· 12 flows") so a frame whose wires have
+   *  gone quiet at density still says how much is in there. */
+  internalFlows: number
+  /** Frame cards only — its internal wires draw only for the row the
+   *  reader is pointing at, either because there are more of them than
+   *  one picture can carry (`INFRAME_WIRE_CAP`) or because they needed
+   *  more lanes than a gutter can hold. The header is what says so. */
+  internalQuiet: boolean
+  /** Frame CHILD only — how many of this row's flows come from, and go
+   *  to, another row of the SAME frame. The fact the wires carry, kept
+   *  on the card so it survives them going quiet; clicking one
+   *  spotlights that row. */
+  internalIn: number
+  internalOut: number
   /** Frame CHILD only: is this on the lineage? False for a child that
    *  merely lives inside the container, shown in "all" mode so the
    *  picture is the whole table rather than an edited version. */
@@ -551,6 +571,23 @@ export interface FocusEdge {
    *  a straight line between two points already inside it can never
    *  leave it (T22, R2). */
   sameAncestorFrame: string | null
+  /** INTERNAL FLOW IS VERTICAL. This wire stays inside
+   *  `sameAncestorFrame` AND that frame reserved it a lane in its own
+   *  left gutter: leave the producer's left port, drop down the lane at
+   *  `x`, turn back in at the consumer's left port. `index` is the
+   *  lane's own slot (0 = innermost, hugging the rows); `x` is its
+   *  absolute centre, resolved once the frame has a position.
+   *
+   *  Null means the plain router: either the wire leaves its frame (the
+   *  ordinary horizontal case) or the frame ran out of lanes, which is
+   *  a density the quiet treatment below already answers. */
+  inFrameLane: { index: number; x: number } | null
+  /** This frame holds more internal lineage than one picture can carry
+   *  legibly (`INFRAME_WIRE_CAP`), so the wire draws only while the
+   *  reader is asking about it — hovering or spotlighting one of its
+   *  ends. The COUNT survives on the rows and the frame header, so what
+   *  is hidden is the ink, never the fact. */
+  internalQuiet: boolean
   /** A grain-coarse wire found a collision-free slot for its seam badge
    *  in the SAME placement pass `labelVisible` comes from. `false` means
    *  every candidate along this wire's own length collided with an
@@ -681,7 +718,7 @@ export function layoutBands(cards: FocusCard[]) {
     // list actually windows: a frame showing everything it has needs no
     // strip saying so.
     const foot = frameWindow(c).scrollable ? FRAME_FOOTER_H : 0
-    c.w = CARD_W + FRAME_PAD * 2
+    c.w = CARD_W + FRAME_PAD * 2 + gutterWidth(c.gutterLanes)
     // A COLLAPSED frame is its header and nothing else. Reserving a
     // body row is for a frame that is open and has none yet — loading,
     // empty, failed — which all need somewhere to say so.
@@ -695,7 +732,10 @@ export function layoutBands(cards: FocusCard[]) {
     const kids = childrenByFrame.get(c.id) ?? []
     for (const k of kids) if (k.kind !== 'frame') k.w = FRAME_CONTENT_W
     const widest = kids.reduce((acc, k) => Math.max(acc, k.w), FRAME_CONTENT_W)
-    c.w = widest + FRAME_PAD * 2
+    // The gutter is INSIDE the frame and to the left of its rows, so the
+    // box grows by it and the rows do not shrink: a container that
+    // routes its own lineage is wider, never tighter.
+    c.w = widest + FRAME_PAD * 2 + gutterWidth(c.gutterLanes)
   }
 
   const byBand = new Map<number, FocusCard[]>()
@@ -740,8 +780,9 @@ export function layoutBands(cards: FocusCard[]) {
   for (const { f: frame } of [...frames].reverse()) {
     const kids = childrenByFrame.get(frame.id) ?? []
     let y = frame.y + headerHeight(frame)
+    const gutter = gutterWidth(frame.gutterLanes)
     for (const k of kids) {
-      k.x = frame.x + FRAME_PAD
+      k.x = frame.x + FRAME_PAD + gutter
       k.y = y
       y += k.h + CARD_GAP
     }

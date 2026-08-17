@@ -84,7 +84,7 @@ describe('the pipeline recovers from a hostile condensation output (T26 R2, inva
 
   it('(c) a dangling edge from condensation never reaches the board — the focal still renders, dev-asserts', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    injectedEdge = { id: 'ghost', source: 'F', target: 'NEVER_DRAWN', count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false, cycleAnchor: false, labelVisible: false, labelT: 0.5, grainCoarse: false, sameAncestorFrame: null, seamSlotted: false }
+    injectedEdge = { id: 'ghost', source: 'F', target: 'NEVER_DRAWN', count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false, cycleAnchor: false, labelVisible: false, labelT: 0.5, grainCoarse: false, sameAncestorFrame: null, inFrameLane: null, internalQuiet: false, seamSlotted: false }
     renderWalk()
     expect(screen.getByRole('dialog', { name: 'Connections of shipments' })).toBeTruthy()
     const focalCard = [...document.querySelectorAll('.react-flow__node')].find(n => n.textContent?.includes('shipments'))

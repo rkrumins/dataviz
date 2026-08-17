@@ -676,6 +676,39 @@ function sameCard(a: FocusCard, b: FocusCard): boolean {
 
 // ── Card node ────────────────────────────────────────────────────────
 
+/** How quiet an internal wire sits when nobody is asking about it, and
+ *  how quiet it sits when its frame is past `INFRAME_WIRE_CAP`. The
+ *  second is zero — the fact moves to the rows' own counts, and a frame
+ *  with forty flows in it is a hairball at any opacity. */
+const INTERNAL_QUIET = 0.3
+const INTERNAL_HIDDEN = 0
+
+/**
+ * The orthogonal path a laned in-frame wire takes: out of the producer's
+ * left port, along to its lane, down (or up) the lane, and back in at
+ * the consumer's left port. Rounded at the two turns so it reads as one
+ * route rather than three segments.
+ *
+ * Degenerate spans — two rows so close that the corners would overlap —
+ * fall back to a plain polyline, which is what a 6px radius would draw
+ * anyway.
+ */
+function lanePath(sx: number, sy: number, laneX: number, tx: number, ty: number): string {
+  const r = 6
+  const dy = ty - sy
+  const dir = dy >= 0 ? 1 : -1
+  const enoughRoom = Math.abs(dy) > r * 2 && sx - laneX > r && tx - laneX > r
+  if (!enoughRoom) return `M ${sx} ${sy} L ${laneX} ${sy} L ${laneX} ${ty} L ${tx} ${ty}`
+  return [
+    `M ${sx} ${sy}`,
+    `L ${laneX + r} ${sy}`,
+    `Q ${laneX} ${sy} ${laneX} ${sy + dir * r}`,
+    `L ${laneX} ${ty - dir * r}`,
+    `Q ${laneX} ${ty} ${laneX + r} ${ty}`,
+    `L ${tx} ${ty}`,
+  ].join(' ')
+}
+
 function TypeIcon({ ctx, typeId, color, className }: { ctx: CardCtx; typeId: string; color: string; className?: string }) {
   const Icon = ctx.visualFor(typeId).Icon
   return <Icon className={className} style={{ color }} />
@@ -690,6 +723,18 @@ function PortHandles() {
     <>
       <Handle type="target" position={Position.Left} className={dot} style={{ backgroundColor: `${TINT_UP}99` }} />
       <Handle type="source" position={Position.Right} className={dot} style={{ backgroundColor: `${TINT_DOWN}99` }} />
+      {/* The internal lane's own exit — a ROUTING ANCHOR, not a port, so
+          it is invisible and shares the incoming port's position: a wire
+          that stays inside this container leaves here, drops down its
+          lane, and turns back in at its consumer's incoming port, which
+          keeps the arrowhead pointing the way every other arrow on the
+          board points. */}
+      <Handle
+        id="lane-out"
+        type="source"
+        position={Position.Left}
+        className="!w-px !h-px !min-w-0 !min-h-0 !border-0 !bg-transparent !opacity-0 pointer-events-none"
+      />
     </>
   )
 }
@@ -1584,6 +1629,34 @@ function ContentsCount({ card }: { card: FocusCard }) {
   )
 }
 
+/**
+ * WHAT STAYS INSIDE — this row's flows to and from other rows of the
+ * SAME container, carried on the card rather than only by the wires, so
+ * the fact survives them going quiet on a dense frame
+ * (`INFRAME_WIRE_CAP`) and survives the reader scrolling the wire's
+ * other end out of the window.
+ *
+ * Reads as the lane it stands for: what comes down into this row, and
+ * what leaves it going on down.
+ */
+function InsideFlows({ card }: { card: FocusCard }) {
+  if (card.internalIn === 0 && card.internalOut === 0) return null
+  const host = card.parentLabel ? `inside ${card.parentLabel}` : 'inside this container'
+  return (
+    <span
+      // On the NAME's own line, not the cue line under it: a row with
+      // nothing else to say is 36px tall and has no second line to put
+      // this on, and growing every row of a dense frame to make one is
+      // the opposite of what this work is for.
+      className="flex items-center gap-1 flex-shrink-0 font-normal text-[9px] tabular-nums text-ink-muted/70"
+      title={`${host}: fed by ${card.internalIn.toLocaleString()}, feeds ${card.internalOut.toLocaleString()}`}
+    >
+      {card.internalIn > 0 && <span>←{card.internalIn.toLocaleString()}</span>}
+      {card.internalOut > 0 && <span>{card.internalOut.toLocaleString()}→</span>}
+    </span>
+  )
+}
+
 /** How much of a wheel gesture makes one row of travel. Trackpads report
  *  a few px per frame and a mouse notch ~100, so this has to be small
  *  enough to feel continuous and large enough that one notch is not a
@@ -1634,8 +1707,9 @@ function RowContent({ card, ctx, displayAccent, onTrail, offCone }: {
         {onTrail && <TrailMark />}
       </div>
       <div className="flex-1 min-w-0">
-        <p className={cn('truncate text-[12px] leading-snug', card.connected ? 'font-medium text-ink' : 'text-ink-secondary')}>
-          {card.label}
+        <p className={cn('flex items-center gap-1.5 min-w-0 text-[12px] leading-snug', card.connected ? 'font-medium text-ink' : 'text-ink-secondary')}>
+          <span className="truncate">{card.label}</span>
+          <InsideFlows card={card} />
         </p>
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug min-w-0">
           {/* Which KIND of thing — only where the frame holds several. */}
@@ -1740,6 +1814,7 @@ function EntityContent({ card, ctx, displayAccent, onTrail, offCone }: {
       <div className="flex-1 min-w-0">
         <p className="flex items-center gap-1.5 min-w-0 text-[12px] font-medium text-ink leading-snug">
           <span className="truncate">{card.label}</span>
+          <InsideFlows card={card} />
         </p>
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug min-w-0">
           {(card.ancestry.length > 0 || card.parentLabel) && (
@@ -1886,6 +1961,17 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
         ? 'nothing here is on this lineage · showing everything inside'
         : `${card.frameConnectedCount.toLocaleString()} on this lineage · of ${total}`
       : `${card.count.toLocaleString()} connected inside${via}`
+  // WHY THERE ARE NO WIRES IN HERE. Past `INFRAME_WIRE_CAP` a frame's
+  // own lineage draws only for the row the reader is pointing at, and an
+  // absence with no explanation reads as "nothing connects" — the exact
+  // lie the counts on the rows exist to prevent. Said only where it is
+  // needed: below the cap the wires are right there saying it.
+  // Terse on purpose: this shares one narrow line with what the frame
+  // holds, and appending a sentence truncated THAT away ("8 o…"). The
+  // rest of the explanation is one hover out, on the title.
+  const quietInside = !searching && card.internalQuiet && card.internalFlows > 0
+    ? `${card.internalFlows.toLocaleString()} flow${card.internalFlows === 1 ? '' : 's'}`
+    : ''
   return (
     <>
       {card.wired && <PortHandles />}
@@ -2001,6 +2087,14 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
                 // lineage, and what is in here altogether.
                 ? <ContentsCount card={card} />
                 : <span className="truncate">{inside}</span>}
+                {quietInside && (
+                  <span
+                    className="flex-shrink-0"
+                    title={` run between things inside  — point at a row to see its own`}
+                  >
+                    · {quietInside} inside
+                  </span>
+                )}
           </p>
         </div>
         )}
@@ -2128,6 +2222,14 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
               : card.contents && !fellBack && !searching
                     ? <ContentsCount card={card} />
                     : <span className="truncate">{inside}</span>}
+                    {quietInside && (
+                  <span
+                    className="flex-shrink-0"
+                    title={` run between things inside  — point at a row to see its own`}
+                  >
+                    · {quietInside} inside
+                  </span>
+                )}
               </p>
             )}
             {card.parentId && <FocalBreadcrumb card={card} ctx={ctx} />}
@@ -2935,6 +3037,12 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     /** Both cards sit under this drawn ancestor frame — route INSIDE its
      *  bounds (T22, R2). */
     sameAncestorFrame?: string | null
+    /** INTERNAL FLOW IS VERTICAL: this wire stays inside its frame and
+     *  owns a lane at `x` in that frame's left gutter. */
+    inFrameLane?: { index: number; x: number } | null
+    /** Its frame holds more internal lineage than one picture can carry,
+     *  so it draws only while the reader is asking about it. */
+    internalQuiet?: boolean
     /** THE GRAIN SEAM's "trace columns" — the ⊕ (if any) that continues
      *  this wire further in the direction it already runs, one per
      *  possible "far" side. */
@@ -2963,17 +3071,28 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // with arrowheads piling up at the frame's own border. Surgical on
   // purpose — only THIS case swaps the path function; every other wire
   // keeps the router exactly as it was.
-  const [path] = d.sameAncestorFrame
-    ? getStraightPath({ sourceX, sourceY, targetX, targetY })
-    : getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
+  //
+  // A LANED wire routes orthogonally instead: out of the producer's left
+  // port, down its own lane in the frame's gutter, and back in at the
+  // consumer's left port. A straight line between two rows of a vertical
+  // list crosses every card between them — which is what the frame's
+  // own lanes exist to stop.
+  const lane = d.inFrameLane ?? null
+  const [path] = lane
+    ? [lanePath(sourceX, sourceY, lane.x, targetX, targetY)]
+    : d.sameAncestorFrame
+      ? getStraightPath({ sourceX, sourceY, targetX, targetY })
+      : getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })
   // The badge's own slot (T22, R3) — along the STRAIGHT line between the
   // ports, which is what the layout's own collision pass measured against
   // (a shallow bezier puts its label here to within a few pixels; for a
   // same-ancestor wire this IS the drawn path). `labelT` is 0.5 — the
   // plain midpoint — unless another badge already claimed that spot.
   const labelT = d.labelT ?? 0.5
-  const labelX = sourceX + (targetX - sourceX) * labelT
-  const labelY = sourceY + (targetY - sourceY) * labelT
+  // A laned wire's own midpoint is on its VERTICAL run — the straight
+  // line between the two ports is not a place this wire ever goes.
+  const labelX = lane ? lane.x : sourceX + (targetX - sourceX) * labelT
+  const labelY = lane ? sourceY + (targetY - sourceY) * 0.5 : sourceY + (targetY - sourceY) * labelT
   const strong = emphasized || onCone
   /**
    * HOW FAR ALONG the cone this wire runs — the near lineage reads
@@ -3002,10 +3121,24 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // Highlighting STRENGTHENS what it points at, and quiets the rest only
   // to a floor that stays legible — a highlight that turns the board into
   // grey ghosts costs the reader the context they are reading against.
+  // A wire that stays INSIDE a container is secondary to the flow across
+  // the board — it answers "what happens in here", which is a question
+  // the reader asks of one row at a time. So it sits quiet until they
+  // ask (hover, or spotlight either end), and where its frame is past
+  // the cap it does not draw at all: the counts on the rows and the
+  // frame header carry the fact, and forty wires in one box carry
+  // nothing at any weight.
+  // Asked of the FRAME, not of the lane: a wire that missed a lane is
+  // still internal, and leaving it at ordinary weight is what drew one
+  // straight diagonal across a quiet frame's cards in the very shot this
+  // was checked against.
+  const internalRest = d.sameAncestorFrame == null ? null
+    : d.internalQuiet ? INTERNAL_HIDDEN : INTERNAL_QUIET
   const opacity = d.dimmed ? 0.12
     : strong ? 1
-      : offCone ? OFF_CONE_EDGE
-        : d.containment ? 0.45 : 0.7
+      : internalRest !== null ? internalRest
+        : offCone ? OFF_CONE_EDGE
+          : d.containment ? 0.45 : 0.7
   // A ×N survives density only where the reader is actually looking.
   //
   // So does a CYCLE badge, with one exception per loop: "this lineage
@@ -4283,6 +4416,10 @@ export function FocusGraphView({
         id: e.id,
         source: e.source,
         target: e.target,
+        // A laned wire leaves by the routing anchor rather than the
+        // outgoing port, so its whole route stays on the gutter side of
+        // the rows and never crosses one.
+        sourceHandle: e.inFrameLane ? 'lane-out' : undefined,
         type: 'focusEdge',
         // Business users shouldn't infer direction from layout
         // convention alone — every hop carries an explicit arrowhead.
@@ -4291,6 +4428,7 @@ export function FocusGraphView({
           count: e.count, dimmed: e.dimmed, tint, mutedTint, cycleBack: e.cycleBack, reducedMotion,
           cycleAnchor: e.cycleAnchor, labelVisible: e.labelVisible, labelDense, trail,
           labelT: e.labelT, grainCoarse: e.grainCoarse, seamSlotted: e.seamSlotted, sameAncestorFrame: e.sameAncestorFrame,
+          inFrameLane: e.inFrameLane, internalQuiet: e.internalQuiet,
           sourcePillUp: cardById.get(e.source)?.pillUp ?? null,
           targetPillDown: cardById.get(e.target)?.pillDown ?? null,
           condensed: e.condensed ?? null,
