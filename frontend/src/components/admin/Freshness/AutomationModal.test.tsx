@@ -87,6 +87,21 @@ async function repoll(qc: QueryClient) {
     })
 }
 
+/**
+ * The tuning knobs sit behind one `Advanced` disclosure per stage, closed by
+ * default — the essentials are the pipeline itself. Only the ROUTE to those
+ * controls moved; every assertion reached through here is the one it was.
+ *
+ * Two collapsed rows both reading "Advanced" would be indistinguishable to a
+ * screen reader, so each carries its stage in its accessible name — which is
+ * also what makes them addressable from here.
+ */
+async function openAdvanced(stage: 'Check' | 'Act') {
+    await userEvent.click(
+        await screen.findByRole('button', { name: new RegExp(`advanced ${stage}`, 'i') }),
+    )
+}
+
 beforeEach(() => {
     vi.clearAllMocks()
     permissionFn.mockReturnValue(true)
@@ -150,7 +165,10 @@ describe('AutomationModal', () => {
     it('renders read-only without system:admin', async () => {
         wrap(<AutomationModal open onClose={() => {}} isAdmin={false} summary={null} />)
 
-        expect(await screen.findByText(/Detect/)).toBeInTheDocument()
+        // The stage name is now in two places — the rail's diagram and the
+        // section it points at — so this asks for the section, not for "the
+        // only element saying Detect".
+        expect(await screen.findByRole('heading', { name: 'Detect' })).toBeInTheDocument()
         expect(screen.getByRole('button', { name: '5m' })).toBeDisabled()
         // The cadence record is admin-only to READ, so a non-admin must not
         // fire a request that can only 403.
@@ -178,6 +196,9 @@ describe('AutomationModal', () => {
         getAggregationSettings.mockResolvedValue(SETTINGS)
         const { qc } = wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
 
+        // The detectors decide what COUNTS as a finding, so they live under
+        // ② Check now, not ③ Act.
+        await openAdvanced('Check')
         // `detectors: null` seeds every box ticked.
         expect(await screen.findByLabelText(/Rollups went missing/)).toBeChecked()
 
@@ -193,7 +214,8 @@ describe('AutomationModal', () => {
         getAggregationSettings.mockResolvedValue(SETTINGS)
         const { qc } = wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
 
-        const capBox = await screen.findByLabelText('At most')
+        await openAdvanced('Act')
+        const capBox = await screen.findByLabelText('At most, each check')
         await userEvent.type(capBox, '3')
 
         getReconciliation.mockResolvedValue({
@@ -204,6 +226,7 @@ describe('AutomationModal', () => {
         expect(capBox).toHaveValue(3)
         // The edit-in-progress survives — and the reader is told, rather than
         // discovering it by overwriting a colleague on Save.
+        await openAdvanced('Check')
         expect(screen.getByLabelText(/Rollups went missing/)).toBeChecked()
         expect(await screen.findByRole('status'))
             .toHaveTextContent(/changed these settings while you were editing/i)
@@ -226,7 +249,8 @@ describe('AutomationModal', () => {
         getAggregationSettings.mockResolvedValue(SETTINGS)
         const { qc } = wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
 
-        const capBox = await screen.findByLabelText('At most')
+        await openAdvanced('Act')
+        const capBox = await screen.findByLabelText('At most, each check')
         await userEvent.type(capBox, '7')
 
         getReconciliation.mockRejectedValue(new Error('gone'))
@@ -252,6 +276,47 @@ describe('AutomationModal', () => {
         await userEvent.click(label)
 
         await waitFor(() => expect(toggle).not.toBeChecked())
+    })
+
+    it('Escape closes straight away while nothing has been typed', async () => {
+        // Guarding an untouched form would be a dialog that exists to be
+        // clicked through, which is how people learn to stop reading them.
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        const onClose = vi.fn()
+        wrap(<AutomationModal open onClose={onClose} isAdmin summary={null} />)
+
+        await screen.findByRole('button', { name: 'Save' })
+        await userEvent.keyboard('{Escape}')
+
+        expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('Escape asks before it throws away an edit', async () => {
+        // Hosting this in a modal handed it three ways to lose work — Escape,
+        // the backdrop and the × — that the inline panel it replaced did not
+        // have. All three go through the same guard.
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        const onClose = vi.fn()
+        wrap(<AutomationModal open onClose={onClose} isAdmin summary={null} />)
+
+        await openAdvanced('Act')
+        await userEvent.type(await screen.findByLabelText('At most, each check'), '5')
+        await userEvent.keyboard('{Escape}')
+
+        expect(onClose).not.toHaveBeenCalled()
+        expect(screen.getByRole('alertdialog')).toHaveTextContent(/unsaved changes will be lost/i)
+
+        // Keep editing puts the form back exactly as it was, edit included.
+        await userEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+        expect(screen.getByLabelText('At most, each check')).toHaveValue(5)
+
+        // And the × asks too — it is a dismissal gesture, not a decision.
+        await userEvent.click(screen.getByRole('button', { name: /close automation settings/i }))
+        expect(onClose).not.toHaveBeenCalled()
+
+        await userEvent.click(screen.getByRole('button', { name: 'Discard' }))
+        expect(onClose).toHaveBeenCalledTimes(1)
     })
 })
 
@@ -317,6 +382,57 @@ describe('admin automation save', () => {
         expect(putReconciliation).toHaveBeenCalledWith(
             expect.objectContaining({ detectors: RECON_POLICY.allDetectors }),
         )
+    })
+
+    it('seeds the shrink allowance from the stored policy', async () => {
+        // `shrinkTolerancePct` reached the API before it reached any UI, so it
+        // arrived here untested across all four of its paths: seed, edit,
+        // validate, write. These three cover them.
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        getReconciliation.mockResolvedValue({
+            policy: { ...RECON_POLICY, shrinkTolerancePct: 25 }, runs: [],
+        })
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
+
+        await openAdvanced('Check')
+        expect(await screen.findByLabelText('Allow rollups to shrink by')).toHaveValue(25)
+    })
+
+    it('sends the shrink allowance in the policy write', async () => {
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        putAggregationCadence.mockResolvedValue({ tuning: null, cadence: null })
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
+
+        await openAdvanced('Check')
+        await userEvent.type(await screen.findByLabelText('Allow rollups to shrink by'), '25')
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalledWith(
+            expect.objectContaining({ shrinkTolerancePct: 25 }),
+        ))
+    })
+
+    it('refuses a shrink allowance outside 0–100 rather than letting the server 422', async () => {
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        putAggregationCadence.mockResolvedValue({ tuning: null, cadence: null })
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
+
+        await openAdvanced('Check')
+        const box = await screen.findByLabelText('Allow rollups to shrink by')
+        await userEvent.type(box, '150')
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        expect(putReconciliation).not.toHaveBeenCalled()
+
+        // The same Save goes through once the number is legal, so the refusal
+        // was about the value and not a button that never worked.
+        await userEvent.clear(box)
+        await userEvent.type(box, '15')
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalledWith(
+            expect.objectContaining({ shrinkTolerancePct: 15 }),
+        ))
     })
 
     it('says out loud that a check cannot outrun a detector that is off', async () => {

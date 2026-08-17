@@ -5,25 +5,28 @@
  * One vocabulary — ① Detect, ② Check, ③ Act — used by the modal, the drawer,
  * the row chips and the run history. Every label derives from here so the
  * three surfaces cannot drift apart. The accents live here for the same reason:
- * the card paints one and the connector feeding it paints another, and they are
- * different components that must not disagree about what colour a stage is.
+ * the stage paints one segment of the spine and the junction feeding it paints
+ * another, and they are different components that must not disagree about what
+ * colour a stage is.
  */
 
 export const STAGES = {
     detect: {
-        n: '①',
+        // A plain digit, not ①: the numeral sits inside a filled disc on the
+        // spine, and a circled glyph inside a circle reads as a mistake.
+        n: '1',
         name: 'Detect',
         means: 'Watches each source for data changed by systems outside this app.',
         costs: 'Reads stored counts, not the data itself — cheap enough to run every minute.',
     },
     check: {
-        n: '②',
+        n: '2',
         name: 'Check',
         means: 'Decides whether the rolled-up lineage still matches the data.',
         costs: 'Pure database work; never touches the graph.',
     },
     act: {
-        n: '③',
+        n: '3',
         name: 'Act',
         means: 'Rebuilds the rolled-up lineage when it no longer matches.',
         costs: 'Minutes of work on the graph — throttled and capped on purpose.',
@@ -31,33 +34,46 @@ export const STAGES = {
 } as const
 
 /** Accents progress along the pipeline — sky (observation) → indigo (judgment)
- *  → violet (execution) — so the palette itself carries the order. They appear
- *  as a 2px left rule and the numeral, never as a filled card: three filled
- *  cards would shout over the one thing that is actually live, the connector. */
+ *  → violet (execution) — so the palette itself carries the order.
+ *
+ *  They are spent on the diagram and the stage's left rule, never on a filled
+ *  stage background: three filled panels would shout over the one thing that is
+ *  actually live, the connector between two stages.
+ *
+ *  The pill in the rail and the section below it are different components that
+ *  must not disagree about what colour a stage is, which is why they read from
+ *  one table rather than hardcoding it twice. */
 export const STAGE_ACCENT: Record<keyof typeof STAGES, {
-    rule: string
-    numeral: string
+    /** The rail pill while this stage is on. */
+    pill: string
+    /** The numeral's disc inside that pill. */
+    disc: string
     /** The connector FEEDING this stage wears its accent. */
     line: string
-    arrow: string
+    /** The 2px rule down the left of the stage's own section. */
+    rule: string
 }> = {
     detect: {
-        rule: 'border-l-sky-500', numeral: 'text-sky-500/35',
-        line: 'border-sky-500/60', arrow: 'text-sky-500/80',
+        pill: 'bg-sky-500/10 text-sky-700 dark:text-sky-300 ring-1 ring-inset ring-sky-500/30',
+        disc: 'bg-sky-500', line: 'bg-sky-500/70', rule: 'border-l-sky-500/60',
     },
     check: {
-        rule: 'border-l-indigo-500', numeral: 'text-indigo-500/35',
-        line: 'border-indigo-500/60', arrow: 'text-indigo-500/80',
+        pill: 'bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 ring-1 ring-inset ring-indigo-500/30',
+        disc: 'bg-indigo-500', line: 'bg-indigo-500/70', rule: 'border-l-indigo-500/60',
     },
     act: {
-        rule: 'border-l-violet-600', numeral: 'text-violet-600/35',
-        line: 'border-violet-600/60', arrow: 'text-violet-600/80',
+        pill: 'bg-violet-600/10 text-violet-700 dark:text-violet-300 ring-1 ring-inset ring-violet-500/30',
+        disc: 'bg-violet-600', line: 'bg-violet-600/70', rule: 'border-l-violet-600/60',
     },
 }
 
 /** The four detectors, in the order the backend evaluates them. Each says what
  *  it looks for in the operator's terms, not the detector's — the codes
- *  (``overlay_missing`` and friends) never reach the screen. */
+ *  (``overlay_missing`` and friends) never reach the screen.
+ *
+ *  They belong to ② Check, not ③ Act: they decide what counts as a finding,
+ *  which is Check's job. The per-check cap decides how many rebuilds follow,
+ *  which is Act's. */
 export const DETECTORS: { key: string; label: string; hint: string }[] = [
     {
         key: 'overlay_missing',

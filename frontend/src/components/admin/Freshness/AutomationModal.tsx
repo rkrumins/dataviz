@@ -6,10 +6,21 @@
  * OPPOSITE order, in three unrelated boxes, with units flipping between
  * minutes and seconds from one box to the next. Nothing in that layout showed
  * that Detect feeds Check — so an operator could turn Detect off and still
- * read the Check interval as a promise. Here the stages sit in order, the
- * connector between them goes dashed and amber when the upstream stage is off,
- * every cadence is one control in one unit, and the modal says out loud which
- * combinations contradict each other.
+ * read the Check interval as a promise. Here the pipeline is stated once as a
+ * diagram under the header, its connectors go dashed and amber and grey
+ * everything downstream when a stage is starved, every cadence is one control
+ * in one unit, and the modal says out loud which combinations contradict each
+ * other.
+ *
+ * The stages stack full-width rather than sitting in three equal columns. The
+ * columns were the defect: three boxes of settings reading as unrelated, and a
+ * shared height that left Detect in a screen of void while Act ran long —
+ * ranking Act highest when Detect is the stage that makes the other two mean
+ * anything.
+ *
+ * Each stage's controls are a ledger — words on the left, the control on the
+ * right, a hairline between — with everything past the essentials behind one
+ * Advanced disclosure. Nothing was dropped; it was ranked.
  *
  * The policy and the cadence are two endpoints but ONE stored record, so the
  * two writes are sequenced (policy first, then cadence), never raced.
@@ -18,18 +29,21 @@
  * whole explanation, the live counts, and the policy controls disabled — the
  * explanation is the valuable half, and hiding it teaches nobody anything.
  *
- * Modal conventions are the house ones, and deliberately not Radix Dialog nor
- * <AnimatePresence>: a Radix modal that unmounts while open strands
- * ``body { pointer-events: none }``, and a portaled AnimatePresence with an
- * exit animation strands an invisible click-blocker over the page. createPortal
- * + a persistent <Backdrop> (a SIBLING of the pointer-events-none wrapper, so
- * its onClick is reachable) + useModalA11y instead.
+ * The shell is the house wizard chrome (``ViewWizard``'s ``WizardShell`` and
+ * ``AssetOnboardingWizard``): gradient header with an icon tile, a rail row
+ * beneath it, a scrolling body and a footer whose primary action is a gradient
+ * button. Deliberately NOT Radix Dialog — a Radix modal that unmounts while
+ * open strands ``body { pointer-events: none }`` and freezes the app. The
+ * <Backdrop> is a plain CSS transition rendered OUTSIDE <AnimatePresence> and
+ * as a SIBLING of the pointer-events-none wrapper, which is the house fix for
+ * the StrictMode click-shield; the panel itself is inside <AnimatePresence> so
+ * it leaves rather than vanishing.
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { motion } from 'framer-motion'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ArrowRight, Loader2, X } from 'lucide-react'
+import { AlertTriangle, Loader2, Workflow, X } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { DurationField, formatDuration } from '@/components/ui/DurationField'
@@ -39,14 +53,16 @@ import { useToast } from '@/components/ui/toast'
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
 import { aggregationService, type AggregationCadence } from '@/services/aggregationService'
 import type { FreshnessSummary } from '@/services/freshnessService'
-import { DETECTORS, STAGE_ACCENT, automationWarnings } from './automationCopy'
-import { StageCard } from './StageCard'
+import { DETECTORS, automationWarnings } from './automationCopy'
+import { Advanced, PipelineRail, SettingRow, StageRow } from './StageRow'
 import { lastPassBrief, pickLastPassRun } from './reconcileHealth'
 import { useReconcileNow, useReconciliation, useSetReconciliationPolicy } from './useFreshness'
 
 const SETTINGS_KEY = ['aggregation', 'settings'] as const
 
-/** Backend bounds, in the one unit the modal speaks. */
+/** Backend bounds, in the one unit the modal speaks. The server's floor for the
+ *  check interval is 30s; this is stricter on purpose, because a sub-minute
+ *  fleet check buys nothing the probe has not already found. */
 const MAX_SECS = 86400
 const MIN_PROBE_SECS = 15
 const MIN_CHECK_SECS = 60
@@ -60,92 +76,134 @@ const DETECT_PRESETS = [15, 30, 60, 600]
 const CHECK_PRESETS = [300, 1800, 3600, 21600]
 const COOLDOWN_PRESETS = [0, 900, 7200, MAX_SECS]
 
+/** One string per cadence, used as BOTH the visible ledger label and the
+ *  control's accessible name. Two copies would eventually disagree, and a
+ *  control whose spoken name differs from the words printed beside it is a
+ *  WCAG failure and a support call. */
+const CADENCE_LABEL = {
+    detect: 'Look for changes every',
+    check: 'Check every',
+    act: 'Minimum time between rebuilds',
+} as const
+
 /** How long the edits have to settle before we ask the server what the stored
  *  policy would do to the fleet. The dry run scans every source. */
 const IMPACT_DEBOUNCE_MS = 600
 
-/** One stage's on/off, worded as the sentence it is rather than a bare label,
- *  so the switch's accessible name is the promise it makes. The words are a
- *  <label> for the switch, not a bare <span>: the sentence is the biggest
- *  thing on the row and pointing at it has to do something. */
-function ToggleRow({ id, label, checked, onChange, disabled }: {
-    id: string
-    label: string
-    checked: boolean
-    onChange: (v: boolean) => void
-    disabled: boolean
-}) {
-    return (
-        <div className="flex items-center justify-between gap-2">
-            <label
-                htmlFor={id}
-                className={cn(
-                    'text-[13px] text-ink-secondary leading-snug min-w-0',
-                    disabled ? 'cursor-not-allowed' : 'cursor-pointer',
-                )}
-            >
-                {label}
-            </label>
-            <ToggleSwitch
-                id={id}
-                size="sm"
-                checked={checked}
-                onChange={onChange}
-                disabled={disabled}
-                aria-label={label}
-            />
-        </div>
-    )
-}
+/** Number fields are mostly digits; the spinners are 16px of chrome that was
+ *  wide enough to clip the placeholder beside it. */
+const NUMBER_BOX = cn(
+    'w-24 h-7 px-2 rounded-lg border border-glass-border bg-canvas',
+    'text-xs text-ink tabular-nums placeholder:text-ink-muted/70',
+    'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+    'disabled:opacity-50 disabled:cursor-not-allowed',
+    '[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none',
+    '[&::-webkit-inner-spin-button]:appearance-none',
+)
 
 /** Two stages read from the admin-only cadence record, so both have to say the
  *  same thing in the same words to a reader who cannot see it. Silently
  *  dropping the controls would read as "this stage has no such setting". */
 function AdminOnlyCadence() {
     return (
-        <p className="text-[11px] text-ink-muted">
+        <p className="pt-2.5 text-[11px] text-ink-muted">
             Only platform admins can see this cadence.
         </p>
     )
 }
 
-/**
- * The seam between two stages, and the one loud thing in here.
- *
- * Feeding: a solid hairline in the downstream stage's accent. Starved: dashed,
- * amber, and labelled — the moment the upstream stage goes off, the downstream
- * cadence stops meaning what it says. The state is carried by the dash pattern
- * and the word as well as the colour, and nothing about it animates on a loop.
- */
-function Connector({ starved, into }: { starved: boolean; into: keyof typeof STAGE_ACCENT }) {
-    const accent = STAGE_ACCENT[into]
+/** A value the deploy owns. Marked, so it is not mistaken for a control that
+ *  has been greyed out — those are two very different invitations. */
+function DeployTag() {
     return (
-        <div
-            aria-hidden
-            className="flex md:flex-col items-center justify-center shrink-0 gap-1.5 py-1 md:py-0 md:px-1"
-        >
-            {/* Stacked below md, so the line rotates to vertical and the arrow
-                drops below it; a row from md, arrow at the right-hand end. */}
-            <span className="flex flex-col md:flex-row items-center">
-                <span
-                    className={cn(
-                        'block h-7 border-l md:h-0 md:w-9 md:border-l-0 md:border-t transition-colors duration-200 motion-reduce:transition-none',
-                        starved ? 'border-dashed border-amber-500' : accent.line,
-                    )}
-                />
-                <ArrowRight
-                    className={cn(
-                        'w-3.5 h-3.5 -mt-1 md:mt-0 md:-ml-1 rotate-90 md:rotate-0 transition-colors duration-200 motion-reduce:transition-none',
-                        starved ? 'text-amber-500' : accent.arrow,
-                    )}
-                />
-            </span>
-            {starved && (
-                <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">
-                    starved
-                </span>
-            )}
+        <span className="shrink-0 whitespace-nowrap rounded-full border border-glass-border px-1.5 py-0.5 text-[10px] text-ink-muted">
+            set by the deploy
+        </span>
+    )
+}
+
+/** The container for a stage's ledger: a hairline off the prose above it, and
+ *  one between every row. */
+function Ledger({ children }: { children: React.ReactNode }) {
+    return (
+        <div className="mt-2.5 border-t border-glass-border/50 divide-y divide-glass-border/50">
+            {children}
         </div>
+    )
+}
+
+/**
+ * The unsaved-changes guard, mirroring ``ProviderOnboardingWizard``'s
+ * ``ConfirmCloseDialog``.
+ *
+ * Putting these settings in a modal handed them two brand-new ways to throw
+ * work away that the inline panel they replaced did not have — Escape and the
+ * backdrop — plus the header ×. All three ask first.
+ *
+ * It is a second portalled dialog, which is normally how this codebase has
+ * frozen itself; the sanctioned shape avoids it by having NO exit animation
+ * and no <AnimatePresence> of its own (``if (!open) return null``), so nothing
+ * of it can be stranded over the page. Focus moves to the safe choice.
+ */
+function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
+    open: boolean
+    onCancel: () => void
+    onConfirm: () => void
+}) {
+    const keepRef = useRef<HTMLButtonElement>(null)
+    useEffect(() => {
+        if (open) keepRef.current?.focus()
+    }, [open])
+
+    if (!open) return null
+
+    return (
+        <>
+            <Backdrop open onClick={onCancel} zClassName="z-[120]" className="bg-black/50" />
+            <div className="fixed inset-0 z-[120] flex items-center justify-center px-4 pointer-events-none">
+                <motion.div
+                    role="alertdialog"
+                    aria-modal="true"
+                    aria-labelledby="automation-discard-title"
+                    aria-describedby="automation-discard-body"
+                    initial={{ opacity: 0, y: 12, scale: 0.96 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    className="pointer-events-auto w-full max-w-md rounded-2xl border border-glass-border bg-canvas-elevated p-6 shadow-lg"
+                >
+                    <div className="flex items-start gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500/10 text-amber-500">
+                            <AlertTriangle className="h-5 w-5" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <h3 id="automation-discard-title" className="text-lg font-semibold text-ink">
+                                Discard these automation changes?
+                            </h3>
+                            <p id="automation-discard-body" className="mt-1 text-sm text-ink-muted">
+                                Your unsaved changes will be lost if you close now. The schedule
+                                keeps running on whatever it was last saved with.
+                            </p>
+                        </div>
+                    </div>
+                    <div className="mt-6 flex items-center justify-end gap-3">
+                        <button
+                            ref={keepRef}
+                            type="button"
+                            onClick={onCancel}
+                            className="rounded-xl border border-glass-border px-4 py-2 text-sm font-medium text-ink-secondary transition-colors hover:bg-black/5 dark:hover:bg-white/5 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                        >
+                            Keep editing
+                        </button>
+                        <button
+                            type="button"
+                            onClick={onConfirm}
+                            className="rounded-xl bg-red-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-600 outline-none focus-visible:ring-2 focus-visible:ring-red-500/50"
+                        >
+                            Discard
+                        </button>
+                    </div>
+                </motion.div>
+            </div>
+        </>
     )
 }
 
@@ -160,7 +218,6 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
 }) {
     const qc = useQueryClient()
     const { showToast } = useToast()
-    const dialogRef = useModalA11y(open, onClose)
 
     const reconQ = useReconciliation()
     const policy = reconQ.data?.policy
@@ -184,6 +241,11 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
     const [shrinkPct, setShrinkPct] = useState('')
     const [detectors, setDetectors] = useState<string[]>([])
 
+    // Closed by default: the essentials are the pipeline, and everything here
+    // is a tuning knob that most readers open this modal without needing.
+    const [checkAdvanced, setCheckAdvanced] = useState(false)
+    const [actAdvanced, setActAdvanced] = useState(false)
+
     // ``seeded`` is STATE, not a ref: nothing editable and no Save may render
     // before the real values have landed. An effect is passive, so a ref would
     // still paint one frame of the initial state — and that state says
@@ -198,6 +260,8 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
      *  "someone else changed this" instead of quietly overwriting them. State
      *  rather than a ref because it is compared during render. */
     const [seededSig, setSeededSig] = useState('')
+    /** Armed by a dismissal gesture while there are unsaved edits. */
+    const [showCloseConfirm, setShowCloseConfirm] = useState(false)
 
     const remoteSig = JSON.stringify([
         policy?.enabled, policy?.checkIntervalSecs, policy?.maxActionsPerRun,
@@ -206,10 +270,41 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         cadence?.driftAutoRebuild, cadence?.rebuildMinIntervalSecs,
     ])
 
+    // Read through a ref inside ``requestClose``: that callback is the argument
+    // to ``useModalA11y``'s effect, so a new identity when ``dirty`` flips would
+    // re-run the effect — refocusing the dialog and stealing the caret on the
+    // very first keystroke of an edit. The ref is written in an effect, not
+    // during render, and effects flush before the next input event can arrive,
+    // so a dismissal can never read a stale flag.
+    const dirtyRef = useRef(dirty)
+    useEffect(() => { dirtyRef.current = dirty }, [dirty])
+    /**
+     * Escape, the backdrop and the × are dismissal gestures, not decisions:
+     * putting a modal in front of this form gave it two brand-new ways to throw
+     * away work that the inline panel it replaced did not have. They ask first
+     * once something has been typed, and pass straight through when nothing has.
+     *
+     * Cancel is deliberately NOT routed here. It is a labelled button that says
+     * what it does, and confirming an explicit discard is the kind of politeness
+     * that trains people to click through dialogs.
+     */
+    const requestClose = useCallback(() => {
+        if (dirtyRef.current) {
+            setShowCloseConfirm(true)
+            return
+        }
+        onClose()
+    }, [onClose])
+
+    const dialogRef = useModalA11y(open, requestClose)
+
     useEffect(() => {
         if (open) return
         setSeeded(false)
         setDirty(false)
+        setShowCloseConfirm(false)
+        setCheckAdvanced(false)
+        setActAdvanced(false)
     }, [open])
 
     useEffect(() => {
@@ -251,7 +346,8 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         onSuccess: () => {
             void qc.invalidateQueries({ queryKey: SETTINGS_KEY })
             // The controls now hold what the server holds, so the modal may go
-            // back to adopting whatever anyone else writes.
+            // back to adopting whatever anyone else writes — and closing can
+            // stop asking whether it is safe.
             setDirty(false)
             showToast('success', 'Automation saved. Takes effect within a minute.')
             onClose()
@@ -279,11 +375,15 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         }
         const capNum = cap.trim() === '' ? null : Number(cap)
         if (capNum != null && (!Number.isFinite(capNum) || capNum < 0 || capNum > MAX_CAP)) {
+            // Reveal the field being complained about: a toast pointing at a
+            // control folded away behind a disclosure is a dead end.
+            setActAdvanced(true)
             showToast('error', 'Rebuilds per check must be between 0 and 200.')
             return
         }
         const shrinkNum = shrinkPct.trim() === '' ? null : Number(shrinkPct)
         if (shrinkNum != null && (!Number.isFinite(shrinkNum) || shrinkNum < 0 || shrinkNum > MAX_SHRINK_PCT)) {
+            setCheckAdvanced(true)
             showToast('error', 'The shrink allowance must be between 0 and 100 percent.')
             return
         }
@@ -341,6 +441,13 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         { probeEnabled: isAdmin ? probeEnabled : undefined },
     )
 
+    // Starvation runs DOWNSTREAM: Detect off does not merely dim Check, it dims
+    // Act too, because what reaches Act is only as fresh as what reached Check.
+    // A non-admin cannot read the probe setting, so for them the first seam is
+    // never claimed to be starved.
+    const starvedIntoCheck = isAdmin && !probeEnabled
+    const starvedIntoAct = !checkEnabled
+
     const pass = pickLastPassRun(reconQ.data?.runs)
     const checkStat = pass
         ? (lastPassBrief(pass) ?? `${pass.scanned.toLocaleString()} checked · all in sync`)
@@ -357,71 +464,93 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         : `${summary.total.toLocaleString()} sources`
             + (watching === true ? ' watched' : watching === false ? ' — watching is off' : '')
     const dryFindings = dryRun.data?.findings?.length ?? null
-    const impact = dryFindings == null
-        ? null
+    // One footer line, not two competing ones. The dry run is measured against
+    // what is STORED, so the sentence says so rather than leaving a second
+    // sentence to disclaim the first.
+    const footerNote = dryFindings == null
+        ? 'Changes take effect within a minute — no restart needed.'
         : dryFindings === 0
-            ? 'Right now a check would rebuild nothing.'
-            : `Right now a check would rebuild ${dryFindings.toLocaleString()} `
-                + `source${dryFindings === 1 ? '' : 's'}.`
+            ? 'With the settings as saved, a check right now would rebuild nothing.'
+            : `With the settings as saved, a check right now would rebuild `
+                + `${dryFindings.toLocaleString()} source${dryFindings === 1 ? '' : 's'}.`
 
     return createPortal(
         <>
-            {/* Sibling of the pointer-events-none wrapper below, never its
-                child — nested, its onClick never receives the click. */}
-            <Backdrop open={open} onClick={onClose} zClassName="z-[60]" className="bg-black/50" />
-            {/* No <AnimatePresence>: a portaled exit animation that gets
-                interrupted strands an invisible click-blocker over the page.
-                It still animates in. */}
-            {open && (
-                <div className="fixed inset-0 z-[61] flex items-start sm:items-center justify-center p-3 sm:p-4 pointer-events-none">
-                    <motion.div
-                        ref={dialogRef}
-                        tabIndex={-1}
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="automation-title"
-                        initial={{ opacity: 0, scale: 0.98, y: 8 }}
-                        animate={{ opacity: 1, scale: 1, y: 0 }}
-                        transition={{ duration: 0.16, ease: 'easeOut' }}
-                        className="pointer-events-auto outline-none w-full max-w-4xl max-h-[90vh] flex flex-col rounded-2xl border border-glass-border bg-canvas-elevated shadow-glass-lg overflow-hidden"
-                    >
-                        {/* Header and footer are flex children of a bounded
+            {/* Plain CSS transition, never inside <AnimatePresence>, and a
+                SIBLING of the pointer-events-none wrapper below rather than its
+                child — nested, its onClick never receives the click. This pair
+                is the house fix for the StrictMode click-shield. */}
+            <Backdrop open={open} onClick={requestClose} zClassName="z-[60]" className="bg-black/50" />
+            {/* The panel DOES animate out — it is the wrapper that must never be
+                strandable, and that wrapper is pointer-events-none. */}
+            <AnimatePresence>
+                {open && (
+                    <div className="fixed inset-0 z-[61] flex items-start sm:items-center justify-center p-3 sm:p-4 pointer-events-none">
+                        <motion.div
+                            ref={dialogRef}
+                            tabIndex={-1}
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="automation-title"
+                            initial={{ scale: 0.95, opacity: 0, y: 20 }}
+                            animate={{ scale: 1, opacity: 1, y: 0 }}
+                            exit={{ scale: 0.95, opacity: 0, y: 20 }}
+                            transition={{ duration: 0.12 }}
+                            className="pointer-events-auto outline-none w-full max-w-3xl max-h-[90vh] flex flex-col rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg overflow-hidden"
+                        >
+                        {/* Header, rail and footer are flex children of a bounded
                             column, so only the middle scrolls: a settings modal
                             that hides its own Save is the failure mode of the
                             dialog this replaces. */}
-                        <header className="flex items-start justify-between gap-3 px-5 py-4 border-b border-glass-border">
-                            <div className="min-w-0">
-                                <h2 id="automation-title" className="text-base font-bold text-ink">
-                                    Automation
-                                </h2>
-                                <p className="text-[13px] text-ink-secondary mt-0.5">
-                                    How the system watches your data and repairs it.
-                                </p>
+                        <header className="flex items-center justify-between gap-4 px-6 sm:px-8 py-5 border-b border-glass-border bg-gradient-to-r from-black/[0.02] to-transparent dark:from-white/[0.02] shrink-0">
+                            <div className="flex items-center gap-4 min-w-0">
+                                <div className="w-12 h-12 shrink-0 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white shadow-md">
+                                    <Workflow className="w-6 h-6" />
+                                </div>
+                                <div className="min-w-0">
+                                    <h2 id="automation-title" className="text-xl font-bold text-ink">
+                                        Automation
+                                    </h2>
+                                    <p className="text-sm text-ink-muted">
+                                        How the system watches your data and repairs it.
+                                    </p>
+                                </div>
                             </div>
-                            <div className="flex items-center gap-2 shrink-0">
-                                <kbd
-                                    aria-hidden
-                                    className="hidden sm:inline-block px-1.5 py-0.5 rounded border border-glass-border text-[10px] font-semibold text-ink-muted"
-                                >
-                                    esc
-                                </kbd>
-                                <button
-                                    type="button"
-                                    onClick={onClose}
-                                    aria-label="Close automation settings"
-                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
-                                >
-                                    <X className="w-4 h-4" />
-                                </button>
-                            </div>
+                            <button
+                                type="button"
+                                onClick={requestClose}
+                                aria-label="Close automation settings"
+                                className="p-2 shrink-0 rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                            >
+                                <X className="w-5 h-5 text-ink-muted" />
+                            </button>
                         </header>
 
-                        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-5 py-4">
-                            <p className="text-[12px] text-ink-muted leading-snug mb-3.5">
+                        {/* The pipeline itself, in the slot the wizards give
+                            their stepper — but a live diagram, not navigation.
+                            It is stated once here so the sections below can get
+                            on with being settings.
+
+                            Gated on ``ready`` with everything else: a rail drawn
+                            from the initial state would assert three stages are
+                            on before anyone has read whether they are. */}
+                        {ready && (
+                        <div className="px-6 sm:px-8 py-4 bg-black/[0.02] dark:bg-white/[0.02] border-b border-glass-border shrink-0">
+                            <PipelineRail
+                                detect={isAdmin ? probeEnabled : null}
+                                check={checkEnabled}
+                                act={isAdmin ? driftAuto : null}
+                                starvedIntoCheck={starvedIntoCheck}
+                                starvedIntoAct={starvedIntoAct}
+                            />
+                            <p className="mt-2.5 text-[11px] text-ink-muted leading-snug">
                                 One pipeline, in the order it runs. Each stage feeds the next, so
                                 turning one off changes what the ones after it can see.
                             </p>
+                        </div>
+                        )}
 
+                        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-6 sm:px-8 py-5">
                             {readFailed && !ready ? (
                                 <div
                                     role="alert"
@@ -438,23 +567,32 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                 </div>
                             ) : (
                                 <>
-                                    <div className="flex flex-col md:flex-row items-stretch gap-2">
-                                        <StageCard
-                                            stage="detect"
-                                            on={isAdmin ? probeEnabled : null}
-                                            stat={detectStat}
-                                        >
-                                            {isAdmin ? (
-                                                <>
-                                                    <ToggleRow
+                                    {/* Run order, top to bottom. The rail above
+                                        already carries the dependency between
+                                        them, so these are free to be settings. */}
+                                    <div className="space-y-6">
+                                    <StageRow
+                                        stage="detect"
+                                        on={isAdmin ? probeEnabled : null}
+                                        stat={detectStat}
+                                    >
+                                        {isAdmin ? (
+                                            <Ledger>
+                                                <SettingRow
+                                                    label="Watch for changes made outside this app"
+                                                    htmlFor="automation-probe"
+                                                >
+                                                    <ToggleSwitch
                                                         id="automation-probe"
-                                                        label="Watch for changes made outside this app"
+                                                        size="sm"
                                                         checked={probeEnabled}
                                                         onChange={edit(setProbeEnabled)}
-                                                        disabled={false}
+                                                        aria-label="Watch for changes made outside this app"
                                                     />
+                                                </SettingRow>
+                                                <SettingRow label={CADENCE_LABEL.detect}>
                                                     <DurationField
-                                                        label="Look for changes every"
+                                                        label={CADENCE_LABEL.detect}
                                                         value={probeSecs}
                                                         onChange={edit(setProbeSecs)}
                                                         presets={DETECT_PRESETS}
@@ -463,92 +601,152 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                                         max={MAX_SECS}
                                                         disabled={!probeEnabled}
                                                     />
-                                                </>
-                                            ) : <AdminOnlyCadence />}
-                                        </StageCard>
+                                                </SettingRow>
+                                            </Ledger>
+                                        ) : <AdminOnlyCadence />}
+                                    </StageRow>
 
-                                        <Connector starved={isAdmin && !probeEnabled} into="check" />
-
-                                        <StageCard
-                                            stage="check"
-                                            on={checkEnabled}
-                                            muted={isAdmin && checkEnabled && !probeEnabled}
-                                            stat={checkStat}
-                                        >
-                                            <ToggleRow
-                                                id="automation-check"
+                                    <StageRow
+                                        stage="check"
+                                        on={checkEnabled}
+                                        muted={starvedIntoCheck}
+                                        stat={checkStat}
+                                    >
+                                        <Ledger>
+                                            <SettingRow
                                                 label="Check every source on a schedule"
-                                                checked={checkEnabled}
-                                                onChange={edit(setCheckEnabled)}
+                                                htmlFor="automation-check"
                                                 disabled={!isAdmin}
-                                            />
-                                            <DurationField
-                                                label="Check every"
-                                                value={checkSecs}
-                                                onChange={edit(setCheckSecs)}
-                                                presets={CHECK_PRESETS}
-                                                defaultSecs={policy.envCheckIntervalSecs}
-                                                min={MIN_CHECK_SECS}
-                                                max={MAX_SECS}
-                                                disabled={!isAdmin || !checkEnabled}
-                                            />
+                                            >
+                                                <ToggleSwitch
+                                                    id="automation-check"
+                                                    size="sm"
+                                                    checked={checkEnabled}
+                                                    onChange={edit(setCheckEnabled)}
+                                                    disabled={!isAdmin}
+                                                    aria-label="Check every source on a schedule"
+                                                />
+                                            </SettingRow>
+                                            <SettingRow label={CADENCE_LABEL.check}>
+                                                <DurationField
+                                                    label={CADENCE_LABEL.check}
+                                                    value={checkSecs}
+                                                    onChange={edit(setCheckSecs)}
+                                                    presets={CHECK_PRESETS}
+                                                    defaultSecs={policy.envCheckIntervalSecs}
+                                                    min={MIN_CHECK_SECS}
+                                                    max={MAX_SECS}
+                                                    disabled={!isAdmin || !checkEnabled}
+                                                />
+                                            </SettingRow>
+                                        </Ledger>
 
-                                            <div>
-                                                <label
-                                                    htmlFor="automation-shrink"
-                                                    className="block text-[11px] font-semibold uppercase tracking-wide text-ink-muted mb-1.5"
-                                                >
-                                                    Allow rollups to shrink by
-                                                </label>
-                                                <div className="flex items-center gap-2">
+                                        <Advanced
+                                            stage="check"
+                                            open={checkAdvanced}
+                                            onToggle={() => setCheckAdvanced(v => !v)}
+                                        >
+                                            <SettingRow
+                                                label="Allow rollups to shrink by"
+                                                htmlFor="automation-shrink"
+                                                disabled={!isAdmin}
+                                                hint="A smaller drop than this is treated as noise rather than “Rollups shrank”."
+                                            >
+                                                <span className="flex items-center gap-2">
                                                     <input
                                                         id="automation-shrink"
                                                         type="number" min={0} max={MAX_SHRINK_PCT} step={1}
                                                         value={shrinkPct}
                                                         disabled={!isAdmin}
                                                         onChange={(e) => edit(setShrinkPct)(e.target.value)}
-                                                        placeholder={`Default (${policy.envShrinkTolerancePct})`}
-                                                        className="w-24 h-7 px-2 rounded-lg border border-glass-border bg-canvas text-xs text-ink disabled:opacity-50"
+                                                        placeholder={`Default ${policy.envShrinkTolerancePct}`}
+                                                        className={NUMBER_BOX}
                                                     />
                                                     <span className="text-[12px] text-ink-muted">percent</span>
-                                                </div>
-                                                <p className="mt-1 text-[11px] text-ink-muted leading-snug">
-                                                    A smaller drop than this is treated as noise rather than
-                                                    “Rollups shrank”.
-                                                </p>
-                                            </div>
+                                                </span>
+                                            </SettingRow>
 
                                             {/* Deploy-owned, so it is context and not a
                                                 disabled input pretending to be editable. */}
-                                            <p className="text-[11px] text-ink-muted leading-snug">
-                                                Evidence older than{' '}
-                                                <span className="text-ink-secondary tabular-nums">
-                                                    {formatDuration(policy.envStatsMaxAgeSecs)}
-                                                </span>{' '}
-                                                is too stale to judge on.{' '}
-                                                <span className="text-ink-muted/70">Set by the deploy.</span>
-                                            </p>
-                                        </StageCard>
+                                            <SettingRow
+                                                label="Evidence must be newer than"
+                                                hint="Older stored counts are too stale to judge on."
+                                            >
+                                                <span className="flex items-center gap-2">
+                                                    <span className="text-[12px] text-ink-secondary tabular-nums">
+                                                        {formatDuration(policy.envStatsMaxAgeSecs)}
+                                                    </span>
+                                                    <DeployTag />
+                                                </span>
+                                            </SettingRow>
 
-                                        <Connector starved={!checkEnabled} into="act" />
+                                            {/* The detectors decide what COUNTS as a finding,
+                                                which is this stage's job. They used to sit under
+                                                ③ Act, next to the cap — which decides how many
+                                                rebuilds follow a finding, a different question. */}
+                                            {/* The <fieldset> is wrapped rather than
+                                                being the divided child itself: a
+                                                <legend> cuts its own fieldset's top
+                                                border, so the ledger hairline came
+                                                out running THROUGH the words. */}
+                                            <div className="pt-2.5">
+                                            <fieldset>
+                                                <legend className="text-[13px] font-medium text-ink">
+                                                    What counts as a finding
+                                                </legend>
+                                                <div className="mt-0.5 divide-y divide-glass-border/40">
+                                                    {DETECTORS.map(d => (
+                                                        <SettingRow
+                                                            key={d.key}
+                                                            label={d.label}
+                                                            htmlFor={`automation-detector-${d.key}`}
+                                                            disabled={!isAdmin}
+                                                            hint={d.hint}
+                                                        >
+                                                            <input
+                                                                id={`automation-detector-${d.key}`}
+                                                                type="checkbox"
+                                                                checked={detectors.includes(d.key)}
+                                                                disabled={!isAdmin}
+                                                                onChange={(e) => {
+                                                                    setDirty(true)
+                                                                    setDetectors(prev => e.target.checked
+                                                                        ? [...prev, d.key]
+                                                                        : prev.filter(k => k !== d.key))
+                                                                }}
+                                                                className="w-4 h-4 accent-indigo-500 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:cursor-not-allowed"
+                                                            />
+                                                        </SettingRow>
+                                                    ))}
+                                                </div>
+                                            </fieldset>
+                                            </div>
+                                        </Advanced>
+                                    </StageRow>
 
-                                        <StageCard
-                                            stage="act"
-                                            on={isAdmin ? driftAuto : null}
-                                            muted={isAdmin && driftAuto && !checkEnabled}
-                                            stat={actStat}
-                                        >
-                                            {isAdmin ? (
-                                                <>
-                                                    <ToggleRow
+                                    <StageRow
+                                        stage="act"
+                                        on={isAdmin ? driftAuto : null}
+                                        muted={starvedIntoCheck || starvedIntoAct}
+                                        stat={actStat}
+                                    >
+                                        {isAdmin ? (
+                                            <Ledger>
+                                                <SettingRow
+                                                    label="Automatically rebuild a source when drift is detected"
+                                                    htmlFor="automation-drift-auto"
+                                                >
+                                                    <ToggleSwitch
                                                         id="automation-drift-auto"
-                                                        label="Automatically rebuild a source when drift is detected"
+                                                        size="sm"
                                                         checked={driftAuto}
                                                         onChange={edit(setDriftAuto)}
-                                                        disabled={false}
+                                                        aria-label="Automatically rebuild a source when drift is detected"
                                                     />
+                                                </SettingRow>
+                                                <SettingRow label={CADENCE_LABEL.act}>
                                                     <DurationField
-                                                        label="Minimum time between rebuilds"
+                                                        label={CADENCE_LABEL.act}
                                                         value={cooldownSecs}
                                                         onChange={edit(setCooldownSecs)}
                                                         presets={COOLDOWN_PRESETS}
@@ -556,74 +754,53 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                                         min={0}
                                                         max={MAX_SECS}
                                                     />
-                                                </>
-                                            ) : <AdminOnlyCadence />}
+                                                </SettingRow>
+                                            </Ledger>
+                                        ) : <AdminOnlyCadence />}
 
-                                            <div className="flex items-center gap-2">
-                                                <label className="text-[12px] text-ink-secondary" htmlFor="automation-cap">
-                                                    At most
-                                                </label>
-                                                <input
-                                                    id="automation-cap"
-                                                    type="number" min={0} max={MAX_CAP} step={1}
-                                                    value={cap}
-                                                    disabled={!isAdmin}
-                                                    onChange={(e) => edit(setCap)(e.target.value)}
-                                                    placeholder={`Default (${policy.envMaxActionsPerRun})`}
-                                                    className="w-24 h-7 px-2 rounded-lg border border-glass-border bg-canvas text-xs text-ink disabled:opacity-50"
-                                                />
-                                                <span className="text-[12px] text-ink-muted">rebuilds per check</span>
-                                            </div>
-                                            <p className="text-[11px] text-ink-muted -mt-2 leading-snug">
-                                                Anything over the cap waits for the next check, so turning
-                                                this on cannot rebuild the whole fleet at once.
-                                            </p>
-
-                                            <fieldset className="space-y-1.5">
-                                                <legend className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted mb-1">
-                                                    What to act on
-                                                </legend>
-                                                {DETECTORS.map(d => (
-                                                    <label key={d.key} className="flex items-start gap-2 text-[12px] text-ink-secondary cursor-pointer">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={detectors.includes(d.key)}
-                                                            disabled={!isAdmin}
-                                                            onChange={(e) => {
-                                                                setDirty(true)
-                                                                setDetectors(prev => e.target.checked
-                                                                    ? [...prev, d.key]
-                                                                    : prev.filter(k => k !== d.key))
-                                                            }}
-                                                            className="accent-indigo-500 mt-0.5"
-                                                        />
-                                                        <span className="min-w-0">
-                                                            {d.label}
-                                                            <span className="block text-[11px] text-ink-muted">{d.hint}</span>
-                                                        </span>
-                                                    </label>
-                                                ))}
-                                            </fieldset>
+                                        <Advanced
+                                            stage="act"
+                                            open={actAdvanced}
+                                            onToggle={() => setActAdvanced(v => !v)}
+                                        >
+                                            <SettingRow
+                                                label="At most, each check"
+                                                htmlFor="automation-cap"
+                                                disabled={!isAdmin}
+                                                hint="Anything over the cap waits for the next check, so turning this on cannot rebuild the whole fleet at once."
+                                            >
+                                                <span className="flex items-center gap-2">
+                                                    <input
+                                                        id="automation-cap"
+                                                        type="number" min={0} max={MAX_CAP} step={1}
+                                                        value={cap}
+                                                        disabled={!isAdmin}
+                                                        onChange={(e) => edit(setCap)(e.target.value)}
+                                                        placeholder={`Default ${policy.envMaxActionsPerRun}`}
+                                                        className={NUMBER_BOX}
+                                                    />
+                                                    <span className="text-[12px] text-ink-muted">rebuilds</span>
+                                                </span>
+                                            </SettingRow>
 
                                             {/* The breaker's limit is deploy-owned and the API does
                                                 not report it, so this states the rule and the live
                                                 count rather than inventing a number. */}
-                                            <p className="text-[11px] text-ink-muted leading-snug">
-                                                A source that keeps needing the same rebuild is stopped
-                                                and waits for a person
-                                                {summary?.suspended != null && (
-                                                    <>
-                                                        {' — '}
-                                                        <span className="text-ink-secondary tabular-nums">
+                                            <SettingRow
+                                                label="Stop a source that keeps failing"
+                                                hint="A source that keeps needing the same rebuild waits for a person instead."
+                                            >
+                                                <span className="flex items-center gap-2">
+                                                    {summary?.suspended != null && (
+                                                        <span className="text-[12px] text-ink-secondary tabular-nums">
                                                             {summary.suspended.toLocaleString()} stopped now
                                                         </span>
-                                                    </>
-                                                )}
-                                                . <span className="text-ink-muted/70">
-                                                    How many tries it allows is set by the deploy.
+                                                    )}
+                                                    <DeployTag />
                                                 </span>
-                                            </p>
-                                        </StageCard>
+                                            </SettingRow>
+                                        </Advanced>
+                                    </StageRow>
                                     </div>
 
                                     {/* A poll that failed AFTER the form was seeded is news, not a
@@ -631,7 +808,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                     {readFailed && (
                                         <p
                                             role="status"
-                                            className="mt-3.5 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] px-2.5 py-1.5 text-[12px] text-ink-secondary leading-snug"
+                                            className="mt-4 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] px-2.5 py-1.5 text-[12px] text-ink-secondary leading-snug"
                                         >
                                             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-500" />
                                             These settings could not be refreshed just now, so the live
@@ -643,7 +820,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                     {changedElsewhere && (
                                         <p
                                             role="status"
-                                            className="mt-3.5 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] px-2.5 py-1.5 text-[12px] text-ink-secondary leading-snug"
+                                            className="mt-4 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] px-2.5 py-1.5 text-[12px] text-ink-secondary leading-snug"
                                         >
                                             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-500" />
                                             Someone else changed these settings while you were editing.
@@ -653,7 +830,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                     )}
 
                                     {warnings.length > 0 && (
-                                        <ul className="mt-3.5 space-y-1.5">
+                                        <ul className="mt-4 space-y-1.5">
                                             {warnings.map(w => (
                                                 <li
                                                     key={w.id}
@@ -665,15 +842,6 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                             ))}
                                         </ul>
                                     )}
-
-                                    {impact && (
-                                        <p className="mt-3.5 text-[12px] text-ink-muted tabular-nums">
-                                            {impact}{' '}
-                                            <span className="text-ink-muted/80">
-                                                Measured against the saved policy, not these edits.
-                                            </span>
-                                        </p>
-                                    )}
                                 </>
                             )}
                         </div>
@@ -683,16 +851,21 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                             real configuration meaning "act on nothing" — on one click.
                             Until then the header × and Esc are the way out. */}
                         {ready && (
-                            <footer className="flex items-center justify-end gap-3 px-5 py-3 border-t border-glass-border bg-canvas-elevated">
+                            <footer className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 px-6 sm:px-8 py-5 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] shrink-0">
                                 {isAdmin ? (
                                     <>
-                                        <p className="mr-auto text-[11px] text-ink-muted hidden sm:block">
-                                            Changes take effect within a minute — no restart needed.
+                                        {/* One line, not two competing ones. */}
+                                        <p className="mr-auto text-[12px] text-ink-muted tabular-nums hidden sm:block">
+                                            {footerNote}
                                         </p>
+                                        {/* Cancel is a labelled button that says what it
+                                            does, so it goes straight through. Confirming
+                                            an explicit discard is the kind of politeness
+                                            that trains people to click past dialogs. */}
                                         <button
                                             type="button"
                                             onClick={onClose}
-                                            className="h-8 px-3 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                                            className="px-5 py-2.5 rounded-xl text-sm font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
                                         >
                                             Cancel
                                         </button>
@@ -700,23 +873,29 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                             type="button"
                                             onClick={onSave}
                                             disabled={saveRecon.isPending || saveCadence.isPending}
-                                            className="inline-flex items-center gap-1.5 h-8 px-4 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                                            className={cn(
+                                                'flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-medium transition-colors duration-150',
+                                                'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                                saveRecon.isPending || saveCadence.isPending
+                                                    ? 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed'
+                                                    : 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white hover:brightness-110 shadow-md',
+                                            )}
                                         >
                                             {(saveRecon.isPending || saveCadence.isPending) && (
-                                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                <Loader2 className="w-4 h-4 animate-spin" />
                                             )}
                                             Save
                                         </button>
                                     </>
                                 ) : (
                                     <>
-                                        <p className="mr-auto text-[11px] text-ink-muted">
+                                        <p className="mr-auto text-[12px] text-ink-muted">
                                             Only platform admins can change these settings.
                                         </p>
                                         <button
                                             type="button"
                                             onClick={onClose}
-                                            className="h-8 px-3 rounded-lg text-xs font-semibold text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                                            className="px-5 py-2.5 rounded-xl text-sm font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
                                         >
                                             Close
                                         </button>
@@ -724,9 +903,19 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                 )}
                             </footer>
                         )}
-                    </motion.div>
-                </div>
-            )}
+                        </motion.div>
+                    </div>
+                )}
+            </AnimatePresence>
+
+            <ConfirmCloseDialog
+                open={showCloseConfirm}
+                onCancel={() => setShowCloseConfirm(false)}
+                onConfirm={() => {
+                    setShowCloseConfirm(false)
+                    onClose()
+                }}
+            />
         </>,
         document.body,
     )
