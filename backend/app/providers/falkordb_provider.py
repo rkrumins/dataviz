@@ -7368,7 +7368,29 @@ class FalkorDBProvider(GraphDataProvider):
                 wanted = list(dict.fromkeys(seed_urns))
                 labels = await self._resolve_urn_labels_bulk(wanted) if wanted else {}
                 seed = [(u, labels.get(u) or "") for u in wanted]
-                seed_capped = False
+                # AND A SEED THAT STANDS FOR FINER THINGS RESOLVES TO THEM.
+                # Lineage lives at the leaves; a table carries none of its
+                # own, its COLUMNS do. A client expanding a card it has not
+                # opened yet holds none of those columns, so the only name
+                # it can send is the card's — and taking that literally
+                # walked a node with no lineage on it and returned an empty
+                # hop set, no frontier, and no error. Reported live: the ⊕
+                # on `int_clean_contacts_t2` shipped three nodes and zero
+                # edges while the same table's eight columns each had an
+                # upstream one hop away.
+                #
+                # This is the rule ``_collect_lineage_seed`` already applies
+                # to the ANCHOR ("a container focus contributes nothing
+                # directly — walk containment down to find who
+                # participates"), applied to every seed, so the two paths
+                # cannot disagree about what "start here" means.
+                beneath, seed_capped = await self._descendant_lineage_seed(
+                    wanted, labels, ltypes, ctypes,
+                    max(1, max_nodes // 2),
+                    max(0.6, min(1.5, deadline - time.monotonic())),
+                )
+                have = {u for u, _ in seed}
+                seed += [(u, lbl) for u, lbl in beneath if u not in have]
             else:
                 seed_timeout = max(0.6, min(1.5, deadline - time.monotonic()))
                 # Reserve at least half the node budget for the WALK. A fat
@@ -8512,6 +8534,85 @@ class FalkorDBProvider(GraphDataProvider):
                 seen.add(u)
                 seed.append((u, (row[1] if len(row) > 1 else None) or ""))
         return seed, seed_capped
+
+    async def _descendant_lineage_seed(
+        self,
+        urns: List[str],
+        labels: Dict[str, str],
+        ltypes: List[str],
+        ctypes: List[str],
+        cap: int,
+        timeout_secs: float,
+    ) -> Tuple[List[Tuple[str, str]], bool]:
+        """Which lineage-bearing entities live BENEATH these seeds.
+
+        ``_collect_lineage_seed``'s containment-descent, asked of a SET
+        rather than of one anchor: a walk continuation names the cards the
+        reader clicked, and a card that holds finer things carries no
+        lineage of its own — its columns do. Seeds that ARE leaves simply
+        contribute nothing here (a leaf has no containment children), so
+        the caller can hand over its whole seed list without sorting them
+        first.
+
+        Bucketed by label for the per-label ``(:Label).urn`` index, the
+        same way ``_expand_raw_lineage_set`` buckets its frontier (there is
+        no label-less URN index; an unlabeled bucket pays one scan, still
+        correct). Returns ``(pairs, capped)`` — ``capped`` when a bucket
+        came back exactly at its LIMIT, which the caller reports as
+        ``seedTruncated``. Failures degrade to "nothing beneath" rather
+        than aborting the walk: the literal seeds still walk.
+        """
+        if not urns or not ltypes or not ctypes or cap <= 0:
+            return [], False
+
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+        ct_alt = "|".join(_sanitize_label(t) for t in ctypes)
+        hops = self._containment_hop_bound()
+        per_query_timeout = max(0.6, min(1.5, timeout_secs))
+
+        by_label: Dict[str, List[str]] = {}
+        for u in urns:
+            by_label.setdefault(labels.get(u) or "", []).append(u)
+
+        async def _run(f_label: str, bucket: List[str]):
+            sl = _sanitize_label(f_label) if f_label else ""
+            label_clause = f":{sl}" if sl else ""
+            cypher = (
+                f"MATCH (f{label_clause})-[c:{ct_alt}*1..{hops}]->(d) "
+                f"WHERE f.urn IN $seeds AND (d)-[:{rel_alt}]-() "
+                "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label LIMIT $cap"
+            )
+            try:
+                return await self._ro_query(
+                    cypher, params={"seeds": bucket, "cap": cap},
+                    timeout=per_query_timeout, op="trace.closure_seed",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "trace_closure: descendant seed query failed: %s", exc,
+                )
+                return None
+
+        results = await asyncio.gather(
+            *(_run(lbl, bucket) for lbl, bucket in by_label.items())
+        )
+
+        pairs: List[Tuple[str, str]] = []
+        seen: Set[str] = set()
+        capped = False
+        for result in results:
+            if result is None:
+                continue
+            rows = result.result_set or []
+            if len(rows) == cap:
+                capped = True
+            for row in rows:
+                u = row[0]
+                if not u or u in seen:
+                    continue
+                seen.add(u)
+                pairs.append((u, (row[1] if len(row) > 1 else None) or ""))
+        return pairs, capped
 
     async def _page_raw_lineage_single(
         self,

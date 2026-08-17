@@ -435,6 +435,54 @@ async def test_a_seed_the_client_already_holds_still_walks(estate):
     assert ("b", "c", "FLOWS_TO") in _hops(leaf_anchored)
 
 
+async def test_a_container_seed_resolves_to_the_leaves_that_carry_the_lineage(estate):
+    """A SEED THAT STANDS FOR FINER THINGS RESOLVES TO THEM.
+
+    Lineage lives at the leaves. A reader clicking ⊕ on a card they have
+    never opened holds none of its leaves, so the only name the client
+    can send is the CARD's — and a card that holds finer things carries
+    no lineage of its own. Taking that seed literally walked a node with
+    no lineage on it and returned an empty hop set, no frontier and no
+    error: the click did nothing and said nothing. Reported live on the
+    dev estate — the ⊕ on `int_clean_contacts_t2` shipped three nodes
+    and zero edges while each of that table's eight columns had an
+    upstream one hop away.
+
+    The anchor path has always resolved a container this way
+    (`_collect_lineage_seed`); this is the same rule applied to every
+    seed, so a walk cannot depend on whether the reader happened to have
+    opened the card first.
+    """
+    p = await estate("container_seed", WALK_SEED)
+
+    # ⊕ on the BOX kc, unopened: the client holds the box and nothing
+    # inside it, and (as always) excludes what it holds.
+    res = await p.trace_closure(
+        urn="kc", upstream_depth=1, downstream_depth=0,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=1000, timeout_ms=15000,
+        seed_urns=["kc"], exclude_urns=["kc"],
+    )
+    assert ("b", "c", "FLOWS_TO") in _hops(res), (
+        "the ⊕ on an unopened container delivered nothing — the seed was "
+        "taken literally instead of resolving to the leaf that carries "
+        "the lineage"
+    )
+    assert sorted(res.upstream_urns) == ["b"]
+    # The walk goes ON from there: b is the new boundary, honestly counted.
+    assert [(f.urn, f.total_count) for f in res.frontier_up] == [("b", 1)]
+
+    # Identical to naming the leaf directly — whether the reader opened
+    # the card first must not change what the walk finds.
+    leaf = await p.trace_closure(
+        urn="kc", upstream_depth=1, downstream_depth=0,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=1000, timeout_ms=15000,
+        seed_urns=["c"], exclude_urns=["kc", "c"],
+    )
+    assert _hops(leaf) == _hops(res)
+
+
 # ── Estate: a diamond ─────────────────────────────────────────────────
 #
 #     kf⊃f  kg⊃g  kh⊃h

@@ -195,13 +195,16 @@ class _TraceFake:
             lin_nodes = {s for s, _, _ in self.lineage} | {t for _, t, _ in self.lineage}
             return _Result([[focus, None]] if focus in lin_nodes else [])
         if "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label" in cypher:
-            #   (2) which containment descendants carry lineage? → CONTAINER
-            #       focus, truncated at $cap (mirrors the real LIMIT so
-            #       seed_capped is exercisable against the fake).
-            focus = params["urn"]
+            #   (2) which containment descendants carry lineage? → the
+            #       CONTAINER case, truncated at $cap (mirrors the real
+            #       LIMIT so seed_capped is exercisable against the fake).
+            #       Asked of ONE anchor (`$urn`, _collect_lineage_seed) or
+            #       of a SET (`$seeds`, _descendant_lineage_seed) — the
+            #       same descent either way.
+            roots = params.get("seeds") or [params["urn"]]
             cap = params["cap"]
             lin_nodes = {s for s, _, _ in self.lineage} | {t for _, t, _ in self.lineage}
-            desc, stack = set(), [focus]
+            desc, stack = set(), list(roots)
             while stack:
                 x = stack.pop()
                 for c in self.children.get(x, []):
@@ -869,16 +872,24 @@ def test_trace_closure_max_nodes_cut_names_the_hub_and_orphans_no_edge():
     assert result.frontier_up == []
 
 
-def test_trace_closure_seed_urns_skip_the_container_seed_walk():
-    """`seed_urns` = a walk CONTINUATION: the caller already knows which nodes
-    carry the lineage, so neither seed query fires.
+def test_trace_closure_seed_urns_walk_every_named_seed_and_what_is_beneath_it():
+    """`seed_urns` = a walk CONTINUATION: the caller names where to start,
+    so the ANCHOR's own "is this a lineage leaf" probe never fires — the
+    walk is not re-derived from a focus the client has already moved past.
 
-    And EVERY named seed walks. A seed is an instruction, not a candidate:
+    Two rules meet here, and both are about not second-guessing the caller:
+
+    EVERY named seed walks. A seed is an instruction, not a candidate:
     `exclude_urns` governs what is re-SHIPPED, never where the walk starts.
     This request is the real client's own shape — the card being expanded
     and every leaf under it are nodes it already holds, so they are all in
     `exclude_urns` too — and dropping them left the walk with an empty seed
-    and the reader with a click that did nothing."""
+    and the reader with a click that did nothing.
+
+    AND a seed that stands for finer things resolves to them: the
+    containment descent DOES run, over the seeds themselves rather than
+    over the anchor, because a card the reader never opened is the only
+    name they can send and a container carries no lineage of its own."""
     fake = _TraceFake()
     fake.contain("dom", "leaf_a")
     fake.lineage = [
@@ -904,11 +915,40 @@ def test_trace_closure_seed_urns_skip_the_container_seed_walk():
         exclude_urns=["dom", "leaf_a", "ghost"],
     ))
 
-    assert all("RETURN DISTINCT d.urn AS urn" not in c for c in seen)
+    # The anchor's own leaf probe never fires...
     assert all("RETURN f.urn AS urn, labels(f)[0] AS label" not in c for c in seen)
+    # ...but the descent does, asked of the SEEDS ($seeds), not the anchor.
+    descent = [c for c in seen if "RETURN DISTINCT d.urn AS urn" in c]
+    assert len(descent) >= 1
+    assert all("$seeds" in c for c in descent)
     got_edges = {(e.source_urn, e.target_urn) for e in result.edges}
     assert got_edges == {("leaf_a", "leaf_b"), ("dom", "d_out"), ("ghost", "g_out")}
     assert "g_out" in result.downstream_urns
+
+
+def test_trace_closure_a_container_seed_resolves_to_its_lineage_bearing_leaves():
+    """The ⊕ on a card the reader has never opened. The client holds the
+    card and nothing inside it, so the card's own urn is the only seed it
+    can name — and a container carries no lineage of its own, its leaves
+    do. Taken literally, that seed walked a node with no lineage on it and
+    returned an empty hop set with no frontier and no error."""
+    fake = _TraceFake()
+    fake.contain("tbl", "col_a")
+    fake.contain("tbl", "col_b")
+    fake.lineage = [("up_a", "col_a", "FLOWS"), ("up_b", "col_b", "FLOWS")]
+    p = _make_provider(fake, hydrate=True)
+
+    result = _run(p.trace_closure(
+        "tbl", upstream_depth=1, downstream_depth=0,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=100, timeout_ms=5000,
+        seed_urns=["tbl"], exclude_urns=["tbl"],
+    ))
+
+    assert {(e.source_urn, e.target_urn) for e in result.edges} == {
+        ("up_a", "col_a"), ("up_b", "col_b"),
+    }
+    assert sorted(result.upstream_urns) == ["up_a", "up_b"]
 
 
 def test_trace_closure_exclude_urns_keep_the_seam_edge_not_the_node():
