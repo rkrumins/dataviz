@@ -673,6 +673,8 @@ async def set_freshness_settings(
     sent = body.model_fields_set
     stored_interval = None
     recon = {}
+    probe = {}
+    pause = {}
     try:
         if "rebuild_min_interval_secs" in sent:
             stored_interval = await svc.set_source_rebuild_interval(
@@ -687,6 +689,23 @@ async def set_freshness_settings(
             recon = await svc.set_source_reconcile_settings(
                 ds_id, session, **kwargs,
             )
+        # Same field set as the direct-mode route in
+        # ``api/v1/endpoints/freshness.py`` — proxy mode is what every
+        # deployed topology runs, so a field handled only there is a
+        # silent 200-and-write-nothing in production.
+        if {"probe_enabled", "probe_interval_secs"} & sent:
+            kwargs = {}
+            if "probe_enabled" in sent:
+                kwargs["enabled"] = body.probe_enabled
+            if "probe_interval_secs" in sent:
+                kwargs["interval_secs"] = body.probe_interval_secs
+            probe = await svc.set_source_probe_settings(
+                ds_id, session, **kwargs,
+            )
+        if "paused_until" in sent:
+            pause = await svc.set_source_pause(
+                ds_id, session, paused_until=body.paused_until,
+            )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return FreshnessSettingsResponse(
@@ -694,6 +713,9 @@ async def set_freshness_settings(
         rebuild_min_interval_secs=stored_interval,
         auto_reconcile_enabled=recon.get("reconcile_enabled"),
         reconcile_check_interval_secs=recon.get("reconcile_check_interval_secs"),
+        probe_enabled=probe.get("probe_enabled"),
+        probe_interval_secs=probe.get("probe_interval_secs"),
+        paused_until=pause.get("paused_until"),
     )
 
 
