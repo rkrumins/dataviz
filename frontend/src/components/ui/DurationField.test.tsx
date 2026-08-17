@@ -32,14 +32,55 @@ describe('DurationField', () => {
         const onChange = vi.fn()
         render(
             <DurationField
-                value={30} onChange={onChange} presets={PRESETS}
+                value={45} onChange={onChange} presets={PRESETS}
                 defaultSecs={60} label="Look for changes every"
             />,
         )
-        expect(screen.getByText(/Overridden: 30s/)).toBeInTheDocument()
+        expect(screen.getByText(/Overridden: 45s/)).toBeInTheDocument()
 
         await userEvent.click(screen.getByRole('button', { name: /reset to default/i }))
         expect(onChange).toHaveBeenCalledWith(null)
+    })
+
+    it('says a chosen preset once, not three times in two units', async () => {
+        // The row used to read `[1m] 60 · Overridden: 1m` — the same duration
+        // three times, twice in seconds, so the last cell read as a fifth
+        // preset in a different unit. In a control that exists so operators
+        // never convert between minutes and seconds, that is the whole bug.
+        render(
+            <DurationField
+                value={30} onChange={vi.fn()} presets={PRESETS}
+                defaultSecs={60} label="Look for changes every"
+            />,
+        )
+        expect(screen.getByRole('button', { name: '30s' })).toHaveAttribute('aria-pressed', 'true')
+        expect(screen.getByLabelText(/custom, seconds/i)).toHaveValue(null)
+        expect(screen.queryByText(/Overridden/)).not.toBeInTheDocument()
+        // The way back to the default is still offered — that is not redundant.
+        expect(screen.getByRole('button', { name: /reset to default/i })).toBeInTheDocument()
+    })
+
+    it('keeps the digits while you type a number a preset happens to cover', async () => {
+        // Hiding preset matches unconditionally emptied the box on the third
+        // keystroke of "300", because 30 is a preset on the way past.
+        const onChange = vi.fn()
+        function Owner() {
+            const [v, setV] = useState<number | null>(null)
+            return (
+                <DurationField
+                    value={v} presets={PRESETS} defaultSecs={60}
+                    label="Look for changes every"
+                    onChange={(n) => { setV(n); onChange(n) }}
+                />
+            )
+        }
+        render(<Owner />)
+        const box = screen.getByLabelText(/custom, seconds/i)
+
+        await userEvent.type(box, '300')
+
+        expect(box).toHaveValue(300)
+        expect(onChange).toHaveBeenLastCalledWith(300)
     })
 
     it('emits seconds when a preset is chosen', async () => {

@@ -744,7 +744,20 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                                         aria-label="Automatically rebuild a source when drift is detected"
                                                     />
                                                 </SettingRow>
-                                                <SettingRow label={CADENCE_LABEL.act}>
+                                                {/* ``0s`` is the most consequential
+                                                    chip on the row and sits in its
+                                                    least conspicuous position, at the
+                                                    head of an ascending ladder that
+                                                    should not be reordered. So it
+                                                    states its consequence once
+                                                    chosen, rather than being dressed
+                                                    up before anyone picks it. */}
+                                                <SettingRow
+                                                    label={CADENCE_LABEL.act}
+                                                    hint={cooldownSecs === 0
+                                                        ? 'No wait at all: a source can be rebuilt again the moment the next check finds drift.'
+                                                        : undefined}
+                                                >
                                                     <DurationField
                                                         label={CADENCE_LABEL.act}
                                                         value={cooldownSecs}

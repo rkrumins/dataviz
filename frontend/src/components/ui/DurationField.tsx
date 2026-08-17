@@ -12,8 +12,14 @@
  * The presets and the free-text box are ONE segmented control. They were two
  * things — a row of chips with an unlabelled number box loose underneath — and
  * that box read as a rendering bug: a bare ``300`` floating below a control
- * group, belonging to nothing. It is a cell of the group now, captioned, so it
- * cannot be mistaken for stray output.
+ * group, belonging to nothing. It is a cell of the group now.
+ *
+ * That cell — and the caption beside it — say something only when they have
+ * something to say. Echoing a chosen preset there put the same duration on the
+ * row three times in two units (``[1m] 60 · Overridden: 1m``), so the last
+ * cell read as a fifth preset labelled in seconds. In a control whose entire
+ * reason for existing is that operators should never convert between minutes
+ * and seconds, that was worse than the orphan box it replaced.
  *
  * The field labels itself through its caller, not a heading of its own: it sits
  * in a settings row whose left-hand words already name it, and repeating them
@@ -22,6 +28,7 @@
  * accessible name — which is why the caller must render the SAME words beside
  * it, or the visible label and the spoken one disagree.
  */
+import { useState } from 'react'
 import { RotateCcw } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -60,10 +67,14 @@ export function DurationField({
     disabled = false, min = 0, max = 86400,
 }: DurationFieldProps) {
     const isDefault = value == null
-    // A value no preset offers. The cell is highlighted rather than emptied of
-    // its number, because clearing it as you typed "300" would wipe the box on
-    // the third keystroke.
+    /** A value no preset offers — the only state the seconds cell has anything
+     *  to add, since otherwise the lit chip has already said it. */
     const isCustom = value != null && !presets.includes(value)
+    /** While the box has the caret it always shows the raw value, preset or
+     *  not. Hiding preset matches unconditionally would wipe the field on the
+     *  third keystroke of typing "300" — 30 is a preset on the way past. */
+    const [typing, setTyping] = useState(false)
+    const shown = value == null ? '' : (typing || isCustom) ? String(value) : ''
 
     return (
         <div
@@ -99,19 +110,18 @@ export function DurationField({
                         {formatDuration(p)}
                     </button>
                 ))}
-                {/* The seconds cell. It shows the effective value whichever way
-                    it was chosen — including a preset's — because clearing it
-                    the moment a typed number happened to match a preset would
-                    wipe the box mid-keystroke. It only lights up when the value
-                    is one no preset offers. */}
+                {/* The seconds cell: empty (and offering itself) unless the
+                    value is genuinely one no preset covers. */}
                 <input
                     type="number"
                     min={min}
                     max={max}
                     disabled={disabled}
                     aria-label={`${label} (custom, seconds)`}
-                    value={value ?? ''}
+                    value={shown}
                     placeholder="Custom"
+                    onFocus={() => setTyping(true)}
+                    onBlur={() => setTyping(false)}
                     onChange={(e) => {
                         const raw = e.target.value.trim()
                         onChange(raw === '' ? null : Number(raw))
@@ -129,14 +139,19 @@ export function DurationField({
 
             <span className="text-[11px]">
                 {isDefault ? (
+                    // Not redundant: no chip is lit in this state, so this is
+                    // the only place the effective duration appears at all.
                     <span className="text-ink-muted">
                         Using default ({formatDuration(defaultSecs)})
                     </span>
                 ) : (
                     <>
-                        <span className="text-ink-secondary font-medium">
-                            Overridden: {formatDuration(value)}
-                        </span>{' '}
+                        {/* Named only when no chip is naming it already. */}
+                        {isCustom && (
+                            <span className="text-ink-secondary font-medium">
+                                Overridden: {formatDuration(value)}{' '}
+                            </span>
+                        )}
                         {/* Shown short, spoken long. The row is already dense,
                             but "Reset" on its own says nothing about what it
                             resets to — and the answer is the whole point of
