@@ -906,6 +906,84 @@ async def test_manual_live_observe_persists_counts(session_factory, monkeypatch)
             {"Table": 99}, {"FLOWS_TO": 200, "AGGREGATED": 500},
         )
 
+
+@pytest.mark.asyncio
+async def test_manual_live_observe_prefers_the_counter_read(session_factory):
+    """A provider with a constant-time path must not pay the two full scans
+    on Check now — a scan-cap of those at once is exactly the load profile
+    the probe lane exists to avoid. get_stats stays the fallback."""
+    await _seed(session_factory, checked_at=_ago(seconds=30))
+
+    scanned = []
+
+    class _Prov:
+        async def get_counts_fast(self):
+            return {
+                "nodeCount": 99,
+                "edgeCount": 700,
+                "entityTypeCounts": {"Table": 99},
+                "edgeTypeCounts": {"FLOWS_TO": 200, "AGGREGATED": 500},
+            }
+
+        async def get_stats(self, bypass_cache=True):
+            scanned.append(True)
+            return {}
+
+    class _Reg:
+        async def get_provider_for_workspace(self, *a, **k):
+            return _Prov()
+
+    class _Svc(_FakeService):
+        _registry = _Reg()
+
+    svc = _Svc()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep(
+        mode="manual",
+    )
+    assert result is not None
+    assert scanned == [], "counter read answered — the scan must not run"
+    async with session_factory() as s:
+        row = await s.get(DataSourceStatsORM, "ds_1")
+        assert row.node_count == 99
+
+
+@pytest.mark.asyncio
+async def test_manual_live_observe_falls_back_when_counters_refuse(
+    session_factory,
+):
+    """None from the counters (multi-label graph) still gets a verdict —
+    through the full read, exactly as before the counter path existed."""
+    await _seed(session_factory, checked_at=_ago(seconds=30))
+
+    class _Prov:
+        async def get_counts_fast(self):
+            return None
+
+        async def get_stats(self, bypass_cache=True):
+            return {
+                "nodeCount": 42,
+                "edgeCount": 700,
+                "entityTypeCounts": {"Table": 42},
+                "edgeTypeCounts": {"FLOWS_TO": 200, "AGGREGATED": 500},
+            }
+
+    class _Reg:
+        async def get_provider_for_workspace(self, *a, **k):
+            return _Prov()
+
+    class _Svc(_FakeService):
+        _registry = _Reg()
+
+    svc = _Svc()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep(
+        mode="manual",
+    )
+    assert result is not None
+    async with session_factory() as s:
+        row = await s.get(DataSourceStatsORM, "ds_1")
+        assert row.node_count == 42
+
+
 @pytest.mark.asyncio
 async def test_manual_sweep_re_evaluates_a_recently_checked_source(session_factory):
     """Check now is a full-fleet pass, not an early hourly tick."""

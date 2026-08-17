@@ -63,6 +63,10 @@ _SCAN_CAP = 200
 # Operator Check now may live-refresh this many sources at once.
 _LIVE_OBS_CONCURRENCY = 8
 _LIVE_OBS_TIMEOUT_S = 5.0
+# Whole-pass ceiling for an operator's Check now / Preview: a 200-source
+# fleet of slow graphs must not hold the HTTP request for minutes. Sources
+# not reached in time evaluate from their stored counts (named skip paths).
+_LIVE_OBS_TOTAL_BUDGET_S = 30.0
 
 # Cold-start guard, separate from the general action cap. A fresh install
 # with 200 never-aggregated sources drains at one first build per sweep
@@ -569,10 +573,12 @@ class ReconciliationSweeper:
     ) -> None:
         """Refresh ctx counts from the live graph for an operator pass.
 
-        Uses ``provider.get_stats`` (cheap per-type counts), never
-        ``get_schema_stats``. Failures leave the SQL snapshot in place so
-        evaluate still has a named skip path. No DB session is held across
-        the graph call.
+        Prefers ``provider.get_counts_fast`` (constant-time counter reads)
+        and falls back to ``provider.get_stats`` (two full scans) only when
+        the counters cannot describe the graph; never ``get_schema_stats``.
+        The whole pass carries a total budget. Failures leave the SQL
+        snapshot in place so evaluate still has a named skip path. No DB
+        session is held across the graph call.
         """
         if not targets:
             return
@@ -585,7 +591,10 @@ class ReconciliationSweeper:
 
         sem = asyncio.Semaphore(_LIVE_OBS_CONCURRENCY)
 
+        failures = 0
+
         async def _one(ds_id: str, workspace_id: Optional[str]) -> None:
+            nonlocal failures
             if not workspace_id:
                 return
             async with sem:
@@ -597,19 +606,31 @@ class ReconciliationSweeper:
                             ),
                             timeout=_LIVE_OBS_TIMEOUT_S,
                         )
-                    try:
+                    # Constant-time counters first — same payload shape as
+                    # get_stats; None means the counters cannot describe
+                    # this graph (multi-label), and only then is the
+                    # two-full-scan read worth paying.
+                    raw = None
+                    fast = getattr(provider, "get_counts_fast", None)
+                    if fast is not None:
                         raw = await asyncio.wait_for(
-                            provider.get_stats(bypass_cache=True),
-                            timeout=_LIVE_OBS_TIMEOUT_S,
+                            fast(), timeout=_LIVE_OBS_TIMEOUT_S,
                         )
-                    except TypeError:
-                        raw = await asyncio.wait_for(
-                            provider.get_stats(),
-                            timeout=_LIVE_OBS_TIMEOUT_S,
-                        )
+                    if raw is None:
+                        try:
+                            raw = await asyncio.wait_for(
+                                provider.get_stats(bypass_cache=True),
+                                timeout=_LIVE_OBS_TIMEOUT_S,
+                            )
+                        except TypeError:
+                            raw = await asyncio.wait_for(
+                                provider.get_stats(),
+                                timeout=_LIVE_OBS_TIMEOUT_S,
+                            )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    failures += 1
                     logger.debug(
                         "reconcile sweep: live observe failed for %s: %s",
                         ds_id, exc,
@@ -657,9 +678,28 @@ class ReconciliationSweeper:
                         ds_id, exc,
                     )
 
-        await asyncio.gather(*[
-            _one(ds_id, ws_id) for ds_id, ws_id in targets
-        ])
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*[
+                    _one(ds_id, ws_id) for ds_id, ws_id in targets
+                ]),
+                timeout=_LIVE_OBS_TOTAL_BUDGET_S,
+            )
+        except asyncio.TimeoutError:
+            refreshed = sum(
+                1 for e in ctx.values() if e.get("live_observed")
+            )
+            logger.warning(
+                "reconcile sweep: live observe budget exhausted — %d of %d "
+                "refreshed; the rest evaluate from stored counts",
+                refreshed, len(targets),
+            )
+        if failures:
+            logger.warning(
+                "reconcile sweep: live observe failed for %d of %d source(s)"
+                " — they evaluate from stored counts (details at debug)",
+                failures, len(targets),
+            )
 
     async def _claim_lock(self, session) -> bool:
         """Transaction-scoped advisory lock, distinct from the stuck-job
