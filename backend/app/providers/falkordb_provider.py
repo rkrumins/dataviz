@@ -3538,7 +3538,10 @@ class FalkorDBProvider(GraphDataProvider):
         params: Dict[str, Any] = {"parent": parent_urn, "lim": limit, "relTypes": rel_list}
 
         if search_query:
-            search_where = "AND (toLower(c.displayName) CONTAINS toLower($searchQuery) OR toLower(c.urn) CONTAINS toLower($searchQuery)) "
+            search_where = (
+                f"AND (toLower({self._map.name('c')}) CONTAINS toLower($searchQuery) "
+                f"OR toLower({self._ident('c')}) CONTAINS toLower($searchQuery)) "
+            )
             params["searchQuery"] = search_query
 
         # Keyset pagination (O(log N) with FalkorDB indices vs O(N) for SKIP).
@@ -3551,12 +3554,13 @@ class FalkorDBProvider(GraphDataProvider):
             params["cursorName"] = cursor_name
             if cursor_urn:
                 cursor_where = (
-                    f"AND (c.displayName {cmp} $cursorName "
-                    f"OR (c.displayName = $cursorName AND c.urn {cmp} $cursorUrn)) "
+                    f"AND ({self._map.name('c')} {cmp} $cursorName "
+                    f"OR ({self._map.name('c')} = $cursorName "
+                    f"AND {self._ident('c')} {cmp} $cursorUrn)) "
                 )
                 params["cursorUrn"] = cursor_urn
             else:
-                cursor_where = f"AND c.displayName {cmp} $cursorName "  # legacy cursor
+                cursor_where = f"AND {self._map.name('c')} {cmp} $cursorName "  # legacy cursor
         else:
             # Fallback to offset when no cursor (first page or legacy callers)
             params["skip"] = offset
@@ -3566,7 +3570,9 @@ class FalkorDBProvider(GraphDataProvider):
         if sort_property:
             safe_prop = _sanitize_label(sort_property)
             dir_kw = " DESC" if sort_direction == "desc" else ""
-            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}"
+            order_suffix = (
+                f" ORDER BY c.{safe_prop}{dir_kw}, {self._ident('c')}{dir_kw}"
+            )
 
         # Use SKIP only when no cursor is provided (first page)
         skip_clause = "" if cursor else " SKIP $skip"
@@ -3575,7 +3581,7 @@ class FalkorDBProvider(GraphDataProvider):
             rel = _sanitize_label(rel_list[0])
             cypher = (
                 f"MATCH (p)-[r:{rel}]->(c) "
-                f"WHERE p.urn = $parent {search_where}{cursor_where}"
+                f"WHERE {self._ident('p')} = $parent {search_where}{cursor_where}"
                 f"WITH c{order_suffix}{skip_clause} LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
                 f"RETURN c, count(gc) as childCount"
@@ -3583,7 +3589,8 @@ class FalkorDBProvider(GraphDataProvider):
         else:
             cypher = (
                 f"MATCH (p)-[r]->(c) "
-                f"WHERE p.urn = $parent AND type(r) IN $relTypes {search_where}{cursor_where}"
+                f"WHERE {self._ident('p')} = $parent AND type(r) IN $relTypes "
+                f"{search_where}{cursor_where}"
                 f"WITH c{order_suffix}{skip_clause} LIMIT $lim "
                 f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
                 f"RETURN c, count(gc) as childCount"
@@ -3645,7 +3652,10 @@ class FalkorDBProvider(GraphDataProvider):
         params: Dict[str, Any] = {"parent": parent_urn, "lim": limit, "relTypes": rel_list}
 
         if search_query:
-            search_where = "AND (toLower(c.displayName) CONTAINS toLower($searchQuery) OR toLower(c.urn) CONTAINS toLower($searchQuery)) "
+            search_where = (
+                f"AND (toLower({self._map.name('c')}) CONTAINS toLower($searchQuery) "
+                f"OR toLower({self._ident('c')}) CONTAINS toLower($searchQuery)) "
+            )
             params["searchQuery"] = search_query
 
         # Keyset pagination, O(log N) vs SKIP's O(N). The keyset is COMPOSITE
@@ -3659,8 +3669,9 @@ class FalkorDBProvider(GraphDataProvider):
             params["cursorName"] = cursor_name
             if cursor_urn:
                 cursor_where = (
-                    f"AND (c.displayName {cmp} $cursorName "
-                    f"OR (c.displayName = $cursorName AND c.urn {cmp} $cursorUrn)) "
+                    f"AND ({self._map.name('c')} {cmp} $cursorName "
+                    f"OR ({self._map.name('c')} = $cursorName "
+                    f"AND {self._ident('c')} {cmp} $cursorUrn)) "
                 )
                 params["cursorUrn"] = cursor_urn
             else:
@@ -3674,7 +3685,9 @@ class FalkorDBProvider(GraphDataProvider):
         if sort_property:
             safe_prop = _sanitize_label(sort_property)
             dir_kw = " DESC" if sort_direction == "desc" else ""
-            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}"
+            order_suffix = (
+                f" ORDER BY c.{safe_prop}{dir_kw}, {self._ident('c')}{dir_kw}"
+            )
 
         skip_clause = "" if cursor else " SKIP $skip"
 
@@ -3692,10 +3705,11 @@ class FalkorDBProvider(GraphDataProvider):
         p_anchor = f"(p:{_sanitize_label(parent_label)})" if parent_label else "(p)"
         cypher = (
             f"MATCH {p_anchor}-[r:{rel_alt}]->(c) "
-            f"WHERE p.urn = $parent {search_where}{cursor_where}"
+            f"WHERE {self._ident('p')} = $parent {search_where}{cursor_where}"
             f"WITH p, r, c{order_suffix}{skip_clause} LIMIT $lim "
             f"OPTIONAL MATCH (c)-[rc:{rel_alt}]->(gc) "
-            f"RETURN c, count(gc) as childCount, p.urn as parentUrn, type(r) as relType, properties(r) as rprops"
+            f"RETURN c, count(gc) as childCount, {self._ident('p')} as parentUrn, "
+            f"type(r) as relType, properties(r) as rprops"
         )
 
         from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
@@ -4607,9 +4621,9 @@ class FalkorDBProvider(GraphDataProvider):
         # containment hierarchy and keep their pre-initialized [] chain.
         def _chain_cypher(label_clause: str) -> str:
             return (
-                f"MATCH (child{label_clause}) WHERE child.urn IN $urns "
+                f"MATCH (child{label_clause}) WHERE {self._ident('child')} IN $urns "
                 f"OPTIONAL MATCH path = (child)<-[:{containment_cypher}*1..{max_depth}]-(a) "
-                "WITH child.urn AS u, "
+                f"WITH {self._ident('child')} AS u, "
                 "     [n IN nodes(path)[1..] | n.urn] AS chain_candidate, "
                 "     coalesce(length(path), 0) AS plen "
                 "ORDER BY u, plen DESC "
@@ -5257,10 +5271,10 @@ class FalkorDBProvider(GraphDataProvider):
                 profile[str(row[0])] = (int(row[1] or 0) > 0, int(row[2] or 0))
         anc = await self._ro_query(
             f"MATCH (a)-[:{c_pattern}*1..{hops}]->(child) "
-            f"WHERE child.urn IN $urns "
-            f"WITH DISTINCT child.urn AS cu, a "
+            f"WHERE {self._ident('child')} IN $urns "
+            f"WITH DISTINCT {self._ident('child')} AS cu, a "
             f"OPTIONAL MATCH q = (r0)-[:{c_pattern}*1..{hops}]->(a) "
-            f"RETURN cu, a.urn, coalesce(max(length(q)), 0)",
+            f"RETURN cu, {self._ident('a')}, coalesce(max(length(q)), 0)",
             params={"urns": urns},
         )
         closures: Dict[str, Dict[str, int]] = {u: {} for u in urns}
@@ -5621,7 +5635,8 @@ class FalkorDBProvider(GraphDataProvider):
         while queue:
             current = queue.popleft()
             result = await self._ro_query(
-                "MATCH (p)-[r]->(c) WHERE p.urn = $urn AND type(r) IN $ctypes RETURN c.urn",
+                f"MATCH (p)-[r]->(c) WHERE {self._ident('p')} = $urn "
+                f"AND type(r) IN $ctypes RETURN {self._ident('c')}",
                 params={"urn": current, "ctypes": containment},
             )
             child_urns = [row[0] for row in (result.result_set or []) if row[0] and row[0] not in visited]
@@ -6664,7 +6679,7 @@ class FalkorDBProvider(GraphDataProvider):
             # Get children (depth 1 for now, or use *1.. if needed)
             cypher_kids = (
                 f"MATCH (p)-[r]->(c) "
-                f"WHERE p.urn = $urn AND type(r) IN $containment "
+                f"WHERE {self._ident('p')} = $urn AND type(r) IN $containment "
                 f"RETURN c.urn"
             )
             res_kids = await self._ro_query(

@@ -48,7 +48,13 @@ _RAW_RE = re.compile(r"MATCH \(s(?::\w+)?\)-\[r(?::[\w|]+)?\]->\(t\) WHERE s\.ur
 def _pattern_types(cypher):
     m = re.search(r"\[r:([\w|]+)\]", cypher)
     return set(m.group(1).split("|")) if m else set()
-_CHAIN_RE = re.compile(r"MATCH \(child(?::(\w+))?\) WHERE child\.urn IN \$urns")
+# The identity property is rendered from the source's mapping now, so it is
+# backtick-quoted and may not be `urn` at all. The guard this regex serves is
+# about the LABEL ANCHOR (per-label index vs full scan), not about which
+# property carries identity — so match any quoted-or-bare property name.
+_CHAIN_RE = re.compile(
+    r"MATCH \(child(?::(\w+))?\) WHERE child\.`?\w+`? IN \$urns"
+)
 _AGG_FANOUT_RE = re.compile(r"MATCH \(x(?::\w+)?\)-\[r:AGGREGATED\]->\(t2\)")
 _AGG_FANIN_RE = re.compile(r"MATCH \(s2\)-\[r:AGGREGATED\]->\(y(?::\w+)?\)")
 

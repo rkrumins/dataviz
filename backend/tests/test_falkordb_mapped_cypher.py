@@ -110,3 +110,23 @@ def test_a_provider_with_no_injection_still_maps_from_its_own_config():
     p._mapped = None
     assert p._ident() == "n.`uuid`"
     assert p._ident_key() == "`uuid`"
+
+
+# ── the keyset contract survives mapping ──────────────────────────────
+
+def test_keyset_order_and_tiebreak_use_the_same_mapped_properties(mapped):
+    """The ORDER BY and the cursor predicate must name the SAME two properties.
+    If they diverge, paging silently skips or repeats rows at page boundaries —
+    which is the bug the urn tiebreaker was added to fix in the first place."""
+    name, ident = mapped._map.name("c"), mapped._ident("c")
+    order_by = f"ORDER BY c.someProp, {ident}"
+    cursor = f"AND ({name} > $cursorName OR ({name} = $cursorName AND {ident} > $cursorUrn))"
+    assert ident in order_by and ident in cursor
+    assert name in cursor
+    # The tiebreaker has to be UNIQUE and index-seekable, so no coalesce.
+    assert "coalesce" not in ident
+
+
+def test_conforming_keyset_is_the_canonical_pair(conforming):
+    assert conforming._ident("c") == "c.`urn`"
+    assert conforming._map.name("c") == "c.`displayName`"
