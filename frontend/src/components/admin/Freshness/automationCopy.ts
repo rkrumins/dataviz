@@ -33,6 +33,32 @@ export const STAGES = {
     },
 } as const
 
+/** Backend bounds, in the one unit both surfaces speak. The server's floor for
+ *  the check interval is 30s; this is stricter on purpose, because a sub-minute
+ *  fleet check buys nothing the probe has not already found. */
+export const MAX_SECS = 86400
+export const MIN_PROBE_SECS = 15
+export const MIN_CHECK_SECS = 60
+
+/** Preset ladders per stage. Deliberately disjoint across the three stages:
+ *  two stages offering the same chip is exactly the confusion this vocabulary
+ *  exists to remove. They live here rather than in the modal because the
+ *  per-source drawer edits the SAME three settings — a second ladder there
+ *  would let one surface offer a value the other cannot. */
+export const DETECT_PRESETS = [15, 30, 60, 600]
+export const CHECK_PRESETS = [300, 1800, 3600, 21600]
+export const COOLDOWN_PRESETS = [0, 900, 7200, MAX_SECS]
+
+/** One string per cadence, used as BOTH the visible ledger label and the
+ *  control's accessible name. Two copies would eventually disagree, and a
+ *  control whose spoken name differs from the words printed beside it is a
+ *  WCAG failure and a support call. */
+export const CADENCE_LABEL = {
+    detect: 'Look for changes every',
+    check: 'Check every',
+    act: 'Minimum time between rebuilds',
+} as const
+
 /** Accents progress along the pipeline — sky (observation) → indigo (judgment)
  *  → violet (execution) — so the palette itself carries the order.
  *

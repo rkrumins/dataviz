@@ -53,38 +53,20 @@ import { useToast } from '@/components/ui/toast'
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
 import { aggregationService, type AggregationCadence } from '@/services/aggregationService'
 import type { FreshnessSummary } from '@/services/freshnessService'
-import { DETECTORS, automationWarnings, hintIdFor } from './automationCopy'
+import {
+    CADENCE_LABEL, CHECK_PRESETS, COOLDOWN_PRESETS, DETECTORS, DETECT_PRESETS,
+    MAX_SECS, MIN_CHECK_SECS, MIN_PROBE_SECS, automationWarnings, hintIdFor,
+} from './automationCopy'
 import { Advanced, PipelineRail, SettingRow, StageRow } from './StageRow'
 import { lastPassBrief, pickLastPassRun } from './reconcileHealth'
 import { useReconcileNow, useReconciliation, useSetReconciliationPolicy } from './useFreshness'
 
 const SETTINGS_KEY = ['aggregation', 'settings'] as const
 
-/** Backend bounds, in the one unit the modal speaks. The server's floor for the
- *  check interval is 30s; this is stricter on purpose, because a sub-minute
- *  fleet check buys nothing the probe has not already found. */
-const MAX_SECS = 86400
-const MIN_PROBE_SECS = 15
-const MIN_CHECK_SECS = 60
+/** Bounds this modal owns alone; the shared ones live in ``automationCopy``
+ *  because the per-source drawer edits the same three cadences. */
 const MAX_CAP = 200
 const MAX_SHRINK_PCT = 100
-
-/** Preset ladders per stage. Deliberately disjoint across the three stages:
- *  two stages offering the same chip is exactly the confusion this modal
- *  exists to remove. */
-const DETECT_PRESETS = [15, 30, 60, 600]
-const CHECK_PRESETS = [300, 1800, 3600, 21600]
-const COOLDOWN_PRESETS = [0, 900, 7200, MAX_SECS]
-
-/** One string per cadence, used as BOTH the visible ledger label and the
- *  control's accessible name. Two copies would eventually disagree, and a
- *  control whose spoken name differs from the words printed beside it is a
- *  WCAG failure and a support call. */
-const CADENCE_LABEL = {
-    detect: 'Look for changes every',
-    check: 'Check every',
-    act: 'Minimum time between rebuilds',
-} as const
 
 /** How long the edits have to settle before we ask the server what the stored
  *  policy would do to the fleet. The dry run scans every source. */

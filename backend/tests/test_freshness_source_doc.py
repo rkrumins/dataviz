@@ -157,6 +157,78 @@ async def test_clearing_a_probe_override_falls_back(session_factory):
     assert state["probe_enabled"] is False
 
 
+@pytest.mark.asyncio
+async def test_pause_round_trips_and_an_explicit_null_clears_it(
+    session_factory, monkeypatch,
+):
+    """The operator snooze, end to end through the route.
+
+    ``set_source_pause`` and the ``paused_until`` branch of
+    ``patch_freshness_settings`` are the newest layer here and the drawer's
+    Pause control depends on all three parts of it: the write, the echo in
+    ``FreshnessSettingsResponse``, and the partial-PATCH rule. That last one
+    matters most — the drawer saves one setting per control, so if an absent
+    key were treated as null, saving a cadence would silently resume a source
+    an operator had deliberately held.
+    """
+    from backend.app.api.v1.endpoints import freshness as fresh_mod
+    from backend.app.services.aggregation.models import (
+        AggregationDataSourceStateORM,
+    )
+    from backend.app.services.aggregation.schemas import (
+        FreshnessSettingsRequest, FreshnessSettingsResponse,
+    )
+    from backend.app.services.aggregation.service import (
+        AggregationService, _state_map,
+    )
+
+    # The dev container runs these routes in proxy mode; force the direct
+    # branch so the handler actually touches the service under test.
+    monkeypatch.setattr(fresh_mod, "_PROXY_ENABLED", False)
+
+    async with session_factory() as s:
+        s.add(AggregationDataSourceStateORM(
+            data_source_id="ds_1", workspace_id="ws_1",
+            aggregation_status="ready",
+        ))
+        await s.commit()
+
+    svc = AggregationService.__new__(AggregationService)
+    until = "2026-08-17T18:00:00+00:00"
+
+    # ``request`` is only read on the proxy branch, which is off here.
+    async with session_factory() as s:
+        out = await fresh_mod.patch_freshness_settings(
+            "ds_1", FreshnessSettingsRequest(pausedUntil=until), object(),
+            svc=svc, session=s,
+        )
+    assert isinstance(out, FreshnessSettingsResponse)
+    assert out.paused_until == until
+
+    async with session_factory() as s:
+        assert (await _state_map(s, ["ds_1"]))["ds_1"]["paused_until"] == until
+
+    # A PATCH that does not mention the pause must not disturb it.
+    async with session_factory() as s:
+        await fresh_mod.patch_freshness_settings(
+            "ds_1", FreshnessSettingsRequest(probeIntervalSecs=30), object(),
+            svc=svc, session=s,
+        )
+    async with session_factory() as s:
+        assert (await _state_map(s, ["ds_1"]))["ds_1"]["paused_until"] == until
+
+    # Explicit null resumes immediately.
+    async with session_factory() as s:
+        out = await fresh_mod.patch_freshness_settings(
+            "ds_1", FreshnessSettingsRequest(pausedUntil=None), object(),
+            svc=svc, session=s,
+        )
+    assert out.paused_until is None
+
+    async with session_factory() as s:
+        assert (await _state_map(s, ["ds_1"]))["ds_1"]["paused_until"] is None
+
+
 def test_freshness_row_kwargs_leaks_doc_only_keys_but_row_ignores_them():
     """``_freshness_row_kwargs``'s dict is spread into BOTH
     ``FreshnessRow(**kwargs)`` and ``FreshnessDoc(**kwargs)`` (see

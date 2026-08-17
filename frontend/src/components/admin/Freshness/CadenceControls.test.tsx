@@ -1,6 +1,7 @@
 /**
- * F9 cadence controls — the per-source override row in the drawer. It shows
- * the RESOLVED value + where that value came from, and its editor fires the
+ * The drawer's per-source automation controls — ① Detect, ② Check, ③ Act, the
+ * same three stages the fleet-wide Automation modal speaks. Each shows the
+ * RESOLVED value + where that value came from, and its editor fires the
  * freshness-settings PATCH.
  *
  * The global editor is the Automation modal now; its tests live in
@@ -91,6 +92,12 @@ beforeEach(() => {
     putReconciliation.mockResolvedValue(RECON_POLICY)
 })
 
+/** The rebuild cadence is ③ Act's, and its editor is a ``DurationField`` —
+ *  reached as a labelled group rather than a bare minutes box, so asserting
+ *  its absence still asserts something. ``ACT_CADENCE`` is the one string that
+ *  names it, as the visible label and as the control's accessible name. */
+const ACT_CADENCE = 'Minimum time between rebuilds'
+
 describe('drawer rebuild-cadence row', () => {
     it('shows the resolved value and its source', async () => {
         getSourceDoc.mockResolvedValue(makeDoc({
@@ -98,10 +105,10 @@ describe('drawer rebuild-cadence row', () => {
         }))
         wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
 
-        expect(await screen.findByText('Rebuild cadence')).toBeInTheDocument()
+        expect(await screen.findByText(ACT_CADENCE)).toBeInTheDocument()
         expect(screen.getByText('Custom')).toBeInTheDocument()
-        // 3600s → "1h" in the resolved-value copy.
-        expect(screen.getByText('1h')).toBeInTheDocument()
+        // 3600s → "1h", flagged as an override because no preset offers it.
+        expect(screen.getByText(/Overridden: 1h/)).toBeInTheDocument()
     })
 
     it('edit fires the PATCH with the interval in seconds', async () => {
@@ -109,9 +116,11 @@ describe('drawer rebuild-cadence row', () => {
         patchFreshnessSettings.mockResolvedValue({ dataSourceId: 'ds-1', rebuildMinIntervalSecs: 300 })
         wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
 
-        const input = await screen.findByLabelText('Rebuild cadence override (minutes)')
+        // The cadence is entered in seconds now — the whole point of the shared
+        // DurationField is that no stage asks the operator to convert units.
+        const input = await screen.findByLabelText(`${ACT_CADENCE} (custom, seconds)`)
         await userEvent.clear(input)
-        await userEvent.type(input, '5')
+        await userEvent.type(input, '300')
         await userEvent.click(screen.getByRole('button', { name: 'Save rebuild cadence' }))
 
         await waitFor(() => expect(patchFreshnessSettings).toHaveBeenCalledWith(
@@ -124,8 +133,11 @@ describe('drawer rebuild-cadence row', () => {
         getSourceDoc.mockResolvedValue(makeDoc())
         wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
 
-        expect(await screen.findByText('Rebuild cadence')).toBeInTheDocument()
-        expect(screen.queryByLabelText('Rebuild cadence override (minutes)')).not.toBeInTheDocument()
+        expect(await screen.findByText(ACT_CADENCE)).toBeInTheDocument()
+        expect(screen.queryByRole('group', { name: ACT_CADENCE })).not.toBeInTheDocument()
+        // The value itself still reads — a viewer who cannot change the cadence
+        // still needs to know what it is.
+        expect(screen.getByText('15m')).toBeInTheDocument()
     })
 
     it('hides the editor for a never-built source (no state row → would 404)', async () => {
@@ -134,8 +146,102 @@ describe('drawer rebuild-cadence row', () => {
         }))
         wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
 
-        expect(await screen.findByText('Rebuild cadence')).toBeInTheDocument()
-        expect(screen.queryByLabelText('Rebuild cadence override (minutes)')).not.toBeInTheDocument()
-        expect(screen.getByText(/once this source has been built/i)).toBeInTheDocument()
+        expect(await screen.findByText(/once this source has been built/i)).toBeInTheDocument()
+        expect(screen.queryByRole('group', { name: ACT_CADENCE })).not.toBeInTheDocument()
+    })
+})
+
+describe('drawer detect stage', () => {
+    it('offers a detect override', async () => {
+        getSourceDoc.mockResolvedValue(makeDoc({ resolvedProbeIntervalSecs: 60 }))
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
+
+        expect(await screen.findByText(/Using default \(1m\)/)).toBeInTheDocument()
+    })
+
+    it('sends the detect override in seconds', async () => {
+        getSourceDoc.mockResolvedValue(makeDoc({ resolvedProbeIntervalSecs: 60 }))
+        patchFreshnessSettings.mockResolvedValue({ dataSourceId: 'ds-1', probeIntervalSecs: 30 })
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
+
+        // The 30s preset: this per-source override had no UI anywhere before,
+        // so the only way to quieten one noisy source was fleet-wide.
+        await userEvent.click(await screen.findByRole('button', { name: '30s' }))
+        await userEvent.click(screen.getByRole('button', { name: 'Save detect frequency' }))
+
+        await waitFor(() => expect(patchFreshnessSettings).toHaveBeenCalledWith(
+            'ds-1', { probeIntervalSecs: 30 },
+        ))
+    })
+})
+
+describe('drawer drift explanation', () => {
+    it('explains why a source is drifting from the stored evidence', async () => {
+        getSourceDoc.mockResolvedValue(makeDoc({
+            driftState: 'overlayMissing',
+            lastFindingReason: 'overlay_missing',
+            lastFindingEvidence: {
+                expectedAggregatedEdges: 50000, observedAggregatedEdges: 0,
+            },
+        }))
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
+
+        expect(await screen.findByText(/Rollups went missing/)).toBeInTheDocument()
+        // Exact, not /50,000/: the pair renders the count AND its delta, so a
+        // loose match finds "50,000" and "(-50,000)" and fails as ambiguous.
+        expect(screen.getByText('50,000')).toBeInTheDocument()
+        expect(screen.getByText('(-50,000)')).toBeInTheDocument()
+    })
+
+    it('stays quiet when the source is in sync', async () => {
+        // The sweep stamps a finding on every evaluation, so a stale reason
+        // outlives the condition — the verdict decides whether it is shown.
+        getSourceDoc.mockResolvedValue(makeDoc({
+            driftState: 'inSync',
+            lastFindingReason: 'overlay_missing',
+            lastFindingEvidence: { expectedAggregatedEdges: 50000, observedAggregatedEdges: 0 },
+        }))
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
+
+        expect(await screen.findByText(ACT_CADENCE)).toBeInTheDocument()
+        expect(screen.queryByText(/Rollups went missing/)).not.toBeInTheDocument()
+    })
+})
+
+describe('drawer snooze', () => {
+    it('pauses automation for the chosen window', async () => {
+        getSourceDoc.mockResolvedValue(makeDoc())
+        patchFreshnessSettings.mockResolvedValue({ dataSourceId: 'ds-1' })
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
+
+        const before = Date.now()
+        await userEvent.selectOptions(
+            await screen.findByLabelText('Pause automation for'), '28800',
+        )
+
+        await waitFor(() => expect(patchFreshnessSettings).toHaveBeenCalled())
+        const [dsId, body] = patchFreshnessSettings.mock.calls[0]
+        expect(dsId).toBe('ds-1')
+        // An instant, not a duration: the server holds until a wall-clock time,
+        // so the window is computed here and sent as ISO.
+        const until = new Date(body.pausedUntil).getTime()
+        expect(until - before).toBeGreaterThanOrEqual(8 * 3600_000)
+        expect(until - before).toBeLessThan(8 * 3600_000 + 60_000)
+    })
+
+    it('shows the expiry and resumes in one click', async () => {
+        getSourceDoc.mockResolvedValue(makeDoc({
+            pausedUntil: new Date(Date.now() + 2 * 3600_000).toISOString(),
+        }))
+        patchFreshnessSettings.mockResolvedValue({ dataSourceId: 'ds-1' })
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
+
+        expect(await screen.findByText(/resumes in 2h/)).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: /Resume now/ }))
+
+        // Explicit null, never an omitted key: only what is sent is written.
+        await waitFor(() => expect(patchFreshnessSettings).toHaveBeenCalledWith(
+            'ds-1', { pausedUntil: null },
+        ))
     })
 })

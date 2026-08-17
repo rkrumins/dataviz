@@ -127,9 +127,24 @@ export interface FreshnessDoc extends FreshnessRow {
     reconcileIntervalOverrideSecs?: number | null
     resolvedReconcileIntervalSecs?: number | null
     reconcileIntervalSource?: 'custom' | 'global' | 'default' | null
+    /** ① Detect — the per-source change-detection override (null = inherit),
+     *  its resolved value and where that value came from. Same trio shape as
+     *  the check and rebuild cadences above. */
+    probeEnabled?: boolean | null
+    probeIntervalSecs?: number | null
+    resolvedProbeIntervalSecs?: number | null
+    probeIntervalSource?: 'custom' | 'global' | 'default' | null
     nextCheckAt?: string | null
     /** Set when the sweep is deliberately not acting on this source. */
     blockedReason?: string | null
+    /** The live detector finding, stamped on EVERY evaluation — including the
+     *  ones the sweep deliberately did not act on. Distinct from
+     *  ``lastReconcile*``, which records the last rebuild we actually queued:
+     *  a source can carry an open finding nobody is acting on, and the drawer
+     *  has to be able to explain that rather than show a bare verdict word. */
+    lastFindingAt?: string | null
+    lastFindingReason?: ReconcileReason | string | null
+    lastFindingEvidence?: Record<string, unknown> | null
 }
 
 /** Echo of the stored per-source overrides after a freshness-settings PATCH.
@@ -147,6 +162,11 @@ export interface FreshnessSettingsPatch {
     rebuildMinIntervalSecs?: number | null
     autoReconcileEnabled?: boolean | null
     reconcileCheckIntervalSecs?: number | null
+    probeEnabled?: boolean | null
+    probeIntervalSecs?: number | null
+    /** Operator snooze: an ISO instant to hold automation until. Explicit
+     *  null resumes immediately. */
+    pausedUntil?: string | null
 }
 
 // ── Reconciliation ──────────────────────────────────────────────────

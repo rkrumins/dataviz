@@ -12,7 +12,7 @@ import { Link } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
-    Activity, AlertTriangle, ArrowUpRight, CheckCircle2, ChevronRight, Clock, Database, Eraser, ShieldCheck,
+    Activity, AlertTriangle, ArrowUpRight, CheckCircle2, ChevronRight, Database, Eraser,
     RefreshCw, Radar, RotateCcw, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -20,6 +20,7 @@ import { usePermission } from '@/store/auth'
 import { useToast } from '@/components/ui/toast'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TimeStamp } from '@/components/ui/TimeStamp'
+import { DurationField, formatDuration } from '@/components/ui/DurationField'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { jobHistoryPath } from '../job-history/shared'
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
@@ -30,13 +31,18 @@ import {
 import { checkNowToast } from './reconcileHealth'
 import { DRIFT_SPEC, DriftStateBadge, REASON_LABEL, type DriftState } from './DriftStateBadge'
 import { OverlayIntegrityMeter } from './OverlayIntegrityMeter'
-import { EvidencePair, reconcileEvidenceRows } from './reconcileEvidence'
+import { EvidencePair, ReconcileWhy, reconcileEvidenceRows } from './reconcileEvidence'
+import {
+    CADENCE_LABEL, CHECK_PRESETS, COOLDOWN_PRESETS, DETECT_PRESETS,
+    MAX_SECS, MIN_CHECK_SECS, MIN_PROBE_SECS, hintIdFor,
+} from './automationCopy'
+import { SettingRow, StageRow } from './StageRow'
 import { useActiveJobs } from './useActiveJobs'
 import { AggStatusPill, FreshnessBadges, MasteryTag, timeUntil } from './FreshnessRow'
 import { isPlatformMastered } from './freshnessTriage'
 import { activityFromEvent, recentActivityEvents } from './lastActivity'
 import type {
-    FailureCategory, FreshnessDoc, RefreshEventSummary,
+    FailureCategory, FreshnessDoc, FreshnessSettingsPatch, RefreshEventSummary,
 } from '@/services/freshnessService'
 
 function shortFp(fp?: string | null): string {
@@ -68,13 +74,12 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
     )
 }
 
-const MAX_INTERVAL_SECS = 86400
-
 function fmtInterval(secs?: number | null): string {
     if (secs == null) return '—'
+    // Zero is a real cadence with a consequence worth spelling out, so it is
+    // the one duration this does not hand to the shared formatter.
     if (secs === 0) return 'Off (rebuild every change)'
-    if (secs % 3600 === 0) return `${secs / 3600}h`
-    return `${Math.round(secs / 60)}m`
+    return formatDuration(secs)
 }
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -83,199 +88,285 @@ const SOURCE_LABEL: Record<string, string> = {
     default: 'System default',
 }
 
+const SAVE_BTN = 'inline-flex items-center h-7 px-2.5 rounded-lg text-[11px] font-semibold '
+    + 'text-white bg-indigo-600 hover:bg-indigo-700 transition-colors '
+    + 'motion-reduce:transition-none disabled:opacity-50 outline-none '
+    + 'focus-visible:ring-2 focus-visible:ring-indigo-500/50'
+
+const QUIET_BTN = 'inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-semibold '
+    + 'text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 '
+    + 'transition-colors motion-reduce:transition-none disabled:opacity-50 outline-none '
+    + 'focus-visible:ring-2 focus-visible:ring-indigo-500/50'
+
+const SELECT_BOX = 'h-7 px-2 rounded-lg border border-glass-border bg-canvas text-[12px] text-ink '
+    + 'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:opacity-50'
+
+/** How long an operator can hold this source's rebuilds for. Hours and days,
+ *  because a snooze is measured in "until I have looked at it", never in
+ *  seconds — which is why this is a list of choices and not a DurationField. */
+const SNOOZE_CHOICES: { label: string; secs: number }[] = [
+    { label: '1 hour', secs: 3600 },
+    { label: '8 hours', secs: 8 * 3600 },
+    { label: '24 hours', secs: 24 * 3600 },
+    { label: '7 days', secs: 7 * 24 * 3600 },
+]
+
+/** The verdicts that mean the sweep found something. ``suspended`` is here
+ *  too: the breaker stopped acting on the source, but the finding that got it
+ *  there is exactly what the operator opened this drawer to read. */
+const FINDING_STATES = new Set<string>([
+    'drifting', 'overlayMissing', 'neverBuilt', 'suspended',
+])
+
 /**
- * "Rebuild cadence" — the resolved rebuild window + where it came from, with a
- * ds:manage-gated override editor (minutes; "Reset to default" clears it). The
- * value flows from the same server-side resolution the cooldown badge reads.
+ * One stage's cadence: what it resolves to, where that value came from, and —
+ * for anyone who can manage the source — a staged editor for the override.
+ *
+ * Staged rather than saved on change because ``DurationField``'s custom cell
+ * fires ``onChange`` per keystroke: typing "300" would PATCH 3, then 30, and
+ * the first two are below the server's floor. Committing the presets
+ * immediately and the box on Save would give one control two commit rules,
+ * which is worse than one Save button.
  */
-function RebuildCadenceRow({ doc }: { doc: FreshnessDoc }) {
+function CadenceEditor({
+    stage, stored, resolved, source, presets, min, max,
+    editable, pending, saveLabel, onSave,
+}: {
+    stage: keyof typeof CADENCE_LABEL
+    /** The stored per-source override; null = inherit. */
+    stored?: number | null
+    /** The effective value after override → global → default resolution. */
+    resolved?: number | null
+    source?: string | null
+    presets: number[]
+    min: number
+    max: number
+    editable: boolean
+    pending: boolean
+    /** Three Save buttons live in this drawer; each must announce which
+     *  setting it commits or a screen-reader user cannot tell them apart. */
+    saveLabel: string
+    onSave: (secs: number | null) => void
+}) {
     const { showToast } = useToast()
-    const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
-    const setSettings = useSetFreshnessSettings()
+    const [value, setValue] = useState<number | null>(stored ?? null)
+    const label = CADENCE_LABEL[stage]
 
-    const overrideMins = doc.rebuildOverrideSecs != null
-        ? String(Math.round(doc.rebuildOverrideSecs / 60))
-        : ''
-    const [mins, setMins] = useState(overrideMins)
-    const source = doc.rebuildIntervalSource ?? 'default'
-
-    // The override lives on the aggregation state row, which only exists once a
-    // source has been built — a never-aggregated source would 404 the PATCH.
-    // Detect that and show guidance instead of a control that can't succeed.
-    const neverBuilt = !doc.lastAggregatedAt
-        && (doc.aggregationStatus == null || doc.aggregationStatus === 'none')
-
-    const save = (value: number | null) => {
-        setSettings.mutate({ dsId: doc.dataSourceId, rebuildMinIntervalSecs: value }, {
-            onSuccess: () => showToast('success', value == null
-                ? 'Rebuild cadence reset to the default.'
-                : 'Rebuild cadence updated.'),
-            onError: (e) => showToast('error', e.message || 'Could not update rebuild cadence.'),
-        })
-    }
-
-    const onSave = () => {
-        const n = mins.trim() === '' ? null : Number(mins)
-        if (n != null && (!Number.isFinite(n) || n < 0 || n * 60 > MAX_INTERVAL_SECS)) {
-            showToast('error', 'Enter a whole number of minutes between 0 and 1440.')
+    const save = () => {
+        if (value != null && (!Number.isFinite(value) || value < min || value > max)) {
+            // formatDuration, not fmtInterval: this is a bound, and a floor of
+            // zero reads "0s" here rather than "Off (rebuild every change)".
+            showToast('error',
+                `Choose a time between ${formatDuration(min)} and ${formatDuration(max)}.`)
             return
         }
-        save(n == null ? null : Math.round(n * 60))
+        onSave(value)
     }
 
     return (
-        <div className="rounded-xl border border-glass-border bg-glass-base/30 p-3 space-y-2">
-            <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 text-sm font-semibold text-ink">
-                    <Clock className="w-4 h-4 text-ink-muted" /> Rebuild cadence
-                </div>
-                <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
-                    {SOURCE_LABEL[source] ?? source}
-                </span>
-            </div>
-            <p className="text-[11px] text-ink-muted">
-                Minimum time between automatic rebuilds of this source. Currently{' '}
-                <span className="font-semibold text-ink">{fmtInterval(doc.resolvedRebuildIntervalSecs)}</span>.
-            </p>
-            {canManage && neverBuilt && (
-                <p className="text-[11px] text-ink-muted pt-1">
-                    You can set a custom cadence once this source has been built for the first time.
-                </p>
-            )}
-            {canManage && !neverBuilt && (
-                <div className="flex items-center gap-2 pt-1">
-                    <input
-                        type="number" min={0} max={1440} step={1}
-                        value={mins}
-                        onChange={(e) => setMins(e.target.value)}
-                        placeholder="Use default"
-                        aria-label="Rebuild cadence override (minutes)"
-                        className="w-28 h-8 px-2 rounded-lg border border-glass-border bg-canvas text-sm text-ink"
+        <SettingRow label={label} hint={SOURCE_LABEL[source ?? 'default'] ?? source}>
+            {editable ? (
+                <span className="flex flex-wrap items-center justify-end gap-2">
+                    <DurationField
+                        label={label}
+                        value={value}
+                        onChange={setValue}
+                        presets={presets}
+                        // Honest while nothing is overridden. Once something is,
+                        // the resolved value IS the override — the doc is never
+                        // told what this source would inherit instead — so the
+                        // caption only misreads for the moment between pressing
+                        // Reset and pressing Save.
+                        defaultSecs={resolved ?? presets[0]}
+                        min={min}
+                        max={max}
                     />
-                    <span className="text-[11px] text-ink-muted">minutes</span>
                     <button
-                        onClick={onSave}
-                        disabled={setSettings.isPending}
-                        aria-label="Save rebuild cadence"
-                        className="ml-auto inline-flex items-center h-8 px-2.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                        type="button"
+                        onClick={save}
+                        disabled={pending}
+                        aria-label={saveLabel}
+                        className={SAVE_BTN}
                     >
                         Save
                     </button>
-                    {doc.rebuildOverrideSecs != null && (
-                        <button
-                            onClick={() => { setMins(''); save(null) }}
-                            disabled={setSettings.isPending}
-                            className="inline-flex items-center h-8 px-2.5 rounded-lg text-xs font-semibold text-ink-muted border border-glass-border hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors disabled:opacity-50"
-                        >
-                            Reset to default
-                        </button>
-                    )}
-                </div>
+                </span>
+            ) : (
+                <span className="text-[12px] text-ink-secondary tabular-nums">
+                    {fmtInterval(resolved)}
+                </span>
             )}
-        </div>
+        </SettingRow>
     )
 }
 
 /**
- * "Reconciliation" — is this source's rolled-up lineage still in step with
- * its data, when was that last checked, and what happened last time.
+ * ① Detect — is anything watching this source for changes made outside the
+ * app, and how often. The per-source override existed on the server with no
+ * UI anywhere, so until now the only way to quieten one noisy source was to
+ * turn detection off for the whole fleet.
  *
- * Sits next to Rebuild cadence because it is the sibling concept: that one
- * governs how often a rebuild MAY run, this one governs how often we look
- * for a reason to run one.
- *
- * Everything shown here is read off the state row — the sweep stamps it, this
- * panel never recomputes it, and the freshness read path makes no graph call.
+ * The snooze lives here, at the head of the pipeline, because it is the
+ * control an operator opens this drawer to reach in a hurry. What it actually
+ * holds is ③ Act, which the hint says in as many words.
  */
-function ReconciliationSection({ doc }: { doc: FreshnessDoc }) {
+function DetectSection({ doc }: { doc: FreshnessDoc }) {
     const { showToast } = useToast()
     const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
     const setSettings = useSetFreshnessSettings()
-    const reconcileNow = useReconcileNow()
-    const isAdmin = usePermission('system:admin')
 
-    const [mins, setMins] = useState(
-        doc.reconcileIntervalOverrideSecs != null
-            ? String(Math.round(doc.reconcileIntervalOverrideSecs / 60))
-            : '',
-    )
-    const source = doc.reconcileIntervalSource ?? 'default'
-    const state = (doc.driftState ?? undefined) as DriftState | undefined
-    const spec = state ? DRIFT_SPEC[state] : undefined
-    // A versioned graph is mastered in Postgres with FalkorDB as a rebuildable
-    // read cache, so version control maintains its rollups on every publish and
-    // this panel's controls would be inert. Explain that instead of offering
-    // switches that do nothing.
-    const isManaged = state === 'managed'
-    // A verdict of drifting/overlayMissing means the panel is reporting a
-    // problem, so the card carries the tone rather than staying neutral.
-    const tone = state === 'overlayMissing'
-        ? 'border-red-500/25 bg-red-500/[0.04]'
-        : state === 'drifting' || state === 'suspended'
-            ? 'border-amber-500/25 bg-amber-500/[0.05]'
-            : isManaged
-                ? 'border-sky-500/25 bg-sky-500/[0.04]'
-                : 'border-glass-border bg-black/[0.02] dark:bg-white/[0.02]'
+    // null means "follow the fleet setting", which this drawer cannot read —
+    // a ds:manage reader is not a platform admin. Treating inherit as on
+    // mirrors the reconciliation toggle in ③ Act, which has always done this.
+    const on = doc.probeEnabled !== false
+    const pausedFor = timeUntil(doc.pausedUntil)
 
-    const saveInterval = (value: number | null) => {
-        // Send ONLY this field: an explicit null clears an override, so a
-        // full-object PATCH would wipe the settings we did not mean to touch.
-        setSettings.mutate(
-            { dsId: doc.dataSourceId, reconcileCheckIntervalSecs: value },
-            {
-                onSuccess: () => showToast('success', value == null
-                    ? 'Check frequency reset to the default.'
-                    : 'Check frequency updated.'),
-                onError: (e) => showToast('error', e.message || 'Could not update the check frequency.'),
-            },
-        )
+    const patch = (body: FreshnessSettingsPatch, ok: string) => {
+        setSettings.mutate({ dsId: doc.dataSourceId, ...body }, {
+            onSuccess: () => showToast('success', ok),
+            onError: (e) => showToast('error', e.message || 'Could not update the setting.'),
+        })
     }
 
-    const setAuto = (enabled: boolean | null) => {
-        setSettings.mutate(
-            { dsId: doc.dataSourceId, autoReconcileEnabled: enabled },
-            {
-                onSuccess: () => showToast('success',
-                    enabled === null ? 'Now following the global setting.'
-                        : enabled ? 'Automatic reconciliation on for this source.'
-                            : 'Automatic reconciliation off for this source.'),
-                onError: (e) => showToast('error', e.message || 'Could not update the setting.'),
-            },
-        )
-    }
-
-    const onSaveInterval = () => {
-        const n = mins.trim() === '' ? null : Number(mins)
-        if (n != null && (!Number.isFinite(n) || n < 5 || n * 60 > MAX_INTERVAL_SECS)) {
-            showToast('error', 'Enter a whole number of minutes between 5 and 1440.')
-            return
-        }
-        saveInterval(n == null ? null : Math.round(n * 60))
-    }
-
-    const runNow = () => {
-        reconcileNow.mutate(
-            { dataSourceIds: [doc.dataSourceId] },
-            {
-                onSuccess: (res) => showToast('success', checkNowToast(res)),
-                onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
-            },
+    const snooze = (secs: number, label: string) => {
+        patch(
+            { pausedUntil: new Date(Date.now() + secs * 1000).toISOString() },
+            `Automation paused for ${label}.`,
         )
     }
 
     return (
-        <div className={cn('rounded-xl border p-3 space-y-2.5', tone)}>
-            <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 text-sm font-semibold text-ink">
-                    <ShieldCheck className="w-4 h-4 text-ink-muted" /> Reconciliation
-                </div>
+        <StageRow
+            stage="detect"
+            on={on}
+            stat={doc.statsAsOf
+                ? <>Counts last read <TimeStamp at={doc.statsAsOf} icon={null} colorByAge={false} /></>
+                : undefined}
+        >
+            <div className="mt-2.5 border-t border-glass-border/50 divide-y divide-glass-border/50">
+                <SettingRow
+                    label="Watch this source for changes made outside the app"
+                    htmlFor="freshness-probe"
+                    disabled={!canManage}
+                >
+                    <ToggleSwitch
+                        id="freshness-probe"
+                        size="sm"
+                        checked={on}
+                        onChange={(next) => patch(
+                            { probeEnabled: next },
+                            next ? 'Now watching this source for changes.'
+                                : 'No longer watching this source for changes.',
+                        )}
+                        disabled={!canManage || setSettings.isPending}
+                        aria-label="Watch this source for changes made outside the app"
+                    />
+                </SettingRow>
+
+                <CadenceEditor
+                    stage="detect"
+                    stored={doc.probeIntervalSecs}
+                    resolved={doc.resolvedProbeIntervalSecs}
+                    source={doc.probeIntervalSource}
+                    presets={DETECT_PRESETS}
+                    min={MIN_PROBE_SECS}
+                    max={MAX_SECS}
+                    editable={canManage}
+                    pending={setSettings.isPending}
+                    saveLabel="Save detect frequency"
+                    onSave={(secs) => patch(
+                        { probeIntervalSecs: secs },
+                        secs == null ? 'Detect frequency reset to the default.'
+                            : 'Detect frequency updated.',
+                    )}
+                />
+
+                {canManage && (pausedFor ? (
+                    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2.5">
+                        <div className="min-w-0 flex-1">
+                            <p className="text-[13px] text-ink-secondary leading-snug">
+                                Paused — automation resumes in {pausedFor}.
+                            </p>
+                            <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">
+                                {new Date(doc.pausedUntil as string).toLocaleString()}
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => patch({ pausedUntil: null }, 'Automation resumed.')}
+                            disabled={setSettings.isPending}
+                            className={cn(QUIET_BTN, 'shrink-0 ml-auto')}
+                        >
+                            <RotateCcw className="w-3.5 h-3.5" /> Resume now
+                        </button>
+                    </div>
+                ) : (
+                    <SettingRow
+                        label="Pause automation for"
+                        htmlFor="freshness-snooze"
+                        hint="Changes are still detected and checked — only rebuilds are held, so a source can be left alone without losing sight of it."
+                    >
+                        <select
+                            id="freshness-snooze"
+                            aria-describedby={hintIdFor('freshness-snooze')}
+                            disabled={setSettings.isPending}
+                            // Always empty: this picks an action, not a stored
+                            // value. What was chosen reads back as the expiry,
+                            // which replaces this row entirely.
+                            value=""
+                            onChange={(e) => {
+                                const choice = SNOOZE_CHOICES
+                                    .find(c => String(c.secs) === e.target.value)
+                                if (choice) snooze(choice.secs, choice.label)
+                            }}
+                            className={SELECT_BOX}
+                        >
+                            <option value="">Choose…</option>
+                            {SNOOZE_CHOICES.map(c => (
+                                <option key={c.secs} value={c.secs}>{c.label}</option>
+                            ))}
+                        </select>
+                    </SettingRow>
+                ))}
+            </div>
+        </StageRow>
+    )
+}
+
+/**
+ * ② Check — does this source's rolled-up lineage still match its data, when
+ * was that last judged, and what was found.
+ *
+ * Everything shown here is read off the state row: the sweep stamps it, this
+ * section never recomputes it, and the freshness read path makes no graph call.
+ */
+function CheckSection({ doc }: { doc: FreshnessDoc }) {
+    const { showToast } = useToast()
+    const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
+    const isAdmin = usePermission('system:admin')
+    const setSettings = useSetFreshnessSettings()
+    const reconcileNow = useReconcileNow()
+
+    const state = (doc.driftState ?? undefined) as DriftState | undefined
+    const spec = state ? DRIFT_SPEC[state] : undefined
+    // A versioned graph is mastered in Postgres with FalkorDB as a rebuildable
+    // read cache, so version control maintains its rollups on every publish and
+    // this section's controls would be inert. Explain that instead of offering
+    // switches that do nothing.
+    const isManaged = state === 'managed'
+    // ``blocked`` is the one verdict that means this stage is genuinely not
+    // running for this source — there is no ontology to judge against.
+    const on = state !== 'blocked'
+
+    return (
+        <StageRow stage="check" on={on} muted={doc.probeEnabled === false}>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
                 <DriftStateBadge state={doc.driftState} />
+                {spec && <p className="text-[11px] text-ink-muted leading-relaxed">{spec.title}</p>}
             </div>
 
-            {spec && <p className="text-[11px] text-ink-muted leading-relaxed">{spec.title}</p>}
-
             {isManaged ? (
-                <div className="rounded-lg border border-sky-500/20 bg-sky-500/[0.05] p-2.5 space-y-1.5">
+                <div className="mt-2 rounded-lg border border-sky-500/20 bg-sky-500/[0.05] p-2.5 space-y-1.5">
                     <p className="text-[11px] text-ink-secondary leading-relaxed">
                         This graph is mastered here and stored in Postgres. FalkorDB
                         holds a rebuildable copy of it, so counting rollups in the
@@ -303,11 +394,27 @@ function ReconciliationSection({ doc }: { doc: FreshnessDoc }) {
                     expected={doc.expectedAggregatedEdges}
                     statsAsOf={doc.statsAsOf}
                     unobservable={doc.driftState === 'unobservable'}
-                    className="pt-0.5"
+                    className="pt-1.5"
                 />
             )}
 
-            <div className="grid grid-cols-2 gap-x-4 gap-y-2 pt-1">
+            {/* Why it's drifting. The sweep has stamped this on every
+                evaluation — including the ones it deliberately did not act on
+                — and until now nothing displayed it, so a paused or opted-out
+                source showed a verdict word and no reason for it. */}
+            {state && FINDING_STATES.has(state) && doc.lastFindingReason && (
+                <ReconcileWhy
+                    mode="open"
+                    reason={doc.lastFindingReason}
+                    evidence={doc.lastFindingEvidence}
+                    foundAt={doc.lastFindingAt}
+                    // No ``dataSourceId``: its link opens this source in
+                    // Freshness, and this IS Freshness.
+                    className="mt-2.5"
+                />
+            )}
+
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2 pt-2.5">
                 <Fact label="Last checked">
                     {doc.lastCheckedAt
                         ? <TimeStamp at={doc.lastCheckedAt} icon={null} colorByAge={false} />
@@ -339,68 +446,163 @@ function ReconciliationSection({ doc }: { doc: FreshnessDoc }) {
                 </Fact>
             </div>
 
-            {/* Hidden, not disabled, for a versioned source: every one of these
-                controls governs a sweep that will never act on it. */}
-            {canManage && !isManaged && (
-                <div className="pt-1.5 border-t border-glass-border/60 space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                        <div className="min-w-0">
-                            <p className="text-xs font-semibold text-ink">Automatic reconciliation</p>
-                            <p className="text-[10px] text-ink-muted">
-                                {doc.autoReconcile === false
-                                    ? 'Off — drift is still detected and shown here, but nothing is rebuilt automatically.'
-                                    : 'On — a rebuild is queued when the rollups fall out of step.'}
-                            </p>
-                        </div>
-                        <ToggleSwitch
-                            checked={doc.autoReconcile !== false}
-                            onChange={(next) => setAuto(next)}
-                            disabled={setSettings.isPending}
-                            aria-label="Automatic reconciliation for this source"
-                        />
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                        <span className="text-[11px] text-ink-muted shrink-0">Check every</span>
-                        <input
-                            type="number" min={5} max={1440} step={1}
-                            value={mins}
-                            onChange={(e) => setMins(e.target.value)}
-                            placeholder={`Default (${Math.round((doc.resolvedReconcileIntervalSecs ?? 3600) / 60)})`}
-                            aria-label="Drift-check frequency override (minutes)"
-                            className="w-32 h-8 px-2 rounded-lg border border-glass-border bg-canvas text-sm text-ink"
-                        />
-                        <span className="text-[11px] text-ink-muted">min</span>
-                        <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
-                            {SOURCE_LABEL[source] ?? source}
-                        </span>
-                        <button
-                            onClick={onSaveInterval}
-                            disabled={setSettings.isPending}
-                            // Distinct from the rebuild-cadence Save above it:
-                            // two controls both announced as "Save" in one
-                            // panel give a screen-reader user no way to tell
-                            // which is which.
-                            aria-label="Save check frequency"
-                            className="ml-auto inline-flex items-center h-8 px-2.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50"
-                        >
-                            Save
-                        </button>
-                    </div>
+            {/* Hidden, not disabled, for a versioned source: the cadence
+                governs a sweep that will never act on it. */}
+            {!isManaged && (
+                <div className="mt-2.5 border-t border-glass-border/50">
+                    <CadenceEditor
+                        stage="check"
+                        stored={doc.reconcileIntervalOverrideSecs}
+                        resolved={doc.resolvedReconcileIntervalSecs}
+                        source={doc.reconcileIntervalSource}
+                        presets={CHECK_PRESETS}
+                        min={MIN_CHECK_SECS}
+                        max={MAX_SECS}
+                        editable={canManage}
+                        pending={setSettings.isPending}
+                        saveLabel="Save check frequency"
+                        onSave={(secs) => setSettings.mutate(
+                            // Send ONLY this field: an explicit null clears an
+                            // override, so a full-object PATCH would wipe the
+                            // settings we did not mean to touch.
+                            { dsId: doc.dataSourceId, reconcileCheckIntervalSecs: secs },
+                            {
+                                onSuccess: () => showToast('success', secs == null
+                                    ? 'Check frequency reset to the default.'
+                                    : 'Check frequency updated.'),
+                                onError: (e) => showToast('error',
+                                    e.message || 'Could not update the check frequency.'),
+                            },
+                        )}
+                    />
 
                     {isAdmin && (
                         <button
-                            onClick={runNow}
+                            type="button"
+                            onClick={() => reconcileNow.mutate(
+                                { dataSourceIds: [doc.dataSourceId] },
+                                {
+                                    onSuccess: (res) => showToast('success', checkNowToast(res)),
+                                    onError: (e) => showToast('error',
+                                        e.message || 'Could not run reconciliation.'),
+                                },
+                            )}
                             disabled={reconcileNow.isPending}
-                            className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-xs font-semibold text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 transition-colors disabled:opacity-50"
+                            className={cn(QUIET_BTN, 'my-2')}
                         >
                             <RefreshCw className={cn('w-3.5 h-3.5', reconcileNow.isPending && 'animate-spin')} />
-                            {reconcileNow.isPending ? 'Reconciling…' : 'Reconcile now'}
+                            {reconcileNow.isPending ? 'Checking…' : 'Check now'}
                         </button>
                     )}
                 </div>
             )}
-        </div>
+        </StageRow>
+    )
+}
+
+/**
+ * ③ Act — may a finding rebuild this source, and how often at most.
+ *
+ * Both settings were split across two panels that never named each other: the
+ * "Automatic reconciliation" switch sat with the check cadence, and the
+ * rebuild window sat in a box of its own above it. They are one decision.
+ */
+function ActSection({ doc }: { doc: FreshnessDoc }) {
+    const { showToast } = useToast()
+    const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
+    const setSettings = useSetFreshnessSettings()
+
+    const isManaged = doc.driftState === 'managed'
+    const auto = doc.autoReconcile !== false
+    // The rebuild-interval override lives on the aggregation state row, which
+    // only exists once a source has been built — a never-aggregated source
+    // would 404 the PATCH. (① Detect and the snooze upsert instead, so they
+    // stay editable here.) Detect that and say so, rather than showing a
+    // control that cannot succeed.
+    const neverBuilt = !doc.lastAggregatedAt
+        && (doc.aggregationStatus == null || doc.aggregationStatus === 'none')
+    const pausedFor = timeUntil(doc.pausedUntil)
+
+    return (
+        <StageRow
+            stage="act"
+            on={!isManaged && auto}
+            // Two ways this stage delivers less than its settings claim: the
+            // stage before it is off, or a person is holding it. Both dim what
+            // it delivers and neither touches its controls.
+            muted={doc.probeEnabled === false || pausedFor != null}
+        >
+            {pausedFor && (
+                <p className="mt-2 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                    Paused for another {pausedFor} — nothing will be rebuilt until then.
+                </p>
+            )}
+            {isManaged ? (
+                <p className="mt-2 text-[11px] text-ink-secondary leading-relaxed">
+                    Version control rebuilds this source's rolled-up lineage on every
+                    publish, so automation never acts on it.
+                </p>
+            ) : (
+                <div className="mt-2.5 border-t border-glass-border/50 divide-y divide-glass-border/50">
+                    <SettingRow
+                        label="Rebuild this source automatically when a check finds drift"
+                        htmlFor="freshness-auto-reconcile"
+                        disabled={!canManage}
+                        hint={auto
+                            ? undefined
+                            : 'Off — drift is still detected and shown here, but nothing is rebuilt automatically.'}
+                    >
+                        <ToggleSwitch
+                            id="freshness-auto-reconcile"
+                            size="sm"
+                            checked={auto}
+                            onChange={(next) => setSettings.mutate(
+                                { dsId: doc.dataSourceId, autoReconcileEnabled: next },
+                                {
+                                    onSuccess: () => showToast('success', next
+                                        ? 'Automatic reconciliation on for this source.'
+                                        : 'Automatic reconciliation off for this source.'),
+                                    onError: (e) => showToast('error',
+                                        e.message || 'Could not update the setting.'),
+                                },
+                            )}
+                            disabled={!canManage || setSettings.isPending}
+                            aria-label="Rebuild this source automatically when a check finds drift"
+                        />
+                    </SettingRow>
+
+                    {canManage && neverBuilt ? (
+                        <p className="py-2.5 text-[11px] text-ink-muted">
+                            You can set a custom cadence once this source has been built
+                            for the first time.
+                        </p>
+                    ) : (
+                        <CadenceEditor
+                            stage="act"
+                            stored={doc.rebuildOverrideSecs}
+                            resolved={doc.resolvedRebuildIntervalSecs}
+                            source={doc.rebuildIntervalSource}
+                            presets={COOLDOWN_PRESETS}
+                            min={0}
+                            max={MAX_SECS}
+                            editable={canManage}
+                            pending={setSettings.isPending}
+                            saveLabel="Save rebuild cadence"
+                            onSave={(secs) => setSettings.mutate(
+                                { dsId: doc.dataSourceId, rebuildMinIntervalSecs: secs },
+                                {
+                                    onSuccess: () => showToast('success', secs == null
+                                        ? 'Rebuild cadence reset to the default.'
+                                        : 'Rebuild cadence updated.'),
+                                    onError: (e) => showToast('error',
+                                        e.message || 'Could not update rebuild cadence.'),
+                                },
+                            )}
+                        />
+                    )}
+                </div>
+            )}
+        </StageRow>
     )
 }
 
@@ -843,13 +1045,20 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                     {/* Cache contents (live footprint + last-known-good) */}
                                     <CacheContents doc={doc} />
 
-                                    {/* Rebuild cadence (resolved + per-source override) */}
-                                    <RebuildCadenceRow doc={doc} />
-
-                                    {/* Reconciliation — the sibling of rebuild
-                                        cadence: how often we look for a reason
-                                        to rebuild, and what we last found. */}
-                                    <ReconciliationSection doc={doc} />
+                                    {/* Automation for this one source, in the
+                                        order it runs — the same three stages,
+                                        words and ladders as the fleet-wide
+                                        Automation modal, narrowed to here. */}
+                                    <div className="space-y-6">
+                                        <p className="text-[11px] text-ink-muted leading-snug">
+                                            Automation runs in three stages. Each one feeds the
+                                            next, so a setting here changes what the stages after
+                                            it can see.
+                                        </p>
+                                        <DetectSection doc={doc} />
+                                        <CheckSection doc={doc} />
+                                        <ActSection doc={doc} />
+                                    </div>
 
                                     {/* Live probe */}
                                     <div className="rounded-xl border border-glass-border bg-glass-base/30 p-3">
