@@ -50,6 +50,7 @@ import {
   buildFocusLayout,
   revealKey,
   viewStateForTransition,
+  initialLensViewState,
   type LensDirectionFilter,
   type LensFetchStatus,
   type LensRoster,
@@ -900,12 +901,57 @@ export function LineageLens({
    */
   const peekOpen = selection !== null
     && layout.cards.some(c => c.nodeId === selection && c.frameId !== null)
-  const dismissOne = useCallback(() => {
-    if (peekOpen) { setSelection(null); return }
-    if (isolatedId !== null) { setIsolated(null); return }
-    if (selection !== null) { setSelection(null); return }
+
+  /**
+   * A CLICK ON THE BOARD'S BACKGROUND NEVER CLOSES THE ROOM.
+   *
+   * It peels one layer and stops. This used to fall through to
+   * `onClose()` when nothing was open, which meant that clicking any
+   * empty part of the lens — the board around the cards, the space
+   * inside a frame — threw the whole walk away. Reported live as "if I
+   * click anywhere within a window of Focus Lens it has a tendency to
+   * close randomly"; the empty board is the largest target in the room,
+   * so it was not random at all.
+   *
+   * Returns whether it actually peeled something, so the ONE caller that
+   * may go further (Escape) can tell "I closed a panel" from "there was
+   * nothing left to close".
+   */
+  const dismissLayer = useCallback((): boolean => {
+    if (peekOpen) { setSelection(null); return true }
+    if (isolatedId !== null) { setIsolated(null); return true }
+    if (selection !== null) { setSelection(null); return true }
+    return false
+  }, [peekOpen, isolatedId, selection, setIsolated, setSelection])
+
+  /**
+   * HAS THE READER BUILT ANYTHING WORTH LOSING? Compared against the
+   * state this focal OPENED with (`viewStateForTransition`'s own fresh
+   * value — one reveal each way, the focus's own ancestors expanded),
+   * plus the history: a second entry means they re-anchored at least
+   * once. Anything more than that is a walk somebody spent clicks on.
+   */
+  const openingView = useMemo(() => initialLensViewState(sg), [sg])
+  const hasWalked = entries.length > 1
+    || view.revealed.size > openingView.revealed.size
+    || view.expandedContainment.size > openingView.expandedContainment.size
+    || view.collapsedContainment.size > 0
+    || view.frameShowAll.size > 0
+    || view.condensedOpen.size > 0
+
+  /** What the reader would be throwing away, in their own terms — a
+   *  count of cards is the honest measure of "how far did I get". */
+  const walkSummary = entries.length > 1
+    ? `You have walked ${entries.length} entities and drawn ${layout.cards.length.toLocaleString()} cards.`
+    : `You have drawn ${layout.cards.length.toLocaleString()} cards on this board.`
+
+  /** Leaving the room — from the backdrop, the × or the last Escape.
+   *  Asks first once there is a walk to lose (user, 2026-08-17). */
+  const [confirmClose, setConfirmClose] = useState(false)
+  const requestClose = useCallback(() => {
+    if (hasWalked) { setConfirmClose(true); return }
     onClose()
-  }, [peekOpen, isolatedId, selection, setIsolated, setSelection, onClose])
+  }, [hasWalked, onClose])
 
   useEffect(() => {
     if (!nodeId) return
@@ -913,7 +959,11 @@ export function LineageLens({
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        dismissOne()
+        // The confirmation is itself the innermost layer while it is up:
+        // Escape backs out of the QUESTION, never answers it.
+        if (confirmClose) { setConfirmClose(false); return }
+        if (dismissLayer()) return
+        requestClose()
         return
       }
       // Keyboard walking: ← back one hop, → forward one hop — browser
@@ -950,7 +1000,7 @@ export function LineageLens({
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [nodeId, canBack, canForward, onBack, onForward, dismissOne])
+  }, [nodeId, canBack, canForward, onBack, onForward, dismissLayer, requestClose, confirmClose])
 
   // ── Wording ────────────────────────────────────────────────────────
 
@@ -1197,10 +1247,11 @@ export function LineageLens({
         transition={{ duration: 0.15 }}
         className="fixed inset-0 z-[9990] flex items-center justify-center p-6"
       >
-        {/* Backdrop */}
+        {/* Backdrop — the ONE click outside the room, and the one that
+            asks before throwing a walk away. */}
         <div
           className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-          onClick={onClose}
+          onClick={requestClose}
         />
 
         <motion.div
@@ -1210,12 +1261,16 @@ export function LineageLens({
           transition={{ duration: 0.18, ease: 'easeOut' }}
           className="relative flex flex-col rounded-2xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-2xl shadow-black/40 overflow-hidden transition-[width,height,max-height] duration-300"
           style={
-            // Graph exploration is a "focus room" — near-fullscreen with
-            // a RESOLVED height (React Flow needs one). The list keeps
+            // Graph exploration is a "focus room" — as much of the
+            // window as it can take while still reading as a room over
+            // the page, with a RESOLVED height (React Flow needs one).
+            // The pixel caps this used to carry (1800×1100) were what
+            // made it look small on a large display: the board is where
+            // a big graph goes, so it gets the screen. The list keeps
             // its adaptive height so small neighborhoods don't get a
             // cavernous empty grid.
             lensViewMode === 'graph'
-              ? { width: 'min(1800px, 96vw)', height: 'min(1100px, 94vh)' }
+              ? { width: '96vw', height: '94vh' }
               : { width: 'min(1000px, 92vw)', maxHeight: 'min(72vh, 780px)', minHeight: 380 }
           }
           role="dialog"
@@ -1519,7 +1574,7 @@ export function LineageLens({
               </div>
               <button
                 type="button"
-                onClick={onClose}
+                onClick={requestClose}
                 aria-label="Close"
                 className="w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
               >
@@ -1771,7 +1826,7 @@ export function LineageLens({
                 edgeTypeInfo={edgeTypeInfo}
                 onSelect={setSelection}
                 onIsolate={setIsolated}
-                onDismiss={dismissOne}
+                onDismiss={dismissLayer}
                 onFocus={onRecenter}
                 onToggleFrame={toggleContents}
                 onFrameScroll={setFrameOffset}
@@ -2143,6 +2198,44 @@ export function LineageLens({
               )}
             </div>
           </div>
+
+          {/* LEAVING THE ROOM. A walk is work — hops fetched one click at
+              a time, containers opened, a path followed — and it lives
+              only while the lens is open. So the way OUT asks, once
+              there is something to lose. (The board's own background
+              never gets here at all: it peels a layer and stops.) */}
+          {confirmClose && (
+            <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
+              <div
+                role="alertdialog"
+                aria-modal="true"
+                aria-label="Leave this walk?"
+                className="w-[380px] rounded-xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-2xl shadow-black/40 p-4"
+              >
+                <p className="text-[13px] font-semibold text-ink">Leave this walk?</p>
+                <p className="mt-1 text-[11.5px] text-ink-muted leading-relaxed">
+                  {walkSummary} Closing the lens starts over from {focalLabel}.
+                </p>
+                <div className="mt-3.5 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    autoFocus
+                    onClick={() => setConfirmClose(false)}
+                    className="px-3 py-1.5 rounded-lg text-[11.5px] font-semibold text-ink bg-black/[0.05] dark:bg-white/[0.08] hover:bg-black/[0.09] dark:hover:bg-white/[0.13] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                  >
+                    Keep exploring
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setConfirmClose(false); onClose() }}
+                    className="px-3 py-1.5 rounded-lg text-[11.5px] font-semibold text-white bg-rose-600 hover:bg-rose-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/40"
+                  >
+                    Close the lens
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </motion.div>
       </motion.div>
     </AnimatePresence>,

@@ -2404,8 +2404,16 @@ describe('browsing what is inside — the peek and the keyboard', () => {
     expect(within(panel as HTMLElement).getByText('schemaField')).toBeTruthy()
     expect(within(panel as HTMLElement).getByText(/in raw_orders/)).toBeTruthy()
     expect(within(panel as HTMLElement).getByText(/Natural key from the source system/)).toBeTruthy()
-    // Lineage, counted off the walk model rather than measured again.
-    expect(within(panel as HTMLElement).getByText(/1 flow in this walk/)).toBeTruthy()
+    // WHAT IT IS CONNECTED TO — what the wires on this card stand for,
+    // PLUS whatever the data source says is still unfetched. Both halves
+    // were reported wrong: a table whose columns carry its lineage read
+    // "0 in · 0 out" beside its own wires, and a column with unfetched
+    // upstream read "0 in" until the reader clicked to go and get it
+    // ("we should really know about it upfront").
+    const counts = within(panel as HTMLElement)
+    expect(counts.getByTitle(/0 on this board, 9 not fetched yet/)).toBeTruthy()
+    expect(counts.getByTitle('1 on this board')).toBeTruthy()
+    expect(counts.getByText(/1 of them drawn so far/)).toBeTruthy()
     expect(within(panel as HTMLElement).getByText(/9 more upstream connections not fetched yet/)).toBeTruthy()
     expect(within(panel as HTMLElement).getByText(/Last synced 3h ago/)).toBeTruthy()
   })
@@ -2484,6 +2492,67 @@ describe('browsing what is inside — the peek and the keyboard', () => {
     // With nothing left to dismiss, Escape means what it always meant.
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(onClose).toHaveBeenCalled()
+  })
+
+  // ── LEAVING THE ROOM (user, 2026-08-17) ──────────────────────────
+  //
+  // "if I click anywhere within a window of Focus Lens it has a tendency
+  // to close randomly" — the board's own background fell through the
+  // dismiss ladder to `onClose()`, and the empty board is the largest
+  // target in the room. It now peels a layer and stops, and the ways
+  // OUT ask first once there is a walk to lose.
+
+  it('a click on the board background NEVER closes the lens — it peels a layer and stops', () => {
+    const onClose = vi.fn()
+    renderLens(['F'], table(), { onClose })
+    const pane = () => document.querySelector('.react-flow__pane')!
+    fireEvent.click(row('order_id'))
+    expect(peek()).toBeTruthy()
+
+    fireEvent.click(pane())          // peels the peek
+    expect(peek()).toBeNull()
+    fireEvent.click(pane())          // peels the isolation
+    fireEvent.click(pane())          // ...and now there is nothing left
+    fireEvent.click(pane())
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('a fresh lens with nothing walked closes straight away — no question worth asking', () => {
+    const onClose = vi.fn()
+    renderLens(['F'], table(), { onClose })
+    fireEvent.click(document.querySelector('.react-flow__pane')!)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalled()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+  })
+
+  it('once a walk exists the backdrop ASKS, and only the answer closes it', () => {
+    const onClose = vi.fn()
+    renderLens(['F', 'B'], table(), { onClose })   // two history entries = walked
+    fireEvent.click(document.querySelector('.absolute.inset-0.bg-black\\/50')!)
+    const ask = screen.getByRole('alertdialog')
+    expect(ask).toBeTruthy()
+    expect(onClose).not.toHaveBeenCalled()
+
+    // "Keep exploring" puts the reader back where they were.
+    fireEvent.click(within(ask).getByText('Keep exploring'))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(onClose).not.toHaveBeenCalled()
+
+    // ...and the other answer is the one that leaves.
+    fireEvent.click(document.querySelector('.absolute.inset-0.bg-black\\/50')!)
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByText('Close the lens'))
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('Escape backs out of the QUESTION rather than answering it', () => {
+    const onClose = vi.fn()
+    renderLens(['F', 'B'], table(), { onClose })
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(onClose).not.toHaveBeenCalled()
   })
 
   it('the row list is one tab stop that owns its rows and names the cursor', () => {

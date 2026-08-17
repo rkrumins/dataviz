@@ -71,6 +71,31 @@ export const FRAME_WINDOW = 8
 export const FRAME_WINDOW_ALL = 10
 
 export const FRAME_HEADER_H = 46
+/**
+ * How many characters of a container's name fit on ONE line of its
+ * header, once the chevron, the type icon and the row of controls have
+ * taken their share of `FRAME_CONTENT_W`.
+ *
+ * A name longer than this gets a SECOND LINE rather than an ellipsis
+ * (user, 2026-08-17): a warehouse of `int_clean_orders_t2`,
+ * `int_clean_gl_postings_t2` and `int_clean_sales_items_t2` truncated to
+ * `int_cle… orders_t2`, `int_… _postings_t2` and `int_… les_items_t2` —
+ * three names that differ exactly where the ellipsis is, so the reader
+ * had to click each one to find out which was which. An estimate rather
+ * than a measurement on purpose: the geometry is computed before the DOM
+ * exists, and one line too many costs 13px where one line too few costs
+ * the name.
+ */
+export const NAME_ONE_LINE_CHARS = 30
+/** ...and how much less it gets when the "in CONTAINER" chip is sharing
+ *  the line with it, which is the case the report came from. */
+export const NAME_ONE_LINE_CHARS_WITH_CHIP = 18
+/** What a second line of the name costs the header. */
+export const NAME_LINE_H = 13
+
+/** Does this container's name need a second line of its header? */
+export const nameLinesFor = (label: string, hasOwnerChip: boolean): 1 | 2 =>
+  label.length > (hasOwnerChip ? NAME_ONE_LINE_CHARS_WITH_CHIP : NAME_ONE_LINE_CHARS) ? 2 : 1
 export const FRAME_PAD = 10
 /** The strip along the bottom of a SCROLLABLE list: where it says which
  *  rows are on screen and offers the click that moves the window.
@@ -237,7 +262,9 @@ export const holdsRows = (card: FocusCard): boolean =>
  *  where it lives, and how far the walk has reached — so it carries the
  *  taller one. */
 export const headerHeight = (card: FocusCard): number =>
-  card.kind === 'focal' ? FOCAL_H : FRAME_HEADER_H
+  card.kind === 'focal'
+    ? FOCAL_H
+    : FRAME_HEADER_H + (card.nameLines === 2 ? NAME_LINE_H : 0)
 
 /** One row a frame holds, in order — enough for the view to run a
  *  type-ahead and move a keyboard cursor over rows the window has
@@ -376,17 +403,38 @@ export interface FocusCard {
   parentLabel: string | null
   /** Raw hops this card's subtree carries to the rest of the picture. */
   count: number
-  /** Hops the walk model holds AT THIS ENTITY, per side — the sentence a
-   *  row states in words when you point at it ("17 flows · 12 in / 5
-   *  out"). Straight off the model's own degree, so it counts the same
-   *  hops the wires do; 0/0 for a row the walk never reached (a roster
-   *  extra), which is exactly the "no lineage" case. */
+  /** WHAT THIS CARD IS CONNECTED TO, per side — the sentence a row
+   *  states in words when you point at it ("17 flows · 12 in / 5 out").
+   *
+   *  Counts what the card STANDS FOR (hops crossing its own subtree —
+   *  the same rule the wires into and out of it obey) PLUS what the data
+   *  source has said is still out there but unfetched. Both halves
+   *  matter and both were wrong before: a TABLE whose columns carry its
+   *  lineage read "0 in · 0 out" beside the wires plainly attached to it
+   *  (it was the node's own raw degree, which for a table is genuinely
+   *  zero), and a column with one unfetched upstream read "0 in" until
+   *  the reader clicked to fetch it — "we should really know about it
+   *  upfront". `drawnIn`/`drawnOut` split out how much is already
+   *  on-screen; `flowsInExact` says whether this is a total or a floor.
+   *
+   *  0/0 for a row the walk never reached (a roster extra), which is
+   *  exactly the "no lineage" case. */
   flowsIn: number
   flowsOut: number
   /** This row's frame holds more than one kind of thing, so the row says
    *  which it is. In a frame of eight columns the chip would be eight
    *  identical labels; in a frame of columns AND views it is the answer. */
   showType: boolean
+  /** How many of `flowsIn`/`flowsOut` are actually ON THE BOARD — the
+   *  hops crossing this card's own subtree boundary in that direction.
+   *  The rest is what the data source says is still out there. */
+  drawnIn: number
+  drawnOut: number
+  /** Is the number above a TOTAL or a FLOOR? False when the data source
+   *  reported a frontier it could not count, so the UI writes "3+"
+   *  rather than claiming three. */
+  flowsInExact: boolean
+  flowsOutExact: boolean
   /** The one relationship type this card's hops share, '' when they
    *  differ or it carries none. */
   edgeTypeNorm: string
@@ -398,6 +446,10 @@ export interface FocusCard {
   depth: number
   /** Frame cards only — opened, and nothing inside connects to the focal. */
   frameEmpty: boolean
+  /** Frame cards only — does this container's name need two lines?
+   *  See `NAME_ONE_LINE_CHARS`: a long name WRAPS rather than being
+   *  ellipsed in the middle, and the header grows to hold it. */
+  nameLines: 1 | 2
   /** Frame cards only — how many vertical lanes its left gutter has to
    *  reserve for the lineage that stays INSIDE it. 0 for every frame
    *  whose contents don't feed each other, which costs it nothing. */

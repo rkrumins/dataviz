@@ -65,6 +65,7 @@ import {
     DIVIDER_ROW_H,
     FOCAL_H,
     FRAME_PAD,
+    nameLinesFor,
     FRAME_WINDOW,
     FRAME_WINDOW_ALL,
     NO_FRAME_ROWS,
@@ -1063,6 +1064,37 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         weightCache.set(urn, n)
         return n
     }
+    /**
+     * `weightOf` split by direction — the hops crossing this card's own
+     * subtree boundary, counted as arriving or leaving.
+     *
+     * THE SAME RULE THE WIRES OBEY, which is the whole point: a card's
+     * stated connection count and the lines attached to it are two
+     * renderings of one fact, and reading it off the entity's OWN raw
+     * degree instead is what put "0 in · 0 out" on a table with wires on
+     * both sides (its columns carry the lineage; the table itself has
+     * none of its own).
+     */
+    const crossCache = new Map<string, { in: number; out: number }>()
+    const crossingOf = (urn: string): { in: number; out: number } => {
+        const hit = crossCache.get(urn)
+        if (hit) return hit
+        const sub = subtreeOf(urn)
+        let arrives = 0
+        let leaves = 0
+        for (const hop of sg.lineageEdges) {
+            if (!population.has(hop.sourceUrn) || !population.has(hop.targetUrn)) continue
+            const from = sub.has(hop.sourceUrn)
+            const to = sub.has(hop.targetUrn)
+            if (from === to) continue
+            if (to) arrives += 1
+            else leaves += 1
+        }
+        const out = { in: arrives, out: leaves }
+        crossCache.set(urn, out)
+        return out
+    }
+
     /** A card already on the board keeps the slot it was first drawn in;
      *  anything else ranks by weight, behind all of them. */
     const UNDRAWN = Number.MAX_SAFE_INTEGER
@@ -1247,10 +1279,11 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         x: 0, y: 0, w: CARD_W, h: CARD_H,
         description: null, freshness: null,
         parentId: null, parentLabel: null,
-        count: 1, flowsIn: 0, flowsOut: 0, showType: false, edgeTypeNorm: '',
+        count: 1, flowsIn: 0, flowsOut: 0, drawnIn: 0, drawnOut: 0,
+        flowsInExact: true, flowsOutExact: true, showType: false, edgeTypeNorm: '',
         frameId: null, depth: 0,
         ancestry: EMPTY_STRINGS, ancestryIds: EMPTY_STRINGS,
-        frameEmpty: false,
+        frameEmpty: false, nameLines: 1,
         gutterLanes: 0,
         connected: true, frameShowingAll: false, frameConnectedCount: 0,
         frameLoaded: 0, frameTotal: -1, frameHasMore: false,
@@ -1514,13 +1547,24 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             freshness: (dataOf(urn).lastSyncedAt as string | undefined) ?? null,
             type: typeFor(urn),
             frameId: hostFrameId,
+            nameLines: nameLinesFor(label, ancestry.length > 0 || parent != null),
             parentId: parent,
             parentLabel: parent ? labelFor(parent) : null,
             ancestry: ancestry.map(labelFor),
             ancestryIds: ancestry,
             count: Math.max(1, weightOf(urn)),
-            flowsIn: nodeOf(urn)?.degreeUp ?? 0,
-            flowsOut: nodeOf(urn)?.degreeDown ?? 0,
+            // What this card is connected to: what is drawn, plus what
+            // the data source says is still out there. The pill for that
+            // side already IS the remainder (a reveal's own not-yet-shown
+            // cohort, or an extend/page's unfetched frontier), so the two
+            // numbers cannot disagree — and a countless frontier makes it
+            // a floor rather than a total.
+            drawnIn: crossingOf(urn).in,
+            drawnOut: crossingOf(urn).out,
+            flowsIn: crossingOf(urn).in + (pillUp?.count ?? 0),
+            flowsOut: crossingOf(urn).out + (pillDown?.count ?? 0),
+            flowsInExact: pillUp == null || pillUp.count != null,
+            flowsOutExact: pillDown == null || pillDown.count != null,
             canOpenChildren: (nodeOf(urn)?.children.length ?? 0) > 0,
             childrenOpen: contentsOpen,
             expandKey: urn,

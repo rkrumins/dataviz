@@ -1242,7 +1242,38 @@ const walkDenseContainer = (): WalkFixture => {
   }
 }
 
+/**
+ * LONG NAMES (user, 2026-08-17): an intermediate layer whose tables all
+ * share the `int_clean_…_t2` prefix and differ only in the middle —
+ * exactly where a middle ellipsis lands. Truncated, the reader had to
+ * click each frame to find out which was which; the header now wraps.
+ */
+const walkLongNames = (): WalkFixture => ({
+  title: 'Names that differ where the ellipsis was',
+  model: walkModel('RPT', {
+    nodes: [
+      wnode('RPT', 'dataset', 'exec_summary'),
+      wnode('t_post', 'dataset', 'int_clean_gl_postings_t2', { childCount: 13 }),
+      wnode('t_items', 'dataset', 'int_clean_sales_items_t2', { childCount: 11 }),
+      wnode('t_events', 'dataset', 'int_clean_product_events_t2', { childCount: 11 }),
+      wnode('c_post', 'schemaField', 'net_amount'),
+      wnode('c_items', 'schemaField', 'net_value_usd'),
+      wnode('c_events', 'schemaField', 'device_type'),
+    ],
+    lineageEdges: [hop('c_post', 'RPT'), hop('c_items', 'RPT'), hop('c_events', 'RPT')],
+    containmentEdges: [
+      holds('t_post', 'c_post'), holds('t_items', 'c_items'), holds('t_events', 'c_events'),
+    ],
+    upstreamUrns: new Set(['c_post', 'c_items', 'c_events']),
+  }),
+  script: base => scripted(base, {
+    reveal: [['in:RPT', 1]],
+    expand: ['t_post', 't_items', 't_events'],
+  }),
+})
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
+  walkLongNames: walkLongNames(),
   walkCollaterals: walkCollaterals(),
   walkIsolatedCone: walkIsolatedCone(),
   walkDiamond: walkDiamond(),

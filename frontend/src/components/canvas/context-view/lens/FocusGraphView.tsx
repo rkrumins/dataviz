@@ -1439,8 +1439,13 @@ function coarseFlows(edges: readonly FocusEdge[], cardId: string, dir: 'in' | 'o
 function spotlightSide(card: FocusCard, dir: 'in' | 'out', edges: readonly FocusEdge[]): { pill: FocusPill | null; text: string } {
   const pill = dir === 'in' ? card.pillUp : card.pillDown
   const dirWord = dir === 'in' ? 'upstream' : 'downstream'
+  // KNOWN and DRAWN are now two fields rather than one field and a
+  // subtraction: the card states what it is connected to (drawn plus
+  // whatever the data source says is still out there) and how much of
+  // that is on the board, so this chip reads both instead of inferring
+  // one from the other and the pill.
   const known0 = dir === 'in' ? card.flowsIn : card.flowsOut
-  const drawn = Math.max(0, pill?.kind === 'reveal' ? known0 - (pill.count ?? 0) : known0)
+  const drawn = dir === 'in' ? card.drawnIn : card.drawnOut
   const coarse = coarseFlows(edges, card.id, dir)
   const seamClause = coarse > 0 ? ` (${coarse.toLocaleString()} at table grain)` : ''
   if (!pill) {
@@ -1926,21 +1931,39 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
         <div className="min-w-0 flex-1">
           {/* Name, then where it lives — the levels above it are text,
               never boxes, so the chip is how they are stated at all. */}
-          <div className="flex items-baseline gap-1.5 min-w-0">
-            {/* The NAME is the identity and takes what it needs first —
-                sharing the shrink evenly turned `clean_charges` into
-                `…n_charges`, which names nothing. The chip lives in
-                what is left, and truncates there. With no chip beside
-                it the name keeps the whole line: capping it anyway
-                clipped `int_clean_products_t1` for no one's benefit. */}
-            <MiddleTruncateName className={cn(
-              'text-[11.5px] font-semibold text-ink leading-tight',
-              hasAncestryChip && 'max-w-[62%] flex-shrink-0',
-            )}>
-              {card.label}
-            </MiddleTruncateName>
-            <FrameAncestry card={card} ctx={ctx} />
-          </div>
+          {/* A LONG NAME WRAPS; IT IS NEVER ELLIPSED IN THE MIDDLE.
+              Names in one warehouse differ exactly where a middle
+              ellipsis lands (`int_clean_orders_t2` vs
+              `int_clean_gl_postings_t2`), so truncating them left the
+              reader clicking each frame to find out which was which. A
+              name that needs the room takes a second line and the chip
+              beside it moves below, out of its way — the header's own
+              geometry already grew by `NAME_LINE_H` to hold it
+              (`headerHeight`). */}
+          {card.nameLines === 2 ? (
+            <>
+              <p className="text-[11.5px] font-semibold text-ink leading-tight break-words" title={card.label}>
+                {card.label}
+              </p>
+              <div className="flex items-baseline gap-1.5 min-w-0">
+                <FrameAncestry card={card} ctx={ctx} />
+              </div>
+            </>
+          ) : (
+            <div className="flex items-baseline gap-1.5 min-w-0">
+              {/* The NAME is the identity and takes what it needs first —
+                  sharing the shrink evenly turned `clean_charges` into
+                  `…n_charges`, which names nothing. The chip lives in
+                  what is left, and truncates there. */}
+              <MiddleTruncateName className={cn(
+                'text-[11.5px] font-semibold text-ink leading-tight',
+                hasAncestryChip && 'max-w-[62%] flex-shrink-0',
+              )}>
+                {card.label}
+              </MiddleTruncateName>
+              <FrameAncestry card={card} ctx={ctx} />
+            </div>
+          )}
           <p
             className="flex items-center gap-1 text-[9px] text-ink-muted/80 leading-tight truncate"
             title={range ? `Rows ${range} — scroll inside ${card.label} to read the rest` : undefined}
@@ -3308,6 +3331,7 @@ function LensPeek({ card, host, ctx, onDismiss }: {
   const rowY = (card.y + card.h / 2) * zoom + ty
   const y = clampPeekY(rowY, paneH)
   const flows = card.flowsIn + card.flowsOut
+  const drawnFlows = card.drawnIn + card.drawnOut
   const pill = card.band < 0 ? card.pillUp ?? card.pillDown : card.pillDown ?? card.pillUp
   const pillDir: 'in' | 'out' = pill != null && pill === card.pillUp ? 'in' : 'out'
   const act = 'w-full flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
@@ -3369,16 +3393,26 @@ function LensPeek({ card, host, ctx, onDismiss }: {
           and a floor is marked as a floor, never rounded into a total. */}
       <div className="px-2.5 py-2 space-y-0.5 text-[10px] tabular-nums">
         <p className="flex items-center gap-2.5">
-          <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
+          <span
+            className="flex items-center gap-1 text-sky-600 dark:text-sky-400"
+            title={`${card.drawnIn.toLocaleString()} on this board${card.flowsIn > card.drawnIn ? `, ${(card.flowsIn - card.drawnIn).toLocaleString()} not fetched yet` : ''}`}
+          >
             <LucideIcons.ArrowDownLeft className="w-3 h-3" />
-            {card.flowsIn.toLocaleString()} in
+            {card.flowsIn.toLocaleString()}{card.flowsInExact ? '' : '+'} in
           </span>
-          <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+          <span
+            className="flex items-center gap-1 text-amber-600 dark:text-amber-400"
+            title={`${card.drawnOut.toLocaleString()} on this board${card.flowsOut > card.drawnOut ? `, ${(card.flowsOut - card.drawnOut).toLocaleString()} not fetched yet` : ''}`}
+          >
             <LucideIcons.ArrowUpRight className="w-3 h-3" />
-            {card.flowsOut.toLocaleString()} out
+            {card.flowsOut.toLocaleString()}{card.flowsOutExact ? '' : '+'} out
           </span>
           <span className="text-ink-muted/70">
-            {flows === 0 ? 'no lineage here' : `${flows.toLocaleString()} flow${flows === 1 ? '' : 's'} in this walk`}
+            {flows === 0
+              ? 'no lineage here'
+              : drawnFlows === flows
+                ? `${flows.toLocaleString()} flow${flows === 1 ? '' : 's'}, all on this board`
+                : `${drawnFlows.toLocaleString()} of them drawn so far`}
           </span>
         </p>
         {pill?.count != null && pill.count > 0 && (

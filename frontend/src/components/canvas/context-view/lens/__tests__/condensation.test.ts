@@ -5,8 +5,8 @@ import type { FocusCard, FocusEdge, FocusGraph } from '../focus-cards'
 const card = (id: string, overrides: Partial<FocusCard> = {}): FocusCard => ({
     id, kind: 'entity', nodeId: id, band: 0,
     x: 0, y: 0, w: 240, h: 64, label: id, description: null, freshness: null, type: 'dataset',
-    parentId: null, parentLabel: null, count: 1, flowsIn: 1, flowsOut: 1, showType: false,
-    edgeTypeNorm: '', frameId: null, depth: 0, frameEmpty: false, connected: true,
+    parentId: null, parentLabel: null, count: 1, flowsIn: 1, flowsOut: 1, drawnIn: 1, drawnOut: 1, flowsInExact: true, flowsOutExact: true, showType: false,
+    edgeTypeNorm: '', frameId: null, depth: 0, frameEmpty: false, nameLines: 1, connected: true,
     gutterLanes: 0,
     frameShowingAll: false, frameConnectedCount: 0, frameLoaded: 0, frameTotal: -1,
     frameHasMore: false, frameSearchedCount: 0, frameSearchedExact: true, frameSharedEdgeType: '',
