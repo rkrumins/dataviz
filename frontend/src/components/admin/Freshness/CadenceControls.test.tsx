@@ -208,15 +208,19 @@ describe('drawer drift explanation', () => {
     })
 })
 
+/** The snooze lives in ③ Act, because ③ Act is the only stage it holds:
+ *  ``reconcile._hold`` gates the dispatch, never the probe or the check. The
+ *  words have to say that — "pause automation" would claim the two stages
+ *  above it stop too. */
 describe('drawer snooze', () => {
-    it('pauses automation for the chosen window', async () => {
+    it('pauses rebuilds for the chosen window', async () => {
         getSourceDoc.mockResolvedValue(makeDoc())
         patchFreshnessSettings.mockResolvedValue({ dataSourceId: 'ds-1' })
         wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
 
         const before = Date.now()
         await userEvent.selectOptions(
-            await screen.findByLabelText('Pause automation for'), '28800',
+            await screen.findByLabelText('Pause rebuilds for'), '28800',
         )
 
         await waitFor(() => expect(patchFreshnessSettings).toHaveBeenCalled())
@@ -236,7 +240,8 @@ describe('drawer snooze', () => {
         patchFreshnessSettings.mockResolvedValue({ dataSourceId: 'ds-1' })
         wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
 
-        expect(await screen.findByText(/resumes in 2h/)).toBeInTheDocument()
+        // Stated on ③ Act itself, which is the stage being held.
+        expect(await screen.findByText(/Paused for another 2h/)).toBeInTheDocument()
         await userEvent.click(screen.getByRole('button', { name: /Resume now/ }))
 
         // Explicit null, never an omitted key: only what is sent is written.

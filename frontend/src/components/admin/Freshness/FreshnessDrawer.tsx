@@ -205,10 +205,6 @@ function CadenceEditor({
  * app, and how often. The per-source override existed on the server with no
  * UI anywhere, so until now the only way to quieten one noisy source was to
  * turn detection off for the whole fleet.
- *
- * The snooze lives here, at the head of the pipeline, because it is the
- * control an operator opens this drawer to reach in a hurry. What it actually
- * holds is ③ Act, which the hint says in as many words.
  */
 function DetectSection({ doc }: { doc: FreshnessDoc }) {
     const { showToast } = useToast()
@@ -219,20 +215,12 @@ function DetectSection({ doc }: { doc: FreshnessDoc }) {
     // a ds:manage reader is not a platform admin. Treating inherit as on
     // mirrors the reconciliation toggle in ③ Act, which has always done this.
     const on = doc.probeEnabled !== false
-    const pausedFor = timeUntil(doc.pausedUntil)
 
     const patch = (body: FreshnessSettingsPatch, ok: string) => {
         setSettings.mutate({ dsId: doc.dataSourceId, ...body }, {
             onSuccess: () => showToast('success', ok),
             onError: (e) => showToast('error', e.message || 'Could not update the setting.'),
         })
-    }
-
-    const snooze = (secs: number, label: string) => {
-        patch(
-            { pausedUntil: new Date(Date.now() + secs * 1000).toISOString() },
-            `Automation paused for ${label}.`,
-        )
     }
 
     return (
@@ -281,55 +269,74 @@ function DetectSection({ doc }: { doc: FreshnessDoc }) {
                     )}
                 />
 
-                {canManage && (pausedFor ? (
-                    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2.5">
-                        <div className="min-w-0 flex-1">
-                            <p className="text-[13px] text-ink-secondary leading-snug">
-                                Paused — automation resumes in {pausedFor}.
-                            </p>
-                            <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">
-                                {new Date(doc.pausedUntil as string).toLocaleString()}
-                            </p>
-                        </div>
-                        <button
-                            type="button"
-                            onClick={() => patch({ pausedUntil: null }, 'Automation resumed.')}
-                            disabled={setSettings.isPending}
-                            className={cn(QUIET_BTN, 'shrink-0 ml-auto')}
-                        >
-                            <RotateCcw className="w-3.5 h-3.5" /> Resume now
-                        </button>
-                    </div>
-                ) : (
-                    <SettingRow
-                        label="Pause automation for"
-                        htmlFor="freshness-snooze"
-                        hint="Changes are still detected and checked — only rebuilds are held, so a source can be left alone without losing sight of it."
-                    >
-                        <select
-                            id="freshness-snooze"
-                            aria-describedby={hintIdFor('freshness-snooze')}
-                            disabled={setSettings.isPending}
-                            // Always empty: this picks an action, not a stored
-                            // value. What was chosen reads back as the expiry,
-                            // which replaces this row entirely.
-                            value=""
-                            onChange={(e) => {
-                                const choice = SNOOZE_CHOICES
-                                    .find(c => String(c.secs) === e.target.value)
-                                if (choice) snooze(choice.secs, choice.label)
-                            }}
-                            className={SELECT_BOX}
-                        >
-                            <option value="">Choose…</option>
-                            {SNOOZE_CHOICES.map(c => (
-                                <option key={c.secs} value={c.secs}>{c.label}</option>
-                            ))}
-                        </select>
-                    </SettingRow>
-                ))}
             </div>
         </StageRow>
+    )
+}
+
+/**
+ * The operator snooze, in ③ Act because ③ Act is what it holds.
+ *
+ * ``paused_until`` is read by ``reconcile._hold``, which gates only the
+ * dispatch: a paused source is still probed, still evaluated, and still
+ * records its finding and its evidence — it is simply not rebuilt. So the
+ * words are "pause rebuilds", never "pause automation", which would claim the
+ * two stages above it stop as well.
+ */
+function SnoozeRow({ doc, pausedFor, pending, onPatch }: {
+    doc: FreshnessDoc
+    /** How long is left, or null when no snooze is in force. */
+    pausedFor: string | null
+    pending: boolean
+    onPatch: (body: FreshnessSettingsPatch, ok: string) => void
+}) {
+    if (pausedFor) {
+        return (
+            <SettingRow
+                label="Rebuilds are paused"
+                hint={`Until ${new Date(doc.pausedUntil as string).toLocaleString()}`}
+            >
+                <button
+                    type="button"
+                    onClick={() => onPatch({ pausedUntil: null }, 'Rebuilds resumed.')}
+                    disabled={pending}
+                    className={QUIET_BTN}
+                >
+                    <RotateCcw className="w-3.5 h-3.5" /> Resume now
+                </button>
+            </SettingRow>
+        )
+    }
+
+    return (
+        <SettingRow
+            label="Pause rebuilds for"
+            htmlFor="freshness-snooze"
+            hint="Problems are still detected, checked and shown here — only the rebuild is held, so a source can be left alone without losing sight of it."
+        >
+            <select
+                id="freshness-snooze"
+                aria-describedby={hintIdFor('freshness-snooze')}
+                disabled={pending}
+                // Always empty: this picks an action, not a stored value. What
+                // was chosen reads back as the expiry, which replaces this row.
+                value=""
+                onChange={(e) => {
+                    const choice = SNOOZE_CHOICES.find(c => String(c.secs) === e.target.value)
+                    if (!choice) return
+                    onPatch(
+                        { pausedUntil: new Date(Date.now() + choice.secs * 1000).toISOString() },
+                        `Rebuilds paused for ${choice.label}.`,
+                    )
+                }}
+                className={SELECT_BOX}
+            >
+                <option value="">Choose…</option>
+                {SNOOZE_CHOICES.map(c => (
+                    <option key={c.secs} value={c.secs}>{c.label}</option>
+                ))}
+            </select>
+        </SettingRow>
     )
 }
 
@@ -501,11 +508,13 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
 }
 
 /**
- * ③ Act — may a finding rebuild this source, and how often at most.
+ * ③ Act — may a finding rebuild this source, how often at most, and the
+ * snooze that holds it.
  *
- * Both settings were split across two panels that never named each other: the
+ * The first two were split across two panels that never named each other: the
  * "Automatic reconciliation" switch sat with the check cadence, and the
- * rebuild window sat in a box of its own above it. They are one decision.
+ * rebuild window sat in a box of its own above it. They are one decision, and
+ * the snooze is the third face of it: a hold rather than an opt-out.
  */
 function ActSection({ doc }: { doc: FreshnessDoc }) {
     const { showToast } = useToast()
@@ -596,6 +605,25 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
                                         : 'Rebuild cadence updated.'),
                                     onError: (e) => showToast('error',
                                         e.message || 'Could not update rebuild cadence.'),
+                                },
+                            )}
+                        />
+                    )}
+
+                    {/* The snooze upserts its state row, so unlike the cadence
+                        above it stays available on a never-built source — which
+                        is exactly the source someone may want to hold. */}
+                    {canManage && (
+                        <SnoozeRow
+                            doc={doc}
+                            pausedFor={pausedFor}
+                            pending={setSettings.isPending}
+                            onPatch={(body, ok) => setSettings.mutate(
+                                { dsId: doc.dataSourceId, ...body },
+                                {
+                                    onSuccess: () => showToast('success', ok),
+                                    onError: (e) => showToast('error',
+                                        e.message || 'Could not update the setting.'),
                                 },
                             )}
                         />
