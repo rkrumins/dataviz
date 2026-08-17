@@ -70,8 +70,20 @@ export function enforceLensInvariants(drawn: FocusGraph, fallback: FocusGraph): 
 
     // (a) + (b) — the focal card is drawn; the board is never empty while
     // an earlier pass still has it.
+    //
+    // NOTHING TO DRAW IS NOT A VIOLATION. A pipeline run over a model
+    // with no nodes — the lens just opened, the first fetch is still in
+    // flight, it failed, or the provider cannot walk at all — produces
+    // an empty graph from every pass, and there is no focus in the data
+    // for any of them to have lost. Asserting there logged a violation
+    // on every render of the ordinary loading state AND raised
+    // `focusRecovered`, so a lens that had simply not finished fetching
+    // whispered "the rest of this walk could not be placed" over its own
+    // spinner. The empty state has its own honest chrome; this stage
+    // stays out of its way and only speaks when a pass DID have cards
+    // and still could not put the focus among them.
     let graph = drawn
-    if (!graph.cards.some(c => c.kind === 'focal')) {
+    if (!graph.cards.some(c => c.kind === 'focal') && (graph.cards.length > 0 || fallback.cards.length > 0)) {
         if (fallback.cards.some(c => c.kind === 'focal')) {
             assert({ code: 'focal-missing', detail: 'the condensed board lost the focus — falling back to the pre-condensation layout' })
             graph = fallback

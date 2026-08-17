@@ -71,10 +71,27 @@ describe('enforceLensInvariants — (a)/(b) the focal card is drawn; the board i
         expect(spy).toHaveBeenCalled()
     })
 
-    it('EMPTY MODEL — neither drawn nor fallback has the focal: forces focusRecovered so the whisper fires', () => {
+    it('NOTHING TO DRAW AT ALL — the ordinary empty state is not a violation, and says nothing', () => {
+        // The lens just opened, the first fetch is in flight, it failed,
+        // or the provider cannot walk: every pass produces an empty
+        // graph and none of them LOST a focus — there was none in the
+        // data. Asserting here logged a violation on every render of the
+        // loading state and raised `focusRecovered`, so a lens that had
+        // simply not finished fetching whispered "the rest of this walk
+        // could not be placed" over its own spinner.
         const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
         const drawn = graphOf([])
-        const fallback = graphOf([])
+        const { graph, violations } = enforceLensInvariants(drawn, graphOf([]))
+        expect(graph).toBe(drawn)
+        expect(graph.focusRecovered).toBe(false)
+        expect(violations).toEqual([])
+        expect(spy).not.toHaveBeenCalled()
+    })
+
+    it('CARDS BUT NO FOCAL ANYWHERE — a genuine violation: forces focusRecovered so the whisper fires', () => {
+        const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const drawn = graphOf([card('a')])
+        const fallback = graphOf([card('a')])
         const { graph, violations } = enforceLensInvariants(drawn, fallback)
         expect(graph.focusRecovered).toBe(true)
         expect(violations.map(v => v.code)).toEqual(['board-empty'])
