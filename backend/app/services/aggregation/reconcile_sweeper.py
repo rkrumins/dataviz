@@ -760,7 +760,7 @@ class ReconciliationSweeper:
 
         # 1. The data source itself (deleted? which ontology? projection?).
         rows = (await session.execute(
-            select(
+            select(  # noqa: cross-domain (reconcile sweep: read-only batched context for ≤_SCAN_CAP sources; provider NAME labels findings)
                 WorkspaceDataSourceORM.id,
                 WorkspaceDataSourceORM.deleted_at,
                 WorkspaceDataSourceORM.is_active,

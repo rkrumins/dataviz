@@ -187,7 +187,7 @@ class ProbeScheduler:
         from .models import AggregationDataSourceStateORM as S
 
         stmt = (
-            select(
+            select(  # noqa: cross-domain (probe lane: stats.last_probed_at is the probe cadence clock; read-only, bounded by AGGREGATION_PROBE_SCAN_CAP)
                 WorkspaceDataSourceORM.id,
                 WorkspaceDataSourceORM.workspace_id,
                 S.probe_enabled,

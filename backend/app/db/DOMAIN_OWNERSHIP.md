@@ -130,6 +130,8 @@ zero, switch to `--strict`.
 | `db/repositories/provider_repo.py` | provider ↔ workspace / visualization | Provider-impact endpoint reads workspace + visualization tables — should use outbox event subscriptions to maintain a per-provider impact projection. |
 | `api/v1/endpoints/catalog.py` | provider ↔ workspace | Same pattern. |
 | `ontology/adapters/sqlalchemy_repo.py` | ontology ↔ workspace | Reading workspace data sources to find which workspaces use an ontology — should be reversed: workspace domain queries ontology by id, not the other way around. |
+| `services/aggregation/probe_scheduler.py` | stats ↔ workspace | Annotated `# noqa: cross-domain` (not in the count). The due-query joins `workspace_data_sources → data_source_stats` because `stats.last_probed_at` is the probe cadence clock. Read-only, bounded by `AGGREGATION_PROBE_SCAN_CAP`. To pay down: denormalise `last_probed_at` onto `aggregation.data_source_state`. |
+| `services/aggregation/reconcile_sweeper.py` | provider ↔ workspace | Annotated `# noqa: cross-domain` (not in the count). `_batch_context` joins `workspace_data_sources → providers` for the provider NAME that labels findings; read-only, ≤ `_SCAN_CAP` rows per tick. To pay down: same denormalise-the-name pattern as `list_jobs_global`. |
 
 ## What this map does NOT do
 
