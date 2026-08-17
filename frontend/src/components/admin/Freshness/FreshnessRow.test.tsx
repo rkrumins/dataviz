@@ -26,6 +26,15 @@ describe('automationChip', () => {
         expect(automationChip({ driftState: 'inSync', autoReconcile: false })?.label)
             .toBe('Automation off')
     })
+
+    it('prefers the opt-out over a snooze — Act stays off regardless of when the snooze lapses', () => {
+        // Drifting + paused + opted-out all at once: "Paused" would wrongly
+        // imply this source resumes on its own once the snooze expires.
+        expect(automationChip({
+            driftState: 'drifting', autoReconcile: false,
+            pausedUntil: '2999-01-01T00:00:00+00:00',
+        })?.label).toBe('Automation off')
+    })
 })
 
 // The unit tests above prove the decision logic; these prove it actually

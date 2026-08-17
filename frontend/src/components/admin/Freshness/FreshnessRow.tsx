@@ -33,7 +33,7 @@ import { PHASE_LABELS, PhaseStepper, jobHistoryPath, phaseLabel } from '../job-h
 import { freshnessState, isDrifting, isPlatformMastered, isReconcileSuspended } from './freshnessTriage'
 import type { FreshnessState, StatusFacet } from './freshnessTriage'
 import {
-    AutoReconcileOffBadge, DRIFT_SPEC, DriftStateBadge,
+    DRIFT_SPEC, DriftStateBadge,
 } from './DriftStateBadge'
 import { failureBadgeLabel, failureBadgeWhy, relatedFailureCount } from './failureGuidance'
 import { SelectionCheckbox } from './SelectionCheckbox'
@@ -78,14 +78,17 @@ type AutomationRow = Pick<FreshnessRowData, 'driftState' | 'autoReconcile' | 'pa
  * repeating "everything is fine" on every row — a chip appears only for a
  * state worth interrupting the scan for.
  *
- * Precedence: the breaker (suspended) always wins, even over an active
- * snooze — a person is needed regardless of whether the source is also
- * paused. A snooze only surfaces while it is actually holding back a real
- * drift verdict; pausing a source that never drifts looks identical to
- * automation working normally, so it stays as quiet as any healthy row. An
- * opted-out source is reported unconditionally — that is a standing
- * configuration fact, not a transient condition, so it does not hide just
- * because the source happens to be in sync right now.
+ * Precedence, most consequential first: the breaker (suspended) always
+ * wins, even over an active snooze — a person is needed regardless of
+ * whether the source is also paused. Next, a deliberate opt-out — it is
+ * more permanent than a snooze (a snooze lapses on its own; automation
+ * being off does not), so it wins over "Paused" too: a drifting, paused,
+ * opted-out source resumes on nothing when the snooze lapses, and telling
+ * the operator "Paused" there would imply otherwise. Only once neither of
+ * those applies does a snooze get to surface, and only while it is
+ * actually holding back a real drift verdict — pausing a source that never
+ * drifts looks identical to automation working normally, so it stays as
+ * quiet as any healthy row.
  */
 export function automationChip(row: AutomationRow): { label: string; tone: string; facet: StatusFacet } | null {
     const neutralTone = 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20'
@@ -93,16 +96,16 @@ export function automationChip(row: AutomationRow): { label: string; tone: strin
     if (row.driftState === 'suspended') {
         return { label: 'Needs a person', tone: DRIFT_SPEC.suspended.tone, facet: 'suspended' }
     }
-    const drifting = row.driftState === 'drifting' || row.driftState === 'overlayMissing'
-    if (drifting && timeUntil(row.pausedUntil)) {
-        return { label: 'Paused', tone: neutralTone, facet: 'drifting' }
-    }
     if (row.autoReconcile === false) {
         // No StatusFacet filters to "automation off" sources specifically,
         // so this resolves to '' (the existing "all" facet) — the render
         // site treats an empty facet as non-interactive rather than wiring
         // up a click that would silently just clear the status filter.
         return { label: 'Automation off', tone: neutralTone, facet: '' }
+    }
+    const drifting = row.driftState === 'drifting' || row.driftState === 'overlayMissing'
+    if (drifting && timeUntil(row.pausedUntil)) {
+        return { label: 'Paused', tone: neutralTone, facet: 'drifting' }
     }
     return null
 }
@@ -320,12 +323,6 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
     // primary freshness label when a ready source is drifting.
     if (isDrifting(row) || isReconcileSuspended(row)) {
         badges.push(<DriftStateBadge key="driftState" state={row.driftState} />)
-    }
-
-    // Drift detected by automation, but automation is switched off here — so
-    // say why nothing is happening about it.
-    if (row.autoReconcile === false && isDrifting(row)) {
-        badges.push(<AutoReconcileOffBadge key="autoOff" />)
     }
 
     if (row.drifted === true) {
