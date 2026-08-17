@@ -543,6 +543,21 @@ async def test_a_cold_versioned_lookup_defers_the_whole_sweep(
     assert state.drift_state is None
     assert state.last_reconcile_checked_at is None
 
+    # The deferral leaves a trace — without a run row, a persistent graphver
+    # outage reads as "sweeps stopped" only hours later. A second deferred
+    # sweep folds into the same row instead of inserting another.
+    async with session_factory() as s:
+        run = (await s.execute(select(ReconcileRunORM))).scalars().one()
+    assert run.errors == 1
+    assert json.loads(run.detail)["bySkip"] == {
+        "versioned_lookup_unavailable": 1,
+    }
+
+    await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    async with session_factory() as s:
+        runs = (await s.execute(select(ReconcileRunORM))).scalars().all()
+    assert len(runs) == 1
+
 
 @pytest.mark.asyncio
 async def test_a_paused_source_records_its_finding_but_queues_nothing(
@@ -974,6 +989,32 @@ async def test_each_sweep_records_a_run_with_its_tallies(session_factory):
     assert findings[0]["providerName"] == "p"
     assert findings[0]["reason"] == "overlay_missing"
     assert findings[0]["acted"] is True
+
+
+@pytest.mark.asyncio
+async def test_idle_ticks_collapse_into_one_heartbeat_row(session_factory):
+    """An idle fleet is 1,440 auto ticks a day; each must not add a row —
+    the ledger and the activity read drown in near-empty heartbeats."""
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    first = await sweeper.sweep()
+    assert first.scanned == 0
+    async with session_factory() as s:
+        one = (await s.execute(select(ReconcileRunORM))).scalars().one()
+    first_stamp = one.started_at
+
+    second = await sweeper.sweep()
+    assert second.scanned == 0
+    async with session_factory() as s:
+        runs = (await s.execute(select(ReconcileRunORM))).scalars().all()
+    assert len(runs) == 1                     # updated in place
+    assert runs[0].started_at >= first_stamp  # ...and still advancing
+
+    # A pass that scanned something always inserts its own row.
+    await _seed(session_factory, ds_id="ds_1")
+    await sweeper.sweep()
+    async with session_factory() as s:
+        runs = (await s.execute(select(ReconcileRunORM))).scalars().all()
+    assert len(runs) == 2
 
 
 @pytest.mark.asyncio

@@ -270,6 +270,12 @@ class ReconciliationSweeper:
 
         phase_a = await self._phase_a(result, data_source_ids, dry_run)
         if phase_a is None:
+            # A lock held by another replica leaves no trace; a recorded
+            # deferral (errors set by _phase_a) must reach the ledger.
+            if result.errors and record:
+                result.started_at = started
+                result.finished_at = _now_iso()
+                await self._record_run(result, actor)
             return None
         actions, nudges = phase_a
 
@@ -328,6 +334,12 @@ class ReconciliationSweeper:
                 "reconcile sweep deferred: cannot determine which data "
                 "sources are versioned (%s) — retrying on the next tick", exc,
             )
+            # Mark the deferral on the result so sweep() records it: with no
+            # run row at all, a persistent graphver outage looks like
+            # "sweeps stopped" only after 3x the check interval — hours of
+            # silence for a subsystem that is effectively down right now.
+            result.errors = 1
+            result.by_skip["versioned_lookup_unavailable"] = 1
             return None
 
         async with self._session_factory() as session:
@@ -1233,11 +1245,45 @@ class ReconciliationSweeper:
 
     async def _record_run(self, result: SweepResult, actor) -> None:
         """Persist the pass, and trim old ones. Never raises: losing a run
-        record must not fail the sweep it describes."""
+        record must not fail the sweep it describes.
+
+        An idle auto tick (nothing scanned, found, seeded or done) advances
+        the previous idle row in place instead of inserting — one row per
+        idle stretch, not 1,440 near-empty rows a day drowning the ledger.
+        The row's stamps still move every tick, so liveness reads keep
+        working at any interval. Manual and preview passes always insert.
+        """
         from .models import ReconcileRunORM
 
+        idle = (
+            result.mode == "auto"
+            and result.scanned == 0
+            and result.findings == 0
+            and result.actions == 0
+            and result.seeded == 0
+        )
         try:
             async with self._session_factory() as session:
+                if idle:
+                    prev = (await session.execute(
+                        select(ReconcileRunORM)
+                        .order_by(ReconcileRunORM.started_at.desc())
+                        .limit(1)
+                    )).scalars().first()
+                    if (
+                        prev is not None
+                        and prev.mode == "auto"
+                        and (prev.scanned or 0) == 0
+                        and (prev.findings or 0) == 0
+                        and (prev.actions or 0) == 0
+                        and (prev.seeded or 0) == 0
+                        and (prev.errors or 0) == result.errors
+                    ):
+                        prev.started_at = result.started_at or _now_iso()
+                        prev.finished_at = result.finished_at or _now_iso()
+                        prev.detail = result.detail_json()
+                        await session.commit()
+                        return
                 session.add(ReconcileRunORM(
                     id=result.run_id,
                     started_at=result.started_at or _now_iso(),

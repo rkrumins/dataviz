@@ -337,6 +337,10 @@ async def get_reconciliation_activity(
         None,
         description="ISO timestamp or duration like 24h. Default: last 24 hours.",
     ),
+    limit: int = Query(
+        500, ge=1, le=2000,
+        description="Maximum run rows to read, newest first.",
+    ),
 ):
     from backend.app.services.aggregation.service import (
         assemble_reconcile_activity,
@@ -349,7 +353,7 @@ async def get_reconciliation_activity(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
         ) from exc
-    return await assemble_reconcile_activity(session, since=cutoff)
+    return await assemble_reconcile_activity(session, since=cutoff, limit=limit)
 
 
 @router.put(

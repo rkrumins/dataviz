@@ -3663,23 +3663,26 @@ async def assemble_reconcile_overview(
 
 def parse_activity_since(raw: Optional[str]) -> datetime:
     """``since`` query: ISO timestamp, or a duration like ``24h``. Default
-    is the last 24 hours."""
+    is the last 24 hours. Clamped to the run-record retention window (30
+    days): rows older than that are trimmed anyway, so a wider window only
+    widens the scan, never the result."""
     now = datetime.now(timezone.utc)
     if not raw:
         return now - timedelta(hours=24)
     text = raw.strip()
     if len(text) > 1 and text[-1] in ("h", "d") and text[:-1].isdigit():
         n = int(text[:-1])
-        return now - (timedelta(hours=n) if text[-1] == "h" else timedelta(days=n))
-    try:
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError(
-            "since must be an ISO timestamp or a duration like 24h or 7d",
-        ) from exc
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+        dt = now - (timedelta(hours=n) if text[-1] == "h" else timedelta(days=n))
+    else:
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                "since must be an ISO timestamp or a duration like 24h or 7d",
+            ) from exc
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    return max(dt, now - timedelta(days=30))
 
 
 def _activity_outcome(finding: dict, event) -> str:
@@ -3692,10 +3695,15 @@ def _activity_outcome(finding: dict, event) -> str:
 
 async def assemble_reconcile_activity(
     session: AsyncSession, *, since: Optional[datetime] = None,
+    limit: int = 500,
 ) -> "ReconcileActivityResponse":
     """Overnight blotter: findings persisted on ``reconcile_runs`` joined
     to ``refresh_events`` by ``run_id``. Preview passes are excluded —
     they evaluate and record, they do not change anything overnight.
+
+    ``limit`` bounds the run rows read (newest first) — each row can carry
+    up to a scan-cap of findings, so an unbounded read over a wide window
+    deserializes an unbounded response.
 
     Never raises: a missing table degrades to an empty ledger rather than
     500ing the cockpit."""
@@ -3712,6 +3720,7 @@ async def assemble_reconcile_activity(
             .where(ReconcileRunORM.mode != "preview")
             .where(ReconcileRunORM.started_at >= cutoff_iso)
             .order_by(ReconcileRunORM.started_at.desc())
+            .limit(limit)
         )).scalars().all()
         run_ids = [r.id for r in runs]
         events_by_key: dict[tuple, object] = {}

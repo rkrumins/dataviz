@@ -364,3 +364,14 @@ def test_activity_since_rejects_garbage():
 
     with pytest.raises(ValueError, match="ISO timestamp"):
         parse_activity_since("yesterday")
+
+
+def test_activity_since_clamps_to_the_retention_window():
+    """Run rows are trimmed at 30 days, so a wider window only widens the
+    scan (one row per sweep tick), never the result."""
+    from backend.app.services.aggregation.service import parse_activity_since
+
+    now = datetime.now(timezone.utc)
+    for raw in ("9999d", "2000-01-01T00:00:00+00:00"):
+        cutoff = parse_activity_since(raw)
+        assert (now - cutoff).total_seconds() <= 30 * 86400 + 60
