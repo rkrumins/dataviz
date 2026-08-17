@@ -123,6 +123,26 @@ class DraftOverlayProvider:
         if callable(setter):
             setter(edge_types, from_ontology)
 
+    def set_node_identity(self, identity_property=None, name_property=None) -> None:
+        """Forward the resolved node-identity mapping to the base provider.
+
+        ``ContextEngine._inject_identity`` is ``hasattr``-gated, so without this
+        method a draft read silently skipped the injection: the base FalkorDB
+        provider kept whatever mapping the PREVIOUS source left on it (instances
+        are cached and shared per ``(provider_id, graph_name)``), which is the
+        exact leak ``FalkorDBProvider.set_node_identity``'s "ALWAYS RESET"
+        contract exists to prevent. An id-keyed source read through a draft
+        therefore hydrated as an empty graph.
+
+        Only ``_base`` gets it. ``self._writer`` is a
+        ``VersionedBranchProvider`` reading Postgres graph-version state, where
+        ``urn`` and ``displayName`` are already canonical columns — there is no
+        physical source property to map there.
+        """
+        setter = getattr(self._base, "set_node_identity", None)
+        if callable(setter):
+            setter(identity_property, name_property)
+
     @property
     def name(self) -> str:
         return f"draft-overlay[{self._gid}:{self._branch}] over {getattr(self._base, 'name', '?')}"
