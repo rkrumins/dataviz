@@ -598,11 +598,26 @@ class InsightsJobConsumer:
         return resolved, node_count
 
     async def _resolve_scope_lock_key(self, envelope: JobEnvelope) -> str | None:
-        """Return the asyncio.Semaphore key for this envelope. For
-        discovery, the envelope already carries ``provider_id:asset_name``,
-        no DB hit needed."""
+        """Return the asyncio.Semaphore key for this envelope, or None for a
+        kind that takes no per-graph lock. For discovery, the envelope already
+        carries ``provider_id:asset_name``, no DB hit needed."""
         if isinstance(envelope, DiscoveryJobEnvelope):
             return envelope.scope_key
+        if isinstance(envelope, ProbeJobEnvelope):
+            # MUST precede the shared stats resolution below (ProbeJobEnvelope
+            # subclasses StatsJobEnvelope) — and returning None here is the
+            # point: a probe takes NO per-graph semaphore.
+            #
+            # The semaphore exists to keep two scans of the same graph from
+            # running at once. A probe is a constant-time counter read, so it
+            # cannot meaningfully contend with one — but it would still QUEUE
+            # behind one, for the scan's full duration (up to 600s), because the
+            # semaphore is acquired before the job's own timeout starts. With
+            # max_per_graph=1 the whole probe lane could sit parked behind deep
+            # scans, and the parked graph is precisely the one whose counts may
+            # have just moved. Exempting probes is what actually delivers the
+            # lane isolation the separate PROBE_STREAM was created for.
+            return None
         scope_key, _ = await self._resolve_ds_meta(envelope.data_source_id)  # type: ignore[attr-defined]
         return scope_key
 

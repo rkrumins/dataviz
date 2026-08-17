@@ -109,6 +109,11 @@ PURGE_STREAM = StreamConfig(
 # takes milliseconds and a counts poll on a large graph takes minutes, so
 # sharing a budget would let one slow scan hold up the freshness signal for
 # the whole fleet. That is the same argument that split heavy from fast.
+#
+# The lane budget is only half of it: a probe also takes no per-graph
+# semaphore (see ``worker._resolve_scope_lock_key``), or it would park behind
+# an in-flight scan of the same graph and the private lane would buy nothing
+# for exactly the source whose counts just moved.
 PROBE_STREAM = StreamConfig(
     kind="probe",
     stream="insights.jobs.probe",

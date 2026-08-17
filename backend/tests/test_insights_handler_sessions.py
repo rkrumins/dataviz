@@ -451,6 +451,81 @@ def test_claim_ttl_scales_with_node_count() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_probe_is_not_parked_behind_a_scan_of_the_same_graph(monkeypatch) -> None:
+    """The probe lane's whole promise: freshness for a graph must not wait on
+    a slow job for that graph.
+
+    The per-graph semaphore is taken BEFORE the job's own timeout starts, so a
+    probe that shares the stats poll's scope key queues for the scan's full
+    duration (up to 600s) — and with ``max_per_graph=1`` the entire probe lane
+    can end up parked on the sources whose counts just moved.
+    """
+    import asyncio
+
+    from backend.insights_service.redis_streams import (
+        PROBE_STREAM, STATS_STREAM,
+    )
+    from backend.insights_service.schemas import ProbeJobEnvelope
+
+    class _Result:
+        def first(self):
+            return ("prov1", "graph1", 250_000)
+
+    class _FakeSession:
+        async def execute(self, _stmt):
+            return _Result()
+
+    @asynccontextmanager
+    async def fake_readonly_session():
+        yield _FakeSession()
+
+    scan_started = asyncio.Event()
+    let_scan_finish = asyncio.Event()
+    probed: list[str] = []
+
+    async def handler(envelope):
+        if envelope.kind == "probe":
+            probed.append(envelope.data_source_id)
+            return
+        scan_started.set()
+        await let_scan_finish.wait()
+
+    async def fake_release(scope_key, stream=None):
+        pass
+
+    async def fake_ack(_cfg, _msg_id):
+        pass
+
+    monkeypatch.setattr(worker_mod, "get_readonly_session", fake_readonly_session)
+    monkeypatch.setattr(worker_mod.dispatcher, "get_handler", lambda _kind: handler)
+    monkeypatch.setattr(worker_mod, "release_claim", fake_release)
+
+    consumer = worker_mod.InsightsJobConsumer(_config())  # max_per_graph=1
+    monkeypatch.setattr(consumer, "_ack", fake_ack)
+    consumer._scope_key_cache.clear()
+    try:
+        scan = asyncio.create_task(
+            consumer._execute(STATS_STREAM, "1-1", _envelope()),
+        )
+        await asyncio.wait_for(scan_started.wait(), timeout=2)
+
+        probe = ProbeJobEnvelope(
+            data_source_id="ds1", workspace_id="ws1",
+            enqueued_at=datetime.now(timezone.utc),
+        )
+        await asyncio.wait_for(
+            consumer._execute(PROBE_STREAM, "1-2", probe), timeout=2,
+        )
+
+        assert probed == ["ds1"]
+        assert not scan.done(), "the probe must overtake a still-running scan"
+    finally:
+        let_scan_finish.set()
+        await scan
+        consumer._scope_key_cache.clear()
+
+
+@pytest.mark.asyncio
 async def test_a_failed_probe_never_writes_the_polling_config(monkeypatch) -> None:
     """A probe failure must not be recorded as a STATS POLL failure.
 
