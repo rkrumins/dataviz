@@ -35,12 +35,24 @@ def test_mapped_identity_hydrates_a_node_that_has_no_urn():
     assert node.display_name == "Orders"
 
 
-def test_native_urn_wins_over_the_mapped_property():
-    """A node carrying the platform's own urn keeps it, so a partially stamped
-    graph resolves consistently whichever half a node is in."""
+def test_the_mapped_property_wins_on_a_mapped_source():
+    """The value handed out here is the one every WHERE predicate gets back, so
+    it must be the property those predicates can seek on. Preferring the
+    canonical urn would hand out a native urn for some nodes and a mapped id for
+    others on the SAME source, and no single predicate finds both.
+
+    On a stamped graph this is a distinction without a difference — the stamp
+    copies the mapped property onto `urn` rather than moving it, so they agree."""
     node = _node_from_props(
         {"urn": "urn:real", "id": "n1"}, "Table", "id", "name",
     )
+    assert node.urn == "n1"
+
+
+def test_canonical_urn_still_addresses_a_node_that_has_no_mapped_property():
+    """The mixed case: a node on a mapped source that never carried the mapped
+    property stays addressable instead of being silently dropped."""
+    node = _node_from_props({"urn": "urn:real"}, "Table", "id", "name")
     assert node.urn == "urn:real"
 
 

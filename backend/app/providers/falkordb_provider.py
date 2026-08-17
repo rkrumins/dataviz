@@ -647,13 +647,23 @@ def _node_from_props(
         source_key = mapping.property_for(canonical)
         return props.get(source_key) if source_key != canonical else None
 
-    # Identity: the canonical `urn` when the node has one, else the source's
-    # URN-equivalent. Before this fallback existed, EVERY node on an id-keyed
-    # graph was dropped here — silently, one `return None` at a time — so the
-    # canvas showed an empty graph and the mapping looked like it did nothing.
-    urn = props.get("urn")
-    if not urn and identity_property and identity_property != "urn":
-        urn = props.get(identity_property)
+    # Identity. On a MAPPED source the mapped property wins, and that ordering
+    # is what makes lookups work: the value handed out here is the one every
+    # WHERE predicate will be given back, so it has to be the property those
+    # predicates can seek on. Reading the canonical `urn` first would hand out
+    # a native urn for some nodes and a mapped id for others on the same source,
+    # and no single predicate can find both.
+    #
+    # On a stamped graph the two are equal anyway — the conformance stamp COPIES
+    # the mapped property onto `urn`, it never moves it. The canonical fallback
+    # stays for the mixed case: a node that has a urn and never had the mapped
+    # property is still addressable rather than silently dropped.
+    mapped_ident = (
+        props.get(identity_property)
+        if identity_property and identity_property != "urn"
+        else None
+    )
+    urn = mapped_ident or props.get("urn")
     if not urn:
         return None
     entity_type = entity_type_str or _mapped("entityType") or "unknown"
@@ -2437,8 +2447,8 @@ class FalkorDBProvider(GraphDataProvider):
         # expanded EVERY edge type then discarded mismatches).
         focus_label = await self._get_cached_label(urn)
         f_anchor = (
-            f"(focus:{_sanitize_label(focus_label)} {{urn: $urn}})"
-            if focus_label else "(focus {urn: $urn})"
+            f"(focus:{_sanitize_label(focus_label)} {{{self._ident_key()}: $urn}})"
+            if focus_label else f"(focus {{{self._ident_key()}: $urn}})"
         )
         c_alt = "|".join(_sanitize_label(t) for t in ctypes if t)
         cypher = (
@@ -2616,6 +2626,49 @@ class FalkorDBProvider(GraphDataProvider):
         from backend.common.providers.identity import MappedCypher
 
         self._mapped = MappedCypher(mapping)
+
+    def _ident(self, var: str = "n") -> str:
+        """This source's identity property on ``var``, as an index-seekable
+        access — the form for a WHERE predicate or an ORDER BY.
+
+        Pairs with what ``_node_from_props`` hands out: hydration prefers the
+        mapped property, so the values that come back in ``$urn`` are the ones
+        this predicate seeks on.
+        """
+        return self._map.ident_prop(var)
+
+    def _ident_key(self) -> str:
+        """This source's identity property, quoted for use as a MAP-LITERAL key
+        — ``MERGE (n:Label {`id`: $urn})``.
+
+        A map literal is the one place a coalesce could never go, which is why
+        the fully-mapped form matters: with identity resolved to a single real
+        property there is nothing to coalesce, and MERGE/MATCH key on it
+        directly. Mirrors ``neo4j_provider._id_prop()``.
+        """
+        from backend.common.providers.identity import quote_property
+
+        return quote_property(self._map.identity_property)
+
+    def _proj_ident_key(self) -> str:
+        """The identity property to key on in the PROJECTION graph.
+
+        Mode-dependent, and the distinction is real rather than pedantic:
+
+        * ``dedicated`` — the projection is a separate graph the platform
+          creates and populates itself (``MERGE (s:Label {urn: …})``). Its nodes
+          are ours, so they are canonical, and mapping here would look for a
+          property nothing ever wrote.
+        * ``in_source`` — the "projection" IS the source graph, so these are the
+          customer's own nodes and must be keyed by the source's identity, or
+          the rollup MERGE creates a duplicate node set beside the real one.
+        """
+        if getattr(self, "_projection_mode", None) == "dedicated":
+            from backend.common.providers.identity import (
+                DEFAULT_IDENTITY_PROPERTY, quote_property,
+            )
+            return quote_property(DEFAULT_IDENTITY_PROPERTY)
+        return self._ident_key()
 
     @property
     def _map(self):
@@ -3012,7 +3065,8 @@ class FalkorDBProvider(GraphDataProvider):
         label = await self._get_cached_label(urn)
         if label:
             result = await self._ro_query(
-                f"MATCH (n:{_sanitize_label(label)} {{urn: $urn}}) RETURN n",
+                f"MATCH (n:{_sanitize_label(label)} {{{self._ident_key()}: $urn}}) "
+                "RETURN n",
                 params={"urn": urn},
                 op="nodes.get",
             )
@@ -3021,7 +3075,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         # Fallback: label-less scan (still works, just slower)
         result = await self._ro_query(
-            "MATCH (n) WHERE n.urn = $urn RETURN n",
+            f"MATCH (n) WHERE {self._ident()} = $urn RETURN n",
             params={"urn": urn},
             op="nodes.get_unlabeled",
         )
@@ -3060,25 +3114,35 @@ class FalkorDBProvider(GraphDataProvider):
                 params["entityTypesLower"] = types_lower
                 conditions.append("toLower(labels(n)[0]) IN $entityTypesLower")
 
+        # Tracked explicitly rather than recognised by substring later: the
+        # identity predicate is now rendered from the source's mapping, so
+        # `"n.urn " in c` no longer identifies it and the urn-anchored path
+        # below would emit the filter twice.
+        urn_conditions: List[str] = []
         if query.urns:
             if len(query.urns) == 1:
-                conditions.append("n.urn = $urn0")
+                urn_conditions.append(f"{self._ident()} = $urn0")
                 params["urn0"] = query.urns[0]
             else:
                 params["urnList"] = query.urns
-                conditions.append("n.urn IN $urnList")
+                urn_conditions.append(f"{self._ident()} IN $urnList")
+            conditions.extend(urn_conditions)
 
         if query.tags:
             # Tags stored as JSON array string - match quoted tag in JSON
             params["tagVal"] = json.dumps(query.tags[0])
-            tag_cond = "(n.tags IS NOT NULL AND n.tags CONTAINS $tagVal)"
+            _tags = self._map.field("tags")
+            tag_cond = f"({_tags} IS NOT NULL AND {_tags} CONTAINS $tagVal)"
             conditions.append(tag_cond)
             if shared_conditions is not None:
                 shared_conditions.append(tag_cond)
 
         if query.search_query:
             params["search"] = query.search_query.lower()
-            search_cond = "(toLower(toString(n.displayName)) CONTAINS $search OR toLower(toString(n.urn)) CONTAINS $search)"
+            search_cond = (
+                f"(toLower(toString({self._map.name()})) CONTAINS $search "
+                f"OR toLower(toString({self._ident()})) CONTAINS $search)"
+            )
             conditions.append(search_cond)
             if shared_conditions is not None:
                 shared_conditions.append(search_cond)
@@ -3101,8 +3165,7 @@ class FalkorDBProvider(GraphDataProvider):
         # along as WHERE conditions. Pagination/order are applied in Python
         # over the merged, bounded result (the urn set IS the bound).
         if query.urns:
-            extra_conditions = [c for c in conditions
-                                if "n.urn " not in c and "n.urn=" not in c]
+            extra_conditions = [c for c in conditions if c not in urn_conditions]
             containment_rel_types = ""
             if include_child_count:
                 containment = list(self._get_containment_edge_types())
@@ -3111,7 +3174,8 @@ class FalkorDBProvider(GraphDataProvider):
 
             def _urn_cypher(label: str) -> str:
                 anchor = f"(n:{label})" if label else "(n)"
-                where = " AND ".join(["n.urn IN $urnList", *extra_conditions])
+                where = " AND ".join(
+                    [f"{self._ident()} IN $urnList", *extra_conditions])
                 base = f"MATCH {anchor} WHERE {where}"
                 if include_child_count and containment_rel_types:
                     return (f"{base} WITH n "
@@ -3762,8 +3826,8 @@ class FalkorDBProvider(GraphDataProvider):
         c_alt = "|".join(_sanitize_label(t) for t in containment if t)
         child_label = await self._get_cached_label(child_urn)
         c_anchor = (
-            f"(c:{_sanitize_label(child_label)} {{urn: $child}})"
-            if child_label else "(c {urn: $child})"
+            f"(c:{_sanitize_label(child_label)} {{{self._ident_key()}: $child}})"
+            if child_label else f"(c {{{self._ident_key()}: $child}})"
         )
         result = await self._ro_query(
             f"MATCH (p)-[r:{c_alt}]->{c_anchor} RETURN p",
@@ -4811,8 +4875,8 @@ class FalkorDBProvider(GraphDataProvider):
                             break
                         safe = _sanitize_label(lbl)
                         res = await self._ro_query(
-                            f"MATCH (n:{safe}) WHERE n.urn IN $urns "
-                            "RETURN n.urn AS u",
+                            f"MATCH (n:{safe}) WHERE {self._ident()} IN $urns "
+                            f"RETURN {self._ident()} AS u",
                             params={"urns": unresolved},
                         )
                         hit = {
@@ -4825,8 +4889,8 @@ class FalkorDBProvider(GraphDataProvider):
                 else:
                     # Label enumeration unavailable — legacy single scan.
                     res = await self._ro_query(
-                        "MATCH (n) WHERE n.urn IN $urns "
-                        "RETURN n.urn AS u, labels(n)[0] AS label",
+                        f"MATCH (n) WHERE {self._ident()} IN $urns "
+                        f"RETURN {self._ident()} AS u, labels(n)[0] AS label",
                         params={"urns": missing},
                     )
                 store_pipe = self._redis.pipeline(transaction=False)
@@ -5180,11 +5244,11 @@ class FalkorDBProvider(GraphDataProvider):
         hops = self._containment_hop_bound()
         urns = [source_urn, target_urn]
         prof = await self._ro_query(
-            f"MATCH (n) WHERE n.urn IN $urns "
+            f"MATCH (n) WHERE {self._ident()} IN $urns "
             f"OPTIONAL MATCH (n)-[:{c_pattern}]->(ch) "
             f"WITH n, count(ch) AS kids "
             f"OPTIONAL MATCH p = (a)-[:{c_pattern}*1..{hops}]->(n) "
-            f"RETURN n.urn, kids, coalesce(max(length(p)), 0)",
+            f"RETURN {self._ident()}, kids, coalesce(max(length(p)), 0)",
             params={"urns": urns},
         )
         profile: Dict[str, Tuple[bool, int]] = {}
@@ -5423,16 +5487,16 @@ class FalkorDBProvider(GraphDataProvider):
         for (s_lbl, t_lbl), items in by_label_pair.items():
             await self._proj_query(
                 "UNWIND $batch AS item "
-                f"MERGE (s:{s_lbl} {{urn: item.s}}) "
-                f"MERGE (t:{t_lbl} {{urn: item.t}}) "
+                f"MERGE (s:{s_lbl} {{{self._proj_ident_key()}: item.s}}) "
+                f"MERGE (t:{t_lbl} {{{self._proj_ident_key()}: item.t}}) "
                 + _SET_CLAUSE,
                 params={"batch": items, "edgeType": edge_type, "digest": digest},
             )
         if unlabeled_items:
             await self._proj_query(
                 "UNWIND $batch AS item "
-                "MERGE (s {urn: item.s}) "
-                "MERGE (t {urn: item.t}) "
+                f"MERGE (s {{{self._proj_ident_key()}: item.s}}) "
+                f"MERGE (t {{{self._proj_ident_key()}: item.t}}) "
                 + _SET_CLAUSE,
                 params={"batch": unlabeled_items, "edgeType": edge_type, "digest": digest},
             )
@@ -6190,9 +6254,9 @@ class FalkorDBProvider(GraphDataProvider):
                 anchor = f"(n:{label})" if label else "(n)"
                 for i in range(0, len(bucket), batch):
                     for row in await _run(
-                        f"MATCH {anchor} WHERE n.urn IN $urns "
+                        f"MATCH {anchor} WHERE {self._ident()} IN $urns "
                         f"OPTIONAL MATCH (n)-[:{c_pattern}]->(ch) "
-                        f"RETURN n.urn, count(ch)",
+                        f"RETURN {self._ident()}, count(ch)",
                         {"urns": bucket[i:i + batch]},
                     ):
                         if row and row[0]:
@@ -7475,8 +7539,8 @@ class FalkorDBProvider(GraphDataProvider):
         # _resolve_root_anchor (which itself falls back on failure).
         anchor_label = await self._get_cached_label(urn)
         f_anchor = (
-            f"(focus:{_sanitize_label(anchor_label)} {{urn: $urn}})"
-            if anchor_label else "(focus {urn: $urn})"
+            f"(focus:{_sanitize_label(anchor_label)} {{{self._ident_key()}: $urn}})"
+            if anchor_label else f"(focus {{{self._ident_key()}: $urn}})"
         )
         c_alt = "|".join(_sanitize_label(t) for t in ctypes if t)
         cypher = (
@@ -7525,8 +7589,8 @@ class FalkorDBProvider(GraphDataProvider):
         rel_alt = "|".join(dict.fromkeys(rel_parts))
         a_label = await self._get_cached_label(anchor_urn)
         a_anchor = (
-            f"(a:{_sanitize_label(a_label)} {{urn: $anchor}})"
-            if a_label else "(a {urn: $anchor})"
+            f"(a:{_sanitize_label(a_label)} {{{self._ident_key()}: $anchor}})"
+            if a_label else f"(a {{{self._ident_key()}: $anchor}})"
         )
 
         cypher = (
@@ -7591,8 +7655,8 @@ class FalkorDBProvider(GraphDataProvider):
         c_alt = "|".join(_sanitize_label(t) for t in ctypes if t)
         a_label = await self._get_cached_label(anchor_urn)
         a_anchor = (
-            f"(a:{_sanitize_label(a_label)} {{urn: $anchor}})"
-            if a_label else "(a {urn: $anchor})"
+            f"(a:{_sanitize_label(a_label)} {{{self._ident_key()}: $anchor}})"
+            if a_label else f"(a {{{self._ident_key()}: $anchor}})"
         )
         cypher = (
             f"MATCH {a_anchor}"
@@ -8010,13 +8074,13 @@ class FalkorDBProvider(GraphDataProvider):
         correctly at every depth; on aligned type-structured trees the
         children ARE the next type level, so behavior is unchanged."""
         cypher = (
-            "MATCH (a {urn: $source})-[c]->(child) "
+            f"MATCH (a {{{self._ident_key()}: $source}})-[c]->(child) "
             "WHERE type(c) IN $ctypes "
             "WITH DISTINCT child.urn AS urn "
             "LIMIT $limit "
             "RETURN 's' AS side, collect(urn) AS urns "
             "UNION "
-            "MATCH (b {urn: $target})-[c]->(child) "
+            f"MATCH (b {{{self._ident_key()}: $target}})-[c]->(child) "
             "WHERE type(c) IN $ctypes "
             "WITH DISTINCT child.urn AS urn "
             "LIMIT $limit "
@@ -8073,10 +8137,10 @@ class FalkorDBProvider(GraphDataProvider):
             # Empty containment — descendants of each anchor reduce to
             # the anchor itself, but only if its label matches.
             cypher = (
-                "MATCH (a {urn: $source}) WHERE labels(a)[0] IN $types "
+                f"MATCH (a {{{self._ident_key()}: $source}}) WHERE labels(a)[0] IN $types "
                 "RETURN 's' AS side, [a.urn] AS urns "
                 "UNION "
-                "MATCH (b {urn: $target}) WHERE labels(b)[0] IN $types "
+                f"MATCH (b {{{self._ident_key()}: $target}}) WHERE labels(b)[0] IN $types "
                 "RETURN 't' AS side, [b.urn] AS urns"
             )
             params: Dict[str, Any] = {
@@ -8103,12 +8167,12 @@ class FalkorDBProvider(GraphDataProvider):
             max_depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
             cypher = (
                 # Source — anchor itself
-                "MATCH (a {urn: $source}) "
+                f"MATCH (a {{{self._ident_key()}: $source}}) "
                 "WHERE labels(a)[0] IN $types "
                 "RETURN 's' AS side, [a.urn] AS urns "
                 "UNION "
                 # Source — descendants via 1..N containment hops
-                f"MATCH (a {{urn: $source}})-[c*1..{max_depth}]->(child) "
+                f"MATCH (a {{{self._ident_key()}: $source}})-[c*1..{max_depth}]->(child) "
                 "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
                 "  AND labels(child)[0] IN $types "
                 "WITH DISTINCT child.urn AS urn "
@@ -8116,12 +8180,12 @@ class FalkorDBProvider(GraphDataProvider):
                 "RETURN 's' AS side, collect(urn) AS urns "
                 "UNION "
                 # Target — anchor itself
-                "MATCH (b {urn: $target}) "
+                f"MATCH (b {{{self._ident_key()}: $target}}) "
                 "WHERE labels(b)[0] IN $types "
                 "RETURN 't' AS side, [b.urn] AS urns "
                 "UNION "
                 # Target — descendants via 1..N containment hops
-                f"MATCH (b {{urn: $target}})-[c*1..{max_depth}]->(child) "
+                f"MATCH (b {{{self._ident_key()}: $target}})-[c*1..{max_depth}]->(child) "
                 "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
                 "  AND labels(child)[0] IN $types "
                 "WITH DISTINCT child.urn AS urn "
@@ -8388,7 +8452,7 @@ class FalkorDBProvider(GraphDataProvider):
             anchor = f"(n:{label})" if label else "(n)"
             try:
                 res = await self._ro_query(
-                    f"MATCH {anchor} WHERE n.urn IN $urns RETURN n",
+                    f"MATCH {anchor} WHERE {self._ident()} IN $urns RETURN n",
                     params={"urns": bucket},
                     timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
                     op="nodes.batch",
@@ -8818,8 +8882,8 @@ class FalkorDBProvider(GraphDataProvider):
                 ("in", f"(n{lbl_frag})<-[r{rel_frag}]-()"),
             ):
                 cypher = (
-                    f"MATCH {pattern} WHERE n.urn IN $urns "
-                    "RETURN n.urn AS urn, count(r) AS c"
+                    f"MATCH {pattern} WHERE {self._ident()} IN $urns "
+                    f"RETURN {self._ident()} AS urn, count(r) AS c"
                 )
                 try:
                     result = await self._ro_query(
