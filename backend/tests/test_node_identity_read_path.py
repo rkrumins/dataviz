@@ -116,3 +116,134 @@ def test_quoting_cannot_break_out_of_the_backticks(hostile):
     quoted = quote_property(hostile)
     assert quoted.startswith("`") and quoted.endswith("`")
     assert "`" not in quoted[1:-1]
+
+
+# ── the full property mapping (MappedCypher) ──────────────────────────
+
+from backend.common.providers.identity import (  # noqa: E402
+    PLATFORM_OWNED_PROPERTIES, MappedCypher,
+)
+from backend.graph.adapters.schema_mapping import SchemaMapping  # noqa: E402
+
+
+def _mapped() -> MappedCypher:
+    return MappedCypher(SchemaMapping(
+        identity_field="id", display_name_field="title",
+        qualified_name_field="fqn", description_field="descr",
+        tags_field="labels",
+    ))
+
+
+def test_conforming_source_emits_canonical_cypher():
+    """The no-op contract: a source that maps nothing must produce exactly the
+    Cypher this provider emitted before any mapping existed."""
+    for m in (MappedCypher(None), MappedCypher(SchemaMapping())):
+        assert m.is_conforming
+        assert m.ident("n") == "n.`urn`"
+        assert m.name("n") == "n.`displayName`"
+        assert m.field("qualifiedName", "n") == "n.`qualifiedName`"
+
+
+def test_mapped_source_renders_its_own_property_names():
+    m = _mapped()
+    assert not m.is_conforming
+    assert m.ident("n") == "coalesce(n.`urn`, n.`id`)"
+    assert m.name("x") == "coalesce(x.`displayName`, x.`title`)"
+    assert m.field("qualifiedName", "n") == "n.`fqn`"
+    assert m.field("description", "t") == "t.`descr`"
+
+
+def test_ident_prop_is_the_index_seekable_form():
+    """`ident()` tolerates a half-stamped graph but cannot use an index;
+    `ident_prop()` is the bare access for predicates, MERGE keys and ORDER BY."""
+    m = _mapped()
+    assert m.ident_prop("n") == "n.`id`"
+    assert "coalesce" not in m.ident_prop("n")
+    assert MappedCypher(None).ident_prop("n") == "n.`urn`"
+
+
+@pytest.mark.parametrize("canonical", sorted(PLATFORM_OWNED_PROPERTIES))
+def test_platform_owned_properties_are_never_mapped(canonical):
+    """The platform invents these, so a foreign graph has no name for them.
+    Mapping one would send a query looking for a property nothing writes."""
+    assert _mapped().property_for(canonical) == canonical
+
+
+def test_hydration_maps_every_source_owned_field():
+    node = _node_from_props(
+        {"id": "n1", "title": "Orders", "fqn": "db.orders",
+         "descr": "desc", "labels": '["pii"]', "team": "data"},
+        "Table", None, None, _mapped(),
+    )
+    assert node.urn == "n1"
+    assert node.display_name == "Orders"
+    assert node.qualified_name == "db.orders"
+    assert node.description == "desc"
+    assert node.tags == ["pii"]
+
+
+def test_a_mapped_key_is_not_also_reported_as_a_user_property():
+    """`fqn` became `qualifiedName`. Leaving it in `properties` too would show
+    the same value twice in the Properties panel."""
+    node = _node_from_props(
+        {"id": "n1", "title": "Orders", "fqn": "db.orders", "team": "data"},
+        "Table", None, None, _mapped(),
+    )
+    assert node.properties == {"team": "data"}
+
+
+def test_platform_owned_values_still_hydrate_from_their_literal_names():
+    node = _node_from_props(
+        {"id": "n1", "title": "T", "layerAssignment": "L", "childCount": 3},
+        "Table", None, None, _mapped(),
+    )
+    assert node.layer_assignment == "L"
+    assert node.child_count == 3
+
+
+# ── composing the two halves of the mapping ───────────────────────────
+
+def _provider(extra_config=None):
+    """A bare provider instance — enough to exercise the mapping plumbing
+    without a connection."""
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    p = object.__new__(FalkorDBProvider)
+    p._graph_name = "g"
+    p._extra_config = extra_config
+    p._mapped = None
+    return p
+
+
+def test_provider_self_seeds_from_stored_schema_mapping():
+    """A provider configured the OLD way (extra_config.schemaMapping) is mapped
+    from its first query, before anything injects the scoped half."""
+    p = _provider({"schemaMapping": {"qualified_name_field": "fqn"}})
+    assert p._map.field("qualifiedName", "n") == "n.`fqn`"
+
+
+def test_scoped_identity_layers_over_stored_schema_mapping():
+    """The two halves come from different places — the scoped identity/name from
+    the four-scope resolver, everything else from provider config — and both
+    have to end up in one mapping."""
+    p = _provider({"schemaMapping": {"qualified_name_field": "fqn"}})
+    p.set_node_identity("id", "title")
+    assert p._map.ident_prop("n") == "n.`id`"
+    assert p._map.name("n") == "coalesce(n.`displayName`, n.`title`)"
+    assert p._map.field("qualifiedName", "n") == "n.`fqn`", "provider config must survive"
+
+
+def test_reset_restores_canonical_identity_but_keeps_provider_config():
+    """The 'always reset' contract clears the SCOPED half only. extra_config is
+    this provider's own configuration, not the previous job's leftovers."""
+    p = _provider({"schemaMapping": {"qualified_name_field": "fqn"}})
+    p.set_node_identity("id", "title")
+    p.set_node_identity(None, None)
+    assert p._map.ident("n") == "n.`urn`"
+    assert p._map.name("n") == "n.`displayName`"
+    assert p._map.field("qualifiedName", "n") == "n.`fqn`"
+
+
+def test_unreadable_extra_config_degrades_to_conforming():
+    p = _provider({"schemaMapping": "not a mapping"})
+    assert p._map.ident("n") == "n.`urn`"

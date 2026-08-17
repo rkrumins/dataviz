@@ -596,6 +596,7 @@ def _node_from_props(
     entity_type_str: Optional[str] = None,
     identity_property: Optional[str] = None,
     name_property: Optional[str] = None,
+    mapping: Optional[Any] = None,
 ) -> Optional[GraphNode]:
     """Build GraphNode from FalkorDB node properties.
 
@@ -605,6 +606,11 @@ def _node_from_props(
     hydrates correctly on the very next request, without waiting for an
     aggregation run to stamp ``urn`` onto its nodes — which is what a
     read-only source or a dedicated projection can never get.
+
+    ``mapping`` (a ``MappedCypher``) carries the REST of the source's property
+    mapping — qualified name, description, tags, entity type. It is optional and
+    layered under the two explicit arguments, which stay for the callers that
+    only ever knew about identity and name.
 
     Reconstructs the user `properties` dict from two layers, in
     increasing priority (later wins):
@@ -626,6 +632,21 @@ def _node_from_props(
     """
     if not props:
         return None
+    # Resolve each canonical field to the property this source actually uses.
+    # The two explicit arguments win so a caller that only knows about identity
+    # and name keeps its exact previous behaviour.
+    if mapping is not None:
+        identity_property = identity_property or mapping.identity_property
+        name_property = name_property or mapping.name_property
+
+    def _mapped(canonical: str):
+        """The source's value for a canonical field, canonical name first."""
+        value = props.get(canonical)
+        if value is not None or mapping is None:
+            return value
+        source_key = mapping.property_for(canonical)
+        return props.get(source_key) if source_key != canonical else None
+
     # Identity: the canonical `urn` when the node has one, else the source's
     # URN-equivalent. Before this fallback existed, EVERY node on an id-keyed
     # graph was dropped here — silently, one `return None` at a time — so the
@@ -635,7 +656,7 @@ def _node_from_props(
         urn = props.get(identity_property)
     if not urn:
         return None
-    entity_type = entity_type_str or props.get("entityType", "unknown")
+    entity_type = entity_type_str or _mapped("entityType") or "unknown"
 
     if "properties" in props:
         # Pre-refactor node still carries the legacy blob. Flag it once
@@ -654,9 +675,25 @@ def _node_from_props(
             )
             _logged_legacy_blob = True
 
+    # Keys the mapping has already consumed into a first-class GraphNode field.
+    # Without this, a source that names its qualified name `qname` would surface
+    # it BOTH as `qualifiedName` and again as a user property called `qname` —
+    # the same value twice, in two places, in the Properties panel.
+    consumed = set(_RESERVED_NODE_KEYS)
+    if mapping is not None:
+        for canonical in (
+            "urn", "displayName", "qualifiedName", "description", "tags",
+            "entityType", "sourceSystem", "lastSyncedAt",
+        ):
+            consumed.add(mapping.property_for(canonical))
+    if identity_property:
+        consumed.add(identity_property)
+    if name_property:
+        consumed.add(name_property)
+
     user_props: Dict[str, Any] = {}
     for k, v in props.items():
-        if k in _RESERVED_NODE_KEYS:
+        if k in consumed:
             continue
         user_props[k] = v
 
@@ -688,14 +725,21 @@ def _node_from_props(
                 or props.get("label")
                 or ""
             ),
-            qualifiedName=props.get("qualifiedName"),
-            description=props.get("description"),
+            qualifiedName=_mapped("qualifiedName"),
+            description=_mapped("description"),
             properties=user_props,
-            tags=json.loads(props["tags"]) if isinstance(props.get("tags"), str) else (props.get("tags") or []),
+            tags=(
+                json.loads(_mapped("tags"))
+                if isinstance(_mapped("tags"), str)
+                else (_mapped("tags") or [])
+            ),
+            # layerAssignment / childCount are PLATFORM-owned — the platform
+            # computes and writes them, so there is no source property to map
+            # them onto. See PLATFORM_OWNED_PROPERTIES.
             layerAssignment=props.get("layerAssignment"),
             childCount=props.get("childCount"),
-            sourceSystem=props.get("sourceSystem"),
-            lastSyncedAt=props.get("lastSyncedAt"),
+            sourceSystem=_mapped("sourceSystem"),
+            lastSyncedAt=_mapped("lastSyncedAt"),
         )
     except Exception as e:
         logger.warning(f"Failed to build GraphNode from props: {e}")
@@ -770,6 +814,11 @@ class FalkorDBProvider(GraphDataProvider):
         # — the cache resolves its own auth, never inherits the graph's.
         self._provider_id = provider_id
         self._extra_config = extra_config
+        # The source's property mapping, rendered as Cypher. Seeded from
+        # extra_config so a provider configured with a schemaMapping is mapped
+        # from its first query — before ContextEngine or the aggregation worker
+        # has had a chance to inject the scoped half via set_node_identity.
+        self._mapped = None
         merged_credentials = dict(credentials or {})
         if cache_redis_url and "cache_redis_url" not in merged_credentials:
             merged_credentials["cache_redis_url"] = cache_redis_url
@@ -2524,16 +2573,75 @@ class FalkorDBProvider(GraphDataProvider):
         omitting the call would leak the previous source's mapping into the
         next query. Passing ``None`` restores the platform defaults — that is a
         meaningful instruction, not a no-op.
+
+        The two arguments are the SCOPED half of the mapping (the part an
+        operator sets per data source / provider / workspace). The rest of the
+        source's property mapping — qualified name, description, tags, entity
+        type — comes from this provider's ``extra_config.schemaMapping``, which
+        is already provider+data-source merged by the time it reaches the
+        constructor. Both halves are composed here into the single
+        ``SchemaMapping`` every query builder reads through, so there is exactly
+        one answer to "what does this source call X".
         """
         from backend.app.services.node_identity import (
-            DEFAULT_IDENTITY_PROPERTY, DEFAULT_NAME_PROPERTY,
+            DEFAULT_IDENTITY_PROPERTY, DEFAULT_NAME_PROPERTY, ResolvedNodeIdentity,
         )
+        from backend.graph.adapters.schema_mapping import SchemaMapping
+
         self._node_identity_property = (
             str(identity_property).strip() if identity_property else ""
         ) or DEFAULT_IDENTITY_PROPERTY
         self._name_property = (
             str(name_property).strip() if name_property else ""
         ) or DEFAULT_NAME_PROPERTY
+
+        resolved = ResolvedNodeIdentity(
+            identity_property=self._node_identity_property,
+            name_property=self._name_property,
+        )
+        # `_extra_config` is already the merged provider+data-source config, so
+        # it goes in as the base with no second override to layer.
+        self.set_schema_mapping(
+            SchemaMapping.merge(self._extra_config, None, resolved)
+        )
+
+    def set_schema_mapping(self, mapping: Optional[Any]) -> None:
+        """Inject the source's full property mapping (a ``SchemaMapping``).
+
+        Wrapped in a ``MappedCypher`` once here rather than at each query
+        builder, so the ~40 methods that reference node properties share one
+        rendering of the mapping and one place where the platform-owned
+        exemption is applied. ``None`` means "this source conforms".
+        """
+        from backend.common.providers.identity import MappedCypher
+
+        self._mapped = MappedCypher(mapping)
+
+    @property
+    def _map(self):
+        """The source's mapping, as every query builder should reach it.
+
+        Self-seeding: a provider whose mapping was never injected still answers
+        from its own ``extra_config.schemaMapping``, so a query builder can call
+        ``self._map.ident("n")`` unconditionally without a `hasattr` dance and
+        without depending on injection order. An unmapped source yields the
+        canonical property, which is the Cypher this file has always emitted.
+        """
+        from backend.common.providers.identity import MappedCypher
+
+        if self._mapped is None:
+            from backend.graph.adapters.schema_mapping import SchemaMapping
+            try:
+                self._mapped = MappedCypher(
+                    SchemaMapping.from_extra_config(self._extra_config)
+                )
+            except Exception as exc:  # pragma: no cover - malformed stored config
+                logger.warning(
+                    "FalkorDB %s: unreadable schemaMapping (%s) — treating this "
+                    "source as conforming.", self._graph_name, exc,
+                )
+                self._mapped = MappedCypher(None)
+        return self._mapped
 
     def _alias_types(self, types, alias_attr: str):
         """Translate each declared/canonical type to the source's observed spelling(s)
@@ -2671,13 +2779,14 @@ class FalkorDBProvider(GraphDataProvider):
         cell = row[0] if isinstance(row, (list, tuple)) else row
         ident = getattr(self, "_node_identity_property", None)
         name_prop = getattr(self, "_name_property", None)
+        mapping = self._map
         if hasattr(cell, "properties"):
             props = cell.properties or {}
             labels = getattr(cell, "labels", None) or []
             entity_type = labels[0] if labels else props.get("entityType", "unknown")
-            return _node_from_props(props, entity_type, ident, name_prop)
+            return _node_from_props(props, entity_type, ident, name_prop, mapping)
         if isinstance(cell, dict):
-            return _node_from_props(cell, None, ident, name_prop)
+            return _node_from_props(cell, None, ident, name_prop, mapping)
         return None
 
     # ---- URN → label cache (Redis Hash) ----
