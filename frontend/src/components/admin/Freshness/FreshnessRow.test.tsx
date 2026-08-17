@@ -27,30 +27,10 @@ describe('automationChip', () => {
             .toBe('Automation off')
     })
 
-    it('names the cooldown holding a drifting source back', () => {
-        expect(automationChip({
-            driftState: 'drifting',
-            cooldownUntil: '2999-01-01T00:00:00+00:00',
-        })?.label).toBe('Held by cooldown')
-    })
-
-    it('says nothing about a cooldown on a healthy source', () => {
-        // A source that was just rebuilt is not a state worth interrupting
-        // the scan for — the cooldown only explains something when there is
-        // a finding it is holding back.
-        expect(automationChip({
-            driftState: 'inSync',
-            cooldownUntil: '2999-01-01T00:00:00+00:00',
-        })).toBeNull()
-    })
-
-    it('prefers a deliberate snooze over the throttle', () => {
-        // Same ordering as the server's hold reasons: the deliberate one wins.
-        expect(automationChip({
-            driftState: 'drifting',
-            pausedUntil: '2999-01-01T00:00:00+00:00',
-            cooldownUntil: '2999-01-01T00:00:00+00:00',
-        })?.label).toBe('Paused')
+    it('leaves the cooldown to FreshnessBadges rather than saying it twice', () => {
+        // "Next rebuild in Xm" already renders from this same `cooldownUntil`
+        // one column across, so a chip here would duplicate the signal.
+        expect(automationChip({ driftState: 'drifting' })).toBeNull()
     })
 
     it('prefers the opt-out over a snooze — Act stays off regardless of when the snooze lapses', () => {

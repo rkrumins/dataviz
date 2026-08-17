@@ -71,7 +71,7 @@ export function timeUntil(iso?: string | null): string | null {
  *  `Pick`, not the full row type, so the decision logic is testable with a
  *  bare literal (see FreshnessRow.test.tsx) rather than a fabricated row. */
 type AutomationRow = Pick<
-    FreshnessRowData, 'driftState' | 'autoReconcile' | 'pausedUntil' | 'cooldownUntil'
+    FreshnessRowData, 'driftState' | 'autoReconcile' | 'pausedUntil'
 >
 
 /**
@@ -131,14 +131,9 @@ export function automationChip(row: AutomationRow): {
             title: 'An operator paused automatic reconciliation for this source.',
         }
     }
-    if (drifting && timeUntil(row.cooldownUntil)) {
-        return {
-            label: 'Held by cooldown', tone: neutralTone, facet: 'drifting',
-            Icon: Clock,
-            title: 'A rebuild ran recently, so the next one waits for the '
-                + 'minimum time between rebuilds to pass.',
-        }
-    }
+    // No cooldown chip here on purpose: FreshnessBadges already renders
+    // "Next rebuild in Xm" from the same `cooldownUntil` on this row, so a
+    // chip would be the same fact twice, one column apart.
     return null
 }
 
