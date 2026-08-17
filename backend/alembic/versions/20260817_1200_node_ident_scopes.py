@@ -31,7 +31,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "20260817_1200_node_ident_scopes"
-down_revision: Union[str, None] = "20260802_1000_open_publishing"
+down_revision: Union[str, None] = "20260802_1000_open_publish"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
