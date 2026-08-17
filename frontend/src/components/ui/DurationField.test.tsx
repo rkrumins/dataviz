@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
@@ -51,6 +52,41 @@ describe('DurationField', () => {
         )
         await userEvent.click(screen.getByRole('button', { name: '5m' }))
         expect(onChange).toHaveBeenCalledWith(300)
+    })
+
+    it('emits the typed number from the free-text box', async () => {
+        // Driven through a real owner: a multi-digit entry only accumulates if
+        // the field is genuinely controlled, and every other test here drives
+        // it by prop or preset, so nothing else would notice if it were not.
+        const onChange = vi.fn()
+        function Owner() {
+            const [v, setV] = useState<number | null>(null)
+            return (
+                <DurationField
+                    value={v} presets={PRESETS} defaultSecs={60}
+                    label="Look for changes every"
+                    onChange={(n) => { setV(n); onChange(n) }}
+                />
+            )
+        }
+        render(<Owner />)
+
+        await userEvent.type(screen.getByLabelText(/custom, seconds/i), '45')
+        expect(onChange).toHaveBeenLastCalledWith(45)
+    })
+
+    it('clearing the free-text box means "default", not zero', async () => {
+        // The invariant the whole control rests on: null and 0 are different
+        // answers, and an emptied box is the null one.
+        const onChange = vi.fn()
+        render(
+            <DurationField
+                value={45} onChange={onChange} presets={PRESETS}
+                defaultSecs={60} label="Look for changes every"
+            />,
+        )
+        await userEvent.clear(screen.getByLabelText(/custom, seconds/i))
+        expect(onChange).toHaveBeenCalledWith(null)
     })
 
     it('distinguishes an explicit 0 from the default', () => {
