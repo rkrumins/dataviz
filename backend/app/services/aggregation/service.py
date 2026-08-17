@@ -3786,12 +3786,16 @@ async def save_reconcile_policy(
 
     Read-modify-write on the SAME column the rebuild cadence lives in, so a
     reconciliation save must not clobber ``rebuildMinIntervalSecs`` or
-    ``driftAutoRebuild`` — hence the merge rather than a replace.
+    ``driftAutoRebuild`` — hence the merge, and the row lock: two concurrent
+    writers merging against the same snapshot would silently drop one
+    another's fields (no-op on SQLite, ``FOR UPDATE`` on Postgres).
     """
     from .models import AggregationSettingsORM
     from .schemas import AggregationCadence
 
-    row = await session.get(AggregationSettingsORM, "global")
+    row = await session.get(
+        AggregationSettingsORM, "global", with_for_update=True,
+    )
     if row is None:
         row = AggregationSettingsORM(id="global")
         session.add(row)

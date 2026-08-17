@@ -159,21 +159,36 @@ async def test_clearing_a_probe_override_falls_back(session_factory):
 
 def test_a_non_iso_pause_is_rejected_at_the_boundary():
     """``_pause_active`` reads an unparseable stamp as expired, so storing one
-    would be a snooze that silently does nothing — reject it on the way in."""
+    would be a snooze that silently does nothing — reject it on the way in.
+    A past instant (already expired on arrival) and a beyond-90-days one (a
+    permanent hold wearing a time-boxed name) are the same class of lie, and
+    a naive stamp is coerced to the UTC the reader compares against."""
     import pydantic
+    from datetime import datetime, timedelta, timezone
 
     from backend.app.services.aggregation.schemas import FreshnessSettingsRequest
 
     with pytest.raises(pydantic.ValidationError):
         FreshnessSettingsRequest(pausedUntil="tomorrow")
+    with pytest.raises(pydantic.ValidationError):
+        FreshnessSettingsRequest(pausedUntil="2020-01-01T00:00:00+00:00")
+    with pytest.raises(pydantic.ValidationError):
+        FreshnessSettingsRequest(pausedUntil="2999-01-01T00:00:00+00:00")
 
-    # The real thing still round-trips, in both spellings the UI can send.
+    # The real thing round-trips in every spelling the UI can send —
+    # normalized to the aware +00:00 form the reader compares against.
+    until = (
+        datetime.now(timezone.utc) + timedelta(days=1)
+    ).replace(microsecond=0)
     assert FreshnessSettingsRequest(
-        pausedUntil="2026-08-17T18:00:00+00:00",
-    ).paused_until == "2026-08-17T18:00:00+00:00"
+        pausedUntil=until.isoformat(),
+    ).paused_until == until.isoformat()
     assert FreshnessSettingsRequest(
-        pausedUntil="2026-08-17T18:00:00Z",
-    ).paused_until == "2026-08-17T18:00:00Z"
+        pausedUntil=until.isoformat().replace("+00:00", "Z"),
+    ).paused_until == until.isoformat()
+    assert FreshnessSettingsRequest(
+        pausedUntil=until.replace(tzinfo=None).isoformat(),
+    ).paused_until == until.isoformat()
 
 
 @pytest.mark.asyncio
@@ -212,8 +227,12 @@ async def test_pause_round_trips_and_an_explicit_null_clears_it(
         ))
         await s.commit()
 
+    from datetime import datetime, timedelta, timezone
+
     svc = AggregationService.__new__(AggregationService)
-    until = "2026-08-17T18:00:00+00:00"
+    until = (
+        datetime.now(timezone.utc) + timedelta(days=1)
+    ).replace(microsecond=0).isoformat()
 
     # ``request`` is only read on the proxy branch, which is off here.
     async with session_factory() as s:

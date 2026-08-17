@@ -558,14 +558,28 @@ class ReconciliationSweeper:
                     state, ctx_row, verdict, acted=True,
                 ))
 
+            await session.commit()  # releases the advisory lock
+
+            # Notifications AFTER the lock-releasing commit. They are
+            # best-effort fan-out over other domains' tables; inside the
+            # locked transaction a repo failure rolled back — or, on
+            # Postgres, poisoned — every state write of the pass.
             if suspend_notices:
                 from backend.app.db.repositories.notification_repo import (
                     notify_reconcile_suspended,
                 )
-                for notice in suspend_notices:
-                    await notify_reconcile_suspended(session, **notice)
-
-            await session.commit()  # releases the advisory lock
+                try:
+                    for notice in suspend_notices:
+                        await notify_reconcile_suspended(session, **notice)
+                    await session.commit()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "reconcile sweep: suspension notification failed "
+                        "(%s) — the suspended state itself is committed",
+                        exc,
+                    )
         return actions, nudges
 
     async def _live_observe_counts(

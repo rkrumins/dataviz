@@ -1266,6 +1266,35 @@ async def test_transition_into_suspended_notifies_once(
 
 
 @pytest.mark.asyncio
+async def test_notify_failure_does_not_fail_the_sweep(
+    session_factory, monkeypatch,
+):
+    """The fan-out runs after the locked commit and is best-effort: a
+    notification-repo failure must not roll back (or poison) the pass's
+    state writes."""
+    async def _boom(session, **kw):
+        raise RuntimeError("notification store down")
+
+    monkeypatch.setattr(
+        "backend.app.db.repositories.notification_repo.notify_reconcile_suspended",
+        _boom,
+    )
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 200},
+        consecutive=3,
+    )
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+    assert result is not None
+    assert result.by_skip == {"suspended": 1}
+    st = await _state(session_factory)
+    assert st.drift_state == "suspended"           # the state write survived
+    assert st.last_reconcile_checked_at is not None
+
+
+@pytest.mark.asyncio
 async def test_notify_dedupes_unread_same_kind_and_resource(session_factory):
     from backend.app.db.models import NotificationORM
     from backend.app.db.repositories.notification_repo import notify
