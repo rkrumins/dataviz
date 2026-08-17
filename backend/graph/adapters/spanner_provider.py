@@ -660,6 +660,25 @@ class SpannerProvider(GraphDataProvider):
     def set_entity_type_levels(self, mapping: Dict[str, int]) -> None:
         self._entity_type_levels = dict(mapping or {})
 
+    def set_node_identity(
+        self,
+        identity_property: Optional[str] = None,
+        name_property: Optional[str] = None,
+    ) -> None:
+        """Apply the resolved node-identity mapping to this provider's
+        ``SchemaMapping`` — see the Neo4j implementation for why both stores
+        now feed one resolver. Only explicit mappings are applied, so a source
+        that configured nothing keeps this adapter's own defaults."""
+        from backend.app.services.node_identity import (
+            DEFAULT_IDENTITY_PROPERTY, DEFAULT_NAME_PROPERTY,
+        )
+        identity = (identity_property or "").strip()
+        name = (name_property or "").strip()
+        if identity and identity != DEFAULT_IDENTITY_PROPERTY:
+            self._schema_mapping.identity_field = identity
+        if name and name != DEFAULT_NAME_PROPERTY:
+            self._schema_mapping.display_name_field = name
+
     def set_resolved_edge_metadata(
         self,
         edge_type_metadata: Dict[str, Any],

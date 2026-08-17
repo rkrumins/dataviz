@@ -140,7 +140,7 @@ def test_legacy_schema_mapping_is_read_as_the_provider_level():
     prov = ProviderORM(
         id="prov_x", name="p", provider_type="neo4j",
         extra_config=json.dumps(
-            {"schemaMapping": {"identityField": "uuid", "displayNameField": "title"}}
+            {"schemaMapping": {"identity_field": "uuid", "display_name_field": "title"}}
         ),
     )
     assert provider_identity_from_extra_config(prov) == ("uuid", "title")
@@ -152,7 +152,7 @@ def test_legacy_schema_mapping_defaults_are_treated_as_unset():
     prov = ProviderORM(
         id="prov_x", name="p", provider_type="neo4j",
         extra_config=json.dumps(
-            {"schemaMapping": {"identityField": "urn", "displayNameField": "displayName"}}
+            {"schemaMapping": {"identity_field": "urn", "display_name_field": "displayName"}}
         ),
     )
     assert provider_identity_from_extra_config(prov) == (None, None)
@@ -218,7 +218,7 @@ async def test_load_data_source_overrides_provider(db_session: AsyncSession):
 
 async def test_load_uses_provider_legacy_schema_mapping(db_session: AsyncSession):
     await _seed(db_session, prov={"extra_config": json.dumps(
-        {"schemaMapping": {"identityField": "uuid"}})})
+        {"schemaMapping": {"identity_field": "uuid"}})})
     r = await load_node_identity(db_session, "ds_ni")
     assert (r.identity_property, r.identity_source) == ("uuid", SOURCE_PROVIDER)
 
@@ -226,7 +226,7 @@ async def test_load_uses_provider_legacy_schema_mapping(db_session: AsyncSession
 async def test_load_column_wins_over_legacy_schema_mapping(db_session: AsyncSession):
     await _seed(db_session, prov={
         "identity_property": "id",
-        "extra_config": json.dumps({"schemaMapping": {"identityField": "uuid"}}),
+        "extra_config": json.dumps({"schemaMapping": {"identity_field": "uuid"}}),
     })
     r = await load_node_identity(db_session, "ds_ni")
     assert r.identity_property == "id"

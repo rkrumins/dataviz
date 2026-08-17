@@ -586,8 +586,20 @@ def _sanitize_node_properties(payload: Optional[Dict[str, Any]]) -> Optional[Dic
     return {**payload, "properties": clean}
 
 
-def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = None) -> Optional[GraphNode]:
+def _node_from_props(
+    props: Dict[str, Any],
+    entity_type_str: Optional[str] = None,
+    identity_property: Optional[str] = None,
+    name_property: Optional[str] = None,
+) -> Optional[GraphNode]:
     """Build GraphNode from FalkorDB node properties.
+
+    ``identity_property`` / ``name_property`` are the source's resolved
+    node-identity mapping (see ``backend.app.services.node_identity``). They
+    make this function the READ-TIME half of the mapping: an id-keyed graph
+    hydrates correctly on the very next request, without waiting for an
+    aggregation run to stamp ``urn`` onto its nodes — which is what a
+    read-only source or a dedicated projection can never get.
 
     Reconstructs the user `properties` dict from two layers, in
     increasing priority (later wins):
@@ -607,7 +619,16 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
     A one-time WARNING surfaces if such a node is observed so the
     operator knows to run the migration.
     """
-    if not props or "urn" not in props:
+    if not props:
+        return None
+    # Identity: the canonical `urn` when the node has one, else the source's
+    # URN-equivalent. Before this fallback existed, EVERY node on an id-keyed
+    # graph was dropped here — silently, one `return None` at a time — so the
+    # canvas showed an empty graph and the mapping looked like it did nothing.
+    urn = props.get("urn")
+    if not urn and identity_property and identity_property != "urn":
+        urn = props.get(identity_property)
+    if not urn:
         return None
     entity_type = entity_type_str or props.get("entityType", "unknown")
 
@@ -645,16 +666,18 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
 
     try:
         return GraphNode(
-            urn=props["urn"],
+            urn=str(urn),
             entityType=str(entity_type),
             # Onboarded third-party graphs often store the human name under
             # `name`/`title`/`label` rather than the platform's `displayName`,
-            # which would otherwise render a BLANK node label. Fall back through
-            # the common keys. A source with a truly custom name property sets
-            # its `name_property`, which the aggregation stamp copies onto
-            # `displayName` server-side (see stamp_identity_urns).
+            # which would otherwise render a BLANK node label. The source's
+            # CONFIGURED name property goes first — that is the operator
+            # telling us where the name lives, and it is the only thing that
+            # can find a name under a key this list could never guess. The
+            # common keys stay as the fallback for unmapped sources.
             displayName=(
                 props.get("displayName")
+                or (props.get(name_property) if name_property else None)
                 or props.get("name")
                 or props.get("title")
                 or props.get("label")
@@ -2441,6 +2464,34 @@ class FalkorDBProvider(GraphDataProvider):
         self._source_entity_aliases: Dict[str, List[str]] = {
             str(k).upper(): [str(s) for s in v] for k, v in (entity_aliases or {}).items()}
 
+    def set_node_identity(
+        self,
+        identity_property: Optional[str] = None,
+        name_property: Optional[str] = None,
+    ) -> None:
+        """Per-source node-identity mapping: which physical property plays the
+        role of ``urn``, and which holds the human name.
+
+        Resolved across all four scopes by
+        ``backend.app.services.node_identity`` and injected here by the
+        aggregation worker (before materialization) and by ``ContextEngine``
+        (before any read). Same "ALWAYS RESET" contract as
+        :meth:`set_source_type_aliases`, and for the same reason: provider
+        instances are cached and shared per ``(provider_id, graph_name)``, so
+        omitting the call would leak the previous source's mapping into the
+        next query. Passing ``None`` restores the platform defaults — that is a
+        meaningful instruction, not a no-op.
+        """
+        from backend.app.services.node_identity import (
+            DEFAULT_IDENTITY_PROPERTY, DEFAULT_NAME_PROPERTY,
+        )
+        self._node_identity_property = (
+            str(identity_property).strip() if identity_property else ""
+        ) or DEFAULT_IDENTITY_PROPERTY
+        self._name_property = (
+            str(name_property).strip() if name_property else ""
+        ) or DEFAULT_NAME_PROPERTY
+
     def _alias_types(self, types, alias_attr: str):
         """Translate each declared/canonical type to the source's observed spelling(s)
         via the injected alias map; identity when there's no alias (governed graphs,
@@ -2575,13 +2626,15 @@ class FalkorDBProvider(GraphDataProvider):
         if not row:
             return None
         cell = row[0] if isinstance(row, (list, tuple)) else row
+        ident = getattr(self, "_node_identity_property", None)
+        name_prop = getattr(self, "_name_property", None)
         if hasattr(cell, "properties"):
             props = cell.properties or {}
             labels = getattr(cell, "labels", None) or []
             entity_type = labels[0] if labels else props.get("entityType", "unknown")
-            return _node_from_props(props, entity_type)
+            return _node_from_props(props, entity_type, ident, name_prop)
         if isinstance(cell, dict):
-            return _node_from_props(cell)
+            return _node_from_props(cell, None, ident, name_prop)
         return None
 
     # ---- URN → label cache (Redis Hash) ----

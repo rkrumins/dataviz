@@ -280,16 +280,16 @@ class AggregationWorker:
                 # a fresh cache namespace — no manual invalidation needed.
                 provider.set_containment_edge_types(containment_types)
 
-                # Inject the frozen node-identity property so the provider's
+                # Inject the frozen node-identity mapping so the provider's
                 # directory build resolves endpoints as
-                # coalesce(n.urn, n[identity_property]). Default "urn" is a
-                # no-op (the historical hardcoded behaviour). Set as a plain
-                # attribute the provider reads at directory-build time.
-                try:
-                    provider._node_identity_property = identity_property
-                    provider._name_property = name_property
-                except Exception:
-                    pass
+                # coalesce(n.urn, n[identity_property]) and the conformance
+                # stamp knows which properties to fill from. Defaults are a
+                # no-op (the historical hardcoded behaviour). Unconditional —
+                # the provider is cached and shared per (provider_id,
+                # graph_name), so an unset call would leave the PREVIOUS job's
+                # mapping in place.
+                if hasattr(provider, "set_node_identity"):
+                    provider.set_node_identity(identity_property, name_property)
 
                 # Per-source vocabulary alignment (Task E): the frozen containment/lineage
                 # types carry the ontology's DECLARED casing, but this graph may spell them
@@ -865,21 +865,21 @@ class AggregationWorker:
         job.lineage_edge_types = json.dumps(lineage_types)
         if hasattr(job, "entity_type_levels"):
             job.entity_type_levels = json.dumps(levels)
-        # Re-derive the node-identity property from the DATA SOURCE too (identity
-        # is a per-source property, not an ontology one). Without this, a
-        # legacy/partial row on an id-keyed source would self-heal its edge types
-        # yet keep identity_property NULL → "urn", so the urn stamp/directory
-        # would still drop every id-keyed node — an asymmetric half-heal.
+        # Re-derive the node-identity property from the SOURCE's scope chain too
+        # (identity is a per-source property, not an ontology one). Without
+        # this, a legacy/partial row on an id-keyed source would self-heal its
+        # edge types yet keep identity_property NULL → "urn", so the urn
+        # stamp/directory would still drop every id-keyed node — an asymmetric
+        # half-heal.
         if hasattr(job, "identity_property"):
             try:
-                from backend.app.db.models import WorkspaceDataSourceORM
-                ds = await session.get(WorkspaceDataSourceORM, job.data_source_id)
-                if ds is not None:
-                    job.identity_property = getattr(ds, "identity_property", None) or "urn"
-                    # Display-name property is per-source too — re-derive it in
-                    # the same pass so the label stamp heals symmetrically.
-                    if hasattr(job, "name_property"):
-                        job.name_property = getattr(ds, "name_property", None) or "name"
+                from backend.app.services.node_identity import load_node_identity
+                identity = await load_node_identity(session, job.data_source_id)
+                job.identity_property = identity.identity_property
+                # Display-name property is per-source too — re-derive it in
+                # the same pass so the label stamp heals symmetrically.
+                if hasattr(job, "name_property"):
+                    job.name_property = identity.name_property
             except Exception as exc:
                 logger.warning(
                     "Aggregation job %s: identity_property re-derive failed "

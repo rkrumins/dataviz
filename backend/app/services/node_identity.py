@@ -207,10 +207,18 @@ def provider_identity_from_extra_config(provider: Any) -> tuple[Optional[str], O
     if not isinstance(mapping, dict):
         return None, None
 
-    identity = _clean(mapping.get("identityField"))
+    # Persisted keys are snake_case — ``SchemaMapping`` is a plain Pydantic
+    # model with no aliases, and the provider wizard writes ``identity_field``.
+    # The camelCase spellings are accepted too so a hand-edited config or a
+    # future alias-enabled model does not read as "unset".
+    identity = _clean(
+        mapping.get("identity_field") or mapping.get("identityField")
+    )
     if identity == DEFAULT_IDENTITY_PROPERTY:
         identity = None
-    name = _clean(mapping.get("displayNameField"))
+    name = _clean(
+        mapping.get("display_name_field") or mapping.get("displayNameField")
+    )
     if name in ("displayName", DEFAULT_NAME_PROPERTY):
         name = None
     return identity, name

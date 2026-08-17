@@ -1,6 +1,6 @@
 """Node-identity mapping at provider, workspace and platform scope.
 
-Revision ID: 20260817_1200_node_identity_scopes
+Revision ID: 20260817_1200_node_ident_scopes
 Revises: 20260802_1000_open_publishing
 Create Date: 2026-08-17 12:00
 
@@ -30,7 +30,7 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "20260817_1200_node_identity_scopes"
+revision: str = "20260817_1200_node_ident_scopes"
 down_revision: Union[str, None] = "20260802_1000_open_publishing"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
