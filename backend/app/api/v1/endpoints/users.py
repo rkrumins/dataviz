@@ -500,6 +500,41 @@ async def _revoke_my_every_session(
     clear_session_cookies(response, request)
 
 
+async def _suspend_and_revoke(
+    session: AsyncSession, user_id: str, *, reason: str,
+) -> int:
+    """Flip a user to ``suspended`` and kill their live sessions.
+
+    One operation, not two, and it exists as a helper so it cannot be
+    half-done. Suspension is currently enforced on the read side:
+    ``validate_session`` (``auth_service/service.py:222``) loads the
+    user on **every authenticated request** and refuses anything whose
+    status is not ``active``. So today the revocation below is
+    belt-and-braces — it adds the ``user.session_revoked`` audit trail
+    and the permissions-changed signal, and takes nothing away.
+
+    What makes it worth having is what happens when that per-request
+    read goes away. Caching identity alongside the session claims in
+    Redis is the single biggest per-request saving available, and the
+    moment it lands, a status column nobody reads stops enforcing
+    anything: the tombstone this writes becomes the enforcement, and it
+    is already on the same pipelined call the request makes anyway.
+    Adding the cache first would have opened a TTL-length window in
+    which a suspended user keeps working, with nothing failing visibly
+    to say so.
+
+    Ordering matches ``change_role``: write the status, then revoke.
+    Revocation is best-effort by design and returns 0 rather than
+    raising, so it must not be what a suspension depends on completing.
+    """
+    from backend.app.services.revocation_service import revoke_subject_sessions
+
+    await user_repo.update_user_status(session, user_id, "suspended")
+    return await revoke_subject_sessions(
+        "user", user_id, session=session, reason=reason,
+    )
+
+
 # ── Admin routes ───────────────────────────────────────────────────────
 
 admin_router = APIRouter()
@@ -567,7 +602,12 @@ async def reject_user(
 
     reason = body.rejection_reason if body else None
 
-    await user_repo.update_user_status(session, user_id, "suspended")
+    # ``reason`` above is the admin's free-text explanation for the
+    # rejection; the revocation reason is a fixed machine code that
+    # lands in the audit event. Deliberately not the same string.
+    revoked = await _suspend_and_revoke(
+        session, user_id, reason="user_rejected",
+    )
     await user_repo.resolve_approval(
         session, user_id,
         status="rejected",
@@ -578,7 +618,12 @@ async def reject_user(
     await user_repo.create_outbox_event(
         session,
         event_type="user.rejected",
-        payload={"user_id": user_id, "rejected_by": admin.id, "reason": reason},
+        payload={
+            "user_id": user_id,
+            "rejected_by": admin.id,
+            "reason": reason,
+            "sessions_revoked": revoked,
+        },
     )
 
     logger.info("User %s rejected by %s", user_id, admin.id)
@@ -736,15 +781,24 @@ async def suspend_user(
     if user.status == "suspended":
         raise HTTPException(status_code=409, detail="User is already suspended")
 
-    await user_repo.update_user_status(session, user_id, "suspended")
+    revoked = await _suspend_and_revoke(
+        session, user_id, reason="user_suspended",
+    )
 
     await user_repo.create_outbox_event(
         session,
         event_type="user.suspended",
-        payload={"user_id": user_id, "suspended_by": admin.id},
+        payload={
+            "user_id": user_id,
+            "suspended_by": admin.id,
+            "sessions_revoked": revoked,
+        },
     )
 
-    logger.info("User %s suspended by %s", user_id, admin.id)
+    logger.info(
+        "User %s suspended by %s (sessions killed: %d)",
+        user_id, admin.id, revoked,
+    )
     return {"detail": "User suspended"}
 
 
