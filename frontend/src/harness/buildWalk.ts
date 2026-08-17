@@ -15,7 +15,6 @@
 import { boundaryFrontierFilter, buildLensSubgraph, distinctSystemCount } from '@/components/canvas/context-view/lens/lens-subgraph'
 import { buildFocusLayout, initialLensViewState } from '@/components/canvas/context-view/lens/focus-layout'
 import { applyCondensation } from '@/components/canvas/context-view/lens/condensation'
-import { walkNeighborRecords } from '@/components/canvas/context-view/LineageLens'
 import type { WalkFixture } from './lensFixtures'
 
 export function buildWalk(fixture: WalkFixture) {
@@ -45,16 +44,6 @@ export function buildWalk(fixture: WalkFixture) {
   return {
     graph,
     focalId: sg.focusUrn,
-    // T23 R3 — the hub-triage list's data source, straight off the walk
-    // model; `fixture.triageAnchor` (a still picture's only way to show
-    // a panel that only ever opens from a click) resolves against THIS
-    // graph's own cards below.
-    partnersFor: (urn: string, dir: 'in' | 'out') =>
-      walkNeighborRecords(sg, urn)[dir === 'in' ? 'incoming' : 'outgoing'],
-    // T23 R3 — pre-opens the triage panel for a still shot; `undefined`
-    // (no click possible without a live app) leaves it closed, same as
-    // every other fixture.
-    triageAnchor: fixture.triageAnchor ?? null,
     directionFilter: fixture.directionFilter,
     selectedId: fixture.selectedId ?? null,
     isolatedId: fixture.isolatedId ?? null,

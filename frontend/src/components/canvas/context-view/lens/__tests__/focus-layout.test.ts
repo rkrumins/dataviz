@@ -2111,7 +2111,7 @@ describe('focus-layout — isolationCone (what one element\'s lineage covers)', 
     const edge = (id: string, source: string, target: string): FocusEdge =>
         ({
             id, source, target, count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false, cycleAnchor: false, labelVisible: false,
-            grainCoarse: false, sameAncestorFrame: null, inFrameLane: null, internalQuiet: false, labelT: 0.5, seamSlotted: false,
+            grainCoarse: false, sameAncestorFrame: null, inFrameLane: null, labelT: 0.5, seamSlotted: false,
         })
     const card = (id: string, frameId: string | null = null): FocusCard =>
         ({ ...({} as FocusCard), id, nodeId: id, frameId, kind: 'entity' })
@@ -2374,7 +2374,7 @@ describe('focus-layout — the grain seam (R1)', () => {
             ({
                 id, source, target, count: 1, edgeTypeNorm: '', dimmed: false,
                 cycleBack: false, cycleAnchor: false, labelVisible: false,
-                grainCoarse, sameAncestorFrame: null, inFrameLane: null, internalQuiet: false, labelT: 0.5, seamSlotted: false,
+                grainCoarse, sameAncestorFrame: null, inFrameLane: null, labelT: 0.5, seamSlotted: false,
             })
         // MKT → IOT lands on IoT's OWN frame — nothing to do with TXN,
         // one of IoT's rows, specifically.
@@ -2438,7 +2438,7 @@ describe('focus-layout — the grain seam (R1)', () => {
             ({
                 id, source, target, count: 1, edgeTypeNorm: '', dimmed: false,
                 cycleBack: false, cycleAnchor: false, labelVisible: false,
-                grainCoarse, sameAncestorFrame: null, inFrameLane: null, internalQuiet: false, labelT: 0.5, seamSlotted: false,
+                grainCoarse, sameAncestorFrame: null, inFrameLane: null, labelT: 0.5, seamSlotted: false,
             })
         // COL ⊂ TABLE ⊂ SCHEMA ⊂ DATABASE — four containment levels.
         // TABLE (the anchor's OWN immediate frame — the one true seam)
@@ -2480,7 +2480,7 @@ describe('focus-layout — the grain seam (R1)', () => {
             ({
                 id, source, target, count: 1, edgeTypeNorm: '', dimmed: false,
                 cycleBack: false, cycleAnchor: false, labelVisible: false,
-                grainCoarse, sameAncestorFrame: null, inFrameLane: null, internalQuiet: false, labelT: 0.5, seamSlotted: false,
+                grainCoarse, sameAncestorFrame: null, inFrameLane: null, labelT: 0.5, seamSlotted: false,
             })
         // TABLE (the anchor's own seam host) has no coarse bundle of its
         // own; only SCHEMA, one level further up, does. Before the fix

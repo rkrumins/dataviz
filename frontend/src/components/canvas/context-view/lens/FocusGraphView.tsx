@@ -50,7 +50,7 @@
  * The viewport re-frames on FOCAL change only: expanding grows the
  * picture in place instead of yanking it away from what you opened.
  */
-import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type UIEvent } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -81,7 +81,7 @@ import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
-import { CARD_W, BAND_GAP, FRAME_FOOTER_H, FRAME_PAD, headerHeight, holdsRows, labelFitsRun, frameWindow, edgeLabelFor, orientationHalf, type EdgeTypeInfoMap, type FocusCard, type FocusEdge, type FocusGraph, type FocusPill, type LensReach, type TriagePartner } from './focus-cards'
+import { CARD_W, BAND_GAP, FRAME_FOOTER_H, FRAME_PAD, headerHeight, holdsRows, labelFitsRun, frameWindow, edgeLabelFor, orientationHalf, type EdgeTypeInfoMap, type FocusCard, type FocusEdge, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
 import { REVEAL_PAGE, isolationCone, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
@@ -130,11 +130,9 @@ const ReachContext = createContext<LensReach | null>(null)
  * threading it through `edge.data` would put a FUNCTION in data React
  * Flow diffs on every rebuild. `onCondenseRun` (T23 R2) rides the same
  * context for the identical reason — a condensed run's own connector
- * chip lives on an edge too. `onOpenTriage` (T23 R3 fix round 1) rides
- * it for the same reason again — the grain seam's own "trace columns"
- * chip has no `CardCtx` either, only whichever edge it is showing on.
+ * chip lives on an edge too.
  */
-const FollowContext = createContext<Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage' | 'onCondenseRun' | 'onOpenTriage' | 'partnersFor'>>({})
+const FollowContext = createContext<Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage' | 'onCondenseRun'>>({})
 /**
  * ISOLATION — the visible lineage cone of whatever the reader is
  * pointing at (see `isolationCone` in focus-layout.ts), and the one
@@ -470,17 +468,10 @@ interface CardCtx {
   /** T23 R2 — fold a currently-unfolded run back (the boundary card's
    *  own re-condense control). */
   onCondenseRun?: (connectorId: string) => void
-  /** T23 R3 — a follow control's own partners, weight-sorted, straight
-   *  off the walk model (never a fetch) — the hub-triage list's data. */
-  partnersFor?: (urn: string, dir: 'in' | 'out') => TriagePartner[]
   /** T23 R3 — place one or more specific urns on the board, bypassing
-   *  rank and the reveal budget (a triage-list row click, or "Show top
-   *  12"). Persists — a placement is a full citizen from then on. */
+   *  rank and the reveal budget. Persists — a placement is a full
+   *  citizen from then on. */
   onPin?: (urns: readonly string[]) => void
-  /** T23 R3 — a follow control's delivery outgrew on-board paging
-   *  (`TRIAGE_THRESHOLD`); open the hub-triage list anchored to it
-   *  instead of revealing/extending in place. */
-  onOpenTriage?: (cardId: string, dir: 'in' | 'out') => void
 }
 
 interface FocusGraphViewProps {
@@ -536,17 +527,12 @@ interface FocusGraphViewProps {
   seedCountFor?: (nodeId: string, dir: 'in' | 'out') => number
   /** T23 R2 — fold a run back (see `CardCtx.onCondenseRun`). */
   onCondenseRun?: (connectorId: string) => void
-  /** T23 R3 — see `CardCtx.partnersFor`. */
-  partnersFor?: (urn: string, dir: 'in' | 'out') => TriagePartner[]
   /** T23 R3 — see `CardCtx.onPin`. */
   onPin?: (urns: readonly string[]) => void
-  /** T23 R3 — see `CardCtx.onOpenTriage`. */
-  onOpenTriage?: (cardId: string, dir: 'in' | 'out') => void
   /** T23 R3 — which follow control's hub-triage list is open, controlled
    *  by the lens (same reason `selectedId` is): a new focal is a new
    *  question, and Escape has to be able to close this in order along
    *  with everything else it dismisses. */
-  triageAnchor?: { cardId: string; dir: 'in' | 'out' } | null
 }
 
 const iconByName = (name: string): LucideIcons.LucideIcon =>
@@ -676,12 +662,21 @@ function sameCard(a: FocusCard, b: FocusCard): boolean {
 
 // ── Card node ────────────────────────────────────────────────────────
 
-/** How quiet an internal wire sits when nobody is asking about it, and
- *  how quiet it sits when its frame is past `INFRAME_WIRE_CAP`. The
- *  second is zero — the fact moves to the rows' own counts, and a frame
- *  with forty flows in it is a hairball at any opacity. */
-const INTERNAL_QUIET = 0.3
-const INTERNAL_HIDDEN = 0
+/**
+ * How a wire that stays INSIDE a container sits when nobody is asking
+ * about it: plainly visible, and quieter than the flow across the board.
+ *
+ * The number matters and has been wrong in both directions. An earlier
+ * pass hid these wires past a dozen per frame and put counts on the rows
+ * instead — the counts read as noise and the lineage read as absent
+ * ("make it go back to show the lineage edges"). The rule now is the
+ * user's own: the reader must SEE that a container has lineage inside
+ * it, and that it can hop several times in there, without those wires
+ * competing with the left-to-right flow the board is about. So: always
+ * drawn, never gated, one step down from the 0.7 an ordinary wire rests
+ * at — and full strength the moment either end is pointed at.
+ */
+const INTERNAL_QUIET = 0.5
 
 /**
  * The orthogonal path a laned in-frame wire takes: out of the producer's
@@ -1128,82 +1123,20 @@ function ContentsChevron({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
 const pillTarget = (key: string): string => key.slice(key.indexOf(':') + 1)
 
 /**
- * T23 R3 — the hub-triage GATE: roughly three reveal pages (~36
- * partners; the brief's own number, `REVEAL_PAGE * 3`). Past this, one
- * click dumping a page onto the board stops being a page and starts
- * being clutter — the reader needs to FIND the one they want instead.
+ * THE ONE PLACE a pill's three kinds resolve to a walk-hook call. Every
+ * follow control on the board goes through here — the gutter pill (row
+ * and frame alike), the inline follow, the spotlight bridge, the peek's
+ * own button, and the grain seam's "trace columns" chip — so a click's
+ * meaning cannot drift between them.
  *
- * Exported as a pure function (same reason `edgeGrainVisual`/
- * `clampPeekY` are) so the threshold is unit-testable without a full
- * React Flow render.
+ * It used to be two functions: this dispatcher, and a `resolveFollowDelivery`
+ * calculus in front of it that decided whether a click was big enough to
+ * open the hub-triage list instead. The list is gone (user, 2026-08-17:
+ * "it randomly pops up and doesn't add much value"), and with it the
+ * only question that calculus answered — so a click now delivers what
+ * its pill says it delivers, always, and the `anchor` is carried purely
+ * so a fetch's spinner lands on the card that asked for it.
  */
-export const TRIAGE_THRESHOLD = REVEAL_PAGE * 3
-
-/**
- * T25 A review round 1 — THE FETCH-THEN-TRIAGE CALCULUS, one pure
- * function every follow control routes a click's DECISION through
- * (WalkPill's gutter pill — row and frame alike — InlineFollow, the
- * spotlight bridge, LensPeek's own follow button; the rail's end pill,
- * `RailEnd`, was a fifth until T28 R2 removed the rail entirely).
- * Before this it was re-derived separately at
- * each control's own `act()`, and drifted: WalkPill and RailEnd each
- * gated on the pill's UNFETCHED frontier count for extend/page (the
- * empty-panel bug — see the fix below), and the SAME wrong number was
- * one copy-paste away from reappearing at a third or fourth control (the
- * user's later screenshots found it at ROW level too — Transactions,
- * Orders — a second, independent recurrence of the identical mistake).
- * One function closes the whole defect family at once, and the state
- * matrix below (`resolveFollowDelivery.test.ts`) is the regression net
- * for it — not a per-control test each new caller has to remember to
- * write again.
- *
- * `knownCount` is the ALREADY-KNOWN cohort for this urn+direction —
- * `partnersFor`'s own count, the exact number `HubTriage` would show —
- * NEVER the pill's own `count` for extend/page (that is the UNFETCHED
- * remainder; gating a click on what has not arrived yet is the bug).
- * `reveal` is always already-local data, so it gates on `groupsTotal`
- * (the key's WHOLE ranking, not just what one page admits) instead.
- */
-export interface FollowDelivery {
-  action: 'reveal' | 'extend' | 'page' | 'triage-open'
-  why: string
-}
-
-// eslint-disable-next-line react-refresh/only-export-components
-export function resolveFollowDelivery(pill: FocusPill, knownCount: number): FollowDelivery {
-  if (pill.kind === 'reveal') {
-    const delivery = pill.groupsTotal ?? null
-    if (delivery != null && delivery > TRIAGE_THRESHOLD) {
-      return { action: 'triage-open', why: `reveal: whole ranking ${delivery} exceeds the gate (${TRIAGE_THRESHOLD})` }
-    }
-    return { action: 'reveal', why: 'reveal: already local data, under the gate' }
-  }
-  // extend/page: an ALREADY-fetched big fan (triage's original purpose)
-  // still opens the panel directly — populated by definition. Anything
-  // else fetches; the frontier estimate never gates a click, because it
-  // describes what has NOT arrived, not what a click would deliver.
-  if (knownCount > TRIAGE_THRESHOLD) {
-    return { action: 'triage-open', why: `${pill.kind}: already known ${knownCount} exceeds the gate (${TRIAGE_THRESHOLD}) — an already-fetched big fan` }
-  }
-  if (pill.kind === 'page' && pill.cursor) {
-    return { action: 'page', why: 'page: known cohort under the gate — fetch the rest' }
-  }
-  return { action: 'extend', why: 'extend: known cohort under the gate — fetch the next hop' }
-}
-
-/** THE ONE PLACE a pill's three kinds resolve to a walk-hook call —
- *  dispatch only, no gate (see `resolveFollowDelivery`/`runFollow` for
- *  the gated version every card-anchored control uses). Two direct
- *  callers left outside that gate, each with its own reason none of the
- *  card-anchored controls share: the grain seam's "trace columns" chip
- *  (lives on an EDGE, whose far endpoint may not even be a drawn card —
- *  no card to anchor a triage list on at all) and `HubTriage`'s own
- *  "load more" button (already INSIDE an open triage list — routing it
- *  through `runFollow` would re-run `resolveFollowDelivery` on the same
- *  over-gate cohort that opened the list and call `onOpenTriage` again,
- *  circularly, on a panel already open). Every other direct call below
- *  is a card-anchored control's own `!card.nodeId` fallback (nothing to
- *  anchor a gate decision on), not a third exception. */
 function actOnPill(
   ctx: Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage'>,
   pill: FocusPill,
@@ -1213,24 +1146,6 @@ function actOnPill(
   if (pill.kind === 'reveal') ctx.onRevealMore?.(pill.key)
   else if (pill.kind === 'page' && pill.cursor) ctx.onPage?.(pillTarget(pill.key), dir, pill.cursor, anchor)
   else ctx.onExtend?.(pill.key, pillTarget(pill.key), dir, anchor)
-}
-
-/** The gated version of `actOnPill` — runs the calculus, then dispatches
- *  exactly what it decided. Every follow control with a real card to
- *  anchor a triage list on (WalkPill, InlineFollow, the spotlight
- *  bridge, LensPeek) calls this, never `actOnPill` directly, so the
- *  gate decision and the dispatch can never drift apart from each
- *  other or between controls. */
-function runFollow(
-  ctx: Pick<CardCtx, 'onRevealMore' | 'onExtend' | 'onPage' | 'onOpenTriage'>,
-  pill: FocusPill,
-  dir: 'in' | 'out',
-  knownCount: number,
-  anchor: { cardId: string; nodeId: string },
-) {
-  const delivery = resolveFollowDelivery(pill, knownCount)
-  if (delivery.action === 'triage-open') { ctx.onOpenTriage?.(anchor.cardId, dir); return }
-  actOnPill(ctx, pill, dir, anchor)
 }
 
 /** A reveal's REST-state card count, honestly abbreviated (F1 secondary)
@@ -1337,15 +1252,9 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
   const base = 'nodrag pointer-events-auto z-20 absolute -translate-y-1/2 flex items-center justify-center gap-1 h-5 rounded-full border text-[9.5px] font-semibold tabular-nums transition-colors'
   const anchor = pillAnchor(card)
   const side = upstream ? 'upstream' : 'downstream'
-  // T25 A review round 1 — routed through the ONE shared calculus
-  // (`resolveFollowDelivery`/`runFollow`) every card-anchored follow
-  // control now uses. `card.nodeId` guards the one caller with none (the
-  // visual harness's own synthetic pills, if any) — `onOpenTriage`/
-  // `partnersFor` both need a real urn to anchor a triage list on.
-  const knownCount = card.nodeId ? ctx.partnersFor?.(card.nodeId, dir)?.length ?? 0 : 0
   const act = () => {
     if (!card.nodeId) { actOnPill(ctx, pill, dir); return }
-    runFollow(ctx, pill, dir, knownCount, { cardId: card.id, nodeId: card.nodeId })
+    actOnPill(ctx, pill, dir, { cardId: card.id, nodeId: card.nodeId })
   }
   // F1 — expansion pins the REST edge (GUTTER_REST_EDGE) and lets the
   // FAR edge move, so a hovered/focused in-frame pill grows outward
@@ -1467,14 +1376,13 @@ function WalkPill({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; 
 function InlineFollow({ card, pill, dir, ctx }: { card: FocusCard; pill: FocusPill; dir: 'in' | 'out'; ctx: CardCtx }) {
   if (!ctx.onRevealMore && !ctx.onExtend && !ctx.onPage) return null
   const verb = pillVerb(pill, dir)
-  const knownCount = card.nodeId ? ctx.partnersFor?.(card.nodeId, dir)?.length ?? 0 : 0
   return (
     <button
       type="button"
       onClick={(e) => {
         e.stopPropagation()
         if (!card.nodeId) { actOnPill(ctx, pill, dir); return }
-        runFollow(ctx, pill, dir, knownCount, { cardId: card.id, nodeId: card.nodeId })
+        actOnPill(ctx, pill, dir, { cardId: card.id, nodeId: card.nodeId })
       }}
       title={verb}
       aria-label={verb}
@@ -1629,34 +1537,6 @@ function ContentsCount({ card }: { card: FocusCard }) {
   )
 }
 
-/**
- * WHAT STAYS INSIDE — this row's flows to and from other rows of the
- * SAME container, carried on the card rather than only by the wires, so
- * the fact survives them going quiet on a dense frame
- * (`INFRAME_WIRE_CAP`) and survives the reader scrolling the wire's
- * other end out of the window.
- *
- * Reads as the lane it stands for: what comes down into this row, and
- * what leaves it going on down.
- */
-function InsideFlows({ card }: { card: FocusCard }) {
-  if (card.internalIn === 0 && card.internalOut === 0) return null
-  const host = card.parentLabel ? `inside ${card.parentLabel}` : 'inside this container'
-  return (
-    <span
-      // On the NAME's own line, not the cue line under it: a row with
-      // nothing else to say is 36px tall and has no second line to put
-      // this on, and growing every row of a dense frame to make one is
-      // the opposite of what this work is for.
-      className="flex items-center gap-1 flex-shrink-0 font-normal text-[9px] tabular-nums text-ink-muted/70"
-      title={`${host}: fed by ${card.internalIn.toLocaleString()}, feeds ${card.internalOut.toLocaleString()}`}
-    >
-      {card.internalIn > 0 && <span>←{card.internalIn.toLocaleString()}</span>}
-      {card.internalOut > 0 && <span>{card.internalOut.toLocaleString()}→</span>}
-    </span>
-  )
-}
-
 /** How much of a wheel gesture makes one row of travel. Trackpads report
  *  a few px per frame and a mouse notch ~100, so this has to be small
  *  enough to feel continuous and large enough that one notch is not a
@@ -1709,7 +1589,6 @@ function RowContent({ card, ctx, displayAccent, onTrail, offCone }: {
       <div className="flex-1 min-w-0">
         <p className={cn('flex items-center gap-1.5 min-w-0 text-[12px] leading-snug', card.connected ? 'font-medium text-ink' : 'text-ink-secondary')}>
           <span className="truncate">{card.label}</span>
-          <InsideFlows card={card} />
         </p>
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug min-w-0">
           {/* Which KIND of thing — only where the frame holds several. */}
@@ -1814,7 +1693,6 @@ function EntityContent({ card, ctx, displayAccent, onTrail, offCone }: {
       <div className="flex-1 min-w-0">
         <p className="flex items-center gap-1.5 min-w-0 text-[12px] font-medium text-ink leading-snug">
           <span className="truncate">{card.label}</span>
-          <InsideFlows card={card} />
         </p>
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug min-w-0">
           {(card.ancestry.length > 0 || card.parentLabel) && (
@@ -1966,12 +1844,6 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
   // absence with no explanation reads as "nothing connects" — the exact
   // lie the counts on the rows exist to prevent. Said only where it is
   // needed: below the cap the wires are right there saying it.
-  // Terse on purpose: this shares one narrow line with what the frame
-  // holds, and appending a sentence truncated THAT away ("8 o…"). The
-  // rest of the explanation is one hover out, on the title.
-  const quietInside = !searching && card.internalQuiet && card.internalFlows > 0
-    ? `${card.internalFlows.toLocaleString()} flow${card.internalFlows === 1 ? '' : 's'}`
-    : ''
   return (
     <>
       {card.wired && <PortHandles />}
@@ -2087,14 +1959,6 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
                 // lineage, and what is in here altogether.
                 ? <ContentsCount card={card} />
                 : <span className="truncate">{inside}</span>}
-                {quietInside && (
-                  <span
-                    className="flex-shrink-0"
-                    title={` run between things inside  — point at a row to see its own`}
-                  >
-                    · {quietInside} inside
-                  </span>
-                )}
           </p>
         </div>
         )}
@@ -2222,14 +2086,6 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
               : card.contents && !fellBack && !searching
                     ? <ContentsCount card={card} />
                     : <span className="truncate">{inside}</span>}
-                    {quietInside && (
-                  <span
-                    className="flex-shrink-0"
-                    title={` run between things inside  — point at a row to see its own`}
-                  >
-                    · {quietInside} inside
-                  </span>
-                )}
               </p>
             )}
             {card.parentId && <FocalBreadcrumb card={card} ctx={ctx} />}
@@ -3040,9 +2896,6 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     /** INTERNAL FLOW IS VERTICAL: this wire stays inside its frame and
      *  owns a lane at `x` in that frame's left gutter. */
     inFrameLane?: { index: number; x: number } | null
-    /** Its frame holds more internal lineage than one picture can carry,
-     *  so it draws only while the reader is asking about it. */
-    internalQuiet?: boolean
     /** THE GRAIN SEAM's "trace columns" — the ⊕ (if any) that continues
      *  this wire further in the direction it already runs, one per
      *  possible "far" side. */
@@ -3129,11 +2982,8 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // frame header carry the fact, and forty wires in one box carry
   // nothing at any weight.
   // Asked of the FRAME, not of the lane: a wire that missed a lane is
-  // still internal, and leaving it at ordinary weight is what drew one
-  // straight diagonal across a quiet frame's cards in the very shot this
-  // was checked against.
-  const internalRest = d.sameAncestorFrame == null ? null
-    : d.internalQuiet ? INTERNAL_HIDDEN : INTERNAL_QUIET
+  // still a wire that stays inside the container, and reads as one.
+  const internalRest = d.sameAncestorFrame == null ? null : INTERNAL_QUIET
   const opacity = d.dimmed ? 0.12
     : strong ? 1
       : internalRest !== null ? internalRest
@@ -3400,247 +3250,6 @@ function CondenseRunMarker({ card }: { card: FocusCard }) {
   )
 }
 
-// ── Hub triage (T23 R3) ──────────────────────────────────────────────
-
-const TRIAGE_W = 292
-const TRIAGE_LIST_H = 224
-const TRIAGE_ROW_H = 26
-
-/** A plain scrollable window rendering only the rows near the visible
- *  band — the codebase's own hand-rolled windowing (`frameWindow`'s own
- *  pattern), not a library: at hub scale (~100 rows) a library buys
- *  nothing a fixed row height and a scroll-position slice does not
- *  already do in a dozen lines. */
-function useVirtualSlice(count: number, viewportH: number, rowH: number) {
-  const [scrollTop, setScrollTop] = useState(0)
-  const start = Math.max(0, Math.floor(scrollTop / rowH) - 4)
-  const end = Math.min(count, start + Math.ceil(viewportH / rowH) + 8)
-  return { start, end, onScroll: (e: UIEvent<HTMLDivElement>) => setScrollTop(e.currentTarget.scrollTop) }
-}
-
-/**
- * T23 R3 — HUB TRIAGE: what a follow control offers once its own
- * delivery outgrows a page (`TRIAGE_THRESHOLD`). Anchored to the card
- * whose control opened it, same flow-space overlay pattern `LensPeek`
- * uses, sized for browsing rather than a glance.
- *
- * REUSES the walk model directly (`ctx.partnersFor`) — never a fetch of
- * its own. Search-as-you-type and the weight sort are both CLIENT-side
- * over what the model already knows, because `/trace/closure` has no
- * server search of its own; the header's own "N more not yet loaded"
- * line is where the genuinely unfetched remainder is stated, honestly,
- * with its own verb-first loader rather than folded into the count a
- * reader can actually see rows for.
- */
-function HubTriage({ card, dir, ctx, drawnUrns, onDismiss }: {
-  card: FocusCard
-  dir: 'in' | 'out'
-  ctx: CardCtx
-  /** Urns already on the board — a placed row reads as placed rather
-   *  than offering to do the same thing twice. */
-  drawnUrns: ReadonlySet<string>
-  onDismiss: () => void
-}) {
-  const [tx, ty, zoom] = useStore(s => s.transform)
-  const paneW = useStore(s => s.width)
-  const paneH = useStore(s => s.height)
-  const [query, setQuery] = useState('')
-  const [grouped, setGrouped] = useState(false)
-
-  const partners = useMemo(
-    () => (card.nodeId ? ctx.partnersFor?.(card.nodeId, dir) ?? [] : []),
-    [ctx, card.nodeId, dir],
-  )
-  const q = query.trim().toLowerCase()
-  const filtered = useMemo(
-    () => (q === '' ? partners : partners.filter(p => p.label.toLowerCase().includes(q))),
-    [partners, q],
-  )
-  const bySystem = useMemo(() => {
-    const map = new Map<string, { systemUrn: string; label: string; members: TriagePartner[]; weight: number }>()
-    for (const p of filtered) {
-      const g = map.get(p.systemUrn) ?? { systemUrn: p.systemUrn, label: p.systemLabel, members: [], weight: 0 }
-      g.members.push(p)
-      g.weight += p.weight
-      map.set(p.systemUrn, g)
-    }
-    return [...map.values()].sort((a, b) => b.members.length - a.members.length || b.weight - a.weight)
-  }, [filtered])
-
-  const { start, end, onScroll } = useVirtualSlice(filtered.length, TRIAGE_LIST_H, TRIAGE_ROW_H)
-
-  const pill = dir === 'in' ? card.pillUp : card.pillDown
-  // Every REVEAL-kind partner is already in `partners` (the model, not
-  // the page state) — nothing about it is "unfetched", so only
-  // extend/page (a genuine server remainder, never admitted from a
-  // frontier before the fetch fires — see `pillFor`'s own invariant)
-  // gets a loader line at all.
-  const remainder = pill && pill.kind !== 'reveal' ? pill.count : null
-
-  const upstream = dir === 'in'
-  const side = upstream ? 'upstream sources' : 'downstream consumers'
-  const anchorLeft = card.x * zoom + tx - TRIAGE_W - 10
-  const anchorRight = (card.x + card.w) * zoom + tx + 10
-  const preferLeft = card.band < 0
-  const fits = (v: number) => v >= 8 && v + TRIAGE_W <= paneW - 8
-  const wanted = preferLeft ? anchorLeft : anchorRight
-  const other = preferLeft ? anchorRight : anchorLeft
-  const x = fits(wanted) ? wanted : fits(other) ? other : Math.max(8, Math.min(wanted, paneW - TRIAGE_W - 8))
-  const rowY = (card.y + card.h / 2) * zoom + ty
-  const y = Math.max(8, Math.min(rowY - 160, paneH - 360 - 8))
-
-  const place = (urns: readonly string[]) => ctx.onPin?.(urns)
-
-  return (
-    <div
-      role="dialog"
-      aria-label={`${card.label} — ${side}`}
-      className="nowheel nodrag absolute z-50 rounded-xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-xl shadow-black/25 overflow-hidden flex flex-col"
-      style={{ left: x, top: y, width: TRIAGE_W }}
-      onClick={(e) => e.stopPropagation()}
-      onWheel={(e) => e.stopPropagation()}
-    >
-      <div className="px-2.5 pt-2.5 pb-2 border-b border-black/[0.07] dark:border-white/[0.08]">
-        <div className="flex items-start gap-1.5">
-          <div className="min-w-0 flex-1">
-            <p className="text-[11px] font-semibold text-ink leading-tight capitalize">{side}</p>
-            <p className="text-[9.5px] text-ink-muted truncate">of {card.label}</p>
-          </div>
-          <button
-            type="button"
-            onClick={onDismiss}
-            aria-label="Close list"
-            className="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
-          >
-            <LucideIcons.X className="w-3 h-3" />
-          </button>
-        </div>
-        {/* Completeness — the known count, and the genuinely unfetched
-            remainder stated separately with its own verb, never folded
-            into one number a reader cannot see rows for. */}
-        <p className="mt-1 text-[9.5px] text-ink-muted/80 tabular-nums">
-          {partners.length.toLocaleString()} known
-          {remainder != null && remainder > 0 && (
-            <>
-              {' '}· {remainder.toLocaleString()} more not yet loaded
-              <button
-                type="button"
-                // The SECOND documented `actOnPill` exception (see its
-                // own doc comment) — this list is already OPEN because
-                // an earlier click's own gate decided the cohort was
-                // over the threshold. Routing this "load more" through
-                // `runFollow` would re-run that SAME decision against
-                // the SAME cohort and re-open the list it is already
-                // inside of; it only ever needs to fetch further, never
-                // to decide again whether to fetch or to open triage.
-                onClick={() => actOnPill(ctx, pill!, dir)}
-                disabled={pill?.status === 'loading'}
-                className="ml-1 text-accent-lineage hover:underline disabled:opacity-50"
-              >
-                {pill?.status === 'loading' ? 'Loading…' : pillVerb(pill!, dir)}
-              </button>
-            </>
-          )}
-        </p>
-        <div className="mt-1.5 flex items-center gap-1.5">
-          <input
-            autoFocus
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Find…"
-            aria-label={`Search ${side}`}
-            className="min-w-0 flex-1 px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] border border-black/10 dark:border-white/10 text-[10px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60"
-          />
-          <button
-            type="button"
-            onClick={() => place(filtered.slice(0, 12).map(p => p.urn))}
-            disabled={filtered.length === 0}
-            title="Place the top 12 by weight on the board"
-            className="flex-shrink-0 px-1.5 py-0.5 rounded border border-black/10 dark:border-white/10 text-[9.5px] font-medium text-ink-muted hover:text-accent-lineage hover:border-accent-lineage/50 disabled:opacity-40 whitespace-nowrap"
-          >
-            Show top 12
-          </button>
-          <button
-            type="button"
-            onClick={() => setGrouped(g => !g)}
-            title="Group by system"
-            aria-pressed={grouped}
-            className={cn(
-              'flex-shrink-0 w-6 h-6 rounded flex items-center justify-center border',
-              grouped
-                ? 'border-accent-lineage/50 text-accent-lineage bg-accent-lineage/10'
-                : 'border-black/10 dark:border-white/10 text-ink-muted hover:text-accent-lineage',
-            )}
-          >
-            <LucideIcons.Layers className="w-3 h-3" />
-          </button>
-        </div>
-      </div>
-
-      {filtered.length === 0 ? (
-        // T25 A — this panel only ever opens once `partners` is already
-        // past the gate (an already-fetched big fan, or an arrival that
-        // just crossed it), so an empty `filtered` here can only be an
-        // active search with no match — never "nothing fetched yet".
-        <p className="px-2.5 py-4 text-[10px] text-ink-muted/70 text-center">No match.</p>
-      ) : grouped ? (
-        <div className="overflow-y-auto nowheel px-2 py-1.5 space-y-1" style={{ maxHeight: TRIAGE_LIST_H }}>
-          {bySystem.map(g => (
-            <div
-              key={g.systemUrn}
-              className="flex items-center gap-1.5 px-1.5 py-1 rounded-lg bg-black/[0.025] dark:bg-white/[0.03] border border-black/[0.06] dark:border-white/[0.06]"
-            >
-              <div className="min-w-0 flex-1">
-                <p className="text-[10px] font-medium text-ink truncate">{g.label}</p>
-                <p className="text-[9px] text-ink-muted/70 tabular-nums">
-                  {g.members.length.toLocaleString()} {g.members.length === 1 ? 'entity' : 'entities'} · {g.weight.toLocaleString()} flow{g.weight === 1 ? '' : 's'}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => place(g.members.map(m => m.urn))}
-                title={`Place all ${g.members.length.toLocaleString()} entities from ${g.label} on the board`}
-                className="flex-shrink-0 px-1.5 py-0.5 rounded border border-black/10 dark:border-white/10 text-[9px] font-medium text-ink-muted hover:text-accent-lineage hover:border-accent-lineage/50"
-              >
-                Place all
-              </button>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="overflow-y-auto nowheel" style={{ height: TRIAGE_LIST_H }} onScroll={onScroll}>
-          <div style={{ height: filtered.length * TRIAGE_ROW_H, position: 'relative' }}>
-            {filtered.slice(start, end).map((p, i) => {
-              const placed = drawnUrns.has(p.urn)
-              return (
-                <button
-                  key={p.urn}
-                  type="button"
-                  onClick={() => !placed && place([p.urn])}
-                  disabled={placed}
-                  title={placed ? `${p.label} is already on the board` : `Place ${p.label} on the board`}
-                  style={{ position: 'absolute', top: (start + i) * TRIAGE_ROW_H, left: 0, right: 0, height: TRIAGE_ROW_H }}
-                  className={cn(
-                    'flex items-center gap-1.5 px-2.5 text-left transition-colors',
-                    placed ? 'cursor-default' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]',
-                  )}
-                >
-                  {placed
-                    ? <LucideIcons.Check className="w-3 h-3 flex-shrink-0 text-accent-lineage" />
-                    : <LucideIcons.Plus className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />}
-                  <span className={cn('flex-1 min-w-0 truncate text-[10.5px]', placed ? 'text-ink-muted' : 'text-ink')}>
-                    {p.label}
-                  </span>
-                  <span className="flex-shrink-0 text-[9px] text-ink-muted/70 tabular-nums">{p.weight.toLocaleString()}</span>
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
 
 /** The key that does the same thing this button does — stated on the
  *  button, so the keyboard is discoverable from the mouse. Honest: these
@@ -3815,8 +3424,7 @@ function LensPeek({ card, host, ctx, onDismiss }: {
               // was a straggler that bypassed the gate entirely, never
               // offering a wholly-unfetched large fan its own triage list.
               if (!card.nodeId) { actOnPill(ctx, pill, pillDir); return }
-              const known = ctx.partnersFor?.(card.nodeId, pillDir)?.length ?? 0
-              runFollow(ctx, pill, pillDir, known, { cardId: card.id, nodeId: card.nodeId })
+              actOnPill(ctx, pill, pillDir, { cardId: card.id, nodeId: card.nodeId })
             }}
             className={cn(
               act,
@@ -4086,10 +3694,7 @@ export function FocusGraphView({
   onPage,
   seedCountFor,
   onCondenseRun,
-  partnersFor,
   onPin,
-  onOpenTriage,
-  triageAnchor = null,
 }: FocusGraphViewProps) {
   // Type visuals resolved ONCE per schema for the whole graph. Cards
   // used to each subscribe to the schema store and linear-scan the
@@ -4190,10 +3795,8 @@ export function FocusGraphView({
     onPage,
     seedCountFor,
     onCondenseRun,
-    partnersFor,
     onPin,
-    onOpenTriage,
-  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onDismiss, onRevealMore, onExtend, onPage, seedCountFor, onCondenseRun, partnersFor, onPin, onOpenTriage])
+  }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onDismiss, onRevealMore, onExtend, onPage, seedCountFor, onCondenseRun, onPin])
 
   const baseNodes = useMemo((): Node[] => {
     const minYByBand = new Map<number, number>()
@@ -4428,7 +4031,7 @@ export function FocusGraphView({
           count: e.count, dimmed: e.dimmed, tint, mutedTint, cycleBack: e.cycleBack, reducedMotion,
           cycleAnchor: e.cycleAnchor, labelVisible: e.labelVisible, labelDense, trail,
           labelT: e.labelT, grainCoarse: e.grainCoarse, seamSlotted: e.seamSlotted, sameAncestorFrame: e.sameAncestorFrame,
-          inFrameLane: e.inFrameLane, internalQuiet: e.internalQuiet,
+          inFrameLane: e.inFrameLane,
           sourcePillUp: cardById.get(e.source)?.pillUp ?? null,
           targetPillDown: cardById.get(e.target)?.pillDown ?? null,
           condensed: e.condensed ?? null,
@@ -4547,25 +4150,6 @@ export function FocusGraphView({
   // re-layout that drops it closes the panel by simply having nothing
   // left to render, rather than a stale position. T28 R2 — used to fall
   // back to `railCards` (the unwindowed extent) for `RailEnd`'s own
-  // anchor, which could sit at the fetched boundary the window folded
-  // away; the rail is gone, and every remaining triage-opening control
-  // (`WalkPill`, `InlineFollow`, the spotlight bridge, `LensPeek`)
-  // anchors on a card it is itself rendering, which by definition is
-  // already in `graph.cards` — so the fallback is dead, not merely
-  // unused, and is removed rather than kept "just in case". `HubTriage`'s
-  // own clamp keeps whatever position this resolves to on-screen, same
-  // as `LensPeek`'s.
-  const triageCard = useMemo(
-    () => (triageAnchor ? graph.cards.find(c => c.id === triageAnchor.cardId) ?? null : null),
-    [graph.cards, triageAnchor],
-  )
-  // Which urns are already full citizens of the board — a triage row for
-  // one of them reads as placed rather than offering to do it again.
-  const drawnUrns = useMemo(() => {
-    const s = new Set<string>()
-    for (const c of graph.cards) if (c.nodeId) s.add(c.nodeId)
-    return s
-  }, [graph.cards])
   // Esc is deliberately NOT handled here. The lens owns it, in one
   // place, and dismisses progressively: a preview first, then the lens
   // itself. Two window-level capture handlers for one key is how the
@@ -4661,16 +4245,6 @@ export function FocusGraphView({
           {condenseRunCards.map(c => (
             <CondenseRunMarker key={`condense:${c.id}`} card={c} />
           ))}
-          {triageCard && triageAnchor && (
-            <HubTriage
-              key={`triage:${triageCard.id}:${triageAnchor.dir}`}
-              card={triageCard}
-              dir={triageAnchor.dir}
-              ctx={ctx}
-              drawnUrns={drawnUrns}
-              onDismiss={onDismiss}
-            />
-          )}
           {/* THE SPOTLIGHT CHIP (R0 + R1b) — states its scope HONESTLY
               (drawn vs. known, never "everything" by omission, and never
               silent about a side that is simply unfetched) and carries
@@ -4723,8 +4297,7 @@ export function FocusGraphView({
                         type="button"
                         onClick={() => {
                           if (!anchorCard.nodeId) { actOnPill(ctx, side.pill!, dir); return }
-                          const known = ctx.partnersFor?.(anchorCard.nodeId, dir)?.length ?? 0
-                          runFollow(ctx, side.pill!, dir, known, { cardId: anchorCard.id, nodeId: anchorCard.nodeId })
+                          actOnPill(ctx, side.pill!, dir, { cardId: anchorCard.id, nodeId: anchorCard.nodeId })
                         }}
                         disabled={side.pill.status === 'loading'}
                         className="nodrag flex-shrink-0 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-accent-lineage bg-accent-lineage/12 hover:bg-accent-lineage/20 disabled:opacity-50 transition-colors"

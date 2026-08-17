@@ -50,7 +50,6 @@ import {
   buildFocusLayout,
   revealKey,
   viewStateForTransition,
-  walkStatusKey,
   type LensDirectionFilter,
   type LensFetchStatus,
   type LensRoster,
@@ -65,9 +64,9 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useTourStore } from '@/features/tour/tourStore'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { lensFocalOf, lensTransitionKind, type LensHistory } from './lens/lensHistory'
-import { labelOf, edgeLabelFor, orientationHalf, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach, type TriagePartner } from './lens/focus-cards'
+import { labelOf, edgeLabelFor, orientationHalf, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach, type LensNeighbor } from './lens/focus-cards'
 import { encodeLensShare } from './lens/shareCodec'
-import { FocusGraphView, TRIAGE_THRESHOLD } from './lens/FocusGraphView'
+import { FocusGraphView } from './lens/FocusGraphView'
 
 /** Leaves one ⊕ extend ships to the server. A hub can stand for
  *  thousands of participants; the request has to stay a request. */
@@ -76,26 +75,20 @@ const EMPTY_TYPE_SET: ReadonlySet<string> = new Set()
 const EMPTY_EXTEND_STATUS: ReadonlyMap<string, 'loading' | 'error'> = new Map()
 const EMPTY_ROSTERS: ReadonlyMap<string, LensRoster> = new Map()
 const EMPTY_ROSTER_STATUS: ReadonlyMap<string, LensFetchStatus> = new Map()
-/** T25 A — see `pendingTriageState`'s own doc comment. `seenLoading`
- *  guards against resolving on a render where `walk` simply has not
- *  caught up to this SAME click's own fetch yet — only a key that was
- *  actually seen 'loading' and then cleared counts as an arrival. */
-type PendingTriageEntry = { cardId: string; anchorUrn: string; dir: 'in' | 'out'; pageKey: string; seenLoading: boolean }
-const EMPTY_PENDING_TRIAGE: ReadonlyMap<string, PendingTriageEntry> = new Map()
 
 /**
  * One hop-1 neighbour of an anchor, as the walk model reports it — the
  * same edges the graph body draws, counted the same way, so the two
- * bodies cannot disagree about what is connected. `TriagePartner`
+ * bodies cannot disagree about what is connected. `LensNeighbor`
  * (focus-cards.ts) is this same shape plus its containment ROOT — the
- * hub-triage list's own "system" grouping.
+ * list body's own "system" grouping.
  */
-type WalkNeighbor = TriagePartner
+type WalkNeighbor = LensNeighbor
 
 /**
  * An anchor's direct neighbours, straight off the walk model —
  * `sg.focusUrn` for the focal's own orientation sentence, or any other
- * urn for T23 R3's hub-triage list (opened off a follow control that is
+ * urn — the list body's own neighbour rows (and, historically, the
  * not necessarily the focal's own).
  *
  * "Hop 1" is structural: a lineage edge with one endpoint on the ANCHOR
@@ -588,16 +581,6 @@ export function LineageLens({
   const inConnections = neighbors.incoming.reduce((n, r) => n + r.weight, 0)
   const outConnections = neighbors.outgoing.reduce((n, r) => n + r.weight, 0)
 
-  /** T23 R3 — the hub-triage list's own data source: an arbitrary
-   *  follow control's partners, weight-sorted, straight off the walk
-   *  model (never a fetch of its own — `walkNeighborRecords` is a pure
-   *  re-projection, same as `neighbors` above). A stable identity so
-   *  `FocusGraphView`'s `ctx` memo does not rebuild on every render. */
-  const partnersFor = useCallback(
-    (urn: string, dir: 'in' | 'out'): TriagePartner[] =>
-      walkNeighborRecords(sg, urn)[dir === 'in' ? 'incoming' : 'outgoing'],
-    [sg],
-  )
 
   /** T23 R3 — a triage-list PLACEMENT: admit one or more specific urns
    *  regardless of rank or reveal budget (`LensViewState.pinned`,
@@ -663,35 +646,15 @@ export function LineageLens({
     setExtendAnchors(prev => (prev.has(urn) ? prev : new Set(prev).add(urn)))
   }, [])
 
-  /**
-   * T25 A — an extend/page click that carries an `anchor` (WalkPill's own
-   * card+urn, never the un-triaged bridge controls) never pre-judges its
-   * own arrival by the frontier count it started from. It fetches, and
-   * waits: `pendingTriage`, keyed exactly like
-   * `walk.extendStatus` (`walkStatusKey`), holds what to do once THIS
-   * fetch resolves — reveal the page (small cohort) or open the hub
-   * triage list populated (big one). Nodeid-scoped and reset on a new
-   * focal, same as `isolationState`/`triageState` just below.
-   */
-  const [pendingTriageState, setPendingTriageState] = useState<{
-    nodeId: string | null
-    entries: ReadonlyMap<string, PendingTriageEntry>
-  }>({ nodeId: null, entries: EMPTY_PENDING_TRIAGE })
-  const pendingTriage = pendingTriageState.nodeId === nodeId ? pendingTriageState.entries : EMPTY_PENDING_TRIAGE
-  const markPendingTriage = useCallback((dir: 'in' | 'out', urn: string, anchor: { cardId: string; nodeId: string }) => {
-    setPendingTriageState(prev => {
-      const entries = new Map(prev.nodeId === nodeId ? prev.entries : EMPTY_PENDING_TRIAGE)
-      entries.set(walkStatusKey(dir, urn), { cardId: anchor.cardId, anchorUrn: anchor.nodeId, dir, pageKey: revealKey(dir, urn), seenLoading: false })
-      return { nodeId, entries }
-    })
-  }, [nodeId])
-
-  const extendWalk = useCallback((_key: string, urn: string, dir: 'in' | 'out', anchor?: { cardId: string; nodeId: string }) => {
+  const extendWalk = useCallback((_key: string, urn: string, dir: 'in' | 'out') => {
     walkApi.extend(urn, toWalkDir(dir), seedLeavesFor(sg, urn, dir))
     markAnchor(urn)
-    if (anchor) markPendingTriage(dir, urn, anchor)
-    else revealMore(revealKey(dir, urn))
-  }, [walkApi, sg, revealMore, markAnchor, markPendingTriage])
+    // Room for what is coming, claimed at CLICK time. This used to wait
+    // for the fetch to land so it could decide between revealing the
+    // page and opening the hub-triage list; the list is gone, so there
+    // is nothing left to decide and nothing to wait for.
+    revealMore(revealKey(dir, urn))
+  }, [walkApi, sg, revealMore, markAnchor])
 
   // T24 F7 — a stable identity, same reason `extendWalk` needs one: an
   // inline arrow here would give `FocusGraphView`'s own `ctx` a new
@@ -704,12 +667,11 @@ export function LineageLens({
 
   /** The rest of THIS node's adjacency, with the server's own cursor —
    *  and, for the same reason as `extendWalk`, room to draw what arrives. */
-  const pageWalk = useCallback((urn: string, dir: 'in' | 'out', cursor: string, anchor?: { cardId: string; nodeId: string }) => {
+  const pageWalk = useCallback((urn: string, dir: 'in' | 'out', cursor: string) => {
     walkApi.page(urn, toWalkDir(dir), cursor)
     markAnchor(urn)
-    if (anchor) markPendingTriage(dir, urn, anchor)
-    else revealMore(revealKey(dir, urn))
-  }, [walkApi, revealMore, markAnchor, markPendingTriage])
+    revealMore(revealKey(dir, urn))
+  }, [walkApi, revealMore, markAnchor])
 
   /** Which cards the LAYOUT opened by itself, so a click on one can
    *  close it. Read from the built cards rather than re-deriving the
@@ -911,77 +873,16 @@ export function LineageLens({
     [nodeId],
   )
 
-  /** T23 R3 — which follow control's hub-triage list is open, keyed to
-   *  the focal exactly like `isolationState` above: a new focal is a new
-   *  question, and a triage list anchored to a card that is no longer
-   *  drawn would be a panel over nothing. Not persisted to the share
-   *  codec — it is a transient reading tool, not exploration state. */
-  const [triageState, setTriageState] = useState<{ nodeId: string | null; anchor: { cardId: string; dir: 'in' | 'out' } | null }>({ nodeId: null, anchor: null })
-  const triageAnchor = triageState.nodeId === nodeId ? triageState.anchor : null
-  const setTriageAnchor = useCallback(
-    (anchor: { cardId: string; dir: 'in' | 'out' } | null) => setTriageState({ nodeId, anchor }),
-    [nodeId],
-  )
-  /** Stable identity for `FocusGraphView`'s `ctx` memo, same reason
-   *  `extendWalk`/`seedCountForCtx` need one — an inline arrow at the
-   *  call site would rebuild `ctx` (and every card reading it) on every
-   *  render. */
-  const openTriage = useCallback(
-    (cardId: string, dir: 'in' | 'out') => setTriageAnchor({ cardId, dir }),
-    [setTriageAnchor],
-  )
-
   /**
-   * T25 A — the arrival half of `markPendingTriage`: once a watched
-   * fetch's own `extendStatus` entry clears (success) or turns 'error'
-   * (the pill's own retry state handles that; nothing to reveal or
-   * triage), decide ONCE, from the real merged model — never the
-   * frontier estimate the click started from — whether the cohort
-   * reveals in place or opens the hub triage list populated. Same
-   * "layout produced a fact, feed it back" shape as `walkedThrough`/
-   * `drawnRank` above: one extra pass, then a no-op.
-   */
-  const extendStatusNow = walk?.extendStatus ?? EMPTY_EXTEND_STATUS
-  useEffect(() => {
-    if (pendingTriage.size === 0) return
-    const remaining = new Map(pendingTriage)
-    let changed = false
-    for (const [statusKey, entry] of pendingTriage) {
-      const status = extendStatusNow.get(statusKey)
-      if (status === 'loading') {
-        // Arm it: the fetch has visibly started, so the NEXT time this
-        // key is gone from `extendStatus` really is arrival, not a
-        // render this same click's own state updates haven't reached
-        // `walk` on yet.
-        if (!entry.seenLoading) { remaining.set(statusKey, { ...entry, seenLoading: true }); changed = true }
-        continue
-      }
-      if (!entry.seenLoading) continue   // not started yet — keep waiting
-      changed = true
-      remaining.delete(statusKey)
-      if (status === 'error') continue
-      const known = partnersFor(entry.anchorUrn, entry.dir).length
-      // Same ratified layout→view feedback pattern as `walkedThrough`/
-      // `drawnRank` above — see their shared doc comment.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (known > TRIAGE_THRESHOLD) openTriage(entry.cardId, entry.dir)
-      else revealMore(entry.pageKey)
-    }
-    if (changed) {
-      setPendingTriageState(prev => (prev.nodeId === nodeId ? { nodeId, entries: remaining } : prev))
-    }
-  }, [pendingTriage, extendStatusNow, nodeId, partnersFor, openTriage, revealMore])
-
-  /**
-   * Lens-local keys: capture phase so the canvas's document-level
-   * keyboard handler never sees them while the lens is open.
+   * THE DISMISS LADDER — one owner for Escape, and for a click on the
+   * board's own background.
    *
-   * It is the ONE owner of Escape, and it dismisses innermost-first: a
-   * row's preview is a panel inside the lens, and closing the whole room
-   * out from under what you just opened is the one behaviour nobody
-   * expects. A second capture handler further in could not do this —
-   * mount order decides which of two runs, and the outer one always
-   * wins — so the sequence lives here rather than being split.
+   * It dismisses innermost-first: a row's preview is a panel inside the
+   * lens, and closing the whole room out from under what you just opened
+   * is the one behaviour nobody expects. A second capture handler
+   * further in could not do this — mount order decides which of two
+   * runs, and the outer one always wins — so the sequence lives here
+   * rather than being split.
    */
   const selection = view.selection
   /**
@@ -1000,14 +901,11 @@ export function LineageLens({
   const peekOpen = selection !== null
     && layout.cards.some(c => c.nodeId === selection && c.frameId !== null)
   const dismissOne = useCallback(() => {
-    // T23 R3 — the triage list is the newest, most local layer a click
-    // could have opened; it closes first, same reasoning as the peek.
-    if (triageAnchor !== null) { setTriageAnchor(null); return }
     if (peekOpen) { setSelection(null); return }
     if (isolatedId !== null) { setIsolated(null); return }
     if (selection !== null) { setSelection(null); return }
     onClose()
-  }, [triageAnchor, peekOpen, isolatedId, selection, setTriageAnchor, setIsolated, setSelection, onClose])
+  }, [peekOpen, isolatedId, selection, setIsolated, setSelection, onClose])
 
   useEffect(() => {
     if (!nodeId) return
@@ -1895,10 +1793,7 @@ export function LineageLens({
                 // request itself would not back up.
                 seedCountFor={walkStatus === 'done' ? seedCountForCtx : undefined}
                 onCondenseRun={toggleCondense}
-                partnersFor={partnersFor}
                 onPin={pinEntities}
-                triageAnchor={triageAnchor}
-                onOpenTriage={openTriage}
               />
               {/* Status surfaces — a lone focal card floating in space
                   explains nothing. */}

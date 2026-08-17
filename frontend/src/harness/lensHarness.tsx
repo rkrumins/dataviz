@@ -165,10 +165,7 @@ export function Harness() {
           onExtend={noop}
           onPage={noop}
           onCondenseRun={noop}
-          partnersFor={built.partnersFor}
           onPin={noop}
-          onOpenTriage={noop}
-          triageAnchor={built.triageAnchor}
         />
       </ReactFlowProvider>
       {perfReport && (

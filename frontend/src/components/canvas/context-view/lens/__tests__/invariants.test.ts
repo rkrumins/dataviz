@@ -19,7 +19,7 @@ const card = (id: string, overrides: Partial<FocusCard> = {}): FocusCard => ({
     x: 0, y: 0, w: 240, h: 64, label: id, description: null, freshness: null, type: 'dataset',
     parentId: null, parentLabel: null, count: 1, flowsIn: 1, flowsOut: 1, showType: false,
     edgeTypeNorm: '', frameId: null, depth: 0, frameEmpty: false, connected: true,
-    gutterLanes: 0, internalFlows: 0, internalQuiet: false, internalIn: 0, internalOut: 0,
+    gutterLanes: 0,
     frameShowingAll: false, frameConnectedCount: 0, frameLoaded: 0, frameTotal: -1,
     frameHasMore: false, frameSearchedCount: 0, frameSearchedExact: true, frameSharedEdgeType: '',
     ancestry: [], ancestryIds: [], frameOffset: 0, frameWindowSize: 0, frameRows: [],
@@ -31,7 +31,7 @@ const card = (id: string, overrides: Partial<FocusCard> = {}): FocusCard => ({
 const edge = (id: string, source: string, target: string): FocusEdge => ({
     id, source, target, count: 1, edgeTypeNorm: '', dimmed: false, cycleBack: false,
     cycleAnchor: false, labelVisible: false, labelT: 0.5, grainCoarse: false,
-    sameAncestorFrame: null, inFrameLane: null, internalQuiet: false, seamSlotted: false,
+    sameAncestorFrame: null, inFrameLane: null, seamSlotted: false,
 })
 
 const graphOf = (cards: FocusCard[], edges: FocusEdge[] = []): FocusGraph => ({

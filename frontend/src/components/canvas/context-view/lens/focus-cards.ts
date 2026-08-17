@@ -307,7 +307,7 @@ export interface FocusPill {
  * the orientation sentence's own "across N systems" already does
  * (`distinctSystemCount`) — one definition of "system" everywhere.
  */
-export interface TriagePartner {
+export interface LensNeighbor {
   urn: string
   label: string
   type: string
@@ -402,21 +402,6 @@ export interface FocusCard {
    *  reserve for the lineage that stays INSIDE it. 0 for every frame
    *  whose contents don't feed each other, which costs it nothing. */
   gutterLanes: number
-  /** Frame cards only — how many flows run between its own children.
-   *  Stated on the header ("· 12 flows") so a frame whose wires have
-   *  gone quiet at density still says how much is in there. */
-  internalFlows: number
-  /** Frame cards only — its internal wires draw only for the row the
-   *  reader is pointing at, either because there are more of them than
-   *  one picture can carry (`INFRAME_WIRE_CAP`) or because they needed
-   *  more lanes than a gutter can hold. The header is what says so. */
-  internalQuiet: boolean
-  /** Frame CHILD only — how many of this row's flows come from, and go
-   *  to, another row of the SAME frame. The fact the wires carry, kept
-   *  on the card so it survives them going quiet; clicking one
-   *  spotlights that row. */
-  internalIn: number
-  internalOut: number
   /** Frame CHILD only: is this on the lineage? False for a child that
    *  merely lives inside the container, shown in "all" mode so the
    *  picture is the whole table rather than an edited version. */
@@ -582,12 +567,6 @@ export interface FocusEdge {
    *  ordinary horizontal case) or the frame ran out of lanes, which is
    *  a density the quiet treatment below already answers. */
   inFrameLane: { index: number; x: number } | null
-  /** This frame holds more internal lineage than one picture can carry
-   *  legibly (`INFRAME_WIRE_CAP`), so the wire draws only while the
-   *  reader is asking about it — hovering or spotlighting one of its
-   *  ends. The COUNT survives on the rows and the frame header, so what
-   *  is hidden is the ink, never the fact. */
-  internalQuiet: boolean
   /** A grain-coarse wire found a collision-free slot for its seam badge
    *  in the SAME placement pass `labelVisible` comes from. `false` means
    *  every candidate along this wire's own length collided with an

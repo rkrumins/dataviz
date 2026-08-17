@@ -316,10 +316,10 @@ describe('T26 R4 — the journey acceptance suite (walkSharedPlatform)', () => {
   })
 })
 
-// ── FOLLOW, at the two scales the everyday estate cannot exercise on
-// its own: a wholly-unfetched fan crossing the hub-triage gate
-// (walkUnfetchedFanTriage), a frame's own local row-paging at hub scale
-// (walkWideHub), and a rail end past the visible window (walkLongChain).
+// ── FOLLOW, at the scales the everyday estate cannot exercise on its
+// own: a wholly-unfetched fan of 45 groups (walkUnfetchedFanTriage), a
+// frame's own local row-paging at hub scale (walkWideHub), and a chain
+// end far past the opening view (walkLongChain).
 // ──────────────────────────────────────────────────────────────────
 
 describe('T26 R4 — follow from every control kind × state (walkWideHub / walkLongChain)', () => {
@@ -330,20 +330,18 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
   })
   afterEach(() => { cleanup(); errorSpy.mockRestore(); usePreferencesStore.setState({ lensInitialDepth: 1 }) })
 
-  it('FOLLOW OVER THE GATE — a cohort of 45 known groups opens the triage list POPULATED, not a wall', () => {
-    // walkUnfetchedFanTriage's own downstream_hub: 45 known groups (well
-    // past TRIAGE_THRESHOLD) plus an honest 60-more frontier — the shape
-    // T25 A's calculus exists for (resolveFollowDelivery.test.ts pins
-    // the pure decision; this is the same decision through the real
-    // component).
+  it('FOLLOW A BIG COHORT — 45 known groups land on the board in pages, never behind a panel', () => {
+    // walkUnfetchedFanTriage's own downstream_hub: 45 known groups plus
+    // an honest 60-more frontier. This used to cross a gate and open the
+    // hub-triage list instead of delivering; the list is gone (user,
+    // 2026-08-17), so the biggest cohort on the estate obeys the same
+    // one-click-one-visible-delivery rule as the smallest.
     renderLens(['F'], doneWalk(WALK_FIXTURES.walkUnfetchedFanTriage.model))
     fireEvent.click(screen.getByTitle(/Shows the next hop downstream of downstream_hub/))
-    // INVARIANT 1 — visible immediately: a populated list, never a wall.
-    const dialog = triage()!
-    expect(dialog).toBeTruthy()
-    expect(within(dialog).getByText(/45 known/)).toBeTruthy()
-    expect(within(dialog).queryByText('Nothing fetched here yet.')).toBeNull()
+    // INVARIANT 1 — visible immediately: cards, on the board.
     assertBoardShows('payments_core')
+    // ...and no panel intercepted the click.
+    expect(triage()).toBeNull()
     assertStrataCoherent(errorSpy)
   })
 

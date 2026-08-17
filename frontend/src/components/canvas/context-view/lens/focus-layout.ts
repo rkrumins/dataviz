@@ -49,7 +49,6 @@ import {
     assignLanes,
     flowOrder,
     gutterWidth,
-    INFRAME_WIRE_CAP,
     LANE_GAP,
     LANE_W,
     type InternalEdgeRef,
@@ -1252,7 +1251,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         frameId: null, depth: 0,
         ancestry: EMPTY_STRINGS, ancestryIds: EMPTY_STRINGS,
         frameEmpty: false,
-        gutterLanes: 0, internalFlows: 0, internalQuiet: false, internalIn: 0, internalOut: 0,
+        gutterLanes: 0,
         connected: true, frameShowingAll: false, frameConnectedCount: 0,
         frameLoaded: 0, frameTotal: -1, frameHasMore: false,
         frameSearchedCount: 0, frameSearchedExact: true,
@@ -1918,7 +1917,6 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             // Filled in by the in-frame routing pass below (the lane's own
             // `x` needs geometry, so it lands after `layoutBands`).
             inFrameLane: null,
-            internalQuiet: false,
             // Filled in by the badge-placement pass, below `layoutBands`.
             seamSlotted: false,
         })
@@ -2004,27 +2002,11 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             const target = rowCardUnder(frameId, edge.target)
             if (!source || !target || source === target) continue
             refs.push({ id: edge.id, source, target })
-            // The fact the wires carry, kept on the cards so it survives
-            // them going quiet.
-            const sc = byId.get(source)
-            const tc = byId.get(target)
-            if (sc) sc.internalOut += 1
-            if (tc) tc.internalIn += 1
         }
         if (refs.length === 0) continue
-        frame.internalFlows = refs.length
         const lanes = assignLanes(order, refs)
-        // QUIET WHEN THE PICTURE CANNOT CARRY THEM — either more flows
-        // than one frame can show legibly at all, or more overlapping
-        // runs than a gutter has lanes for. The second half matters: a
-        // wire that missed a lane has nowhere to go but straight across
-        // the cards, which is the exact drawing this work removes, so
-        // the frame goes quiet rather than drawing one of them anyway.
-        const quiet = refs.length > INFRAME_WIRE_CAP || lanes.size < refs.length
-        frame.internalQuiet = quiet
         let used = 0
         for (const edge of group) {
-            edge.internalQuiet = quiet
             const index = lanes.get(edge.id)
             if (index === undefined) continue
             edge.inFrameLane = { index, x: 0 }

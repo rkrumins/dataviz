@@ -16,7 +16,7 @@ import { describe, it, expect } from 'vitest'
 import { buildLensSubgraph, type LensSubgraph } from '../lens-subgraph'
 import type { LensWalkNode } from '../closure-adapter'
 import { buildFocusLayout, initialLensViewState, type LensViewState } from '../focus-layout'
-import { gutterWidth, INFRAME_WIRE_CAP, MAX_LANES } from '../frame-flow'
+import { gutterWidth, MAX_LANES } from '../frame-flow'
 import { FRAME_PAD, type FocusCard, type FocusGraph } from '../focus-cards'
 
 const wnode = (urn: string, type = 'dataset', label = urn): LensWalkNode => ({
@@ -186,33 +186,13 @@ describe('in-frame routing — the wires never cross a card', () => {
     })
 })
 
-describe('in-frame routing — the counts survive the wires', () => {
-    it('each row carries how many of its flows stay inside the container', () => {
-        const g = goldEstate()
-        expect(frameOf(g, 'dim').internalOut).toBe(2)
-        expect(frameOf(g, 'dim').internalIn).toBe(0)
-        expect(frameOf(g, 'support').internalIn).toBe(1)
-        expect(frameOf(g, 'support').internalOut).toBe(1)
-        expect(frameOf(g, 'orders').internalIn).toBe(3)
-        // orders' hop to the FOCUS leaves the container, so it is not
-        // counted here — that one is drawn horizontally, as always.
-        expect(frameOf(g, 'orders').internalOut).toBe(0)
-        expect(frameOf(g, 'ledger').internalIn + frameOf(g, 'ledger').internalOut).toBe(0)
-    })
-
-    it('the frame states its own total', () => {
-        expect(frameOf(goldEstate(), 'GOLD').internalFlows).toBe(4)
-    })
-})
-
-describe('in-frame routing — density', () => {
+describe('in-frame routing — density: a container\'s own lineage ALWAYS draws', () => {
     /** A warehouse of `n` tables in one chain — every table feeds the
      *  next, so there are n-1 internal flows and every run is adjacent.
      *  `skips` adds the shortcut hops a real warehouse has (t0 also
      *  feeding t2 and t3, and so on), which is how a container gets
-     *  denser without getting taller — the shape the cap is FOR, and the
-     *  only way past it: a frame draws one window of rows however many
-     *  it holds. */
+     *  denser without getting taller: a frame draws one window of rows
+     *  however many it holds. */
     function chainEstate(n: number, skips = 0): FocusGraph {
         const nodes = [wnode('RPT', 'dataset', 'reporting_table'), wnode('WH', 'container', 'WAREHOUSE')]
         const hops: Array<[string, string]> = []
@@ -229,30 +209,26 @@ describe('in-frame routing — density', () => {
         return build('RPT', nodes, hops, contains, reveal, ['WH'])
     }
 
-    it('past the cap the wires go quiet, and the frame is left to say why', () => {
+    it('a dense container still draws every one of its flows, each in its own lane', () => {
+        // The user's own ruling (2026-08-17): "make it go back to show
+        // the lineage edges... I want to ensure that user clearly sees
+        // that there is an intra container lineage that can within
+        // itself hop multiple hops within the container". An earlier
+        // pass quieted these past a dozen and put counts on the rows;
+        // the counts read as noise and the lineage read as absent.
         const g = chainEstate(8, 2)
         const frame = frameOf(g, 'WH')
-        expect(frame.internalFlows).toBeGreaterThan(INFRAME_WIRE_CAP)
         const internal = g.edges.filter(e => e.sameAncestorFrame === frame.id)
-        expect(internal.length).toBeGreaterThan(0)
-        expect(internal.every(e => e.internalQuiet)).toBe(true)
+        expect(internal.length).toBeGreaterThan(12)
+        expect(internal.every(e => e.inFrameLane != null)).toBe(true)
+        expect(frame.gutterLanes).toBeGreaterThan(1)
+        expect(frame.gutterLanes).toBeLessThanOrEqual(MAX_LANES)
     })
 
-    it('under the cap they stay loud', () => {
-        const g = chainEstate(4)
-        const internal = g.edges.filter(e => e.sameAncestorFrame === frameOf(g, 'WH').id)
-        expect(internal.length).toBeGreaterThan(0)
-        expect(internal.every(e => e.internalQuiet)).toBe(false)
-    })
-
-    it('MORE OVERLAPPING RUNS THAN LANES — the frame goes quiet rather than drawing one across its cards', () => {
-        // Six nested/overlapping runs over eight rows: five fit the
-        // gutter, the sixth cannot. An unlaned wire has nowhere to go but
-        // straight between its two ports, across every card between —
-        // the exact drawing this work removes — so a frame that cannot
-        // route them all draws none of them at rest, however few there
-        // are. (Six is comfortably under INFRAME_WIRE_CAP, so this is the
-        // LANE budget talking, not the flow budget.)
+    it('MANY OVERLAPPING RUNS still all get lanes — the ceiling is generous, not a gate', () => {
+        // A fan: t0 feeds t1..t6, each of which feeds t7. Every run
+        // straddles the middle of the list, so almost none of them can
+        // share a lane — twelve runs, twelve lanes, all drawn.
         const nodes = [wnode('RPT', 'dataset', 'exec'), wnode('WH', 'container', 'WAREHOUSE')]
         const contains: Array<[string, string]> = []
         const reveal = ['in:RPT']
@@ -261,25 +237,18 @@ describe('in-frame routing — density', () => {
             contains.push(['WH', `t${i}`])
             reveal.push(`in:t${i}`)
         }
-        // A fan: t0 feeds t1..t6, each of which feeds t7. Every run
-        // straddles the middle of the list, so almost none of them can
-        // share a lane.
         const hops: Array<[string, string]> = [['t7', 'RPT']]
         for (let i = 1; i <= 6; i++) { hops.push(['t0', `t${i}`], [`t${i}`, 't7']) }
         const g = build('RPT', nodes, hops, contains, reveal, ['WH'])
         const frame = frameOf(g, 'WH')
-        expect(frame.internalFlows).toBeLessThanOrEqual(INFRAME_WIRE_CAP)
-        expect(frame.gutterLanes).toBe(MAX_LANES)
         const internal = g.edges.filter(e => e.sameAncestorFrame === frame.id)
-        expect(internal.some(e => e.inFrameLane === null)).toBe(true)
-        expect(internal.every(e => e.internalQuiet)).toBe(true)
-        expect(frame.internalQuiet).toBe(true)
+        expect(internal.every(e => e.inFrameLane != null)).toBe(true)
+        expect(frame.gutterLanes).toBeGreaterThan(5)
+        expect(frame.gutterLanes).toBeLessThanOrEqual(MAX_LANES)
     })
 
     it('a chain reuses ONE lane the whole way down — adjacent runs never overlap', () => {
         const g = chainEstate(8)
-        const frame = frameOf(g, 'WH')
-        expect(frame.gutterLanes).toBe(1)
-        expect(frame.gutterLanes).toBeLessThanOrEqual(MAX_LANES)
+        expect(frameOf(g, 'WH').gutterLanes).toBe(1)
     })
 })

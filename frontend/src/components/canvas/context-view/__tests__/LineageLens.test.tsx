@@ -593,41 +593,6 @@ const pillCatalogue = () => {
   })
 }
 
-/**
- * T25 A — the arrival `pillCatalogue`'s wholly-unfetched PAGED would
- * land: `n` of PAGED's OWN upstream sources merged in, `extendStatus`
- * cleared for the key the click started (`up:PAGED`) — exactly what
- * `useLensWalk` hands back once the fetch resolves. `remainder`, when
- * given, is the genuine unfetched amount still left after this page.
- */
-const pagedArrival = (n: number, remainder: number | null = null): WalkEntry => {
-  const base = pillCatalogue()
-  const nodes = [...base.nodes]
-  const lineageEdges = [...base.lineageEdges]
-  for (let i = 0; i < n; i++) {
-    const urn = `ps${String(i).padStart(3, '0')}`
-    nodes.push(wnode(urn, 'dataset', `paged_source_${String(i).padStart(3, '0')}`))
-    lineageEdges.push(hop(urn, 'PAGED'))
-  }
-  return {
-    model: walkModel('F', {
-      nodes,
-      lineageEdges,
-      upstreamUrns: new Set([...base.upstreamUrns, ...nodes.slice(base.nodes.length).map(nd => nd.urn)]),
-      downstreamUrns: base.downstreamUrns,
-      frontierUp: [
-        frontier('EXACT', 48), frontier('UNKNOWN', null), frontier('BUSY', 12), frontier('FAILED', 9),
-        ...(remainder != null ? [frontier('PAGED', remainder)] : []),
-      ],
-    }),
-    // T25 B — the visible window now defaults to the WALK's own depth,
-    // not a fixed radius; PAGED's own upstream sources land two hops out
-    // (F → PAGED → ps###), so this needs `depth: 2` or the window folds
-    // them away regardless of the arrival/reveal decision this fixture
-    // exists to test.
-    status: 'done', error: null, extendStatus: new Map(), depth: 2,
-  }
-}
 
 /** Fourteen upstream groups against a REVEAL_PAGE of twelve, so the
  *  focus's own ⊕ has a remainder to offer from data already in hand. */
@@ -827,284 +792,6 @@ describe('the ⊕ tells the truth about what it costs', () => {
   })
 })
 
-// ── T23 R3 — HUB TRIAGE ────────────────────────────────────────────────
-
-/** Forty flat upstream sources, all weight 1 — a reveal whose WHOLE
- *  ranking (`groupsTotal`) exceeds the triage gate (`TRIAGE_THRESHOLD`,
- *  three reveal pages) even though the first page still admits twelve
- *  of them for free, same as `crowdedFanIn` above but past the gate. */
-const hubFanIn = (n: number) => {
-  const nodes = [wnode('F', 'dataset', 'dim_customer')]
-  const lineageEdges = []
-  for (let i = 0; i < n; i++) {
-    const urn = `s${String(i).padStart(3, '0')}`
-    nodes.push(wnode(urn, 'dataset', `source_${String(i).padStart(3, '0')}`))
-    lineageEdges.push(hop(urn, 'F'))
-  }
-  return walkModel('F', { nodes, lineageEdges, upstreamUrns: new Set(nodes.slice(1).map(n => n.urn)) })
-}
-
-// The lens's OWN outer chrome is also `role="dialog"` (`aria-label`
-// "Connections of X" — see the F3 share tests below), and so is
-// `LensPeek` ("Preview of X") — the triage panel's own aria-label
-// ("X — upstream sources"/"X — downstream consumers") is the one that
-// never collides with either, so every query here goes through it
-// rather than a bare, ambiguous `getByRole('dialog')`.
-const triage = () => screen.queryByRole('dialog', { name: /upstream sources|downstream consumers/ })
-/** `onBoard` matches text anywhere in the document, and a triage row's
- *  own label is exactly the entity name a placed CARD would also show —
- *  once the list is open, a placed-vs-listed check has to exclude the
- *  list's own rows to mean "on the board" rather than "mentioned
- *  anywhere on screen". */
-const onBoardOutside = (dialog: HTMLElement, label: string) =>
-  screen.queryAllByText(label).some(el => !dialog.contains(el))
-
-describe('hub triage (T23 R3)', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
-  afterEach(() => cleanup())
-
-  it('a reveal whose whole delivery exceeds the gate opens the triage list instead of dumping a page', () => {
-    renderLens(['F'], doneWalk(hubFanIn(40)))
-    expect(onBoard('source_020')).toBe(false)
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only/))
-    // No page landed on the board — the click opened the list, not a reveal.
-    expect(onBoard('source_020')).toBe(false)
-    expect(triage()).toBeTruthy()
-  })
-
-  // T25 A — the reported P0: clicking ⊕ on a WHOLLY-UNFETCHED fan used to
-  // gate on `pill.count` (the unfetched frontier — 96 here) and open the
-  // triage list BEFORE any fetch: "0 known · 96 more not yet loaded",
-  // greyed "Show top 12", every re-click re-presenting the same empty
-  // wall. The gate now reads what is actually KNOWN (0 — nothing about
-  // PAGED's own upstream has landed) rather than what might arrive, so
-  // the click just fetches, exactly like any other unfetched fan.
-  it('T25 A — a wholly-unfetched extend/page FETCHES first, no pre-fetch triage wall', () => {
-    const { api } = renderLens(['F'], doneWalk(pillCatalogue()))
-    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of partially_loaded/))
-    expect(api.page).toHaveBeenCalledWith('PAGED', 'up', 'eyJvZmZzZXQiOjMwfQ==')
-    expect(triage()).toBeNull()
-  })
-
-  it('T25 A — on arrival, a cohort past the gate opens the triage list POPULATED, not empty', () => {
-    const api = makeApi()
-    const { rerender } = renderLens(['F'], doneWalk(pillCatalogue()), {}, api)
-    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of partially_loaded/))
-
-    // The fetch is IN FLIGHT — exactly what `useLensWalk` shows the
-    // instant the click's own request starts, before the response lands.
-    rerender(
-      <LineageLens
-        history={{ entries: ['F'], cursor: 0 }}
-        walk={doneWalk(pillCatalogue(), new Map([['up:PAGED', 'loading']]))}
-        walkApi={api}
-        onRecenter={vi.fn()}
-        onBack={vi.fn()}
-        onForward={vi.fn()}
-        onClose={vi.fn()}
-      />,
-    )
-    expect(triage()).toBeNull()
-
-    // The merge lands: forty of PAGED's OWN upstream sources — a
-    // genuinely large fan — with `extendStatus` cleared for the key the
-    // click started, exactly as `useLensWalk` would hand it over.
-    rerender(
-      <LineageLens
-        history={{ entries: ['F'], cursor: 0 }}
-        walk={pagedArrival(40, 56)}
-        walkApi={api}
-        onRecenter={vi.fn()}
-        onBack={vi.fn()}
-        onForward={vi.fn()}
-        onClose={vi.fn()}
-      />,
-    )
-    const dialog = triage()!
-    expect(dialog).toBeTruthy()
-    expect(within(dialog).getByText(/40 known/)).toBeTruthy()
-    expect(within(dialog).queryByText('Nothing fetched here yet.')).toBeNull()
-  })
-
-  it('T25 A — on arrival, a small cohort reveals directly — no wall, no panel', () => {
-    const api = makeApi()
-    const { rerender } = renderLens(['F'], doneWalk(pillCatalogue()), {}, api)
-    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of partially_loaded/))
-
-    // In flight, same as the populated-panel test above — the reveal
-    // must not fire before the response is actually known.
-    rerender(
-      <LineageLens
-        history={{ entries: ['F'], cursor: 0 }}
-        walk={doneWalk(pillCatalogue(), new Map([['up:PAGED', 'loading']]))}
-        walkApi={api}
-        onRecenter={vi.fn()}
-        onBack={vi.fn()}
-        onForward={vi.fn()}
-        onClose={vi.fn()}
-      />,
-    )
-    expect(onBoard('paged_source_000')).toBe(false)
-
-    rerender(
-      <LineageLens
-        history={{ entries: ['F'], cursor: 0 }}
-        walk={pagedArrival(6)}
-        walkApi={api}
-        onRecenter={vi.fn()}
-        onBack={vi.fn()}
-        onForward={vi.fn()}
-        onClose={vi.fn()}
-      />,
-    )
-    expect(triage()).toBeNull()
-    expect(onBoard('paged_source_000')).toBe(true)
-    expect(onBoard('paged_source_005')).toBe(true)
-  })
-
-  it('the header states the known count honestly, with no unfetched remainder for a reveal (everything it stands for is already in the model)', () => {
-    renderLens(['F'], doneWalk(hubFanIn(40)))
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only/))
-    const dialog = triage()!
-    expect(within(dialog).getByText('40 known')).toBeTruthy()
-    expect(within(dialog).queryByText(/more not yet loaded/)).toBeNull()
-  })
-
-  it('search filters the list, and clicking a row places that entity on the board — a full citizen, not a preview', () => {
-    renderLens(['F'], doneWalk(hubFanIn(40)))
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only/))
-    const dialog = triage()!
-    fireEvent.change(within(dialog).getByPlaceholderText('Find…'), { target: { value: 'source_039' } })
-    expect(within(dialog).queryByTitle('Place source_020 on the board')).toBeNull()
-    expect(onBoardOutside(dialog, 'source_039')).toBe(false)
-    fireEvent.click(within(dialog).getByTitle('Place source_039 on the board'))
-    expect(onBoardOutside(dialog, 'source_039')).toBe(true)
-    // Placed, not merely previewed: the row now reads as already on the
-    // board rather than offering to place it again.
-    expect(within(dialog).getByTitle('source_039 is already on the board')).toBeTruthy()
-  })
-
-  it('"Show top 12" places twelve at once, weight-sorted', () => {
-    renderLens(['F'], doneWalk(hubFanIn(40)))
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only/))
-    const dialog = triage()!
-    fireEvent.click(within(dialog).getByText('Show top 12'))
-    // Every source ties on weight (one hop each) — the tiebreak is the
-    // label, so the alphabetically-first twelve win, same order the
-    // list itself renders them in. The list stays open (every label is
-    // still IN it), so the board check has to look outside it.
-    expect(onBoardOutside(dialog, 'source_000')).toBe(true)
-    expect(onBoardOutside(dialog, 'source_011')).toBe(true)
-    expect(onBoardOutside(dialog, 'source_012')).toBe(false)
-  })
-
-  it('"grouped by system" rolls partners up into per-system cards, and "Place all" places the whole group', () => {
-    // Containment groups the REVEAL admission by root too (same rule a
-    // frame's own badge uses) — three systems is under REVEAL_PAGE, so
-    // all three admit for free and this pill falls through to the
-    // FRONTIER branch, same as `pillCatalogue`'s PAGED above. That is
-    // deliberate here: it is what lets the partners already in the
-    // model carry real containment (something to group by) while the
-    // gate itself still fires off a genuine, separate unfetched
-    // remainder — the exact two-part header the brief asks for.
-    const SYSTEMS = 3
-    const nodes = [wnode('F', 'dataset', 'core_ledger')]
-    const containmentEdges = []
-    const lineageEdges = []
-    for (let s = 0; s < SYSTEMS; s++) {
-      nodes.push(wnode(`sys${s}`, 'system', `source_system_${s}`))
-    }
-    for (let i = 0; i < 40; i++) {
-      const sysUrn = `sys${i % SYSTEMS}`
-      const urn = `s${String(i).padStart(3, '0')}`
-      nodes.push(wnode(urn, 'dataset', `feed_${String(i).padStart(3, '0')}`))
-      containmentEdges.push(holds(sysUrn, urn))
-      lineageEdges.push(hop(urn, 'F'))
-    }
-    renderLens(['F'], doneWalk(walkModel('F', {
-      nodes, containmentEdges, lineageEdges,
-      upstreamUrns: new Set(nodes.slice(1 + SYSTEMS).map(n => n.urn)),
-      // `count` is `totalCount - degreeUp`, not `totalCount` verbatim
-      // (see `pillFor`'s frontier branch) — F already has 40 known
-      // upstream hops, so the genuinely-unfetched remainder here is
-      // 100 - 40 = 60, comfortably past the gate.
-      frontierUp: [frontier('F', 100)],
-    })))
-    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of core_ledger only/))
-    const dialog = triage()!
-    expect(within(dialog).getByText('40 known · 60 more not yet loaded')).toBeTruthy()
-    fireEvent.click(within(dialog).getByTitle('Group by system'))
-    // Forty split evenly across three systems.
-    expect(within(dialog).getByText('source_system_0')).toBeTruthy()
-    expect(within(dialog).getByText(/14 entities/)).toBeTruthy()
-    // The three systems already admit for free (3 ≤ REVEAL_PAGE — that
-    // is exactly what put this pill on the FRONTIER branch above), so
-    // every member is already drawn; "Place all" is verified through
-    // `view.pinned` itself instead of a board-visibility change that
-    // this particular fixture can never produce.
-    const writeText = vi.fn()
-    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
-    fireEvent.click(within(dialog).getByTitle('Place all 14 entities from source_system_0 on the board'))
-    fireEvent.click(screen.getByLabelText('Copy exploration link'))
-    const url = new URL(writeText.mock.calls[0][0] as string)
-    const decoded = decodeLensShare(url.searchParams.get('lens') ?? '')
-    if (decoded?.v !== 3) throw new Error('expected a v3 token')
-    for (let i = 0; i < 40; i += SYSTEMS) expect(decoded.pinned).toContain(`s${String(i).padStart(3, '0')}`)
-  })
-
-  it('Escape closes the triage list first — the newest layer, dismissed before anything else the lens owns', () => {
-    renderLens(['F'], doneWalk(hubFanIn(40)))
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only/))
-    expect(triage()).toBeTruthy()
-    fireEvent.keyDown(window, { key: 'Escape' })
-    expect(triage()).toBeNull()
-  })
-
-  it('a click on the pane behind the board closes the triage list too', () => {
-    renderLens(['F'], doneWalk(hubFanIn(40)))
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only/))
-    expect(triage()).toBeTruthy()
-    fireEvent.click(document.querySelector('.react-flow__pane')!)
-    expect(triage()).toBeNull()
-  })
-
-  // T25 A review round 1 — the user's LATER screenshots (Transactions,
-  // Orders — 61 and 78 flows) hit the identical empty-panel bug at ROW
-  // level: a second, independent recurrence of the exact same mistake
-  // this task already fixed once at the top-level gutter pill and the
-  // rail end. Same `WalkPill` component renders both, but the gate used
-  // to be re-derived per call site — this pins that a row nested in a
-  // frame gets the SAME fetch-first treatment, through the ONE shared
-  // calculus (`resolveFollowDelivery`), not a re-derived one.
-  it('a ROW-level ⊕ (nested in a frame) gets the same fetch-first treatment as a top-level card', () => {
-    const { api } = renderLens(['F'], doneWalk(walkModel('F', {
-      nodes: [
-        wnode('F', 'dataset', 'ledger'),
-        wnode('DB', 'DATABASE', 'warehouse', { childCount: 1 }),
-        wnode('TXN', 'dataset', 'transactions'),
-      ],
-      containmentEdges: [holds('DB', 'TXN')],
-      lineageEdges: [hop('TXN', 'F')],
-      upstreamUrns: new Set(['DB', 'TXN']),
-      // 61 unfetched, matching the user's own "Transactions" screenshot.
-      frontierUp: [frontier('TXN', 61)],
-    })))
-    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of transactions/))
-    expect(api.extend).toHaveBeenCalledWith('TXN', 'up', ['TXN'])
-    expect(triage()).toBeNull()
-  })
-})
-
-// ── F1 — THE FOLLOW PILL NEVER BLOCKS THE ROW IT SITS ON ──────────────
-
-/**
- * Reported (user screenshot, T24 F1, P0): T21's hover expansion keyed
- * off the ROW's own `group` class, so pointing anywhere on the row —
- * including its ContentsChevron — swept a ~100px ghost zone over the
- * chevron, the type icon, and the leading label. A column that is
- * itself a small struct (its own nested field) is the exact shape that
- * carries both a ContentsChevron AND a follow pill on one row.
- */
 describe('F1 — the follow pill never blocks the row it sits on', () => {
   beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
@@ -2735,15 +2422,13 @@ describe('browsing what is inside — the peek and the keyboard', () => {
     expect(peek()).toBeNull()
   })
 
-  // T26 — the peek's own follow button used to dispatch straight to
-  // `ctx.onRevealMore`/`onExtend`/`onPage`, bypassing `resolveFollowDelivery`
-  // entirely: the ONE card-anchored follow control in the whole lens that
-  // never ran the gate. A row whose own cohort is FULLY known but ranks
-  // past the triage threshold (a 'reveal' pill's own gate, per T25 A —
-  // `groupsTotal > TRIAGE_THRESHOLD`) proves it: before this fix, clicking
-  // it from the peek dumped a page directly; now it opens the SAME
-  // populated triage list the row's own ⊕ would.
-  it('the peek\'s own follow button runs the SAME gate every other card-anchored control does', () => {
+  // The peek's own follow button is a follow control like any other: it
+  // dispatches the pill it is showing, through the same `actOnPill` the
+  // gutter pill uses. (It used to run a `resolveFollowDelivery` gate in
+  // front of that, which decided whether a big cohort opened the
+  // hub-triage list instead — the list is gone, so a click on a big
+  // cohort now reveals it in place like every other click.)
+  it('the peek\'s own follow button dispatches the pill it is showing', () => {
     const nodes = [
       wnode('F', 'dataset', 'stg_orders'),
       wnode('T', 'dataset', 'raw_orders', { childCount: 1 }),
@@ -2754,19 +2439,16 @@ describe('browsing what is inside — the peek and the keyboard', () => {
       hop('c1', 'F'),
       ...Array.from({ length: 40 }, (_, i) => hop(`s${String(i).padStart(3, '0')}`, 'c1')),
     ]
-    const api = makeApi()
     renderLens(['F'], doneWalk(walkModel('F', {
       nodes,
       containmentEdges: [holds('T', 'c1')],
       lineageEdges,
       upstreamUrns: new Set(['c1', ...Array.from({ length: 40 }, (_, i) => `s${String(i).padStart(3, '0')}`)]),
-    })), {}, api)
+    })))
     fireEvent.click(row('order_id'))
     fireEvent.click(within(peek() as HTMLElement).getByText(/Walk further upstream/))
-    // The gate opened the SAME triage list a card-anchored click always
-    // does — never a raw reveal dump, and never nothing.
-    expect(triage()).toBeTruthy()
-    expect(api.extend).not.toHaveBeenCalled()
+    // ONE CLICK, ONE VISIBLE DELIVERY: the cohort lands on the board.
+    expect(onBoard('source_000')).toBe(true)
   })
 
   it('the peek focuses where it is, and opens what it holds', () => {
@@ -3040,117 +2722,11 @@ describe('the lens survives gaining and losing its focal', () => {
   })
 })
 
-// ── T25 C2 — RE-ANCHOR RESETS ALL T23-ERA VIEW STATE ────────────────
-
-describe('re-anchoring from a walked-through state (T25 C2, invariant b)', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 }))
-  afterEach(() => { cleanup(); usePreferencesStore.setState({ lensInitialDepth: 1 }) })
-
-  // T25 C2 (2/2) — THE DETERMINISTIC RACE, named and pinned rather than
-  // left as "couldn't reproduce": a re-anchor while a T25 A fetch is
-  // still IN FLIGHT on the OLD focal. `pendingTriage` (LineageLens.tsx)
-  // is nodeId-scoped exactly like `viewState` — this proves it, the same
-  // way invariant (b)'s own test proves `viewState`'s reset, by walking
-  // the EXACT interleaving with no sleeps: fire the fetch, THEN
-  // re-anchor before it resolves (both are plain synchronous `rerender`
-  // calls — no fake timers needed, because in this component's own
-  // contract `walk` is a PROP the caller controls one state transition
-  // at a time; the interleaving IS the sequence of props handed to
-  // `rerender`, not wall-clock time). Without the nodeId guard, a stale
-  // resolution could fire `revealMore`/`openTriage` against card ids
-  // that belong to a walk the board is no longer showing.
-  it('a fetch left in flight on the OLD focal never fires its arrival decision against the NEW one (T25 C2, 2/2 — the deterministic race)', () => {
-    const api = makeApi()
-    const { rerender } = renderLens(['F'], doneWalk(pillCatalogue()), {}, api)
-    // Start the fetch on F's own wholly-unfetched PAGED card — marks a
-    // `pendingTriage` entry tagged nodeId: 'F'.
-    fireEvent.click(screen.getByTitle(/Loads the next hop upstream of partially_loaded/))
-    expect(api.page).toHaveBeenCalledTimes(1)
-    // ARM it: the fetch is visibly in flight — still focal F — exactly
-    // what `useLensWalk` shows the instant the click's own request
-    // starts (see the T25 A "on arrival" tests above for why this step
-    // cannot be skipped: without it, `seenLoading` is never set and the
-    // race below is vacuous — it would pass whether or not the nodeId
-    // guard exists at all).
-    rerender(
-      <LineageLens
-        history={{ entries: ['F'], cursor: 0 }}
-        walk={doneWalk(pillCatalogue(), new Map([['up:PAGED', 'loading']]))}
-        walkApi={api}
-        onRecenter={vi.fn()}
-        onBack={vi.fn()}
-        onForward={vi.fn()}
-        onClose={vi.fn()}
-      />,
-    )
-    // The interleaving: re-anchor to B BEFORE F's fetch ever resolves.
-    // B's own model coincidentally ALSO has a 'PAGED' entity — the SAME
-    // urn F's in-flight fetch was anchored on — with forty of its OWN
-    // upstream sources already known. This is what makes a guard
-    // failure OBSERVABLE rather than merely inert: without the nodeId
-    // check, the stale entry would recompute `partnersFor('PAGED','in')`
-    // against B's CURRENT model (40, past the gate) and open a triage
-    // panel anchored to a card id from F's own layout, on B's board —
-    // wrong regardless of whether the id happens to resolve to anything
-    // real there.
-    const focalB = doneWalk(walkModel('B', {
-      nodes: [
-        wnode('B', 'dataset', 'target_table'),
-        wnode('SRC', 'dataset', 'upstream_of_b'),
-        wnode('PAGED', 'dataset', 'unrelated_but_same_urn'),
-        ...Array.from({ length: 40 }, (_, i) => wnode(`bp${i}`, 'dataset', `b_paged_source_${i}`)),
-      ],
-      lineageEdges: [
-        hop('SRC', 'B'), hop('PAGED', 'B'),
-        ...Array.from({ length: 40 }, (_, i) => hop(`bp${i}`, 'PAGED')),
-      ],
-      upstreamUrns: new Set(['SRC', 'PAGED', ...Array.from({ length: 40 }, (_, i) => `bp${i}`)]),
-    }))
-    rerender(
-      <LineageLens
-        history={{ entries: ['F', 'B'], cursor: 1 }}
-        walk={focalB}
-        walkApi={api}
-        onRecenter={vi.fn()}
-        onBack={vi.fn()}
-        onForward={vi.fn()}
-        onClose={vi.fn()}
-      />,
-    )
-    // THE RACE ITSELF, right here: `focalB`'s OWN `extendStatus` never
-    // had an `up:PAGED` key to begin with — indistinguishable, to a
-    // nodeId-blind reader, from F's fetch having just resolved WHILE B
-    // is what's on screen. Without the nodeId guard on `pendingTriage`,
-    // THIS is the render where a stale arrival fires `openTriage`
-    // against F's own PAGED card id — which, in this fixture, resolves
-    // to B's OWN coincidentally-named-but-unrelated PAGED entity (40
-    // known upstream sources of its own — past the gate), so the wrong
-    // fire is externally OBSERVABLE rather than merely inert: a triage
-    // panel the user never asked for, materializing the instant the
-    // re-anchor lands. The new focal's board must render immediately —
-    // not blank, not waiting on F's fetch, nothing stolen from F's click.
-    expect(onBoard('target_table')).toBe(true)
-    expect(onBoard('upstream_of_b')).toBe(true)
-    expect(triage()).toBeNull()
-    // One more render for good measure — the guard's effect is stable,
-    // not a one-tick coincidence.
-    rerender(
-      <LineageLens
-        history={{ entries: ['F', 'B'], cursor: 1 }}
-        walk={{ ...focalB, model: { ...focalB.model } }}
-        walkApi={api}
-        onRecenter={vi.fn()}
-        onBack={vi.fn()}
-        onForward={vi.fn()}
-        onClose={vi.fn()}
-      />,
-    )
-    // B's board is undisturbed: no triage panel materialized (which
-    // would have opened anchored to F's PAGED card — invisible on B's
-    // own board, an inert but corrupt state), and B's own content is
-    // still exactly what it was.
-    expect(triage()).toBeNull()
-    expect(onBoard('target_table')).toBe(true)
-    expect(onBoard('upstream_of_b')).toBe(true)
-  })
-})
+// T25 C2 (2/2) — THE DETERMINISTIC RACE, retired with its cause. A
+// re-anchor while a fetch was still in flight used to be able to fire
+// that fetch's ARRIVAL DECISION (reveal the page, or open the hub-triage
+// list) against the NEW focal's card ids, which is why `pendingTriage`
+// was nodeId-scoped. The triage list is gone and with it the deferred
+// decision: an extend now claims its page at CLICK time, against the
+// focal it was clicked on, and `useLensWalk`'s own session guard drops a
+// response that outlives its focal. Nothing is left here to race.

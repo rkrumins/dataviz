@@ -30,7 +30,6 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { FocusGraphView } from '../FocusGraphView'
 import { buildFocusLayout, initialLensViewState } from '../focus-layout'
 import type { LensWalkNode } from '../closure-adapter'
-import { INFRAME_WIRE_CAP } from '../frame-flow'
 import { buildLensSubgraph } from '../lens-subgraph'
 import { applyCondensation } from '../condensation'
 import { WALK_FIXTURES } from '@/harness/lensFixtures'
@@ -414,14 +413,13 @@ describe('P0 — perf harness (Task 20)', () => {
       // route it — not a budget met by having nothing to do.
       //
       // A frame draws ONE WINDOW of rows however many it holds, so the
-      // wires it can ever draw are bounded by that window even here —
-      // which is why the cap is a number about the window and not about
-      // the container. The passes still SEE all fifty tables' hops
-      // (`internalHopsOf` scans every projected bundle), which is the
-      // part this times.
-      expect(frame.internalFlows).toBeGreaterThan(INFRAME_WIRE_CAP)
+      // wires it can ever draw are bounded by that window even here. The
+      // passes still SEE all fifty tables' hops (`internalHopsOf` scans
+      // every projected bundle), which is the part this times.
+      const internal = warm.edges.filter(e => e.sameAncestorFrame === frame.id)
+      expect(internal.length).toBeGreaterThan(12)
+      expect(internal.every(e => e.inFrameLane != null)).toBe(true)
       expect(frame.gutterLanes).toBeGreaterThan(0)
-      expect(warm.edges.filter(e => e.sameAncestorFrame === frame.id).every(e => e.internalQuiet)).toBe(true)
 
       const N = 20
       const samples: number[] = []
@@ -432,7 +430,7 @@ describe('P0 — perf harness (Task 20)', () => {
       }
       const avg = samples.reduce((a, b) => a + b, 0) / N
       const max = Math.max(...samples)
-      console.log(`[in-frame] dense container rebuild flows=${frame.internalFlows} lanes=${frame.gutterLanes} cards=${warm.cards.length} avgMs=${avg.toFixed(3)} maxMs=${max.toFixed(3)}`)
+      console.log(`[in-frame] dense container rebuild flows=${internal.length} lanes=${frame.gutterLanes} cards=${warm.cards.length} avgMs=${avg.toFixed(3)} maxMs=${max.toFixed(3)}`)
       expect(avg).toBeLessThan(REGRESSION_CEILING_MS)
     })
   })

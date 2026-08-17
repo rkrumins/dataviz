@@ -24,19 +24,20 @@
  */
 
 /**
- * Past this many flows inside ONE container, drawing every one of them
- * at once is noise whatever the routing does — a warehouse with forty
- * tables feeding each other is a hairball as a picture and a scan as a
- * list. Past it the wires go quiet and draw only for the row the reader
- * is asking about; the COUNTS stay on the rows and the frame header, so
- * what goes is the ink and never the fact.
+ * How many lanes a gutter will grow to.
+ *
+ * DELIBERATELY GENEROUS (user, 2026-08-17): a container's own lineage
+ * always draws, at any density — "I want to ensure that user clearly
+ * sees that there is an intra container lineage that can within itself
+ * hop multiple hops within the container". An earlier pass quieted the
+ * wires past a dozen and put counts on the rows instead; the counts read
+ * as noise and the lineage read as absent, which is the opposite of the
+ * point. So the ceiling is only here to stop a gutter growing wider than
+ * the rows it serves — at sixteen lanes that is ~150px, and a frame that
+ * needs more than sixteen simultaneously-overlapping runs is beyond what
+ * any node-link picture answers well.
  */
-export const INFRAME_WIRE_CAP = 12
-
-/** Lanes past this are not worth drawing: the gutter would be wider
- *  than the rows it serves, and a frame that dense is the density
- *  gate's problem (the wires go quiet), not the router's. */
-export const MAX_LANES = 5
+export const MAX_LANES = 16
 
 /** One lane's horizontal share of the gutter. */
 export const LANE_W = 9

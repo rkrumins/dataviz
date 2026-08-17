@@ -79,12 +79,6 @@ export interface WalkFixture {
   /** Consecutive stops in the walked path, as `[from, to]` urn pairs —
    *  the wires that draw slightly firmer. */
   trailAdjacent?: Array<[string, string]>
-  /** T23 R3 — pre-opens the hub-triage list for the shot (it only ever
-   *  opens from a click, which a still picture can't drive). The CARD id
-   *  a follow control hangs off — `'f'` for the focal, `n:${urn}`
-   *  otherwise (T27 — one id scheme regardless of kind), the same
-   *  scheme `isolatedId` above uses. */
-  triageAnchor?: { cardId: string; dir: 'in' | 'out' }
 }
 
 const scripted = (
@@ -950,21 +944,6 @@ const walkLongChainUnfolded = (): WalkFixture => {
 }
 
 /**
- * T23 R3 — `walkWideHub` with the hub-triage list forced open on F's own
- * hundred-incoming upstream direction: the mandatory "triage list on
- * walkWideHub" shot. FORCED, not clicked — the canonical fixture's own
- * default script (T20) admits all twelve systems for free (12 ≤
- * REVEAL_PAGE), so no ⊕ here would naturally cross the triage gate; the
- * panel is shown at the scale it exists for regardless, the same reason
- * `isolatedId` forces a state a still picture cannot click its way to.
- */
-const walkWideHubTriage = (): WalkFixture => ({
-  ...walkWideHub(),
-  title: 'The hundred-incoming hub — the triage list, forced open',
-  triageAnchor: { cardId: 'f', dir: 'in' },
-})
-
-/**
  * T25 A — the OTHER triage shape `walkWideHubTriage` cannot show: a
  * cohort that ARRIVED from a genuine fetch rather than sat fully local
  * from the start. `HUB` carries forty-five of its own downstream
@@ -1004,7 +983,6 @@ const walkUnfetchedFanTriage = (): WalkFixture => {
     // and never reaches the frontier branch, and the panel's remainder
     // line (the whole point of this fixture) never appears.
     script: base => scripted(base, { reveal: [['out:HUB', 4]] }),
-    triageAnchor: { cardId: 'n:HUB', dir: 'out' },
   }
 }
 
@@ -1285,7 +1263,6 @@ export const WALK_FIXTURES: Record<string, WalkFixture> = {
   walkLongChain: walkLongChain(),
   walkLongChainUnfolded: walkLongChainUnfolded(),
   walkWideHub: walkWideHub(),
-  walkWideHubTriage: walkWideHubTriage(),
   walkUnfetchedFanTriage: walkUnfetchedFanTriage(),
   walkGrainSeam: walkGrainSeam(),
   walkGrainSeamUnderclaim: walkGrainSeamUnderclaim(),
