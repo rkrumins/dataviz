@@ -184,6 +184,27 @@ async def test_a_faster_override_beats_a_slow_global(
 
 
 @pytest.mark.asyncio
+async def test_a_disabled_override_does_not_drag_the_cutoff(
+    session_factory, _enqueued, monkeypatch,
+):
+    """A probe-disabled source can never be due, so its narrow override must
+    not widen the SQL window for the whole fleet."""
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.service"
+        ".AGGREGATION_PROBE_INTERVAL_SECS", 900,
+    )
+    await _seed(
+        session_factory, "ds_off",
+        last_probed_at=_ago(seconds=5),
+        probe_enabled=False, probe_interval_secs=15,
+    )
+    await _seed(session_factory, "ds_on", last_probed_at=_ago(seconds=100))
+    summary = await ProbeScheduler(session_factory).tick()
+    assert (summary.seen, summary.enqueued) == (0, 0)
+    assert _enqueued == []
+
+
+@pytest.mark.asyncio
 async def test_deleted_source_is_never_probed(session_factory, _enqueued):
     """Liveness is deleted_at, not is_active — a tombstone that kept its
     active flag would otherwise be probed forever."""

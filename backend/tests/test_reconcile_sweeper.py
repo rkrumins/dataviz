@@ -580,8 +580,12 @@ async def test_a_source_in_rebuild_cooldown_is_deferred(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_cooldown_hold_does_not_advance_last_checked(session_factory):
-    """A hold must leave the source due — otherwise rebuild waits an hour."""
+async def test_cooldown_hold_advances_the_fairness_stamp_but_stays_due(
+    session_factory,
+):
+    """A hold advances the fairness clock (so held sources rotate out of the
+    oldest-first window) yet stays due through the unresolved-drift clause —
+    the rebuild still does not wait for the check interval."""
     checked = _ago(seconds=300)
     await _seed(
         session_factory,
@@ -596,7 +600,7 @@ async def test_cooldown_hold_does_not_advance_last_checked(session_factory):
     assert result.by_skip == {"cooldown": 1}
     st = await _state(session_factory)
     assert st.drift_state == "overlayMissing"
-    assert st.last_reconcile_checked_at == checked  # unchanged
+    assert st.last_reconcile_checked_at != checked  # fairness clock moved
 
     # Still due on the next tick (unresolved finding newer than last act).
     result2 = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
@@ -1415,3 +1419,77 @@ async def test_claim_lock_fails_closed_on_postgres_error():
 
     sweeper = ReconciliationSweeper(lambda: None, lambda: None)
     assert await sweeper._claim_lock(_Session()) is False
+
+
+# ── Fairness: the scan window rotates ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_held_sources_do_not_monopolize_the_scan_window(
+    session_factory, monkeypatch,
+):
+    """Past _SCAN_CAP permanently-held sources, a frozen fairness clock meant
+    nothing else in the fleet was ever scanned again."""
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.reconcile_sweeper._SCAN_CAP", 1,
+    )
+    # Held: drifting but inside the rebuild cooldown, oldest stamp.
+    await _seed(
+        session_factory, ds_id="ds_held",
+        edge_counts={"FLOWS_TO": 200},
+        last_aggregated_ago_secs=60,
+        stats_age_secs=30,
+        checked_at=_ago(hours=3),
+        raw_fingerprint="aaa",
+    )
+    # Healthy and overdue, but with the newer stamp.
+    await _seed(session_factory, ds_id="ds_healthy", checked_at=_ago(hours=2))
+
+    svc = _FakeService()
+    first = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert first.scanned == 1
+    assert first.by_skip == {"cooldown": 1}  # the held source went first
+
+    # The hold advanced the fairness clock, so the next tick reaches the
+    # other source instead of re-confirming the same hold forever.
+    second = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert second.scanned == 1
+    assert second.by_skip == {"in_sync": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_sub_300s_check_override_is_honoured(session_factory):
+    """The SQL cutoff must widen to the fastest per-source override, or a
+    60s override behind the 300s clamp is silently inert."""
+    await _seed(
+        session_factory,
+        checked_at=_ago(seconds=120),
+        stats_age_secs=200,  # older than checked_at: digest clauses stay quiet
+    )
+    async with session_factory() as s:
+        st = await s.get(AggregationDataSourceStateORM, "ds_1")
+        st.reconcile_check_interval_secs = 60
+        await s.commit()
+
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+    assert result.scanned == 1  # 120s since last check > the 60s override
+
+
+@pytest.mark.asyncio
+async def test_a_sub_300s_override_not_yet_elapsed_stays_quiet(session_factory):
+    await _seed(
+        session_factory,
+        checked_at=_ago(seconds=30),
+        stats_age_secs=200,
+    )
+    async with session_factory() as s:
+        st = await s.get(AggregationDataSourceStateORM, "ds_1")
+        st.reconcile_check_interval_secs = 60
+        await s.commit()
+
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+    assert result.scanned == 0

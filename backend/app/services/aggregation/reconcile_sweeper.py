@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from .reconcile import Observation, Verdict, evaluate
 
@@ -119,12 +119,17 @@ class _Action:
 
 
 # Skips that mean "we looked and we are done with this source until the
-# next interval / stats change". Holds and deferrals must NOT advance
-# last_reconcile_checked_at or a known finding waits up to an hour.
+# next interval / stats change". Only these adopt last_seen_counts_digest:
+# stamping a hold's digest would silence the tripwire on numbers nobody has
+# acted on. Every evaluated source still advances last_reconcile_checked_at
+# — it is the fairness clock for the oldest-first scan window; a hold that
+# froze it pinned itself to the head of the window and, past _SCAN_CAP held
+# sources, starved the rest of the fleet out of the sweep entirely.
 _TERMINAL_SKIPS = frozenset({"in_sync", "platform_mastered"})
 
 # Unresolved findings stay due every tick until an action or in_sync —
-# heals rows stamped by the old "advance last_checked on hold" bug.
+# this clause, not a frozen checked_at stamp, is what keeps a held or
+# deferred finding due while the fairness clock advances.
 _UNRESOLVED_DRIFT = frozenset({"drifting", "overlayMissing", "neverBuilt"})
 
 
@@ -471,26 +476,34 @@ class ReconciliationSweeper:
                     elif verdict.skip in ("stats_stale", "stats_unhealthy"):
                         if len(nudges) < _NUDGE_CAP:
                             nudges.append((state.data_source_id, state.workspace_id))
-                    # Holds / unevaluated skips leave last_checked alone so
-                    # the source stays due on the next tick.
+                    # Every evaluated source advances the fairness clock —
+                    # a frozen stamp pinned holds to the head of the oldest-
+                    # first window until, past _SCAN_CAP of them, nothing
+                    # else was ever scanned. A hold stays due through the
+                    # unresolved-drift clause, not through this stamp.
                     if _is_terminal_skip(verdict):
                         state.last_reconcile_checked_at = now
-                        # Same timing as last_checked: record the numbers we
-                        # just accepted, so an identical re-probe is free. A
-                        # hold deliberately leaves this alone and stays due.
+                        # Record the numbers we just accepted, so an
+                        # identical re-probe is free. Terminal-only: a hold's
+                        # digest stays unstamped so the tripwire keeps firing
+                        # on numbers nobody has acted on.
                         state.last_seen_counts_digest = ctx_row.get(
                             "counts_digest"
                         )
+                    elif not dry_run:
+                        state.last_reconcile_checked_at = now
                     if verdict.reason:
                         result.finding_rows.append(_finding_row(
                             state, ctx_row, verdict, acted=False,
                         ))
                     continue
 
-                # Deferrals (dry-run listing, action cap, first-build cap)
-                # must not advance last_checked — the finding is still open.
+                # A cap deferral advances the fairness clock too — the
+                # finding stays open (and due) through the unresolved-drift
+                # clause. A dry run lists without stamping anything.
                 if dry_run or len(actions) >= max_actions:
                     if not dry_run and len(actions) >= max_actions:
+                        state.last_reconcile_checked_at = now
                         logger.info(
                             "reconcile sweep: action cap (%d) reached — %s "
                             "deferred to the next sweep",
@@ -508,6 +521,11 @@ class ReconciliationSweeper:
                 first_build = verdict.reason == "never_aggregated"
                 if first_build:
                     if first_builds >= _FIRST_BUILD_CAP:
+                        # Same fairness stamp as the action cap above: a
+                        # >200-source backlog of never-built sources drained
+                        # at 1/tick must rotate through the window, not camp
+                        # in it.
+                        state.last_reconcile_checked_at = now
                         result.finding_rows.append(_finding_row(
                             state, ctx_row, verdict, acted=False,
                             skip="cap",
@@ -684,6 +702,16 @@ class ReconciliationSweeper:
                 global_interval or _MIN_CHECK_INTERVAL_SECS,
                 _MIN_CHECK_INTERVAL_SECS,
             )
+            # A per-source override faster than the clamp above was never
+            # loaded by the timestamp clause — the exact bug the probe
+            # lane's _fastest_override exists for. One scalar MIN keeps the
+            # cutoff a SUPERSET of every override; _is_due stays the exact
+            # per-source test.
+            fastest = (await session.execute(
+                select(func.min(S.reconcile_check_interval_secs))
+            )).scalar()
+            if fastest is not None:
+                interval = min(interval, int(fastest))
             cutoff = (
                 datetime.now(timezone.utc) - timedelta(seconds=interval)
             ).isoformat()
