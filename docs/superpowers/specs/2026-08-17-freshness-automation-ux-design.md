@@ -63,7 +63,11 @@ with `Preview exactly ▸` opening the existing `ReconcilePreviewDialog`. Deboun
 
 ## 3. Row signal — quiet by default
 
-`FreshnessRow` stops rendering the unconditional `RECONCILE CHECK` chip. An automation chip renders only for a notable state:
+Two separate problems, discovered while mapping the code:
+
+**3a. The `RECONCILE CHECK` pill is not an automation chip.** It is the Last activity column's `in_step` kind — "the last thing that happened here was a check, and it found the rollups in sync". The content is right; the *weight* is wrong. `ACTIVITY_PILL.in_step` renders a bordered, uppercase, sky-toned pill — visually identical in structure to `failed` (red) and `queued` (amber). On a healthy fleet that is a wall of shouting pills saying "nothing happened". Fix: `in_step` degrades to quiet muted text (no border, no uppercase, no fill) — `✓ checked 1m ago`. Every other kind keeps its pill. Nothing is removed; the routine outcome stops competing with the exceptional ones.
+
+**3b. There is no automation-state signal at all.** Add one, rendered only for a notable state:
 
 | State | Chip | Meaning |
 |---|---|---|
