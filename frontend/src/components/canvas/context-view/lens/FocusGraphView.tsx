@@ -72,6 +72,7 @@ import {
   type EdgeProps,
   type Node,
   type NodeProps,
+  type NodeChange,
   type ReactFlowInstance,
   type XYPosition,
 } from '@xyflow/react'
@@ -1087,6 +1088,33 @@ function IconTip({ label, side = 'top', children }: {
       </span>
     </span>
   )
+}
+
+/**
+ * Fold one batch of React Flow node changes into the live drag map —
+ * POSITION changes only, and nothing else.
+ *
+ * Returns `null` when the batch carries no position at all, so the
+ * caller can skip the state update entirely: React Flow reports
+ * selection, dimension and removal changes through the same channel,
+ * and a drag frame must not pay for any of them.
+ *
+ * Pure and exported so the rule is testable without a browser: jsdom
+ * has no layout, so React Flow's own pointer maths never runs there and
+ * a DOM-level drag test can only ever assert a ceiling.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function mergeDragPositions(
+  prev: ReadonlyMap<string, XYPosition>,
+  changes: readonly NodeChange<Node>[],
+): ReadonlyMap<string, XYPosition> | null {
+  let next: Map<string, XYPosition> | null = null
+  for (const change of changes) {
+    if (change.type !== 'position' || !change.position) continue
+    next ??= new Map(prev)
+    next.set(change.id, change.position)
+  }
+  return next
 }
 
 /** Hover action cluster shared by entity-ish cards. */
@@ -4093,9 +4121,8 @@ export function FocusGraphView({
    * an arriving fetch or a newly opened container grows the picture
    * without throwing away the arrangement someone just made.
    *
-   * Only the final position is committed (onNodeDragStop) — React Flow
-   * moves the node itself during the gesture, so a drag costs exactly
-   * one state update rather than one per frame.
+   * The FINAL position lands here (`onNodeDragStop`); the position under
+   * the pointer mid-gesture lives in `dragPositions` beside it.
    */
   // Stamped with the focal it belongs to and read through, rather than
   // cleared by an effect: a different focal is a different picture, and
@@ -4104,6 +4131,32 @@ export function FocusGraphView({
     () => ({ focalId, positions: EMPTY_POSITIONS }),
   )
   const moved = movedState.focalId === focalId ? movedState.positions : EMPTY_POSITIONS
+
+  /**
+   * WHERE A CARD IS RIGHT NOW, mid-drag.
+   *
+   * `nodes` is a CONTROLLED prop derived from the built layout, so React
+   * Flow's own store is re-seeded from it on every render and a drag it
+   * is never told about is painted back to where the layout says the
+   * card belongs. Reported live: "I am not getting an indication that it
+   * is actually being moved and only when I release it I see that it was
+   * moved" — the card really was following the pointer inside React
+   * Flow, and every render put it back.
+   *
+   * PERFORMANCE, which is the reason this is a separate map rather than
+   * `applyNodeChanges` over the whole array: only POSITION changes are
+   * read, and only for the handful of nodes actually under the gesture
+   * (one, in every gesture the lens offers). The `nodes` memo below
+   * returns every untouched node BY IDENTITY, so a drag frame costs one
+   * array map and re-renders exactly the card that moved — not the
+   * board. `onNodeDragStop` folds the final position into `moved` and
+   * empties this in the same update, so nothing accumulates.
+   */
+  const [dragPositions, setDragPositions] = useState<ReadonlyMap<string, XYPosition>>(EMPTY_POSITIONS)
+  const onNodesChange = useCallback((changes: NodeChange<Node>[]) => {
+    setDragPositions(prev => mergeDragPositions(prev, changes) ?? prev)
+  }, [])
+
   const commitDrag = useCallback((_: unknown, node: Node) => {
     setMovedState(prev => {
       const base = prev.focalId === focalId ? prev.positions : EMPTY_POSITIONS
@@ -4111,6 +4164,10 @@ export function FocusGraphView({
       positions.set(node.id, { x: node.position.x, y: node.position.y })
       return { focalId, positions }
     })
+    // The committed position is the same one that was under the pointer,
+    // so releasing the mouse changes nothing on screen — the card does
+    // not jump, and the live map goes back to empty for the next drag.
+    setDragPositions(EMPTY_POSITIONS)
   }, [focalId])
   const resetLayout = useCallback(() => setMovedState({ focalId, positions: EMPTY_POSITIONS }), [focalId])
 
@@ -4119,10 +4176,13 @@ export function FocusGraphView({
   const nodes = useMemo(() => baseNodes.map((n) => {
     const cardNodeId = (n.data as { card?: FocusCard }).card?.nodeId ?? null
     const sel = cardNodeId != null && cardNodeId === selectedId
-    const pos = moved.get(n.id)
+    // Under the pointer beats where it was dropped beats where the
+    // layout put it — the drag has to win, or the card snaps back to
+    // its committed position on every frame of the gesture.
+    const pos = dragPositions.get(n.id) ?? moved.get(n.id)
     if (sel === !!n.selected && !pos) return n
     return { ...n, selected: sel, ...(pos ? { position: pos } : {}) }
-  }), [baseNodes, selectedId, moved])
+  }), [baseNodes, selectedId, moved, dragPositions])
 
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const edges = useMemo((): Edge[] => {
@@ -4344,6 +4404,7 @@ export function FocusGraphView({
           nodesConnectable={false}
           elementsSelectable={false}
           edgesFocusable={false}
+          onNodesChange={onNodesChange}
           onNodeDragStop={commitDrag}
           // Clicking the board behind everything DISMISSES, innermost
           // first — the same order Escape uses, so the two gestures
