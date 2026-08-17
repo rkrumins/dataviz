@@ -85,6 +85,9 @@ import os
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
+from backend.common.providers.identity import (
+    node_identity_expr as _shared_identity_expr,
+)
 from backend.common.providers.pair_rules import (
     ancestor_closure,
     boundary_pairs,
@@ -121,18 +124,25 @@ def _env_float(name: str, default: float, lo: float, hi: float) -> float:
 
 def _scan_range_width() -> int:
     """Fixed ID-range width for edge scans. Wider = fewer queries but
-    larger result payloads; 250k rows of 2-3 ints is a few MB."""
-    return _env_int("AGGREGATION_SCAN_RANGE_WIDTH", 250_000, 10_000, 5_000_000)
+    larger result payloads; 200k rows of 2-3 ints is a few MB."""
+    return _env_int("AGGREGATION_SCAN_RANGE_WIDTH", 200_000, 10_000, 5_000_000)
 
 
 def _max_pending_pairs() -> int:
     """Memory cap on the in-worker pair accumulator AND the raw-pair base
     map. Crossing it triggers a lattice roll-up (base) or an early flush
     to the graph (accumulator) — memory stays bounded on pathological
-    graphs at the cost of extra writes. Default 5M (~500MB packed) keeps
-    typical multi-million-edge graphs on the flush-free diff path within
-    the worker's 4Gi budget."""
-    return _env_int("AGGREGATION_MAX_PENDING_PAIRS", 5_000_000, 50_000, 50_000_000)
+    graphs at the cost of extra writes.
+
+    Default 50M keeps every graph up to that size on the flush-free diff
+    path: overflow is exact but costs extra write round-trips, and the
+    target scale (1M nodes / 2M edges → ~3-4M boundary pairs) never comes
+    close to the cap. NOTE the cap is what bounds WORKER RSS (not graph
+    memory — unaffected by FalkorDB topology): 50M pairs is ~5GB packed,
+    ABOVE the worker's 4Gi budget, so a graph that truly accumulates that
+    many pairs will OOM rather than flush. Lower this (or raise the worker
+    limit) before aggregating beyond ~30M pairs."""
+    return _env_int("AGGREGATION_MAX_PENDING_PAIRS", 50_000_000, 50_000, 50_000_000)
 
 
 def _delete_chunk() -> int:
@@ -145,9 +155,10 @@ def _apply_chunk() -> int:
 
 def _pacing_ratio() -> float:
     """Sleep between write sub-batches for ``last_batch_duration × ratio``
-    — bounds this job's FalkorDB write duty cycle (0.5 → ≤ ~66%), leaving
-    query threads for interactive readers."""
-    return _env_float("AGGREGATION_WRITE_PACING_RATIO", 0.5, 0.0, 10.0)
+    — bounds this job's FalkorDB write duty cycle, leaving query threads
+    for interactive readers. Higher = GENTLER (and slower): 1.0 → ≤ ~50%
+    duty cycle, 0.5 → ≤ ~66%, 0.0 → no sleep at all."""
+    return _env_float("AGGREGATION_WRITE_PACING_RATIO", 1.0, 0.0, 10.0)
 
 
 def _scan_timeout_s() -> float:
@@ -155,32 +166,25 @@ def _scan_timeout_s() -> float:
 
 
 def _node_identity_expr(identity_property: Optional[str]) -> str:
-    """Cypher expression for a node's canonical identity: the platform ``urn``, falling back to the
-    source's configured URN-equivalent property when a node has no ``urn``.
+    """Cypher expression for a node's canonical identity, bound to the ``n``
+    variable this module's directory scans use.
 
-    Every consumer keys on ``urn``, but an ONBOARDED third-party graph identifies nodes by ``id``
-    (or ``name``), not ``urn``. The DEFINITIVE fix is :meth:`FalkorDBProvider.stamp_identity_urns`,
-    which copies the identity property onto ``urn`` for every node at aggregation start — after it
-    runs, the whole urn-keyed write / index / read / trace stack works unchanged. This expression is
-    defense-in-depth for the directory scans: it still resolves identity if the stamp was skipped
-    (e.g. a read-only source) or hasn't reached a freshly-added node yet. It does NOT fix the
-    AGGREGATED write (which MERGEs on the ``urn`` PROPERTY and cannot key on a coalesce expression) —
-    the stamp is what makes writes attach.
-
-    Default is ``urn`` (OPT-IN — no behavior change for conforming graphs); a source sets it to its
-    URN-equivalent (e.g. ``id``)."""
-    prop = identity_property or "urn"
-    safe = str(prop).replace("`", "")
-    if not safe or safe == "urn":
-        return "n.`urn`"
-    return f"coalesce(n.`urn`, n.`{safe}`)"
+    Thin alias over :func:`backend.common.providers.identity.node_identity_expr`
+    — shared with the read path so the aggregation directory and a canvas read
+    can never resolve a node's identity differently. It does NOT fix the
+    AGGREGATED write (which MERGEs on the ``urn`` PROPERTY and cannot key on a
+    coalesce expression); ``stamp_identity_urns`` is what makes writes attach.
+    """
+    return _shared_identity_expr(identity_property, "n")
 
 
 def _extract_concurrency() -> int:
     """Concurrent read-only range scans (extract/reconcile/node directory).
     Bounded well below the server's THREAD_COUNT so interactive readers
-    always have query threads."""
-    return _env_int("AGGREGATION_EXTRACT_CONCURRENCY", 2, 1, 4)
+    always have query threads. Default 1 (serial) is the gentlest setting
+    — raise it toward the ceiling of 4 to shorten EXTRACT on large graphs
+    at the cost of provider load."""
+    return _env_int("AGGREGATION_EXTRACT_CONCURRENCY", 1, 1, 4)
 
 
 def _scan_shrink_floor() -> int:
@@ -222,8 +226,50 @@ def _max_materialized_edges() -> int:
     guidance) rather than writing more :AGGREGATED edges than this into
     the shared FalkorDB instance. The materialized result lives in
     FalkorDB's RAM at ~0.5KB/edge — exceeding the instance's memory
-    kills it for every graph it hosts."""
-    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 2_000_000, 10_000, 50_000_000)
+    kills it for every graph it hosts.
+
+    Default 25M ≈ 12.5GB at 0.5KB/edge. Sized against ONE SHARD, because a
+    FalkorDB graph key lives entirely on one node — Redis Cluster does not
+    split a graph, so sharding scales the NUMBER of graphs, not the size
+    of any one (see ``falkordb_connection`` module docstring). The
+    reference cluster runs ``maxmemory 40gb`` per shard at ~22GB planned
+    usage, so ~18GB of headroom; this budget claims ~70% of that.
+
+    Boundary pairs run ~1.5-2x raw edge count, so 25M covers a graph of
+    roughly 12-16M edges — 6-8x the 1M-node / 2M-edge floor the defaults
+    target, which is the point: that floor is a MINIMUM, not the ceiling.
+
+    NOTE this is ABOVE the ~8GB "largest single graph" figure in
+    ``docs/INFRASTRUCTURE_LAUNCH_SCALE.md`` §2.2, and that doc's headroom
+    covers skew + largest graph + growth together. Because keyslot
+    placement is not load-aware, two graphs near this budget landing on
+    one shard is the case that gets tight — watch per-shard
+    ``used_memory`` and rebalance by moving a graph, per that doc.
+
+    It is a backstop, not a sizing guard: it exists so a pathological
+    result fails LOUDLY here rather than filling the shard. That matters
+    more on a cluster than standalone — ``noeviction`` at the shard cap
+    fails writes for every graph on that shard, and with
+    ``cluster-require-full-coverage no`` the rest of the cluster keeps
+    serving, so it degrades partially instead of obviously. Raise it per
+    job (ceiling 50M) only on an instance with the headroom to match."""
+    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 25_000_000, 10_000, 50_000_000)
+
+
+def _max_cube_edges() -> int:
+    """Ceiling on the AUTO-mode full-cube estimate — deliberately separate
+    from ``_max_materialized_edges``.
+
+    Auto mode stores the full cube when its estimate fits, and the cube
+    scales as edges × depth² (observed: 1.17M edges → 5.6M pairs → OOM).
+    Sharing the write budget would mean raising that backstop silently
+    flipped auto into full-cube for nearly every real graph — turning
+    "Auto" into "Always full detail". This knob keeps the cube decision
+    pinned to what the owning SHARD can actually hold (~8M edges ≈ 4GB at
+    0.5KB/edge) while the write budget stays a runaway backstop. Keep it
+    strictly below ``_max_materialized_edges`` — a cube the write budget
+    would reject should never be selected in the first place."""
+    return _env_int("AGGREGATION_MAX_CUBE_EDGES", 8_000_000, 10_000, 50_000_000)
 
 
 class MaterializationBudgetExceeded(ValueError):
@@ -1535,18 +1581,24 @@ class AggregationPipeline:
                     if sid is None or tid is None:
                         continue
                     estimate += (anc_count(int(sid))) * (anc_count(int(tid)))
-        cap = self._knob_int(
+        # The cube ceiling is deliberately NOT the write budget: the budget
+        # is a runaway backstop sized well above any real result, while the
+        # cube decision must stay pinned to what the instance can hold.
+        # Sharing them would make raising the backstop silently turn "Auto"
+        # into "Always full detail". See _max_cube_edges.
+        cap = _max_cube_edges()
+        write_budget = self._knob_int(
             "max_materialized_edges", _max_materialized_edges, 10_000, 50_000_000,
         )
         self._cube_estimate = estimate
         self._cube_mode = estimate <= cap
         logger.info(
             "aggregation pipeline on %s: auto mode — full-cube estimate "
-            "~%d cells vs budget %d → %s.",
-            self.p._graph_name, estimate, cap,
+            "~%d cells vs cube ceiling %d (write budget %d) → %s.",
+            self.p._graph_name, estimate, cap, write_budget,
             "FULL CUBE (every ancestor combination stored)"
             if self._cube_mode else
-            "structural depth-diagonal (cube exceeds budget; mixed "
+            "structural depth-diagonal (cube exceeds ceiling; mixed "
             "granularities served on demand)",
         )
 

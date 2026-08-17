@@ -389,6 +389,20 @@ async def get_provider(
     return prov
 
 
+def _effective_provider_identity(prov) -> tuple:
+    """The provider's node-identity mapping as the resolver will see it: the
+    columns, falling back to the legacy ``extra_config.schemaMapping``."""
+    if prov is None:
+        return (None, None)
+    from backend.app.services.node_identity import provider_identity_from_extra_config
+
+    legacy_identity, legacy_name = provider_identity_from_extra_config(prov)
+    return (
+        getattr(prov, "identity_property", None) or legacy_identity,
+        getattr(prov, "name_property", None) or legacy_name,
+    )
+
+
 @router.put("/{provider_id}", response_model=ProviderResponse)
 async def update_provider(
     provider_id: str = Path(...),
@@ -397,10 +411,32 @@ async def update_provider(
     _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
 ):
     """Update a provider. Evicts any cached provider instances."""
+    from backend.app.services.node_identity import (
+        invalidate_node_identity, provider_identity_from_extra_config,
+        scopes_resolving_through,
+    )
+    from backend.app.db.models import ProviderORM
+
+    old_prov = await session.get(ProviderORM, provider_id)
+    # Compare the EFFECTIVE provider-level mapping, which folds in the legacy
+    # extra_config.schemaMapping — editing that JSON re-resolves every source on
+    # this provider just as surely as editing the column does.
+    old_identity = _effective_provider_identity(old_prov)
+
     prov = await provider_repo.update_provider(session, provider_id, req)
     if not prov:
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
     await provider_registry.evict_provider(provider_id)
+
+    new_prov = await session.get(ProviderORM, provider_id)
+    if old_identity != _effective_provider_identity(new_prov):
+        # Every source on this provider that doesn't override the mapping now
+        # resolves differently — mark them stale so the UI prompts a re-run.
+        await invalidate_node_identity(
+            session,
+            await scopes_resolving_through(session, provider_id=provider_id),
+            "provider_identity_changed",
+        )
     return prov
 
 

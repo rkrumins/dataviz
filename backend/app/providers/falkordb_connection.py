@@ -979,6 +979,15 @@ async def _resolve_cluster_node_once(
     # redirects, so even this short-lived client needs the rewrite.
     cluster = RedisCluster(
         startup_nodes=nodes,
+        # Explicit, not the library default: redis.asyncio's RedisCluster
+        # defaults require_full_coverage=True (the sync one does not), and
+        # the SERVER runs --cluster-require-full-coverage no so surviving
+        # shards keep serving through an outage. Left at the default, one
+        # dead shard made initialize() raise "All slots are not covered"
+        # and took down resolution for EVERY graph — including graphs whose
+        # slots live on healthy shards, which is the opposite of what the
+        # DR runbook's one-shard-at-a-time restore assumes.
+        require_full_coverage=False,
         **_conn_auth_kwargs(cfg, socket_timeout),
         **_address_remap_kwargs(cfg),
     )
@@ -1254,6 +1263,13 @@ def build_cluster_conn(cfg: FalkorDBConnConfig, host: str, port: int, pool_kwarg
                if (h, p) != (host, port)]
     return RedisCluster(
         host=host, port=port, startup_nodes=startup or None,
+        # See _resolve_cluster_node_once: the async client defaults this to
+        # True, the server runs --cluster-require-full-coverage no. A dead
+        # shard must not fail client construction for graphs that live on
+        # the healthy ones. (Contrast _cluster_primary_nodes_once, which
+        # sets True deliberately — a partial union there would silently
+        # under-report GRAPH.LIST.)
+        require_full_coverage=False,
         **pool_kwargs, **tls_client_kwargs(cfg.tls_settings()),
         # Every slot-map/MOVED/ASK address this client dials goes through the
         # operator's remap — the redirects announce pod IPs too.

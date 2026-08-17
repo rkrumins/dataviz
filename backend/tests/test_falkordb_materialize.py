@@ -368,9 +368,77 @@ def test_stamp_identity_urns_sets_urn_from_identity_property():
     stamped = _run(p.stamp_identity_urns())
     assert stamped >= 3
     assert any(
-        "coalesce(n.`urn`, n.`id`)" in c and "n.`urn` IS NULL" in c and "n.`id` IS NOT NULL" in c
+        "n.`urn` IS NULL" in c and "n.`id` IS NOT NULL" in c and "n.`urnSource`" in c
         for c in calls
-    ), "stamp must fill urn from id only for nodes missing urn (coalesce, never overwrite)"
+    ), "stamp must fill urn from id for nodes missing urn, recording the source property"
+
+
+def test_stamp_never_overwrites_a_native_urn():
+    """A node that came with its own `urn` carries no `urnSource` marker, and
+    the guard must exclude it — the stamp may only ever overwrite values it
+    wrote itself."""
+    p = _make_provider(_FakeFalkor())
+    p._node_identity_property = "id"
+    p._projection_mode = "in_source"
+    calls = []
+
+    async def _noop_connect():
+        return None
+
+    async def _ro(cypher, params=None, **kw):
+        return _Result([[100]]) if "max(ID(n))" in cypher else _Result([])
+
+    async def _wq(cypher, params=None, **kw):
+        calls.append(cypher)
+        r = _Result()
+        r.properties_set = 1
+        return r
+
+    p._ensure_connected = _noop_connect
+    p._ro_query = _ro
+    p._query = _wq
+    _run(p.stamp_identity_urns())
+
+    stamp = next(c for c in calls if "n.`urnSource`" in c)
+    # The re-point arm requires a marker to be PRESENT. Without that clause a
+    # node holding a native urn would match on "the mapping changed" and have
+    # its real identity overwritten.
+    assert "n.`urnSource` IS NOT NULL" in stamp
+    assert "n.`urnSource` <> $ident" in stamp
+
+
+def test_stamp_repoints_nodes_it_previously_stamped():
+    """Re-pointing a source from `id` to `uuid` must rewrite the nodes stamped
+    under `id`. The fill-only pass could not: `urn` was already set, so the
+    mapping change silently did nothing at all."""
+    p = _make_provider(_FakeFalkor())
+    p._node_identity_property = "uuid"
+    p._projection_mode = "in_source"
+    calls, params_seen = [], []
+
+    async def _noop_connect():
+        return None
+
+    async def _ro(cypher, params=None, **kw):
+        return _Result([[10]]) if "max(ID(n))" in cypher else _Result([])
+
+    async def _wq(cypher, params=None, **kw):
+        calls.append(cypher)
+        params_seen.append(params or {})
+        r = _Result()
+        r.properties_set = 5
+        return r
+
+    p._ensure_connected = _noop_connect
+    p._ro_query = _ro
+    p._query = _wq
+    assert _run(p.stamp_identity_urns()) >= 5
+
+    stamp = next(c for c in calls if "n.`urnSource`" in c)
+    assert "n.`uuid`" in stamp
+    # The marker is compared as a PARAM, so a property name can never be
+    # interpolated into a string literal in the predicate.
+    assert any(pr.get("ident") == "uuid" for pr in params_seen)
 
 
 def test_stamp_identity_urns_noop_for_default_and_dedicated():
@@ -421,7 +489,14 @@ def test_stamp_display_name_from_custom_name_property():
 
     stamped = _run(p.stamp_identity_urns())
     assert stamped >= 2
-    assert any("coalesce(n.`displayName`, n.`title`)" in c for c in calls)
+    assert any(
+        "n.`displayName` IS NULL" in c and "n.`title` IS NOT NULL" in c
+        and "n.`nameSource`" in c
+        for c in calls
+    )
+    # Identity conforms, so the urn arm must not appear at all — a
+    # displayName-only stamp must never touch `urn`.
+    assert not any("n.`urnSource`" in c for c in calls)
     assert all("n.`urn`" not in c for c in calls), "identity conforming → no urn stamp"
 
 
@@ -1561,7 +1636,8 @@ def test_auto_mode_materializes_full_cube_within_budget():
     # fallback must never be a silent log line.
     assert result["run_stats"]["regime"] == "cube"
     assert result["run_stats"]["cube_estimate"] >= len(agg)
-    assert result["run_stats"]["materialize_budget"] == 2_000_000
+    # The DEFAULT budget (no tuning override here) — sized per shard.
+    assert result["run_stats"]["materialize_budget"] == 25_000_000
     assert fake.meta["edgeCount"] == len(agg)
     assert fake.meta["maxDepth"] == 2
     # Depth stamps on every row, structural on the self-nesting shape.
@@ -1616,3 +1692,50 @@ def test_auto_mode_falls_back_to_boundary_above_budget():
     finally:
         m._max_materialized_edges = orig
     assert result2["errors"] == 0
+
+
+def test_auto_mode_cube_ceiling_is_independent_of_write_budget():
+    """The auto cube/boundary decision keys off AGGREGATION_MAX_CUBE_EDGES,
+    NOT the write budget.
+
+    These were one constant. The write budget is a runaway backstop sized
+    far above any real result, so sharing it meant raising the backstop
+    silently flipped auto into full-cube for nearly every graph — turning
+    "Auto" into "Always full detail", the mode that OOMs multi-million-edge
+    instances. A huge write budget must still leave the cube decision alone.
+    """
+    import backend.app.providers.falkordb_materialize as m
+
+    fake = _FakeFalkor()
+    levels = _seed_self_nesting_graph(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    # Cube estimate for this graph is 18 cells. A 50M write budget clears
+    # it by six orders of magnitude, but the cube ceiling sits below it.
+    orig = m._max_cube_edges
+    m._max_cube_edges = lambda: 10
+    try:
+        result = _run(_materialize(p, tuning={
+            "materialize_fine_pairs": "auto",
+            "max_materialized_edges": 50_000_000,
+        }))
+    finally:
+        m._max_cube_edges = orig
+
+    assert result["errors"] == 0
+    # Estimate (18) exceeds the ceiling (10) → boundary, despite the
+    # write budget being effectively unlimited.
+    assert result["run_stats"]["regime"] == "boundary"
+    assert result["run_stats"]["materialize_budget"] == 50_000_000
+    assert fake.meta is not None and fake.meta["regime"] == "boundary"
+
+    # Same graph, same 50M write budget, ceiling back above the estimate
+    # → cube. Only the ceiling moved.
+    fake2 = _FakeFalkor()
+    levels2 = _seed_self_nesting_graph(fake2, depth=3)
+    p2 = _make_provider(fake2, levels2)
+    result2 = _run(_materialize(p2, tuning={
+        "materialize_fine_pairs": "auto",
+        "max_materialized_edges": 50_000_000,
+    }))
+    assert result2["run_stats"]["regime"] == "cube"

@@ -21,6 +21,7 @@ import {
 } from '@/components/admin/workspace/useDataSourceDeletion'
 import { DeletedDataSources } from '@/components/admin/workspace/DeletedDataSources'
 import { aggregationService } from '@/services/aggregationService'
+import { DEFAULT_TIMEOUT_SECS } from '@/components/admin/shared/AggregationOverridesForm'
 import { useToast } from '@/components/ui/toast'
 import { usePermission, usePermissionClaims } from '@/store/auth'
 import { useFeature } from '@/store/features'
@@ -29,6 +30,7 @@ import { AddDataSourceWizard } from '@/components/admin/workspace/AddDataSourceW
 import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
 import { DataSourceGridCard } from '@/components/admin/workspace/DataSourceGridCard'
+import { WorkspaceNodeIdentityDefaults } from '@/components/admin/workspace/WorkspaceNodeIdentityDefaults'
 import { WorkspaceCardSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { DataSourceDetailPanel } from '@/components/admin/workspace/DataSourceDetailPanel'
 import WorkspaceViewsSection from '@/components/admin/workspace/WorkspaceViewsSection'
@@ -226,9 +228,9 @@ export function WorkspaceDetailPage() {
         if (nameChanged || identityChanged || namePropChanged) {
             await workspaceService.updateDataSource(wsId, dsId, {
                 ...(nameChanged ? { dedicatedGraphName: pending.dedicatedGraphName || undefined } : {}),
-                // Empty string clears back to the default "urn" server-side.
+                // Empty string clears the override server-side, so the source
+                // inherits from its provider / workspace / the platform again.
                 ...(identityChanged ? { identityProperty: pending.identityProperty } : {}),
-                // Empty string clears back to the default "name" server-side.
                 ...(namePropChanged ? { nameProperty: pending.nameProperty } : {}),
             })
         }
@@ -258,6 +260,12 @@ export function WorkspaceDetailPage() {
             await aggregationService.triggerAggregation(ds.id, {
                 projectionMode: ds.projectionMode || 'in_source',
                 batchSize: 1000,
+                // Omit ``tuning`` on purpose: the control plane then resolves
+                // the admin's configured defaults, so this button always runs
+                // the current settings rather than a frozen client-side copy.
+                // ``timeoutSecs`` is NOT resolved that way — a null column
+                // falls back to the 15-minute stall window — so it is sent.
+                timeoutSecs: DEFAULT_TIMEOUT_SECS,
             }, 'manual')
             showToast('success', `Aggregation triggered for "${ds.label || 'data source'}"`)
             reload()
@@ -287,6 +295,9 @@ export function WorkspaceDetailPage() {
             targets.map(ds => aggregationService.triggerAggregation(ds.id, {
                 projectionMode: ds.projectionMode || 'in_source',
                 batchSize: 1000,
+                // Same as handleReaggregate: tuning resolves server-side,
+                // the stall timeout does not.
+                timeoutSecs: DEFAULT_TIMEOUT_SECS,
             }, 'manual')),
         )
         const triggered = results.filter(r => r.status === 'fulfilled').length
@@ -463,6 +474,15 @@ export function WorkspaceDetailPage() {
                             </p>
                         </div>
                     </div>
+
+                    {/* Workspace-level default, above the grid it governs. */}
+                    <WorkspaceNodeIdentityDefaults
+                        wsId={wsId!}
+                        identityProperty={workspace.identityProperty}
+                        nameProperty={workspace.nameProperty}
+                        canEdit={canManageDataSources}
+                        onSaved={reload}
+                    />
 
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-lg font-bold text-ink">Data Sources</h3>

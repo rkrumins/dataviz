@@ -15,7 +15,7 @@ import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
 import type { PanelView } from '@/hooks/useAdvancedSearch'
 import { useSchemaStore } from '@/store/schema'
-import { useFocusedMatchUrn } from '@/store/searchStore'
+import { useDraftPredicate, useFocusedMatchUrn } from '@/store/searchStore'
 import type {
     AncestorRef,
     SearchAggregateBucket,
@@ -30,11 +30,12 @@ import { ZeroResultsDiagnostic } from '../ZeroResultsDiagnostic'
 import { ErrorView } from './ErrorView'
 import { HitsByParent } from './HitsByParent'
 import { RunningSkeleton } from './RunningSkeleton'
+import { findScopeCondition } from './predicateComposition'
 
 
 export interface ResultsPaneProps {
     view: PanelView
-    onDrill: (bucket: {
+    onScopeToGroup: (bucket: {
         ancestorUrn: string
         ancestorDisplayName: string
         ancestorEntityType: string
@@ -50,7 +51,7 @@ export interface ResultsPaneProps {
 
 
 export const ResultsPane: FC<ResultsPaneProps> = ({
-    view, onDrill, onReveal, onOpen, onLoadMore, isLoadingMore,
+    view, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
 }) => {
     // Ref to the scroll container. Threaded through to HitsByParent →
     // VirtualizedHitList so the virtualizer can measure the visible
@@ -73,7 +74,7 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
             >
                 <Dispatch
                     view={view}
-                    onDrill={onDrill}
+                    onScopeToGroup={onScopeToGroup}
                     onReveal={onReveal}
                     onOpen={onOpen}
                     onLoadMore={onLoadMore}
@@ -87,7 +88,7 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
 
 
 function Dispatch({
-    view, onDrill, onReveal, onOpen, onLoadMore, isLoadingMore,
+    view, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
     scrollElementRef,
 }: ResultsPaneProps & { scrollElementRef: RefObject<HTMLDivElement | null> }) {
     switch (view.kind) {
@@ -99,7 +100,7 @@ function Dispatch({
             return (
                 <ResultsContent
                     view={view}
-                    onDrill={onDrill}
+                    onScopeToGroup={onScopeToGroup}
                     onReveal={onReveal}
                     onOpen={onOpen}
                     onLoadMore={onLoadMore}
@@ -114,11 +115,11 @@ function Dispatch({
 
 
 function ResultsContent({
-    view, onDrill, onReveal, onOpen, onLoadMore, isLoadingMore,
+    view, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
     scrollElementRef,
 }: {
     view: Extract<PanelView, { kind: 'results' }>
-    onDrill: ResultsPaneProps['onDrill']
+    onScopeToGroup: ResultsPaneProps['onScopeToGroup']
     onReveal?: ResultsPaneProps['onReveal']
     onOpen?: ResultsPaneProps['onOpen']
     onLoadMore?: ResultsPaneProps['onLoadMore']
@@ -137,6 +138,15 @@ function ResultsContent({
     )
     const hits: SearchHit[] = result.hits ?? []
     const paths = result.paths ?? null
+
+    // Containers the draft is already scoped to, so a group card can
+    // say "you're inside this" instead of offering a filter that would
+    // replace itself with an identical one.
+    const draftPredicate = useDraftPredicate()
+    const scopedUrns = useMemo(
+        () => new Set(findScopeCondition(draftPredicate)?.urns ?? []),
+        [draftPredicate],
+    )
 
     // ─── Client-side hit filter ─────────────────────────────────────
     // Pure list-narrowing tool — does NOT touch matchUrnSet, so the
@@ -299,7 +309,7 @@ function ResultsContent({
                 <section className="space-y-2.5 p-4">
                     <SectionHeader
                         title={`${allBuckets.length} ${allBuckets.length === 1 ? 'group' : 'groups'}`}
-                        subtitle="Click any group to drill in"
+                        subtitle="Click a group to add an “inside” filter"
                     />
                     <div className="space-y-2.5">
                         {allBuckets.map((b, i) => (
@@ -308,7 +318,13 @@ function ResultsContent({
                                 bucket={b}
                                 grandTotal={grandTotal}
                                 index={i}
-                                onDrill={() => onDrill(b)}
+                                isActiveScope={
+                                    Boolean(b.ancestorUrn)
+                                    && scopedUrns.has(b.ancestorUrn)
+                                }
+                                onScopeToGroup={b.ancestorUrn
+                                    ? () => onScopeToGroup(b)
+                                    : undefined}
                             />
                         ))}
                     </div>

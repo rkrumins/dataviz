@@ -23,7 +23,7 @@
  *   └─────────────────────────────────────────────┘
  */
 import { motion, animate, useMotionValue, useTransform } from 'framer-motion'
-import { ChevronRight } from 'lucide-react'
+import { FolderTree } from 'lucide-react'
 import * as LucideIcons from 'lucide-react'
 import { type FC, useEffect, useMemo } from 'react'
 
@@ -143,12 +143,18 @@ export interface AggregateBucketCardProps {
     grandTotal: number
     /** Stagger index for the entry animation (0, 1, 2, ...). */
     index: number
-    /** Click handler — typically calls `useAdvancedSearch.drillInto(bucket)`. */
-    onDrill?: () => void
+    /** Narrow the query to this container by adding an "inside" filter
+     *  row to the draft. Omitted when the bucket has no ancestor URN
+     *  (entityType / property / layer aggregations), which is why the
+     *  card must tolerate not being actionable. */
+    onScopeToGroup?: () => void
+    /** The draft is already scoped to this container — show it as the
+     *  current scope rather than offering the same filter again. */
+    isActiveScope?: boolean
 }
 
 export const AggregateBucketCard: FC<AggregateBucketCardProps> = ({
-    bucket, grandTotal, index, onDrill,
+    bucket, grandTotal, index, onScopeToGroup, isActiveScope = false,
 }) => {
     const style = useMemo(
         () => styleFor(bucket.ancestorEntityType),
@@ -162,6 +168,7 @@ export const AggregateBucketCard: FC<AggregateBucketCardProps> = ({
     const sharePct = Math.round(share * 1000) / 10  // one decimal
     const sampleNames = bucket.sampleHits.slice(0, 4).map((h) => h.node.displayName)
     const staggerDelay = Math.min(index * 0.04, 0.4)
+    const interactive = Boolean(onScopeToGroup) && !isActiveScope
 
     return (
         <motion.div
@@ -182,9 +189,26 @@ export const AggregateBucketCard: FC<AggregateBucketCardProps> = ({
                 "shadow-node transition-shadow duration-200",
                 "hover:shadow-node-hover hover:border-accent-lineage/30",
                 style.shadowColor && `hover:${style.shadowColor}`,
-                onDrill && "cursor-pointer",
+                interactive && "cursor-pointer",
+                isActiveScope && "border-accent-lineage/45 ring-1 ring-accent-lineage/20",
             )}
-            onClick={onDrill}
+            // The whole card is the target — it's a big, obvious hit
+            // area — but it has to behave like the button it is, so
+            // keyboard users get the same action.
+            role={interactive ? 'button' : undefined}
+            tabIndex={interactive ? 0 : undefined}
+            aria-label={interactive
+                ? `Search inside ${bucket.ancestorDisplayName || 'this group'}`
+                : undefined}
+            onClick={interactive ? onScopeToGroup : undefined}
+            onKeyDown={interactive
+                ? (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        onScopeToGroup?.()
+                    }
+                }
+                : undefined}
         >
             {/* Subtle decorative gradient overlay — dark-mode only */}
             <div className={cn(
@@ -217,16 +241,30 @@ export const AggregateBucketCard: FC<AggregateBucketCardProps> = ({
                         {bucket.ancestorEntityType || 'aggregate'}
                     </div>
                 </div>
-                {onDrill && (
+                {isActiveScope ? (
                     <div className={cn(
-                        "shrink-0 w-7 h-7 rounded-lg flex items-center justify-center",
+                        "shrink-0 inline-flex items-center gap-1 h-7 px-2 rounded-lg",
+                        "bg-accent-lineage/15 text-accent-lineage",
+                        "text-[10.5px] font-medium",
+                    )}>
+                        <FolderTree className="w-3.5 h-3.5" strokeWidth={2.4} />
+                        Searching inside
+                    </div>
+                ) : interactive && (
+                    // Named, not just a chevron: the action writes a
+                    // filter row into the user's query, and an arrow
+                    // reads like navigation rather than a query edit.
+                    <div className={cn(
+                        "shrink-0 inline-flex items-center gap-1 h-7 px-2 rounded-lg",
                         "bg-glass/30 text-ink-muted",
+                        "text-[10.5px] font-medium whitespace-nowrap",
                         "opacity-0 -translate-x-1",
                         "group-hover:opacity-100 group-hover:translate-x-0",
                         "group-hover:bg-accent-lineage/15 group-hover:text-accent-lineage",
                         "transition-all duration-200",
                     )}>
-                        <ChevronRight className="w-4 h-4" strokeWidth={2.5} />
+                        <FolderTree className="w-3.5 h-3.5" strokeWidth={2.4} />
+                        Search inside
                     </div>
                 )}
             </div>

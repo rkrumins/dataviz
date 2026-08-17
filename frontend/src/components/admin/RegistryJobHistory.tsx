@@ -43,44 +43,26 @@ import type { AggregationOverridesValue } from './shared/AggregationOverridesFor
 import { PageContainer } from '@/components/layout/PageContainer'
 
 // ── Defaults ─────────────────────────────────────────────────────────
-const DEFAULT_TIMEOUT_SECS = 7200
+const DEFAULT_TIMEOUT_SECS = 10800
 const DEFAULT_MAX_RETRIES = 3
 const DEFAULT_BATCH_SIZE = 5000
-
-/**
- * Convert a job row's stored ``tuning`` (snake_case keys, as persisted by the
- * pipeline) back into the camelCase request shape so a re-trigger can start
- * from the same knobs.
- */
-function tuningFromJob(raw: Record<string, unknown> | null | undefined): AggregationTuning | undefined {
-    if (!raw) return undefined
-    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
-    const tuning: AggregationTuning = {}
-    const scanRangeWidth = num(raw['scan_range_width'])
-    if (scanRangeWidth !== undefined) tuning.scanRangeWidth = scanRangeWidth
-    const maxPendingPairs = num(raw['max_pending_pairs'])
-    if (maxPendingPairs !== undefined) tuning.maxPendingPairs = maxPendingPairs
-    const applyChunk = num(raw['apply_chunk'])
-    if (applyChunk !== undefined) tuning.applyChunk = applyChunk
-    const deleteChunk = num(raw['delete_chunk'])
-    if (deleteChunk !== undefined) tuning.deleteChunk = deleteChunk
-    const writePacingRatio = num(raw['write_pacing_ratio'])
-    if (writePacingRatio !== undefined) tuning.writePacingRatio = writePacingRatio
-    const extractConcurrency = num(raw['extract_concurrency'])
-    if (extractConcurrency !== undefined) tuning.extractConcurrency = extractConcurrency
-    if (typeof raw['materialize_leaf_pairs'] === 'boolean') tuning.materializeLeafPairs = raw['materialize_leaf_pairs']
-    if (typeof raw['materialize_fine_pairs'] === 'boolean') tuning.materializeFinePairs = raw['materialize_fine_pairs']
-    const maxMaterializedEdges = num(raw['max_materialized_edges'])
-    if (maxMaterializedEdges !== undefined) tuning.maxMaterializedEdges = maxMaterializedEdges
-    return Object.keys(tuning).length > 0 ? tuning : undefined
-}
 
 /** Only send ``tuning`` when the user actually set an override. */
 function tuningForRequest(tuning: AggregationTuning | undefined): AggregationTuning | undefined {
     return tuning && Object.keys(tuning).length > 0 ? tuning : undefined
 }
 
-function buildInitialOverridesFromJob(
+/**
+ * Seed the Re-trigger / Resume dialog for an existing job.
+ *
+ * Performance settings come from the CONFIGURED DEFAULTS, never from the
+ * job row. Replaying a failed job's frozen tuning is what made a graph
+ * that failed under bad settings keep failing under those same settings:
+ * the whole point of re-triggering is to get the current defaults. Only
+ * ``projectionMode`` is carried over, because that is a structural choice
+ * about where the projection lives, not a performance knob.
+ */
+export function buildInitialOverridesFromJob(
     job: AggregationJobResponse,
     defaultTuning?: AggregationTuning,
 ): AggregationOverridesValue {
@@ -94,9 +76,9 @@ function buildInitialOverridesFromJob(
     return {
         batchSize: safeBatchSize,
         projectionMode: (job.projectionMode === 'dedicated' ? 'dedicated' : 'in_source'),
-        maxRetries: job.maxRetries ?? DEFAULT_MAX_RETRIES,
-        timeoutMinutes: Math.round((job.timeoutSecs ?? DEFAULT_TIMEOUT_SECS) / 60),
-        tuning: tuningFromJob(job.tuning) ?? defaultTuning,
+        maxRetries: DEFAULT_MAX_RETRIES,
+        timeoutMinutes: Math.round(DEFAULT_TIMEOUT_SECS / 60),
+        tuning: defaultTuning,
     }
 }
 

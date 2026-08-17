@@ -45,7 +45,7 @@ import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
 import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 import { FirstRunHero } from './FirstRunHero'
 import { RetriggerDialog } from './job-history/RetriggerDialog'
-import type { AggregationOverridesValue } from './shared/AggregationOverridesForm'
+import { PRESET_TIMEOUT_MINUTES, type AggregationOverridesValue } from './shared/AggregationOverridesForm'
 import type { Envelope, AssetStatsPayload } from '@/types/insights'
 import { StatusChip } from '@/components/insights/StatusChip'
 import { RefreshControl } from '@/components/insights/RefreshControl'
@@ -958,7 +958,7 @@ export function RegistryAssets() {
                     batchSize: 5000,
                     projectionMode: firstMode,
                     maxRetries: 3,
-                    timeoutMinutes: 120,
+                    timeoutMinutes: PRESET_TIMEOUT_MINUTES,
                     tuning: settings?.tuning ?? undefined,
                 },
             })
@@ -1692,7 +1692,7 @@ export function RegistryAssets() {
                     batchSize: 5000,
                     projectionMode: 'in_source',
                     maxRetries: 3,
-                    timeoutMinutes: 120,
+                    timeoutMinutes: PRESET_TIMEOUT_MINUTES,
                 }}
                 onConfirmRetrigger={handleConfirmReaggregate}
             />

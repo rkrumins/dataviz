@@ -52,12 +52,12 @@ worker re-validates the ontology fingerprint before running.
 **Materialization modes (auto by default).** The pipeline ESTIMATES
 the full ancestor cross-product volume up front (one counting scan:
 Σ ancestors(src)+1 × ancestors(tgt)+1 — a conservative upper bound) and,
-when it fits `AGGREGATION_MAX_MATERIALIZED_EDGES`, stores the FULL CUBE:
+when it fits `AGGREGATION_MAX_CUBE_EDGES`, stores the FULL CUBE:
 every ancestor combination (column→table, table→table, column→domain,
 …) physically exists, so every canvas granularity and expansion answers
-from storage alone. Above budget it falls back to the structural
+from storage alone. Above that ceiling it falls back to the structural
 boundary below (`AGGREGATION_MATERIALIZE_FINE_PAIRS=true|false` forces a
-mode; a forced cube over budget fails terminally, loudly). Known caveat
+mode; a forced cube over the WRITE BUDGET fails terminally, loudly). Known caveat
 of boundary mode on SELF-NESTING types: the on-demand reader still
 reasons in ontology type levels, so mixed-granularity drill answers can
 be incomplete there — depth-aware on-demand reads are the tracked
@@ -107,9 +107,36 @@ milliseconds even 8 levels deep on multi-million-edge graphs. Same
 answers, same response shape. Trace is unaffected: trace-at-level reads
 same-level cells (still materialized) and already uses raw edges at the
 finest level. A hard write budget (`AGGREGATION_MAX_MATERIALIZED_EDGES`,
-default 2M) fails a job loudly — terminally, no retries, with a
+default 25M) fails a job loudly — terminally, no retries, with a
 per-level composition breakdown in the error — rather than ever letting
-a result OOM the shared instance. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
+a result OOM the shared instance.
+
+**Size it against ONE SHARD.** A FalkorDB graph key lives entirely on one
+node — Redis Cluster does NOT split a graph, so sharding scales the
+*number* of graphs you can host, not the size of any one, and running on
+a cluster gives a single large graph zero extra headroom
+(`backend/app/providers/falkordb_connection.py` module docstring). The
+reference cluster (`deploy/k8s/overlays/production-cluster/`) runs
+`maxmemory 40gb` per shard against ~22GB planned usage — about 18GB of
+headroom. The 25M default is ~12.5GB at ~0.5KB/edge, roughly 70% of that.
+Boundary pairs run ~1.5-2x raw edge count, so it covers a graph of about
+12-16M edges — several times the 1M-node / 2M-edge floor the defaults
+target, which is the point: that floor is a MINIMUM, not a ceiling.
+
+Note this sits **above** the ~8GB "largest single graph" figure in
+[Infrastructure: Launch Scale](/docs/infra-launch-scale) §2.2, whose 18GB of
+headroom covers skew *and* the largest graph *and* growth together.
+Because keyslot placement is deterministic rather than load-aware, the
+case to watch is two graphs near this budget landing on the same shard —
+monitor per-shard `used_memory` and rebalance by moving a graph, per that
+document.
+
+The budget is a backstop, not a sizing guard — it exists so a pathological
+result fails loudly instead of filling the shard. That matters *more* on a
+cluster: `noeviction` at the shard cap fails writes for every graph on
+that shard, and with `cluster-require-full-coverage no` the rest of the
+cluster keeps serving, so the failure is partial and confusing rather
+than obvious. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
 true` restores the legacy full cube (budget-guarded); jobs without an
 ontology level map — or with a SINGLE-LEVEL map (no container types) —
 fall back to it automatically. An empty graph completes as a clean
@@ -220,8 +247,10 @@ the **first checkpoint**, before any graph work. Resume rules:
   limits if Redis is down.
 * **Pacing**: every write sub-batch is AIMD-sized (shrinks on latency
   creep) and followed by `duration × AGGREGATION_WRITE_PACING_RATIO`
-  sleep (default 0.5 → ≤ ~66% write duty cycle), on top of the existing
-  per-process write semaphore and latency-quiesce circuit.
+  sleep (default 1.0 → ≤ ~50% write duty cycle), on top of the existing
+  per-process write semaphore and latency-quiesce circuit. The ratio is a
+  sleep multiplier, so RAISING it slows the job down and LOWERING it
+  speeds it up — 0.5 → ≤ ~66%, 0.25 → ≤ ~80%, 0 → no sleep at all.
 * **Progress-aware watchdog** (worker): a job is killed only when it
   makes no forward progress for `AGGREGATION_STALL_TIMEOUT_SECS`
   (default 900) or exceeds `AGGREGATION_JOB_MAX_WALL_SECS` (default
@@ -242,18 +271,19 @@ pipeline).
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `AGGREGATION_SCAN_RANGE_WIDTH` | 250000 | Edge-ID range width per scan query |
-| `AGGREGATION_MAX_PENDING_PAIRS` | 5000000 | In-memory pair cap before overflow flush |
+| `AGGREGATION_SCAN_RANGE_WIDTH` | 200000 | Edge-ID range width per scan query |
+| `AGGREGATION_MAX_PENDING_PAIRS` | 50000000 | In-memory pair cap before overflow flush |
 | `AGGREGATION_APPLY_CHUNK` | 20000 | Keys resolved+written per apply chunk |
 | `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
-| `AGGREGATION_WRITE_PACING_RATIO` | 0.5 | Sleep-after-write ratio |
+| `AGGREGATION_WRITE_PACING_RATIO` | 1.0 | Sleep-after-write ratio — HIGHER is gentler and slower (1.0 → ≤ ~50% duty cycle); 0 disables pacing |
 | `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query timeout (s) |
 | `AGGREGATION_SCAN_SHRINK_FLOOR` | 10000 | Smallest range width the shrink-on-timeout ladder descends to (a floor-width timeout is an outage and fails the run) |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs (legacy mode only) |
-| `AGGREGATION_MATERIALIZE_FINE_PAIRS` | false | Legacy full cube (leaf-involving + mixed-level pairs) |
-| `AGGREGATION_MAX_MATERIALIZED_EDGES` | 2000000 | Hard write budget (fail loud, never OOM) |
+| `AGGREGATION_MATERIALIZE_FINE_PAIRS` | auto | `auto` picks cube-vs-boundary by estimate; `true`/`false` force the legacy full cube (leaf-involving + mixed-level pairs) |
+| `AGGREGATION_MAX_MATERIALIZED_EDGES` | 25000000 | Hard write budget (fail loud, never OOM). ~12.5GB at 0.5KB/edge — sized against ONE SHARD, since a graph never spans shards. Ceiling 50M |
+| `AGGREGATION_MAX_CUBE_EDGES` | 8000000 | Ceiling on the AUTO-mode full-cube estimate. Deliberately separate from the write budget: sharing them meant raising the backstop silently turned `auto` into full-cube. Not per-job tunable |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
-| `AGGREGATION_EXTRACT_CONCURRENCY` | 2 | Concurrent read-only range scans (waves) |
+| `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves) |
 | `AGGREGATION_STALL_TIMEOUT_SECS` | 900 | Watchdog stall window |
 | `AGGREGATION_JOB_MAX_WALL_SECS` | 86400 | Watchdog wall-clock safety net |
 | `AGGREGATION_MEM_HIGH_WATER_PCT` | 75 | Worker defers new claims above this RSS/limit % |
@@ -279,8 +309,16 @@ Every job records `worker_id`, and completed jobs persist `run_stats`
 (per-phase durations + writes/deletes) shown in the job detail panel.
 
 Memory budget per large job at 2M nodes / 5M edges: child→parent map
-~200MB + accumulator (capped) ~250MB + ID cache ~125MB ≈ under 1GB;
-worker pods ship with a 4Gi limit.
+~200MB + accumulator ~250MB + ID cache ~125MB ≈ under 1GB; worker pods
+ship with a 4Gi limit. This is WORKER memory, not graph memory — it is
+unaffected by FalkorDB's topology. Note the accumulator is bounded by the
+PAIRS a graph actually produces, not by `AGGREGATION_MAX_PENDING_PAIRS` —
+the cap is only the early-flush trigger. At the 50M default the cap is far
+above the 4Gi budget (~50M pairs is ~5GB packed), so it will not fire
+before the pod's memory limit does. That is deliberate for graphs in the
+low-millions of pairs, where flushing costs write round-trips and buys
+nothing; lower it (or raise the worker limit) before aggregating a graph
+expected to exceed ~30M pairs.
 
 ## Hardening wave (2026-07-10): what changed, why, and the impact
 

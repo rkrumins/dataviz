@@ -119,35 +119,35 @@ const TUNING_FIELDS: TuningFieldSpec[] = [
         label: 'Scan range width',
         tip: 'Width of each edge-ID range the extract phase scans per query. The pipeline shrinks this automatically under pressure — this value is the ceiling.',
         help: 'Edges per scan range (10,000-5,000,000)',
-        min: 10_000, max: 5_000_000, placeholder: 250_000,
+        min: 10_000, max: 5_000_000, placeholder: 200_000,
     },
     {
         key: 'writePacingRatio',
         label: 'Write pacing ratio',
-        tip: 'Idle time inserted between write chunks, as a ratio of the previous chunk’s duration. Higher values leave more headroom for live queries; 0 disables pacing.',
+        tip: 'Idle time inserted between write chunks, as a ratio of the previous chunk’s duration. Higher values leave more headroom for live queries but make the job slower; 0 disables pacing entirely.',
         help: 'Pause between writes (0-10)',
-        min: 0, max: 10, placeholder: 0.5, step: 0.1, float: true,
+        min: 0, max: 10, placeholder: 1.0, step: 0.1, float: true,
     },
     {
         key: 'maxPendingPairs',
         label: 'Memory cap — max pending pairs',
         tip: 'Maximum aggregated pairs held in memory before the pipeline flushes early. Lower values reduce worker RSS at the cost of more flush cycles.',
         help: 'Pairs held in memory (50,000-50,000,000)',
-        min: 50_000, max: 50_000_000, placeholder: 5_000_000,
+        min: 50_000, max: 50_000_000, placeholder: 50_000_000,
     },
     {
         key: 'extractConcurrency',
         label: 'Extract concurrency',
         tip: 'Number of parallel extract scans. Higher values speed up the extract phase but put more read load on the provider.',
         help: 'Parallel scans (1-4)',
-        min: 1, max: 4, placeholder: 2,
+        min: 1, max: 4, placeholder: 1,
     },
     {
         key: 'maxMaterializedEdges',
         label: 'Materialization budget',
-        tip: 'Hard ceiling on stored AGGREGATED edges (~0.5KB of graph memory each). Auto storage falls back to the depth-diagonal above this budget; forced full detail fails loudly instead of exceeding it. Raise it (with enough FalkorDB memory) to pre-create more.',
+        tip: 'Hard ceiling on stored AGGREGATED edges (~0.5KB of graph memory each). A backstop, not a sizing guard — forced full detail fails loudly instead of exceeding it. Size it against a SINGLE graph store node: a graph never spans cluster shards, so sharding adds no headroom for one large graph. Auto storage decides cube-vs-diagonal against its own ceiling, so raising this does not change that choice.',
         help: 'Max stored rollup edges (10,000-50,000,000)',
-        min: 10_000, max: 50_000_000, placeholder: 2_000_000,
+        min: 10_000, max: 50_000_000, placeholder: 25_000_000,
     },
 ]
 
@@ -196,7 +196,7 @@ export function TuningFields({ value, onChange, disabled = false }: TuningFields
             <div>
                 <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
                     Rollup storage
-                    <Tip label="Auto stores every ancestor combination when it fits the materialization budget, and falls back to the canonical depth-diagonal above it (finer granularities are derived on demand at read time — nothing is lost, it is just not pre-created). Full detail always pre-creates every combination and FAILS the job instead of exceeding the budget, so raise the budget to match the estimate the job log reports.">
+                    <Tip label="Auto stores every ancestor combination when the estimate fits what the graph instance can hold, and falls back to the canonical depth-diagonal above it (finer granularities are derived on demand at read time — nothing is lost, it is just not pre-created). Full detail always pre-creates every combination and FAILS the job instead of exceeding the materialization budget; on multi-million-edge graphs that combination is what exhausts the instance, so Auto is the safe choice at scale.">
                         <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
                     </Tip>
                 </label>
@@ -313,24 +313,56 @@ interface ConfigPreset {
     tuning: AggregationTuning
 }
 
-const CONFIG_PRESETS: ConfigPreset[] = [
+/**
+ * Every preset carries the same CAPACITY FLOOR — budgets, rollup storage
+ * and timeout — so any profile completes a large graph (1M nodes / 2M
+ * edges and beyond) out of the box. Capacity is not a preference; it is
+ * what stops a job failing on the write budget. What the presets actually
+ * trade off is how hard they lean on the provider: pacing, extract
+ * concurrency, scan width and retries.
+ *
+ * `materializeFinePairs` is deliberately ABSENT from every preset. It is
+ * typed `boolean | undefined` and "Auto" is only expressible by OMITTING
+ * the key, so setting it here would force full-detail — the mode that
+ * OOMs a multi-million-edge graph.
+ */
+const CAPACITY_FLOOR = {
+    // Worker RSS bound — unaffected by the graph store's topology.
+    maxPendingPairs: 50_000_000,
+    // Graph-store bound, so sized against ONE SHARD: a graph key never
+    // spans shards, and the reference cluster runs maxmemory 40gb per
+    // shard with ~18GB free. 25M x ~0.5KB ~= 12.5GB, covering a graph
+    // several times the 1M-node / 2M-edge floor.
+    maxMaterializedEdges: 25_000_000,
+} as const
+
+/**
+ * Stall-timeout default, shared by every trigger path so a job started
+ * from the banner or a workspace card gets the same no-progress window as
+ * one started from this form. Exported in seconds too, since the API takes
+ * ``timeoutSecs``.
+ */
+export const PRESET_TIMEOUT_MINUTES = 180
+export const DEFAULT_TIMEOUT_SECS = PRESET_TIMEOUT_MINUTES * 60
+
+export const CONFIG_PRESETS: ConfigPreset[] = [
     {
         id: 'conservative',
         label: 'Conservative',
-        description: 'Safest option — low provider load, gentle write pacing',
+        description: 'Safest option — lowest provider load, gentlest write pacing',
         icon: Shield,
         maxRetries: 5,
-        timeoutMinutes: 180,
-        tuning: { scanRangeWidth: 100_000, writePacingRatio: 1.0, extractConcurrency: 1 },
+        timeoutMinutes: PRESET_TIMEOUT_MINUTES,
+        tuning: { ...CAPACITY_FLOOR, scanRangeWidth: 100_000, writePacingRatio: 2.0, extractConcurrency: 1 },
     },
     {
         id: 'balanced',
         label: 'Balanced',
-        description: 'Recommended — self-tuning defaults',
+        description: 'Recommended — handles large graphs at a gentle write duty cycle',
         icon: Activity,
         maxRetries: 3,
-        timeoutMinutes: 120,
-        tuning: {},
+        timeoutMinutes: PRESET_TIMEOUT_MINUTES,
+        tuning: { ...CAPACITY_FLOOR, scanRangeWidth: 200_000, writePacingRatio: 1.0, extractConcurrency: 1 },
     },
     {
         id: 'performance',
@@ -338,14 +370,15 @@ const CONFIG_PRESETS: ConfigPreset[] = [
         description: 'Maximum throughput, heavier provider load',
         icon: Zap,
         maxRetries: 1,
-        timeoutMinutes: 60,
-        tuning: { scanRangeWidth: 500_000, writePacingRatio: 0.25, extractConcurrency: 3 },
+        timeoutMinutes: PRESET_TIMEOUT_MINUTES,
+        tuning: { ...CAPACITY_FLOOR, scanRangeWidth: 500_000, writePacingRatio: 0.25, extractConcurrency: 3 },
     },
 ]
 
 const TUNING_KEYS: (keyof AggregationTuning)[] = [
     'scanRangeWidth', 'maxPendingPairs', 'applyChunk', 'deleteChunk',
     'writePacingRatio', 'extractConcurrency', 'materializeLeafPairs',
+    'maxMaterializedEdges', 'materializeFinePairs',
 ]
 
 // ============================================
@@ -371,12 +404,19 @@ export function AggregationOverridesForm({
 
     const currentTraits = useMemo(() => {
         const mr = value.maxRetries
-        const tm = value.timeoutMinutes
+        // Throughput is set by the write duty cycle and scan parallelism —
+        // NOT by the timeout, which only bounds how long a job may sit
+        // making no progress. Pacing is a sleep multiplier, so lower is
+        // faster: 0 → no pause, 1.0 → ~50% duty cycle.
+        const pacing = value.tuning?.writePacingRatio ?? 1.0
+        const concurrency = value.tuning?.extractConcurrency ?? 1
+        const pacingScore = pacing <= 0 ? 5 : pacing <= 0.25 ? 4 : pacing <= 0.5 ? 3 : pacing <= 1.0 ? 2 : 1
+        const concurrencyScore = concurrency >= 4 ? 5 : concurrency >= 3 ? 4 : concurrency >= 2 ? 3 : 2
         return {
-            speed: tm <= 60 ? 5 : tm <= 120 ? 3 : tm <= 180 ? 2 : 1,
+            speed: Math.max(1, Math.min(5, Math.round((pacingScore * 2 + concurrencyScore) / 3))),
             reliability: mr >= 5 ? 5 : mr >= 3 ? 3 : mr >= 1 ? 2 : 1,
         }
-    }, [value.maxRetries, value.timeoutMinutes])
+    }, [value.maxRetries, value.tuning])
 
     const update = (patch: Partial<AggregationOverridesValue>) => {
         onChange({ ...value, ...patch })
@@ -573,8 +613,8 @@ export function AggregationOverridesForm({
                                     {/* Timeout */}
                                     <div>
                                         <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
-                                            Timeout (minutes)
-                                            <Tip label="Maximum wall-clock duration the aggregation job can run. Prevents runaway jobs from consuming resources indefinitely.">
+                                            Stall timeout (minutes)
+                                            <Tip label="How long the job may make NO forward progress before the watchdog kills it. This is not a cap on total runtime — a job that keeps progressing runs until it finishes (up to a 24h safety net), so a long value here only decides how long a genuinely wedged job holds the graph's write lease.">
                                                 <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
                                             </Tip>
                                         </label>
@@ -592,11 +632,11 @@ export function AggregationOverridesForm({
                                             }}
                                             onBlur={e => {
                                                 const v = parseInt(e.target.value)
-                                                update({ timeoutMinutes: clampTimeout(Number.isFinite(v) ? v : 120) })
+                                                update({ timeoutMinutes: clampTimeout(Number.isFinite(v) ? v : PRESET_TIMEOUT_MINUTES) })
                                             }}
                                             className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
                                         />
-                                        <p className="text-[10px] text-ink-muted mt-1">Max job duration (1-1440 min)</p>
+                                        <p className="text-[10px] text-ink-muted mt-1">No-progress window (1-1440 min)</p>
                                         <div className="mt-1.5">
                                             <ImpactMeter label="Speed" level={currentTraits.speed} />
                                         </div>

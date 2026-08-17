@@ -7,13 +7,18 @@
  *   2. Talk to the backend through RemoteGraphProvider.searchAdvanced,
  *      with abort-on-restart so a stale request can never overwrite a
  *      fresh one (e.g. user re-runs while a slow query is still in flight).
- *   3. Track the scope drill stack — when the user clicks "Drill into
- *      Customers", we push a scope frame; the breadcrumb pops it.
+ *   3. Report which draft the current results belong to (``runState``)
+ *      so the editor knows whether it has unrun changes.
  *
- * Drill semantics: every drill re-issues the same predicate with
- * `scope.rootUrns` set to the bucket's `ancestorUrn`. The hit
- * subtree is the new universe; the same template applies inside it.
- * This is the "orient before drill" UX from the brief.
+ * Scoping to a container is NOT tracked here. It used to be: the hook
+ * kept a drill stack and `stampScope` gave the top frame absolute
+ * precedence over `scope.rootUrns`. Because nothing ever popped that
+ * stack, one click on a result group silently clamped every later query
+ * to that container — the panel appeared to return 0 matches forever
+ * until it was closed and reopened (which remounted this hook and reset
+ * the stack). Scope is now an ordinary `descendantOf` row in the user's
+ * own draft: visible, editable, undoable, and compiled into the very
+ * same root-URN clamp server-side. See `predicateComposition.setScopeCondition`.
  *
  * Not stored: the raw-JSON / Explain / Discover surfaces — those live
  * in the SearchMapPanel's "Power tools" tab and share the same query
@@ -24,6 +29,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { rememberUrnLabels } from '@/lib/urnLabels'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useSchemaStore } from '@/store/schema'
@@ -181,22 +187,28 @@ export type PanelView =
         query: SearchQuery; message: string;
         elapsedMs: number }
 
-/** One frame on the drill stack — used to render the scope breadcrumb. */
-export interface ScopeFrame {
-    /** URN of the ancestor we drilled into. Empty string at the root. */
-    urn: string
-    /** Human-readable label for the breadcrumb. */
-    label: string
-    /** Entity type, used to colour-tint the breadcrumb chip. */
-    entityType: string
+/**
+ * Which draft the panel has actually dispatched, and how that went.
+ *
+ * Lives here rather than in QueryCard because it describes the state of
+ * a *request*, not of an editor: QueryCard used to set it optimistically
+ * at dispatch time and never clear it, so a run that aborted or errored
+ * left the identical draft permanently un-rerunnable. It also unmounts
+ * whenever the Advanced drawer opens, which made the behaviour look
+ * random. ``hash`` is ``JSON.stringify`` of the pre-scope-stamp
+ * predicate — the same string ``buildRunnablePredicate`` produces.
+ */
+export interface RunState {
+    hash: string
+    status: 'running' | 'done' | 'failed'
 }
-
-const ROOT_FRAME: ScopeFrame = { urn: '', label: 'All', entityType: '' }
 
 
 export interface UseAdvancedSearchResult {
     view: PanelView
-    scope: ScopeFrame[]
+    /** Which draft produced the current view, and how it went. Null
+     *  before the first run and after an explicit cancel/reset. */
+    runState: RunState | null
     /** True when no template has been selected yet. */
     isIdle: boolean
     /** Pick a template — moves the view to `templateSelected` with default inputs. */
@@ -214,18 +226,13 @@ export interface UseAdvancedSearchResult {
     runTemplate: (template: SearchTemplate,
                   inputs?: Record<string, string | number>) => Promise<void>
     /** Run a raw predicate tree (from the visual builder OR the AskBar).
-     *  Bypasses the template form: stamps view scope + drill frame,
-     *  dispatches through the same running → results state machine.
+     *  Bypasses the template form: stamps view scope, dispatches through
+     *  the same running → results state machine.
      *  Optional ``optionsOverride`` lets free-form searches opt out of
      *  the default aggregation (so a 49-hit search renders 49 rows, not
      *  one bucket containing 49). */
     runPredicate: (predicate: Predicate,
                    optionsOverride?: SearchQuery['options']) => Promise<void>
-    /** Drill into an aggregate bucket — pushes a scope frame and re-runs. */
-    drillInto: (bucket: { ancestorUrn: string; ancestorDisplayName: string;
-                          ancestorEntityType: string }) => void
-    /** Pop scope frames to the given index (0 = root). */
-    popScope: (toIndex: number) => void
     /** Abort any in-flight query and return to idle. */
     cancel: () => void
     /** Fetch the next page of hits using the cursor on the current
@@ -252,7 +259,7 @@ export interface UseAdvancedSearchResult {
 export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
     const provider = useGraphProvider()
     const [view, setView] = useState<PanelView>({ kind: 'idle' })
-    const [scope, setScope] = useState<ScopeFrame[]>([ROOT_FRAME])
+    const [runState, setRunState] = useState<RunState | null>(null)
     const abortRef = useRef<AbortController | null>(null)
 
     // Cancel any in-flight request when the hook unmounts (panel closed
@@ -286,21 +293,16 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
         // the canvas stops highlighting matches the moment the user
         // backs out of the form.
         useSearchStore.getState().clear()
+        setRunState(null)
         setView({ kind: 'idle' })
     }, [])
 
     const stampScope = useCallback(
-        (template: SearchTemplate, inputs: Record<string, string | number>,
-         scopeStack: ScopeFrame[] | null): SearchQuery => {
+        (template: SearchTemplate,
+         inputs: Record<string, string | number>): SearchQuery => {
             const raw = template.build(inputs)
             // ALWAYS stamp the viewId — the backend's ViewScopeResolver
-            // requires it on every request. If the user has drilled
-            // (non-root scope frames), additionally pass the current
-            // ancestor URN as a narrowing hint via scope.rootUrns; the
-            // resolver intersects it with the view's allowed roots.
-            const drillFrame = scopeStack
-                ? scopeStack[scopeStack.length - 1]
-                : null
+            // requires it on every request.
             const scopeMode = useSearchStore.getState().scopeMode
 
             // Read live canvas + schema state at call time so we don't
@@ -357,44 +359,48 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
                     schema?.rootEntityTypes ?? [],
                 )
 
-            // Client-side safety net: cap matches the BE default
-            // (DEEP_SEARCH_SCOPE_ROOT_URNS_CAP=256). If the view has
-            // more top-level containers than this, we truncate
-            // client-side rather than letting the BE 422. The diagnostic
-            // surfaces the truncation so the user sees they're not
-            // searching the full set.
-            const SAFE_ROOT_URN_CAP = 256
-            const wasTruncated = allCanvasRootUrns.length > SAFE_ROOT_URN_CAP
-            const canvasRootUrns = wasTruncated
-                ? allCanvasRootUrns.slice(0, SAFE_ROOT_URN_CAP)
+            // Client-side safety net matching the BE's
+            // DEEP_SEARCH_SCOPE_ROOT_URNS_CAP (5000). The old value
+            // here was 256 — a stale copy of an earlier BE default —
+            // and views between the two thresholds were silently
+            // clamped to an ARBITRARY first-256 slice, which reads to
+            // the user as "search randomly can't find things".
+            //
+            // Past the cap we now DROP the hint rather than truncate
+            // it. This clamp is only a narrowing hint: the backend's
+            // ViewScopeResolver enforces the view boundary server-side
+            // on every request regardless, so omitting it costs some
+            // candidate-set width but can never widen what the user is
+            // allowed to see, whereas a truncated list silently hides
+            // real matches.
+            const SAFE_ROOT_URN_CAP = 5000
+            const canvasRootUrns = allCanvasRootUrns.length > SAFE_ROOT_URN_CAP
+                ? []
                 : allCanvasRootUrns
-            if (wasTruncated) {
-                // One-shot console warning (production hardening — the
-                // diagnostic in ZeroResultsDiagnostic is the primary
-                // user-facing channel; the console line helps support).
+            if (allCanvasRootUrns.length > SAFE_ROOT_URN_CAP) {
                 // eslint-disable-next-line no-console
                 console.warn(
                     `[advancedSearch] view has ${allCanvasRootUrns.length} `
-                    + `top-level containers; truncating to ${SAFE_ROOT_URN_CAP}. `
-                    + 'Switch to "Entire data source" or raise '
-                    + 'DEEP_SEARCH_SCOPE_ROOT_URNS_CAP to reach the rest.',
+                    + `top-level containers, over the ${SAFE_ROOT_URN_CAP} cap; `
+                    + 'searching without the client-side root hint. The view '
+                    + 'boundary is still enforced server-side.',
                 )
             }
 
             // Precedence for scope.rootUrns:
-            //   1. Drill frame (highest priority — user drilled into
-            //      a specific bucket; honour their selection).
-            //   2. Raw.scope.rootUrns (caller-supplied — e.g. a
+            //   1. Raw.scope.rootUrns (caller-supplied — e.g. a
             //      template that targets a specific URN).
-            //   3. Canvas view roots (the "in this view" boundary).
+            //   2. Canvas view roots (the "in this view" boundary).
+            //
+            // Scoping to a container the user picked out of the results
+            // is deliberately NOT here — it travels as a `descendantOf`
+            // row in their own draft (see the module header).
             //
             // Only attaches roots when scope_mode is 'view' or 'visible'
             // — 'data_source' explicitly opts out of any clamp.
             const explicitRoots = (raw.scope as { rootUrns?: string[] } | undefined)?.rootUrns
             let rootUrns: string[] | undefined
-            if (drillFrame && drillFrame.urn) {
-                rootUrns = [drillFrame.urn]
-            } else if (explicitRoots && explicitRoots.length > 0) {
+            if (explicitRoots && explicitRoots.length > 0) {
                 rootUrns = explicitRoots
             } else if (
                 scopeMode !== 'data_source'
@@ -430,34 +436,52 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
     const runWithInputs = useCallback(async (
         template: SearchTemplate,
         inputs: Record<string, string | number>,
-        scopeStack: ScopeFrame[],
+        runKey: string | null,
     ) => {
         if (!(provider instanceof RemoteGraphProvider)) {
             setView({
                 kind: 'error', template, inputs,
-                query: stampScope(template, inputs, null),
+                query: stampScope(template, inputs),
                 message:
                     'Active provider is not the remote backend — ' +
                     'advanced search only works against the live API.',
                 elapsedMs: 0,
             })
+            if (runKey) setRunState({ hash: runKey, status: 'failed' })
             return
         }
         abortRef.current?.abort()
         const controller = new AbortController()
         abortRef.current = controller
 
-        const query = stampScope(template, inputs, scopeStack)
+        const query = stampScope(template, inputs)
         const startedAt = performance.now()
         setView({ kind: 'running', template, inputs, query, startedAt })
+        if (runKey) setRunState({ hash: runKey, status: 'running' })
 
         try {
             const result = await provider.searchAdvanced(query)
+            // An aborted run has been superseded — the newer run owns
+            // both the view and the run state, so touch neither.
             if (controller.signal.aborted) return
             setView({
                 kind: 'results', template, inputs, query, result,
                 elapsedMs: Math.round(performance.now() - startedAt),
             })
+            if (runKey) setRunState({ hash: runKey, status: 'done' })
+            // Every ancestor ref and aggregate bucket ships a
+            // displayName. Remember them so a scope row built from
+            // these results can render "inside GOLD" rather than the
+            // raw URN — the container often isn't loaded on the canvas,
+            // so this response is the only place the name exists.
+            const ancestorPaths = collectAncestorPaths(result)
+            rememberUrnLabels(ancestorPaths.flatMap((p) => p.path))
+            for (const facet of result.aggregates ?? []) {
+                rememberUrnLabels(facet.map((b) => ({
+                    urn: b.ancestorUrn,
+                    displayName: b.ancestorDisplayName,
+                })))
+            }
             // Publish the match URN set so the ContextView canvas
             // (W3 — useSearchHighlight + SearchPinOverlay +
             // ChevronMatchBadge) can react. JSON.stringify is
@@ -467,7 +491,7 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
             useSearchStore.getState().setResult({
                 viewId,
                 matchUrns: collectMatchUrns(result),
-                ancestorPaths: collectAncestorPaths(result),
+                ancestorPaths,
                 queryHash: JSON.stringify(query),
             })
             // Auto-save the dispatched predicate to per-view Recent.
@@ -487,6 +511,10 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
                 message: (e as Error).message,
                 elapsedMs: Math.round(performance.now() - startedAt),
             })
+            // Remember the failure against this draft so the auto-run
+            // effect doesn't hammer a query that can't succeed. The
+            // explicit Run button still forces a retry.
+            if (runKey) setRunState({ hash: runKey, status: 'failed' })
             // On error, drop any previously-published result-set so the
             // canvas doesn't keep highlighting stale matches.
             useSearchStore.getState().clear()
@@ -495,15 +523,15 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
 
     const run = useCallback(async () => {
         if (view.kind === 'idle' || view.kind === 'running') return
-        await runWithInputs(view.template, view.inputs, scope)
-    }, [view, scope, runWithInputs])
+        await runWithInputs(view.template, view.inputs, null)
+    }, [view, runWithInputs])
 
     const runTemplate = useCallback(
         async (template: SearchTemplate,
                inputs?: Record<string, string | number>) => {
-            await runWithInputs(template, inputs ?? defaultInputs(template), scope)
+            await runWithInputs(template, inputs ?? defaultInputs(template), null)
         },
-        [scope, runWithInputs],
+        [runWithInputs],
     )
 
     const runPredicate = useCallback(async (
@@ -554,40 +582,12 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
                 options: optionsOverride ?? defaultOptions,
             }),
         }
-        await runWithInputs(syntheticTemplate, {}, scope)
-    }, [scope, runWithInputs])
-
-    const drillInto = useCallback((bucket: {
-        ancestorUrn: string
-        ancestorDisplayName: string
-        ancestorEntityType: string
-    }) => {
-        if (view.kind !== 'results') return
-        const nextScope: ScopeFrame[] = [
-            ...scope,
-            {
-                urn: bucket.ancestorUrn,
-                label: bucket.ancestorDisplayName,
-                entityType: bucket.ancestorEntityType,
-            },
-        ]
-        setScope(nextScope)
-        // Re-run the same template + inputs but now scoped to the
-        // bucket. The stampScope helper injects scope.rootUrns.
-        void runWithInputs(view.template, view.inputs, nextScope)
-    }, [view, scope, runWithInputs])
-
-    const popScope = useCallback((toIndex: number) => {
-        const clamped = Math.max(0, Math.min(toIndex, scope.length - 1))
-        if (clamped === scope.length - 1) return
-        const nextScope = scope.slice(0, clamped + 1)
-        setScope(nextScope)
-        // If we have a query in flight or showing, re-run it at the
-        // new scope so the displayed buckets/hits match the breadcrumb.
-        if (view.kind === 'results' || view.kind === 'error') {
-            void runWithInputs(view.template, view.inputs, nextScope)
-        }
-    }, [scope, view, runWithInputs])
+        // The run key must match the hash ``buildRunnablePredicate``
+        // computes, so the editor can tell "these results are for the
+        // draft I'm looking at" — hash the predicate as handed in,
+        // before stampScope's defensive AND-wrap.
+        await runWithInputs(syntheticTemplate, {}, JSON.stringify(predicate))
+    }, [runWithInputs])
 
     // ---------------------------------------------------------------
     // loadMore — cursor pagination (W2.2).
@@ -668,6 +668,10 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
         // Drop any published result-set so the canvas doesn't keep
         // highlighting matches from a query the user explicitly killed.
         useSearchStore.getState().clear()
+        // An aborted run never reports an outcome, so clear the run
+        // state here — otherwise it would sit at 'running' forever and
+        // the editor would think the draft was already dispatched.
+        setRunState(null)
         if (view.kind === 'running') {
             // Restore the form so the user can adjust + retry without
             // losing their inputs.
@@ -681,7 +685,7 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
 
     return {
         view,
-        scope,
+        runState,
         isIdle: view.kind === 'idle',
         selectTemplate,
         setInput,
@@ -689,8 +693,6 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
         run,
         runTemplate,
         runPredicate,
-        drillInto,
-        popScope,
         cancel,
         loadMore,
         isLoadingMore,

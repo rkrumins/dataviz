@@ -35,6 +35,19 @@ export default {
         // Adaptive backgrounds
         canvas: {
           DEFAULT: 'var(--nx-bg-canvas)',
+          // Alias of DEFAULT. `bg-canvas-base` is used ~65 times across
+          // the app — heavily in the Advanced Search panel — but was
+          // never defined here, so every one of those surfaces has been
+          // rendering transparent. Defining it is what those call sites
+          // always meant; migrating them to `bg-canvas` would be a
+          // larger, riskier sweep for the same pixels.
+          //
+          // Note the opacity modifier is inert on this whole family:
+          // the variables hold complete colors, not channel triples, so
+          // Tailwind drops the alpha and `bg-canvas-base/60` paints the
+          // same as `bg-canvas-base`. That is already true of
+          // `canvas-elevated/95` etc. throughout the app.
+          base: 'var(--nx-bg-canvas)',
           elevated: 'var(--nx-bg-elevated)',
           overlay: 'var(--nx-bg-overlay)',
         },

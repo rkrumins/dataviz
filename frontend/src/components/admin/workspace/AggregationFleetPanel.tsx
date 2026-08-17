@@ -45,13 +45,13 @@ interface TuningField {
 }
 
 const TUNING_FIELDS: TuningField[] = [
-    { key: 'scanRangeWidth', label: 'Scan range width', min: 10_000, max: 5_000_000, placeholder: '250000', help: 'Edge-ID range per read query' },
-    { key: 'maxPendingPairs', label: 'Memory cap (pairs)', min: 50_000, max: 50_000_000, placeholder: '5000000', help: 'In-worker pair cap before early flush' },
-    { key: 'writePacingRatio', label: 'Write pacing ratio', min: 0, max: 10, step: 0.1, placeholder: '0.5', help: 'Sleep after each write × duration' },
-    { key: 'extractConcurrency', label: 'Extract concurrency', min: 1, max: 4, placeholder: '2', help: 'Parallel read scans per job' },
+    { key: 'scanRangeWidth', label: 'Scan range width', min: 10_000, max: 5_000_000, placeholder: '200000', help: 'Edge-ID range per read query' },
+    { key: 'maxPendingPairs', label: 'Memory cap (pairs)', min: 50_000, max: 50_000_000, placeholder: '50000000', help: 'In-worker pair cap before early flush' },
+    { key: 'writePacingRatio', label: 'Write pacing ratio', min: 0, max: 10, step: 0.1, placeholder: '1.0', help: 'Sleep after each write × duration; lower is faster' },
+    { key: 'extractConcurrency', label: 'Extract concurrency', min: 1, max: 4, placeholder: '1', help: 'Parallel read scans per job' },
     { key: 'applyChunk', label: 'Apply chunk', min: 1_000, max: 200_000, placeholder: '20000', help: 'Pairs written per apply chunk' },
     { key: 'deleteChunk', label: 'Delete chunk', min: 100, max: 50_000, placeholder: '10000', help: 'Stale edges deleted per query' },
-    { key: 'maxMaterializedEdges', label: 'Write budget (edges)', min: 10_000, max: 50_000_000, placeholder: '2000000', help: 'Fail loudly instead of exceeding this' },
+    { key: 'maxMaterializedEdges', label: 'Write budget (edges)', min: 10_000, max: 50_000_000, placeholder: '25000000', help: 'Fail loudly instead of exceeding this; sized per graph-store node' },
 ]
 
 function DefaultsDialog({ onClose }: { onClose: () => void }) {
