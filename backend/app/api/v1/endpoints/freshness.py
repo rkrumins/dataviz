@@ -33,12 +33,9 @@ from backend.app.api.v1.endpoints.aggregation import (
     _REQUIRE_DS_MANAGE,
     _get_svc,
     _proxy,
+    _require_ingestion_read,
 )
-from backend.app.auth.dependencies import (
-    get_current_user,
-    get_permission_claims,
-    requires,
-)
+from backend.app.auth.dependencies import requires
 from backend.app.db.engine import (
     get_db_session,
     get_graph_read_db_session,
@@ -58,10 +55,6 @@ from backend.app.services.aggregation.schemas import (
     RefreshRequest,
     RefreshResponse,
 )
-from backend.app.services.permission_service import (
-    PermissionClaims,
-    has_permission_any_workspace,
-)
 from backend.auth_service.interface import User
 
 logger = logging.getLogger(__name__)
@@ -69,36 +62,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ── Read gate: the Ingestion surface's visibility perms ─────────────
-# Mirrors nav_catalogue.py "ingestion": any of these, held globally or in
-# ANY one workspace, unlocks the read. The cockpit is a cross-workspace
-# operator surface, so the gate is any-workspace rather than per-ds.
-
-_INGESTION_READ_PERMS = (
-    "system:admin",
-    "system:org-admin",
-    "workspace:provider:read",
-    "workspace:datasource:manage",
-)
-
-
-async def _require_ingestion_read(
-    user: User = Depends(get_current_user),
-    claims: PermissionClaims = Depends(get_permission_claims),
-) -> User:
-    """Grant when the caller holds any Ingestion-surface permission
-    (globally or in any workspace). 403 otherwise."""
-    if any(has_permission_any_workspace(claims, p) for p in _INGESTION_READ_PERMS):
-        return user
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail={
-            "error": "missing_permission",
-            "permission": " | ".join(_INGESTION_READ_PERMS),
-            "scope": {"type": "global", "id": None},
-            "message": "Missing Ingestion access",
-        },
-    )
+# ── Read gate: shared with aggregation.py ───────────────────────────
+# ``_require_ingestion_read`` lives beside ``_REQUIRE_SYSTEM_ADMIN`` in
+# aggregation.py now, because the settings READ uses it too (the Automation
+# modal renders read-only for non-admins). Imported above.
 
 
 # ── Provider batch-refresh gate: platform-admin only ─────────────────

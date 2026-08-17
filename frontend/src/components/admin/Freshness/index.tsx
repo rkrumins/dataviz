@@ -356,7 +356,7 @@ export function Freshness() {
                 summary={summary}
                 activeFacet={fstatus}
                 onFacet={(facet) => patchParams({ fstatus: facet || null })}
-                onOpenAutomation={isSystemAdmin ? openAutomation : undefined}
+                onOpenAutomation={openAutomation}
                 onReload={() => { void fleet.refetch() }}
                 reloading={fleet.isFetching}
                 onRefreshAll={isSystemAdmin ? () => setFleetDialogOpen(true) : undefined}

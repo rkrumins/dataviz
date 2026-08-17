@@ -1286,6 +1286,28 @@ def test_refresh_batch_status_requires_ingestion_gate():
     assert any(getattr(f, "__name__", "") == "_require_ingestion_read" for f in fns)
 
 
+def test_settings_read_is_ingestion_read_and_write_stays_admin():
+    """The Automation modal renders read-only for non-admins, so the settings
+    GET opened to ingestion readers — while the PUT must stay system:admin."""
+    from backend.app.api.v1.endpoints import aggregation as agg_mod
+
+    def _agg_route(path, method):
+        for r in agg_mod.router.routes:
+            if r.path == path and method in r.methods:
+                return r
+        raise AssertionError(f"route {method} {path} not found")
+
+    get_fns = _dep_calls(_agg_route("/aggregation/settings", "GET").dependant)
+    assert any(
+        getattr(f, "__name__", "") == "_require_ingestion_read"
+        for f in get_fns
+    )
+    assert agg_mod._REQUIRE_SYSTEM_ADMIN not in get_fns
+
+    put_fns = _dep_calls(_agg_route("/aggregation/settings", "PUT").dependant)
+    assert agg_mod._REQUIRE_SYSTEM_ADMIN in put_fns
+
+
 # ── F9: per-source rebuild-cadence override PATCH ───────────────────────
 
 

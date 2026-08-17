@@ -163,16 +163,22 @@ describe('automationWarnings', () => {
 
 describe('AutomationModal', () => {
     it('renders read-only without system:admin', async () => {
+        getAggregationSettings.mockResolvedValue(SETTINGS)
         wrap(<AutomationModal open onClose={() => {}} isAdmin={false} summary={null} />)
 
         // The stage name is now in two places — the rail's diagram and the
         // section it points at — so this asks for the section, not for "the
         // only element saying Detect".
         expect(await screen.findByRole('heading', { name: 'Detect' })).toBeInTheDocument()
+        // The settings READ is ingestion-read server-side (the PUT stays
+        // admin), so a non-admin sees the real Detect and Act values with
+        // every control disabled and no Save.
+        await waitFor(() => expect(getAggregationSettings).toHaveBeenCalled())
+        expect(
+            await screen.findByLabelText('Watch for changes made outside this app'),
+        ).toBeDisabled()
         expect(screen.getByRole('button', { name: '5m' })).toBeDisabled()
-        // The cadence record is admin-only to READ, so a non-admin must not
-        // fire a request that can only 403.
-        expect(getAggregationSettings).not.toHaveBeenCalled()
+        expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
     })
 
     it('offers nothing to save when the settings cannot be read', async () => {
@@ -384,14 +390,19 @@ describe('AutomationModal', () => {
             .toHaveAccessibleDescription(/far fewer rollups than the last build produced/i)
     })
 
-    it('never tells a reader who cannot see Detect that it is feeding Check', async () => {
-        // `starvedIntoCheck` is false for a non-admin — correctly, since we must
-        // not claim the probe is off. But that made the first seam read
-        // `feeding` to exactly the reader the pill beside it reads `hidden` to.
+    it('shows a non-admin the real Detect state, starving seam included', async () => {
+        // The first seam used to read `hidden` to a non-admin because the
+        // settings read was admin-only. It is ingestion-read now, so the rail
+        // renders from the real probe value — including the starvation a
+        // probe-off deploy causes.
+        getAggregationSettings.mockResolvedValue({
+            ...SETTINGS, envProbeEnabled: false,
+        })
         wrap(<AutomationModal open onClose={() => {}} isAdmin={false} summary={null} />)
 
         await screen.findByRole('heading', { name: 'Detect' })
-        // The seam into Act is still knowable, so exactly one caption remains.
+        // Detect off starves the seam into Check; only Check→Act still feeds.
+        await waitFor(() => expect(screen.getAllByText('starved')).toHaveLength(1))
         expect(screen.getAllByText('feeding')).toHaveLength(1)
     })
 })
