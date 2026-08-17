@@ -146,6 +146,7 @@ describe('admin cadence popover', () => {
         getAggregationSettings.mockResolvedValue({
             tuning: null, cadence: { rebuildMinIntervalSecs: 600, driftAutoRebuild: false },
             envRebuildMinIntervalSecs: 900, envDriftAutoRebuild: true,
+            envProbeEnabled: true, envProbeIntervalSecs: 60,
         })
         putAggregationCadence.mockResolvedValue({ tuning: null, cadence: { rebuildMinIntervalSecs: 120, driftAutoRebuild: false } })
         wrap(<CadenceSettingsDialog isOpen onClose={() => {}} />)
@@ -159,17 +160,22 @@ describe('admin cadence popover', () => {
         await userEvent.click(screen.getByRole('button', { name: 'Save' }))
 
         await waitFor(() => expect(putAggregationCadence).toHaveBeenCalledWith(
-            { rebuildMinIntervalSecs: 120, driftAutoRebuild: false },
+            {
+                rebuildMinIntervalSecs: 120, driftAutoRebuild: false,
+                probeEnabled: true, probeIntervalSecs: null,
+            },
         ))
     })
 
     it('no persisted cadence: a plain Save round-trips the env defaults (no drift clobber)', async () => {
-        // Deploy env has drift-auto OFF and no persisted cadence. The toggle
-        // must seed from the env default (false), so an interval-only Save does
-        // NOT flip drift-auto on fleet-wide.
+        // Deploy env has drift-auto and change-detection OFF, and no persisted
+        // cadence. Both toggles must seed from their env default (false), so an
+        // interval-only Save does NOT switch either on fleet-wide. Every toggle
+        // added to this dialog inherits the same hazard, hence both here.
         getAggregationSettings.mockResolvedValue({
             tuning: null, cadence: null,
             envRebuildMinIntervalSecs: 900, envDriftAutoRebuild: false,
+            envProbeEnabled: false, envProbeIntervalSecs: 60,
         })
         putAggregationCadence.mockResolvedValue({ tuning: null, cadence: null })
         wrap(<CadenceSettingsDialog isOpen onClose={() => {}} />)
@@ -180,7 +186,10 @@ describe('admin cadence popover', () => {
         await userEvent.click(screen.getByRole('button', { name: 'Save' }))
 
         await waitFor(() => expect(putAggregationCadence).toHaveBeenCalledWith(
-            { rebuildMinIntervalSecs: null, driftAutoRebuild: false },
+            {
+                rebuildMinIntervalSecs: null, driftAutoRebuild: false,
+                probeEnabled: false, probeIntervalSecs: null,
+            },
         ))
     })
 })

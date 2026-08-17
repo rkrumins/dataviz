@@ -69,6 +69,39 @@ def raw_fingerprint_from_counts(
     return digest, observed_aggregated, sum(raw_edges.values())
 
 
+def counts_digest_from_counts(
+    entity_type_counts: Optional[Dict[str, Any]],
+    edge_type_counts: Optional[Dict[str, Any]],
+) -> str:
+    """Digest EVERY count, AGGREGATED included — "did anything at all move?".
+
+    This is the sweeper's *tripwire*, and it is deliberately the opposite of
+    :func:`raw_fingerprint_from_counts`, which excludes AGGREGATED so that a
+    rebuild cannot move the drift baseline it is compared against.
+
+    The distinction matters because the two answer different questions.
+    Comparing this digest against a BASELINE would indeed re-trigger forever,
+    since a rebuild changes the AGGREGATED count. But it is compared against
+    the counts the sweeper last *looked at*, which makes it exact: it fires
+    if and only if some count changed since the previous evaluation. Excluding
+    AGGREGATED here would blind the tripwire to a wiped overlay with unchanged
+    raw data — precisely the failure this whole mechanism exists to catch.
+    """
+    nodes = {str(k): _as_int(v) for k, v in (entity_type_counts or {}).items()}
+    edges = {str(k): _as_int(v) for k, v in (edge_type_counts or {}).items()}
+    structure = {
+        # Own namespace, same reasoning as the "raw1" tag above: on a source
+        # with no AGGREGATED edges this would otherwise be byte-identical to
+        # the raw digest, so a mix-up would look correct on exactly the
+        # never-aggregated sources and be wrong everywhere else.
+        "v": "all1",
+        "nodes": dict(sorted(nodes.items())),
+        "edges": dict(sorted(edges.items())),
+    }
+    raw = json.dumps(structure, sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 def _as_int(value: Any) -> int:
     """Coerce a count to int; unparseable values count as 0.
 

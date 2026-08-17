@@ -52,10 +52,15 @@ from .redis_streams import (
 from .schemas import (
     DiscoveryJobEnvelope,
     JobEnvelope,
+    ProbeJobEnvelope,
     PurgeJobEnvelope,
     StatsJobEnvelope,
     parse_envelope,
 )
+
+# Outer budget for a drift probe. Constant-time work plus admission wait and
+# session churn; deliberately NOT size-adaptive (see _resolve_timeout_and_bucket).
+_PROBE_TIMEOUT_SECS = float(os.getenv("STATS_PROBE_TIMEOUT_SECS", "20"))
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +123,7 @@ class InsightsJobConsumer:
             "sweep": self._config.sweep_concurrency,
             "heavy": self._config.heavy_concurrency,
             "purge": self._config.purge_concurrency,
+            "probe": self._config.probe_concurrency,
         }
 
     def _lane_free_slots(self) -> dict[str, int]:
@@ -595,6 +601,17 @@ class InsightsJobConsumer:
                 float(resilience.DISCOVERY_LIVE_TIMEOUT_SECS) + 10.0,
                 "n/a",
             )
+        if isinstance(envelope, ProbeJobEnvelope):
+            # MUST precede the stats branch: ProbeJobEnvelope subclasses
+            # StatsJobEnvelope, so without this a probe inherits the
+            # size-adaptive poll budget and is allowed to hang for ten minutes
+            # holding a slot in a lane sized for millisecond work.
+            #
+            # A probe reads counters, so its cost is independent of graph size
+            # — a fixed budget is the honest shape here, and anything slower
+            # than this is a sick provider the next tick should retry against,
+            # not a big graph deserving patience.
+            return _PROBE_TIMEOUT_SECS, "probe"
         # stats / schema — node count comes from the cached ds-meta
         # lookup (the scope-key resolution already warmed it).
         _, node_count = await self._resolve_ds_meta(envelope.data_source_id)  # type: ignore[attr-defined]

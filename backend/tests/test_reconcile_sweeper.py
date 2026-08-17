@@ -1174,3 +1174,152 @@ async def test_no_active_service_defers_rather_than_crashing(session_factory):
     assert result.findings == 1
     assert result.actions == 0
     assert result.errors == 1
+
+
+# ── Counts-digest tripwire ──────────────────────────────────────────────
+#
+# The probe lane writes fresh counts far more often than the sweep acts, so
+# due-ness has to key on whether anything actually MOVED rather than on how
+# recently the stats row was written. These lock down that property in both
+# directions: a source that moved is picked up immediately even inside its
+# check interval, and a source that was re-probed to the same numbers is not
+# picked up at all.
+
+
+async def _set_digests(factory, ds_id, *, stats_digest, seen_digest):
+    async with factory() as s:
+        stats = await s.get(DataSourceStatsORM, ds_id)
+        stats.counts_digest = stats_digest
+        state = await s.get(AggregationDataSourceStateORM, ds_id)
+        state.last_seen_counts_digest = seen_digest
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_moved_counts_are_due_inside_the_check_interval(session_factory):
+    """A drifted source must not wait out its check interval."""
+    await _seed(session_factory, checked_at=_ago(seconds=5))
+    await _set_digests(
+        session_factory, "ds_1", stats_digest="new", seen_digest="old",
+    )
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert [c.data_source_id for c in candidates] == ["ds_1"]
+
+
+@pytest.mark.asyncio
+async def test_unchanged_counts_do_not_re_open_a_checked_source(session_factory):
+    """The scalability property: re-probing a quiet source costs nothing.
+
+    Without this, every probe would make every source due on the next tick
+    and the sweep would churn the whole fleet continuously.
+    """
+    await _seed(session_factory, checked_at=_ago(seconds=5))
+    await _set_digests(
+        session_factory, "ds_1", stats_digest="same", seen_digest="same",
+    )
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert candidates == []
+
+
+@pytest.mark.asyncio
+async def test_never_probed_source_is_not_permanently_due(session_factory):
+    """A NULL stats digest must not read as "distinct from" forever."""
+    await _seed(session_factory, checked_at=_ago(seconds=5))
+    await _set_digests(
+        session_factory, "ds_1", stats_digest=None, seen_digest="whatever",
+    )
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert candidates == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_stamps_the_digest_it_evaluated(session_factory):
+    """Closing the loop: an evaluation records what it saw, so the same
+    numbers do not re-open the source on the next tick."""
+    await _seed(session_factory)
+    async with session_factory() as s:
+        stats = await s.get(DataSourceStatsORM, "ds_1")
+        stats.counts_digest = "digest-under-test"
+        await s.commit()
+
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+
+    state = await _state(session_factory)
+    assert state.last_seen_counts_digest == "digest-under-test"
+
+
+@pytest.mark.asyncio
+async def test_wiped_overlay_moves_the_digest(session_factory):
+    """The tripwire must see an overlay wipe, which leaves raw counts alone.
+
+    This is why the digest includes AGGREGATED and the drift BASELINE
+    excludes it — swapping the two would make this case invisible.
+    """
+    from backend.app.services.aggregation.fingerprint import (
+        counts_digest_from_counts, raw_fingerprint_from_counts,
+    )
+    entity = {"Table": 100}
+    healthy = {"FLOWS_TO": 200, "AGGREGATED": 500}
+    wiped = {"FLOWS_TO": 200}
+
+    assert (
+        counts_digest_from_counts(entity, healthy)
+        != counts_digest_from_counts(entity, wiped)
+    ), "digest must move when the overlay is wiped"
+    assert (
+        raw_fingerprint_from_counts(entity, healthy)[0]
+        == raw_fingerprint_from_counts(entity, wiped)[0]
+    ), "raw baseline must NOT move when only the overlay changes"
+
+
+@pytest.mark.asyncio
+async def test_stale_counts_are_refreshed_by_a_priority_probe(
+    session_factory, monkeypatch,
+):
+    """The fix for "its only move is to ask the stats service and wait".
+
+    A source whose counts are too old to act on must get a probe on the
+    priority lane, not merely a stats poll — the poll is two full scans and is
+    throttled to one enqueue per source per minute, which is how a stale source
+    used to sit unresolved for most of an hour.
+    """
+    probes: list = []
+    polls: list = []
+
+    async def _probe(ds_id, workspace_id, *, priority=False):
+        probes.append((ds_id, priority))
+        return "msg", "enqueued"
+
+    async def _poll(ds_id, workspace_id):
+        polls.append(ds_id)
+
+    monkeypatch.setattr(
+        "backend.insights_service.enqueue.enqueue_probe_job_safe", _probe,
+    )
+    monkeypatch.setattr(
+        "backend.insights_service.enqueue.mark_stats_changed", _poll,
+    )
+
+    # Older than AGGREGATION_RECONCILE_STATS_MAX_AGE_SECS (2700).
+    await _seed(session_factory, stats_age_secs=4000)
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+
+    assert result.by_skip.get("stats_stale") == 1
+    assert probes == [("ds_1", True)], "expected one PRIORITY probe"
+    # The poll still follows — it owns the deep facet — it is just no longer
+    # what the next sweep has to wait on.
+    assert polls == ["ds_1"]

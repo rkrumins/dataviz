@@ -167,6 +167,13 @@ export interface JobsSummary {
 export interface AggregationCadence {
   rebuildMinIntervalSecs?: number | null; // 0 .. 86400 (0 disables the throttle)
   driftAutoRebuild?: boolean | null;
+  /** Whether sources are actively probed for changed counts. Off means drift
+   *  is only noticed when the much slower stats poll happens to refresh. */
+  probeEnabled?: boolean | null;
+  /** How often each source's counts are re-read, 15 .. 86400. This is the
+   *  self-detection SLO — a source nobody notifies us about is noticed within
+   *  roughly this window plus one sweep tick. */
+  probeIntervalSecs?: number | null;
 }
 
 export interface AggregationSettingsResponse {
@@ -176,6 +183,8 @@ export interface AggregationSettingsResponse {
    *  `persisted ?? envDefault` so a no-op save round-trips the real default. */
   envRebuildMinIntervalSecs?: number | null;
   envDriftAutoRebuild?: boolean | null;
+  envProbeEnabled?: boolean | null;
+  envProbeIntervalSecs?: number | null;
   updatedAt?: string | null;
   updatedBy?: string | null;
 }

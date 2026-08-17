@@ -970,6 +970,23 @@ class DataSourceStatsORM(Base):
     top_level_nodes = Column(Text, nullable=True)        # JSON payload, NULL = never materialized
     top_level_updated_at = Column(Text, nullable=True)   # ISO timestamp, freshness marker
 
+    # Drift-probe facet. ``counts_digest`` hashes EVERY count above, AGGREGATED
+    # included; the reconcile sweep stamps the value it last evaluated into
+    # ``aggregation.data_source_state.last_seen_counts_digest``, so "did
+    # anything move since we last looked" is a SQL comparison rather than an
+    # evaluation pass over the fleet. Including AGGREGATED is deliberate — the
+    # drift BASELINE must exclude it (a rebuild would move it), but a tripwire
+    # that excluded it could not see a wiped overlay on unchanged raw data.
+    # ``last_probed_at`` is the probe lane's own cadence marker, separate from
+    # the stats poll's ``data_source_polling_configs.last_polled_at`` because
+    # the two lanes run at very different frequencies.
+    counts_digest = Column(Text, nullable=True)
+    last_probed_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_ds_stats_probe_due", "last_probed_at"),
+    )
+
     # Relationships
     data_source = relationship("WorkspaceDataSourceORM", back_populates="stats")
 

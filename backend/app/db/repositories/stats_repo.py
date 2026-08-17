@@ -139,6 +139,9 @@ async def upsert_data_source_stats_counts(
     edge_count: int,
     entity_type_counts: str,
     edge_type_counts: str,
+    *,
+    counts_digest: Optional[str] = None,
+    probed: bool = False,
 ) -> DataSourceStatsORM:
     """Partial upsert — the cheap counts facet.
 
@@ -147,14 +150,29 @@ async def upsert_data_source_stats_counts(
     columns owned by the deep facet. On first contact (no row yet) the
     JSON columns fall back to their ``{}`` defaults until the first
     deep poll fills them.
+
+    ``counts_digest`` hashes the counts being written (AGGREGATED
+    included). Storing it alongside them is what lets the reconcile sweep
+    detect movement with a SQL comparison instead of an evaluation pass.
+    ``None`` leaves the stored digest alone, so callers that do not
+    compute one are unaffected.
+
+    ``probed`` stamps ``last_probed_at``, claiming this write for the probe
+    lane's cadence. The stats poll leaves it alone: the two lanes run at
+    different frequencies and must not reset each other's clock.
     """
+    now = datetime.now(timezone.utc).isoformat()
     existing = await get_data_source_stats(session, ds_id)
     if existing:
         existing.node_count = node_count
         existing.edge_count = edge_count
         existing.entity_type_counts = entity_type_counts
         existing.edge_type_counts = edge_type_counts
-        existing.updated_at = datetime.now(timezone.utc).isoformat()
+        existing.updated_at = now
+        if counts_digest is not None:
+            existing.counts_digest = counts_digest
+        if probed:
+            existing.last_probed_at = now
         await session.flush()
         return existing
 
@@ -164,6 +182,8 @@ async def upsert_data_source_stats_counts(
         edge_count=edge_count,
         entity_type_counts=entity_type_counts,
         edge_type_counts=edge_type_counts,
+        counts_digest=counts_digest,
+        last_probed_at=now if probed else None,
     )
     session.add(new_stats)
     await session.flush()

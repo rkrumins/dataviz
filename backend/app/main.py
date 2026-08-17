@@ -951,6 +951,24 @@ async def lifespan(_app: FastAPI):
                 )
                 logger.info("Reconciliation sweeper started")
 
+                # Probe scheduler — enqueues the constant-time counts reads
+                # the sweep above depends on. Without it the sweep is only as
+                # timely as the stats service's 900s poll, because refreshing
+                # those counts otherwise means two full graph scans. Decides
+                # which sources and when; the stats service executes.
+                from .services.aggregation.probe_scheduler import (
+                    run_probe_scheduler,
+                )
+                _app.state._probe_sched_shutdown = asyncio.Event()
+                _app.state._probe_sched_task = asyncio.create_task(
+                    run_probe_scheduler(
+                        get_jobs_session,
+                        _app.state._probe_sched_shutdown,
+                    ),
+                    name="aggregation-probe-scheduler",
+                )
+                logger.info("Probe scheduler started")
+
             # Stuck-job reconciler — runs wherever the aggregation worker
             # lives. Lock-aware: the per-job exec lock is the liveness
             # signal, so a job whose executor died (lock expired) is
@@ -1305,6 +1323,21 @@ async def lifespan(_app: FastAPI):
             _reconciler_task.cancel()
             try:
                 await _reconciler_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Same for the probe scheduler — it reads through the DB pool.
+    _probe_shutdown = getattr(_app.state, "_probe_sched_shutdown", None)
+    _probe_task = getattr(_app.state, "_probe_sched_task", None)
+    if _probe_shutdown is not None:
+        _probe_shutdown.set()
+    if _probe_task is not None and not _probe_task.done():
+        try:
+            await asyncio.wait_for(_probe_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _probe_task.cancel()
+            try:
+                await _probe_task
             except (asyncio.CancelledError, Exception):
                 pass
 

@@ -170,6 +170,21 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Reconciliation sweeper started")
 
+    # 8.6 Probe scheduler — what makes the sweep above TIMELY. The sweep can
+    # only act on the counts it finds in Postgres, and those used to arrive on
+    # the stats service's 900s poll because refreshing them meant two full
+    # graph scans. This loop enqueues constant-time counter reads instead, so
+    # the evidence is minutes fresher and drift is caught within a minute of
+    # happening. It decides only WHICH sources and WHEN; the stats service
+    # executes them, keeping every provider call in the tier that owns them.
+    from .probe_scheduler import run_probe_scheduler
+    probe_shutdown = asyncio.Event()
+    probe_task = asyncio.create_task(
+        run_probe_scheduler(get_jobs_session, probe_shutdown),
+        name="aggregation-probe-scheduler",
+    )
+    logger.info("Probe scheduler started")
+
     # 9. State-sync consumer (WS1.2). Projects aggregation status events
     # from the events stream into public.workspace_data_sources (the
     # viz-service's local read hint) and invalidates aggregated-read
@@ -210,6 +225,12 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(recon_sweeper_task, timeout=2.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             recon_sweeper_task.cancel()
+    probe_shutdown.set()
+    if not probe_task.done():
+        try:
+            await asyncio.wait_for(probe_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            probe_task.cancel()
     await state_sync.stop()
     state_sync_task.cancel()
     try:

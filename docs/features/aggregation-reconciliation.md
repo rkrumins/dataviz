@@ -26,6 +26,50 @@ Meanwhile the stats service already collected the evidence, roughly every 15
 minutes, into `public.data_source_stats.edge_type_counts` — a JSON dict that
 carries the `AGGREGATED` count beside every raw edge type. Nothing read it.
 
+Reading it was only half the problem. Because that evidence arrived on a
+15-minute poll and each source was checked at most hourly, a source could be
+serving wrong rollups for over an hour before anything noticed. The poll is
+slow for a good reason — it is two full graph scans — so the fix was not to
+run it more often. See **The probe** below.
+
+## The probe
+
+The sweep can only act on the counts it finds in Postgres, so how fast it
+reacts is set by how fast those counts refresh. `provider.get_stats()` refreshes
+them with two full scans — `MATCH (n) RETURN labels(n)[0], count(*)` and its
+edge twin — which is why its idle interval has to be 900s.
+
+FalkorDB will answer a *bare* count from its label and relation-type counters
+instead: `MATCH (n) RETURN count(n)`, `MATCH (n:L) RETURN count(n)` and the
+edge equivalents all plan as `Results / Project` with **no scan operator**.
+Adding any projection alongside the count loses the optimisation, which is
+exactly what the two queries above do.
+
+`provider.get_counts_fast()` therefore rebuilds the same payload from
+`db.labels()` + `db.relationshipTypes()` plus one constant-time count each.
+Measured on a 500k-node / 850k-edge graph: **~1.3ms against ~514ms**, and
+constant in graph size rather than linear. That is what makes a 60s probe
+cadence affordable where the counts poll must stay at 900s, and it takes
+worst-case drift detection from roughly 75 minutes to under one.
+
+Two corrections are load-bearing, both verified against a live engine:
+
+* **Zero-count buckets are dropped.** `db.labels()` keeps listing a label after
+  its last node is deleted, where `get_stats` returns no row for it. A
+  `{"Ghost": 0}` key hashes differently from an absent one, so keeping it would
+  read as drift on the first probe of every graph that ever deleted a type.
+* **`unknown` is derived as `total − sum(labels)`.** Unlabelled nodes are
+  invisible to per-label counts and `get_stats` buckets them under
+  `labels(n)[0] or "unknown"`. If the label sum comes out *above* the total the
+  graph has multi-label nodes, per-label counting is no longer equivalent, and
+  the probe returns `None` so the caller falls back to the scan.
+
+Scheduling and execution are split deliberately. `ProbeScheduler` (Control
+Plane) resolves policy and enqueues; the stats service executes, because every
+outbound provider call belongs to the tier that owns them. They meet at the
+`insights.jobs.probe` stream, whose SET NX claim means any number of requests
+for one source inside the claim window buy exactly one probe.
+
 ## The design
 
 A scheduled sweep decides everything from Postgres. **`ReconciliationSweeper`
@@ -33,7 +77,7 @@ takes no provider registry**, which is the structural guarantee — asserted in
 the tests — that it cannot make a graph call even by accident.
 
 ```
-tick (60s)  → is any source due?  (per-source interval, default hourly)
+tick (60s)  → is any source due?  (counts moved, or per-source interval)
   Phase A — advisory lock held, pure SQL, no network
      batched reads → evaluate() → stamp drift_state + last_checked_at
                                 → seed baselines, write run header → COMMIT
@@ -164,18 +208,23 @@ cadence — the same store, the same 30-second cache, the same dialog.
 | Field | Env fallback | Default |
 |---|---|---|
 | `reconcileEnabled` | `AGGREGATION_RECONCILE_ENABLED` | `true` |
-| `reconcileCheckIntervalSecs` | `AGGREGATION_RECONCILE_INTERVAL_SECS` | `3600` (floor 300) |
+| `reconcileCheckIntervalSecs` | `AGGREGATION_RECONCILE_INTERVAL_SECS` | `3600` (floor 30) |
 | `reconcileMaxActionsPerRun` | `AGGREGATION_RECONCILE_MAX_ACTIONS` | `10` |
 | `reconcileShrinkTolerancePct` | `AGGREGATION_RECONCILE_SHRINK_TOLERANCE_PCT` | `10` |
 | `reconcileDetectors` | — | unset = all on; **`[]` = all off** |
 | — | `AGGREGATION_RECONCILE_STATS_MAX_AGE_SECS` | `2700` |
 | — | `AGGREGATION_RECONCILE_BREAKER_CAP` | `3` |
 | — | `AGGREGATION_RECONCILE_SCAN_TIMEOUT` | `3` |
+| `probeEnabled` | `AGGREGATION_PROBE_ENABLED` | `true` |
+| `probeIntervalSecs` | `AGGREGATION_PROBE_INTERVAL_SECS` | `60` (floor 15) |
+| — | `AGGREGATION_PROBE_BATCH_CAP` | `200` |
+| — | `STATS_PROBE_CONCURRENCY` (stats-service lane) | `4` |
 
 Per-source overrides are columns on `aggregation.data_source_state`:
 `reconcile_enabled` (the per-source feature flag — it cannot live in
-`feature_flags`, which is a single global row) and
-`reconcile_check_interval_secs`. Resolution is override → global → env, the
+`feature_flags`, which is a single global row),
+`reconcile_check_interval_secs`, and `probe_enabled` /
+`probe_interval_secs`. Resolution is override → global → env, the
 same chain `rebuild_min_interval_secs` uses.
 
 > **`reconcileDetectors == []` means "act on nothing", not "unset".** Every read

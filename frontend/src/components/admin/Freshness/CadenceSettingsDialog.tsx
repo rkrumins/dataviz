@@ -10,6 +10,11 @@
  * that no longer match its data, how many rebuilds one check may queue, and
  * which findings are acted on.
  *
+ * **Change detection** — how often each source's counts are re-read, which is
+ * what decides how quickly a change made outside the app is noticed at all.
+ * Separate from the check above on purpose: this governs how fresh the
+ * evidence is, that one governs how often we act on it.
+ *
  * Both live here rather than in two dialogs because they are stored in the
  * same record: a second editor would be a second source of truth for one
  * setting, and whichever saved last would win.
@@ -33,6 +38,7 @@ import { freshnessService } from '@/services/freshnessService'
 import { FRESHNESS_KEYS, useSetReconciliationPolicy } from './useFreshness'
 
 const MAX_MINUTES = 1440 // 86400s / 60 — the backend's hard ceiling
+const MAX_SECONDS = 86400 // the backend's ceiling for the probe interval
 
 /** The four detectors, in the order the backend evaluates them. Each says
  *  what it looks for in the operator's terms, not the detector's. */
@@ -78,6 +84,8 @@ export function CadenceSettingsDialog({ isOpen, onClose }: {
     const [reconMins, setReconMins] = useState('')
     const [reconCap, setReconCap] = useState('')
     const [detectors, setDetectors] = useState<string[]>([])
+    const [probeEnabled, setProbeEnabled] = useState(true)
+    const [probeSecs, setProbeSecs] = useState('')
 
     // Seed from the persisted cadence, falling back to the EFFECTIVE env
     // defaults (never a hardcoded assumption). This is load-bearing for the
@@ -89,13 +97,22 @@ export function CadenceSettingsDialog({ isOpen, onClose }: {
     const envMins = settingsQ.data?.envRebuildMinIntervalSecs != null
         ? Math.round(settingsQ.data.envRebuildMinIntervalSecs / 60)
         : null
+    const envProbeEnabled = settingsQ.data?.envProbeEnabled
+    const envProbeSecs = settingsQ.data?.envProbeIntervalSecs ?? null
     useEffect(() => {
         if (!settingsQ.data) return
         setMins(cadence?.rebuildMinIntervalSecs != null
             ? String(Math.round(cadence.rebuildMinIntervalSecs / 60))
             : '')
         setDriftAuto(cadence?.driftAutoRebuild ?? envDriftAuto ?? true)
-    }, [settingsQ.data, cadence, envDriftAuto])
+        // Same seeding rule as the toggle above: fall back to the EFFECTIVE
+        // env default, never a hardcoded guess, so a save that only meant to
+        // change the interval round-trips the real current state.
+        setProbeEnabled(cadence?.probeEnabled ?? envProbeEnabled ?? true)
+        setProbeSecs(cadence?.probeIntervalSecs != null
+            ? String(cadence.probeIntervalSecs)
+            : '')
+    }, [settingsQ.data, cadence, envDriftAuto, envProbeEnabled])
 
     // The reconciliation policy comes from its own endpoint (it carries the
     // env defaults and the detector vocabulary), but is STORED alongside the
@@ -143,13 +160,18 @@ export function CadenceSettingsDialog({ isOpen, onClose }: {
             return
         }
         const rn = reconMins.trim() === '' ? null : Number(reconMins)
-        if (rn != null && (!Number.isFinite(rn) || rn < 5 || rn > MAX_MINUTES)) {
-            showToast('error', 'Check frequency must be between 5 and 1440 minutes.')
+        if (rn != null && (!Number.isFinite(rn) || rn < 1 || rn > MAX_MINUTES)) {
+            showToast('error', 'Check frequency must be between 1 and 1440 minutes.')
             return
         }
         const cap = reconCap.trim() === '' ? null : Number(reconCap)
         if (cap != null && (!Number.isFinite(cap) || cap < 0 || cap > 200)) {
             showToast('error', 'Rebuilds per check must be between 0 and 200.')
+            return
+        }
+        const ps = probeSecs.trim() === '' ? null : Number(probeSecs)
+        if (ps != null && (!Number.isFinite(ps) || ps < 15 || ps > MAX_SECONDS)) {
+            showToast('error', 'Change detection must be between 15 and 86400 seconds.')
             return
         }
         // Both writes land in the same stored record, so they are sequenced
@@ -168,6 +190,8 @@ export function CadenceSettingsDialog({ isOpen, onClose }: {
                 onSuccess: () => save.mutate({
                     rebuildMinIntervalSecs: n == null ? null : Math.round(n * 60),
                     driftAutoRebuild: driftAuto,
+                    probeEnabled,
+                    probeIntervalSecs: ps,
                 }),
                 onError: (e: Error) =>
                     showToast('error', e.message || 'Could not save reconciliation settings.'),
@@ -263,7 +287,7 @@ export function CadenceSettingsDialog({ isOpen, onClose }: {
                                                 </label>
                                                 <input
                                                     id="recon-interval"
-                                                    type="number" min={5} max={MAX_MINUTES} step={1}
+                                                    type="number" min={1} max={MAX_MINUTES} step={1}
                                                     value={reconMins}
                                                     onChange={(e) => setReconMins(e.target.value)}
                                                     placeholder={envReconMins != null ? `Default (${envReconMins})` : 'Default'}
@@ -316,6 +340,58 @@ export function CadenceSettingsDialog({ isOpen, onClose }: {
                                                     still detected and shown in the table.
                                                 </p>
                                             </fieldset>
+                                        </>
+                                    )}
+                                </div>
+
+                                {/* ── Change detection ────────────────────
+                                    How quickly a change made OUTSIDE the app
+                                    is noticed. Separate from the check above
+                                    on purpose: this controls how fresh the
+                                    evidence is, that one controls how often
+                                    we act on it. Cheap enough to run every
+                                    minute because it reads counters rather
+                                    than scanning the graph. */}
+                                <div className="pt-4 border-t border-glass-border space-y-3">
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div className="min-w-0">
+                                            <p className="text-sm font-semibold text-ink">Change detection</p>
+                                            <p className="text-[11px] text-ink-muted mt-0.5">
+                                                Watches each source for data changed by
+                                                systems outside this app. Reads only the
+                                                stored counts, not the data itself, so it
+                                                is cheap enough to run every minute.
+                                            </p>
+                                        </div>
+                                        <ToggleSwitch
+                                            checked={probeEnabled}
+                                            onChange={setProbeEnabled}
+                                            aria-label="Change detection"
+                                        />
+                                    </div>
+
+                                    {probeEnabled && (
+                                        <>
+                                            <div className="flex items-center gap-2">
+                                                <label className="text-sm text-ink-secondary" htmlFor="probe-interval">
+                                                    Look for changes every
+                                                </label>
+                                                <input
+                                                    id="probe-interval"
+                                                    type="number" min={15} max={MAX_SECONDS} step={5}
+                                                    value={probeSecs}
+                                                    onChange={(e) => setProbeSecs(e.target.value)}
+                                                    placeholder={envProbeSecs != null ? `Default (${envProbeSecs})` : 'Default'}
+                                                    className="w-32 h-9 px-2.5 rounded-lg border border-glass-border bg-canvas text-sm text-ink"
+                                                />
+                                                <span className="text-sm text-ink-muted">seconds</span>
+                                            </div>
+                                            <p className="text-[11px] text-ink-muted -mt-1">
+                                                How long a change can go unnoticed when nothing
+                                                tells us about it. Turning this off means a change
+                                                is only found when the slower statistics refresh
+                                                happens to run.
+                                            </p>
                                         </>
                                     )}
                                 </div>

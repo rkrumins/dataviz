@@ -8295,6 +8295,109 @@ class FalkorDBProvider(GraphDataProvider):
 
         return result
 
+    async def get_counts_fast(self) -> Optional[Dict[str, Any]]:
+        """Same payload as :meth:`get_stats`, without scanning the graph.
+
+        FalkorDB's ``reduce_count`` optimization answers ``count()`` over an
+        unfiltered pattern from the label/relation matrix counters — the plan
+        is ``Results / Project`` with no scan operator at all. Projecting
+        ``labels(n)[0]`` or ``type(r)`` alongside the count is what loses it,
+        which is exactly what ``get_stats`` does and why its two queries cost
+        ~514ms on a 500k-node / 850k-edge graph where this costs ~1.3ms.
+
+        So the per-type breakdown comes from the schema catalogue
+        (``db.labels()`` / ``db.relationshipTypes()``, both O(#types)) plus one
+        constant-time count each. **Never add a projection to these queries.**
+
+        Cost is ``4 + labels + types`` round trips and is therefore constant in
+        the SIZE of the graph but linear in the size of its SCHEMA — the exact
+        inverse of ``get_stats``. On a small graph with a wide schema the two
+        converge; the win is on the large graphs that forced the 900s poll
+        interval in the first place.
+
+        Returns ``None`` — not an error — when the counts cannot be trusted,
+        so the caller falls back to :meth:`get_stats`. That happens when the
+        label counts sum ABOVE the node total, which means multi-label nodes:
+        per-label counting then double-counts relative to ``labels(n)[0]``
+        semantics. Our own writers are single-label by construction
+        (``MERGE (n:{label} {urn: …})``) but an external loader need not be.
+        """
+        await self._ensure_connected()
+
+        async def _count(cypher: str) -> int:
+            res = await self._ro_query_tolerant(cypher, op="probe.count")
+            rows = res.result_set or []
+            return int(rows[0][0] or 0) if rows and rows[0] else 0
+
+        async def _catalogue(cypher: str) -> List[str]:
+            res = await self._ro_query_tolerant(cypher, op="probe.catalogue")
+            return [row[0] for row in (res.result_set or []) if row and row[0]]
+
+        labels = await _catalogue(
+            "CALL db.labels() YIELD label RETURN label"
+        )
+        rel_types = await _catalogue(
+            "CALL db.relationshipTypes() YIELD relationshipType "
+            "RETURN relationshipType"
+        )
+        node_count = await _count("MATCH (n) RETURN count(n)")
+        edge_count = await _count("MATCH ()-[r]->() RETURN count(r)")
+
+        # Zero-count buckets are DROPPED, not reported. The catalogue keeps
+        # listing a label/type after its last row is deleted, where get_stats
+        # simply returns no row for it — and a {"Ghost": 0} key hashes
+        # differently from an absent one, so keeping it would read as drift on
+        # the first probe of every graph that ever deleted a type.
+        entity_type_counts: Dict[str, Any] = {}
+        for label in labels:
+            safe = str(label).replace("`", "")
+            count = await _count(f"MATCH (n:`{safe}`) RETURN count(n)")
+            if count:
+                entity_type_counts[label] = count
+
+        edge_type_counts: Dict[str, Any] = {}
+        for rel_type in rel_types:
+            safe = str(rel_type).replace("`", "")
+            count = await _count(f"MATCH ()-[r:`{safe}`]->() RETURN count(r)")
+            if count:
+                edge_type_counts[rel_type] = count
+
+        label_sum = sum(entity_type_counts.values())
+        if label_sum > node_count:
+            logger.info(
+                "get_counts_fast on %s: label counts sum to %d over %d nodes "
+                "(multi-label graph) — deferring to the full scan",
+                self._graph_name, label_sum, node_count,
+            )
+            return None
+        if label_sum < node_count:
+            # Unlabelled nodes: invisible to per-label counts, and get_stats
+            # buckets them under `labels(n)[0] or "unknown"`. Deriving the
+            # remainder reproduces that bucket exactly.
+            entity_type_counts["unknown"] = node_count - label_sum
+
+        # An edge carries exactly one type, so unlike nodes there is no honest
+        # remainder to attribute. A disagreement means the catalogue is not
+        # describing this graph; refuse rather than report a wrong shape.
+        if sum(edge_type_counts.values()) != edge_count:
+            logger.info(
+                "get_counts_fast on %s: edge-type counts sum to %d over %d "
+                "edges — deferring to the full scan",
+                self._graph_name, sum(edge_type_counts.values()), edge_count,
+            )
+            return None
+
+        result = {
+            "nodeCount": node_count,
+            "edgeCount": edge_count,
+            "entityTypeCounts": entity_type_counts,
+            "edgeTypeCounts": edge_type_counts,
+        }
+        # Same payload get_stats would have produced, so priming its cache
+        # keeps the two from disagreeing for the TTL.
+        await self.prime_stats_cache(result)
+        return result
+
     async def prime_stats_cache(self, stats: Dict[str, Any]) -> None:
         """Write-through prime of the ``{graph}:stats_cache`` Redis key.
 

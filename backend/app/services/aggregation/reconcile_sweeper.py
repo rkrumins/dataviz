@@ -112,6 +112,10 @@ class _Action:
     adopt_raw_fingerprint: Optional[str] = None
     adopt_node_count: int = 0
     adopt_edge_count: int = 0
+    # The counts digest this pass evaluated, stamped with the same timing as
+    # the baseline above so a dispatched source stops re-opening on numbers
+    # we have already acted on.
+    adopt_counts_digest: Optional[str] = None
 
 
 # Skips that mean "we looked and we are done with this source until the
@@ -403,7 +407,7 @@ class ReconciliationSweeper:
                     and not full_scan
                     and not self._is_due(
                         state, interval,
-                        stats_updated=ctx_row.get("stats_updated"),
+                        counts_digest=ctx_row.get("counts_digest"),
                     )
                 ):
                     continue
@@ -471,6 +475,12 @@ class ReconciliationSweeper:
                     # the source stays due on the next tick.
                     if _is_terminal_skip(verdict):
                         state.last_reconcile_checked_at = now
+                        # Same timing as last_checked: record the numbers we
+                        # just accepted, so an identical re-probe is free. A
+                        # hold deliberately leaves this alone and stays due.
+                        state.last_seen_counts_digest = ctx_row.get(
+                            "counts_digest"
+                        )
                     if verdict.reason:
                         result.finding_rows.append(_finding_row(
                             state, ctx_row, verdict, acted=False,
@@ -642,9 +652,10 @@ class ReconciliationSweeper:
         """Bounded, oldest-checked-first. Explicit ids and operator
         manual/preview passes bypass due-ness; auto ticks do not.
 
-        Auto also loads sources whose stats row is newer than the last
-        verdict — a counts poll (or Probe write-back) must not wait for
-        the check interval before evaluate runs.
+        Auto also loads sources whose COUNTS have moved since the last
+        verdict — a probe or counts poll that finds real change must not wait
+        for the check interval before evaluate runs, and one that finds
+        nothing must not cost anything at all.
         """
         from backend.app.db.models import DataSourceStatsORM
         from .models import AggregationDataSourceStateORM as S
@@ -674,7 +685,34 @@ class ReconciliationSweeper:
                     (S.last_reconcile_checked_at.is_(None))
                     | (S.last_reconcile_checked_at < cutoff)
                     | (
-                        DataSourceStatsORM.updated_at.isnot(None)
+                        # The tripwire: the counts moved since we last looked.
+                        #
+                        # Content, not timestamps. ``data_source_stats
+                        # .updated_at`` carries ``onupdate``, so the older
+                        # "stats row is newer than the last verdict" test fired
+                        # on ANY write to that row — including a probe that
+                        # re-read identical numbers. At a 60s probe cadence
+                        # that is the whole fleet, every tick, forever.
+                        #
+                        # The NULL guard is load-bearing: IS DISTINCT FROM
+                        # treats a never-written NULL as different from any
+                        # stored value, which would pin the source permanently
+                        # due instead of never due.
+                        DataSourceStatsORM.counts_digest.isnot(None)
+                        & DataSourceStatsORM.counts_digest.is_distinct_from(
+                            S.last_seen_counts_digest
+                        )
+                    )
+                    | (
+                        # No digest yet — a source the probe has not reached,
+                        # or a row written by a producer that predates the
+                        # column. Fall back to the timestamp test so those keep
+                        # exactly their previous behaviour. Being permissive
+                        # here is safe and being absent is not: this query must
+                        # stay a SUPERSET of what ``_is_due`` accepts, or a
+                        # source it would have acted on is never even loaded.
+                        DataSourceStatsORM.counts_digest.is_(None)
+                        & DataSourceStatsORM.updated_at.isnot(None)
                         & S.last_reconcile_checked_at.isnot(None)
                         & (
                             DataSourceStatsORM.updated_at
@@ -713,7 +751,9 @@ class ReconciliationSweeper:
             ProviderORM,
             WorkspaceDataSourceORM,
         )
-        from .fingerprint import raw_fingerprint_from_counts
+        from .fingerprint import (
+            counts_digest_from_counts, raw_fingerprint_from_counts,
+        )
         from .models import AggregationJobORM
 
         out: Dict[str, Dict] = {d: {} for d in ds_ids}
@@ -792,6 +832,15 @@ class ReconciliationSweeper:
                 observed_aggregated=observed_agg,
                 observed_raw_fingerprint=fp,
                 observed_raw_edge_total=raw_edges,
+                # Carried so the pass can stamp what it evaluated; see
+                # ``_is_due`` / ``_candidates``. Falls back to deriving the
+                # digest from the counts themselves, so a row written by a
+                # producer that predates the column still converges instead of
+                # looking permanently unmoved.
+                counts_digest=(
+                    row.counts_digest
+                    or counts_digest_from_counts(entity_counts, edge_counts)
+                ),
             )
 
         # 3. Is the stats poll itself healthy?
@@ -928,17 +977,26 @@ class ReconciliationSweeper:
         )
 
     @staticmethod
-    def _is_due(state, interval_secs: int, *, stats_updated=None) -> bool:
-        """Due when the check interval elapsed, observation moved after the
-        last verdict, or an unresolved finding is still open."""
+    def _is_due(state, interval_secs: int, *, counts_digest=None) -> bool:
+        """Due when the check interval elapsed, the counts moved since the
+        last verdict, or an unresolved finding is still open.
+
+        Mirrors the SQL in :meth:`_candidates` — the two must agree, or a
+        source the query selected gets silently dropped here (or vice versa).
+        Both compare digests rather than timestamps so that a probe finding
+        identical numbers is free; see the note in ``_candidates``.
+        """
         if interval_secs <= 0:
             return True
         if _unresolved_finding_open(state):
             return True
+        if (
+            counts_digest is not None
+            and counts_digest != state.last_seen_counts_digest
+        ):
+            return True
         last = _parse_iso(state.last_reconcile_checked_at)
         if last is None:
-            return True
-        if stats_updated is not None and stats_updated > last:
             return True
         elapsed = (datetime.now(timezone.utc) - last).total_seconds()
         return elapsed >= interval_secs
@@ -1035,6 +1093,8 @@ class ReconciliationSweeper:
             state.reconcile_consecutive_actions or 0
         ) + 1
         state.last_reconcile_checked_at = now
+        if action.adopt_counts_digest is not None:
+            state.last_seen_counts_digest = action.adopt_counts_digest
 
     async def _dispatch_first_build(self, svc, session, action, actor, run_id) -> None:
         """Queue the very first aggregation for an onboarded source.
@@ -1082,12 +1142,26 @@ class ReconciliationSweeper:
         )
 
     async def _nudge_stats(self, ds_id, workspace_id) -> None:
-        """Ask the stats service to re-poll a source whose counts were too
-        stale to act on, so the next sweep has fresh numbers. Best-effort."""
+        """Get fresh numbers for a source whose counts were too stale to act on.
+
+        A PROBE, not a stats poll. Both refresh the counts this sweep needs,
+        but the probe reads FalkorDB's counters (~1ms, priority lane) while the
+        poll runs two full scans and is throttled to one enqueue per source per
+        minute — on a large graph that difference is the whole reason a stale
+        source used to sit unresolved for the better part of an hour.
+
+        The poll still follows, because it owns the deep facet and the polling
+        lifecycle; it is simply no longer what the next sweep waits on.
+        Best-effort throughout: losing a nudge costs one more tick, never
+        correctness — the per-source interval remains the backstop.
+        """
         if not workspace_id:
             return
         try:
-            from backend.insights_service.enqueue import mark_stats_changed
+            from backend.insights_service.enqueue import (
+                enqueue_probe_job_safe, mark_stats_changed,
+            )
+            await enqueue_probe_job_safe(ds_id, workspace_id, priority=True)
             await mark_stats_changed(ds_id, workspace_id)
         except Exception as exc:
             logger.debug("reconcile sweep: stats nudge failed for %s: %s", ds_id, exc)
@@ -1144,6 +1218,7 @@ def _action_from(state, ctx_row, verdict, obs, *, acted: bool) -> _Action:
         adopt_raw_fingerprint=obs.observed_raw_fingerprint,
         adopt_node_count=obs.node_count,
         adopt_edge_count=obs.observed_raw_edge_total,
+        adopt_counts_digest=ctx_row.get("counts_digest"),
     )
 
 

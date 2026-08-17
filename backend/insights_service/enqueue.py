@@ -1,10 +1,13 @@
 """Cross-service helpers for enqueueing insights-service jobs.
 
-Three job kinds funnel through one ``enqueue_job`` core:
+Four job kinds funnel through one ``enqueue_job`` core:
 
 * ``stats_poll`` — post-registration data-source poll.
   Producers: insights scheduler tick, ``/graph/stats`` cache miss,
   workspace add-data-source seeding.
+* ``probe``      — constant-time counts, the drift tripwire.
+  Producers: the probe scheduler tick, and change signals from external
+  systems (which buy a probe, never a rebuild).
 * ``discovery``  — pre-registration asset list / per-asset stats.
   Producers: ``/admin/providers/{id}/assets*`` cache miss,
   scheduler-driven background refreshes.
@@ -28,6 +31,8 @@ from backend.app.services.aggregation.redis_client import get_redis
 from .redis_streams import (
     DISCOVERY_HOT_STREAM,
     DISCOVERY_STREAM,
+    PROBE_HOT_STREAM,
+    PROBE_STREAM,
     StreamConfig,
     enqueue,
     get_stream,
@@ -37,6 +42,7 @@ from .redis_streams import (
 from .schemas import (
     DiscoveryJobEnvelope,
     JobEnvelope,
+    ProbeJobEnvelope,
     PurgeJobEnvelope,
     StatsJobEnvelope,
 )
@@ -290,6 +296,46 @@ async def enqueue_stats_job_force(
     return await enqueue_stats_job_safe(data_source_id, workspace_id)
 
 
+# ── Probe: the drift tripwire ────────────────────────────────────────
+
+# A probe is milliseconds of work, so the claim only has to outlive one
+# in-flight probe rather than a large-graph scan. Reusing the stats TTL
+# (1200s) would make a source un-probeable for twenty minutes after a
+# worker died mid-probe — the same defect the discovery lane hit.
+_PROBE_DEDUP_TTL_SECS = int(os.getenv("STATS_PROBE_DEDUP_TTL_SECS", "90"))
+
+
+async def enqueue_probe_job_safe(
+    data_source_id: str,
+    workspace_id: str,
+    *,
+    priority: bool = False,
+) -> tuple[Optional[str], EnqueueOutcome]:
+    """Queue a drift probe unless one is already in flight for this source.
+
+    ``priority=True`` routes to the hot stream, for probes a change signal
+    asked for; the scheduler's fleet sweep rides the background stream.
+    Both share one dedup claim, so a signalled source that the sweep has
+    already queued coalesces rather than probing twice.
+
+    The dedup claim IS the anti-abuse property on the ingress path: any
+    number of signals for one source inside the claim window buy exactly
+    one probe.
+    """
+    if not data_source_id or not workspace_id:
+        return None, "error"
+    envelope = ProbeJobEnvelope(
+        data_source_id=data_source_id,
+        workspace_id=workspace_id,
+        enqueued_at=datetime.now(timezone.utc),
+    )
+    return await enqueue_job_safe_ex(
+        envelope,
+        dedup_ttl_secs=_PROBE_DEDUP_TTL_SECS,
+        stream=PROBE_HOT_STREAM if priority else PROBE_STREAM,
+    )
+
+
 # ── Discovery: pre-registration asset cache miss ─────────────────────
 
 # Discovery jobs complete in seconds (list_graphs / get_stats), unlike
@@ -432,6 +478,7 @@ __all__ = [
     "enqueue_stats_job",
     "enqueue_stats_job_safe",
     "enqueue_stats_job_force",
+    "enqueue_probe_job_safe",
     "mark_stats_changed",
     "enqueue_discovery_job_safe",
     "enqueue_discovery_job_force",

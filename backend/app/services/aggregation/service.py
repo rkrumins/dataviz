@@ -96,6 +96,25 @@ AGGREGATION_RECONCILE_STATS_MAX_AGE_SECS = int(
 AGGREGATION_RECONCILE_BREAKER_CAP = int(
     __import__("os").getenv("AGGREGATION_RECONCILE_BREAKER_CAP", "3")
 )
+# ── Drift probe ──────────────────────────────────────────────────────────
+# The probe reads FalkorDB's label/relation counters rather than scanning, so
+# it costs ~1ms where the stats poll costs hundreds. That is what lets this
+# interval be 60s while STATS_DEFAULT_INTERVAL_SECS stays 900 — and it is the
+# self-detection SLO: a source nobody signals is noticed within roughly this
+# window plus one sweep tick.
+AGGREGATION_PROBE_ENABLED = (
+    __import__("os").getenv("AGGREGATION_PROBE_ENABLED", "true")
+    .strip().lower() in ("1", "true", "yes", "on")
+)
+AGGREGATION_PROBE_INTERVAL_SECS = int(
+    __import__("os").getenv("AGGREGATION_PROBE_INTERVAL_SECS", "60")
+)
+# Fleet-wide ceiling on probes enqueued per tick. Probes are cheap
+# INDIVIDUALLY; this bounds the fan-out against one provider when a large
+# fleet comes due at once.
+AGGREGATION_PROBE_BATCH_CAP = int(
+    __import__("os").getenv("AGGREGATION_PROBE_BATCH_CAP", "200")
+)
 
 
 # ── F9: configurable rebuild cadence ─────────────────────────────────────
@@ -152,6 +171,29 @@ def resolve_reconcile_interval(
     if global_secs is not None:
         return global_secs
     return AGGREGATION_RECONCILE_INTERVAL_SECS
+
+
+def resolve_probe_enabled(
+    override: Optional[bool], global_value: Optional[bool],
+) -> bool:
+    """Per-source override → persisted global → env default. Same shape as
+    :func:`resolve_reconcile_enabled`; ``False`` is a real value."""
+    if override is not None:
+        return override
+    if global_value is not None:
+        return global_value
+    return AGGREGATION_PROBE_ENABLED
+
+
+def resolve_probe_interval(
+    override_secs: Optional[int], global_secs: Optional[int],
+) -> int:
+    """Per-source override → persisted global → env default (60)."""
+    if override_secs is not None:
+        return override_secs
+    if global_secs is not None:
+        return global_secs
+    return AGGREGATION_PROBE_INTERVAL_SECS
 
 
 def reconcile_policy_from_cadence(cadence) -> "ReconcilePolicy":
@@ -998,6 +1040,8 @@ class AggregationService:
         env_kwargs = dict(
             env_rebuild_min_interval_secs=AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
             env_drift_auto_rebuild=AGGREGATION_DRIFT_AUTO_REBUILD,
+            env_probe_enabled=AGGREGATION_PROBE_ENABLED,
+            env_probe_interval_secs=AGGREGATION_PROBE_INTERVAL_SECS,
         )
         row = await session.get(AggregationSettingsORM, "global")
         if row is None:

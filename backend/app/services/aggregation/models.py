@@ -244,6 +244,20 @@ class AggregationDataSourceStateORM(Base):
     # Per-source check cadence (seconds). NULL = inherit global, then env.
     reconcile_check_interval_secs = Column(Integer, nullable=True)
 
+    # ── Drift probe (the cheap counts tripwire) ───────────────────────
+    # How often the probe lane reads this source's constant-time counts, and
+    # whether it does so at all. Same NULL = inherit global, then env chain as
+    # the two above. Kept separate from reconcile_check_interval_secs: probing
+    # is what makes fresh evidence APPEAR, checking is what acts on it, and a
+    # deployment may well want a fast probe and a slow act.
+    probe_enabled = Column(Boolean, nullable=True)
+    probe_interval_secs = Column(Integer, nullable=True)
+    # The ``data_source_stats.counts_digest`` this sweep last evaluated. The
+    # candidate query fires on ``IS DISTINCT FROM``, so a re-probe that finds
+    # identical counts costs nothing and only a real movement re-opens the
+    # source. NOT a drift baseline — see ``raw_fingerprint`` below for that.
+    last_seen_counts_digest = Column(Text, nullable=True)
+
     # Drift baseline, derived from the stats service's cached counts with
     # AGGREGATED excluded (``raw_fingerprint_from_counts``). Deliberately NOT
     # ``graph_fingerprint``, which includes AGGREGATED and therefore moves on

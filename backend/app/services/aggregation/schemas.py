@@ -739,9 +739,11 @@ class AggregationCadence(BaseModel):
                     "whose rollups have drifted. Unset → env default.",
     )
     reconcile_check_interval_secs: Optional[int] = Field(
-        None, alias="reconcileCheckIntervalSecs", ge=300, le=86400,
-        description="How often each source is checked for drift. The 300s "
-                    "floor keeps a mistyped value from hammering the fleet. "
+        None, alias="reconcileCheckIntervalSecs", ge=30, le=86400,
+        description="How often each source is checked for drift. Evaluation "
+                    "is pure SQL over counts the probe already collected, and "
+                    "a source whose counts have not moved is not re-evaluated "
+                    "at all, so this can safely sit near the probe interval. "
                     "Unset → env default.",
     )
     reconcile_max_actions_per_run: Optional[int] = Field(
@@ -762,6 +764,24 @@ class AggregationCadence(BaseModel):
                     "overlay_shrunk, never_aggregated, raw_drift. Unset = "
                     "all enabled; an EMPTY list = all disabled (detection "
                     "still runs and is still surfaced).",
+    )
+
+    # ── Drift probe ───────────────────────────────────────────────────
+    # What actually makes detection fast. The probe reads FalkorDB's
+    # counters instead of scanning, so its interval is a freshness dial
+    # rather than a load dial — the opposite of the stats poll's 900s.
+    probe_enabled: Optional[bool] = Field(
+        None, alias="probeEnabled",
+        description="Whether sources are actively probed for changed counts. "
+                    "Off means drift is only noticed when the (much slower) "
+                    "stats poll happens to refresh. Unset → env default.",
+    )
+    probe_interval_secs: Optional[int] = Field(
+        None, alias="probeIntervalSecs", ge=15, le=86400,
+        description="How often each source's counts are re-read. This is the "
+                    "self-detection SLO: a source nobody notifies us about is "
+                    "noticed within roughly this window plus one sweep tick. "
+                    "Unset → env default.",
     )
 
     class Config:
@@ -790,6 +810,12 @@ class AggregationSettingsResponse(BaseModel):
     )
     env_drift_auto_rebuild: Optional[bool] = Field(
         None, alias="envDriftAutoRebuild",
+    )
+    env_probe_enabled: Optional[bool] = Field(
+        None, alias="envProbeEnabled",
+    )
+    env_probe_interval_secs: Optional[int] = Field(
+        None, alias="envProbeIntervalSecs",
     )
     updated_at: Optional[str] = Field(None, alias="updatedAt")
     updated_by: Optional[str] = Field(None, alias="updatedBy")

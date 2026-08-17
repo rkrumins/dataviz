@@ -207,6 +207,16 @@ async def init_aggregation_db() -> None:
                 "ADD COLUMN IF NOT EXISTS last_finding_evidence TEXT NULL",
                 f"CREATE INDEX IF NOT EXISTS ix_ds_state_recon_due "
                 f"ON {SCHEMA_NAME}.data_source_state (last_reconcile_checked_at)",
+                # Drift probe (2026-08-17), mirrored in alembic
+                # 20260817_1200_drift_probe. Per-source probe cadence, resolved
+                # by the same override → global → env chain as the two
+                # reconcile settings above.
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS probe_enabled BOOLEAN NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS probe_interval_secs INTEGER NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS last_seen_counts_digest TEXT NULL",
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:
