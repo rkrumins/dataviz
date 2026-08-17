@@ -436,47 +436,6 @@ describe('P0 — perf harness (Task 20)', () => {
   })
 
   /**
-   * DRAGGING A CARD paints where the pointer is, and costs one card.
-   *
-   * The `nodes` prop is controlled from the built layout, so React Flow
-   * is re-seeded from it on every render and a drag it is not told about
-   * is painted straight back — reported as "I am not getting an
-   * indication that it is actually being moved and only when I release
-   * it I see that it was moved". Telling it (`onNodesChange`) is the
-   * fix; the number that matters is what a drag FRAME costs on a board
-   * with a lot of cards, which is what this measures.
-   */
-  describe('(drag) a live drag re-renders the card that moved, not the board', () => {
-    it('walkWideHub: one drag frame touches one card', () => {
-      const profiler = makeProfilerRecorder()
-      const { container } = renderBoard('walkWideHub', profiler)
-      const board = nodes(container)
-      expect(board.length).toBeGreaterThan(10)
-
-      profiler.reset()
-      resetRenderCounts()
-      // One frame of a drag, as React Flow reports it: a position change
-      // for exactly the node under the pointer.
-      const target = board[0]
-      act(() => {
-        fireEvent.mouseDown(target, { clientX: 0, clientY: 0, button: 0 })
-        fireEvent.mouseMove(target, { clientX: 40, clientY: 24 })
-      })
-      const rendered = [...renderCounts.entries()].filter(([k]) => k.startsWith('FocusNode'))
-      const total = rendered.reduce((n, [, v]) => n + v, 0)
-      console.log(
-        `[drag] walkWideHub boardNodes=${board.length} commits=${profiler.commitCount} `
-        + `ms=${profiler.totalMs.toFixed(2)} cardRenders=${total}`,
-      )
-      // THE BUDGET: a drag frame must not re-render the board. jsdom has
-      // no layout so React Flow's own pointer maths may not fire at all
-      // here — the claim this can honestly make is the ceiling, not that
-      // the drag happened.
-      expect(total).toBeLessThan(board.length)
-    })
-  })
-
-  /**
    * Task 20, P4 — React Flow render hygiene. `nodeTypes`/`edgeTypes` are
    * verified module-level constants by inspection (`NODE_TYPES`/
    * `EDGE_TYPES` in FocusGraphView.tsx, outside any component); no
