@@ -153,7 +153,10 @@ def test_root_anchor_walk_is_typed_and_seeked():
     p = _make_provider({"urn:f": "Node"})
     _run(p._resolve_root_anchor("urn:f", ["HAS"]))
     q = p.recorded[0]
-    assert "(focus:Node {urn: $urn})" in q
+    # The identity property is rendered from the source's mapping, so it is
+    # backtick-quoted; what this test guards is the LABEL-anchored seek, not the
+    # spelling of the property.
+    assert "(focus:Node {`urn`: $urn})" in q
     assert "[c:HAS*1.." in q
     assert "ALL(rel IN c" not in q
 
@@ -177,9 +180,9 @@ def test_get_nodes_urn_path_is_label_bucketed():
     from backend.common.models.graph import NodeQuery
     p = _make_provider({"urn:a": "Node", "urn:b": "Roots", "urn:c": None})
     _run(p.get_nodes(NodeQuery(urns=["urn:a", "urn:b", "urn:c"], includeChildCount=False)))
-    anchored = [q for q in p.recorded if "n.urn IN $urnList" in q]
+    anchored = [q for q in p.recorded if "IN $urnList" in q]
     assert anchored, p.recorded
     assert any("(n:Node)" in q for q in anchored)
     assert any("(n:Roots)" in q for q in anchored)
     # urn:c has no resolved label → residue bucket keeps the unlabeled anchor
-    assert any("MATCH (n) WHERE n.urn IN $urnList" in q for q in anchored)
+    assert any("MATCH (n) WHERE n.`urn` IN $urnList" in q for q in anchored)
