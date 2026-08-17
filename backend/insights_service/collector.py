@@ -35,9 +35,6 @@ from backend.app.db.repositories.stats_repo import (
     upsert_data_source_stats_counts,
 )
 from backend.app.registry.provider_registry import provider_registry
-from backend.app.services.aggregation.fingerprint import (
-    counts_digest_from_counts,
-)
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.top_level_cache import (
     TOP_LEVEL_MATERIALIZE_LIMIT,
@@ -170,12 +167,6 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
             edge_count=int(stats.get("edgeCount", 0) or 0),
             entity_type_counts=json.dumps(entity_counts),
             edge_type_counts=json.dumps(edge_counts),
-            # Written here too, not just by the probe: the reconcile sweep's
-            # candidate query only gets its cheap content predicate for rows
-            # that carry a digest, and falls back to a timestamp comparison
-            # otherwise. Filling it on every counts write means a deployment
-            # converges on the cheap path without waiting for a probe.
-            counts_digest=counts_digest_from_counts(entity_counts, edge_counts),
         )
         await _stamp_poll_success(session, envelope.data_source_id)
 
@@ -542,7 +533,6 @@ async def probe_counts(envelope: StatsJobEnvelope) -> None:
             edge_count=int(stats.get("edgeCount", 0) or 0),
             entity_type_counts=json.dumps(entity_counts),
             edge_type_counts=json.dumps(edge_counts),
-            counts_digest=counts_digest_from_counts(entity_counts, edge_counts),
             probed=True,
         )
 

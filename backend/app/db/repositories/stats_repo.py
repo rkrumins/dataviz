@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Sequence
@@ -132,6 +133,22 @@ async def invalidate_schema_facets(
     await session.flush()
 
 
+def _counts_digest(entity_type_counts: str, edge_type_counts: str) -> str:
+    """Digest of the counts about to be written. The columns hold JSON text,
+    so parse before hashing; an unparseable value hashes as empty, mirroring
+    the sweeper's own read-side fallback."""
+    from backend.app.services.aggregation.fingerprint import (
+        counts_digest_from_counts,
+    )
+
+    try:
+        entities = json.loads(entity_type_counts or "{}")
+        edges = json.loads(edge_type_counts or "{}")
+    except (TypeError, ValueError):
+        entities, edges = {}, {}
+    return counts_digest_from_counts(entities, edges)
+
+
 async def upsert_data_source_stats_counts(
     session: AsyncSession,
     ds_id: str,
@@ -140,7 +157,6 @@ async def upsert_data_source_stats_counts(
     entity_type_counts: str,
     edge_type_counts: str,
     *,
-    counts_digest: Optional[str] = None,
     probed: bool = False,
 ) -> DataSourceStatsORM:
     """Partial upsert — the cheap counts facet.
@@ -154,14 +170,17 @@ async def upsert_data_source_stats_counts(
     ``counts_digest`` hashes the counts being written (AGGREGATED
     included). Storing it alongside them is what lets the reconcile sweep
     detect movement with a SQL comparison instead of an evaluation pass.
-    ``None`` leaves the stored digest alone, so callers that do not
-    compute one are unaffected.
+    It is derived HERE rather than passed in: a caller that wrote changed
+    counts without one left the row describing itself with the PREVIOUS
+    digest, so the sweep's tripwire read "nothing moved" for counts that had
+    just moved. Computing it beside the write makes that structural.
 
     ``probed`` stamps ``last_probed_at``, claiming this write for the probe
     lane's cadence. The stats poll leaves it alone: the two lanes run at
     different frequencies and must not reset each other's clock.
     """
     now = datetime.now(timezone.utc).isoformat()
+    digest = _counts_digest(entity_type_counts, edge_type_counts)
     existing = await get_data_source_stats(session, ds_id)
     if existing:
         existing.node_count = node_count
@@ -169,8 +188,7 @@ async def upsert_data_source_stats_counts(
         existing.entity_type_counts = entity_type_counts
         existing.edge_type_counts = edge_type_counts
         existing.updated_at = now
-        if counts_digest is not None:
-            existing.counts_digest = counts_digest
+        existing.counts_digest = digest
         if probed:
             existing.last_probed_at = now
         await session.flush()
@@ -182,7 +200,7 @@ async def upsert_data_source_stats_counts(
         edge_count=edge_count,
         entity_type_counts=entity_type_counts,
         edge_type_counts=edge_type_counts,
-        counts_digest=counts_digest,
+        counts_digest=digest,
         last_probed_at=now if probed else None,
     )
     session.add(new_stats)

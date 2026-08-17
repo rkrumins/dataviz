@@ -876,6 +876,15 @@ async def test_manual_live_observe_persists_counts(session_factory, monkeypatch)
         assert row is not None
         assert row.node_count == 99
         assert json.loads(row.entity_type_counts) == {"Table": 99}
+        # …with the digest describing THESE counts. Persisting fresh counts
+        # beside the previously stored digest made the tripwire report
+        # "nothing moved" for the one source an operator just looked at.
+        from backend.app.services.aggregation.fingerprint import (
+            counts_digest_from_counts,
+        )
+        assert row.counts_digest == counts_digest_from_counts(
+            {"Table": 99}, {"FLOWS_TO": 200, "AGGREGATED": 500},
+        )
 
 @pytest.mark.asyncio
 async def test_manual_sweep_re_evaluates_a_recently_checked_source(session_factory):
