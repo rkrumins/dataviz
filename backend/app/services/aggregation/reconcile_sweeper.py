@@ -634,7 +634,15 @@ class ReconciliationSweeper:
     async def _claim_lock(self, session) -> bool:
         """Transaction-scoped advisory lock, distinct from the stuck-job
         reconciler's so the two sweeps never block each other. A non-Postgres
-        backend (unit fakes) simply proceeds — single-instance semantics."""
+        backend (unit fakes, SQLite) simply proceeds — single-instance
+        semantics. On Postgres an error fails CLOSED: skipping one 60s tick
+        is strictly cheaper than two replicas acting on the same sources.
+        (The residual Phase-A/Phase-B window across replicas is collapsed by
+        the trigger idempotency keys — a duplicate dispatch lands as a
+        ConflictError no-op in Phase B.)"""
+        dialect = getattr(getattr(session, "bind", None), "dialect", None)
+        if getattr(dialect, "name", None) != "postgresql":
+            return True
         try:
             got = (await session.execute(text(
                 "SELECT pg_try_advisory_xact_lock("
@@ -643,8 +651,12 @@ class ReconciliationSweeper:
             return got not in (False, 0)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            return True
+        except Exception as exc:
+            logger.warning(
+                "reconcile sweep: could not claim the sweep lock (%s) — "
+                "skipping this tick", exc,
+            )
+            return False
 
     async def _candidates(
         self, session, data_source_ids, global_interval, *, full_scan=False,
@@ -1031,6 +1043,7 @@ class ReconciliationSweeper:
                             svc, session, action, actor, result.run_id,
                         )
                         deferred = False
+                        queued = True
                     else:
                         resp = await svc.signal_source_changed(
                             action.data_source_id, session,
@@ -1048,6 +1061,14 @@ class ReconciliationSweeper:
                         deferred = bool(
                             resp is not None and getattr(resp, "deferred", False)
                         )
+                        # A response without a job id is a no-op (unchanged
+                        # gate, trigger conflict, resolution failure, not
+                        # applicable). None still reads as queued — the unit
+                        # fakes return None.
+                        queued = (
+                            resp is None
+                            or getattr(resp, "job_id", None) is not None
+                        )
                     if deferred:
                         # Cooldown raced the hold — leave last_checked alone
                         # so the next tick retries once the window opens.
@@ -1055,6 +1076,19 @@ class ReconciliationSweeper:
                             "reconcile sweep: dispatch deferred for %s — "
                             "staying due",
                             action.data_source_id,
+                        )
+                        continue
+                    if not queued:
+                        # Nothing was queued, so nothing may adopt the drifted
+                        # fingerprint as the new baseline, advance the breaker,
+                        # or count as an action. The source stays due; the
+                        # retry converges (an unchanged gate resolves once the
+                        # probe refreshes counts, a conflict becomes the
+                        # in_flight guard, a resolution failure a guard skip).
+                        logger.info(
+                            "reconcile sweep: signal queued no job for %s "
+                            "(%s) — leaving it due, not counting an action",
+                            action.data_source_id, action.reason,
                         )
                         continue
                     await self._finalize_action(session, action, mode)

@@ -45,6 +45,7 @@ from backend.app.services.aggregation.models import (
 from backend.app.services.aggregation.reconcile_sweeper import (
     ReconciliationSweeper,
 )
+from backend.app.services.aggregation.schemas import SourceChangedResponse
 
 
 def _iso(dt: datetime) -> str:
@@ -1352,3 +1353,65 @@ async def test_stale_counts_are_refreshed_by_a_priority_probe(
     # The poll still follows — it owns the deep facet — it is just no longer
     # what the next sweep has to wait on.
     assert polls == ["ds_1"]
+
+
+# ── Dispatch outcomes and the sweep lock ────────────────────────────────
+
+
+class _NoJobService(_FakeService):
+    """signal_source_changed runs but queues nothing — the shape the real
+    service returns on the unchanged gate, a trigger conflict, a resolution
+    failure, or a not-applicable source (job_id=None, deferred=False)."""
+
+    async def signal_source_changed(self, ds_id, session, **kw):
+        await super().signal_source_changed(ds_id, session, **kw)
+        return SourceChangedResponse(
+            changed=True,
+            job_id=None,
+            reason=kw.get("reason", "raw_drift"),
+            current_fingerprint="fp_new",
+            stored_fingerprint="fp_old",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_signal_that_queues_no_job_is_not_an_action(session_factory):
+    """Counting a no-job signal as an action adopted the drifted fingerprint
+    as the new baseline with no rebuild behind it — that drift could never
+    fire again — and walked the breaker toward suspended on nothing."""
+    await _seed(session_factory, raw_fingerprint="fp_old")
+    svc = _NoJobService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert len(svc.signals) == 1
+    assert result.actions == 0
+    assert result.errors == 0
+
+    st = await _state(session_factory)
+    assert st.raw_fingerprint == "fp_old"        # baseline NOT adopted
+    assert st.last_reconciled_at is None         # no action stamped
+    assert (st.reconcile_consecutive_actions or 0) == 0
+
+    # Still due: the next sweep re-evaluates and signals again.
+    await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    assert len(svc.signals) == 2
+
+
+@pytest.mark.asyncio
+async def test_claim_lock_fails_closed_on_postgres_error():
+    """A Postgres hiccup must cost one tick, not the mutual exclusion."""
+
+    class _Dialect:
+        name = "postgresql"
+
+    class _Bind:
+        dialect = _Dialect()
+
+    class _Session:
+        bind = _Bind()
+
+        async def execute(self, *_a, **_k):
+            raise RuntimeError("connection lost")
+
+    sweeper = ReconciliationSweeper(lambda: None, lambda: None)
+    assert await sweeper._claim_lock(_Session()) is False
