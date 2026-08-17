@@ -439,6 +439,12 @@ class ProviderCreateRequest(BaseModel):
     tls_enabled: bool = Field(False, alias="tlsEnabled")
     extra_config: Optional[Dict[str, Any]] = Field(None, alias="extraConfig")
     falkor_max_resident: Optional[int] = Field(None, alias="falkorMaxResident")
+    # Node-identity mapping DEFAULTS for every data source on this provider.
+    # None = unset (fall through to the workspace, then the platform default);
+    # "" clears an existing value back to unset. See
+    # ``backend.app.services.node_identity``.
+    identity_property: Optional[str] = Field(None, alias="identityProperty")
+    name_property: Optional[str] = Field(None, alias="nameProperty")
 
     class Config:
         populate_by_name = True
@@ -502,6 +508,12 @@ class ProviderUpdateRequest(BaseModel):
     is_active: Optional[bool] = Field(None, alias="isActive")
     extra_config: Optional[Dict[str, Any]] = Field(None, alias="extraConfig")
     falkor_max_resident: Optional[int] = Field(None, alias="falkorMaxResident")
+    # Node-identity mapping DEFAULTS for every data source on this provider.
+    # None = unset (fall through to the workspace, then the platform default);
+    # "" clears an existing value back to unset. See
+    # ``backend.app.services.node_identity``.
+    identity_property: Optional[str] = Field(None, alias="identityProperty")
+    name_property: Optional[str] = Field(None, alias="nameProperty")
 
     class Config:
         populate_by_name = True
@@ -535,6 +547,11 @@ class ProviderResponse(BaseModel):
     # FalkorDB sentinel-DAEMON credentials (sentinel_username/sentinel_password
     # in the blob) — the daemons authenticate separately from the data plane.
     sentinel_auth_configured: bool = Field(False, alias="sentinelAuthConfigured")
+    # The provider's OWN node-identity defaults. None = this provider sets none;
+    # a data source under it may still resolve one from the workspace or the
+    # platform default.
+    identity_property: Optional[str] = Field(None, alias="identityProperty")
+    name_property: Optional[str] = Field(None, alias="nameProperty")
 
     class Config:
         populate_by_name = True
@@ -887,11 +904,21 @@ class DataSourceResponse(BaseModel):
     is_restricted: bool = Field(False, alias="isRestricted")
     access_level: Optional[str] = Field(None, alias="accessLevel")  # read | write | admin
     extra_config: Optional[dict] = Field(None, alias="extraConfig")
-    # Node-identity property (URN-equivalent). Always populated on the way out —
-    # legacy/unset rows echo "urn" so the client never has to special-case NULL.
+    # Node-identity property (URN-equivalent), RESOLVED across all four scopes
+    # (this source → its provider → its workspace → the platform default).
+    # Always populated on the way out, so a client never special-cases NULL and
+    # every badge shows what is actually in force rather than only what this row
+    # happens to store.
     identity_property: str = Field("urn", alias="identityProperty")
-    # Node display-name property; unset rows echo "name" (the default).
+    # Node display-name property; resolved the same way.
     name_property: str = Field("name", alias="nameProperty")
+    # WHICH level each resolved value came from: "data_source" | "provider" |
+    # "workspace" | "global" | "default". This is what lets the UI say
+    # "inherited from provider" instead of presenting an inherited value as if
+    # this source had chosen it — and what tells the editor whether clearing the
+    # field would change anything.
+    identity_property_source: str = Field("default", alias="identityPropertySource")
+    name_property_source: str = Field("default", alias="namePropertySource")
     # Provenance: "managed" = in-app writable graph (blank/versioned models),
     # "federated" = external system of record. None on legacy rows — clients
     # derive from shape (no catalog item → managed), mirroring the ORM comment.
@@ -929,6 +956,11 @@ class WorkspaceUpdateRequest(BaseModel):
     # 'request' (members ask, a publisher answers) | 'open' (anyone who
     # can change a view's visibility may publish it directly).
     publish_policy: Optional[str] = Field(None, alias="publishPolicy")
+    # Node-identity mapping DEFAULTS for the sources in this workspace.
+    # None = untouched by this request; "" clears back to unset (fall through
+    # to the platform default). See ``backend.app.services.node_identity``.
+    identity_property: Optional[str] = Field(None, alias="identityProperty")
+    name_property: Optional[str] = Field(None, alias="nameProperty")
 
     class Config:
         populate_by_name = True
@@ -950,6 +982,10 @@ class WorkspaceResponse(BaseModel):
     view_count: int = Field(0, alias="viewCount")
     #: Who may publish a view platform-wide here — 'request' | 'open'.
     publish_policy: str = Field("open", alias="publishPolicy")
+    #: The workspace's OWN node-identity defaults. None = it sets none; sources
+    #: under it may still resolve one from their provider or the platform.
+    identity_property: Optional[str] = Field(None, alias="identityProperty")
+    name_property: Optional[str] = Field(None, alias="nameProperty")
 
     class Config:
         populate_by_name = True

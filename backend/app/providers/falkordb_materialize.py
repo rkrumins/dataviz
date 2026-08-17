@@ -85,6 +85,9 @@ import os
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
+from backend.common.providers.identity import (
+    node_identity_expr as _shared_identity_expr,
+)
 from backend.common.providers.pair_rules import (
     ancestor_closure,
     boundary_pairs,
@@ -163,25 +166,16 @@ def _scan_timeout_s() -> float:
 
 
 def _node_identity_expr(identity_property: Optional[str]) -> str:
-    """Cypher expression for a node's canonical identity: the platform ``urn``, falling back to the
-    source's configured URN-equivalent property when a node has no ``urn``.
+    """Cypher expression for a node's canonical identity, bound to the ``n``
+    variable this module's directory scans use.
 
-    Every consumer keys on ``urn``, but an ONBOARDED third-party graph identifies nodes by ``id``
-    (or ``name``), not ``urn``. The DEFINITIVE fix is :meth:`FalkorDBProvider.stamp_identity_urns`,
-    which copies the identity property onto ``urn`` for every node at aggregation start — after it
-    runs, the whole urn-keyed write / index / read / trace stack works unchanged. This expression is
-    defense-in-depth for the directory scans: it still resolves identity if the stamp was skipped
-    (e.g. a read-only source) or hasn't reached a freshly-added node yet. It does NOT fix the
-    AGGREGATED write (which MERGEs on the ``urn`` PROPERTY and cannot key on a coalesce expression) —
-    the stamp is what makes writes attach.
-
-    Default is ``urn`` (OPT-IN — no behavior change for conforming graphs); a source sets it to its
-    URN-equivalent (e.g. ``id``)."""
-    prop = identity_property or "urn"
-    safe = str(prop).replace("`", "")
-    if not safe or safe == "urn":
-        return "n.`urn`"
-    return f"coalesce(n.`urn`, n.`{safe}`)"
+    Thin alias over :func:`backend.common.providers.identity.node_identity_expr`
+    — shared with the read path so the aggregation directory and a canvas read
+    can never resolve a node's identity differently. It does NOT fix the
+    AGGREGATED write (which MERGEs on the ``urn`` PROPERTY and cannot key on a
+    coalesce expression); ``stamp_identity_urns`` is what makes writes attach.
+    """
+    return _shared_identity_expr(identity_property, "n")
 
 
 def _extract_concurrency() -> int:

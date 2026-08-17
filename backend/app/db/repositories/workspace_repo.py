@@ -32,7 +32,38 @@ logger = logging.getLogger(__name__)
 # ORM → Pydantic conversion                                           #
 # ------------------------------------------------------------------ #
 
-def _ds_to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
+async def _resolve_ds_identities(session, ws_rows) -> dict:
+    """``{data_source_id: ResolvedNodeIdentity}`` for every source across these
+    workspaces, so the list/detail reads report the mapping actually in force
+    rather than only what each row happens to store.
+
+    Best-effort: resolution is display metadata, and a workspace listing must
+    not fail because one provider row could not be read."""
+    from backend.app.services.node_identity import load_node_identity
+
+    out = {}
+    try:
+        for ws in ws_rows:
+            for ds in (getattr(ws, "data_sources", None) or []):
+                out[ds.id] = await load_node_identity(session, ds)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("workspace node-identity resolution failed (%s)", exc)
+    return out
+
+
+def _ds_effective(identity, attr: str, row, fallback: str) -> str:
+    if identity is not None:
+        return getattr(identity, attr)
+    return (getattr(row, attr, None) or fallback)
+
+
+def _ds_source(identity, attr: str, row, column: str) -> str:
+    if identity is not None:
+        return getattr(identity, attr)
+    return "data_source" if getattr(row, column, None) else "default"
+
+
+def _ds_to_response(row: WorkspaceDataSourceORM, identity=None) -> DataSourceResponse:
     # Resolve display label: explicit label → graph_name (physical asset) → catalog item name
     resolved_label = row.label
     if not resolved_label and row.graph_name:
@@ -57,9 +88,11 @@ def _ds_to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         # the workspace list/detail reads, so omitting these made a saved
         # identity/name mapping silently read back as the default on refresh
         # (same duplicated-serializer drift the aggregationStatus note below hit).
-        # NULL / unset → the platform defaults so clients never special-case them.
-        identityProperty=(getattr(row, "identity_property", None) or "urn"),
-        nameProperty=(getattr(row, "name_property", None) or "name"),
+        # The RESOLVED mapping when the caller supplied one, else this row's own.
+        identityProperty=_ds_effective(identity, "identity_property", row, "urn"),
+        nameProperty=_ds_effective(identity, "name_property", row, "name"),
+        identityPropertySource=_ds_source(identity, "identity_source", row, "identity_property"),
+        namePropertySource=_ds_source(identity, "name_source", row, "name_property"),
         sourceMode=row.source_mode,
         writeBackEnabled=bool(row.write_back_enabled),
         # The column existed and was never mapped, so DataSourceResponse fell back to
@@ -73,8 +106,15 @@ def _ds_to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
     )
 
 
-def _to_response(row: WorkspaceORM) -> WorkspaceResponse:
-    ds_list = [_ds_to_response(ds) for ds in (row.data_sources or [])]
+def _to_response(row: WorkspaceORM, identities=None) -> WorkspaceResponse:
+    """``identities`` maps data-source id → its resolved node-identity mapping.
+    Supplied by the async read paths (see :func:`_resolve_ds_identities`); when
+    absent each source falls back to its own columns."""
+    identities = identities or {}
+    ds_list = [
+        _ds_to_response(ds, identities.get(ds.id))
+        for ds in (row.data_sources or [])
+    ]
     return WorkspaceResponse(
         id=row.id,
         name=row.name,
@@ -85,6 +125,8 @@ def _to_response(row: WorkspaceORM) -> WorkspaceResponse:
         createdAt=row.created_at,
         updatedAt=row.updated_at,
         publishPolicy=row.publish_policy or "open",
+        identityProperty=getattr(row, "identity_property", None),
+        nameProperty=getattr(row, "name_property", None),
     )
 
 
@@ -136,10 +178,11 @@ async def list_workspaces(session: AsyncSession) -> List[WorkspaceResponse]:
     rows = result.scalars().unique().all()
 
     members, views = await _counts_by_workspace(session)
+    identities = await _resolve_ds_identities(session, rows)
 
     out: List[WorkspaceResponse] = []
     for r in rows:
-        resp = _to_response(r)
+        resp = _to_response(r, identities)
         resp.member_count = int(members.get(r.id, 0) or 0)
         resp.view_count = int(views.get(r.id, 0) or 0)
         out.append(resp)
@@ -187,7 +230,9 @@ async def list_workspaces_page(
         .offset(offset)
     )
     result = await session.execute(page_stmt)
-    return [_to_response(r) for r in result.scalars().unique().all()], total
+    rows = list(result.scalars().unique().all())
+    identities = await _resolve_ds_identities(session, rows)
+    return [_to_response(r, identities) for r in rows], total
 
 
 async def get_workspace(
@@ -197,7 +242,9 @@ async def get_workspace(
         _ws_query().where(WorkspaceORM.id == workspace_id)
     )
     row = result.scalar_one_or_none()
-    return _to_response(row) if row else None
+    if not row:
+        return None
+    return _to_response(row, await _resolve_ds_identities(session, [row]))
 
 
 async def get_workspace_orm(
@@ -280,7 +327,7 @@ async def create_workspace(
         _ws_query().where(WorkspaceORM.id == ws.id)
     )
     row = result.scalar_one_or_none()
-    return _to_response(row)
+    return _to_response(row, await _resolve_ds_identities(session, [row] if row else []))
 
 
 async def update_workspace(
@@ -302,10 +349,16 @@ async def update_workspace(
         if req.publish_policy not in ("request", "open"):
             raise ValueError("publishPolicy must be 'request' or 'open'")
         row.publish_policy = req.publish_policy
+    # Node-identity defaults for this workspace's sources. Absent = untouched,
+    # "" = clear back to unset (fall through to the platform default).
+    if req.identity_property is not None:
+        row.identity_property = req.identity_property.strip() or None
+    if req.name_property is not None:
+        row.name_property = req.name_property.strip() or None
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
-    return _to_response(row)
+    return _to_response(row, await _resolve_ds_identities(session, [row]))
 
 
 async def delete_workspace(

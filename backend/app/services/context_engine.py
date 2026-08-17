@@ -53,6 +53,9 @@ class ContextEngine:
         # Single ontology cache slot (resolved form, includes flat projection fields).
         self._resolved_ontology_cache: Optional[Any] = None
         self._resolved_ontology_cache_ts: float = 0.0
+        # The data source's resolved node-identity mapping (None until the
+        # first resolution, or when it could not be read).
+        self._node_identity: Optional[Any] = None
         # Lock to prevent concurrent ontology resolution (race condition on first request)
         self._ontology_resolve_lock = asyncio.Lock()
 
@@ -360,6 +363,40 @@ class ContextEngine:
             else:
                 self.provider.set_source_type_aliases({}, {})
 
+    def _inject_identity(self, identity) -> None:
+        """Inject the resolved node-identity mapping (same "always reset"
+        contract as the aliases — provider instances are shared and cached).
+
+        Until this existed, the mapping only ever reached a provider inside the
+        AGGREGATION worker, so a source keyed by ``id`` read as an empty graph
+        until someone re-ran aggregation. Injecting it here is what makes a
+        newly-declared mapping take effect on the very next read.
+        """
+        if hasattr(self.provider, "set_node_identity"):
+            if identity is not None:
+                self.provider.set_node_identity(
+                    identity.identity_property, identity.name_property)
+            else:
+                self.provider.set_node_identity(None, None)
+
+    async def _resolve_node_identity(self):
+        """The data source's effective mapping across all four scopes.
+
+        Best-effort: a failure here must never fail a read — falling back to
+        the platform defaults is exactly the behaviour that predates the
+        feature."""
+        if self._db_session is None or not self._data_source_id:
+            return None
+        try:
+            from .node_identity import load_node_identity
+            return await load_node_identity(self._db_session, self._data_source_id)
+        except Exception as exc:
+            logger.warning(
+                "node-identity resolution failed for ds=%s (reads fall back to "
+                "the platform defaults): %s", self._data_source_id, exc,
+            )
+            return None
+
     async def _resolve_ontology(self):
         """
         Single ontology resolution entry point with TTL caching.
@@ -399,10 +436,12 @@ class ContextEngine:
                 from . import resolved_ontology_cache as ont_cache
                 shared = await ont_cache.lookup(self._workspace_id, self._data_source_id)
                 if shared is not None:
-                    resolved, alignment = shared
+                    resolved, alignment, identity = shared
                     self._inject_resolved(resolved)
                     self._source_alignment = alignment
                     self._inject_alignment(alignment)
+                    self._node_identity = identity
+                    self._inject_identity(identity)
                     self._resolved_ontology_cache = resolved
                     self._resolved_ontology_cache_ts = time.monotonic()
                     return resolved
@@ -470,11 +509,20 @@ class ContextEngine:
                             resolved, introspected_entity_ids, introspected_rel_ids)
                     except Exception as exc:
                         logger.warning("source vocabulary alignment failed (non-fatal): %s", exc)
+                    # Per-source node identity: which physical property plays
+                    # the role of `urn`, and where the human name lives.
+                    # Resolved from the data source's whole scope chain and
+                    # injected before the first read, so a mapping declared on
+                    # the provider or workspace applies immediately rather than
+                    # waiting for an aggregation run to stamp the graph.
+                    self._node_identity = await self._resolve_node_identity()
+                    self._inject_identity(self._node_identity)
                     if gen_before is not None:
                         from . import resolved_ontology_cache as ont_cache
                         ont_cache.store(
                             self._workspace_id, self._data_source_id, gen_before,
-                            resolved, getattr(self, "_source_alignment", None))
+                            resolved, getattr(self, "_source_alignment", None),
+                            self._node_identity)
                     self._resolved_ontology_cache = resolved
                     self._resolved_ontology_cache_ts = time.monotonic()
                     return resolved
@@ -500,6 +548,12 @@ class ContextEngine:
             # layer, so even an empty introspection result must configure the
             # provider (empty = flat graph, not "unconfigured").
             self._inject_resolved(fallback, force_authoritative=True)
+            # Identity is a per-SOURCE property, independent of whether the
+            # ontology resolved — the degraded path must configure it too, or a
+            # transient ontology-service outage would silently un-map an
+            # id-keyed graph.
+            self._node_identity = await self._resolve_node_identity()
+            self._inject_identity(self._node_identity)
             self._resolved_ontology_cache = fallback
             self._resolved_ontology_cache_ts = time.monotonic()
             return fallback

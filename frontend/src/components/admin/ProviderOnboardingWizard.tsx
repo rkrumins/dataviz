@@ -39,6 +39,7 @@ import { useToast } from '@/components/ui/toast'
 import { DocsLink } from '@/components/help/DocsLink'
 import { useWizardKeyboard } from './AssetOnboardingWizard/hooks/useWizardKeyboard'
 import { DataHubLogo, FalkorDBLogo, Neo4jLogo, SpannerLogo } from './ProviderLogos'
+import { NodeIdentityField } from '@/components/dataSource/NodeIdentity'
 
 type ProviderWizardStep = 'type' | 'connection' | 'schema' | 'review'
 type WizardPhase = 'steps' | 'success'
@@ -150,6 +151,10 @@ interface ProviderOnboardingFormData {
   cacheAuthConfigured: boolean
   schemaMappingEnabled: boolean
   schemaMapping: SchemaMappingState
+  // Node-identity DEFAULT for every data source on this provider. '' = unset,
+  // so sources fall through to their workspace and then the platform default.
+  identityProperty: string
+  nameProperty: string
   // Spanner uses project/instance/database identifiers rather than host/port.
   // Field is optional because non-Spanner providers ignore it.
   spanner?: SpannerFormState
@@ -375,6 +380,8 @@ export function buildInitialFormData(provider?: ProviderResponse | null): Provid
     password: '',
     authConfigured: provider?.authConfigured ?? false,
     cacheAuthConfigured: provider?.cacheAuthConfigured ?? false,
+    identityProperty: provider?.identityProperty ?? '',
+    nameProperty: provider?.nameProperty ?? '',
     schemaMappingEnabled: Boolean(schemaMapping),
     schemaMapping: {
       identityField: schemaMapping?.identity_field ?? DEFAULT_SCHEMA_MAPPING.identityField,
@@ -710,6 +717,12 @@ function buildConnectivityRequest(formData: ProviderOnboardingFormData): Provide
     tlsEnabled: formData.tlsEnabled,
     credentials,
     extraConfig: buildExtraConfig(formData),
+    // Omitted when blank: on CREATE there is nothing to clear, so an empty
+    // field means "set no provider default" rather than "clear one".
+    ...(formData.identityProperty.trim()
+      ? { identityProperty: formData.identityProperty.trim() } : {}),
+    ...(formData.nameProperty.trim()
+      ? { nameProperty: formData.nameProperty.trim() } : {}),
   }
 }
 
@@ -1256,6 +1269,11 @@ export function ProviderOnboardingWizard({
           tlsEnabled: formData.tlsEnabled,
           credentials: buildCredentials(formData),
           extraConfig: buildExtraConfig(formData),
+          // Always sent, including as '' — that is how an admin CLEARS the
+          // provider default so its sources fall through again. Omitting it
+          // would mean "untouched", making the clear impossible to express.
+          identityProperty: formData.identityProperty.trim(),
+          nameProperty: formData.nameProperty.trim(),
           ...(credentialsClear.length ? { credentialsClear } : {}),
         }
         const updated = await providerService.update(provider.id, req)
@@ -2272,6 +2290,19 @@ export function ProviderOnboardingWizard({
                     )}
                   </div>
       )}
+
+      {/* Node-identity DEFAULT for every source on this provider. Lives here
+          rather than on the (Neo4j/Spanner-only) schema-mapping step because it
+          applies to every provider type -- and the provider is usually the right
+          level for it: one connection's graphs are almost always shaped alike. */}
+      <NodeIdentityField
+        scope="provider"
+        canEdit
+        value={formData.identityProperty}
+        onChange={(v) => updateFormData({ identityProperty: v })}
+        nameValue={formData.nameProperty}
+        onNameChange={(v) => updateFormData({ nameProperty: v })}
+      />
     </div>
   )
 

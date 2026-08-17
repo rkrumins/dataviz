@@ -368,9 +368,77 @@ def test_stamp_identity_urns_sets_urn_from_identity_property():
     stamped = _run(p.stamp_identity_urns())
     assert stamped >= 3
     assert any(
-        "coalesce(n.`urn`, n.`id`)" in c and "n.`urn` IS NULL" in c and "n.`id` IS NOT NULL" in c
+        "n.`urn` IS NULL" in c and "n.`id` IS NOT NULL" in c and "n.`urnSource`" in c
         for c in calls
-    ), "stamp must fill urn from id only for nodes missing urn (coalesce, never overwrite)"
+    ), "stamp must fill urn from id for nodes missing urn, recording the source property"
+
+
+def test_stamp_never_overwrites_a_native_urn():
+    """A node that came with its own `urn` carries no `urnSource` marker, and
+    the guard must exclude it — the stamp may only ever overwrite values it
+    wrote itself."""
+    p = _make_provider(_FakeFalkor())
+    p._node_identity_property = "id"
+    p._projection_mode = "in_source"
+    calls = []
+
+    async def _noop_connect():
+        return None
+
+    async def _ro(cypher, params=None, **kw):
+        return _Result([[100]]) if "max(ID(n))" in cypher else _Result([])
+
+    async def _wq(cypher, params=None, **kw):
+        calls.append(cypher)
+        r = _Result()
+        r.properties_set = 1
+        return r
+
+    p._ensure_connected = _noop_connect
+    p._ro_query = _ro
+    p._query = _wq
+    _run(p.stamp_identity_urns())
+
+    stamp = next(c for c in calls if "n.`urnSource`" in c)
+    # The re-point arm requires a marker to be PRESENT. Without that clause a
+    # node holding a native urn would match on "the mapping changed" and have
+    # its real identity overwritten.
+    assert "n.`urnSource` IS NOT NULL" in stamp
+    assert "n.`urnSource` <> $ident" in stamp
+
+
+def test_stamp_repoints_nodes_it_previously_stamped():
+    """Re-pointing a source from `id` to `uuid` must rewrite the nodes stamped
+    under `id`. The fill-only pass could not: `urn` was already set, so the
+    mapping change silently did nothing at all."""
+    p = _make_provider(_FakeFalkor())
+    p._node_identity_property = "uuid"
+    p._projection_mode = "in_source"
+    calls, params_seen = [], []
+
+    async def _noop_connect():
+        return None
+
+    async def _ro(cypher, params=None, **kw):
+        return _Result([[10]]) if "max(ID(n))" in cypher else _Result([])
+
+    async def _wq(cypher, params=None, **kw):
+        calls.append(cypher)
+        params_seen.append(params or {})
+        r = _Result()
+        r.properties_set = 5
+        return r
+
+    p._ensure_connected = _noop_connect
+    p._ro_query = _ro
+    p._query = _wq
+    assert _run(p.stamp_identity_urns()) >= 5
+
+    stamp = next(c for c in calls if "n.`urnSource`" in c)
+    assert "n.`uuid`" in stamp
+    # The marker is compared as a PARAM, so a property name can never be
+    # interpolated into a string literal in the predicate.
+    assert any(pr.get("ident") == "uuid" for pr in params_seen)
 
 
 def test_stamp_identity_urns_noop_for_default_and_dedicated():
@@ -421,7 +489,14 @@ def test_stamp_display_name_from_custom_name_property():
 
     stamped = _run(p.stamp_identity_urns())
     assert stamped >= 2
-    assert any("coalesce(n.`displayName`, n.`title`)" in c for c in calls)
+    assert any(
+        "n.`displayName` IS NULL" in c and "n.`title` IS NOT NULL" in c
+        and "n.`nameSource`" in c
+        for c in calls
+    )
+    # Identity conforms, so the urn arm must not appear at all — a
+    # displayName-only stamp must never touch `urn`.
+    assert not any("n.`urnSource`" in c for c in calls)
     assert all("n.`urn`" not in c for c in calls), "identity conforming → no urn stamp"
 
 

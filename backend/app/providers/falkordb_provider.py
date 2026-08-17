@@ -508,6 +508,11 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
     "entityId", "searchableText",
     "properties",      # legacy blob — read path no longer hydrates from it
     "propertiesRaw",   # native escape hatch for non-scalar property values
+    # Provenance written by the conformance stamp: which SOURCE property each
+    # canonical value was filled from. They are what lets a re-pointed mapping
+    # rewrite its own previous work without ever touching a node that carried a
+    # native urn / displayName. Provider-owned bookkeeping, not user data.
+    "urnSource", "nameSource",
 })
 
 
@@ -586,8 +591,20 @@ def _sanitize_node_properties(payload: Optional[Dict[str, Any]]) -> Optional[Dic
     return {**payload, "properties": clean}
 
 
-def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = None) -> Optional[GraphNode]:
+def _node_from_props(
+    props: Dict[str, Any],
+    entity_type_str: Optional[str] = None,
+    identity_property: Optional[str] = None,
+    name_property: Optional[str] = None,
+) -> Optional[GraphNode]:
     """Build GraphNode from FalkorDB node properties.
+
+    ``identity_property`` / ``name_property`` are the source's resolved
+    node-identity mapping (see ``backend.app.services.node_identity``). They
+    make this function the READ-TIME half of the mapping: an id-keyed graph
+    hydrates correctly on the very next request, without waiting for an
+    aggregation run to stamp ``urn`` onto its nodes — which is what a
+    read-only source or a dedicated projection can never get.
 
     Reconstructs the user `properties` dict from two layers, in
     increasing priority (later wins):
@@ -607,7 +624,16 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
     A one-time WARNING surfaces if such a node is observed so the
     operator knows to run the migration.
     """
-    if not props or "urn" not in props:
+    if not props:
+        return None
+    # Identity: the canonical `urn` when the node has one, else the source's
+    # URN-equivalent. Before this fallback existed, EVERY node on an id-keyed
+    # graph was dropped here — silently, one `return None` at a time — so the
+    # canvas showed an empty graph and the mapping looked like it did nothing.
+    urn = props.get("urn")
+    if not urn and identity_property and identity_property != "urn":
+        urn = props.get(identity_property)
+    if not urn:
         return None
     entity_type = entity_type_str or props.get("entityType", "unknown")
 
@@ -645,16 +671,18 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
 
     try:
         return GraphNode(
-            urn=props["urn"],
+            urn=str(urn),
             entityType=str(entity_type),
             # Onboarded third-party graphs often store the human name under
             # `name`/`title`/`label` rather than the platform's `displayName`,
-            # which would otherwise render a BLANK node label. Fall back through
-            # the common keys. A source with a truly custom name property sets
-            # its `name_property`, which the aggregation stamp copies onto
-            # `displayName` server-side (see stamp_identity_urns).
+            # which would otherwise render a BLANK node label. The source's
+            # CONFIGURED name property goes first — that is the operator
+            # telling us where the name lives, and it is the only thing that
+            # can find a name under a key this list could never guess. The
+            # common keys stay as the fallback for unmapped sources.
             displayName=(
                 props.get("displayName")
+                or (props.get(name_property) if name_property else None)
                 or props.get("name")
                 or props.get("title")
                 or props.get("label")
@@ -2000,10 +2028,19 @@ class FalkorDBProvider(GraphDataProvider):
         * ``displayName`` ← ``name_property``  (piggybacks on the urn pass, or runs standalone only
           for a CUSTOM name property — a fully conforming source stays a complete no-op)
 
+        Each stamped value records WHICH property it came from, in ``urnSource`` / ``nameSource``.
+        That provenance is what makes the mapping editable rather than write-once: a fill-only pass
+        can never rewrite a node it already stamped, so re-pointing a source from ``id`` to ``uuid``
+        used to leave every existing node on the OLD identity forever, with no error and no way to
+        tell from the graph which nodes were wrong. A node whose marker disagrees with the current
+        mapping is now re-stamped from the new property.
+
         Safe: in-source projection only (never mutates a possibly read-only source behind a
-        dedicated projection); ``coalesce`` SETs only fill a MISSING value, never overwrite; batched
-        by internal ID range (no property index needed); best-effort per batch. Idempotent — a
-        re-run only touches nodes added since the last run. Returns nodes stamped.
+        dedicated projection); a node with NO marker carried its own native ``urn`` /
+        ``displayName`` and is never touched, so this can only ever overwrite values it wrote
+        itself; batched by internal ID range (no property index needed); best-effort per batch.
+        Idempotent — a re-run with an unchanged mapping only touches nodes added since the last
+        one. Returns properties stamped.
         """
         ident = str(getattr(self, "_node_identity_property", None) or "urn").replace("`", "")
         name_prop = str(getattr(self, "_name_property", None) or "name").replace("`", "")
@@ -2029,13 +2066,39 @@ class FalkorDBProvider(GraphDataProvider):
         if max_id < 0:
             return 0
 
+        # Two cases per property:
+        #   FILL     — the canonical value is missing, so take it from the source property;
+        #   RE-POINT — we filled it before from a DIFFERENT property (the marker says so),
+        #              so the mapping changed under us and the old value is stale.
+        # A node with no marker and a value present is native data: excluded by both.
+        #
+        # The two properties are stamped in ONE pass (these are full scans; two passes would
+        # double the cost on a multi-million-node graph), which means the WHERE matches a node
+        # that qualifies for EITHER. Each SET is therefore guarded by its OWN condition — an
+        # unguarded pair would let a node that only needed a displayName fill also have its
+        # native urn overwritten.
         sets, wheres = [], []
         if stamp_urn:
-            sets.append(f"n.`urn` = coalesce(n.`urn`, n.`{ident}`)")
-            wheres.append(f"(n.`urn` IS NULL AND n.`{ident}` IS NOT NULL)")
+            urn_cond = (
+                f"((n.`urn` IS NULL OR (n.`urnSource` IS NOT NULL AND n.`urnSource` <> $ident)) "
+                f"AND n.`{ident}` IS NOT NULL)"
+            )
+            sets.append(
+                f"n.`urn` = CASE WHEN {urn_cond} THEN n.`{ident}` ELSE n.`urn` END, "
+                f"n.`urnSource` = CASE WHEN {urn_cond} THEN $ident ELSE n.`urnSource` END"
+            )
+            wheres.append(urn_cond)
         if stamp_name:
-            sets.append(f"n.`displayName` = coalesce(n.`displayName`, n.`{name_prop}`)")
-            wheres.append(f"(n.`displayName` IS NULL AND n.`{name_prop}` IS NOT NULL)")
+            name_cond = (
+                f"((n.`displayName` IS NULL OR (n.`nameSource` IS NOT NULL "
+                f"AND n.`nameSource` <> $nameProp)) AND n.`{name_prop}` IS NOT NULL)"
+            )
+            sets.append(
+                f"n.`displayName` = CASE WHEN {name_cond} THEN n.`{name_prop}` "
+                f"ELSE n.`displayName` END, "
+                f"n.`nameSource` = CASE WHEN {name_cond} THEN $nameProp ELSE n.`nameSource` END"
+            )
+            wheres.append(name_cond)
         set_clause = ", ".join(sets)
         where_clause = " OR ".join(wheres)
 
@@ -2048,7 +2111,10 @@ class FalkorDBProvider(GraphDataProvider):
                 r = await self._query(
                     f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND ({where_clause}) "
                     f"SET {set_clause}",
-                    params={"lo": lo, "hi": hi}, op="identity.stamp",
+                    params={
+                        "lo": lo, "hi": hi, "ident": ident, "nameProp": name_prop,
+                    },
+                    op="identity.stamp",
                 )
                 stamped += int(getattr(r, "properties_set", 0) or 0)
             except Exception as exc:
@@ -2441,6 +2507,34 @@ class FalkorDBProvider(GraphDataProvider):
         self._source_entity_aliases: Dict[str, List[str]] = {
             str(k).upper(): [str(s) for s in v] for k, v in (entity_aliases or {}).items()}
 
+    def set_node_identity(
+        self,
+        identity_property: Optional[str] = None,
+        name_property: Optional[str] = None,
+    ) -> None:
+        """Per-source node-identity mapping: which physical property plays the
+        role of ``urn``, and which holds the human name.
+
+        Resolved across all four scopes by
+        ``backend.app.services.node_identity`` and injected here by the
+        aggregation worker (before materialization) and by ``ContextEngine``
+        (before any read). Same "ALWAYS RESET" contract as
+        :meth:`set_source_type_aliases`, and for the same reason: provider
+        instances are cached and shared per ``(provider_id, graph_name)``, so
+        omitting the call would leak the previous source's mapping into the
+        next query. Passing ``None`` restores the platform defaults — that is a
+        meaningful instruction, not a no-op.
+        """
+        from backend.app.services.node_identity import (
+            DEFAULT_IDENTITY_PROPERTY, DEFAULT_NAME_PROPERTY,
+        )
+        self._node_identity_property = (
+            str(identity_property).strip() if identity_property else ""
+        ) or DEFAULT_IDENTITY_PROPERTY
+        self._name_property = (
+            str(name_property).strip() if name_property else ""
+        ) or DEFAULT_NAME_PROPERTY
+
     def _alias_types(self, types, alias_attr: str):
         """Translate each declared/canonical type to the source's observed spelling(s)
         via the injected alias map; identity when there's no alias (governed graphs,
@@ -2575,13 +2669,15 @@ class FalkorDBProvider(GraphDataProvider):
         if not row:
             return None
         cell = row[0] if isinstance(row, (list, tuple)) else row
+        ident = getattr(self, "_node_identity_property", None)
+        name_prop = getattr(self, "_name_property", None)
         if hasattr(cell, "properties"):
             props = cell.properties or {}
             labels = getattr(cell, "labels", None) or []
             entity_type = labels[0] if labels else props.get("entityType", "unknown")
-            return _node_from_props(props, entity_type)
+            return _node_from_props(props, entity_type, ident, name_prop)
         if isinstance(cell, dict):
-            return _node_from_props(cell)
+            return _node_from_props(cell, None, ident, name_prop)
         return None
 
     # ---- URN → label cache (Redis Hash) ----

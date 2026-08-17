@@ -441,6 +441,34 @@ class Neo4jProvider(GraphDataProvider):
         """
         self._entity_type_levels: Dict[str, int] = dict(mapping)
 
+    def set_node_identity(
+        self,
+        identity_property: Optional[str] = None,
+        name_property: Optional[str] = None,
+    ) -> None:
+        """Apply the resolved node-identity mapping to this provider's
+        ``SchemaMapping``.
+
+        Neo4j has always read these two fields from ``extra_config.schemaMapping``
+        while FalkorDB read them from the data source's columns, so one source
+        could be mapped two different ways depending on which provider served
+        the request. Both now come from the same resolver
+        (``backend.app.services.node_identity``), which reads this provider's
+        stored ``schemaMapping`` as its provider-level input — so an install
+        that only ever configured ``extra_config`` resolves to exactly what it
+        had before, and a value set on the data source, workspace or platform
+        now reaches Neo4j too.
+        """
+        from backend.app.services.node_identity import (
+            DEFAULT_IDENTITY_PROPERTY, DEFAULT_NAME_PROPERTY,
+        )
+        identity = (identity_property or "").strip()
+        name = (name_property or "").strip()
+        if identity and identity != DEFAULT_IDENTITY_PROPERTY:
+            self._mapping.identity_field = identity
+        if name and name != DEFAULT_NAME_PROPERTY:
+            self._mapping.display_name_field = name
+
     def _get_node_level(self, entity_type: Any) -> Optional[int]:
         mapping = getattr(self, "_entity_type_levels", None)
         if not mapping:
