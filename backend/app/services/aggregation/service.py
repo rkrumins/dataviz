@@ -1481,20 +1481,20 @@ class AggregationService:
     # (it means "clear the override, inherit the global").
     _UNSET = object()
 
-    async def set_source_reconcile_settings(
-        self, ds_id: str, session: AsyncSession, *,
-        enabled: Any = _UNSET, check_interval_secs: Any = _UNSET,
-    ) -> dict:
-        """Set or clear the per-source reconciliation overrides.
+    async def _get_or_create_state(
+        self, ds_id: str, session: AsyncSession,
+    ) -> "AggregationDataSourceStateORM":
+        """Fetch this source's aggregation-state row, creating one if absent.
 
-        UPSERTS, deliberately unlike ``set_source_rebuild_interval``, which
-        requires the state row to exist. A never-aggregated source has no
-        state row — and that is precisely the source an operator may want to
-        exclude from the automatic first build, so refusing to record their
-        choice would break the case the setting exists for.
+        Shared by every per-source override setter (reconcile, probe,
+        pause, ...): a never-aggregated source has no state row — and that
+        is precisely the source an operator may want to exclude, from the
+        first build, from probing, from anything — so refusing to record
+        the choice would break the case the setting exists for.
 
-        Only fields explicitly passed are written; the rest keep their stored
-        value.
+        Raises ``NotFoundError`` if the data source itself doesn't exist (or
+        is soft-deleted). Does not commit; the caller mutates the returned
+        row and commits once, alongside its own fields.
         """
         from .models import AggregationDataSourceStateORM
 
@@ -1511,6 +1511,24 @@ class AggregationService:
                 aggregation_status="none",
             )
             session.add(state)
+        return state
+
+    async def set_source_reconcile_settings(
+        self, ds_id: str, session: AsyncSession, *,
+        enabled: Any = _UNSET, check_interval_secs: Any = _UNSET,
+    ) -> dict:
+        """Set or clear the per-source reconciliation overrides.
+
+        UPSERTS, deliberately unlike ``set_source_rebuild_interval``, which
+        requires the state row to exist. A never-aggregated source has no
+        state row — and that is precisely the source an operator may want to
+        exclude from the automatic first build, so refusing to record their
+        choice would break the case the setting exists for.
+
+        Only fields explicitly passed are written; the rest keep their stored
+        value.
+        """
+        state = await self._get_or_create_state(ds_id, session)
 
         if enabled is not self._UNSET:
             state.reconcile_enabled = enabled
@@ -1539,21 +1557,7 @@ class AggregationService:
         Only fields explicitly passed are written. ``None`` clears an
         override; ``False`` is a real value and is stored as one.
         """
-        from .models import AggregationDataSourceStateORM
-
-        state = await session.get(AggregationDataSourceStateORM, ds_id)
-        if state is None:
-            from backend.app.db.models import WorkspaceDataSourceORM
-
-            ds = await session.get(WorkspaceDataSourceORM, ds_id)
-            if ds is None or ds.deleted_at is not None:
-                raise NotFoundError(f"Data source {ds_id} not found")
-            state = AggregationDataSourceStateORM(
-                data_source_id=ds_id,
-                workspace_id=ds.workspace_id,
-                aggregation_status="none",
-            )
-            session.add(state)
+        state = await self._get_or_create_state(ds_id, session)
 
         if enabled is not self._UNSET:
             state.probe_enabled = enabled
