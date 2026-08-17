@@ -154,6 +154,9 @@ export interface FreshnessSettings {
     rebuildMinIntervalSecs?: number | null
     autoReconcileEnabled?: boolean | null
     reconcileCheckIntervalSecs?: number | null
+    probeEnabled?: boolean | null
+    probeIntervalSecs?: number | null
+    pausedUntil?: string | null
 }
 
 /** PATCH body. Only the keys you send are written — every field treats an

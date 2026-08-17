@@ -67,10 +67,12 @@ export function timeUntil(iso?: string | null): string | null {
     return `${Math.round(hours / 24)}d`
 }
 
-/** The three reconciliation fields `automationChip` reads off a fleet row —
- *  a `Pick`, not the full row type, so the decision logic is testable with a
+/** The reconciliation fields `automationChip` reads off a fleet row — a
+ *  `Pick`, not the full row type, so the decision logic is testable with a
  *  bare literal (see FreshnessRow.test.tsx) rather than a fabricated row. */
-type AutomationRow = Pick<FreshnessRowData, 'driftState' | 'autoReconcile' | 'pausedUntil'>
+type AutomationRow = Pick<
+    FreshnessRowData, 'driftState' | 'autoReconcile' | 'pausedUntil' | 'cooldownUntil'
+>
 
 /**
  * The automation-state chip for a fleet row. Absence is the signal: a
@@ -88,24 +90,54 @@ type AutomationRow = Pick<FreshnessRowData, 'driftState' | 'autoReconcile' | 'pa
  * those applies does a snooze get to surface, and only while it is
  * actually holding back a real drift verdict — pausing a source that never
  * drifts looks identical to automation working normally, so it stays as
- * quiet as any healthy row.
+ * quiet as any healthy row. The cooldown comes last for the same reason it
+ * comes last on the server: a snooze is deliberate and a cooldown is just
+ * the throttle doing its job, so naming the deliberate hold is more useful
+ * when both apply.
  */
-export function automationChip(row: AutomationRow): { label: string; tone: string; facet: StatusFacet } | null {
+export function automationChip(row: AutomationRow): {
+    label: string
+    tone: string
+    facet: StatusFacet
+    Icon: typeof Clock
+    title: string
+} | null {
     const neutralTone = 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20'
 
     if (row.driftState === 'suspended') {
-        return { label: 'Needs a person', tone: DRIFT_SPEC.suspended.tone, facet: 'suspended' }
+        return {
+            label: 'Needs a person', tone: DRIFT_SPEC.suspended.tone,
+            facet: 'suspended', Icon: AlertTriangle,
+            title: DRIFT_SPEC.suspended.title,
+        }
     }
     if (row.autoReconcile === false) {
         // No StatusFacet filters to "automation off" sources specifically,
         // so this resolves to '' (the existing "all" facet) — the render
         // site treats an empty facet as non-interactive rather than wiring
         // up a click that would silently just clear the status filter.
-        return { label: 'Automation off', tone: neutralTone, facet: '' }
+        return {
+            label: 'Automation off', tone: neutralTone, facet: '', Icon: Minus,
+            title: 'Automatic reconciliation is turned off for this source. '
+                + 'Drift is still detected and shown, but nothing is rebuilt '
+                + 'automatically.',
+        }
     }
     const drifting = row.driftState === 'drifting' || row.driftState === 'overlayMissing'
     if (drifting && timeUntil(row.pausedUntil)) {
-        return { label: 'Paused', tone: neutralTone, facet: 'drifting' }
+        return {
+            label: 'Paused', tone: neutralTone, facet: 'drifting',
+            Icon: PauseCircle,
+            title: 'An operator paused automatic reconciliation for this source.',
+        }
+    }
+    if (drifting && timeUntil(row.cooldownUntil)) {
+        return {
+            label: 'Held by cooldown', tone: neutralTone, facet: 'drifting',
+            Icon: Clock,
+            title: 'A rebuild ran recently, so the next one waits for the '
+                + 'minimum time between rebuilds to pass.',
+        }
     }
     return null
 }
@@ -587,12 +619,11 @@ export function FreshnessRow({
                     {(() => {
                         const chip = automationChip(row)
                         if (!chip) return null
-                        const Icon = chip.facet === 'suspended' ? AlertTriangle
-                            : chip.facet === 'drifting' ? PauseCircle
-                            : Minus
-                        const title = chip.facet === 'suspended' ? DRIFT_SPEC.suspended.title
-                            : chip.facet === 'drifting' ? 'An operator paused automatic reconciliation for this source.'
-                            : 'Automatic reconciliation is turned off for this source. Drift is still detected and shown, but nothing is rebuilt automatically.'
+                        // Icon and title travel WITH the decision: two chips
+                        // now share the 'drifting' facet (Paused and the
+                        // cooldown hold), so the facet alone can no longer
+                        // say which words and which shape belong to a row.
+                        const { Icon, title } = chip
                         const chipClass = cn(
                             'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold',
                             chip.tone,

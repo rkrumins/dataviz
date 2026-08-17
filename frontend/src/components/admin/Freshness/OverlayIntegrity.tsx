@@ -2,8 +2,8 @@
  * OverlayIntegrity — the Freshness command center's identity card.
  *
  * Integrity Pulse owns the land briefing. Overnight history sits behind one
- * recency control. Cadence also opens from the schedule sentence; the header
- * keeps the explicit Cadence / Refresh all / Reload controls.
+ * recency control. Automation also opens from the schedule sentence; the
+ * header keeps the explicit Automation / Refresh all / Reload controls.
  */
 import { useState } from 'react'
 import { Clock, RefreshCw, Zap } from 'lucide-react'
@@ -27,13 +27,13 @@ import {
 } from './reconcileHealth'
 
 export function OverlayIntegrity({
-    summary, activeFacet, onFacet, onOpenCadence, onReload, reloading,
+    summary, activeFacet, onFacet, onOpenAutomation, onReload, reloading,
     onRefreshAll, onOpenSource, window: windowProp, onWindowChange,
 }: {
     summary: FreshnessSummary | null | undefined
     activeFacet: StatusFacet
     onFacet: (facet: StatusFacet) => void
-    onOpenCadence?: () => void
+    onOpenAutomation?: () => void
     onReload: () => void
     reloading: boolean
     onRefreshAll?: () => void
@@ -145,14 +145,14 @@ export function OverlayIntegrity({
                             Refresh all sources
                         </button>
                     )}
-                    {isAdmin && onOpenCadence && (
+                    {isAdmin && onOpenAutomation && (
                         <button
                             type="button"
-                            onClick={onOpenCadence}
+                            onClick={onOpenAutomation}
                             className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
                         >
                             <Clock className="w-3.5 h-3.5" />
-                            Cadence
+                            Automation
                         </button>
                     )}
                     <button
@@ -182,7 +182,7 @@ export function OverlayIntegrity({
                     onPreview={() => setPreviewOpen(true)}
                     onFacet={onFacet}
                     activeFacet={activeFacet}
-                    onOpenCadence={isAdmin ? onOpenCadence : undefined}
+                    onOpenCadence={isAdmin ? onOpenAutomation : undefined}
                     lastDriftAt={newestFinding}
                     historyOpen={historyOpen}
                     onToggleHistory={() => setHistoryOpen(v => !v)}

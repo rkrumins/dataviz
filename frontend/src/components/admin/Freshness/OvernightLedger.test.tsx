@@ -57,7 +57,7 @@ describe('OvernightLedger', () => {
         expect(screen.getByRole('heading', { name: 'Last pass' })).toBeInTheDocument()
         expect(screen.getByText('Sol Xlarge')).toBeInTheDocument()
         expect(screen.getByText('Payments')).toBeInTheDocument()
-        expect(screen.getByText('Held (Cap)')).toBeInTheDocument()
+        expect(screen.getByText('Held (Rebuilds-per-check limit reached)')).toBeInTheDocument()
         expect(screen.getByRole('link', { name: /job/i })).toHaveAttribute(
             'href', expect.stringContaining('search=agg_1'),
         )

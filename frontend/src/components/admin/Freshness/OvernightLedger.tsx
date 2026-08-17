@@ -9,26 +9,32 @@ import { jobHistoryPath } from '../job-history/shared'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { cn } from '@/lib/utils'
 import type { ReconcileActivityItem } from '@/services/freshnessService'
-import { REASON_LABEL } from './DriftStateBadge'
+import { DRIFT_SPEC, REASON_LABEL } from './DriftStateBadge'
 import { groupLedgerBySweep, type LedgerGroup } from './reconcileHealth'
 
+/** Why a finding was not acted on, in the ①②③ vocabulary the rest of this
+ *  surface speaks: Detect reads counts, Check compares them against the
+ *  rollups, Act rebuilds. The two verdict words come from the shared spec
+ *  rather than being spelled out again here. ``paused`` was missing entirely,
+ *  so an operator snooze printed the raw backend code. */
 const SKIP_LABEL: Record<string, string> = {
     deleted: 'Deleted',
-    platform_mastered: 'Version controlled',
+    platform_mastered: DRIFT_SPEC.managed.label,
     no_ontology: 'No ontology assigned',
-    no_stats: 'Never profiled',
-    stats_stale: 'Statistics too old to trust',
-    stats_unhealthy: 'Statistics polling unhealthy',
+    no_stats: 'No counts to check yet',
+    stats_stale: 'Counts too old to check',
+    stats_unhealthy: 'Counts could not be read',
     in_flight: 'Rebuild already running',
     already_marked: 'Already queued for rebuild',
-    cooldown: 'Within the rebuild cooldown',
-    failed_backoff: 'Backing off after a failure',
-    opted_out: 'Aggregation skipped',
+    cooldown: 'Within the minimum time between rebuilds',
+    paused: 'Rebuilds paused by an operator',
+    failed_backoff: 'Backing off after a failed rebuild',
+    opted_out: 'Automation off for this source',
     disabled: 'Automation off',
-    suspended: 'Reconciliation suspended',
+    suspended: DRIFT_SPEC.suspended.label,
     seeded: 'First check — baseline recorded',
-    in_sync: 'In sync',
-    cap: 'Cap',
+    in_sync: DRIFT_SPEC.inSync.label,
+    cap: 'Rebuilds-per-check limit reached',
 }
 
 const MODE_LABEL: Record<string, string> = {
