@@ -122,9 +122,10 @@ collide with the schema digest for a source that happens to have no overlay.
 | Circuit breaker (3 consecutive actions) | A finding we can never clear would rebuild a huge graph every hour indefinitely. |
 | `no_ontology` | `trigger()` would raise `OntologyResolutionError` once an hour. Recorded as a finding instead — a useful signal on its own. |
 
-Two conditions produce a finding that is **recorded and surfaced but not acted
+Three conditions produce a finding that is **recorded and surfaced but not acted
 on**, so the cockpit stays honest about drift even where automation is off:
-`policy_disabled` and `cooldown` / `failed_backoff`.
+`policy_disabled`, `paused` (an operator snooze, held in the state row's
+`paused_until` until it lapses) and `cooldown` / `failed_backoff`.
 
 ### Caps
 
@@ -285,7 +286,7 @@ source per hour — with tallies by reason and by skip code, trimmed to 30 days.
 `activity` defaults to the last 24 hours (`since=24h`, or an ISO timestamp).
 Each row is a finding from `reconcile_runs.detail.findings`, joined to
 `refresh_events` by `run_id`, so a rebuilt source carries its `jobId` and a
-held source (cooldown, cap, automation off, already suspended) is still
+held source (cooldown, cap, automation off, paused, already suspended) is still
 visible.
 
 The reads stay in-process in both modes because they are pure SQL over tables

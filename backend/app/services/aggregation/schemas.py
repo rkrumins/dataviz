@@ -35,6 +35,27 @@ def _validate_projection_mode(value: Optional[str]) -> Optional[str]:
     return value
 
 
+def _validate_paused_until(value: Optional[str]) -> Optional[str]:
+    """Reject a snooze the reader cannot parse.
+
+    ``reconcile._pause_active`` treats an unparseable stamp as expired — the
+    right call there, since a corrupt value must not pause a source forever.
+    Accepting one here would therefore store a snooze that silently does
+    nothing, so the format is enforced at the boundary instead.
+    """
+    if value is None:
+        return value
+    from datetime import datetime
+    try:
+        datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "paused_until must be an ISO-8601 instant (e.g. "
+            "2026-08-17T12:00:00+00:00)"
+        )
+    return value
+
+
 def _validate_batch_size(value: Optional[int]) -> Optional[int]:
     if value is None:
         return value
@@ -890,6 +911,11 @@ class FreshnessSettingsRequest(BaseModel):
         description="ISO-8601 instant until which automation is held for this "
                     "source. Null resumes immediately.",
     )
+
+    @field_validator("paused_until")
+    @classmethod
+    def _check_paused_until(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_paused_until(v)
 
     class Config:
         populate_by_name = True

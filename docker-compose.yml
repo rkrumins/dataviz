@@ -205,6 +205,12 @@ services:
 
 
       AGGREGATION_API_PORT: "8091"
+      # Probe claim TTL. Set HERE because the claim is taken where a probe is
+      # enqueued — the probe scheduler and the reconcile sweep, both of which
+      # live in this process. It only has to outlive one in-flight probe, not
+      # a large-graph scan: reusing the stats TTL (1200s) would leave a source
+      # un-probeable for twenty minutes after a worker died mid-probe.
+      STATS_PROBE_DEDUP_TTL_SECS: "${STATS_PROBE_DEDUP_TTL_SECS:-90}"
       SYNODIC_ROLE: controlplane
       # Internal service auth (WS2.3). Shared secret the control plane
       # requires on every route except health/docs. UNSET by default ->
@@ -498,6 +504,7 @@ services:
       # lane so a minutes-long counts scan can never delay the freshness
       # signal the reconcile sweep keys on.
       STATS_PROBE_CONCURRENCY: "${STATS_PROBE_CONCURRENCY:-4}"
+      STATS_PROBE_TIMEOUT_SECS: "${STATS_PROBE_TIMEOUT_SECS:-20}"
       # Background sweep refreshes only REGISTERED assets by default;
       # unregistered ones refresh on demand (hot lane) when viewed.
       DISCOVERY_SWEEP_REGISTERED_ONLY: "${DISCOVERY_SWEEP_REGISTERED_ONLY:-true}"

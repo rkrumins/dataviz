@@ -319,8 +319,19 @@ from .service import ConflictError, NotFoundError  # noqa: E402
 
 @app.get("/health", tags=["health"])
 async def health():
-    """Health check for K8s liveness/readiness probes."""
-    return {"status": "healthy", "role": "aggregation-controlplane"}
+    """Health check for K8s liveness/readiness probes.
+
+    Carries the probe scheduler's last tick: drift detection is only as timely
+    as this loop, and "no findings" and "nothing is looking" are otherwise
+    indistinguishable from the outside.
+    """
+    from .probe_scheduler import get_probe_scheduler_status
+
+    return {
+        "status": "healthy",
+        "role": "aggregation-controlplane",
+        "probe_scheduler": get_probe_scheduler_status(),
+    }
 
 
 # ── GET /aggregation/jobs/summary ───────────────────────────────────

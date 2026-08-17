@@ -157,6 +157,25 @@ async def test_clearing_a_probe_override_falls_back(session_factory):
     assert state["probe_enabled"] is False
 
 
+def test_a_non_iso_pause_is_rejected_at_the_boundary():
+    """``_pause_active`` reads an unparseable stamp as expired, so storing one
+    would be a snooze that silently does nothing — reject it on the way in."""
+    import pydantic
+
+    from backend.app.services.aggregation.schemas import FreshnessSettingsRequest
+
+    with pytest.raises(pydantic.ValidationError):
+        FreshnessSettingsRequest(pausedUntil="tomorrow")
+
+    # The real thing still round-trips, in both spellings the UI can send.
+    assert FreshnessSettingsRequest(
+        pausedUntil="2026-08-17T18:00:00+00:00",
+    ).paused_until == "2026-08-17T18:00:00+00:00"
+    assert FreshnessSettingsRequest(
+        pausedUntil="2026-08-17T18:00:00Z",
+    ).paused_until == "2026-08-17T18:00:00Z"
+
+
 @pytest.mark.asyncio
 async def test_pause_round_trips_and_an_explicit_null_clears_it(
     session_factory, monkeypatch,

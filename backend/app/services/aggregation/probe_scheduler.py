@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -46,6 +46,23 @@ class ProbeTickSummary:
     errors: int = 0
 
 
+# The running loop's instance is owned by the control-plane lifespan task and
+# unreachable from a request handler, so each tick also publishes here for
+# ``/health`` to read — same shape and reasoning as the stats scheduler's
+# ``get_scheduler_status``.
+_last_tick: Optional[ProbeTickSummary] = None
+_last_tick_at: Optional[datetime] = None
+
+
+def get_probe_scheduler_status() -> dict:
+    """JSON-friendly snapshot of the last tick for the health probe. Without
+    it an operator cannot tell a fleet with nothing to probe from a probe
+    scheduler that is not running at all."""
+    if _last_tick is None or _last_tick_at is None:
+        return {"last_tick_at": None}
+    return {"last_tick_at": _last_tick_at.isoformat(), **asdict(_last_tick)}
+
+
 class ProbeScheduler:
     def __init__(self, session_factory):
         self._session_factory = session_factory
@@ -56,10 +73,13 @@ class ProbeScheduler:
         return self._last
 
     async def start(self, shutdown: asyncio.Event) -> None:
+        global _last_tick, _last_tick_at
+
         logger.info("Probe scheduler started (tick=%.0fs)", _TICK_SECS)
         while not shutdown.is_set():
             try:
-                self._last = await self.tick()
+                self._last = _last_tick = await self.tick()
+                _last_tick_at = datetime.now(timezone.utc)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

@@ -253,6 +253,29 @@ async def test_enqueue_failure_does_not_raise(session_factory, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_the_last_tick_reaches_the_health_probe(session_factory, _enqueued):
+    """"Nothing found" and "nothing is looking" must not look the same from
+    outside the process."""
+    from backend.app.services.aggregation import probe_scheduler as mod
+
+    # Module state, so start from a known one rather than from whatever an
+    # earlier test in this file left behind.
+    mod._last_tick = mod._last_tick_at = None
+    assert mod.get_probe_scheduler_status() == {"last_tick_at": None}
+
+    await _seed(session_factory, "ds_1", last_probed_at=_ago(seconds=300))
+    shutdown = asyncio.Event()
+    task = asyncio.create_task(ProbeScheduler(session_factory).start(shutdown))
+    await asyncio.sleep(0.05)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=5)
+
+    status = mod.get_probe_scheduler_status()
+    assert status["last_tick_at"] is not None
+    assert status["enqueued"] == 1
+
+
+@pytest.mark.asyncio
 async def test_tick_failure_does_not_kill_the_loop(session_factory, monkeypatch):
     async def _boom(self):
         raise RuntimeError("boom")

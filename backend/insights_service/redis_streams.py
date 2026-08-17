@@ -38,15 +38,18 @@ class StreamConfig:
     """Identity of one Redis Stream + its consumer group + dedup namespace.
 
     ``lane`` groups streams into worker concurrency budgets: ``fast``
-    (cheap counts polls + discovery), ``heavy`` (full schema-stats scan
-    sets), ``purge`` (long-running deletes). One slow heavy job can then
-    never occupy the slots that keep counts fresh — see worker.run.
+    (cheap counts polls + user-initiated discovery), ``sweep`` (background
+    discovery refreshes), ``heavy`` (full schema-stats scan sets),
+    ``purge`` (long-running deletes), ``probe`` (constant-time counts).
+    One slow heavy job can then never occupy the slots that keep counts
+    fresh — see worker.run.
     """
     kind: str            # 'stats_poll' | 'stats_deep' | 'discovery' | 'purge' | 'probe'
     stream: str          # Redis stream key
     group: str           # XREADGROUP consumer group
     dedup_prefix: str    # SET NX key prefix for the producer-side claim
-    lane: str = "fast"   # worker concurrency lane: 'fast' | 'heavy' | 'purge'
+    # worker concurrency lane: 'fast' | 'sweep' | 'heavy' | 'purge' | 'probe'
+    lane: str = "fast"
 
 
 # All streams use one consumer group so a single XREADGROUP call can
