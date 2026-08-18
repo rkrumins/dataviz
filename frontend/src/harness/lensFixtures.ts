@@ -1272,7 +1272,36 @@ const walkLongNames = (): WalkFixture => ({
   }),
 })
 
+/**
+ * FOCUS A PLATFORM (user, 2026-08-18): Snowflake holding SILVER →
+ * INTERMEDIATE_T1 → GOLD, every hop of it inside the thing being asked
+ * about. This drew five layers and NOT ONE WIRE until the focus stopped
+ * suppressing its own contents' lineage — "why is the lineage
+ * disappeared?".
+ */
+const walkPlatformInternals = (): WalkFixture => ({
+  title: 'A platform whose own layers feed each other',
+  model: walkModel('SNOW', {
+    nodes: [
+      wnode('SNOW', 'dataPlatform', 'Snowflake'),
+      wnode('SILVER', 'container', 'SILVER'),
+      wnode('INT_T1', 'container', 'INTERMEDIATE_T1'),
+      wnode('GOLD', 'container', 'GOLD'),
+      wnode('clean_orders', 'dataset', 'clean_orders'),
+      wnode('int_orders', 'dataset', 'int_clean_orders_t1'),
+      wnode('fact_orders', 'dataset', 'fact_orders'),
+    ],
+    lineageEdges: [hop('clean_orders', 'int_orders'), hop('int_orders', 'fact_orders')],
+    containmentEdges: [
+      holds('SNOW', 'SILVER'), holds('SNOW', 'INT_T1'), holds('SNOW', 'GOLD'),
+      holds('SILVER', 'clean_orders'), holds('INT_T1', 'int_orders'), holds('GOLD', 'fact_orders'),
+    ],
+  }),
+  script: base => scripted(base, { expand: ['SNOW', 'SILVER', 'INT_T1', 'GOLD'] }),
+})
+
 export const WALK_FIXTURES: Record<string, WalkFixture> = {
+  walkPlatformInternals: walkPlatformInternals(),
   walkLongNames: walkLongNames(),
   walkCollaterals: walkCollaterals(),
   walkIsolatedCone: walkIsolatedCone(),

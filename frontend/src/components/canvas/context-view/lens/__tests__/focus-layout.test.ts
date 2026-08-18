@@ -2683,9 +2683,21 @@ describe('focus-layout — walk export, pure and server-free', () => {
         expect(payload.nodes.some(n => n.urn === 'DOM')).toBe(false)
         const db = payload.nodes.find(n => n.urn === 'DB')!
         expect(db).toMatchObject({ name: 'RISK_DB', type: 'DATABASE', parentUrn: null, depth: 0 })
+        // WHERE IT LIVES, WHICH SIDE IT IS ON, AND WHAT IT CONNECTS TO —
+        // the three things a reader sorts a lineage export by, and none
+        // of which used to be in it. `path` survives a container the
+        // picture demoted to a breadcrumb, which is exactly when
+        // `parentUrn` goes null.
+        expect(db.direction).toBe('upstream')
+        expect(db.hops).toBeGreaterThan(0)
+        expect(typeof db.path).toBe('string')
+        expect(db.knownIn).toBeGreaterThanOrEqual(db.drawnIn)
+        expect(db.knownOut).toBeGreaterThanOrEqual(db.drawnOut)
         // Edges are addressed by URN, not the layout's internal card ids —
         // and the three raw hops into DB bundle into one weighted edge.
-        expect(payload.edges).toContainEqual({ sourceUrn: 't0', targetUrn: 'F', type: 'DERIVES_FROM', weight: 1 })
+        expect(payload.edges).toContainEqual({
+            sourceUrn: 't0', targetUrn: 'F', type: 'DERIVES_FROM', weight: 1, insideContainer: false,
+        })
     })
 
     it('reflects only what is VISIBLE — a collapsed branch drops out of the export too', () => {
@@ -2701,16 +2713,19 @@ describe('focus-layout — walk export, pure and server-free', () => {
         const payload = buildWalkExport(layout(sg), sg.focusUrn, () => '2026-08-13T00:00:00.000Z')
         const csv = walkExportToCsv(payload)
         const lines = csv.split('\n')
-        expect(lines[0]).toBe('urn,name,type,parentUrn,depth')
+        expect(lines[0]).toBe('urn,name,type,path,direction,hops,parentUrn,depth,drawnIn,drawnOut,knownIn,knownOut')
         const blankAt = lines.indexOf('')
         expect(blankAt).toBeGreaterThan(0)
-        expect(lines[blankAt + 1]).toBe('sourceUrn,targetUrn,type,weight')
+        expect(lines[blankAt + 1]).toBe('sourceUrn,targetUrn,type,weight,insideContainer')
         // A name that itself contains a comma is quoted, not corrupted.
-        const withComma = { ...payload, nodes: [{ urn: 'x', name: 'Revenue, Q1', type: 't', parentUrn: null, depth: 0 }] }
+        const withComma = { ...payload, nodes: [{
+            urn: 'x', name: 'Revenue, Q1', type: 't', path: '', direction: 'focus' as const, hops: 0,
+            parentUrn: null, depth: 0, drawnIn: 0, drawnOut: 0, knownIn: 0, knownOut: 0,
+        }] }
         expect(walkExportToCsv(withComma)).toContain('"Revenue, Q1"')
         // A urn with no parent IN THE PICTURE renders as an EMPTY field,
         // not the literal string "null".
-        expect(lines.some(l => l.startsWith('DB,RISK_DB,DATABASE,,0'))).toBe(true)
+        expect(lines.some(l => l.startsWith('DB,RISK_DB,DATABASE,'))).toBe(true)
         expect(csv).not.toContain('null')
     })
 
@@ -2723,20 +2738,20 @@ describe('focus-layout — walk export, pure and server-free', () => {
             focus: 'x',
             generatedAt: '2026-08-14T00:00:00.000Z',
             nodes: [
-                { urn: '=cmd|calc', name: '@SUM(A1)', type: '+t', parentUrn: '-x', depth: -1 },
-                { urn: 'plain', name: 'Revenue', type: 't', parentUrn: null, depth: 0 },
+                { urn: '=cmd|calc', name: '@SUM(A1)', type: '+t', path: '', direction: 'focus' as const, hops: 0, parentUrn: '-x', depth: -1, drawnIn: 0, drawnOut: 0, knownIn: 0, knownOut: 0 },
+                { urn: 'plain', name: 'Revenue', type: 't', path: '', direction: 'focus' as const, hops: 0, parentUrn: null, depth: 0, drawnIn: 0, drawnOut: 0, knownIn: 0, knownOut: 0 },
             ],
-            edges: [{ sourceUrn: '=a', targetUrn: 'b', type: 'FLOWS', weight: 2 }],
+            edges: [{ sourceUrn: '=a', targetUrn: 'b', type: 'FLOWS', weight: 2, insideContainer: false }],
         }
         const lines = walkExportToCsv(payload).split('\n')
 
-        expect(lines[1]).toBe("'=cmd|calc,'@SUM(A1),'+t,'-x,-1")
+        expect(lines[1]).toBe("'=cmd|calc,'@SUM(A1),'+t,,focus,0,'-x,-1,0,0,0,0")
         // A NUMBER is never a formula: defusing a negative depth into
         // `'-1` would corrupt the column it was meant to protect.
-        expect(lines[1].endsWith(',-1')).toBe(true)
+        expect(lines[1]).toContain(',-1,')
         // And an ordinary name is left exactly as it was.
-        expect(lines[2]).toBe('plain,Revenue,t,,0')
-        expect(lines[lines.length - 1]).toBe("'=a,b,FLOWS,2")
+        expect(lines[2]).toBe('plain,Revenue,t,,focus,0,,0,0,0,0,0')
+        expect(lines[lines.length - 1]).toBe("'=a,b,FLOWS,2,no")
     })
 })
 

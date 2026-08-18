@@ -506,13 +506,6 @@ export function projectLensEdges<N extends LensNodeLike>(
     sg: LensSubgraph<N>,
     population: ReadonlySet<string>,
     visible: ReadonlySet<string>,
-    /** A subtree whose INTERNAL hops are not board geometry — the focus's
-     *  own, in practice. A hop with both ends inside it is the contents
-     *  talking to each other: it feeds their ×N counts and the drill, and
-     *  drawing it would run a wire out of the contains-stack and back in
-     *  (reported live as the tower). Hops that CROSS the boundary are
-     *  drawn at the finest visible grain on both ends, as always. */
-    internalTo?: ReadonlySet<string>,
 ): ProjectedLensEdge[] {
     const nearestVisible = (urn: string): string | null => {
         let cursor: string | null = urn
@@ -528,7 +521,22 @@ export function projectLensEdges<N extends LensNodeLike>(
     const bundles = new Map<string, ProjectedLensEdge>()
     for (const hop of sg.lineageEdges) {
         if (!population.has(hop.sourceUrn) || !population.has(hop.targetUrn)) continue
-        if (internalTo?.has(hop.sourceUrn) && internalTo.has(hop.targetUrn)) continue
+        // THE FOCUS'S OWN CONTENTS TALK TO EACH OTHER, AND THAT IS
+        // LINEAGE. A hop with both ends inside the focus used to be
+        // dropped here: at the time the focus drew its contents as a
+        // stack with no route between them, so such a wire left the
+        // stack and came straight back in — the reported "tower".
+        // In-frame lane routing gave every container a way to draw its
+        // own internal lineage (a gutter lane, never across a card), and
+        // the focus is a row-holding card like any other — so the reason
+        // is gone and the suppression with it.
+        //
+        // Reported live: focusing Snowflake drew its five layers with no
+        // wires at all between them, while the canvas behind plainly
+        // showed SILVER feeding INTERMEDIATE_T1 — "why is the lineage
+        // disappeared?". A hop internal to a COLLAPSED container is
+        // still not drawn: `s === t` below catches that, which is a
+        // statement about what is visible rather than about the focus.
         const s = nearestVisible(hop.sourceUrn)
         const t = nearestVisible(hop.targetUrn)
         if (!s || !t || s === t) continue   // internal to a collapsed container

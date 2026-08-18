@@ -120,6 +120,71 @@ describe('in-frame routing — the rows obey the flow', () => {
     })
 })
 
+describe('the FOCUS draws its own contents\' lineage too', () => {
+    /** Focus a PLATFORM whose layers feed each other — the reported
+     *  Snowflake shape: SILVER → INTERMEDIATE_T1 → GOLD, all of it
+     *  inside the thing being asked about. */
+    function platformFocus(): FocusGraph {
+        return build(
+            'SNOW',
+            [
+                wnode('SNOW', 'dataPlatform', 'Snowflake'),
+                wnode('SILVER', 'container', 'SILVER'),
+                wnode('INT_T1', 'container', 'INTERMEDIATE_T1'),
+                wnode('GOLD', 'container', 'GOLD'),
+                wnode('c_silver', 'dataset', 'clean_orders'),
+                wnode('c_int', 'dataset', 'int_clean_orders_t1'),
+                wnode('c_gold', 'dataset', 'fact_orders'),
+            ],
+            [['c_silver', 'c_int'], ['c_int', 'c_gold']],
+            [
+                ['SNOW', 'SILVER'], ['SNOW', 'INT_T1'], ['SNOW', 'GOLD'],
+                ['SILVER', 'c_silver'], ['INT_T1', 'c_int'], ['GOLD', 'c_gold'],
+            ],
+            [], ['SNOW', 'SILVER', 'INT_T1', 'GOLD'],
+        )
+    }
+
+    it('a hop between two things inside the focus IS drawn', () => {
+        // Reported live: focusing Snowflake drew five layers and not one
+        // wire between them, while the canvas behind plainly showed them
+        // feeding each other — "why is the lineage disappeared?". The
+        // suppression existed because the contains-stack had no route
+        // between its own rows; in-frame lanes are that route.
+        const g = platformFocus()
+        expect(g.edges.length).toBeGreaterThan(0)
+        const ids = new Set(g.cards.map(c => c.id))
+        for (const e of g.edges) {
+            expect(ids.has(e.source)).toBe(true)
+            expect(ids.has(e.target)).toBe(true)
+        }
+    })
+
+    it('...and it routes through the focus\'s own gutter, never across a card', () => {
+        const g = platformFocus()
+        const internal = g.edges.filter(e => e.sameAncestorFrame != null)
+        expect(internal.length).toBeGreaterThan(0)
+        expect(internal.every(e => e.inFrameLane != null)).toBe(true)
+    })
+
+    it('a hop inside a SHUT container stays hidden — that is about what is visible, not about the focus', () => {
+        const g = build(
+            'SNOW',
+            [
+                wnode('SNOW', 'dataPlatform', 'Snowflake'),
+                wnode('SILVER', 'container', 'SILVER'),
+                wnode('a', 'dataset', 'clean_a'), wnode('b', 'dataset', 'clean_b'),
+            ],
+            [['a', 'b']],
+            [['SNOW', 'SILVER'], ['SILVER', 'a'], ['SILVER', 'b']],
+            [], ['SNOW'],   // SILVER itself never opened
+        )
+        // Both ends roll up to the same drawn card, so there is nothing
+        // to draw a wire between.
+        expect(g.edges.filter(e => e.source === e.target)).toHaveLength(0)
+    })
+})
+
 describe('in-frame routing — the wires never cross a card', () => {
     it('every internal wire gets a lane, and the lane sits LEFT of every row of its frame', () => {
         const g = goldEstate()

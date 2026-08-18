@@ -822,14 +822,18 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      * decides that per hop, so shutting the stack turns eight column
      * wires back into one bundle with no other machinery involved.
      *
-     * What is NOT drawn: a hop with both ends inside the focus. That is
-     * the contents talking among themselves — it feeds their ×N counts
-     * and the drill, and as a wire it leaves the contains-stack and comes
-     * straight back into it, which is the tower in miniature. The same
-     * boundary rule the ⊕ and Reach obey, in geometry.
+     * AND THE FOCUS'S OWN CONTENTS ARE NO EXCEPTION. A hop with both
+     * ends inside the focus used to be dropped here — at the time the
+     * contains-stack had no route between its own rows, so the wire left
+     * the stack and came back in ("the tower in miniature"). In-frame
+     * lanes gave every container a way to draw its internal lineage
+     * without crossing a card, and the focus is a row-holding card like
+     * any other, so it now draws its own the same way. Reported live:
+     * focusing Snowflake showed five layers and not one wire between
+     * them, while the canvas behind showed them feeding each other.
      */
     const wired = new Set(visibleOrder)
-    const projected = projectLensEdges(sg, population, wired, subtreeOf(sg.focusUrn))
+    const projected = projectLensEdges(sg, population, wired)
 
     /**
      * What each card SPEAKS FOR: itself, plus every population member
@@ -2469,6 +2473,23 @@ export interface WalkExportNode {
     parentUrn: string | null
     /** Nesting level, 0 for a top-level card — same as `FocusCard.depth`. */
     depth: number
+    /** WHERE IT LIVES, in full — every containment level above it, not
+     *  just the one this picture happened to draw. `parentUrn` is null
+     *  for a card whose container was demoted to a breadcrumb, which
+     *  left a spreadsheet with no way to say where the thing was. */
+    path: string
+    /** Which SIDE of the focus this is on, and how far — the two facts a
+     *  reader sorts and filters a lineage export by, and neither was in
+     *  it. 'focus' for the subject itself. */
+    direction: 'upstream' | 'downstream' | 'focus'
+    hops: number
+    /** What it is connected to, and how much of that is on this board:
+     *  the same numbers the card itself states, so an export and the
+     *  picture it came from cannot disagree. */
+    drawnIn: number
+    drawnOut: number
+    knownIn: number
+    knownOut: number
 }
 
 export interface WalkExportEdge {
@@ -2477,6 +2498,10 @@ export interface WalkExportEdge {
     /** '' when the bundle carries more than one relationship type. */
     type: string
     weight: number
+    /** This flow stays INSIDE one container rather than crossing the
+     *  board — the distinction the gutter lanes draw, kept in the data
+     *  so a reader can separate "within SILVER" from "SILVER to GOLD". */
+    insideContainer: boolean
 }
 
 export interface WalkExportPayload {
@@ -2505,6 +2530,13 @@ export function buildWalkExport(
             urn: c.nodeId!,
             name: c.label,
             type: c.type,
+            path: c.ancestry.length > 0 ? c.ancestry.join(' › ') : (c.parentLabel ?? ''),
+            direction: c.band === 0 ? 'focus' as const : c.band < 0 ? 'upstream' as const : 'downstream' as const,
+            hops: Math.abs(c.band),
+            drawnIn: c.drawnIn,
+            drawnOut: c.drawnOut,
+            knownIn: c.flowsIn,
+            knownOut: c.flowsOut,
             // The parent IN THIS PICTURE, which is what the rest of the
             // export describes. A card whose container was demoted to a
             // breadcrumb is top-level here, and naming a parent that has
@@ -2518,6 +2550,7 @@ export function buildWalkExport(
         targetUrn: cardById.get(e.target)?.nodeId ?? e.target,
         type: e.edgeTypeNorm,
         weight: e.count,
+        insideContainer: e.sameAncestorFrame !== null,
     }))
     return { focus: focusUrn, generatedAt: now(), nodes, edges }
 }
@@ -2549,12 +2582,17 @@ function csvField(v: string | number | null): string {
  */
 export function walkExportToCsv(payload: WalkExportPayload): string {
     const nodeRows = [
-        'urn,name,type,parentUrn,depth',
-        ...payload.nodes.map(n => [n.urn, n.name, n.type, n.parentUrn, n.depth].map(csvField).join(',')),
+        'urn,name,type,path,direction,hops,parentUrn,depth,drawnIn,drawnOut,knownIn,knownOut',
+        ...payload.nodes.map(n => [
+            n.urn, n.name, n.type, n.path, n.direction, n.hops,
+            n.parentUrn, n.depth, n.drawnIn, n.drawnOut, n.knownIn, n.knownOut,
+        ].map(csvField).join(',')),
     ]
     const edgeRows = [
-        'sourceUrn,targetUrn,type,weight',
-        ...payload.edges.map(e => [e.sourceUrn, e.targetUrn, e.type, e.weight].map(csvField).join(',')),
+        'sourceUrn,targetUrn,type,weight,insideContainer',
+        ...payload.edges.map(e => [
+            e.sourceUrn, e.targetUrn, e.type, e.weight, e.insideContainer ? 'yes' : 'no',
+        ].map(csvField).join(',')),
     ]
     return [...nodeRows, '', ...edgeRows].join('\n')
 }

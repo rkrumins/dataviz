@@ -65,7 +65,6 @@ import {
   getBezierPath,
   getStraightPath,
   getNodesBounds,
-  getViewportForBounds,
   useReactFlow,
   useStore,
   type Edge,
@@ -87,6 +86,52 @@ import { REVEAL_PAGE, isolationCone, buildWalkExport, walkExportToCsv, type Lens
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 import { bumpRenderCount } from './renderProbe'
+
+/** The longest edge an exported image may have, BEFORE `pixelRatio`
+ *  doubles it. A ceiling on the FILE, never on the content: a board
+ *  larger than this is drawn smaller, never clipped. */
+const EXPORT_MAX_PX = 4000
+
+/** Breathing room around the board in an exported image, in board units
+ *  at zoom 1. */
+const EXPORT_PAD = 80
+
+/**
+ *  THE WHOLE BOARD, ALWAYS — the frame an export is drawn into, and the
+ *  viewport transform that lands the board inside it.
+ *
+ *  The export used to cap the frame at 3200x2400 and then ask
+ *  `getViewportForBounds` to fit the board into it with a MINIMUM zoom
+ *  of 0.25, so any board needing to shrink further was fitted at 0.25
+ *  and the rest of it fell outside the frame. Reported live: "it
+ *  doesn't actually take a correct one but only a section".
+ *
+ *  The fit is chosen FIRST, from the board's own size, and the frame is
+ *  sized to the result — so there is nothing left to clamp and nothing
+ *  can fall outside. The pixel ceiling bounds the FILE, not the
+ *  content: past it the picture gets smaller, never cropped.
+ *
+ *  Pure so the no-crop property is testable without a rasterizer: for
+ *  any bounds, the transformed board corners land within the frame.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function exportFrameFor(bounds: { x: number; y: number; width: number; height: number }): {
+  width: number
+  height: number
+  vp: { x: number; y: number; zoom: number }
+} {
+  const boardW = bounds.width + EXPORT_PAD * 2
+  const boardH = bounds.height + EXPORT_PAD * 2
+  const zoom = Math.min(1, EXPORT_MAX_PX / boardW, EXPORT_MAX_PX / boardH)
+  return {
+    // Clamped as well as ceil'd: at the ceiling `boardH * zoom` lands a
+    // float hair ABOVE EXPORT_MAX_PX, and `ceil` turns that hair into a
+    // whole extra pixel of frame past the stated maximum.
+    width: Math.min(EXPORT_MAX_PX, Math.ceil(boardW * zoom)),
+    height: Math.min(EXPORT_MAX_PX, Math.ceil(boardH * zoom)),
+    vp: { x: (EXPORT_PAD - bounds.x) * zoom, y: (EXPORT_PAD - bounds.y) * zoom, zoom },
+  }
+}
 
 /** Direction tints — the house semantics: upstream = sky, downstream
  *  = amber (matches the list columns and the canvas). */
@@ -3716,7 +3761,7 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
     downloadBlob(new Blob([walkExportToCsv(payload)], { type: 'text/csv' }), `${fileStem}.csv`)
   }
 
-  // PNG export: re-project the whole graph into a fixed frame and
+  // PNG export: re-project the whole graph into a frame sized to it and
   // rasterize the viewport pane (the standard React Flow recipe).
   // The rasterizer is imported LAZILY — it is only needed when someone
   // actually exports, it keeps ~30KB out of the initial chunk, and a
@@ -3735,9 +3780,7 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
       // origin. They always sit inside their frame's rect anyway, so
       // the frames already account for them.
       const bounds = getNodesBounds(rf.getNodes().filter(n => !n.parentId))
-      const width = Math.min(Math.ceil(bounds.width) + 160, 3200)
-      const height = Math.min(Math.ceil(bounds.height) + 160, 2400)
-      const vp = getViewportForBounds(bounds, width, height, 0.25, 2, 0.08)
+      const { width, height, vp } = exportFrameFor(bounds)
       const bg = getComputedStyle(document.documentElement).getPropertyValue('--nx-bg-elevated').trim() || '#ffffff'
       const dataUrl = await toPng(viewport, {
         backgroundColor: bg,
