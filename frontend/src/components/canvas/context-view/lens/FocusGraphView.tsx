@@ -4521,8 +4521,22 @@ export function FocusGraphView({
       className={cn(
         'relative h-full w-full min-h-0 text-black/[0.16] dark:text-white/[0.14]',
         // Baked positions + stable card ids: a CSS transform transition
-        // makes shared cards glide when the focal changes. The card
-        // being dragged opts out — an eased transform lags the pointer.
+        // was meant to make shared cards glide when the focal changes,
+        // with the dragged card opting out (an eased transform lags the
+        // pointer).
+        //
+        // IT HAS NEVER RUN. Tailwind reads `_` inside an arbitrary
+        // variant as a SPACE, so `[&_.react-flow__node]` compiles to the
+        // selector `.react-flow node` — a descendant ELEMENT called
+        // `node` — which matches nothing on any board. Verified in a
+        // real browser: of 151 nodes, 0 carry `transform` in their
+        // computed `transition-property`. Escaping the underscores
+        // (`react-flow\_\_node`) is all it would take to switch both
+        // rules on, and the drag opt-out is dead in the identical way,
+        // so they have to be fixed together or a drag starts lagging
+        // the pointer. Left inert deliberately for now: a focal change
+        // snaps today, and turning on a 300ms board-wide animation is a
+        // decision about feel, not a bug fix.
         !reducedMotion && '[&_.react-flow__node]:transition-transform [&_.react-flow__node]:duration-300 [&_.react-flow__node.dragging]:transition-none',
       )}
     >
