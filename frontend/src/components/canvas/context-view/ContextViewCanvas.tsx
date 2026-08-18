@@ -108,7 +108,7 @@ import {
 import { decodeLensShare } from './lens/shareCodec'
 import { useLensWalk } from '@/hooks/useLensWalk'
 import { useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
-import { TraceWalkBar } from './TraceWalkBar'
+import { TraceWalkDock } from './TraceWalkDock'
 
 /** The native canvas trace has no per-edge drilldowns — the closure walk
  *  model is complete at leaf grain. One shared empty map keeps the trace
@@ -1577,7 +1577,17 @@ export function ContextViewCanvas({
   // ends and useCanvasTraceWalk delta-merges each wave into the store.
   const canvasTrace = useCanvasTraceWalk(provider)
   const traceActive = canvasTrace.isTracing
+  const traceModel = canvasTrace.walkEntry?.model ?? null
+  // Direction visibility — the dock's upstream/downstream toggles. Reset
+  // on every trace start so a new trace always opens with the whole flow.
+  const [traceShowUpstream, setTraceShowUpstream] = useState(true)
+  const [traceShowDownstream, setTraceShowDownstream] = useState(true)
   const startCanvasTrace = useCallback((nodeId: string) => {
+    // A trace with the flow overlay off is a contradiction — tracing IS
+    // asking to see the flow.
+    setShowLineageFlow(true)
+    setTraceShowUpstream(true)
+    setTraceShowDownstream(true)
     canvasTrace.start(displayMap.get(nodeId)?.urn ?? nodeId)
   }, [canvasTrace, displayMap])
   const exitCanvasTrace = useCallback(() => {
@@ -1600,6 +1610,61 @@ export function ContextViewCanvas({
       : expandedNodes
   ), [traceActive, expandedNodes, canvasTrace.expansionUrns])
 
+  // The dock's direction toggles narrow WHAT RENDERS, never what was
+  // walked: the focus and its host containers always stay.
+  const traceVisibleUrns = useMemo<ReadonlySet<string>>(() => {
+    if (!traceActive || !traceModel || (traceShowUpstream && traceShowDownstream)) {
+      return canvasTrace.traceNodeUrns
+    }
+    const out = new Set<string>()
+    for (const u of canvasTrace.traceNodeUrns) {
+      const isUp = traceModel.upstreamUrns.has(u)
+      const isDown = traceModel.downstreamUrns.has(u)
+      if ((isUp && traceShowUpstream) || (isDown && traceShowDownstream) || (!isUp && !isDown)) out.add(u)
+    }
+    return out
+  }, [traceActive, traceModel, canvasTrace.traceNodeUrns, traceShowUpstream, traceShowDownstream])
+
+  // The flow-direction picture for LineageFlowOverlay — the SAME styling
+  // contract the legacy trace drove (cyan upstream, amber downstream,
+  // focus glow, non-participants dimmed), synthesized from the walk model.
+  const nativeTraceResult = useMemo(() => {
+    if (!traceActive || !traceModel) return null
+    const toIds = (urns: ReadonlySet<string>) => {
+      const s = new Set<string>()
+      for (const u of urns) s.add(urnToIdMap.get(u) ?? u)
+      return s
+    }
+    return {
+      upstreamNodes: toIds(traceModel.upstreamUrns),
+      downstreamNodes: toIds(traceModel.downstreamUrns),
+      focusId: canvasTrace.tracedUrn ? (urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn) : null,
+    }
+  }, [traceActive, traceModel, canvasTrace.tracedUrn, urnToIdMap])
+
+  // Dock stats: what the walk found, by kind and by direction.
+  const traceCensus = useMemo(() => {
+    if (!traceActive || !traceModel) return []
+    const counts = new Map<string, number>()
+    for (const n of traceModel.nodes) {
+      const t = n.entityType ?? 'other'
+      counts.set(t, (counts.get(t) ?? 0) + 1)
+    }
+    return [...counts.entries()].map(([type, count]) => ({ type, count })).sort((a, b) => b.count - a.count)
+  }, [traceActive, traceModel])
+  const traceParticipants = useMemo(() => {
+    const upstream: Array<{ urn: string; label: string }> = []
+    const downstream: Array<{ urn: string; label: string }> = []
+    if (traceActive && traceModel) {
+      for (const n of traceModel.nodes) {
+        const entry = { urn: n.urn, label: n.displayName ?? n.urn }
+        if (traceModel.upstreamUrns.has(n.urn)) upstream.push(entry)
+        else if (traceModel.downstreamUrns.has(n.urn)) downstream.push(entry)
+      }
+    }
+    return { upstream, downstream }
+  }, [traceActive, traceModel])
+
   // Trace filter — when a trace is active, hides everything outside the trace
   // context (traced URNs + drilldown URNs + their containment ancestors).
   // When trace is off, returns the inputs unchanged with no allocation.
@@ -1610,7 +1675,7 @@ export function ContextViewCanvas({
   } = useTraceFilteredHierarchy({
     nodesByLayer, displayFlat, displayMap,
     isTracing: traceActive,
-    traceNodes: canvasTrace.traceNodeUrns,
+    traceNodes: traceVisibleUrns,
     // The closure walk model is already complete at leaf grain — there
     // are no per-edge drilldowns in the native trace.
     drilldowns: EMPTY_DRILLDOWNS,
@@ -2916,10 +2981,13 @@ export function ContextViewCanvas({
   // longer bypasses the gate. Trace's focus-incident edges stay
   // materialized via `effectiveLineageEdges` so the anchor is legible.
   const isStubsMode = useMemo(() => {
+    // Trace mode: the flow IS the point, and the walk budget already
+    // bounds the edge count — every trace wire draws, no stub culling.
+    if (traceActive) return false
     if (lineageRenderMode === 'raw') return false
     if (lineageRenderMode === 'stubs') return true
     return visibleLineageEdges.length > autoStubThreshold
-  }, [lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
+  }, [traceActive, lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
 
   // Significance ranking: bundled edge count first (a 600-edge bundle IS
   // the macro flow), confidence as the tie-break.
@@ -3610,11 +3678,12 @@ export function ContextViewCanvas({
           )}
         </AnimatePresence>
 
-        {/* Native trace narration — the walk fetches and merges by itself;
-            this strip says where it stands and holds Keep walking / Retry /
-            Exit trace. */}
+        {/* Native trace dock — bottom-docked stats + controls; the walk
+            fetches and merges by itself, this surface describes the flow
+            (direction counts in the wire colors, census, participants)
+            and holds Flow view / Keep walking / Retry / Exit trace. */}
         {traceActive && (
-          <TraceWalkBar
+          <TraceWalkDock
             tracedName={
               (canvasTrace.tracedUrn
                 ? displayMap.get(urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)?.name
@@ -3623,7 +3692,18 @@ export function ContextViewCanvas({
             }
             nodeCount={canvasTrace.walkEntry?.model.nodes.length ?? 0}
             flowCount={canvasTrace.walkEntry?.model.lineageEdges.length ?? 0}
+            upstreamCount={traceParticipants.upstream.length}
+            downstreamCount={traceParticipants.downstream.length}
             hiddenCount={hiddenTraceCount}
+            typeCensus={traceCensus}
+            upstream={traceParticipants.upstream}
+            downstream={traceParticipants.downstream}
+            showUpstream={traceShowUpstream}
+            showDownstream={traceShowDownstream}
+            onToggleUpstream={() => setTraceShowUpstream(v => !v)}
+            onToggleDownstream={() => setTraceShowDownstream(v => !v)}
+            onJumpToUrn={(urn) => { void revealAndFocus(urnToIdMap.get(urn) ?? urn) }}
+            onOpenFlowView={() => { if (canvasTrace.tracedUrn) openLensAt(canvasTrace.tracedUrn, true) }}
             walkStatus={canvasTrace.walkEntry?.status ?? 'loading'}
             walkError={canvasTrace.walkEntry?.error ?? null}
             status={canvasTrace.fullWalkStatus}
@@ -4009,7 +4089,7 @@ export function ContextViewCanvas({
           ref={horizontalScrollRef}
           className="flex-1 overflow-auto relative scroll-smooth"
           onClick={handleBackgroundClick}
-          style={{ paddingBottom: 'var(--trace-dock-height, 0px)' }}
+          style={{ paddingBottom: traceActive ? 120 : 'var(--trace-dock-height, 0px)' }}
         >
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them
               (z-index managed in component to 0, cols should be higher).
@@ -4026,7 +4106,7 @@ export function ContextViewCanvas({
               toggleEdgePanel={toggleEdgePanel}
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={traceActive}
-              traceResult={trace.result}
+              traceResult={traceActive ? nativeTraceResult : trace.result}
               highlightedEdges={mergedHighlightEdges}
               isHighlightActive={isHighlightActive}
               resolveEdgeColor={resolveEdgeColor}

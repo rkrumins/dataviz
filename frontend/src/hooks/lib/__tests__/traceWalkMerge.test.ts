@@ -145,19 +145,25 @@ describe('computeTraceWalkDelta — merge rules', () => {
 })
 
 describe('traceExpansionUrns', () => {
-  it('collects the containment ancestors of every participant, cycle-safe', () => {
+  it('expands the traced node and its DIRECT flow partners — not the whole walk', () => {
+    // c1 (in T under P) is traced; c2 (in T2) feeds it directly; far
+    // (in TFAR) is two hops away and must stay collapsed.
     const m = model({
-      nodes: [wnode('c1'), wnode('c2'), wnode('T', 'dataset'), wnode('P', 'container'), wnode('T2', 'dataset')],
-      containmentEdges: [holds('P', 'T'), holds('T', 'c1'), holds('T2', 'c2')],
+      nodes: [wnode('c1'), wnode('c2'), wnode('far'), wnode('T', 'dataset'), wnode('P', 'container'), wnode('T2', 'dataset'), wnode('TFAR', 'dataset')],
+      lineageEdges: [hop('c2', 'c1', 'e1'), hop('far', 'c2', 'e2')],
+      containmentEdges: [holds('P', 'T'), holds('T', 'c1'), holds('T2', 'c2'), holds('TFAR', 'far')],
     })
-    expect([...traceExpansionUrns(m)].sort()).toEqual(['P', 'T', 'T2'])
+    expect([...traceExpansionUrns(m, 'c1')].sort()).toEqual(['P', 'T', 'T2'])
+  })
 
+  it('is cycle-safe', () => {
     const cyclic = model({
       nodes: [wnode('a'), wnode('b')],
+      lineageEdges: [hop('b', 'a', 'e1')],
       containmentEdges: [holds('a', 'b'), holds('b', 'a')],
     })
-    // Terminates; both appear as each other's ancestor.
-    expect([...traceExpansionUrns(cyclic)].sort()).toEqual(['a', 'b'])
+    // Terminates; the chain walk simply contributes what it saw.
+    expect([...traceExpansionUrns(cyclic, 'a')].sort()).toEqual(['a', 'b'])
   })
 })
 

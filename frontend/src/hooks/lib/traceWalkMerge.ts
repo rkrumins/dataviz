@@ -119,20 +119,29 @@ export function computeTraceWalkDelta(opts: {
 }
 
 /**
- * The containment ancestors of every model participant — what the canvas
- * must EXPAND so the whole flow is visible upfront. Walks child→parent
+ * What the canvas must EXPAND when a trace starts: the containment
+ * chains of the TRACED node and of its DIRECT flow partners (one hop in
+ * the lineage edges) — the user's "that level + 1" restraint. Everything
+ * further stays a collapsed container with bundled flow arrows, the
+ * canvas's normal idiom; drilling reveals only flow children because
+ * the trace filter governs what an expansion shows. Walks child→parent
  * from the model's own containment edges; cycle-safe via a per-walk
  * visited set (a cycle terminates and simply contributes its members).
  */
-export function traceExpansionUrns(model: LensWalkModel): Set<string> {
+export function traceExpansionUrns(model: LensWalkModel, focusUrn: string): Set<string> {
     const childToParent = new Map<string, string>()
     for (const e of model.containmentEdges) {
         if (e.sourceUrn && e.targetUrn) childToParent.set(e.targetUrn, e.sourceUrn)
     }
+    const seeds = new Set<string>([focusUrn])
+    for (const e of model.lineageEdges) {
+        if (e.sourceUrn === focusUrn) seeds.add(e.targetUrn)
+        if (e.targetUrn === focusUrn) seeds.add(e.sourceUrn)
+    }
     const out = new Set<string>()
-    for (const n of model.nodes) {
-        const seen = new Set<string>([n.urn])
-        let cursor = childToParent.get(n.urn)
+    for (const seed of seeds) {
+        const seen = new Set<string>([seed])
+        let cursor = childToParent.get(seed)
         while (cursor && !seen.has(cursor)) {
             seen.add(cursor)
             out.add(cursor)

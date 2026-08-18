@@ -121,8 +121,8 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
     }, [model])
 
     const expansionUrns = useMemo<ReadonlySet<string>>(
-        () => (model ? traceExpansionUrns(model) : EMPTY_URNS),
-        [model],
+        () => (model && tracedUrn ? traceExpansionUrns(model, tracedUrn) : EMPTY_URNS),
+        [model, tracedUrn],
     )
 
     return {
