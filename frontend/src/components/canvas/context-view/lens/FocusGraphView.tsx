@@ -440,6 +440,44 @@ function useRowCursor(frameKey: string | null, urn: string | null): boolean {
  * every accent-coloured element mutes its OWN colour beside it.
  */
 const OFF_CONE_CARD = 'opacity-60'
+
+/**
+ * A CARD'S OWN COLOURS, HANDED TO ITS CONTENTS AS VARIABLES.
+ *
+ * The three content components below draw a card's type colour in half a
+ * dozen places, and that colour is muted while the card sits off an
+ * isolation cone. Passing it down as a PROP meant the entire inner tree
+ * of all 151 cards was rebuilt whenever the board started or stopped
+ * isolating — which is every click on a card and every click on the
+ * pane. MEASURED: ~300 card renders per click, and a CPU profile
+ * attributing essentially all of it to `jsxDEV`/`createElement`; the
+ * interactions themselves showed up as 264-344ms INP in the live app.
+ *
+ * The wrapper still re-renders (it is one div, and it owns the border,
+ * the lift and the dim), and it now publishes the SAME computed colours
+ * as custom properties. The contents read them through `var()`, so their
+ * props no longer change with cone state at all and `memo` can skip
+ * them. Same colours, same `muteColor` output, no filter — the pixels
+ * are unchanged; only who rebuilds is.
+ */
+const CARD_ACCENT = 'var(--nx-card-accent)'
+/** The accent at the 12%-ish wash used behind icons and type chips —
+ *  precomputed on the wrapper because `var()` cannot append an alpha. */
+const CARD_ACCENT_SOFT = 'var(--nx-card-accent-soft)'
+/** The relationship-type dot, which is the EDGE type's colour rather
+ *  than the card's, and mutes on the same rule. */
+const CARD_EDGE_SWATCH = 'var(--nx-card-edge-swatch)'
+
+/** The three variables above, for one card. Built where `displayAccent`
+ *  already is, so a card that is not on a cone pays nothing extra. */
+function cardColorVars(displayAccent: string, edgeTypeNorm: string | undefined, offCone: boolean): CSSProperties {
+  const swatch = edgeTypeNorm ? generateEdgeColorFromType(edgeTypeNorm) : undefined
+  return {
+    '--nx-card-accent': displayAccent,
+    '--nx-card-accent-soft': `${displayAccent}1f`,
+    ...(swatch ? { '--nx-card-edge-swatch': offCone ? muteColor(swatch) : swatch } : {}),
+  } as CSSProperties
+}
 const OFF_CONE_EDGE = 0.28
 
 /**
@@ -1768,13 +1806,12 @@ const WHEEL_PX_PER_ROW = 26
  * A row the walk never reached keeps the quiet "no lineage" treatment —
  * it is context, and it must never read as a connection.
  */
-function RowContent({ card, ctx, displayAccent, onTrail, offCone }: {
+const RowContent = memo(function RowContent({ card, ctx, onTrail }: {
   card: FocusCard
   ctx: CardCtx
-  displayAccent: string
   onTrail: boolean
-  offCone: boolean
 }) {
+  bumpRenderCount('CardContent')
   // The row's flow tally used to hang off its ×N as a tooltip. Both are
   // gone: the peek panel states it in words, scoped to what it actually
   // is ("1 flow in this walk"), which is the honest home for a number
@@ -1785,9 +1822,9 @@ function RowContent({ card, ctx, displayAccent, onTrail, offCone }: {
       <ContentsChevron card={card} ctx={ctx} />
       <div
         className="relative w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
-        style={{ backgroundColor: card.connected ? `${displayAccent}1f` : 'transparent' }}
+        style={{ backgroundColor: card.connected ? CARD_ACCENT_SOFT : 'transparent' }}
       >
-        <TypeIcon ctx={ctx} typeId={card.type} color={displayAccent} className={cn('w-3.5 h-3.5', !card.connected && 'opacity-60')} />
+        <TypeIcon ctx={ctx} typeId={card.type} color={CARD_ACCENT} className={cn('w-3.5 h-3.5', !card.connected && 'opacity-60')} />
         {onTrail && <TrailMark />}
       </div>
       <div className="flex-1 min-w-0">
@@ -1799,7 +1836,7 @@ function RowContent({ card, ctx, displayAccent, onTrail, offCone }: {
           {card.showType && (
             <span
               className="flex-shrink-0 px-1 rounded uppercase tracking-wide font-semibold"
-              style={{ backgroundColor: `${displayAccent}1f`, color: displayAccent }}
+              style={{ backgroundColor: CARD_ACCENT_SOFT, color: CARD_ACCENT }}
             >
               {card.type}
             </span>
@@ -1808,7 +1845,7 @@ function RowContent({ card, ctx, displayAccent, onTrail, offCone }: {
             <>
               <span
                 className="w-1 h-1 rounded-full flex-shrink-0"
-                style={{ backgroundColor: offCone ? muteColor(generateEdgeColorFromType(card.edgeTypeNorm)) : generateEdgeColorFromType(card.edgeTypeNorm) }}
+                style={{ backgroundColor: CARD_EDGE_SWATCH }}
               />
               <span
                 className="truncate uppercase tracking-wide"
@@ -1849,7 +1886,7 @@ function RowContent({ card, ctx, displayAccent, onTrail, offCone }: {
       <WalkPills card={card} ctx={ctx} />
     </>
   )
-}
+})
 
 /** The quiet line between the rows that answer the question and the rows
  *  that merely live here. Not an entity, so it is not a card you can
@@ -1874,13 +1911,12 @@ function FrameDividerNode({ data }: NodeProps) {
   )
 }
 
-function EntityContent({ card, ctx, displayAccent, onTrail, offCone }: {
+const EntityContent = memo(function EntityContent({ card, ctx, onTrail }: {
   card: FocusCard
   ctx: CardCtx
-  displayAccent: string
   onTrail: boolean
-  offCone: boolean
 }) {
+  bumpRenderCount('CardContent')
   return (
     <>
       {card.wired && <PortHandles />}
@@ -1888,9 +1924,9 @@ function EntityContent({ card, ctx, displayAccent, onTrail, offCone }: {
       {(
         <div
           className="relative w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0"
-          style={{ backgroundColor: `${displayAccent}1f` }}
+          style={{ backgroundColor: CARD_ACCENT_SOFT }}
         >
-          <TypeIcon ctx={ctx} typeId={card.type} color={displayAccent} className="w-3.5 h-3.5" />
+          <TypeIcon ctx={ctx} typeId={card.type} color={CARD_ACCENT} className="w-3.5 h-3.5" />
           {onTrail && <TrailMark />}
         </div>
       )}
@@ -1909,7 +1945,7 @@ function EntityContent({ card, ctx, displayAccent, onTrail, offCone }: {
             <>
               <span
                 className="w-1 h-1 rounded-full flex-shrink-0"
-                style={{ backgroundColor: offCone ? muteColor(generateEdgeColorFromType(card.edgeTypeNorm)) : generateEdgeColorFromType(card.edgeTypeNorm) }}
+                style={{ backgroundColor: CARD_EDGE_SWATCH }}
               />
               <span
                 className="truncate uppercase tracking-wide"
@@ -1931,7 +1967,7 @@ function EntityContent({ card, ctx, displayAccent, onTrail, offCone }: {
       <WalkPills card={card} ctx={ctx} />
     </>
   )
-}
+})
 
 /**
  * Content-based memo boundary. The builder returns fresh card objects
@@ -1962,14 +1998,14 @@ function findTitle(card: FocusCard): string {
  * shell (and the double-click that focuses this container) lives there
  * instead of here.
  */
-function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }: {
+const FrameContent = memo(function FrameContent({ card, ctx, focalStats, isFocal, onTrail }: {
   card: FocusCard
   ctx: CardCtx
   focalStats?: { coarser: number }
   isFocal: boolean
-  displayAccent: string
   onTrail: boolean
 }) {
+  bumpRenderCount('CardContent')
   // The Find box is asked for rather than always sitting there — see the
   // header, where 64px of permanent input clipped the honest counts.
   const [findOpen, setFindOpen] = useState(false)
@@ -2110,14 +2146,14 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
             : <LucideIcons.ChevronRight className="w-3.5 h-3.5" />}
         </button>
         )}
-        <TypeIcon ctx={ctx} typeId={card.type} color={displayAccent} className="w-3.5 h-3.5 flex-shrink-0" />
+        <TypeIcon ctx={ctx} typeId={card.type} color={CARD_ACCENT} className="w-3.5 h-3.5 flex-shrink-0" />
         {/* The focus states its KIND on the control line and its NAME on
             a line of its own below — it is the thing the whole board is
             about, and a name sharing a row with four controls is the
             thing most likely to truncate. */}
         {isFocal && (
           <>
-            <p className="text-[9.5px] font-bold uppercase tracking-[0.12em] truncate" style={{ color: displayAccent }}>
+            <p className="text-[9.5px] font-bold uppercase tracking-[0.12em] truncate" style={{ color: CARD_ACCENT }}>
               {card.type}
             </p>
             {card.fetch === 'loading' && (
@@ -2413,7 +2449,7 @@ function FrameContent({ card, ctx, focalStats, isFocal, displayAccent, onTrail }
       )}
     </>
   )
-}
+})
 
 /**
  * The stable outer shell every card-like node renders through (T27 — one
@@ -2488,6 +2524,7 @@ function FocusNode({ data, selected }: NodeProps) {
           : {})}
         onDoubleClick={dblClick}
         style={{
+          ...cardColorVars(displayAccent, card.edgeTypeNorm, offCone),
           width: card.w,
           height: card.h,
           borderColor: isFocal ? displayAccent : `${displayAccent}55`,
@@ -2514,7 +2551,7 @@ function FocusNode({ data, selected }: NodeProps) {
           offCone && OFF_CONE_CARD,
         )}
       >
-        <FrameContent card={card} ctx={ctx} focalStats={focalStats} isFocal={isFocal} displayAccent={displayAccent} onTrail={onTrail} />
+        <FrameContent card={card} ctx={ctx} focalStats={focalStats} isFocal={isFocal} onTrail={onTrail} />
       </div>
     )
   }
@@ -2575,6 +2612,7 @@ function FocusNode({ data, selected }: NodeProps) {
           dim,
         )}
         style={{
+          ...cardColorVars(displayAccent, card.edgeTypeNorm, offCone),
           width: card.w,
           height: card.h,
           ...(card.connected ? { borderLeftWidth: 3, borderLeftColor: displayAccent } : {}),
@@ -2603,7 +2641,7 @@ function FocusNode({ data, selected }: NodeProps) {
           card.connected ? '' : ' — inside this, but no lineage with the focused entity'
         }`}
       >
-        <RowContent card={card} ctx={ctx} displayAccent={displayAccent} onTrail={onTrail} offCone={offCone} />
+        <RowContent card={card} ctx={ctx} onTrail={onTrail} />
       </div>
     )
   }
@@ -2625,6 +2663,7 @@ function FocusNode({ data, selected }: NodeProps) {
       // reasoning as the row's own title, just above.
       title={`${card.label}${card.description ? ` — ${card.description}` : ''}`}
       style={{
+        ...cardColorVars(displayAccent, card.edgeTypeNorm, offCone),
         width: card.w, height: card.h, borderLeftWidth: 3, borderLeftColor: displayAccent,
         ...(selected ? { boxShadow: `0 0 0 2px ${accent}, 0 8px 20px -8px ${accent}59` }
           : onCone ? coneLift(accent, anchor, hops)
@@ -2635,7 +2674,7 @@ function FocusNode({ data, selected }: NodeProps) {
         dim,
       )}
     >
-      <EntityContent card={card} ctx={ctx} displayAccent={displayAccent} onTrail={onTrail} offCone={offCone} />
+      <EntityContent card={card} ctx={ctx} onTrail={onTrail} />
     </div>
   )
 }

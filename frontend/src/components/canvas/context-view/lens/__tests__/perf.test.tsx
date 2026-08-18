@@ -277,6 +277,52 @@ describe('P0 — perf harness (Task 20)', () => {
         vi.useRealTimers()
       }
     })
+
+    /**
+     * THE COST OF STARTING TO ISOLATE, which is what a CLICK on a card
+     * does and what a click on the pane undoes. Both flip one board-wide
+     * fact — "is anything isolated at all?" — that every card must
+     * answer, so both re-render all 151 wrappers no matter how small the
+     * lit cone is. That is unavoidable: every off-cone card really does
+     * change (it dims and desaturates).
+     *
+     * What IS avoidable is rebuilding each card's whole INNER tree for
+     * it. The contents take their colours as CSS variables published by
+     * the wrapper, so their props do not change with cone state and
+     * `memo` skips them. MEASURED in a real browser: the flip's worst
+     * frame went 142.5ms -> 66.7ms on this fixture, and the live-app
+     * interactions this fixes were reported at 264-344ms INP.
+     */
+    it('walkWideHub: starting to isolate re-renders card SHELLS, never their contents', () => {
+      vi.useFakeTimers()
+      try {
+        const profiler = makeProfilerRecorder()
+        const { container } = renderBoard('walkWideHub', profiler)
+        const board = nodes(container)
+        expect(board.length).toBeGreaterThanOrEqual(100)
+
+        profiler.reset()
+        resetRenderCounts()
+        // Nothing was isolated; now something is — the whole-board flip.
+        act(() => { fireEvent.mouseEnter(board[0]) })
+        act(() => { vi.advanceTimersByTime(250) })
+
+        const shells = renderCounts.get('FocusNode') ?? 0
+        const contents = renderCounts.get('CardContent') ?? 0
+        console.log(
+          `[isolate-flip] walkWideHub boardNodes=${board.length} ms=${profiler.totalMs.toFixed(2)} `
+          + `shells=${shells} contents=${contents}`,
+        )
+        // The flip really does reach every card...
+        expect(shells).toBeGreaterThan(board.length / 2)
+        // ...and rebuilds almost none of their innards. A small allowance
+        // for the handful whose cone answer genuinely changed (they take
+        // `onTrail`/`card` the same as ever, so memo lets those through).
+        expect(contents).toBeLessThan(20)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
   })
 
   describe('(d) buildFocusLayout rebuild wall-time', () => {
