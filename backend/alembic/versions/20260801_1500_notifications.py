@@ -16,7 +16,9 @@ eventually-consistent fan-out that can lag or drop turns "you have
 access" into "you have access and nobody told you". The outbox keeps
 carrying the same events for external consumers.
 
-Plain forward DDL per docs/MIGRATIONS.md.
+Guarded per docs/MIGRATIONS.md ("Guard the DDL; never guard the data"):
+fresh installs already hold this table from ``0001_baseline``'s create_all,
+and the chain-replay route runs this file on top of it.
 """
 from __future__ import annotations
 
@@ -33,26 +35,32 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "notifications",
-        sa.Column("id", sa.Text(), primary_key=True),
-        sa.Column("user_id", sa.Text(), nullable=False),
-        sa.Column("kind", sa.Text(), nullable=False),
-        sa.Column("title", sa.Text(), nullable=False),
-        sa.Column("body", sa.Text(), nullable=True),
-        sa.Column("link", sa.Text(), nullable=True),
-        sa.Column("actor_id", sa.Text(), nullable=True),
-        sa.Column("resource_type", sa.Text(), nullable=True),
-        sa.Column("resource_id", sa.Text(), nullable=True),
-        sa.Column("read_at", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.Text(), nullable=False),
-    )
-    op.create_index(
-        "idx_notifications_user_created", "notifications", ["user_id", "created_at"],
-    )
-    op.create_index(
-        "idx_notifications_unread", "notifications", ["user_id", "read_at"],
-    )
+    # Guarded: ``0001_baseline`` create_all already builds this table on a
+    # database born from baseline (see docs/MIGRATIONS.md).
+    bind = op.get_bind()
+    if not sa.inspect(bind).has_table("notifications"):
+        op.create_table(
+            "notifications",
+            sa.Column("id", sa.Text(), primary_key=True),
+            sa.Column("user_id", sa.Text(), nullable=False),
+            sa.Column("kind", sa.Text(), nullable=False),
+            sa.Column("title", sa.Text(), nullable=False),
+            sa.Column("body", sa.Text(), nullable=True),
+            sa.Column("link", sa.Text(), nullable=True),
+            sa.Column("actor_id", sa.Text(), nullable=True),
+            sa.Column("resource_type", sa.Text(), nullable=True),
+            sa.Column("resource_id", sa.Text(), nullable=True),
+            sa.Column("read_at", sa.Text(), nullable=True),
+            sa.Column("created_at", sa.Text(), nullable=False),
+        )
+    bind.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS idx_notifications_user_created "
+        "ON notifications (user_id, created_at)"
+    ))
+    bind.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS idx_notifications_unread "
+        "ON notifications (user_id, read_at)"
+    ))
 
 
 def downgrade() -> None:

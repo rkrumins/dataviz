@@ -29,8 +29,12 @@ happened) and ``admin_viewed``, which records a platform admin opening
 a private view they neither created nor were shared on — break-glass
 access stays available and stops being invisible to the owner.
 
-Plain forward DDL per docs/MIGRATIONS.md: fresh installs get these
-columns from ``0001_baseline``'s create_all and never run this file.
+Fresh installs get these columns from ``0001_baseline``'s create_all and
+never run this file, so the DDL below is guarded (docs/MIGRATIONS.md,
+"Guard the DDL; never guard the data") — the chain-replay route does run
+it on top of a baseline that already holds them. The ``alter_column``
+that drops the server default stays outside the guard so both routes
+end up with the same column.
 """
 from __future__ import annotations
 
@@ -56,31 +60,25 @@ _ACTIONS_NEW = (
 
 
 def upgrade() -> None:
-    op.add_column(
-        "views",
-        sa.Column("publish_requested_by", sa.Text(), nullable=True),
-    )
-    op.add_column(
-        "views",
-        sa.Column("publish_requested_at", sa.Text(), nullable=True),
-    )
-    op.add_column(
-        "views",
-        sa.Column("publish_request_note", sa.Text(), nullable=True),
-    )
-    op.create_index(
-        "idx_view_publish_requested", "views", ["publish_requested_at"],
-    )
+    # Guarded because ``0001_baseline`` is create_all against the live ORM:
+    # a database built from baseline already holds these columns, and the
+    # chain-replay route then re-applies this file on top of them.
+    bind = op.get_bind()
+    for _column in (
+        "publish_requested_by", "publish_requested_at", "publish_request_note",
+    ):
+        bind.execute(sa.text(
+            f"ALTER TABLE views ADD COLUMN IF NOT EXISTS {_column} TEXT"
+        ))
+    bind.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS idx_view_publish_requested "
+        "ON views (publish_requested_at)"
+    ))
 
-    op.add_column(
-        "workspaces",
-        sa.Column(
-            "publish_policy",
-            sa.Text(),
-            nullable=False,
-            server_default="request",
-        ),
-    )
+    bind.execute(sa.text(
+        "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS publish_policy TEXT "
+        "NOT NULL DEFAULT 'request'"
+    ))
     # The ORM default is Python-side; a lingering server default would
     # read as permanent autogenerate drift (same reasoning as the
     # ctxmodel_vis migration).

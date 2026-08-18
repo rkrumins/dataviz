@@ -46,12 +46,13 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "workspace_data_sources",
-        sa.Column(
-            "is_restricted", sa.Boolean(), nullable=False, server_default=sa.false(),
-        ),
-    )
+    # Guarded: a database built from ``0001_baseline``'s create_all already
+    # has this column. The UPDATE below is data, not DDL, and still runs.
+    bind = op.get_bind()
+    bind.execute(sa.text(
+        "ALTER TABLE workspace_data_sources ADD COLUMN IF NOT EXISTS "
+        "is_restricted BOOLEAN NOT NULL DEFAULT FALSE"
+    ))
     # The ORM default is Python-side; a lingering server default reads as
     # permanent autogenerate drift.
     op.alter_column("workspace_data_sources", "is_restricted", server_default=None)
