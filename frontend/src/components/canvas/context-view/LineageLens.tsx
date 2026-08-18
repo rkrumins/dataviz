@@ -37,7 +37,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useRelationshipTypes } from '@/store/schema'
 import { relationshipLabel } from '@/lib/relationshipLabel'
-import type { WalkEntry, LensWalkDir } from '@/hooks/useLensWalk'
+import type { WalkEntry, LensWalkDir, FullWalkStatus } from '@/hooks/useLensWalk'
 import { emptyWalkModel, type LensWalkNode } from './lens/closure-adapter'
 import {
   boundaryFrontierFilter,
@@ -293,6 +293,15 @@ export interface LineageLensProps {
   onLocateAll?: (nodeIds: string[]) => void | Promise<void>
   /** Escalate to a full server trace from the focal node (closes the lens). */
   onTrace?: (nodeId: string) => void
+  /** Full walk (trace mode) — the hook auto-follows every frontier; the
+   *  lens only SAYS where the walk stands and offers its two controls.
+   *  All four absent = the feature is not wired, nothing renders. */
+  fullWalkEnabled?: boolean
+  fullWalkStatus?: FullWalkStatus | null
+  /** Switch between One hop (server-lazy ⊕ walking) and Full flow. */
+  onFullWalkToggle?: (on: boolean) => void
+  /** Grant a budget-capped walk another round / re-arm a stalled one. */
+  onFullWalkContinue?: () => void
   /** Feature-flagged out-of-view preview for the focal node: partners
    *  that exist in the data source but are outside this view's scope.
    *  Advisory only — never part of the canvas. */
@@ -320,6 +329,10 @@ export function LineageLens({
   onRevealOnCanvas,
   onOpenDetails,
   onTrace,
+  fullWalkEnabled = false,
+  fullWalkStatus = null,
+  onFullWalkToggle,
+  onFullWalkContinue,
   externalPreview,
 }: LineageLensProps) {
   const { entries, cursor } = history
@@ -1304,6 +1317,19 @@ export function LineageLens({
                 {walkStatus === 'loading' && (
                   <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
                 )}
+                {/* Full walk — where the trace stands, off the same model
+                    the board draws. Walking gets its own spinner because
+                    the initial fetch's one above stops at 'done' while
+                    the frontier ops are still landing hops. */}
+                {fullWalkStatus?.walking && (
+                  <span className="flex items-center gap-1 text-accent-lineage/90">
+                    <LucideIcons.Loader2 className="w-3 h-3 animate-spin" />
+                    {`tracing the full flow · ${model?.nodes.length ?? 0} nodes`}
+                  </span>
+                )}
+                {fullWalkStatus?.exhausted && (
+                  <span className="text-ink-muted/80">full flow drawn</span>
+                )}
               </p>
             </div>
             {/* History navigation — browser semantics: Back/Forward move
@@ -1429,6 +1455,45 @@ export function LineageLens({
                       className={cn(
                         'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                         lensFrameChildren === mode
+                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                          : 'text-ink-muted hover:text-ink',
+                      )}
+                    >
+                      <Icon className="w-3 h-3" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Walk — how far the lens fetches by itself. "One hop"
+                  is the classic server-lazy walk (⊕ fetches each next
+                  hop); "Full flow" is trace mode: the lens keeps
+                  following every frontier until the end-to-end flow is
+                  drawn. Only rendered where the caller wired the mode. */}
+              {lensViewMode === 'graph' && onFullWalkToggle && (
+                <div
+                  role="group"
+                  aria-label="How far to walk the flow"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
+                    Walk
+                  </span>
+                  {([
+                    { on: false, Icon: LucideIcons.Footprints, label: 'One hop',
+                      title: 'Walk the flow yourself — ⊕ on a card fetches its next hop' },
+                    { on: true, Icon: LucideIcons.Route, label: 'Full flow',
+                      title: 'Trace mode: keep walking automatically until the whole end-to-end flow is drawn' },
+                  ] as const).map(({ on, Icon, label, title }) => (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => onFullWalkToggle(on)}
+                      title={title}
+                      aria-pressed={fullWalkEnabled === on}
+                      className={cn(
+                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                        fullWalkEnabled === on
                           ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
                           : 'text-ink-muted hover:text-ink',
                       )}
@@ -1785,6 +1850,38 @@ export function LineageLens({
                 {model?.truncationReason ? ` (${model.truncationReason})` : ''}, so these counts are floors.
                 Use ⊕ to walk further, or the filter to narrow.
               </span>
+            </div>
+          )}
+          {/* Full walk stopped short of the ends — say WHY and offer the
+              way onward, same narration contract as the strips above. */}
+          {fullWalkStatus?.budgetHit && (
+            <div className="flex items-center gap-2 px-4 py-1.5 border-b border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
+              <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
+              <span>{`The flow continues past ${model?.nodes.length ?? 0} nodes — the walk paused at its safety budget.`}</span>
+              {onFullWalkContinue && (
+                <button
+                  type="button"
+                  onClick={onFullWalkContinue}
+                  className="ml-auto flex-shrink-0 font-semibold hover:underline"
+                >
+                  Keep walking
+                </button>
+              )}
+            </div>
+          )}
+          {fullWalkStatus?.stalled && (
+            <div className="flex items-center gap-2 px-4 py-1.5 border-b border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
+              <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
+              <span>Part of the flow could not be walked — some steps failed at the data source.</span>
+              {onFullWalkContinue && (
+                <button
+                  type="button"
+                  onClick={onFullWalkContinue}
+                  className="ml-auto flex-shrink-0 font-semibold hover:underline"
+                >
+                  Try again
+                </button>
+              )}
             </div>
           )}
 
