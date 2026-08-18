@@ -49,7 +49,7 @@ export interface UseEdgeProjectionOptions {
    * trace-filtered hierarchy. Endpoint resolution via displayMap/ancestorMap
    * still applies — edges to entirely-unresolved nodes are still dropped.
    */
-  traceAddedEdgeIds?: Set<string>
+  traceAddedEdgeIds?: ReadonlySet<string>
   /**
    * Canvas containment parent map (child id → parent id) from
    * useContainmentHierarchy. Used by the trace-mode bundling projection
