@@ -1170,7 +1170,7 @@ export function ContextViewCanvas({
       }
     }
 
-    // TRACE MODE: Toggle trace using unified trace hook + smart level
+    // TRACE: open the Lineage Lens on this node with the full walk on.
     toggleTraceRef.current(nodeId)
   }, [nodes, interactions, canEditGraph])
 
@@ -1215,62 +1215,9 @@ export function ContextViewCanvas({
     }
   }, [lineageEdgeTypes, trace.setConfig])
 
-  // Trace ALWAYS runs at the focus node's own level — `level: 'auto'` resolves
-  // server-side to the focus's hierarchy.level, so a column-level focus traces
-  // column-level lineage (TRANSFORMS, AGGREGATED, or any other ontology-
-  // classified lineage edge type). The previous "auto-coarsen" hack broke
-  // fine-grained TRANSFORMS lineage; removed.
-  //
-  // Every entry point gates on `hydrationPhase === 'complete'`. Firing a
-  // trace mid-hydration returns nothing (backend has only loaded a partial
-  // edge set yet) — the user is presented with a warning toast instead.
-  // Reading the stores via getState() inside the callback avoids re-render
-  // churn and side-steps the temporal-dead-zone of capturing variables
-  // declared later in the component body.
-  const guardTraceHydration = useCallback((): boolean => {
-    if (useCanvasStore.getState().hydrationPhase === 'complete') return true
-    useToastStore.getState().addToast({
-      type: 'warning',
-      message: 'Trace is unavailable until lineage finishes loading. Please wait a moment.',
-      key: 'trace-not-ready',
-    })
-    return false
-  }, [])
-
-  const startTraceWithSmartLevel = useCallback((nodeId: string) => {
-    if (!guardTraceHydration()) return
-    trace.setConfig({ level: 'auto', lineageEdgeTypes })
-    return trace.startTrace(nodeId)
-  }, [trace, lineageEdgeTypes, guardTraceHydration])
-
-  const toggleTraceWithSmartLevel = useCallback((nodeId: string) => {
-    if (!guardTraceHydration()) return
-    trace.setConfig({ level: 'auto', lineageEdgeTypes })
-    return trace.toggleTrace(nodeId)
-  }, [trace, lineageEdgeTypes, guardTraceHydration])
-
-  const traceUpstreamWithSmartLevel = useCallback((nodeId: string) => {
-    if (!guardTraceHydration()) return
-    trace.setConfig({ level: 'auto', lineageEdgeTypes })
-    return trace.traceUpstream(nodeId)
-  }, [trace, lineageEdgeTypes, guardTraceHydration])
-
-  const traceDownstreamWithSmartLevel = useCallback((nodeId: string) => {
-    if (!guardTraceHydration()) return
-    trace.setConfig({ level: 'auto', lineageEdgeTypes })
-    return trace.traceDownstream(nodeId)
-  }, [trace, lineageEdgeTypes, guardTraceHydration])
-
-  const traceFullLineageWithSmartLevel = useCallback((nodeId: string) => {
-    if (!guardTraceHydration()) return
-    trace.setConfig({ level: 'auto', lineageEdgeTypes })
-    return trace.traceFullLineage(nodeId)
-  }, [trace, lineageEdgeTypes, guardTraceHydration])
-
-  // Wire up the forward-declared refs (used by hooks that fire earlier in
-  // render order, before granularityOptions is in scope).
-  startTraceRef.current = startTraceWithSmartLevel
-  toggleTraceRef.current = toggleTraceWithSmartLevel
+  // Trace entry points now open the Lineage Lens in full-walk mode — see
+  // `openTraceLens` below, where the forward-declared refs are wired. The
+  // smart-level /trace/v2 wrappers that lived here are gone with them.
 
   // Staged changes — review-before-save layer for all canvas edits
   const stagedChangeList = useStagedChangesStore(s => s.changes)
@@ -3079,9 +3026,20 @@ export function ContextViewCanvas({
       ? { entries: initialLensShare.entries, cursor: initialLensShare.cursor }
       : EMPTY_LENS_HISTORY
   ))
-  const openLens = useCallback((nodeId: string) => {
+  // Trace = the Lens walked to the ends: every trace affordance opens
+  // the lens with the full walk ON; ordinary lens entries keep the
+  // classic one-hop ⊕ walk. The legacy /trace/v2 machinery below stays
+  // wired but is no longer reachable from this canvas's entry points.
+  const [lensFullWalk, setLensFullWalk] = useState(false)
+  const openLensAt = useCallback((nodeId: string, fullWalk: boolean) => {
+    setLensFullWalk(fullWalk)
     setLensHistory({ entries: [nodeId], cursor: 0 })
   }, [])
+  const openLens = useCallback((nodeId: string) => openLensAt(nodeId, false), [openLensAt])
+  const openTraceLens = useCallback((nodeId: string) => openLensAt(nodeId, true), [openLensAt])
+  // Forward-declared refs, for hooks that fire earlier in render order.
+  startTraceRef.current = openTraceLens
+  toggleTraceRef.current = openTraceLens
   const lensRecenter = useCallback((nodeId: string) => setLensHistory(h => lensPush(h, nodeId)), [])
   const lensBack = useCallback(() => setLensHistory(lensBackward), [])
   const lensForward = useCallback(() => setLensHistory(lensForwardStep), [])
@@ -3104,7 +3062,7 @@ export function ContextViewCanvas({
   const lensInitialDepth = initialLensShare && (initialLensShare.v === 2 || initialLensShare.v === 3) && lensFocal === initialLensShare.entries[initialLensShare.cursor]
     ? initialLensShare.depth
     : userLensInitialDepth
-  const lensWalk = useLensWalk(lensFocal, provider, lensInitialDepth)
+  const lensWalk = useLensWalk(lensFocal, provider, lensInitialDepth, lensFullWalk)
   // The rest of a restored exploration — applied once, inside the lens,
   // to the same focal the depth override above targets.
   const lensWalkSeed = useMemo<LensWalkSeed | null>(() => {
@@ -3512,7 +3470,7 @@ export function ContextViewCanvas({
         onSetLineageRenderMode={setLineageRenderMode}
         traceActive={trace.isTracing}
         canTrace={selectedNodeIds.length === 1 && !selectedNodeIds[0].startsWith('logical:')}
-        onStartTrace={() => { if (selectedNodeIds[0]) startTraceWithSmartLevel(selectedNodeIds[0]) }}
+        onStartTrace={() => { if (selectedNodeIds[0]) openTraceLens(selectedNodeIds[0]) }}
         onExitTrace={exitTrace}
         lineageReady={hydrationPhase === 'complete'}
         traceUpstreamDepth={trace.config.upstreamDepth}
@@ -3598,7 +3556,7 @@ export function ContextViewCanvas({
               onExit={exitTrace}
               onJumpToUrn={(urn) => {
                 const id = urnToIdMap.get(urn) ?? urn
-                startTraceWithSmartLevel(id)
+                openTraceLens(id)
               }}
             />
           )}
@@ -3946,7 +3904,10 @@ export function ContextViewCanvas({
             }
             void locateManyOnCanvas(ids)
           }}
-          onTrace={(nodeId) => traceFullLineageWithSmartLevel(nodeId)}
+          fullWalkEnabled={lensFullWalk}
+          fullWalkStatus={lensFocal ? lensWalk.fullWalkFor(lensFocal) : null}
+          onFullWalkToggle={setLensFullWalk}
+          onFullWalkContinue={() => { if (lensFocal) lensWalk.continueFullWalk(lensFocal) }}
         />
 
         {/* Blank (hand-built) model guidance — the full-canvas hero on a truly
@@ -4228,9 +4189,9 @@ export function ContextViewCanvas({
           <EntityDrawer
             key="entity-drawer"
             onFocusConnections={openLens}
-            onTraceUp={(nodeId) => traceUpstreamWithSmartLevel(nodeId)}
-            onTraceDown={(nodeId) => traceDownstreamWithSmartLevel(nodeId)}
-            onFullTrace={(nodeId) => traceFullLineageWithSmartLevel(nodeId)}
+            onTraceUp={(nodeId) => openTraceLens(nodeId)}
+            onTraceDown={(nodeId) => openTraceLens(nodeId)}
+            onFullTrace={(nodeId) => openTraceLens(nodeId)}
             onFocusNode={revealAndFocus}
             onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
           />
@@ -4287,7 +4248,7 @@ export function ContextViewCanvas({
             anchor: interactions.state.contextMenu.position,
           })
         } : undefined}
-        onTraceNode={(id) => startTraceWithSmartLevel(id)}
+        onTraceNode={(id) => openTraceLens(id)}
         onFocusConnections={openLens}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={canEditGraph ? interactions.editEdge : undefined}

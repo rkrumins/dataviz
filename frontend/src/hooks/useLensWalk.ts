@@ -176,11 +176,10 @@ export function useLensWalk(
     const stateRef = useRef(state)
     useEffect(() => { stateRef.current = state }, [state])
 
-    // Full walk wants the whole flow, so the opening fetch goes out at the
-    // contract's max depth no matter what the one-hop preference says.
-    const effectiveDepth = fullWalk ? Math.max(initialDepth, FULL_WALK_INITIAL_DEPTH) : initialDepth
-
     const runFetch = useCallback(async (urn: string) => {
+        // Full walk wants the whole flow, so the opening fetch goes out at
+        // the contract's max depth no matter what the one-hop pref says.
+        const effectiveDepth = fullWalk ? Math.max(initialDepth, FULL_WALK_INITIAL_DEPTH) : initialDepth
         const cacheKey = cacheKeyFor(provider, urn)
         if (startedRef.current.has(cacheKey)) return
 
@@ -217,7 +216,7 @@ export function useLensWalk(
                 depth: effectiveDepth,
             }))
         }
-    }, [provider, effectiveDepth])
+    }, [provider, initialDepth, fullWalk])
 
     /** Shared by `extend` and `page`: both fetch one further hop from a
      *  specific card+direction and merge the response into the CURRENT
