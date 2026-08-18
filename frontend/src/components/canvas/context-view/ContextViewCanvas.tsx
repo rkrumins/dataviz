@@ -1588,9 +1588,16 @@ export function ContextViewCanvas({
     setShowLineageFlow(true)
     setTraceShowUpstream(true)
     setTraceShowDownstream(true)
+    // The trace surface stays unobstructed: close the sticky drawer and
+    // keep node clicks from re-opening it for the whole session (exit
+    // restores the normal click-opens-drawer behaviour).
+    const store = useCanvasStore.getState()
+    store.closeNodeDrawer()
+    store.setDrawerSuppressed(true)
     canvasTrace.start(displayMap.get(nodeId)?.urn ?? nodeId)
   }, [canvasTrace, displayMap])
   const exitCanvasTrace = useCallback(() => {
+    useCanvasStore.getState().setDrawerSuppressed(false)
     canvasTrace.exit()
     resetAllCircuitBreakers()
   }, [canvasTrace])
@@ -3898,7 +3905,10 @@ export function ContextViewCanvas({
           rootsLoaded={rootsLoaded}
           rootsHaveMore={rootsHaveMore}
           onLoadMoreRoots={() => { void loadMoreRoots() }}
-          selectedExternal={selectedExternalLineage}
+          // During a trace the external-scope chip speaks browse-view
+          // language that contradicts the trace picture (and its counts
+          // live in the trace dock) — suppressed until exit.
+          selectedExternal={traceActive ? null : selectedExternalLineage}
           onPreviewExternal={externalLineagePreview ? () => { void handlePreviewExternal() } : undefined}
           unresolvedEdgeCount={showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
           unassignedEntities={unassignedEntities}
@@ -3999,18 +4009,22 @@ export function ContextViewCanvas({
         {/* Layer Strip — docked horizontal navigator: you-are-here chips
             per layer, click-to-jump, add-layer (draft) and Fit. Frame-
             anchored (never in scroll content). */}
-        <LayerStrip
-          layers={stripLayers}
-          scrollRef={horizontalScrollRef}
-          // "+" routes to the existing AddLayerColumn at the canvas end —
-          // one deliberate creation flow (name input there), not a
-          // second create path.
-          onAddLayer={isDraft ? () => {
-            const el = horizontalScrollRef.current
-            el?.scrollTo({ left: el.scrollWidth, behavior: 'smooth' })
-          } : undefined}
-          onFit={handleFitToWidth}
-        />
+        {/* Hidden while tracing: the TraceWalkDock owns the bottom, and
+            layer navigation is what the trace filter already did. */}
+        {!traceActive && (
+          <LayerStrip
+            layers={stripLayers}
+            scrollRef={horizontalScrollRef}
+            // "+" routes to the existing AddLayerColumn at the canvas end —
+            // one deliberate creation flow (name input there), not a
+            // second create path.
+            onAddLayer={isDraft ? () => {
+              const el = horizontalScrollRef.current
+              el?.scrollTo({ left: el.scrollWidth, behavior: 'smooth' })
+            } : undefined}
+            onFit={handleFitToWidth}
+          />
+        )}
 
         {/* Lineage Lens — ego-graph overlay (portal to body). */}
         <LineageLens
@@ -4089,7 +4103,7 @@ export function ContextViewCanvas({
           ref={horizontalScrollRef}
           className="flex-1 overflow-auto relative scroll-smooth"
           onClick={handleBackgroundClick}
-          style={{ paddingBottom: traceActive ? 120 : 'var(--trace-dock-height, 0px)' }}
+          style={{ paddingBottom: 'var(--trace-dock-height, 0px)' }}
         >
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them
               (z-index managed in component to 0, cols should be higher).

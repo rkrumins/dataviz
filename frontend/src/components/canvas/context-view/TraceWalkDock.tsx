@@ -22,7 +22,7 @@
  * Chrome: bottom-docked strip in the canvas-elevated idiom, amber only
  * where attention is needed.
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { FullWalkStatus, LensWalkStatus } from '@/hooks/useLensWalk'
@@ -81,8 +81,24 @@ export function TraceWalkDock({
   const [expanded, setExpanded] = useState(false)
   const failed = walkStatus === 'error'
 
+  // Publish the dock's real height as --trace-dock-height on the canvas
+  // body (same contract the legacy dock had): EdgeLegend, the status
+  // chips, and the scroll padding all lift above it automatically. Runs
+  // every render so strips/panel growth is always reflected.
+  const dockRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = dockRef.current
+    const parent = el?.closest<HTMLElement>('[data-canvas-body]')
+    if (!el || !parent) return
+    parent.style.setProperty('--trace-dock-height', `${el.offsetHeight + 12}px`)
+    return () => {
+      parent.style.removeProperty('--trace-dock-height')
+    }
+  })
+
   return (
     <div
+      ref={dockRef}
       data-canvas-interactive
       className="absolute bottom-0 left-0 right-0 z-30 border-t border-black/10 dark:border-white/10 bg-canvas-elevated/95 backdrop-blur-sm shadow-[0_-4px_16px_rgba(0,0,0,0.12)]"
     >

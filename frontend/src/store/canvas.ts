@@ -125,6 +125,11 @@ interface CanvasState {
   // Decoupled from selection so background clicks / selection changes
   // don't close it; only an explicit close (X) does.
   drawerNodeId: string | null
+  /** While true (the native canvas trace), a single-select click does NOT
+   *  open the sticky drawer — the trace surface stays unobstructed.
+   *  Explicit openNodeDrawer calls are always honoured. */
+  drawerSuppressed: boolean
+  setDrawerSuppressed: (suppressed: boolean) => void
   openNodeDrawer: (id: string) => void
   closeNodeDrawer: () => void
 
@@ -352,8 +357,9 @@ export const useCanvasStore = create<CanvasState>()(
         lastNodeClick: { nodeId: id, seq: state.lastNodeClick.seq + 1 },
         // Single-select of a real entity opens (or swaps) the sticky drawer.
         // Toggle-off keeps it open — only the X button closes it. Logical
-        // groupings and multi-select never touch the drawer.
-        ...(!multi && !id.startsWith('logical:') ? { drawerNodeId: id } : {}),
+        // groupings, multi-select, and a suppressed drawer (native trace)
+        // never touch it.
+        ...(!multi && !id.startsWith('logical:') && !state.drawerSuppressed ? { drawerNodeId: id } : {}),
       })),
       selectEdge: (id, multi = false) => set((state) => ({
         selectedEdgeIds: multi
@@ -371,6 +377,8 @@ export const useCanvasStore = create<CanvasState>()(
 
       // Sticky entity drawer
       drawerNodeId: null,
+      drawerSuppressed: false,
+      setDrawerSuppressed: (suppressed) => set({ drawerSuppressed: suppressed }),
       openNodeDrawer: (id) => set({ drawerNodeId: id }),
       closeNodeDrawer: () => set({ drawerNodeId: null }),
 

@@ -125,6 +125,27 @@ describe('TraceWalkDock — the flow, counted', () => {
   })
 })
 
+describe('TraceWalkDock — bottom-chrome coexistence', () => {
+  it('publishes its height as --trace-dock-height on the canvas body, and clears it on unmount', () => {
+    const host = document.createElement('div')
+    host.setAttribute('data-canvas-body', '')
+    document.body.appendChild(host)
+    const { unmount } = render(<TraceWalkDock {...({
+      tracedName: 'x', nodeCount: 1, flowCount: 1, upstreamCount: 0, downstreamCount: 0,
+      hiddenCount: 0, typeCensus: [], upstream: [], downstream: [],
+      showUpstream: true, showDownstream: true,
+      onToggleUpstream: vi.fn(), onToggleDownstream: vi.fn(), onJumpToUrn: vi.fn(),
+      onOpenFlowView: vi.fn(), walkStatus: 'done', walkError: null,
+      status: status({ exhausted: true }), onKeepWalking: vi.fn(), onRetry: vi.fn(), onExit: vi.fn(),
+    } satisfies TraceWalkDockProps)} />, { container: host })
+
+    expect(host.style.getPropertyValue('--trace-dock-height')).toMatch(/px$/)
+    unmount()
+    expect(host.style.getPropertyValue('--trace-dock-height')).toBe('')
+    host.remove()
+  })
+})
+
 describe('TraceWalkDock — the participants panel', () => {
   it('expands to list every upstream and downstream participant', () => {
     renderDock()
