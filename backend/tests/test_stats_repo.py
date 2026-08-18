@@ -162,6 +162,95 @@ async def test_upsert_does_not_create_duplicate(db_session: AsyncSession):
     assert fetched.node_count == 2
 
 
+# ── counts facet: the digest is derived, never supplied ───────────────
+
+async def test_counts_write_always_stamps_a_digest_of_what_it_wrote(
+    db_session: AsyncSession,
+):
+    """The sweep's tripwire compares this digest against the one it last
+    evaluated, so a row that carries counts must carry THEIR digest.
+
+    It used to be an optional argument, and three callers (live observe,
+    Probe now, first-contact seeding) wrote changed counts without one — the
+    row then described itself with the previous write's digest and the sweep
+    read "nothing moved" for counts that had just moved.
+    """
+    from backend.app.services.aggregation.fingerprint import (
+        counts_digest_from_counts,
+    )
+
+    ds_id = await _seed_data_source(db_session)
+
+    await stats_repo.upsert_data_source_stats_counts(
+        db_session,
+        ds_id=ds_id,
+        node_count=10, edge_count=3,
+        entity_type_counts='{"Table": 10}',
+        edge_type_counts='{"FLOWS_TO": 3}',
+    )
+    await db_session.flush()
+
+    # Read the value out, not the row: the second write below mutates the
+    # same identity-mapped object.
+    first_digest = (
+        await stats_repo.get_data_source_stats(db_session, ds_id)
+    ).counts_digest
+    assert first_digest == counts_digest_from_counts(
+        {"Table": 10}, {"FLOWS_TO": 3},
+    )
+
+    # The update path is where the bug lived: fresh counts, stale digest.
+    await stats_repo.upsert_data_source_stats_counts(
+        db_session,
+        ds_id=ds_id,
+        node_count=11, edge_count=3,
+        entity_type_counts='{"Table": 11}',
+        edge_type_counts='{"FLOWS_TO": 3}',
+    )
+    await db_session.flush()
+
+    moved = await stats_repo.get_data_source_stats(db_session, ds_id)
+    assert moved.counts_digest == counts_digest_from_counts(
+        {"Table": 11}, {"FLOWS_TO": 3},
+    )
+    assert moved.counts_digest != first_digest
+
+
+# ── touch_probe_stamp ─────────────────────────────────────────────────
+
+async def test_touch_probe_stamp_updates_without_touching_counts(
+    db_session: AsyncSession,
+):
+    """The unanswerable-probe stamp: last_probed_at moves, nothing else."""
+    ds_id = await _seed_data_source(db_session)
+    await stats_repo.upsert_data_source_stats_counts(
+        db_session,
+        ds_id=ds_id,
+        node_count=7, edge_count=3,
+        entity_type_counts='{"Table": 7}',
+        edge_type_counts='{"FLOWS_TO": 3}',
+    )
+    before = await stats_repo.get_data_source_stats(db_session, ds_id)
+    updated_at, digest = before.updated_at, before.counts_digest
+
+    await stats_repo.touch_probe_stamp(db_session, ds_id)
+
+    fetched = await stats_repo.get_data_source_stats(db_session, ds_id)
+    assert fetched.last_probed_at is not None
+    assert fetched.node_count == 7
+    assert fetched.updated_at == updated_at    # the poll clock is untouched
+    assert fetched.counts_digest == digest     # the tripwire is untouched
+
+
+async def test_touch_probe_stamp_noop_when_row_missing(db_session: AsyncSession):
+    """UPDATE-only: fabricating a zero-count row here could read as a wiped
+    overlay downstream."""
+    await stats_repo.touch_probe_stamp(db_session, "ds_nonexistent")
+
+    fetched = await stats_repo.get_data_source_stats(db_session, "ds_nonexistent")
+    assert fetched is None
+
+
 # ── set_top_level_nodes ───────────────────────────────────────────────
 
 async def test_set_top_level_nodes_round_trip(db_session: AsyncSession):

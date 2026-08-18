@@ -11,7 +11,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProviders, listWorkspaces, permissionFn, listJobsGlobal } = vi.hoisted(() => ({
+const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProviders, listWorkspaces, permissionFn, listJobsGlobal, getReconciliation, getReconciliationActivity, reconcileNow } = vi.hoisted(() => ({
     listFleet: vi.fn(),
     refreshSource: vi.fn(),
     getSourceDoc: vi.fn(),
@@ -21,10 +21,16 @@ const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProvid
     listWorkspaces: vi.fn(),
     permissionFn: vi.fn(),
     listJobsGlobal: vi.fn(),
+    getReconciliation: vi.fn(),
+    getReconciliationActivity: vi.fn(),
+    reconcileNow: vi.fn(),
 }))
 
 vi.mock('@/store/auth', () => ({
     usePermission: (perm: string, workspaceId?: string | null) => permissionFn(perm, workspaceId),
+    usePermissionClaims: () => ({}),
+    checkPermission: (_claims: unknown, perm: string, workspaceId?: string | null) =>
+        Boolean(permissionFn(perm, workspaceId)),
 }))
 
 vi.mock('@/services/freshnessService', async () => {
@@ -38,6 +44,9 @@ vi.mock('@/services/freshnessService', async () => {
             getSourceDoc,
             refreshAll,
             getBatch,
+            getReconciliation,
+            getReconciliationActivity,
+            reconcileNow,
         },
     }
 })
@@ -56,7 +65,9 @@ beforeAll(() => {
 import { Freshness } from './index'
 import { FreshnessRow, primaryAction, overflowActions } from './FreshnessRow'
 import { FreshnessDrawer } from './FreshnessDrawer'
-import { compareSeverity, freshnessState, severityRank } from './freshnessTriage'
+import {
+    compareSeverity, freshnessState, isDrifting, isPlatformMastered, needsAttention, severityRank,
+} from './freshnessTriage'
 import type { FreshnessRow as FreshnessRowData } from '@/services/freshnessService'
 
 const recent = new Date(Date.now() - 5 * 60_000).toISOString()
@@ -111,6 +122,20 @@ describe('Freshness cockpit', () => {
         listWorkspaces.mockResolvedValue([{ id: 'ws-1', name: 'Analytics' }])
         // Default: no active jobs, so unrelated tests see no live-progress badges.
         listJobsGlobal.mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 })
+        getReconciliation.mockResolvedValue({
+            policy: {
+                enabled: true, checkIntervalSecs: 3600,
+                envEnabled: true, envCheckIntervalSecs: 3600, envMaxActionsPerRun: 10,
+                envShrinkTolerancePct: 10, envStatsMaxAgeSecs: 2700, allDetectors: [],
+            },
+            runs: [{
+                id: 'rcn_1', mode: 'auto', scanned: 12, skipped: 10, seeded: 0,
+                findings: 2, actions: 2, errors: 0, byReason: {}, bySkip: {},
+                startedAt: recent,
+            }],
+        })
+        getReconciliationActivity.mockResolvedValue({ since: recent, items: [] })
+        reconcileNow.mockResolvedValue({ skipped: false, findings: [], run: null })
         // Default: caller can manage sources (rows show actions); not admin.
         permissionFn.mockImplementation((perm: string) => perm === 'workspace:datasource:manage')
     })
@@ -122,12 +147,31 @@ describe('Freshness cockpit', () => {
             expect(screen.getByText('Orders Graph')).toBeInTheDocument()
         })
         expect(screen.getByText('Customers Graph')).toBeInTheDocument()
-        // "as of Xm ago" cache chips are present.
-        expect(screen.getAllByText(/as of/i).length).toBeGreaterThan(0)
+        expect(screen.getAllByText('Cached').length).toBeGreaterThan(0)
+        expect(screen.getAllByText(/updated/i).length).toBeGreaterThan(0)
+        // Last activity is a human pill, never raw "api · completed".
+        expect(screen.getByText(/Refresh queued/i)).toBeInTheDocument()
+        expect(screen.queryByText(/api ·/i)).not.toBeInTheDocument()
         // The source_changed row has a marker but NO running job → "Queued",
         // not "Recomputing" (which now means a job is genuinely in flight).
-        expect(screen.getByText('Queued')).toBeInTheDocument()
+        expect(screen.getAllByText('Queued').length).toBeGreaterThan(0)
         expect(screen.queryByText('Recomputing')).not.toBeInTheDocument()
+        expect(screen.getAllByText('External').length).toBeGreaterThan(0)
+        expect(screen.queryByText('Versioned')).not.toBeInTheDocument()
+    })
+
+    it('tags a version-controlled source in the Source column', async () => {
+        listFleet.mockResolvedValue({
+            ...fleet,
+            rows: [
+                { ...fleet.rows[0], name: 'Versioned Graph', platformMastered: true },
+                { ...fleet.rows[1], name: 'External Graph', platformMastered: false },
+            ],
+        })
+        renderTab()
+        await waitFor(() => expect(screen.getByText('Versioned Graph')).toBeInTheDocument())
+        expect(screen.getByText('Versioned')).toBeInTheDocument()
+        expect(screen.getByText('External')).toBeInTheDocument()
     })
 
     it('fires read-caches immediately from the row action menu', async () => {
@@ -185,33 +229,123 @@ describe('Freshness cockpit', () => {
         expect(screen.queryByRole('button', { name: /more actions for customers graph/i })).not.toBeInTheDocument()
     })
 
-    // ── R5.1 — stat band counts + tile filtering ─────────────────────
-    it('renders summary counts on the stat band and filters rows by tile', async () => {
+    // ── R5.1 — filter bar facets (stat band removed) ─────────────────
+    it('filters rows from the status segment on the filter bar', async () => {
         const user = userEvent.setup()
         listFleet.mockResolvedValue({
             ...fleet,
             summary: { total: 2, ready: 2, pending: 0, failed: 0, notBuilt: 0, recomputing: 1, needsAttention: 1, cacheStamped: 2 },
         })
-        renderTab()
+        renderTab('/?tab=freshness')
 
-        const band = await screen.findByRole('group', { name: /fleet summary/i })
-        expect(within(band).getByRole('button', { name: /total sources/i })).toHaveTextContent('2')
-        expect(within(band).getByRole('button', { name: /needs attention/i })).toHaveTextContent('1')
+        const bar = await screen.findByRole('group', { name: /filter by status/i })
+        expect(within(bar).getByRole('button', { name: /^Needs attention$/i })).toBeInTheDocument()
+        await waitFor(() => {
+            expect(screen.getByText(/2\/2 cached/)).toBeInTheDocument()
+        })
 
         // Both rows visible before filtering.
         expect(screen.getByText('Orders Graph')).toBeInTheDocument()
         expect(screen.getByText('Customers Graph')).toBeInTheDocument()
 
-        // Clicking the "Needs attention" tile keeps only the stale row.
-        await user.click(within(band).getByRole('button', { name: /needs attention/i }))
+        await user.click(within(bar).getByRole('button', { name: /^Needs attention$/i }))
         await waitFor(() => expect(screen.queryByText('Customers Graph')).not.toBeInTheDocument())
         expect(screen.getByText('Orders Graph')).toBeInTheDocument()
         expect(probe.search).toContain('fstatus=needsAttention')
 
-        // Clicking "Total sources" clears the facet.
-        await user.click(within(band).getByRole('button', { name: /total sources/i }))
+        await user.click(within(bar).getByRole('button', { name: /^All$/i }))
         await waitFor(() => expect(screen.getByText('Customers Graph')).toBeInTheDocument())
         expect(probe.search).not.toContain('fstatus')
+    })
+
+    it('toggles the suspended facet from the pulse needs-a-person count', async () => {
+        const user = userEvent.setup()
+        listFleet.mockResolvedValue({
+            total: 2,
+            rows: [
+                { ...fleet.rows[0], driftState: 'suspended', name: 'Held Source' },
+                { ...fleet.rows[1], driftState: 'inSync', name: 'Healthy Source' },
+            ],
+            summary: {
+                total: 2, ready: 2, pending: 0, failed: 0, notBuilt: 0,
+                recomputing: 0, needsAttention: 1, cacheStamped: 2,
+                drifting: 0, suspended: 1,
+            },
+        })
+        renderTab('/?tab=freshness&fstatus=')
+
+        await waitFor(() => expect(screen.getByText('Held Source')).toBeInTheDocument())
+        // Pulse count — prefer the aria-pressed control over Start here chips.
+        const pulse = screen.getAllByRole('button', { name: /held by the breaker/i })
+            .find(el => el.getAttribute('aria-pressed') != null)
+        expect(pulse).toBeTruthy()
+        await user.click(pulse!)
+        await waitFor(() => expect(screen.queryByText('Healthy Source')).not.toBeInTheDocument())
+        expect(screen.getByText('Held Source')).toBeInTheDocument()
+        expect(probe.search).toContain('fstatus=suspended')
+    })
+
+    it('renders a recon fetch error instead of looking healthy', async () => {
+        getReconciliation.mockReset()
+        getReconciliation.mockRejectedValue(new Error('boom'))
+        renderTab()
+        expect(await screen.findByText(/could not load overlay integrity/i, {}, { timeout: 4000 }))
+            .toBeInTheDocument()
+    })
+
+    it('lands on every source instead of auto-filtering to needs-attention', async () => {
+        listFleet.mockResolvedValue({
+            ...fleet,
+            summary: {
+                total: 2, ready: 1, pending: 0, failed: 0, notBuilt: 0,
+                recomputing: 0, needsAttention: 1, cacheStamped: 2,
+            },
+        })
+        renderTab()
+        expect(await screen.findByText('Orders Graph')).toBeInTheDocument()
+        expect(screen.getByText('Customers Graph')).toBeInTheDocument()
+        expect(probe.search).not.toContain('fstatus=needsAttention')
+        expect(probe.search).not.toContain('fstatus=drifting')
+    })
+
+    it('names the failure cause on the row and filters related failures', async () => {
+        const user = userEvent.setup()
+        listFleet.mockResolvedValue({
+            total: 2,
+            rows: [
+                {
+                    ...fleet.rows[0], name: 'OOM One', aggregationStatus: 'failed',
+                    staleReason: null, lastFailureCategory: 'out_of_memory',
+                },
+                {
+                    ...fleet.rows[1], name: 'OOM Two', aggregationStatus: 'failed',
+                    staleReason: null, lastFailureCategory: 'out_of_memory',
+                },
+            ],
+            summary: {
+                total: 2, ready: 0, pending: 0, failed: 2, notBuilt: 0,
+                recomputing: 0, needsAttention: 2, cacheStamped: 2,
+            },
+        })
+        renderTab('/?tab=freshness&fstatus=')
+        await waitFor(() => expect(screen.getAllByText('Out of memory').length).toBeGreaterThanOrEqual(2))
+        await user.click(screen.getAllByRole('button', { name: /1 more like this/i })[0])
+        await waitFor(() => expect(probe.search).toContain('ffail=out_of_memory'))
+    })
+
+    it('lets an operator select ready sources and refresh caches in bulk', async () => {
+        const user = userEvent.setup()
+        renderTab('/?tab=freshness&fstatus=')
+        await waitFor(() => expect(screen.getByText('Customers Graph')).toBeInTheDocument())
+        await user.click(screen.getByRole('checkbox', { name: 'Select all sources' }))
+        expect(await screen.findByText('2 sources selected')).toBeInTheDocument()
+        const caches = screen.getAllByRole('button', { name: 'Refresh caches' })
+        expect(caches.length).toBeGreaterThan(0)
+        expect(screen.getByRole('button', { name: 'Rebuild lineage' })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'Retry rebuild' })).not.toBeInTheDocument()
+        await user.click(caches[caches.length - 1])
+        await waitFor(() => expect(refreshSource).toHaveBeenCalled())
+        expect(refreshSource.mock.calls.every(([, body]) => body.scope === 'read-caches')).toBe(true)
     })
 
     // ── R5.2 — severity ordering helper ──────────────────────────────
@@ -227,14 +361,37 @@ describe('Freshness cockpit', () => {
         const ready = mk({ name: 'ready', aggregationStatus: 'ready' })
         const notBuilt = mk({ name: 'notBuilt', aggregationStatus: null })
 
-        expect([
-            severityRank(failed), severityRank(recomputing), severityRank(pending),
-            severityRank(cooldown), severityRank(ready), severityRank(notBuilt),
-        ]).toEqual([0, 1, 2, 3, 4, 5])
+        // Drifting outranks recomputing: a recomputing source is already on
+        // its way to correct, while a drifting one is serving a picture that
+        // no longer matches its data with nothing yet in flight for it.
+        const drifting = mk({ name: 'drifting', aggregationStatus: 'ready', driftState: 'overlayMissing' })
 
-        const shuffled = [ready, notBuilt, failed, cooldown, pending, recomputing]
+        expect([
+            severityRank(failed), severityRank(drifting), severityRank(recomputing),
+            severityRank(pending), severityRank(cooldown), severityRank(ready),
+            severityRank(notBuilt),
+        ]).toEqual([0, 1, 2, 3, 4, 5, 6])
+
+        // A version-controlled source is NOT drifting and does not need
+        // attention. It is deliberately excluded from every detector because
+        // version control maintains its rollups, so surfacing it as a problem
+        // would put a permanent false alarm in the cockpit. Mirrors
+        // ``_DRIFTING_STATES`` in service.py, which excludes it too.
+        const managed = mk({ name: 'managed', aggregationStatus: 'ready', driftState: 'managed' })
+        expect(isDrifting(managed)).toBe(false)
+        expect(needsAttention(managed)).toBe(false)
+        expect(severityRank(managed)).toBe(severityRank(ready))
+        expect(isPlatformMastered(managed)).toBe(true)
+        expect(isPlatformMastered(mk({ platformMastered: true, driftState: 'inSync' }))).toBe(true)
+        expect(isPlatformMastered(mk({ platformMastered: false, driftState: 'managed' }))).toBe(false)
+
+        const suspended = mk({ name: 'suspended', aggregationStatus: 'ready', driftState: 'suspended' })
+        expect(needsAttention(suspended)).toBe(true)
+        expect(isDrifting(suspended)).toBe(false)
+
+        const shuffled = [ready, notBuilt, failed, cooldown, pending, recomputing, drifting]
         expect(shuffled.slice().sort(compareSeverity).map(r => r.name))
-            .toEqual(['failed', 'recomputing', 'pending', 'cooldown', 'ready', 'notBuilt'])
+            .toEqual(['failed', 'drifting', 'recomputing', 'pending', 'cooldown', 'ready', 'notBuilt'])
 
         // Ties in severity break by most-recent aggregation, then name.
         const older = mk({ name: 'aardvark', aggregationStatus: 'ready', lastAggregatedAt: '2020-01-01T00:00:00Z' })
@@ -546,6 +703,49 @@ describe('Freshness cockpit', () => {
         await waitFor(() => {
             expect(refreshSource).toHaveBeenCalledWith('ds-1', expect.objectContaining({ scope: 'rollups' }))
         })
+    })
+
+    it('after Probe drift on an external source, offers Rebuild lineage now', async () => {
+        const user = userEvent.setup()
+        permissionFn.mockImplementation(
+            (perm: string) => perm === 'system:admin' || perm === 'workspace:datasource:manage',
+        )
+        getSourceDoc.mockImplementation(async (_id: string, probe?: boolean) => ({
+            ...baseDoc,
+            platformMastered: false,
+            drifted: probe ? true : null,
+            liveFingerprint: probe ? 'live-fp' : null,
+            liveNodeCount: probe ? 99 : null,
+            liveEdgeCount: probe ? 40 : null,
+        }))
+        renderDrawer()
+
+        await user.click(await screen.findByRole('button', { name: /probe now/i }))
+        expect(await screen.findByText(/live graph does not match the last aggregation/i)).toBeInTheDocument()
+        expect(screen.getByText(/counts were refreshed/i)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /rebuild lineage now/i })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /reconcile this source/i })).toBeInTheDocument()
+
+        await user.click(screen.getByRole('button', { name: /rebuild lineage now/i }))
+        await waitFor(() => {
+            expect(refreshSource).toHaveBeenCalledWith('ds-1', expect.objectContaining({ scope: 'rollups' }))
+        })
+    })
+
+    it('after Probe drift on a versioned source, points to version control without a reconcile fix', async () => {
+        const user = userEvent.setup()
+        getSourceDoc.mockImplementation(async (_id: string, probe?: boolean) => ({
+            ...baseDoc,
+            platformMastered: true,
+            drifted: probe ? true : null,
+            liveFingerprint: probe ? 'live-fp' : null,
+        }))
+        renderDrawer()
+
+        await user.click(await screen.findByRole('button', { name: /probe now/i }))
+        expect(await screen.findByText(/version control owns the rollups/i)).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /rebuild lineage now/i })).not.toBeInTheDocument()
+        expect(screen.getByRole('link', { name: /open version control/i })).toBeInTheDocument()
     })
 
     // ── G3.R3 — fleet "Refresh all sources" (admin-gated) ────────────

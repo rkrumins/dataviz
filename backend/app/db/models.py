@@ -1023,6 +1023,23 @@ class DataSourceStatsORM(Base):
     top_level_nodes = Column(Text, nullable=True)        # JSON payload, NULL = never materialized
     top_level_updated_at = Column(Text, nullable=True)   # ISO timestamp, freshness marker
 
+    # Drift-probe facet. ``counts_digest`` hashes EVERY count above, AGGREGATED
+    # included; the reconcile sweep stamps the value it last evaluated into
+    # ``aggregation.data_source_state.last_seen_counts_digest``, so "did
+    # anything move since we last looked" is a SQL comparison rather than an
+    # evaluation pass over the fleet. Including AGGREGATED is deliberate — the
+    # drift BASELINE must exclude it (a rebuild would move it), but a tripwire
+    # that excluded it could not see a wiped overlay on unchanged raw data.
+    # ``last_probed_at`` is the probe lane's own cadence marker, separate from
+    # the stats poll's ``data_source_polling_configs.last_polled_at`` because
+    # the two lanes run at very different frequencies.
+    counts_digest = Column(Text, nullable=True)
+    last_probed_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_ds_stats_probe_due", "last_probed_at"),
+    )
+
     # Relationships
     data_source = relationship("WorkspaceDataSourceORM", back_populates="stats")
 
@@ -2580,18 +2597,42 @@ class RefreshEventORM(Base):
     workspace_id = Column(Text, nullable=True)
     data_source_id = Column(Text, nullable=False)
     provider_id = Column(Text, nullable=True)
-    origin = Column(Text, nullable=False)      # script|connector|api|drift|reconcile
+    origin = Column(Text, nullable=False)      # script|connector|api|drift|reconcile|reconcile-sweep
     actor = Column(Text, nullable=False, default="internal")
     scope = Column(Text, nullable=False)       # auto|read-caches|rollups|full|batch-item|clear
     gate = Column(Text, nullable=False)        # changed|unchanged|forced|n/a
     actions = Column(Text, nullable=True)      # JSON: what was acted on
     outcome = Column(Text, nullable=False)     # accepted|deferred|noop|conflict|error|completed|failed
     detail = Column(Text, nullable=True)
+    # WHY the reconciliation sweep acted — one of the typed detector codes in
+    # ``services/aggregation/reconcile.REASONS``. Deliberately unconstrained
+    # (like ``detail``) so adding a detector later needs no migration.
+    reason = Column(Text, nullable=True)
+    # JSON evidence behind ``reason``: observed vs expected AGGREGATED edges,
+    # raw node/edge counts before → after, both fingerprints, and how old the
+    # stats row was. Kept OUT of ``actions``, which is contractually "what the
+    # signal DID" and is a List[str] on the wire.
+    evidence = Column(Text, nullable=True)
+    # The aggregation job this event produced, when it produced one. Without
+    # it the two halves of the audit trail never meet: this table knows WHY a
+    # rebuild was decided on and Job History knows WHAT the rebuild did, and
+    # nothing joined them. Logical reference (no FK — different domain).
+    job_id = Column(Text, nullable=True)
+    # The reconcile_runs row that produced this event, when the origin is
+    # reconcile-sweep. Lets the overnight ledger join "this pass" to the
+    # sources it touched, instead of filtering Job History by trigger + day.
+    run_id = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("idx_refresh_events_ds_ts", "data_source_id", "ts"),
+        Index("idx_refresh_events_origin_run", "origin", "run_id"),
         CheckConstraint(
-            "origin IN ('script', 'connector', 'api', 'drift', 'reconcile')",
+            # 'reconcile' is the stale-marker reconciler in scheduler.py;
+            # 'reconcile-sweep' is the drift / overlay-integrity sweep. They
+            # are different subsystems and the UI distinguishes them, so the
+            # new one gets its own value rather than reusing the old.
+            "origin IN ('script', 'connector', 'api', 'drift', 'reconcile', "
+            "'reconcile-sweep')",
             name="ck_refresh_events_origin",
         ),
         CheckConstraint(

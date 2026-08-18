@@ -41,6 +41,11 @@ export interface AggregationJobResponse {
   dataSourceId: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   triggerSource: string;
+  /** Set only when ``triggerSource === 'reconcile'``: the detector that fired
+   *  and the counts behind it, read from the audit event naming this job.
+   *  "Automatic" alone just relocates the question — this answers it. */
+  reconcileReason?: string | null;
+  reconcileEvidence?: Record<string, unknown> | null;
   progress: number;
   totalEdges: number;
   processedEdges: number;
@@ -131,6 +136,13 @@ export interface DataSourceReadinessResponse {
   /** True when a ready cube predates the depth-stamp contract and should be
    *  rebuilt — drives the per-source "rebuild to fix nested hierarchies" warning. */
   needsRebuild?: boolean;
+  /** Reconciliation verdict from the last drift check, so the profile can say
+   *  whether the rollups still match the graph without a second request. */
+  driftState?: string | null;
+  lastReconciledAt?: string | null;
+  lastReconcileReason?: string | null;
+  /** Resolved per-source → global → env. */
+  autoReconcile?: boolean | null;
   message: string;
 }
 
@@ -155,6 +167,13 @@ export interface JobsSummary {
 export interface AggregationCadence {
   rebuildMinIntervalSecs?: number | null; // 0 .. 86400 (0 disables the throttle)
   driftAutoRebuild?: boolean | null;
+  /** Whether sources are actively probed for changed counts. Off means drift
+   *  is only noticed when the much slower stats poll happens to refresh. */
+  probeEnabled?: boolean | null;
+  /** How often each source's counts are re-read, 15 .. 86400. This is the
+   *  self-detection SLO — a source nobody notifies us about is noticed within
+   *  roughly this window plus one sweep tick. */
+  probeIntervalSecs?: number | null;
 }
 
 export interface AggregationSettingsResponse {
@@ -164,6 +183,8 @@ export interface AggregationSettingsResponse {
    *  `persisted ?? envDefault` so a no-op save round-trips the real default. */
   envRebuildMinIntervalSecs?: number | null;
   envDriftAutoRebuild?: boolean | null;
+  envProbeEnabled?: boolean | null;
+  envProbeIntervalSecs?: number | null;
   updatedAt?: string | null;
   updatedBy?: string | null;
 }

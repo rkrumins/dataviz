@@ -155,6 +155,36 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Stuck-job reconciler started")
 
+    # 8.5 Reconciliation sweep — a different subsystem from the reconciler
+    # above despite the shared word. That one keeps JOBS honest; this one
+    # keeps the :AGGREGATED OVERLAY honest, detecting a wipe, a shrink, a
+    # never-built source or raw-count drift from the stats service's cached
+    # counts. It is given no registry by construction, so it can never make a
+    # graph call; its own advisory lock (a distinct key) keeps replicas from
+    # double-sweeping.
+    from .reconcile_sweeper import run_reconcile_sweeper
+    recon_sweeper_shutdown = asyncio.Event()
+    recon_sweeper_task = asyncio.create_task(
+        run_reconcile_sweeper(get_jobs_session, recon_sweeper_shutdown),
+        name="aggregation-reconcile-sweeper",
+    )
+    logger.info("Reconciliation sweeper started")
+
+    # 8.6 Probe scheduler — what makes the sweep above TIMELY. The sweep can
+    # only act on the counts it finds in Postgres, and those used to arrive on
+    # the stats service's 900s poll because refreshing them meant two full
+    # graph scans. This loop enqueues constant-time counter reads instead, so
+    # the evidence is minutes fresher and drift is caught within a minute of
+    # happening. It decides only WHICH sources and WHEN; the stats service
+    # executes them, keeping every provider call in the tier that owns them.
+    from .probe_scheduler import run_probe_scheduler
+    probe_shutdown = asyncio.Event()
+    probe_task = asyncio.create_task(
+        run_probe_scheduler(get_jobs_session, probe_shutdown),
+        name="aggregation-probe-scheduler",
+    )
+    logger.info("Probe scheduler started")
+
     # 9. State-sync consumer (WS1.2). Projects aggregation status events
     # from the events stream into public.workspace_data_sources (the
     # viz-service's local read hint) and invalidates aggregated-read
@@ -189,6 +219,18 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(reconciler_task, timeout=2.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             reconciler_task.cancel()
+    recon_sweeper_shutdown.set()
+    if not recon_sweeper_task.done():
+        try:
+            await asyncio.wait_for(recon_sweeper_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            recon_sweeper_task.cancel()
+    probe_shutdown.set()
+    if not probe_task.done():
+        try:
+            await asyncio.wait_for(probe_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            probe_task.cancel()
     await state_sync.stop()
     state_sync_task.cancel()
     try:
@@ -261,6 +303,8 @@ from .schemas import (  # noqa: E402
     DriftCheckResponse,
     FreshnessSettingsRequest,
     FreshnessSettingsResponse,
+    ReconcileRunInternal,
+    ReconcileRunResponse,
     RefreshRequestInternal,
     RefreshResponse,
     ResumeOverrides,
@@ -275,8 +319,19 @@ from .service import ConflictError, NotFoundError  # noqa: E402
 
 @app.get("/health", tags=["health"])
 async def health():
-    """Health check for K8s liveness/readiness probes."""
-    return {"status": "healthy", "role": "aggregation-controlplane"}
+    """Health check for K8s liveness/readiness probes.
+
+    Carries the probe scheduler's last tick: drift detection is only as timely
+    as this loop, and "no findings" and "nothing is looking" are otherwise
+    indistinguishable from the outside.
+    """
+    from .probe_scheduler import get_probe_scheduler_status
+
+    return {
+        "status": "healthy",
+        "role": "aggregation-controlplane",
+        "probe_scheduler": get_probe_scheduler_status(),
+    }
 
 
 # ── GET /aggregation/jobs/summary ───────────────────────────────────
@@ -612,14 +667,137 @@ async def set_freshness_settings(
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(_get_session),
 ):
+    """Partial-update semantics, matching the web-tier route: only fields the
+    caller actually sent are written, because ``null`` on any of them means
+    "clear the override"."""
+    sent = body.model_fields_set
+    stored_interval = None
+    recon = {}
+    probe = {}
+    pause = {}
     try:
-        stored = await svc.set_source_rebuild_interval(
-            ds_id, body.rebuild_min_interval_secs, session,
-        )
+        if "rebuild_min_interval_secs" in sent:
+            stored_interval = await svc.set_source_rebuild_interval(
+                ds_id, body.rebuild_min_interval_secs, session,
+            )
+        if {"auto_reconcile_enabled", "reconcile_check_interval_secs"} & sent:
+            kwargs = {}
+            if "auto_reconcile_enabled" in sent:
+                kwargs["enabled"] = body.auto_reconcile_enabled
+            if "reconcile_check_interval_secs" in sent:
+                kwargs["check_interval_secs"] = body.reconcile_check_interval_secs
+            recon = await svc.set_source_reconcile_settings(
+                ds_id, session, **kwargs,
+            )
+        # Same field set as the direct-mode route in
+        # ``api/v1/endpoints/freshness.py`` — proxy mode is what every
+        # deployed topology runs, so a field handled only there is a
+        # silent 200-and-write-nothing in production.
+        if {"probe_enabled", "probe_interval_secs"} & sent:
+            kwargs = {}
+            if "probe_enabled" in sent:
+                kwargs["enabled"] = body.probe_enabled
+            if "probe_interval_secs" in sent:
+                kwargs["interval_secs"] = body.probe_interval_secs
+            probe = await svc.set_source_probe_settings(
+                ds_id, session, **kwargs,
+            )
+        if "paused_until" in sent:
+            pause = await svc.set_source_pause(
+                ds_id, session, paused_until=body.paused_until,
+            )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return FreshnessSettingsResponse(
-        data_source_id=ds_id, rebuild_min_interval_secs=stored,
+        data_source_id=ds_id,
+        rebuild_min_interval_secs=stored_interval,
+        auto_reconcile_enabled=recon.get("reconcile_enabled"),
+        reconcile_check_interval_secs=recon.get("reconcile_check_interval_secs"),
+        probe_enabled=probe.get("probe_enabled"),
+        probe_interval_secs=probe.get("probe_interval_secs"),
+        paused_until=pause.get("paused_until"),
+    )
+
+
+# ── POST /aggregation/reconcile/run ──────────────────────────────────
+
+@app.post(
+    "/aggregation/reconcile/run",
+    response_model=ReconcileRunResponse,
+    summary="Run a reconciliation sweep now (or preview one)",
+)
+async def run_reconcile(body: ReconcileRunInternal):
+    """On-demand twin of the scheduled sweep. Explicit ``dataSourceIds``
+    bypass per-source due-ness, so an operator can reconcile one source
+    without waiting for its next check window."""
+    from backend.app.db.engine import get_jobs_session
+
+    from .reconcile_sweeper import ReconciliationSweeper
+    from .schemas import ReconcileFinding, ReconcileRunResponse
+
+    sweeper = ReconciliationSweeper(get_jobs_session)
+    result = await sweeper.sweep(
+        dry_run=body.dry_run,
+        data_source_ids=body.data_source_ids,
+        mode="preview" if body.dry_run else "manual",
+        actor=body.actor,
+    )
+    if result is None:
+        # Another replica holds the sweep lock — nothing ran, and that is a
+        # normal outcome rather than an error.
+        return ReconcileRunResponse(skipped=True)
+    return ReconcileRunResponse(
+        run=_run_model_cp(result),
+        findings=_findings_from_result(result),
+    )
+
+
+def _findings_from_result(result):
+    """Named drifted sources for Check now and Preview. Live runs persist
+    ``finding_rows``; dry-run Preview also fills ``pending``."""
+    from .schemas import ReconcileFinding
+
+    if result.finding_rows:
+        return [
+            ReconcileFinding(
+                data_source_id=row["dataSourceId"],
+                workspace_id=row.get("workspaceId"),
+                name=row.get("name"),
+                provider_id=row.get("providerId"),
+                provider_name=row.get("providerName"),
+                reason=row["reason"],
+                evidence=row.get("evidence") or {},
+            )
+            for row in result.finding_rows
+            if row.get("dataSourceId") and row.get("reason")
+        ]
+    return [
+        ReconcileFinding(
+            data_source_id=a.data_source_id,
+            workspace_id=a.workspace_id,
+            name=a.name,
+            provider_id=a.provider_id,
+            provider_name=a.provider_name,
+            reason=a.reason,
+            evidence=a.evidence,
+        )
+        for a in result.pending
+    ]
+
+
+def _run_model_cp(result):
+    """SweepResult → the wire model (the sweep's in-memory tallies, not a
+    re-read of the row it just wrote)."""
+    from .schemas import ReconcileRun
+
+    return ReconcileRun(
+        id=result.run_id, mode=result.mode, scanned=result.scanned,
+        skipped=result.skipped, seeded=result.seeded,
+        findings=result.findings, actions=result.actions,
+        errors=result.errors, by_reason=result.by_reason,
+        by_skip=result.by_skip,
+        started_at=getattr(result, "started_at", None),
+        finished_at=getattr(result, "finished_at", None),
     )
 
 

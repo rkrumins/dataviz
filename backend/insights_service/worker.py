@@ -52,10 +52,15 @@ from .redis_streams import (
 from .schemas import (
     DiscoveryJobEnvelope,
     JobEnvelope,
+    ProbeJobEnvelope,
     PurgeJobEnvelope,
     StatsJobEnvelope,
     parse_envelope,
 )
+
+# Outer budget for a drift probe. Constant-time work plus admission wait and
+# session churn; deliberately NOT size-adaptive (see _resolve_timeout_and_bucket).
+_PROBE_TIMEOUT_SECS = float(os.getenv("STATS_PROBE_TIMEOUT_SECS", "20"))
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +123,7 @@ class InsightsJobConsumer:
             "sweep": self._config.sweep_concurrency,
             "heavy": self._config.heavy_concurrency,
             "purge": self._config.purge_concurrency,
+            "probe": self._config.probe_concurrency,
         }
 
     def _lane_free_slots(self) -> dict[str, int]:
@@ -383,6 +389,31 @@ class InsightsJobConsumer:
     ) -> None:
         """Persist the per-scope error, then decide retry vs DLQ based
         on XPENDING delivery count."""
+        if isinstance(envelope, ProbeJobEnvelope):
+            # MUST precede the StatsJobEnvelope branch below: ProbeJobEnvelope
+            # subclasses it (the same trap _resolve_timeout_and_bucket guards
+            # against), so without this a failed probe runs the STATS poll's
+            # failure path — stamping last_status="error" and last_polled_at=now
+            # on the polling config. The reconcile sweep reads that status as an
+            # absolute "stats unhealthy" guard, and only a successful counts poll
+            # ever clears it, so a probe could disable drift detection for the
+            # source it was meant to accelerate (and push the poll's own due-time
+            # out by up to a full poll interval).
+            #
+            # A probe owns no polling-config lifecycle — see collector.
+            # probe_counts. It logs and drops; the ProbeScheduler re-enqueues on
+            # its next tick, which is seconds away, and the sweep's own check
+            # interval remains the correctness backstop either way. A DLQ entry
+            # for work that is about to be superseded would be noise.
+            logger.warning(
+                "probe.failure scope=%s error=%s — dropping; the probe "
+                "scheduler retries on its next tick",
+                envelope.scope_key, error[:200],
+            )
+            await self._ack(stream_cfg, msg_id)
+            await release_claim(envelope.scope_key, stream=stream_cfg)
+            return
+
         delivery_count = await self._delivery_count(stream_cfg, msg_id)
         max_attempts = self._config.max_delivery_attempts
 
@@ -567,11 +598,26 @@ class InsightsJobConsumer:
         return resolved, node_count
 
     async def _resolve_scope_lock_key(self, envelope: JobEnvelope) -> str | None:
-        """Return the asyncio.Semaphore key for this envelope. For
-        discovery, the envelope already carries ``provider_id:asset_name``,
-        no DB hit needed."""
+        """Return the asyncio.Semaphore key for this envelope, or None for a
+        kind that takes no per-graph lock. For discovery, the envelope already
+        carries ``provider_id:asset_name``, no DB hit needed."""
         if isinstance(envelope, DiscoveryJobEnvelope):
             return envelope.scope_key
+        if isinstance(envelope, ProbeJobEnvelope):
+            # MUST precede the shared stats resolution below (ProbeJobEnvelope
+            # subclasses StatsJobEnvelope) — and returning None here is the
+            # point: a probe takes NO per-graph semaphore.
+            #
+            # The semaphore exists to keep two scans of the same graph from
+            # running at once. A probe is a constant-time counter read, so it
+            # cannot meaningfully contend with one — but it would still QUEUE
+            # behind one, for the scan's full duration (up to 600s), because the
+            # semaphore is acquired before the job's own timeout starts. With
+            # max_per_graph=1 the whole probe lane could sit parked behind deep
+            # scans, and the parked graph is precisely the one whose counts may
+            # have just moved. Exempting probes is what actually delivers the
+            # lane isolation the separate PROBE_STREAM was created for.
+            return None
         scope_key, _ = await self._resolve_ds_meta(envelope.data_source_id)  # type: ignore[attr-defined]
         return scope_key
 
@@ -595,6 +641,17 @@ class InsightsJobConsumer:
                 float(resilience.DISCOVERY_LIVE_TIMEOUT_SECS) + 10.0,
                 "n/a",
             )
+        if isinstance(envelope, ProbeJobEnvelope):
+            # MUST precede the stats branch: ProbeJobEnvelope subclasses
+            # StatsJobEnvelope, so without this a probe inherits the
+            # size-adaptive poll budget and is allowed to hang for ten minutes
+            # holding a slot in a lane sized for millisecond work.
+            #
+            # A probe reads counters, so its cost is independent of graph size
+            # — a fixed budget is the honest shape here, and anything slower
+            # than this is a sick provider the next tick should retry against,
+            # not a big graph deserving patience.
+            return _PROBE_TIMEOUT_SECS, "probe"
         # stats / schema — node count comes from the cached ds-meta
         # lookup (the scope-key resolution already warmed it).
         _, node_count = await self._resolve_ds_meta(envelope.data_source_id)  # type: ignore[attr-defined]

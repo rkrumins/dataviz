@@ -32,5 +32,6 @@ lerna-debug.log*
 *.tsbuildinfo
 
 
-# Visual harness output — regenerate with `npm run harness:shot`.
+# Generated visual output — regenerate with `npm run harness:shot`.
 .harness/
+.superpowers-shots/

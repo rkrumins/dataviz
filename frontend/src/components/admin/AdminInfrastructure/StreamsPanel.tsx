@@ -14,7 +14,7 @@ import type {
     OutboxSection, StreamDescriptor, StreamsSection,
 } from '@/services/systemStatusService'
 import { compactNum, formatAgeMs } from './meta'
-import { Sparkline } from './Sparkline'
+import { Sparkline } from '@/components/ui/Sparkline'
 
 interface Props {
     streams: StreamsSection | null

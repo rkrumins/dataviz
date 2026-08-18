@@ -70,7 +70,7 @@ services:
       # at +80% but never below 256MB) so the incr — and thus restart time —
       # stays small. The acute case (a bulk import) is compacted explicitly by
       # the importer via BGREWRITEAOF right after the push.
-      REDIS_ARGS: --maxmemory ${FALKORDB_MAXMEMORY:-12gb} --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes --auto-aof-rewrite-percentage 80 --auto-aof-rewrite-min-size 256mb
+      REDIS_ARGS: --maxmemory ${FALKORDB_MAXMEMORY:-14gb} --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes --auto-aof-rewrite-percentage 80 --auto-aof-rewrite-min-size 256mb
     volumes:
       # FalkorDB's actual data dir is /var/lib/falkordb/data (the image
       # symlinks /data/data → there). Mounting the volume at /data would
@@ -205,6 +205,12 @@ services:
 
 
       AGGREGATION_API_PORT: "8091"
+      # Probe claim TTL. Set HERE because the claim is taken where a probe is
+      # enqueued — the probe scheduler and the reconcile sweep, both of which
+      # live in this process. It only has to outlive one in-flight probe, not
+      # a large-graph scan: reusing the stats TTL (1200s) would leave a source
+      # un-probeable for twenty minutes after a worker died mid-probe.
+      STATS_PROBE_DEDUP_TTL_SECS: "${STATS_PROBE_DEDUP_TTL_SECS:-90}"
       SYNODIC_ROLE: controlplane
       # Internal service auth (WS2.3). Shared secret the control plane
       # requires on every route except health/docs. UNSET by default ->
@@ -493,6 +499,12 @@ services:
       STATS_SWEEP_CONCURRENCY: "${STATS_SWEEP_CONCURRENCY:-2}"
       STATS_HEAVY_CONCURRENCY: "${STATS_HEAVY_CONCURRENCY:-1}"
       STATS_PURGE_CONCURRENCY: "${STATS_PURGE_CONCURRENCY:-1}"
+      # Drift probes read FalkorDB's counters instead of scanning, so this
+      # budget bounds fan-out against one endpoint, not our own CPU. Its own
+      # lane so a minutes-long counts scan can never delay the freshness
+      # signal the reconcile sweep keys on.
+      STATS_PROBE_CONCURRENCY: "${STATS_PROBE_CONCURRENCY:-4}"
+      STATS_PROBE_TIMEOUT_SECS: "${STATS_PROBE_TIMEOUT_SECS:-20}"
       # Background sweep refreshes only REGISTERED assets by default;
       # unregistered ones refresh on demand (hot lane) when viewed.
       DISCOVERY_SWEEP_REGISTERED_ONLY: "${DISCOVERY_SWEEP_REGISTERED_ONLY:-true}"

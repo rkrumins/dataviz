@@ -44,6 +44,7 @@ from backend.app.services.aggregation.schemas import (
 from backend.app.services.permission_service import (
     PermissionClaims,
     has_permission,
+    has_permission_any_workspace,
 )
 from backend.auth_service.interface import User
 from backend.common.models.management import (
@@ -199,6 +200,41 @@ _REQUIRE_DS_MANAGE = _require_ds_perm("workspace:datasource:manage")
 _REQUIRE_SYSTEM_ADMIN = requires("system:admin")
 
 
+# ── Read gate: the Ingestion surface's visibility perms ─────────────
+# Mirrors nav_catalogue.py "ingestion": any of these, held globally or in
+# ANY one workspace, unlocks the read. The cockpit is a cross-workspace
+# operator surface, so the gate is any-workspace rather than per-ds.
+# Shared with the freshness routes (which import it from here): the
+# Automation modal renders read-only for non-admins, so the settings READ
+# uses this gate while the settings WRITE stays ``system:admin``.
+
+_INGESTION_READ_PERMS = (
+    "system:admin",
+    "system:org-admin",
+    "workspace:provider:read",
+    "workspace:datasource:manage",
+)
+
+
+async def _require_ingestion_read(
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+) -> User:
+    """Grant when the caller holds any Ingestion-surface permission
+    (globally or in any workspace). 403 otherwise."""
+    if any(has_permission_any_workspace(claims, p) for p in _INGESTION_READ_PERMS):
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error": "missing_permission",
+            "permission": " | ".join(_INGESTION_READ_PERMS),
+            "scope": {"type": "global", "id": None},
+            "message": "Missing Ingestion access",
+        },
+    )
+
+
 # ── Lazy imports for direct mode (avoid importing if proxy-only) ────
 
 def _direct_imports():
@@ -240,7 +276,10 @@ async def get_jobs_summary(
 @router.get(
     "/aggregation/settings",
     summary="Get global aggregation tuning defaults",
-    dependencies=[Depends(_REQUIRE_SYSTEM_ADMIN)],
+    # Ingestion-read, not admin: the Automation modal renders these values
+    # read-only for non-admins (the response carries tuning/cadence knobs and
+    # env echoes — no secrets). The PUT below stays system:admin.
+    dependencies=[Depends(_require_ingestion_read)],
 )
 async def get_aggregation_settings(
     request: Request,

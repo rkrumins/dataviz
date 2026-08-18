@@ -1,24 +1,22 @@
 /**
  * Freshness — the Ingestion → Freshness triage cockpit.
  *
- * A cross-workspace operator view of every data source's aggregation/cache
- * freshness. The stat band doubles as the status filter; a sticky faceted bar
- * (provider/workspace multi-select, status segment, name search) refines the
- * fleet; the table groups by provider, orders by severity, and collapses the
- * healthy groups into one-line rollups so attention items float to the top.
+ * Overlay integrity briefs the schedule and live verdict; Start here guides
+ * attention; the stat band doubles as the status filter; a sticky faceted bar
+ * (status, provider, workspace, search) refines the fleet; the table groups by
+ * provider and orders by severity.
  *
  * All facet state lives in the URL search params (shared with Ingestion's
  * ``?tab=``), so reload and back/forward restore the view. Provider/workspace
- * facets filter client-side over the fetched page (≤200 rows); the tile counts
- * come from the server ``summary``. Reads never trigger a rebuild.
+ * facets filter client-side over the fetched page (≤200 rows). Reads never
+ * trigger a rebuild.
  */
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Clock, RefreshCw, Zap } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { RefreshCw, Zap } from 'lucide-react'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { usePermission } from '@/store/auth'
+import { usePermission, checkPermission, usePermissionClaims } from '@/store/auth'
 import { useToast } from '@/components/ui/toast'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { workspaceService } from '@/services/workspaceService'
@@ -31,12 +29,19 @@ import { FleetRefreshDialog } from './FleetRefreshDialog'
 import { FreshnessStatBand } from './FreshnessStatBand'
 import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
-import { CadenceSettingsDialog } from './CadenceSettingsDialog'
+import { AutomationModal } from './AutomationModal'
+import { OverlayIntegrity } from './OverlayIntegrity'
 import { useFleetFreshness, useRefreshSource, FRESHNESS_KEYS } from './useFreshness'
 import { useActiveJobs, ACTIVE_JOBS_KEY } from './useActiveJobs'
 import {
-    compareSeverity, isGroupAttention, matchesFacet, type StatusFacet,
+    compareSeverity, freshnessState, isGroupAttention, matchesFacet, matchesFailureFacet,
+    type FailureFacet, type StatusFacet,
 } from './freshnessTriage'
+import { asFailureCategory } from './failureGuidance'
+import { parseDriftWindow } from './reconcileHealth'
+import { StartHereStrip } from './StartHereStrip'
+import { BulkRetryBar } from './BulkRetryBar'
+import { SelectionCheckbox } from './SelectionCheckbox'
 
 const SCOPE_LABEL: Record<RefreshScope, string> = {
     auto: 'Refresh',
@@ -46,12 +51,19 @@ const SCOPE_LABEL: Record<RefreshScope, string> = {
     full: 'Full refresh',
 }
 
-const COLS = 6
+const COLS = 7
 
-const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped']
+const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped', 'drifting', 'suspended']
+const FAILURE_FACETS: readonly FailureFacet[] = [
+    'out_of_memory', 'provider_unavailable', 'ontology', 'timeout', 'conflict', 'unknown',
+]
 
 function parseStatus(raw: string | null): StatusFacet {
     return (raw && (STATUS_FACETS as readonly string[]).includes(raw)) ? (raw as StatusFacet) : ''
+}
+
+function parseFailure(raw: string | null): FailureFacet {
+    return (raw && (FAILURE_FACETS as readonly string[]).includes(raw)) ? (raw as FailureFacet) : ''
 }
 
 function parseList(raw: string | null): string[] {
@@ -69,6 +81,8 @@ export function Freshness() {
     const fprov = useMemo(() => parseList(searchParams.get('fprov')), [searchParams])
     const fws = useMemo(() => parseList(searchParams.get('fws')), [searchParams])
     const fstatus = parseStatus(searchParams.get('fstatus'))
+    const ffail = parseFailure(searchParams.get('ffail'))
+    const fwin = parseDriftWindow(searchParams.get('fwin'))
     const fq = searchParams.get('fq') ?? ''
 
     // Patch specific params, preserving everything else (notably ``tab``).
@@ -105,14 +119,35 @@ export function Freshness() {
         }
     }, [fq])
 
+    // The open drawer lives in the URL, not local state, so a link from
+    // elsewhere in the app — a reconciliation job in Job History, a data
+    // source profile — can land directly on one source's detail instead of
+    // dropping the reader on an unfiltered fleet table to find it again.
+    // Back/forward and a copied link both work as a result.
+    const drawerDsId = searchParams.get('fds')
+    const setDrawerDsId = useCallback(
+        (id: string | null) => patchParams({ fds: id }),
+        [patchParams],
+    )
+    // Stable for the same reason as closeAutomation below: it feeds the
+    // drawer's focus effect.
+    const closeDrawer = useCallback(() => setDrawerDsId(null), [setDrawerDsId])
+
+    // The Automation modal opens from the URL for the same reason the drawer
+    // does: "here is how the schedule is configured" is a link someone sends.
+    const automationOpen = searchParams.get('automation') === 'open'
+    const openAutomation = useCallback(() => patchParams({ automation: 'open' }), [patchParams])
+    // Stable: it feeds the modal's focus effect, and a fresh identity on every
+    // render of this page would pull focus back to the dialog mid-keystroke.
+    const closeAutomation = useCallback(() => patchParams({ automation: null }), [patchParams])
+
     // ── Local (non-URL) UI state ──────────────────────────────────────
-    const [drawerDsId, setDrawerDsId] = useState<string | null>(null)
     const [confirm, setConfirm] = useState<{ dsId: string; scope: RefreshScope; firstBuild?: boolean } | null>(null)
     const [providerDialog, setProviderDialog] = useState<{ id: string; name: string } | null>(null)
     const [fleetDialogOpen, setFleetDialogOpen] = useState(false)
-    const [cadenceOpen, setCadenceOpen] = useState(false)
     const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({})
     const [expandedRow, setExpandedRow] = useState<string | null>(null)
+    const [selectedIds, setSelectedIds] = useState<string[]>([])
 
     // ── Data ──────────────────────────────────────────────────────────
     // No server-side provider/workspace/stale filter: those are client facets
@@ -204,10 +239,11 @@ export function Freshness() {
     const q = fq.trim().toLowerCase()
     const tableRows = useMemo(() => scopeRows.filter(r =>
         matchesFacet(r, fstatus) &&
+        matchesFailureFacet(r, ffail) &&
         (q === '' ||
             (r.name || r.dataSourceId).toLowerCase().includes(q) ||
             (r.providerName ?? '').toLowerCase().includes(q)),
-    ), [scopeRows, fstatus, q])
+    ), [scopeRows, fstatus, ffail, q])
 
     // ── Grouping: attention groups first, severity-sorted within ──────
     const groups = useMemo(() => {
@@ -246,7 +282,7 @@ export function Freshness() {
         measure()
         window.addEventListener('resize', measure)
         return () => window.removeEventListener('resize', measure)
-    }, [fprov, fws, fstatus, fq])
+    }, [fprov, fws, fstatus, ffail, fq])
 
     // ── Refresh actions ───────────────────────────────────────────────
     const doRefresh = (dsId: string, scope: RefreshScope, firstBuild?: boolean) => {
@@ -275,42 +311,73 @@ export function Freshness() {
 
     const busyDsId = refreshSource.isPending ? refreshSource.variables?.dsId : undefined
     const truncated = (fleet.data?.total ?? 0) > rows.length
-    const hasFilters = fprov.length > 0 || fws.length > 0 || fstatus !== '' || q !== ''
-    const clearAll = () => patchParams({ fprov: null, fws: null, fstatus: null, fq: null })
+    const hasFilters = fprov.length > 0 || fws.length > 0 || fstatus !== '' || ffail !== '' || q !== ''
+    const clearAll = () => patchParams({ fprov: null, fws: null, fstatus: null, ffail: null, fq: null })
     const buildMode = confirm?.firstBuild === true
 
+    const toggleSelect = useCallback((id: string) => {
+        setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+    }, [])
+
+    const permissionClaims = usePermissionClaims()
+    const selectableIds = useMemo(() => (
+        tableRows
+            .filter(r => freshnessState(r) !== 'recomputing')
+            .filter(r => checkPermission(permissionClaims, 'workspace:datasource:manage', r.workspaceId))
+            .map(r => r.dataSourceId)
+    ), [tableRows, permissionClaims])
+
+    const allSelectableSelected = selectableIds.length > 0
+        && selectableIds.every(id => selectedIds.includes(id))
+    const someSelectableSelected = selectableIds.some(id => selectedIds.includes(id))
+
+    const toggleSelectAll = useCallback(() => {
+        setSelectedIds(prev => {
+            if (selectableIds.length === 0) return prev
+            const allOn = selectableIds.every(id => prev.includes(id))
+            if (allOn) return prev.filter(id => !selectableIds.includes(id))
+            const merged = new Set(prev)
+            for (const id of selectableIds) merged.add(id)
+            return Array.from(merged)
+        })
+    }, [selectableIds])
+
+    // Only visible selections count (facet change / refetch): derived, not
+    // pruned in an effect, so a facet-hidden selection reappears when the
+    // facet is cleared and the bulk bar still only ever acts on visible rows.
+    const visibleSelectedIds = useMemo(() => {
+        const visible = new Set(tableRows.map(r => r.dataSourceId))
+        return selectedIds.filter(id => visible.has(id))
+    }, [selectedIds, tableRows])
+
     return (
-        <div className="space-y-4">
-            {/* Reload — the fleet also auto-refreshes every 30s while mounted. */}
-            <div className="flex items-center justify-end gap-2">
-                {isSystemAdmin && (
-                    <button
-                        onClick={() => setFleetDialogOpen(true)}
-                        className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
-                    >
-                        <Zap className="w-3.5 h-3.5" />
-                        Refresh all sources
-                    </button>
-                )}
-                {isSystemAdmin && (
-                    <button
-                        onClick={() => setCadenceOpen(true)}
-                        className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
-                    >
-                        <Clock className="w-3.5 h-3.5" />
-                        Cadence settings
-                    </button>
-                )}
-                <button
-                    onClick={() => fleet.refetch()}
-                    disabled={fleet.isFetching}
-                    aria-label="Reload freshness"
-                    className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors disabled:opacity-50"
-                >
-                    <RefreshCw className={cn('w-3.5 h-3.5', fleet.isFetching && 'animate-spin')} />
-                    Reload
-                </button>
-            </div>
+        <div className={`space-y-4${visibleSelectedIds.length > 0 ? ' pb-24' : ''}`}>
+            <OverlayIntegrity
+                summary={summary}
+                activeFacet={fstatus}
+                onFacet={(facet) => patchParams({ fstatus: facet || null })}
+                onOpenAutomation={openAutomation}
+                onReload={() => { void fleet.refetch() }}
+                reloading={fleet.isFetching}
+                onRefreshAll={isSystemAdmin ? () => setFleetDialogOpen(true) : undefined}
+                onOpenSource={setDrawerDsId}
+                window={fwin}
+                onWindowChange={(w) => patchParams({ fwin: w === '24h' ? null : w })}
+            />
+
+            <StartHereStrip
+                summary={summary}
+                rows={scopeRows}
+                status={fstatus}
+                failureFacet={ffail}
+                onStatus={(facet) => patchParams({ fstatus: facet || null })}
+                onFailure={(facet) => patchParams({
+                    ffail: facet || null,
+                    // Cause filters imply looking at failures.
+                    fstatus: facet ? 'needsAttention' : (fstatus || null),
+                })}
+                onClear={() => patchParams({ fstatus: null, ffail: null })}
+            />
 
             {/* Stat band — scrolls away; the tiles are the status filter. */}
             <FreshnessStatBand
@@ -329,10 +396,13 @@ export function Freshness() {
                     selectedWorkspaces={fws}
                     onWorkspacesChange={(ids) => patchParams({ fws: ids.join(',') || null })}
                     status={fstatus}
-                    onStatusChange={(s) => patchParams({ fstatus: s || null })}
+                    onStatusChange={(s) => patchParams({ fstatus: s || null, ffail: null })}
+                    failureFacet={ffail}
+                    onFailureChange={(f) => patchParams({ ffail: f || null })}
                     search={searchInput}
                     onSearchChange={setSearchInput}
                     onClearAll={clearAll}
+                    summary={summary}
                 />
             </div>
 
@@ -365,6 +435,20 @@ export function Freshness() {
                     <table className="w-full min-w-[720px] text-left">
                         <thead>
                             <tr className="text-[10px] uppercase tracking-wide text-ink-muted">
+                                <th style={{ top: headerTop }} className="pl-3 pr-1 py-2 w-10 sticky z-10 bg-canvas">
+                                    {selectableIds.length > 0 ? (
+                                        <SelectionCheckbox
+                                            selected={allSelectableSelected}
+                                            indeterminate={someSelectableSelected && !allSelectableSelected}
+                                            onToggle={toggleSelectAll}
+                                            ariaLabel={allSelectableSelected
+                                                ? 'Deselect all sources'
+                                                : 'Select all sources'}
+                                        />
+                                    ) : (
+                                        <span className="inline-block w-[18px]" aria-hidden />
+                                    )}
+                                </th>
                                 {['Source', 'Aggregation', 'Cache', 'Freshness', 'Last activity'].map(h => (
                                     <th key={h} style={{ top: headerTop }} className="px-3 py-2 font-semibold sticky z-10 bg-canvas">{h}</th>
                                 ))}
@@ -401,6 +485,15 @@ export function Freshness() {
                                                 expanded={expandedRow === row.dataSourceId}
                                                 onToggleExpand={(dsId) => setExpandedRow(cur => (cur === dsId ? null : dsId))}
                                                 onCancelJob={onCancelJob}
+                                                peerRows={tableRows}
+                                                onFilterFailure={(cat) => {
+                                                    const facet = asFailureCategory(cat)
+                                                    if (facet) patchParams({ ffail: facet, fstatus: 'needsAttention' })
+                                                }}
+                                                onFilterStatus={(facet) => patchParams({ fstatus: facet || null })}
+                                                selectable
+                                                selected={selectedIds.includes(row.dataSourceId)}
+                                                onToggleSelect={toggleSelect}
                                             />
                                         ))}
                                     </Fragment>
@@ -411,11 +504,21 @@ export function Freshness() {
                 </div>
             )}
 
+            <BulkRetryBar
+                selectedIds={visibleSelectedIds}
+                rows={tableRows}
+                onClear={() => setSelectedIds([])}
+                onDone={() => {
+                    void fleet.refetch()
+                    void qc.invalidateQueries({ queryKey: ACTIVE_JOBS_KEY })
+                }}
+            />
+
             <FreshnessDrawer
                 key={drawerDsId ?? 'closed'}
                 dsId={drawerDsId}
                 isOpen={drawerDsId != null}
-                onClose={() => setDrawerDsId(null)}
+                onClose={closeDrawer}
                 workspaceName={
                     drawerDsId
                         ? workspaceName.get(rows.find(r => r.dataSourceId === drawerDsId)?.workspaceId ?? '')
@@ -458,9 +561,11 @@ export function Freshness() {
                 onClose={() => setFleetDialogOpen(false)}
             />
 
-            <CadenceSettingsDialog
-                isOpen={cadenceOpen}
-                onClose={() => setCadenceOpen(false)}
+            <AutomationModal
+                open={automationOpen}
+                onClose={closeAutomation}
+                isAdmin={isSystemAdmin}
+                summary={summary}
             />
         </div>
     )

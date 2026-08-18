@@ -1,9 +1,11 @@
+import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from ..models import DataSourceStatsORM
 
@@ -132,6 +134,22 @@ async def invalidate_schema_facets(
     await session.flush()
 
 
+def _counts_digest(entity_type_counts: str, edge_type_counts: str) -> str:
+    """Digest of the counts about to be written. The columns hold JSON text,
+    so parse before hashing; an unparseable value hashes as empty, mirroring
+    the sweeper's own read-side fallback."""
+    from backend.app.services.aggregation.fingerprint import (
+        counts_digest_from_counts,
+    )
+
+    try:
+        entities = json.loads(entity_type_counts or "{}")
+        edges = json.loads(edge_type_counts or "{}")
+    except (TypeError, ValueError):
+        entities, edges = {}, {}
+    return counts_digest_from_counts(entities, edges)
+
+
 async def upsert_data_source_stats_counts(
     session: AsyncSession,
     ds_id: str,
@@ -139,6 +157,8 @@ async def upsert_data_source_stats_counts(
     edge_count: int,
     entity_type_counts: str,
     edge_type_counts: str,
+    *,
+    probed: bool = False,
 ) -> DataSourceStatsORM:
     """Partial upsert — the cheap counts facet.
 
@@ -147,14 +167,31 @@ async def upsert_data_source_stats_counts(
     columns owned by the deep facet. On first contact (no row yet) the
     JSON columns fall back to their ``{}`` defaults until the first
     deep poll fills them.
+
+    ``counts_digest`` hashes the counts being written (AGGREGATED
+    included). Storing it alongside them is what lets the reconcile sweep
+    detect movement with a SQL comparison instead of an evaluation pass.
+    It is derived HERE rather than passed in: a caller that wrote changed
+    counts without one left the row describing itself with the PREVIOUS
+    digest, so the sweep's tripwire read "nothing moved" for counts that had
+    just moved. Computing it beside the write makes that structural.
+
+    ``probed`` stamps ``last_probed_at``, claiming this write for the probe
+    lane's cadence. The stats poll leaves it alone: the two lanes run at
+    different frequencies and must not reset each other's clock.
     """
+    now = datetime.now(timezone.utc).isoformat()
+    digest = _counts_digest(entity_type_counts, edge_type_counts)
     existing = await get_data_source_stats(session, ds_id)
     if existing:
         existing.node_count = node_count
         existing.edge_count = edge_count
         existing.entity_type_counts = entity_type_counts
         existing.edge_type_counts = edge_type_counts
-        existing.updated_at = datetime.now(timezone.utc).isoformat()
+        existing.updated_at = now
+        existing.counts_digest = digest
+        if probed:
+            existing.last_probed_at = now
         await session.flush()
         return existing
 
@@ -164,10 +201,35 @@ async def upsert_data_source_stats_counts(
         edge_count=edge_count,
         entity_type_counts=entity_type_counts,
         edge_type_counts=edge_type_counts,
+        counts_digest=digest,
+        last_probed_at=now if probed else None,
     )
     session.add(new_stats)
     await session.flush()
     return new_stats
+
+
+async def touch_probe_stamp(session: AsyncSession, ds_id: str) -> None:
+    """Stamp ``last_probed_at`` without writing any counts.
+
+    For probe attempts that cannot produce counts (no constant-time path on
+    the provider, or a multi-label graph the counters cannot describe): the
+    stamp takes the source out of the probe due-set for one interval, so it
+    is retried once per interval instead of every scheduler tick — and starts
+    answering the moment the provider can. UPDATE-only: fabricating a
+    zero-count row here could read as a wiped overlay downstream. A source
+    with no stats row stays due until its first poll creates one.
+    """
+    existing = await get_data_source_stats(session, ds_id)
+    if existing is None:
+        return
+    existing.last_probed_at = datetime.now(timezone.utc).isoformat()
+    # Pin the poll clock: ``updated_at`` carries ``onupdate``, and letting it
+    # move on a stamp-only touch would make stale counts look freshly polled
+    # (the stats_stale guard reads it). Explicitly including the current
+    # value in the UPDATE keeps the hook from firing.
+    flag_modified(existing, "updated_at")
+    await session.flush()
 
 
 async def set_top_level_nodes(session: AsyncSession, ds_id: str, payload_json: str) -> None:

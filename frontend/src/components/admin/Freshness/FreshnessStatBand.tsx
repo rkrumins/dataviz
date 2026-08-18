@@ -1,5 +1,5 @@
 /**
- * FreshnessStatBand — the triage cockpit's overview row: six stat tiles that
+ * FreshnessStatBand — the triage cockpit's overview row: seven stat tiles that
  * double as the status filter. Each tile is a toggle button (``aria-pressed``);
  * clicking it selects that status facet, clicking the active one — or "Total" —
  * clears back to all. The tiles are overlapping facets, not a partition (a row
@@ -11,7 +11,7 @@
  * tile's number equals the rows it reveals. When ``summary`` is null (fleet too
  * large to summarise), the band renders nothing.
  */
-import { AlertTriangle, CheckCircle2, Database, Layers, Loader2, MinusCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Database, Layers, Loader2, MinusCircle, Waves } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { FreshnessSummary } from '@/services/freshnessService'
 import type { StatusFacet } from './freshnessTriage'
@@ -34,6 +34,11 @@ const ACCENTS: Record<string, Accent> = {
     amber: { chip: 'bg-amber-500/15 text-amber-500', value: 'text-amber-600 dark:text-amber-400', activeRing: 'border-amber-500/60 ring-amber-500/30', restTint: 'bg-amber-500/[0.04] border-amber-500/25' },
     slate: { chip: 'bg-slate-500/10 text-slate-500', value: 'text-slate-600 dark:text-slate-400', activeRing: 'border-slate-500/60 ring-slate-500/30' },
     violet: { chip: 'bg-violet-500/10 text-violet-500', value: 'text-violet-600 dark:text-violet-400', activeRing: 'border-violet-500/60 ring-violet-500/30' },
+    // Drifting sits beside "Needs attention" (amber) in the band, so it takes
+    // rose rather than a second amber — and it carries its own icon and label
+    // besides, because those two hues are close enough that colour alone must
+    // never be what tells them apart.
+    rose: { chip: 'bg-rose-500/15 text-rose-500', value: 'text-rose-600 dark:text-rose-400', activeRing: 'border-rose-500/60 ring-rose-500/30', restTint: 'bg-rose-500/[0.04] border-rose-500/25' },
 }
 
 function Tile({
@@ -93,7 +98,7 @@ export function FreshnessStatBand({ summary, activeFacet, onToggle }: {
     const coverage = summary.total > 0 ? Math.round((summary.cacheStamped / summary.total) * 100) : 0
 
     return (
-        <div role="group" aria-label="Fleet summary" className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div role="group" aria-label="Fleet summary" className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 wide:grid-cols-7 gap-3">
             <Tile
                 icon={Layers} label="Total sources" value={summary.total.toLocaleString()}
                 accent={ACCENTS.indigo} active={activeFacet === ''}
@@ -103,6 +108,18 @@ export function FreshnessStatBand({ summary, activeFacet, onToggle }: {
                 icon={CheckCircle2} label="Ready" value={summary.ready.toLocaleString()}
                 accent={ACCENTS.emerald} active={activeFacet === 'ready'}
                 onToggle={() => toggle('ready')}
+            />
+            <Tile
+                icon={Waves} label="Drifting" value={(summary.drifting ?? 0).toLocaleString()}
+                accent={ACCENTS.rose} active={activeFacet === 'drifting'}
+                onToggle={() => toggle('drifting')}
+                secondary={
+                    summary.drifting > 0 ? (
+                        <p className="mt-2 text-[10px] text-ink-muted/70 leading-snug">
+                            Rollups no longer match the data
+                        </p>
+                    ) : undefined
+                }
             />
             <Tile
                 icon={Loader2} label="Rebuilding now" value={summary.pending.toLocaleString()} spin={summary.pending > 0}

@@ -39,7 +39,7 @@ each domain as a well-fenced module in one service.
 | **provider** | `providers`, `catalog_items` | Pure infrastructure — no tenant data, no PII. |
 | **ontology** | `ontologies`, `ontology_audit_log`, `ontology_source_mappings` | Versioned + immutable audit log. `revision` is the optimistic concurrency token. |
 | **visualization** | `context_models`, `views`, `view_favourites` | References ontology + workspace by ID only. `ontology_digest` captures schema fingerprint at save time. |
-| **aggregation** | `aggregation_jobs`, `data_source_polling_configs` | Job lifecycle. Hot writes (checkpoints). |
+| **aggregation** | `aggregation_jobs`, `data_source_polling_configs`, `reconcile_runs` | Job lifecycle. Hot writes (checkpoints). `reconcile_runs` is one row per reconciliation sweep (not per data source), trimmed to 30 days. |
 | **stats** | `data_source_stats` | Read-mostly cache. Tolerant of staleness. |
 | **platform** | `feature_flags`, `feature_categories`, `feature_definitions`, `feature_registry_meta`, `announcements`, `announcement_config`, `management_db_config`, `schema_migrations` | Reference + global config. |
 | **events** | `outbox_events` | Cross-domain contract. Every domain writes here; consumers drain. |
@@ -130,6 +130,8 @@ zero, switch to `--strict`.
 | `db/repositories/provider_repo.py` | provider ↔ workspace / visualization | Provider-impact endpoint reads workspace + visualization tables — should use outbox event subscriptions to maintain a per-provider impact projection. |
 | `api/v1/endpoints/catalog.py` | provider ↔ workspace | Same pattern. |
 | `ontology/adapters/sqlalchemy_repo.py` | ontology ↔ workspace | Reading workspace data sources to find which workspaces use an ontology — should be reversed: workspace domain queries ontology by id, not the other way around. |
+| `services/aggregation/probe_scheduler.py` | stats ↔ workspace | Annotated `# noqa: cross-domain` (not in the count). The due-query joins `workspace_data_sources → data_source_stats` because `stats.last_probed_at` is the probe cadence clock. Read-only, bounded by `AGGREGATION_PROBE_SCAN_CAP`. To pay down: denormalise `last_probed_at` onto `aggregation.data_source_state`. |
+| `services/aggregation/reconcile_sweeper.py` | provider ↔ workspace | Annotated `# noqa: cross-domain` (not in the count). `_batch_context` joins `workspace_data_sources → providers` for the provider NAME that labels findings; read-only, ≤ `_SCAN_CAP` rows per tick. To pay down: same denormalise-the-name pattern as `list_jobs_global`. |
 
 ## What this map does NOT do
 

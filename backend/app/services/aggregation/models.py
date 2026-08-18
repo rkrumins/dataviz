@@ -12,7 +12,9 @@ Tables:
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, Column, Index, Integer, Text, text
+from sqlalchemy import (
+    Boolean, CheckConstraint, Column, Index, Integer, Text, text,
+)
 from backend.app.db.engine import Base
 
 
@@ -28,6 +30,12 @@ def _now() -> str:
 TRIGGER_SOURCES = (
     "onboarding", "manual", "schedule", "drift", "api",
     "purge", "post_purge", "auto",
+    # ``reconcile`` is the automatic reconciliation sweep. It needs its own
+    # value because the job it queues went through signal_source_changed,
+    # which hardcoded "api" — so an hourly automatic rebuild was
+    # indistinguishable in Job History from a person clicking Rebuild, which
+    # is exactly the question the audit trail exists to answer.
+    "reconcile",
 )
 API_TRIGGER_SOURCES = tuple(s for s in TRIGGER_SOURCES if s != "purge")
 
@@ -207,7 +215,13 @@ class AggregationDataSourceStateORM(Base):
     via Redis events.
     """
     __tablename__ = "data_source_state"
-    __table_args__ = ({"schema": "aggregation"},)
+    __table_args__ = (
+        # The reconciliation sweep's candidate query orders by this column and
+        # takes the oldest-checked first, so it is the one index that turns a
+        # fleet-wide scan into a bounded read.
+        Index("ix_ds_state_recon_due", "last_reconcile_checked_at"),
+        {"schema": "aggregation"},
+    )
 
     data_source_id = Column(Text, primary_key=True)
     workspace_id = Column(Text, nullable=False, index=True)
@@ -220,6 +234,102 @@ class AggregationDataSourceStateORM(Base):
     # the persisted global cadence, then the env default. Resolved by
     # ``resolve_rebuild_interval`` across the service, scheduler and web tier.
     rebuild_min_interval_secs = Column(Integer, nullable=True)
+
+    # ── Automatic reconciliation (drift / overlay-integrity sweep) ────
+    # Per-source opt-out. NULL = inherit the persisted global, then the env
+    # default. This is the "feature flag for certain data sources" — it
+    # cannot live in ``feature_flags``, which is a single global row
+    # (CheckConstraint "id = 1").
+    reconcile_enabled = Column(Boolean, nullable=True)
+    # Per-source check cadence (seconds). NULL = inherit global, then env.
+    reconcile_check_interval_secs = Column(Integer, nullable=True)
+
+    # ── Drift probe (the cheap counts tripwire) ───────────────────────
+    # How often the probe lane reads this source's constant-time counts, and
+    # whether it does so at all. Same NULL = inherit global, then env chain as
+    # the two above. Kept separate from reconcile_check_interval_secs: probing
+    # is what makes fresh evidence APPEAR, checking is what acts on it, and a
+    # deployment may well want a fast probe and a slow act.
+    probe_enabled = Column(Boolean, nullable=True)
+    probe_interval_secs = Column(Integer, nullable=True)
+    # Operator snooze (ISO-8601). Automation still evaluates and still records
+    # its finding while this is in the future; it just does not act.
+    paused_until = Column(Text, nullable=True)
+    # The ``data_source_stats.counts_digest`` this sweep last evaluated. The
+    # candidate query fires on ``IS DISTINCT FROM``, so a re-probe that finds
+    # identical counts costs nothing and only a real movement re-opens the
+    # source. NOT a drift baseline — see ``raw_fingerprint`` below for that.
+    last_seen_counts_digest = Column(Text, nullable=True)
+
+    # Drift baseline, derived from the stats service's cached counts with
+    # AGGREGATED excluded (``raw_fingerprint_from_counts``). Deliberately NOT
+    # ``graph_fingerprint``, which includes AGGREGATED and therefore moves on
+    # every rebuild. NULL means "never seen" — the sweep seeds it and acts on
+    # nothing, which is what stops a fleet-wide storm on first run.
+    raw_fingerprint = Column(Text, nullable=True)
+    raw_node_count = Column(Integer, nullable=True)
+    raw_edge_count = Column(Integer, nullable=True)
+
+    # Last evaluation, whatever the outcome. Drives per-source due-ness and
+    # the UI's "last checked" / "next check in…".
+    last_reconcile_checked_at = Column(Text, nullable=True)
+    # Last time the sweep actually ACTED. The column records "last acted";
+    # the matching ``refresh_events`` row records what and why. That split is
+    # what keeps the audit from becoming one row per source per hour.
+    last_reconciled_at = Column(Text, nullable=True)
+    last_reconcile_reason = Column(Text, nullable=True)
+    last_reconcile_mode = Column(Text, nullable=True)  # auto | manual
+    # Stored verdict, stamped at every evaluation and read straight off the
+    # column by the freshness API — the read path must never run detection.
+    drift_state = Column(Text, nullable=True)
+    # Live finding, stamped whenever evaluate() returns a detector reason
+    # (including holds: cooldown, automation off, breaker). Cleared on
+    # in_sync. Distinct from last_reconcile_* which is the last rebuild.
+    last_finding_at = Column(Text, nullable=True)
+    last_finding_reason = Column(Text, nullable=True)
+    last_finding_evidence = Column(Text, nullable=True)
+    # Circuit breaker. Increments on every action, resets whenever an
+    # evaluation finds nothing wrong. At the cap the source is suspended, so
+    # a finding we can never clear cannot rebuild a huge graph hourly forever.
+    reconcile_consecutive_actions = Column(Integer, nullable=True, default=0)
+
+
+class ReconcileRunORM(Base):
+    """One pass of the reconciliation sweep.
+
+    Sweep-level, NOT per-source: this is what lets the cockpit answer "when
+    did this last run and what did it find" without writing a row per data
+    source per hour. Per-source outcomes that ACTED get a ``refresh_events``
+    row; everything else is a tally in ``detail``.
+    """
+    __tablename__ = "reconcile_runs"
+    __table_args__ = (
+        Index("ix_recon_runs_started", "started_at"),
+        CheckConstraint(
+            "mode IN ('auto', 'manual', 'preview')",
+            name="ck_recon_runs_mode",
+        ),
+        {"schema": "aggregation"},
+    )
+
+    id = Column(Text, primary_key=True, default=lambda: f"rcn_{uuid.uuid4().hex[:12]}")
+    started_at = Column(Text, nullable=False, default=_now)
+    finished_at = Column(Text, nullable=True)
+    # ``preview`` is a dry run: it evaluates and records, but acts on nothing.
+    mode = Column(Text, nullable=False, default="auto")
+    actor = Column(Text, nullable=True)
+
+    scanned = Column(Integer, nullable=False, default=0)
+    skipped = Column(Integer, nullable=False, default=0)
+    seeded = Column(Integer, nullable=False, default=0)
+    findings = Column(Integer, nullable=False, default=0)
+    actions = Column(Integer, nullable=False, default=0)
+    errors = Column(Integer, nullable=False, default=0)
+
+    # JSON: {"byReason": {...}, "bySkip": {...}, "sample": [ds_id, ...]}.
+    # ``bySkip`` is the difference between "nothing drifted" and "every stats
+    # row was too stale to trust", which look identical without it.
+    detail = Column(Text, nullable=True)
 
 
 class AggregationSettingsORM(Base):

@@ -162,6 +162,10 @@ def _patch_fleet_collaborators(monkeypatch, *, signals=None, events=None,
         return running or {}
     monkeypatch.setattr(svc_mod, "_running_job_map", _running)
 
+    async def _failures(session, ds_ids):
+        return {}
+    monkeypatch.setattr(svc_mod, "_latest_failure_map", _failures)
+
     async def _stale():
         return stale or []
     monkeypatch.setattr(gc_mod, "list_stale_sources", _stale)
@@ -173,19 +177,30 @@ def _patch_fleet_collaborators(monkeypatch, *, signals=None, events=None,
 
 
 def _patch_cadence(monkeypatch, *, global_secs=None, overrides=None,
-                   drift_auto=None):
+                   drift_auto=None, states=None):
     """Stub the two F9 cadence reads: the cached global cadence and the
-    batched per-source override map. Neither touches ``session.execute`` so
-    the queued-result ordering the other collaborators rely on is preserved."""
+    batched per-source state map. Neither touches ``session.execute`` so
+    the queued-result ordering the other collaborators rely on is preserved.
+
+    ``overrides`` stays a ``{ds_id: secs}`` shorthand for the rebuild-interval
+    column; ``states`` sets any other state-row field (drift verdict, the
+    reconcile overrides) for a source."""
     async def _cadence(session):
         return AggregationCadence(
             rebuild_min_interval_secs=global_secs, drift_auto_rebuild=drift_auto,
         )
     monkeypatch.setattr(svc_mod, "read_global_cadence", _cadence)
 
-    async def _overrides(session, ds_ids):
-        return dict(overrides or {})
-    monkeypatch.setattr(svc_mod, "_rebuild_override_map", _overrides)
+    merged = {
+        ds_id: {"rebuild_min_interval_secs": secs}
+        for ds_id, secs in (overrides or {}).items()
+    }
+    for ds_id, fields in (states or {}).items():
+        merged.setdefault(ds_id, {}).update(fields)
+
+    async def _states(session, ds_ids):
+        return {k: dict(v) for k, v in merged.items()}
+    monkeypatch.setattr(svc_mod, "_state_map", _states)
 
 
 # ── Fleet assembly ──────────────────────────────────────────────────────
@@ -317,6 +332,31 @@ def test_fleet_summary_counts_mixed_fixture(monkeypatch):
     assert s.recomputing == 2  # ds-ready + ds-failed both have markers
     assert s.needs_attention == 2  # ds-ready(marker) + ds-failed(marker&failed, counted once)
     assert s.cache_stamped == 2  # ds-ready + ds-failed have genat
+    assert s.suspended == 0
+
+
+def test_fleet_summary_counts_suspended_in_needs_attention(monkeypatch):
+    """A source the breaker tripped is a person-required row: it must
+    increment ``suspended`` AND ``needsAttention``, without also counting
+    as drifting (the overlay is still wrong; the split is that automation
+    will not retry)."""
+    ds_ok = _ds(id="ds-ok", status="ready")
+    ds_held = _ds(id="ds-held", status="ready")
+    _patch_fleet_collaborators(monkeypatch)
+    _patch_cadence(
+        monkeypatch,
+        states={"ds-held": {"drift_state": "suspended"}},
+    )
+    session = _FakeSession([
+        _FakeResult(scalar=2),
+        _FakeResult(rows=[(ds_ok, "Prov A"), (ds_held, "Prov A")]),
+    ])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+    s = resp.summary
+    assert s is not None
+    assert s.suspended == 1
+    assert s.drifting == 0
+    assert s.needs_attention == 1
 
 
 def test_fleet_summary_pending_ignores_dead_status_value(monkeypatch):
@@ -806,6 +846,56 @@ def test_source_probe_failure_degrades_without_raising(monkeypatch):
     assert doc.drifted is None  # probe failed → unknown, not a crash
 
 
+def test_source_probe_persists_counts_facet(monkeypatch):
+    """Probe writes the counts it already fetched — does not stamp drift_state."""
+    writes: list = []
+
+    async def _fake_upsert(session, **kw):
+        writes.append(kw)
+
+    monkeypatch.setattr(
+        "backend.app.db.repositories.stats_repo.upsert_data_source_stats_counts",
+        _fake_upsert,
+    )
+    stats = _stats(nodes=42, edges=11)
+    provider = _OneShotProvider(stats)
+    svc = _svc(_FakeRegistry(provider))
+    _patch_source_collaborators(monkeypatch)
+    session = _FakeSession([_FakeResult(rows=[(_ds(fp="DIFFERENT"), "Prov A")])])
+
+    doc = _run(svc.assemble_source_freshness("ds-1", session, probe=True))
+    assert doc.drifted is True
+    assert len(writes) == 1
+    assert writes[0]["ds_id"] == "ds-1"
+    assert writes[0]["node_count"] == 42
+    assert writes[0]["edge_count"] == 11
+    assert '"Entity"' in writes[0]["entity_type_counts"]
+    # Probe must not mutate drift_state on the aggregation state row.
+    assert not any("drift_state" in str(w) for w in writes)
+
+
+def test_source_probe_failure_does_not_write_counts(monkeypatch):
+    writes: list = []
+
+    async def _fake_upsert(session, **kw):
+        writes.append(kw)
+
+    monkeypatch.setattr(
+        "backend.app.db.repositories.stats_repo.upsert_data_source_stats_counts",
+        _fake_upsert,
+    )
+
+    class _Boom:
+        async def get_schema_stats(self):
+            raise RuntimeError("provider down")
+
+    svc = _svc(_FakeRegistry(_Boom()))
+    _patch_source_collaborators(monkeypatch)
+    session = _FakeSession([_FakeResult(rows=[(_ds(), "Prov A")])])
+    _run(svc.assemble_source_freshness("ds-1", session, probe=True))
+    assert writes == []
+
+
 # ── classify_failure: category classifier, order matters (H1, spec §9c) ─
 
 
@@ -878,6 +968,35 @@ def test_source_doc_failure_fields_none_when_no_jobs(monkeypatch):
     assert doc.last_failure_reason is None
     assert doc.last_failure_category is None
     assert doc.retry_count is None
+
+
+def test_fleet_row_carries_failure_category_for_failed_sources(monkeypatch):
+    """The table must name the cause without opening the drawer — fleet
+    rows get a batched latest-job lookup for aggregation_status=failed."""
+    failed = _ds(id="ds-oom", status="failed")
+    ready = _ds(id="ds-ok", status="ready")
+    _patch_fleet_collaborators(monkeypatch)
+
+    async def _failures(session, ds_ids):
+        assert set(ds_ids) == {"ds-oom"}
+        return {
+            "ds-oom": {
+                "reason": "OOM command not allowed when used memory > 'maxmemory'.",
+                "category": "out_of_memory",
+            },
+        }
+
+    monkeypatch.setattr(svc_mod, "_latest_failure_map", _failures)
+    session = _FakeSession([
+        _FakeResult(scalar=2),
+        _FakeResult(rows=[(failed, "Prov A"), (ready, "Prov A")]),
+    ])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+    by_id = {r.data_source_id: r for r in resp.rows}
+    assert by_id["ds-oom"].last_failure_category == "out_of_memory"
+    assert "maxmemory" in (by_id["ds-oom"].last_failure_reason or "")
+    assert by_id["ds-ok"].last_failure_category is None
+    assert by_id["ds-ok"].last_failure_reason is None
 
 
 def test_source_unknown_ds_returns_none(monkeypatch):
@@ -1167,6 +1286,28 @@ def test_refresh_batch_status_requires_ingestion_gate():
     assert any(getattr(f, "__name__", "") == "_require_ingestion_read" for f in fns)
 
 
+def test_settings_read_is_ingestion_read_and_write_stays_admin():
+    """The Automation modal renders read-only for non-admins, so the settings
+    GET opened to ingestion readers — while the PUT must stay system:admin."""
+    from backend.app.api.v1.endpoints import aggregation as agg_mod
+
+    def _agg_route(path, method):
+        for r in agg_mod.router.routes:
+            if r.path == path and method in r.methods:
+                return r
+        raise AssertionError(f"route {method} {path} not found")
+
+    get_fns = _dep_calls(_agg_route("/aggregation/settings", "GET").dependant)
+    assert any(
+        getattr(f, "__name__", "") == "_require_ingestion_read"
+        for f in get_fns
+    )
+    assert agg_mod._REQUIRE_SYSTEM_ADMIN not in get_fns
+
+    put_fns = _dep_calls(_agg_route("/aggregation/settings", "PUT").dependant)
+    assert agg_mod._REQUIRE_SYSTEM_ADMIN in put_fns
+
+
 # ── F9: per-source rebuild-cadence override PATCH ───────────────────────
 
 
@@ -1174,12 +1315,29 @@ class _FakeSettingsSvc:
     def __init__(self, *, raises=None):
         self._raises = raises
         self.called_with = None
+        self.probe_called_with = None
+        self.pause_called_with = None
 
     async def set_source_rebuild_interval(self, ds_id, secs, session):
         self.called_with = (ds_id, secs)
         if self._raises:
             raise self._raises
         return secs
+
+    async def set_source_probe_settings(self, ds_id, session, **kwargs):
+        self.probe_called_with = (ds_id, kwargs)
+        if self._raises:
+            raise self._raises
+        return {
+            "probe_enabled": kwargs.get("enabled"),
+            "probe_interval_secs": kwargs.get("interval_secs"),
+        }
+
+    async def set_source_pause(self, ds_id, session, *, paused_until):
+        self.pause_called_with = (ds_id, paused_until)
+        if self._raises:
+            raise self._raises
+        return {"paused_until": paused_until}
 
 
 def test_freshness_settings_request_validates_bounds():
@@ -1261,6 +1419,31 @@ def test_cp_freshness_settings_twin_delegates():
     out = _run(cp.set_freshness_settings("ds-1", body=body, svc=svc, session=object()))
     assert svc.called_with == ("ds-1", 90)
     assert out.rebuild_min_interval_secs == 90
+
+
+def test_cp_freshness_settings_twin_round_trips_probe_and_pause():
+    """Proxy mode is what every deployed topology runs: a field handled only
+    by the direct-mode route is a silent 200-and-write-nothing in prod. The
+    drawer's Detect toggle, Detect interval and Snooze all go through here."""
+    from datetime import datetime, timedelta, timezone
+
+    from backend.app.services.aggregation import controlplane as cp
+
+    until = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    svc = _FakeSettingsSvc()
+    body = FreshnessSettingsRequest(
+        probeEnabled=False,
+        probeIntervalSecs=120,
+        pausedUntil=until,
+    )
+    out = _run(cp.set_freshness_settings("ds-1", body=body, svc=svc, session=object()))
+    assert svc.probe_called_with == (
+        "ds-1", {"enabled": False, "interval_secs": 120},
+    )
+    assert svc.pause_called_with == ("ds-1", until)
+    assert out.probe_enabled is False
+    assert out.probe_interval_secs == 120
+    assert out.paused_until == until
 
 
 if __name__ == "__main__":

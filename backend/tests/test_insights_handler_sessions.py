@@ -43,6 +43,7 @@ def _config() -> StatsServiceConfig:
         sweep_concurrency=2,
         heavy_concurrency=1,
         purge_concurrency=1,
+        probe_concurrency=4,
         max_per_graph=1,
         max_delivery_attempts=3,
         drain_timeout_secs=60,
@@ -355,7 +356,9 @@ async def test_lane_accounting_spawn_and_reap(monkeypatch) -> None:
     consumer._spawn(STATS_STREAM, "1-1", fields)
     consumer._spawn(STATS_DEEP_STREAM, "1-2", deep_fields)
     assert consumer.lane_active_snapshot() == {"fast": 1, "heavy": 1}
-    assert consumer._lane_free_slots() == {"fast": 3, "sweep": 2, "heavy": 0, "purge": 1}
+    assert consumer._lane_free_slots() == {
+        "fast": 3, "sweep": 2, "heavy": 0, "purge": 1, "probe": 4,
+    }
     assert PURGE_STREAM.lane == "purge"
 
     # Cancel the spawned tasks and reap — counters must return to zero.
@@ -367,7 +370,9 @@ async def test_lane_accounting_spawn_and_reap(monkeypatch) -> None:
     consumer._reap_done_tasks()
 
     assert consumer.lane_active_snapshot() == {"fast": 0, "heavy": 0}
-    assert consumer._lane_free_slots() == {"fast": 4, "sweep": 2, "heavy": 1, "purge": 1}
+    assert consumer._lane_free_slots() == {
+        "fast": 4, "sweep": 2, "heavy": 1, "purge": 1, "probe": 4,
+    }
     consumer._scope_key_cache.clear()
 
 
@@ -443,3 +448,150 @@ def test_claim_ttl_scales_with_node_count() -> None:
     assert _claim_ttl(cfg, 500_000) == 1200
     # Unknown size (no stats row yet) behaves like small.
     assert _claim_ttl(cfg, None) == 180
+
+
+@pytest.mark.asyncio
+async def test_a_probe_is_not_parked_behind_a_scan_of_the_same_graph(monkeypatch) -> None:
+    """The probe lane's whole promise: freshness for a graph must not wait on
+    a slow job for that graph.
+
+    The per-graph semaphore is taken BEFORE the job's own timeout starts, so a
+    probe that shares the stats poll's scope key queues for the scan's full
+    duration (up to 600s) — and with ``max_per_graph=1`` the entire probe lane
+    can end up parked on the sources whose counts just moved.
+    """
+    import asyncio
+
+    from backend.insights_service.redis_streams import (
+        PROBE_STREAM, STATS_STREAM,
+    )
+    from backend.insights_service.schemas import ProbeJobEnvelope
+
+    class _Result:
+        def first(self):
+            return ("prov1", "graph1", 250_000)
+
+    class _FakeSession:
+        async def execute(self, _stmt):
+            return _Result()
+
+    @asynccontextmanager
+    async def fake_readonly_session():
+        yield _FakeSession()
+
+    scan_started = asyncio.Event()
+    let_scan_finish = asyncio.Event()
+    probed: list[str] = []
+
+    async def handler(envelope):
+        if envelope.kind == "probe":
+            probed.append(envelope.data_source_id)
+            return
+        scan_started.set()
+        await let_scan_finish.wait()
+
+    async def fake_release(scope_key, stream=None):
+        pass
+
+    async def fake_ack(_cfg, _msg_id):
+        pass
+
+    monkeypatch.setattr(worker_mod, "get_readonly_session", fake_readonly_session)
+    monkeypatch.setattr(worker_mod.dispatcher, "get_handler", lambda _kind: handler)
+    monkeypatch.setattr(worker_mod, "release_claim", fake_release)
+
+    consumer = worker_mod.InsightsJobConsumer(_config())  # max_per_graph=1
+    monkeypatch.setattr(consumer, "_ack", fake_ack)
+    consumer._scope_key_cache.clear()
+    try:
+        scan = asyncio.create_task(
+            consumer._execute(STATS_STREAM, "1-1", _envelope()),
+        )
+        await asyncio.wait_for(scan_started.wait(), timeout=2)
+
+        probe = ProbeJobEnvelope(
+            data_source_id="ds1", workspace_id="ws1",
+            enqueued_at=datetime.now(timezone.utc),
+        )
+        await asyncio.wait_for(
+            consumer._execute(PROBE_STREAM, "1-2", probe), timeout=2,
+        )
+
+        assert probed == ["ds1"]
+        assert not scan.done(), "the probe must overtake a still-running scan"
+    finally:
+        let_scan_finish.set()
+        await scan
+        consumer._scope_key_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_probe_never_writes_the_polling_config(monkeypatch) -> None:
+    """A probe failure must not be recorded as a STATS POLL failure.
+
+    ``record_failure`` sets ``last_status="error"`` (which the reconcile sweep
+    treats as an absolute "stats unhealthy" guard, cleared only by a successful
+    counts poll) and ``last_polled_at=now`` (which defers the poll itself).
+    Probes run ~15x more often than polls and a provider restart fails all of
+    them at once, so without an explicit branch a probe wipes out drift
+    detection for the fleet exactly when it is needed most.
+    """
+    from backend.insights_service.redis_streams import PROBE_STREAM
+    from backend.insights_service.schemas import ProbeJobEnvelope
+
+    recorded: list[tuple] = []
+    released: list[str] = []
+    acked: list[str] = []
+
+    async def fake_record_failure(ds_id, error):
+        recorded.append((ds_id, error))
+
+    async def fake_release(scope_key, stream=None):
+        released.append(scope_key)
+
+    async def fake_ack(_cfg, msg_id):
+        acked.append(msg_id)
+
+    monkeypatch.setattr(worker_mod, "stats_record_failure", fake_record_failure)
+    monkeypatch.setattr(worker_mod, "release_claim", fake_release)
+
+    consumer = worker_mod.InsightsJobConsumer(_config())
+    monkeypatch.setattr(consumer, "_ack", fake_ack)
+
+    await consumer._handle_failure(
+        PROBE_STREAM, "1-1",
+        ProbeJobEnvelope(
+            data_source_id="ds-1", workspace_id="ws-1",
+            enqueued_at=datetime.now(timezone.utc),
+        ),
+        "provider unavailable",
+    )
+
+    assert recorded == [], "a probe failure must not touch the polling config"
+    # Logged and dropped — the scheduler re-enqueues on its next tick.
+    assert acked == ["1-1"]
+    assert released == ["ds-1"]
+
+
+@pytest.mark.asyncio
+async def test_probe_gets_a_short_fixed_timeout_not_the_large_graph_budget():
+    """A probe is constant-time work, so it must never inherit the
+    size-adaptive poll budget.
+
+    ``ProbeJobEnvelope`` subclasses ``StatsJobEnvelope``, so without an explicit
+    branch it falls through to the large-graph pivot and a probe on a big (or
+    not-yet-measured) graph is allowed to hang for ten minutes — holding a slot
+    in a lane sized for millisecond work.
+    """
+    from backend.insights_service.schemas import ProbeJobEnvelope
+
+    consumer = worker_mod.InsightsJobConsumer(_config())
+    envelope = ProbeJobEnvelope(
+        data_source_id="ds-1", workspace_id="ws-1",
+        enqueued_at=datetime.now(timezone.utc),
+    )
+    timeout, bucket = await consumer._resolve_timeout_and_bucket(envelope)
+
+    assert timeout <= 60, f"probe budget should be seconds, got {timeout}"
+    assert timeout != _config().poll_timeout_large_secs
+    assert bucket == "probe"

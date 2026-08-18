@@ -9,7 +9,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ServiceEntry } from '@/services/systemStatusService'
 import { STATUS_META, formatAgeMs, formatBytes, num, obj, str } from './meta'
-import { Sparkline } from './Sparkline'
+import { Sparkline } from '@/components/ui/Sparkline'
 
 /** The one-line work signal per service — what the component is DOING. */
 function workSignal(svc: ServiceEntry): string[] {

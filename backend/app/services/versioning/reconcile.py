@@ -45,6 +45,7 @@ def _bounded_query(client, cypher: str, params=None):
 
     return _q(client, cypher, params=params, timeout_ms=_READ_TIMEOUT_MS)
 
+from . import config
 from .models import (
     BranchORM,
     EdgeVersionORM,
@@ -52,6 +53,13 @@ from .models import (
     GraphORM,
     NodeVersionORM,
     ProjectionStateORM,
+)
+
+# Derived in-graph bookkeeping, excluded from every cache-vs-committed-main
+# comparison. Built from the ONE definition in ``config`` — see the note there
+# on why a second copy of this list was a bug.
+_NOT_DERIVED = " AND ".join(
+    f"NOT '{label}' IN labels(n)" for label in config.DERIVED_LABELS
 )
 
 # Reuse the reader/projector's label sanitiser so the deep check compares against the SAME
@@ -129,12 +137,19 @@ async def pg_live_counts_projectable(session, graph_id: str, branch_id: str) -> 
 async def falkor_counts(client) -> Tuple[int, int]:
     """Node/edge counts in a FalkorDB cache graph, excluding derived-cache artifacts.
 
-    The ``:AGGREGATED`` rollup layer and its ``_GVRollupMeta`` marker are derived (aggregation
+    The ``:AGGREGATED`` rollup layer and the bookkeeping nodes beside it are derived (aggregation
     worker + projector's incremental maintenance), NOT committed-main entities — exclude them or
-    every graph with rollups reads as "extra entities vs committed main"."""
+    every graph with rollups reads as "extra entities vs committed main".
+
+    ALL of ``config.DERIVED_LABELS``, not just ``_GVRollupMeta``. In ``in_source`` mode — the mode
+    versioned graphs use — the aggregation pipeline stamps an ``_AggMeta`` singleton into this same
+    graph, so omitting it left the count one high after ANY aggregation job (including one the
+    projector queued itself via ``on_rollups_stale``). ``_sweep_tombstoned`` cannot clear it — it
+    carries no tombstone — so the verify reported extra entities, ``published`` went False, and
+    ``_apply`` pinned the watermark: reads fell back to Postgres until someone rebuilt by hand."""
     fn = await _bounded_query(
         client,
-        "MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) RETURN count(n) AS c")
+        f"MATCH (n) WHERE {_NOT_DERIVED} RETURN count(n) AS c")
     fe = await _bounded_query(
         client,
         "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c")
@@ -161,7 +176,7 @@ async def falkor_counts(client) -> Tuple[int, int]:
 # the id-less MERGE stamps to the LAST writer, so a collapsed parallel edge's surviving r.id AND its
 # attributes come from the SAME Postgres edge, and comparing FalkorDB against that Postgres row by id
 # is consistent.
-_SCAN_NODES = ("MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) AND n.entityId IS NOT NULL "
+_SCAN_NODES = (f"MATCH (n) WHERE {_NOT_DERIVED} AND n.entityId IS NOT NULL "
                "RETURN n.entityId, n.urn, n.displayName, labels(n) ORDER BY n.entityId SKIP $s LIMIT $l")
 _SCAN_EDGES = ("MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' AND r.id IS NOT NULL "
                "RETURN r.id, type(r), r.confidence, r.properties ORDER BY r.id SKIP $s LIMIT $l")
