@@ -156,7 +156,10 @@ export function TourOverlay() {
   }
 
   return createPortal(
-    <div className="fixed inset-0 z-[200]" role="dialog" aria-modal="true" aria-label={`${tour.title} tour`}>
+    // Above EVERYTHING, including the Lineage Lens portal (z-[9990]) —
+    // a spotlight tour that renders under the surface it's explaining
+    // is invisible.
+    <div className="fixed inset-0 z-[9999]" role="dialog" aria-modal="true" aria-label={`${tour.title} tour`}>
       {/* Click-catcher — blocks interaction with the app while the tour runs. */}
       <div className="absolute inset-0" onClick={(e) => e.stopPropagation()} />
 

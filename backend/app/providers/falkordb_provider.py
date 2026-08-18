@@ -39,6 +39,8 @@ from ..models.graph import (
     ChildrenWithEdgesResult, TopLevelNodesResult,
     TraceResult, TraceFocus,
 )
+# The closure-walk models are not carried by the app-level re-export above.
+from backend.common.models.graph import TraceClosureResult, TraceFrontierNode
 from .base import GraphDataProvider
 from backend.common.interfaces.provider import ProviderConfigurationError
 
@@ -153,6 +155,14 @@ def _sanitize_label(s: str) -> str:
 # continuing would silently skip or repeat rows — so providers reject the
 # mismatch (ValueError → 400 at the endpoint).
 _CURSOR_PREFIX = "k1:"
+
+# How many closure-frontier candidates get a real degree probe. Every boundary
+# node the walk did not finish is a candidate, and they all share ONE
+# `get_node_degrees` wave — so a hub-heavy closure could otherwise turn its
+# "what did I miss?" epilogue into the most expensive part of the request.
+# Past the cap the entries still ship, with totalCount None ("there is more,
+# we don't know how much"), which is what an unprobed frontier honestly is.
+CLOSURE_FRONTIER_PROBE_CAP = int(os.getenv("CLOSURE_FRONTIER_PROBE_CAP", "1000"))
 
 
 class CursorMismatchError(ValueError):
@@ -4368,18 +4378,30 @@ class FalkorDBProvider(GraphDataProvider):
             for u in missing_urns:
                 result[u] = computed.get(u, [])
 
-            # Batch-store all computed chains in one pipeline
-            store_pipe = self._redis.pipeline(transaction=False)
-            for u in missing_urns:
-                store_pipe.execute_command(
-                    "HSET", cache_key, u, json.dumps(result.get(u, [])),
-                )
-            # TTL so the ancestors hash stays evictable (see _cache_urn_label).
-            store_pipe.expire(cache_key, self._ancestor_cache_ttl())
-            try:
-                await store_pipe.execute()
-            except Exception as e:
-                logger.debug(f"Failed to batch-store ancestor chains: {e}")
+            # Batch-store all computed chains in one pipeline.
+            #
+            # The cache is an OPTIMIZATION, never a hard dependency. There is no
+            # cache client when CACHE_REDIS_URL is unset OR when the dedicated
+            # cache Redis is simply DOWN (``build_cache_client`` returns None by
+            # construction — it never co-locates the cache on FalkorDB). Guard
+            # the write: this line used to raise AttributeError on a None client
+            # and, because the raise escaped the whole method, it THREW AWAY the
+            # chains that had just been computed successfully above. Callers saw
+            # `truncated: ancestors_failed` and a trace with NO containment tree
+            # — i.e. a cache outage silently broke the graph read path, the exact
+            # inverse of the decoupling's intent.
+            if self._redis is not None:
+                store_pipe = self._redis.pipeline(transaction=False)
+                for u in missing_urns:
+                    store_pipe.execute_command(
+                        "HSET", cache_key, u, json.dumps(result.get(u, [])),
+                    )
+                # TTL so the ancestors hash stays evictable (see _cache_urn_label).
+                store_pipe.expire(cache_key, self._ancestor_cache_ttl())
+                try:
+                    await store_pipe.execute()
+                except Exception as e:
+                    logger.debug(f"Failed to batch-store ancestor chains: {e}")
 
         return result
 
@@ -4720,19 +4742,30 @@ class FalkorDBProvider(GraphDataProvider):
                         "RETURN n.urn AS u, labels(n)[0] AS label",
                         params={"urns": missing},
                     )
-                store_pipe = self._redis.pipeline(transaction=False)
-                store_count = 0
+                # The cache is an OPTIMIZATION, never a hard dependency. Resolve
+                # the result FIRST, then write the cache only if a client exists.
+                # This pipeline used to be opened BEFORE the loop, so a None
+                # client (unset CACHE_REDIS_URL, or the dedicated cache Redis
+                # simply DOWN — build_cache_client returns None by construction)
+                # raised before ``out`` was ever populated. That threw away labels
+                # which had resolved perfectly well and pushed the caller into the
+                # unlabeled-MATCH fallback — i.e. a FULL NODE SCAN, the
+                # 4-9s-on-2M-nodes antipattern this very cache exists to avoid.
+                # A cache outage must not knock every label lookup off its index.
+                resolved_labels: List[Tuple[str, str]] = []
                 for row in res.result_set or []:
                     urn, label = row[0], row[1]
                     if label:
                         safe = _sanitize_label(label)
                         out[urn] = safe
-                        store_pipe.hset(label_key, urn, safe)
-                        store_count += 1
+                        resolved_labels.append((urn, safe))
                     else:
                         out[urn] = None
-                if store_count > 0:
+                if resolved_labels and self._redis is not None:
                     try:
+                        store_pipe = self._redis.pipeline(transaction=False)
+                        for urn, safe in resolved_labels:
+                            store_pipe.hset(label_key, urn, safe)
                         await store_pipe.execute()
                     except Exception:
                         pass
@@ -7151,17 +7184,505 @@ class FalkorDBProvider(GraphDataProvider):
             object.__setattr__(result, "_fallback_level", fallback_level)
         return result
 
+    async def trace_closure(
+        self,
+        urn: str,
+        upstream_depth: int,
+        downstream_depth: int,
+        lineage_edge_types: List[str],
+        containment_edge_types: List[str],
+        max_nodes: int,
+        timeout_ms: int,
+        seed_urns: Optional[List[str]] = None,
+        exclude_urns: Optional[List[str]] = None,
+        after_cursor: Optional[str] = None,
+    ) -> TraceClosureResult:
+        """Focus-scoped, regime-independent lineage closure — ONE step of a walk.
+
+        Walks RAW lineage edges outward from the focus (upstream + downstream)
+        as a bounded per-hop frontier BFS (``_expand_raw_lineage_set``),
+        gathering exactly the leaves that participate in THIS focus's lineage —
+        not its container's. Depends on NO ``:AGGREGATED`` cells, so it is
+        correct at the finest grain even in boundary regime where leaf rollups
+        are never materialised (the "trace disappears at the attribute level"
+        bug). Always hydrates the containment ancestor chain so the canvas can
+        nest the participants — containment is used to PLACE nodes, never as a
+        lineage hop.
+
+        Bounded like ``trace_at_level``: the engine deadline (< the middleware
+        tier) makes it truncate to a 200 with a ``truncationReason`` rather than
+        race a 504; ``max_nodes`` caps the working set. Python is a frontier
+        cursor + a visited set (cycle-safe on any cyclic graph); every
+        set-shaped step is one label-qualified index-seeking Cypher.
+
+        The walk is SERVER-DRIVEN one step at a time — the client keeps the
+        graph it has accumulated and asks for the next step — so three
+        parameters describe where it already is:
+
+        ``seed_urns``    start the hops from these known lineage participants
+                         instead of deriving a seed from the focus. A walk
+                         CONTINUATION: the client is expanding a frontier node,
+                         not re-anchoring on the focus.
+        ``exclude_urns`` nodes the client already holds. They are never
+                         re-shipped in ``nodes``, but an EDGE into one still
+                         is — that seam edge is what stitches this step onto
+                         the graph the client already has. It says nothing
+                         about where the walk may START: a node named in
+                         ``seed_urns`` is walked from (and hydrated with the
+                         rest of the working set) whether or not it is also
+                         excluded, which is the only shape a real client
+                         ever sends.
+        ``after_cursor`` page ONE node's adjacency in ONE direction instead of
+                         walking: the fallback for a hub with more lineage than
+                         a hop can carry. ``e:<edge id>`` names the NEXT id to
+                         consider, so ``e:0`` is from the start.
+
+        ``frontierUp``/``frontierDown`` name the boundary nodes the walk did NOT
+        finish — depth ran out, the ``max_nodes`` budget cut them off, or a page
+        came back full — carrying the full-graph degree in that direction when
+        it is known, so the canvas can offer "+N more" instead of presenting a
+        bounded closure as the whole truth. A boundary node whose adjacency is
+        already fully on screen is NOT frontier: it is an honest dead end, and
+        saying otherwise puts a chip on a node with nothing behind it. An entry
+        carries ``nextCursor`` when it can be RESUMED: the budget/deadline cut
+        set pages from ``e:0``, a full page resumes past its last row, and a
+        depth-exhausted entry gets none (re-root it with ``seed_urns``).
+        """
+        await self._ensure_connected()
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+
+        # Normalize + per-graph case-align the declared rel-type sets (the
+        # case-sensitive [:TYPE] / type(r) patterns need the graph's spelling).
+        ltypes = [t.upper() for t in (lineage_edge_types or [])]
+        ctypes = [t.upper() for t in (containment_edge_types or [])]
+        ltypes = self._alias_rel_types(ltypes) if ltypes else ltypes
+        ctypes = self._alias_rel_types(ctypes) if ctypes else ctypes
+
+        try:
+            focus_node = await self.get_node(urn)
+        except Exception:
+            focus_node = None
+        focus_level = self._get_node_level(focus_node.entity_type) if focus_node else None
+        focus_entity_type = str(focus_node.entity_type) if focus_node else "unknown"
+        focus_label = focus_entity_type if focus_node else ""
+
+        edges_by_id: Dict[str, GraphEdge] = {}
+        upstream_urns: Set[str] = set()
+        downstream_urns: Set[str] = set()
+        truncation_reason: Optional[str] = None
+        excluded: Set[str] = set(exclude_urns or [])
+        seed_truncated = False
+
+        # Boundary bookkeeping, dict-as-ordered-set: ``cut_*`` = stopped by the
+        # budget or the deadline, ``depth_*`` = stopped by the requested depth.
+        # The dicts buy dedup and, for the per-row cut insertions, row order.
+        # The ring folds below come from SETS, so those members land in hash
+        # order — this is not a sorted or fully insertion-ordered frontier.
+        cut_up: Dict[str, None] = {}
+        cut_down: Dict[str, None] = {}
+        depth_up: Dict[str, None] = {}
+        depth_down: Dict[str, None] = {}
+        paged_anchor: Optional[str] = None
+        paged_cursor: Optional[str] = None
+
+        def _record_edge(rec: Dict[str, Any]) -> None:
+            eid = rec["edgeId"]
+            if eid not in edges_by_id:
+                edges_by_id[eid] = GraphEdge(
+                    id=eid,
+                    sourceUrn=rec["sourceUrn"],
+                    targetUrn=rec["targetUrn"],
+                    edgeType=rec["edgeType"],
+                    properties={},
+                )
+
+        if after_cursor is not None:
+            # ---- paging shape: one node, one direction, one page ----------
+            # No seed walk and no BFS: the client is draining a single hub it
+            # already has, so re-walking would re-ship everything around it.
+            try:
+                after_id = int(after_cursor[2:])
+            except (TypeError, ValueError):
+                # The endpoint guarantees ^e:\d+$; if something else arrives,
+                # refuse rather than silently page from the start (which would
+                # re-ship a page the client already holds).
+                raise ValueError("invalid cursor")
+            up = int(upstream_depth) > 0
+            anchor_label = await self._get_cached_label(urn) or focus_label
+            rows, last_edge_id = await self._page_raw_lineage_single(
+                urn, anchor_label, "incoming" if up else "outgoing", ltypes,
+                after_id, max_nodes, max(0.0, deadline - time.monotonic()),
+            )
+            # The anchor and the client's known set are "already visited" here,
+            # exactly as in the BFS below: their edges still ship (that is the
+            # seam), but the nodes are not re-shipped and are not re-attributed
+            # to a direction the client already filed them under.
+            known = excluded | {urn}
+            discovered: Set[str] = {urn}
+            for rec in rows:
+                _record_edge(rec)
+                other = rec.get("otherUrn")
+                if not other or other in known:
+                    continue
+                discovered.add(other)
+                (upstream_urns if up else downstream_urns).add(other)
+                # A partner arrives here UNWALKED — the page read the ANCHOR's
+                # adjacency, never this node's — which is exactly the shape of
+                # a ring the last allowed hop discovered. So it is filed like
+                # one: a depth-boundary candidate, probed below and kept only
+                # if it has more than the client can see. Filing it nowhere
+                # (the bug) shipped a partner with no frontier entry at all,
+                # and a partner with no entry is stamped "the walk ends here".
+                (depth_up if up else depth_down)[other] = None
+            if len(rows) >= max_nodes:
+                # A FULL page means there is more of this node's adjacency.
+                # Its entry is kept whatever the probe says — here the cursor,
+                # not the count, is the affordance.
+                paged_anchor = urn
+                (cut_up if up else cut_down)[urn] = None
+                if last_edge_id is not None:
+                    # A cursor names the NEXT id to consider, so resume one
+                    # past the last row shipped.
+                    paged_cursor = f"e:{last_edge_id + 1}"
+        else:
+            # ---- seed: the nodes the hops start from -----------------------
+            if seed_urns:
+                # A walk CONTINUATION. The caller already knows which nodes
+                # carry the lineage it is expanding from, so the container seed
+                # walk is deliberately skipped: re-deriving a seed from the
+                # focus's containment would cost a round-trip and re-anchor the
+                # walk on a focus the client has already moved past.
+                # A SEED IS AN INSTRUCTION, NOT A CANDIDATE. ``exclude_urns``
+                # says what must not be re-SHIPPED; it never says where the
+                # walk may START. The two got conflated here, and the cost
+                # was total: a client's seeds are BY CONSTRUCTION nodes it
+                # already holds (the lineage leaves under the card whose ⊕
+                # was clicked), so every seed was also excluded — and every
+                # expand of a card whose CHILDREN carry the lineage, rather
+                # than the card itself, walked from an empty seed and
+                # returned nothing. Measured live on a 14-column table: 0
+                # edges and 0 frontier entries, against 14 of each for the
+                # identical request with the seeds kept out of the exclude
+                # set. Every test in the live gate had carefully subtracted
+                # its seeds from its excludes; the client never could.
+                wanted = list(dict.fromkeys(seed_urns))
+                labels = await self._resolve_urn_labels_bulk(wanted) if wanted else {}
+                seed = [(u, labels.get(u) or "") for u in wanted]
+                # AND A SEED THAT STANDS FOR FINER THINGS RESOLVES TO THEM.
+                # Lineage lives at the leaves; a table carries none of its
+                # own, its COLUMNS do. A client expanding a card it has not
+                # opened yet holds none of those columns, so the only name
+                # it can send is the card's — and taking that literally
+                # walked a node with no lineage on it and returned an empty
+                # hop set, no frontier, and no error. Reported live: the ⊕
+                # on `int_clean_contacts_t2` shipped three nodes and zero
+                # edges while the same table's eight columns each had an
+                # upstream one hop away.
+                #
+                # This is the rule ``_collect_lineage_seed`` already applies
+                # to the ANCHOR ("a container focus contributes nothing
+                # directly — walk containment down to find who
+                # participates"), applied to every seed, so the two paths
+                # cannot disagree about what "start here" means.
+                beneath, seed_capped = await self._descendant_lineage_seed(
+                    wanted, labels, ltypes, ctypes,
+                    max(1, max_nodes // 2),
+                    max(0.6, min(1.5, deadline - time.monotonic())),
+                )
+                have = {u for u, _ in seed}
+                seed += [(u, lbl) for u, lbl in beneath if u not in have]
+            else:
+                seed_timeout = max(0.6, min(1.5, deadline - time.monotonic()))
+                # Reserve at least half the node budget for the WALK. A fat
+                # container can have more lineage-bearing descendants than the
+                # whole budget; seeding all of them leaves nothing to spend on
+                # hops, and the client gets a board of nodes with no lineage on
+                # it — the one thing a lineage view must never be.
+                seed_limit = max(1, max_nodes // 2)
+                seed, seed_capped = await self._collect_lineage_seed(
+                    urn, focus_label, ltypes, ctypes, seed_limit, seed_timeout,
+                )
+            # A capped seed makes the response partial, but it must NOT stop the
+            # walk: the flag is folded into truncation_reason at the return, not
+            # here, because setting it now would fail the loop's
+            # `not truncation_reason` guard and ship a nodes-without-edges board.
+            seed_truncated = seed_capped
+
+            seed_set = {u for u, _ in seed}
+            seed_labels = {u: lbl for u, lbl in seed}
+
+            # Excluded urns are pre-visited: never walked from, never
+            # re-shipped — but an edge INTO one is still recorded below.
+            visited: Set[str] = seed_set | {urn} | excluded
+            discovered = seed_set | {urn}
+
+            up_frontier: Set[str] = set(seed_set) if upstream_depth > 0 else set()
+            down_frontier: Set[str] = set(seed_set) if downstream_depth > 0 else set()
+            up_labels: Dict[str, str] = dict(seed_labels)
+            down_labels: Dict[str, str] = dict(seed_labels)
+
+            max_hops = max(int(upstream_depth), int(downstream_depth))
+            hop = 0
+            while (up_frontier or down_frontier) and hop < max_hops and not truncation_reason:
+                hop += 1
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    truncation_reason = "timeout"
+                    break
+                hop_timeout = max(0.6, min(1.5, remaining / 2))
+                # Ask for only what still fits under max_nodes: rows past the
+                # budget get dropped below anyway, and their edges with them.
+                hop_limit = max(1, max_nodes - len(discovered))
+                # The excluded set NEVER filters the query, at any hop. It is
+                # already pre-populated into `visited`, and rows are recorded
+                # edge-FIRST/visited-second below, so an excluded node costs a
+                # row and yields only its EDGE — the seam that stitches this
+                # step onto the graph the client already holds.
+                #
+                # This used to be a DB-side `NOT o.urn IN $exclude` on hop 1,
+                # on the reasoning that a hop-1 seam is always an edge the
+                # client walked in on. It is not: on a DIAMOND (b→c, b→x,
+                # x→c) the client holds b, c and x after one hop but has
+                # never seen x→c, and a continuation seeded at c had that row
+                # filtered away in the DB — lost for good, while a one-shot
+                # depth-2 closure showed it plainly. Uniform semantics cost
+                # hop-1 LIMIT budget on rows into already-known nodes; that
+                # is the price of never losing an edge between two held nodes.
+                directions: List[str] = []
+                coros = []
+                if up_frontier and hop <= upstream_depth:
+                    directions.append("up")
+                    coros.append(self._expand_raw_lineage_set(
+                        list(up_frontier), up_labels, "incoming", ltypes,
+                        hop_limit, hop_timeout,
+                    ))
+                elif up_frontier:
+                    # Ran out of DEPTH, not of graph (asymmetric depths) — this
+                    # ring is the upstream boundary, and the loop is about to
+                    # forget it while the other direction keeps going.
+                    depth_up.update(dict.fromkeys(up_frontier))
+                if down_frontier and hop <= downstream_depth:
+                    directions.append("down")
+                    coros.append(self._expand_raw_lineage_set(
+                        list(down_frontier), down_labels, "outgoing", ltypes,
+                        hop_limit, hop_timeout,
+                    ))
+                elif down_frontier:
+                    depth_down.update(dict.fromkeys(down_frontier))
+                if not coros:
+                    break
+
+                results = await asyncio.gather(*coros)
+
+                new_up: Set[str] = set()
+                new_down: Set[str] = set()
+                new_up_labels: Dict[str, str] = {}
+                new_down_labels: Dict[str, str] = {}
+                for direction, recs in zip(directions, results):
+                    if len(recs) >= hop_limit:
+                        # The hop hit its own LIMIT: rows were left on the
+                        # floor and nothing tells us WHICH frontier node they
+                        # belonged to, so the whole ring is a candidate. The
+                        # probe drops the ones that turn out to be fully shown.
+                        truncation_reason = "max_nodes"
+                        ring = up_frontier if direction == "up" else down_frontier
+                        cut = cut_up if direction == "up" else cut_down
+                        cut.update(dict.fromkeys(ring))
+                    for rec in recs:
+                        other = rec.get("otherUrn")
+                        is_new = bool(other) and other not in visited
+                        if is_new and len(discovered) >= max_nodes:
+                            # Budget check BEFORE recording anything: a node we
+                            # cannot ship must not leave its edge behind, or the
+                            # canvas draws an edge into nothing. What has more
+                            # to give is the NEAR endpoint — and unlike the one
+                            # we are dropping, it is on screen, so it is what
+                            # the client can ask about.
+                            truncation_reason = "max_nodes"
+                            near = rec["targetUrn"] if direction == "up" else rec["sourceUrn"]
+                            (cut_up if direction == "up" else cut_down)[near] = None
+                            continue
+                        # Edge FIRST, visited check second: an edge to an
+                        # already-known node is the seam that joins this step to
+                        # what the client already holds.
+                        _record_edge(rec)
+                        if not is_new:
+                            continue
+                        visited.add(other)
+                        discovered.add(other)
+                        lbl = rec.get("otherLabel") or ""
+                        if direction == "up":
+                            new_up.add(other)
+                            upstream_urns.add(other)
+                            new_up_labels[other] = lbl
+                        else:
+                            new_down.add(other)
+                            downstream_urns.add(other)
+                            new_down_labels[other] = lbl
+                up_frontier, down_frontier = new_up, new_down
+                up_labels, down_labels = new_up_labels, new_down_labels
+
+            if truncation_reason in ("max_nodes", "timeout"):
+                # Whatever we were about to expand (timeout) or had just
+                # discovered (max_nodes) never got its hop.
+                cut_up.update(dict.fromkeys(up_frontier))
+                cut_down.update(dict.fromkeys(down_frontier))
+            else:
+                # Depth exhaustion: the ring that was still growing when the
+                # last allowed hop finished. A ring that simply DRAINED is
+                # empty here — a dead end, never a frontier.
+                depth_up.update(dict.fromkeys(up_frontier))
+                depth_down.update(dict.fromkeys(down_frontier))
+
+        # ---- frontier: what the walk did not finish, and how much is left --
+        candidates_up = list(dict.fromkeys([*depth_up, *cut_up]))
+        candidates_down = list(dict.fromkeys([*depth_down, *cut_down]))
+        frontier_up: List[TraceFrontierNode] = []
+        frontier_down: List[TraceFrontierNode] = []
+        if candidates_up or candidates_down:
+            def _probe_slice(candidates: List[str]) -> List[str]:
+                # A full page files a budget's worth of partners as candidates,
+                # and they queue AHEAD of the anchor — enough to push the one
+                # entry a draining client is actually reading past the cap. The
+                # anchor goes first; everything else keeps candidate order.
+                if paged_anchor is not None and paged_anchor in candidates:
+                    rest = [u for u in candidates if u != paged_anchor]
+                    # max(0, …): a cap of 0 means "do not probe", and a bare
+                    # `cap - 1` would slice [:-1] — probing all but one.
+                    return [paged_anchor, *rest[:max(0, CLOSURE_FRONTIER_PROBE_CAP - 1)]]
+                return candidates[:CLOSURE_FRONTIER_PROBE_CAP]
+
+            probe_up = _probe_slice(candidates_up)
+            probe_down = _probe_slice(candidates_down)
+            degrees: Dict[str, Dict[str, int]] = {}
+            if (deadline - time.monotonic()) < 1.5:
+                # Not enough budget for the probe wave. The frontier still
+                # ships — unknown counts, not invented ones.
+                probe_up, probe_down = [], []
+            else:
+                try:
+                    degrees = await self.get_node_degrees(
+                        list(dict.fromkeys([*probe_up, *probe_down])), ltypes,
+                    )
+                except Exception as exc:
+                    logger.warning("trace_closure: frontier probe failed: %s", exc)
+
+            shown_in: Dict[str, int] = defaultdict(int)
+            shown_out: Dict[str, int] = defaultdict(int)
+            for edge in edges_by_id.values():
+                shown_out[edge.source_urn] += 1
+                shown_in[edge.target_urn] += 1
+
+            def _frontier(
+                candidates: List[str], probed: Set[str], key: str,
+                shown: Dict[str, int], cut: Dict[str, None],
+            ) -> List[TraceFrontierNode]:
+                out: List[TraceFrontierNode] = []
+                for u in candidates:
+                    total = (degrees.get(u) or {}).get(key) if u in probed else None
+                    if u == paged_anchor:
+                        out.append(TraceFrontierNode(
+                            urn=u, totalCount=total, nextCursor=paged_cursor,
+                        ))
+                        continue
+                    # A node the BUDGET or the DEADLINE cut off has a sound
+                    # resume: page it from the start ("e:0" — a cursor names
+                    # the next id to consider) and let the client's merge
+                    # dedupe whatever it already holds. A node that merely ran
+                    # out of DEPTH does not: nothing about it was left
+                    # half-read, its affordance is a re-root via seedUrns, and
+                    # a cursor there would promise a continuation that isn't.
+                    cursor = "e:0" if u in cut else None
+                    if total is None:
+                        # Unprobed, probe failed, or the degree bucket failed —
+                        # absence is UNKNOWN, never zero.
+                        out.append(TraceFrontierNode(urn=u, nextCursor=cursor))
+                    elif total > shown.get(u, 0):
+                        out.append(TraceFrontierNode(
+                            urn=u, totalCount=total, nextCursor=cursor,
+                        ))
+                    # else: everything this node has is already on screen.
+                return out
+
+            frontier_up = _frontier(candidates_up, set(probe_up), "in", shown_in, cut_up)
+            frontier_down = _frontier(candidates_down, set(probe_down), "out", shown_out, cut_down)
+
+        # Hydrate participant nodes, then their containment ancestor chains, so
+        # the canvas can nest the closure. Guarded: on failure surface a
+        # truncated-200 with the reason rather than dropping the lineage.
+        nodes_by_urn: Dict[str, GraphNode] = {}
+        try:
+            hydrated = await self.get_nodes_batch(list(discovered))
+            nodes_by_urn = {n.urn: n for n in hydrated if n}
+        except Exception:
+            truncation_reason = truncation_reason or "nodes_failed"
+
+        containment_edges_list: List[GraphEdge] = []
+        if ctypes and nodes_by_urn:
+            if (deadline - time.monotonic()) < 2.0:
+                truncation_reason = truncation_reason or "ancestors_failed"
+            else:
+                try:
+                    chains = await self._compute_and_store_ancestors_bulk(
+                        list(nodes_by_urn.keys()),
+                    )
+                    seen_anc: Set[str] = set()
+                    ancestor_urns: List[str] = []
+                    for chain in chains.values():
+                        for ancestor in chain or []:
+                            if ancestor and ancestor not in seen_anc:
+                                seen_anc.add(ancestor)
+                                ancestor_urns.append(ancestor)
+                    new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+                    if new_ancestors:
+                        ancestor_nodes = await self.get_nodes_batch(new_ancestors)
+                        for n in ancestor_nodes:
+                            if n:
+                                nodes_by_urn[n.urn] = n
+                    if len(nodes_by_urn) > 1:
+                        containment_edges_list = await self._fetch_containment_edges(
+                            list(nodes_by_urn.keys()), ctypes, chains=chains,
+                        )
+                except Exception:
+                    truncation_reason = truncation_reason or "ancestors_failed"
+
+        # The seed cap, folded in at the end: the walk ran on what it had, and
+        # the response still says out loud that it is partial.
+        truncation_reason = truncation_reason or ("max_nodes" if seed_truncated else None)
+
+        return TraceClosureResult(
+            nodes=list(nodes_by_urn.values()),
+            edges=list(edges_by_id.values()),
+            containmentEdges=containment_edges_list,
+            upstreamUrns=upstream_urns,
+            downstreamUrns=downstream_urns,
+            focus=TraceFocus(
+                urn=urn,
+                level=focus_level if focus_level is not None else 0,
+                entityType=focus_entity_type,
+            ),
+            effectiveLevel=focus_level if focus_level is not None else 0,
+            isInherited=False,
+            inheritedFromUrn=None,
+            truncated=(truncation_reason is not None),
+            truncationReason=truncation_reason,
+            frontierUp=frontier_up,
+            frontierDown=frontier_down,
+            seedTruncated=seed_truncated,
+        )
+
     async def expand_aggregated(
         self,
         source_urn: str,
         target_urn: str,
-        next_level: int,
+        next_level: Optional[int],
         lineage_edge_types: List[str],
         containment_edge_types: List[str],
         max_nodes: int,
         timeout_ms: int,
         use_raw_edges: bool = False,
         include_containment_edges: bool = False,
+        drill_anchor: Optional[str] = None,
     ) -> TraceResult:
         await self._ensure_connected()
         deadline = time.monotonic() + (timeout_ms / 1000.0)
@@ -7187,6 +7708,27 @@ class FalkorDBProvider(GraphDataProvider):
             structural = (
                 await self._edge_depth_stamps(source_urn, target_urn)
             ) is not None
+        # No level to descend to is itself a request for the structural
+        # drill. A caller that cannot name a level is not confused — a
+        # type appearing at two containment depths (``Container`` inside
+        # ``Container``) has no single ``hierarchy.level``, so there is
+        # no number it could honestly send.
+        if next_level is None:
+            structural = True
+
+        # Which anchor is being OPENED. Only that side descends; the
+        # other contributes itself and everything beneath it.
+        #
+        # Stepping both sides in lockstep is why opening a Data Domain
+        # against a Table five levels below returned nothing: the level
+        # path filtered the Table side to types at the domain's next
+        # level (it has none), and the structural path walked the Table
+        # down to its columns. Either way the two sets could never meet,
+        # and the caller was told "nothing here connects" about lineage
+        # that plainly exists. The partner is the question, not another
+        # thing to descend.
+        if drill_anchor is not None and drill_anchor not in (source_urn, target_urn):
+            drill_anchor = None
 
         # Single-query pair fetch: source + target descendants in one
         # UNION'd Cypher round-trip. Saves one planner pass and frees a
@@ -7197,10 +7739,12 @@ class FalkorDBProvider(GraphDataProvider):
             if structural:
                 s_urns, t_urns = await self._collect_children_pair(
                     source_urn, target_urn, ctypes, max_nodes,
+                    drill_anchor=drill_anchor,
                 )
             else:
                 s_urns, t_urns = await self._collect_descendants_pair_at_level(
                     source_urn, target_urn, next_level, ctypes, max_nodes,
+                    drill_anchor=drill_anchor,
                 )
         except Exception:
             s_urns, t_urns = [], []
@@ -7263,6 +7807,14 @@ class FalkorDBProvider(GraphDataProvider):
         focus_level_actual = (
             self._get_node_level(anchor_node.entity_type) if anchor_node else next_level
         )
+        # The response model wants a concrete level. A structural drill
+        # has none to report — the caller could not name one, which is
+        # the whole reason it asked structurally — so fall back to the
+        # anchor's own resolved level and finally to 0 rather than
+        # failing validation on a `None` nobody asked to be meaningful.
+        reported_level = focus_level_actual if focus_level_actual is not None else next_level
+        if reported_level is None:
+            reported_level = 0
 
         return TraceResult(
             nodes=list(nodes_by_urn.values()),
@@ -7272,10 +7824,10 @@ class FalkorDBProvider(GraphDataProvider):
             downstreamUrns=set(),
             focus=TraceFocus(
                 urn=source_urn,
-                level=focus_level_actual if focus_level_actual is not None else next_level,
+                level=reported_level,
                 entityType=str(anchor_node.entity_type) if anchor_node else "unknown",
             ),
-            effectiveLevel=next_level,
+            effectiveLevel=next_level if next_level is not None else reported_level,
             isInherited=False,
             inheritedFromUrn=None,
             truncated=(truncation_reason is not None),
@@ -7776,6 +8328,383 @@ class FalkorDBProvider(GraphDataProvider):
                     continue
         return out
 
+    async def _expand_raw_lineage_set(
+        self,
+        frontier: List[str],
+        frontier_labels: Dict[str, str],
+        direction: str,
+        ltypes: List[str],
+        limit: int,
+        timeout_secs: float,
+    ) -> List[Dict[str, Any]]:
+        """One BFS hop over RAW lineage edges — the regime-independent core of
+        ``trace_closure``.
+
+        Unlike ``_expand_aggregated_set`` this walks the DECLARED lineage
+        rel-types directly (``[r:LTYPE1|LTYPE2|...]``) with NO neighbour
+        label/level filter: focus scoping comes from starting at the focus and
+        following its ACTUAL lineage, not from constraining peers. Reads the
+        MAIN graph (raw edges live there, not the projection graph), so it is
+        correct at the finest grain even in boundary regime where leaf rollups
+        are never materialised.
+
+        ``direction``: ``'incoming'`` walks upstream (``(f)<-[r]-(o)``),
+        ``'outgoing'`` walks downstream (``(f)-[r]->(o)``). Each returned record
+        is oriented source->target and carries ``otherUrn``/``otherLabel`` — the
+        far (newly-discovered) endpoint and its entity-type label — so the
+        caller seeds the next frontier ALREADY label-bucketed without a
+        separate label round-trip.
+
+        The frontier is bucketed by label so each sub-query uses the per-label
+        ``(:Label).urn`` index (there is no label-less URN index; an unlabeled
+        bucket pays one scan, still correct).
+
+        There is deliberately NO exclude filter. The caller's already-known
+        set is applied in Python AFTER the row is recorded, so an edge into a
+        known node still ships while the node itself does not — see the note
+        at the call site in ``trace_closure`` for the diamond this protects.
+        """
+        if not frontier or limit <= 0 or not ltypes:
+            return []
+
+        by_label: Dict[str, List[str]] = {}
+        for urn in frontier:
+            by_label.setdefault(frontier_labels.get(urn) or "", []).append(urn)
+
+        if direction == "incoming":
+            arrow = "<-[r:{rel}]-"
+            source_var, target_var = "o", "f"
+        else:
+            arrow = "-[r:{rel}]->"
+            source_var, target_var = "f", "o"
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+        per_query_timeout = max(0.6, min(1.5, timeout_secs))
+
+        queries: List[Tuple[str, Dict[str, Any]]] = []
+        for f_label, urns in by_label.items():
+            sl = _sanitize_label(f_label) if f_label else ""
+            label_clause = f":{sl}" if sl else ""
+            where_clause = "WHERE f.urn IN $frontier "
+            params: Dict[str, Any] = {"frontier": urns, "limit": limit}
+            cypher = (
+                f"MATCH (f{label_clause}){arrow.format(rel=rel_alt)}(o) "
+                + where_clause
+                + f"RETURN {source_var}.urn AS sourceUrn, {target_var}.urn AS targetUrn, "
+                "id(r) AS edgeId, type(r) AS edgeType, "
+                "o.urn AS otherUrn, labels(o)[0] AS otherLabel "
+                "LIMIT $limit"
+            )
+            queries.append((cypher, params))
+
+        async def _run(c: str, p: Dict[str, Any]):
+            try:
+                return await self._ro_query(
+                    c, params=p, timeout=per_query_timeout, op="trace.closure_expand",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "trace_closure: raw lineage expand (%s) failed: %s",
+                    direction, exc,
+                )
+                return None
+
+        results = await asyncio.gather(*(_run(c, p) for c, p in queries))
+
+        out: List[Dict[str, Any]] = []
+        seen_edge_ids: Set[str] = set()
+        for result in results:
+            if result is None:
+                continue
+            for row in (result.result_set or []):
+                try:
+                    eid = str(row[2]) if row[2] is not None else f"raw-{row[0]}-{row[1]}"
+                    if eid in seen_edge_ids:
+                        continue
+                    seen_edge_ids.add(eid)
+                    out.append({
+                        "sourceUrn": row[0],
+                        "targetUrn": row[1],
+                        "edgeId": eid,
+                        "edgeType": str(row[3]) if row[3] else ltypes[0],
+                        "otherUrn": row[4],
+                        "otherLabel": row[5],
+                    })
+                    if len(out) >= limit:
+                        return out
+                except Exception:
+                    continue
+        return out
+
+    async def _collect_lineage_seed(
+        self,
+        focus_urn: str,
+        focus_label: str,
+        ltypes: List[str],
+        ctypes: List[str],
+        cap: int,
+        timeout_secs: float,
+    ) -> Tuple[List[Tuple[str, str]], bool]:
+        """The nodes to START the closure BFS from.
+
+        Lineage lives at the leaves, never on containers. A LEAF focus is its
+        own seed. A CONTAINER focus (a Domain/Layer/Table with no lineage of
+        its own) contributes nothing directly — so this is the ONE place
+        containment flows DOWNWARD: walk containment down to find which
+        descendants of the top-most node carry incident lineage, and seed from
+        those. The closure BFS then shows only their LINEAGE hops; containment
+        is never a hop. Bounded by ``cap`` (a container with more lineage
+        leaves than that spills to the lazy/coarse path — handled by the
+        caller's ``max_nodes`` truncation + cursor).
+
+        Returns ``(seed, seed_capped)`` where ``seed`` is a list of
+        ``(urn, entity_type_label)`` pairs (already label-bucketed for
+        index-seeking sub-queries — no extra label lookup) and
+        ``seed_capped`` is True when the descendants query returned exactly
+        its ``cap`` LIMIT (more lineage-bearing descendants may exist than
+        were returned — the caller reports ``seedTruncated``).
+
+        The caller's ``exclude_urns`` deliberately plays NO part here: it
+        governs what is re-SHIPPED, never where the walk STARTS. Dropping a
+        held node from the seed only means never re-deriving the hops it
+        has not been asked about yet — see the ``wanted`` comment in
+        ``trace_closure``, which is the same rule on the explicit-seed path.
+        """
+        if not ltypes:
+            return [(focus_urn, focus_label)], False
+
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+        per_query_timeout = max(0.6, min(1.5, timeout_secs))
+        sl = _sanitize_label(focus_label) if focus_label else ""
+        label_clause = f":{sl}" if sl else ""
+
+        # FalkorDB REJECTS the tempting single-round-trip form
+        #     WITH [f] + collect(DISTINCT d) AS cands
+        # (mixing a node alias with an aggregation) — it fails with
+        #     "_AR_EXP_UpdateEntityIdx: Unable to locate a value with alias f"
+        # VERIFIED against a live engine (a fake that string-matches Cypher
+        # cannot catch this). So: two separately-valid queries, GATHERED, and
+        # unioned in Python — a cursor role, not a filter:
+        #   (1) does the focus itself carry lineage?         → LEAF focus
+        #   (2) which containment descendants carry lineage? → CONTAINER focus
+        queries: List[Tuple[str, Dict[str, Any]]] = [(
+            f"MATCH (f{label_clause} {{urn: $urn}}) WHERE (f)-[:{rel_alt}]-() "
+            "RETURN f.urn AS urn, labels(f)[0] AS label",
+            {"urn": focus_urn},
+        )]
+        if ctypes:
+            ct_alt = "|".join(_sanitize_label(t) for t in ctypes)
+            hops = self._containment_hop_bound()
+            queries.append((
+                f"MATCH (f{label_clause} {{urn: $urn}})-[c:{ct_alt}*1..{hops}]->(d) "
+                f"WHERE (d)-[:{rel_alt}]-() "
+                "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label LIMIT $cap",
+                {"urn": focus_urn, "cap": cap},
+            ))
+
+        async def _run_seed(c: str, prm: Dict[str, Any]):
+            try:
+                return await self._ro_query(
+                    c, params=prm, timeout=per_query_timeout, op="trace.closure_seed",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "trace_closure: seed query failed for %s: %s", focus_urn, exc,
+                )
+                return None
+
+        results = await asyncio.gather(*(_run_seed(c, prm) for c, prm in queries))
+        if all(r is None for r in results):
+            # Every probe errored — degrade to the focus itself rather than
+            # reporting "no lineage", which would be a lie.
+            return [(focus_urn, focus_label)], False
+
+        seed_capped = False
+        if ctypes and len(results) > 1 and results[1] is not None:
+            seed_capped = len(results[1].result_set or []) == cap
+
+        seed: List[Tuple[str, str]] = []
+        seen: Set[str] = set()
+        for result in results:
+            if result is None:
+                continue
+            for row in (result.result_set or []):
+                u = row[0]
+                if not u or u in seen:
+                    continue
+                seen.add(u)
+                seed.append((u, (row[1] if len(row) > 1 else None) or ""))
+        return seed, seed_capped
+
+    async def _descendant_lineage_seed(
+        self,
+        urns: List[str],
+        labels: Dict[str, str],
+        ltypes: List[str],
+        ctypes: List[str],
+        cap: int,
+        timeout_secs: float,
+    ) -> Tuple[List[Tuple[str, str]], bool]:
+        """Which lineage-bearing entities live BENEATH these seeds.
+
+        ``_collect_lineage_seed``'s containment-descent, asked of a SET
+        rather than of one anchor: a walk continuation names the cards the
+        reader clicked, and a card that holds finer things carries no
+        lineage of its own — its columns do. Seeds that ARE leaves simply
+        contribute nothing here (a leaf has no containment children), so
+        the caller can hand over its whole seed list without sorting them
+        first.
+
+        Bucketed by label for the per-label ``(:Label).urn`` index, the
+        same way ``_expand_raw_lineage_set`` buckets its frontier (there is
+        no label-less URN index; an unlabeled bucket pays one scan, still
+        correct). Returns ``(pairs, capped)`` — ``capped`` when a bucket
+        came back exactly at its LIMIT, which the caller reports as
+        ``seedTruncated``. Failures degrade to "nothing beneath" rather
+        than aborting the walk: the literal seeds still walk.
+        """
+        if not urns or not ltypes or not ctypes or cap <= 0:
+            return [], False
+
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+        ct_alt = "|".join(_sanitize_label(t) for t in ctypes)
+        hops = self._containment_hop_bound()
+        per_query_timeout = max(0.6, min(1.5, timeout_secs))
+
+        by_label: Dict[str, List[str]] = {}
+        for u in urns:
+            by_label.setdefault(labels.get(u) or "", []).append(u)
+
+        async def _run(f_label: str, bucket: List[str]):
+            sl = _sanitize_label(f_label) if f_label else ""
+            label_clause = f":{sl}" if sl else ""
+            cypher = (
+                f"MATCH (f{label_clause})-[c:{ct_alt}*1..{hops}]->(d) "
+                f"WHERE f.urn IN $seeds AND (d)-[:{rel_alt}]-() "
+                "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label LIMIT $cap"
+            )
+            try:
+                return await self._ro_query(
+                    cypher, params={"seeds": bucket, "cap": cap},
+                    timeout=per_query_timeout, op="trace.closure_seed",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "trace_closure: descendant seed query failed: %s", exc,
+                )
+                return None
+
+        results = await asyncio.gather(
+            *(_run(lbl, bucket) for lbl, bucket in by_label.items())
+        )
+
+        pairs: List[Tuple[str, str]] = []
+        seen: Set[str] = set()
+        capped = False
+        for result in results:
+            if result is None:
+                continue
+            rows = result.result_set or []
+            if len(rows) == cap:
+                capped = True
+            for row in rows:
+                u = row[0]
+                if not u or u in seen:
+                    continue
+                seen.add(u)
+                pairs.append((u, (row[1] if len(row) > 1 else None) or ""))
+        return pairs, capped
+
+    async def _page_raw_lineage_single(
+        self,
+        urn: str,
+        label: str,
+        direction: str,
+        ltypes: List[str],
+        after_id: Optional[int],
+        limit: int,
+        timeout: float,
+    ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+        """Cursor page over ONE node's raw-lineage adjacency in ONE
+        direction — the lazy/coarse fallback for a single frontier node
+        whose full hop would blow the BFS budget, paired with
+        ``_expand_raw_lineage_set``'s batched hop.
+
+        Stable-ordered by ``id(r)``. ``after_id`` is INCLUSIVE — "the next
+        edge id to consider", not "the last one you saw" — so ``0`` means
+        from the start and the caller's next cursor is ``last_edge_id + 1``.
+        The exclusive form could not express "from the start" at all: the
+        wire grammar is ``^e:\\d+$``, so the only available start was
+        ``e:0``, which silently skipped the edge with ``id(r) == 0``. Row
+        dicts use the SAME keys as ``_expand_raw_lineage_set`` rows so
+        callers can share processing code between the batched and
+        single-node paths.
+
+        ``label`` falsy falls back to an unlabeled anchor match — a
+        single-node scan, so the missing per-label index is an accepted
+        cost here (unlike the frontier-wide bucketing in the sibling
+        helpers, where an unlabeled bucket would pay that cost per URN).
+        """
+        if not ltypes or limit <= 0:
+            return [], None
+
+        after = 0 if after_id is None else after_id
+        sl = _sanitize_label(label) if label else ""
+        label_clause = f":{sl}" if sl else ""
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+
+        if direction == "incoming":
+            arrow = f"<-[r:{rel_alt}]-"
+            source_expr, target_expr = "o.urn", "f.urn"
+        else:
+            arrow = f"-[r:{rel_alt}]->"
+            source_expr, target_expr = "f.urn", "o.urn"
+
+        cypher = (
+            f"MATCH (f{label_clause} {{urn: $urn}}){arrow}(o) "
+            "WHERE id(r) >= $after "
+            f"RETURN id(r) AS edgeId, {source_expr} AS sourceUrn, {target_expr} AS targetUrn, "
+            "type(r) AS edgeType, o.urn AS otherUrn, labels(o)[0] AS otherLabel "
+            "ORDER BY id(r) "
+            "LIMIT $limit"
+        )
+        # Per-query bound, same as the sibling walk helpers — deliberately
+        # NOT the caller's whole remaining budget. Keeping every individual
+        # page query small is what lets the closure's overall deadline
+        # degrade to a truncated (200) response instead of one runaway
+        # query eating the whole request; a single label-qualified anchor
+        # page at LIMIT <= 2000 fits comfortably inside this bound.
+        per_query_timeout = max(0.6, min(1.5, timeout))
+        try:
+            result = await self._ro_query(
+                cypher, params={"urn": urn, "after": after, "limit": limit},
+                timeout=per_query_timeout, op="trace.closure_page",
+            )
+        except Exception as exc:
+            logger.warning(
+                "trace_closure: page query failed for %s (%s): %s", urn, direction, exc,
+            )
+            return [], None
+
+        rows: List[Dict[str, Any]] = []
+        last_edge_id: Optional[int] = None
+        for row in (result.result_set or []):
+            try:
+                raw_eid = row[0]
+                eid_int = int(raw_eid) if raw_eid is not None else None
+                rows.append({
+                    "sourceUrn": row[1],
+                    "targetUrn": row[2],
+                    "edgeId": str(raw_eid) if raw_eid is not None else f"raw-{row[1]}-{row[2]}",
+                    "edgeType": str(row[3]) if row[3] else ltypes[0],
+                    "otherUrn": row[4],
+                    "otherLabel": row[5],
+                })
+                if eid_int is not None:
+                    last_edge_id = eid_int
+            except Exception:
+                continue
+        return rows, last_edge_id
+
     async def _collect_ancestor_urns(
         self, urns: List[str], ctypes: List[str],
     ) -> List[str]:
@@ -7893,13 +8822,64 @@ class FalkorDBProvider(GraphDataProvider):
         target_urn: str,
         ctypes: List[str],
         limit: int,
+        drill_anchor: Optional[str] = None,
     ) -> Tuple[List[str], List[str]]:
-        """STRUCTURAL drill: each anchor's DIRECT containment children —
-        one step below the expanded pair, each side advancing from its
-        own depth (ragged pairs included: a childless side stays at the
-        anchor itself). Label-agnostic, so self-nesting ontologies drill
-        correctly at every depth; on aligned type-structured trees the
-        children ARE the next type level, so behavior is unchanged."""
+        """STRUCTURAL drill: DIRECT containment children — one step below
+        the expanded pair. Label-agnostic, so self-nesting ontologies
+        drill correctly at every depth; on aligned type-structured trees
+        the children ARE the next type level, so behavior is unchanged.
+
+        ``drill_anchor`` names the side being OPENED. Only it descends;
+        the other contributes itself plus its whole subtree, so anchors
+        at very different depths can still meet. Without it both sides
+        advance from their own depth (ragged pairs included), which is
+        the historical behaviour and correct only for a pair that was
+        already aligned.
+
+        Either way a childless side falls back to the anchor itself."""
+        if drill_anchor is not None:
+            partner = target_urn if drill_anchor == source_urn else source_urn
+            depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
+            cypher = (
+                # The opened side — one containment step down.
+                "MATCH (a {urn: $drill})-[c]->(child) "
+                "WHERE type(c) IN $ctypes "
+                "WITH DISTINCT child.urn AS urn "
+                "LIMIT $limit "
+                "RETURN 'd' AS side, collect(urn) AS urns "
+                "UNION "
+                # The partner — itself...
+                "MATCH (b {urn: $partner}) "
+                "RETURN 'p' AS side, [b.urn] AS urns "
+                "UNION "
+                # ...and everything beneath it, at any depth.
+                f"MATCH (b {{urn: $partner}})-[c*1..{depth}]->(sub) "
+                "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
+                "WITH DISTINCT sub.urn AS urn "
+                "LIMIT $limit "
+                "RETURN 'p' AS side, collect(urn) AS urns"
+            )
+            result = await self._ro_query(
+                cypher,
+                params={"drill": drill_anchor, "partner": partner,
+                        "ctypes": ctypes, "limit": limit},
+                op="trace.children_drill",
+                timeout=2.0,
+            )
+            drilled: List[str] = []
+            partner_side: List[str] = []
+            for row in (result.result_set or []):
+                if not row or len(row) < 2:
+                    continue
+                urns = [u for u in (row[1] if isinstance(row[1], list) else []) if u]
+                if row[0] == 'd':
+                    drilled.extend(urns)
+                elif row[0] == 'p':
+                    partner_side.extend(urns)
+            drilled = list(dict.fromkeys(drilled)) or [drill_anchor]
+            partner_side = list(dict.fromkeys(partner_side)) or [partner]
+            return (drilled, partner_side) if drill_anchor == source_urn else (partner_side, drilled)
+
         cypher = (
             "MATCH (a {urn: $source})-[c]->(child) "
             "WHERE type(c) IN $ctypes "
@@ -7942,6 +8922,7 @@ class FalkorDBProvider(GraphDataProvider):
         target_level: int,
         ctypes: List[str],
         limit: int,
+        drill_anchor: Optional[str] = None,
     ) -> Tuple[List[str], List[str]]:
         """Collect descendants of both anchors in a SINGLE Cypher round-trip.
 
@@ -7956,9 +8937,28 @@ class FalkorDBProvider(GraphDataProvider):
         Returns ``(source_urns, target_urns)``. Either side may be empty if
         the anchor's label does not match ``target_level``'s type set.
         """
+        # ``drill_anchor`` names the side being OPENED. Only it is
+        # level-filtered; the partner contributes itself and its whole
+        # subtree. Level-filtering BOTH is what empties the partner side
+        # whenever it sits finer than the level asked for — a Table has
+        # no descendants at a Domain's next level, so ``t_urns`` came
+        # back empty and the expand reported "nothing connects" about
+        # lineage that exists.
+        if drill_anchor is not None:
+            return await self._collect_level_and_subtree(
+                drill_anchor,
+                target_urn if drill_anchor == source_urn else source_urn,
+                target_level, ctypes, limit,
+                drilled_is_source=drill_anchor == source_urn,
+            )
         types = self._types_at_level(target_level)
         if not types:
-            return [], []
+            # Nothing declared at that level. Returning empty here made
+            # the expand report "nothing connects" about a level the
+            # ONTOLOGY could not describe — a statement about our type
+            # map, dressed up as a statement about the data. Each anchor
+            # stands for itself instead, so the edge query still runs.
+            return [source_urn], [target_urn]
 
         if not ctypes:
             # Empty containment — descendants of each anchor reduce to
@@ -8046,7 +9046,72 @@ class FalkorDBProvider(GraphDataProvider):
                 s_set.update(urn_list)
             elif side == 't':
                 t_set.update(urn_list)
-        return list(s_set), list(t_set)
+        # An anchor that matched nothing falls back to ITSELF, mirroring
+        # ``_collect_children_pair``. Without this a side could come back
+        # empty and short-circuit the whole expand to zero edges — the
+        # asymmetry between these two helpers was itself a bug.
+        return (list(s_set) or [source_urn], list(t_set) or [target_urn])
+
+    async def _collect_level_and_subtree(
+        self,
+        drilled_urn: str,
+        partner_urn: str,
+        target_level: int,
+        ctypes: List[str],
+        limit: int,
+        *,
+        drilled_is_source: bool,
+    ) -> Tuple[List[str], List[str]]:
+        """One side descends to ``target_level``; the other contributes
+        itself plus its whole subtree, unfiltered. See the dispatch in
+        ``_collect_descendants_pair_at_level`` for why."""
+        types = self._types_at_level(target_level)
+        max_depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
+        parts = [
+            # The opened side — anchor itself when it already sits at the level
+            "MATCH (a {urn: $drill}) WHERE labels(a)[0] IN $types "
+            "RETURN 'd' AS side, [a.urn] AS urns",
+            # ...and its descendants at that level
+            f"MATCH (a {{urn: $drill}})-[c*1..{max_depth}]->(child) "
+            "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
+            "  AND labels(child)[0] IN $types "
+            "WITH DISTINCT child.urn AS urn LIMIT $limit "
+            "RETURN 'd' AS side, collect(urn) AS urns",
+            # The partner — itself
+            "MATCH (b {urn: $partner}) RETURN 'p' AS side, [b.urn] AS urns",
+            # ...and everything beneath it, at any depth, any label
+            f"MATCH (b {{urn: $partner}})-[c*1..{max_depth}]->(sub) "
+            "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
+            "WITH DISTINCT sub.urn AS urn LIMIT $limit "
+            "RETURN 'p' AS side, collect(urn) AS urns",
+        ]
+        if not types:
+            # Nothing declared at that level — the opened side still
+            # contributes itself, so the expand degrades to "does this
+            # container connect at all" rather than to silence.
+            parts = [
+                "MATCH (a {urn: $drill}) RETURN 'd' AS side, [a.urn] AS urns",
+                *parts[2:],
+            ]
+        if not ctypes:
+            parts = [p for p in parts if "*1.." not in p]
+        result = await self._ro_query(
+            " UNION ".join(parts),
+            params={"drill": drilled_urn, "partner": partner_urn,
+                    "ctypes": ctypes, "types": types, "limit": limit},
+            op="trace.level_and_subtree",
+            timeout=2.0,
+        )
+        d_set: Set[str] = set()
+        p_set: Set[str] = set()
+        for row in (result.result_set or []):
+            if not row or len(row) < 2:
+                continue
+            urns = [u for u in (row[1] if isinstance(row[1], list) else []) if u]
+            (d_set if row[0] == 'd' else p_set).update(urns)
+        drilled = list(d_set) or [drilled_urn]
+        partner = list(p_set) or [partner_urn]
+        return (drilled, partner) if drilled_is_source else (partner, drilled)
 
     async def _edges_between_sets(
         self, s_urns: List[str], t_urns: List[str], level: int,

@@ -35,6 +35,9 @@ class StubMain:
     def set_containment_edge_types(self, ets, from_ontology=False):
         pass
 
+    def set_node_identity(self, identity_property=None, name_property=None):
+        self.identity = (identity_property, name_property)
+
     async def get_node(self, urn):
         return self.nodes.get(urn)
 
@@ -112,6 +115,13 @@ async def _run() -> None:
     assert {n.urn for n in (await p.trace_at_level("A", 0, 1, 1, ["LINEAGE"], ["CONTAINS"], 100, 1000)).nodes} \
         == {"A", "B", "A.c", "B.c"}
 
+    # ── a base that cannot do closures (StubMain, like VersionedBranchProvider
+    #    on a stale projection) ⇒ the overlay says so the way every sibling
+    #    read does, rather than reaching for a method that is not there and
+    #    turning a 501 into an AttributeError 500. ────────────────────────────
+    with pytest.raises(NotImplementedError):
+        await p.trace_closure("A", 1, 1, ["LINEAGE"], ["CONTAINS"], 100, 1000)
+
     # ── added lineage edge ⇒ that rollup +1, nothing else moves ─────────────────
     p2 = _mk(base, {**_EMPTY, "edgesUpsert": [
         {"id": "lin2", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]},
@@ -171,6 +181,25 @@ async def _run() -> None:
 
 def test_draft_overlay_invariant_and_delta():
     asyncio.run(_run())
+
+
+def test_set_node_identity_reaches_the_base_provider():
+    """The mapping must survive the overlay hop.
+
+    ContextEngine._inject_identity is hasattr-gated, so a missing passthrough
+    here does not raise — it silently leaves the shared, cached base provider
+    on the PREVIOUS source's mapping, and an id-keyed source read through a
+    draft hydrates as an empty graph. Also pin the reset: passing None is a
+    real instruction ("restore the platform defaults"), not a no-op.
+    """
+    base = StubMain()
+    p = _mk(base, _EMPTY)
+
+    p.set_node_identity("asset_id", "asset_name")
+    assert base.identity == ("asset_id", "asset_name")
+
+    p.set_node_identity(None, None)
+    assert base.identity == (None, None)
 
 
 if __name__ == "__main__":

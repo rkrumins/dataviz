@@ -18,6 +18,9 @@ import type {
     TraceOptions,
     TraceV2Request,
     TraceV2Result,
+    TraceClosureRequest,
+    TraceClosureFrontierNode,
+    LensClosureExtras,
     ExpandAggregatedRequest,
     ExpandAggregatedBatchRequest,
     LayerAssignmentRequest,
@@ -59,6 +62,14 @@ interface RawTraceV2Result {
     truncationReason?: string | null
     /** Optional sidecar metadata — only present when the v2 envelope emits it. */
     meta?: TraceMeta
+}
+
+// Wire shape from POST /trace/closure — RawTraceV2Result plus the three
+// closure-only fields, pre-normalization.
+interface RawTraceClosureResult extends RawTraceV2Result {
+    frontierUp?: TraceClosureFrontierNode[]
+    frontierDown?: TraceClosureFrontierNode[]
+    seedTruncated?: boolean
 }
 
 function normalizeTraceV2(raw: RawTraceV2Result): TraceV2Result {
@@ -671,6 +682,29 @@ export class RemoteGraphProvider implements GraphDataProvider {
             timeoutMs: TIMEOUTS.TRACE_MS,
         })
         return normalizeTraceV2(raw)
+    }
+
+    /**
+     * Focus-scoped lineage closure — POST /trace/closure.
+     *
+     * Regime-independent: the server walks RAW lineage from the focus (seeding
+     * from a container's lineage-bearing leaves when the focus has none), so it
+     * reaches attribute→attribute even where boundary-mode aggregation never
+     * materialised leaf rollups. Same never-504 contract as /trace/v2 —
+     * truncation surfaces as `truncated: true`, never an error.
+     */
+    async traceClosure(request: TraceClosureRequest): Promise<TraceV2Result & LensClosureExtras> {
+        const raw = await this.fetch<RawTraceClosureResult>('/trace/closure', {
+            method: 'POST',
+            body: JSON.stringify(request),
+            timeoutMs: TIMEOUTS.TRACE_MS,
+        })
+        return {
+            ...normalizeTraceV2(raw),
+            frontierUp: raw.frontierUp ?? [],
+            frontierDown: raw.frontierDown ?? [],
+            seedTruncated: raw.seedTruncated ?? false,
+        }
     }
 
     async expandAggregated(request: ExpandAggregatedRequest): Promise<TraceV2Result> {

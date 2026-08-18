@@ -3,7 +3,7 @@ import hashlib
 import json as _json
 import logging
 import time
-from typing import List, Dict, Any, Set, Optional, Tuple, TYPE_CHECKING
+from typing import Iterable, List, Dict, Any, Set, Optional, Tuple, TYPE_CHECKING
 from ..models.graph import (
     GraphNode, GraphEdge, LineageResult, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
@@ -13,6 +13,7 @@ from ..models.graph import (
 )
 from backend.common.models.graph import (
     TraceResultV2, TraceExpandRequest, TraceDelta, TraceMeta, MegaNodeInfo,
+    TraceClosureRequest, TraceClosureResult,
 )
 
 from ..providers.base import GraphDataProvider
@@ -33,6 +34,36 @@ logger = logging.getLogger(__name__)
 # Granularity is now expressed as an entity type ID string (e.g. "dataset", "term").
 # Coarseness is derived from hierarchy.level in the resolved ontology — level 0 = coarsest.
 # No hardcoded mapping needed.
+
+#: Relationship types this system MATERIALISES itself. They are stored in
+#: the graph like any other edge, and a source's resolved ontology
+#: routinely lists them among its lineage types — but nothing in the data
+#: source ever said them: ``:AGGREGATED`` is the aggregation worker's own
+#: rollup of a real flow, projected onto every coarser grain above its
+#: endpoints. A walk that treats them as lineage counts one real flow once
+#: per level of containment above it.
+#:
+#: Uppercase, and compared uppercase — the graph's own spelling varies per
+#: source (see ``_alias_rel_types``).
+#:
+#: This is the ONE place that names them for the closure. The aggregated
+#: read paths (``trace_at_level``, ``expand_aggregated_edge`` and the
+#: materialiser) read ``:AGGREGATED`` deliberately and carry their own
+#: literals; they are a different question and are left alone.
+SYNTHETIC_LINEAGE_EDGE_TYPES = frozenset({"AGGREGATED"})
+
+
+def _real_lineage_types(edge_types: Iterable[str]) -> List[str]:
+    """`edge_types` minus anything this system materialised itself.
+
+    Order-preserving and duplicate-tolerant, because the provider turns
+    the list straight into a Cypher relationship alternation.
+    """
+    return [
+        t for t in edge_types
+        if t and str(t).upper() not in SYNTHETIC_LINEAGE_EDGE_TYPES
+    ]
+
 
 class ContextEngine:
     _ONTOLOGY_CACHE_TTL = 300  # 5 minutes
@@ -1309,6 +1340,54 @@ class ContextEngine:
                 include_inherited_lineage=req.include_inherited_lineage,
             )
 
+    async def trace_closure(self, req: TraceClosureRequest) -> TraceClosureResult:
+        """Focus-scoped, regime-independent lineage closure — ONE step of a walk.
+
+        The provider walks RAW lineage outward from the focus (or from
+        ``req.seed_urns`` when continuing a walk) — correct at the finest
+        grain regardless of aggregation regime, showing only lineage hops
+        (containment only seeds/nests). Deliberately NO level resolution:
+        the closure is level-free by design, unlike ``trace``. Behind the
+        same per-(provider, graph) trace semaphore + engine deadline.
+        """
+        resolved = await self._resolve_ontology()
+        # SYNTHETIC EDGES ARE NOT LINEAGE. See SYNTHETIC_LINEAGE_EDGE_TYPES:
+        # a source's resolved ontology routinely LISTS ``AGGREGATED`` among
+        # its lineage types, but those relationships are the aggregation
+        # worker's own materialised rollups, not anything a data source
+        # said. Walking them counts one real flow once per coarser grain
+        # above it, which is what put "5 in / 4 out" on a column with two
+        # real neighbours — and it contradicts this closure's whole design,
+        # which is regime-independent precisely because it depends on NO
+        # ``:AGGREGATED`` cells.
+        #
+        # Filtered from BOTH the resolved default and anything a caller
+        # asked for, at this one seam: the provider hands the same list to
+        # its BFS, its cursor page AND its degree probe, so the counts the
+        # frontier reports stay consistent with the edges that shipped.
+        edge_types = _real_lineage_types(
+            req.lineage_edge_types or list(resolved.lineage_edge_types or [])
+        )
+        containment_types = list(resolved.containment_edge_types or [])
+        max_nodes = min(req.max_nodes or ContextEngine.TRACE_MAX_NODES, ContextEngine.TRACE_MAX_NODES)
+        fn = getattr(self.provider, "trace_closure", None)
+        if fn is None:
+            raise NotImplementedError("provider does not support trace_closure")
+
+        async with self._trace_semaphore():
+            return await fn(
+                urn=req.urn,
+                upstream_depth=req.upstream_depth if req.direction in ("upstream", "both") else 0,
+                downstream_depth=req.downstream_depth if req.direction in ("downstream", "both") else 0,
+                lineage_edge_types=edge_types,
+                containment_edge_types=containment_types,
+                max_nodes=max_nodes,
+                timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
+                seed_urns=req.seed_urns,
+                exclude_urns=req.exclude_urns,
+                after_cursor=req.after_cursor,
+            )
+
     # ------------------------------------------------------------------ #
     # Trace v2 wrappers — skeleton-first contract                          #
     #                                                                     #
@@ -1437,16 +1516,27 @@ class ContextEngine:
 
     async def expand_aggregated_edge(self, req: ExpandRequest) -> TraceResult:
         resolved = await self._resolve_ontology()
-        # next_level can be int or entity-type-id; resolve to int
-        level = await self._resolve_level(req.next_level, req.source_urn, resolved)
+        # next_level can be int, entity-type-id, or ABSENT. Absent must
+        # survive to the provider as None — it means "drill structurally,
+        # one containment step", the only honest ask when the ontology
+        # repeats a type at two depths. _resolve_level would coerce None
+        # through its "auto" branch into the source's own level, which
+        # silently turned a structural request back into the level-pair
+        # query the caller was trying to avoid.
+        level = (
+            None if req.next_level is None
+            else await self._resolve_level(req.next_level, req.source_urn, resolved)
+        )
         edge_types = req.lineage_edge_types or list(resolved.lineage_edge_types or [])
         containment_types = list(resolved.containment_edge_types or [])
 
         # Use raw edges when next_level is the finest level in the ontology
         # — at that level AGGREGATED is 1:1 with raw lineage anyway, but
-        # raw is safer (no dependency on materialization having run).
+        # raw is safer (no dependency on materialization having run). A
+        # structural drill (level None) lets the provider's own
+        # agg-first / empty→raw fallback decide instead.
         finest_level = self._finest_level(resolved)
-        use_raw = (finest_level is not None and level >= finest_level)
+        use_raw = (level is not None and finest_level is not None and level >= finest_level)
 
         async with self._trace_semaphore():
             return await self.provider.expand_aggregated(
@@ -1459,6 +1549,7 @@ class ContextEngine:
                 timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
                 use_raw_edges=use_raw,
                 include_containment_edges=req.include_containment_edges,
+                drill_anchor=getattr(req, "drill_anchor", None),
             )
 
     async def _resolve_level(self, level_input: Any, source_urn: str, ontology: Any) -> int:
