@@ -102,8 +102,11 @@ export function computeTraceWalkDelta(opts: {
         // HARD RULE: only a node merged THIS session may gain a parent.
         const targetIsMerged = newNodeIds.has(e.targetUrn) || session.mergedNodeIds.has(e.targetUrn)
         if (!targetIsMerged || !resolvable(e.sourceUrn)) continue
-        const withEdgeType = e as { edgeType?: string }
-        pushEdge(`twc:${e.sourceUrn}>${e.targetUrn}`, e.sourceUrn, e.targetUrn, withEdgeType.edgeType ?? 'CONTAINS')
+        const withExtras = e as { id?: string; edgeType?: string }
+        pushEdge(
+            withExtras.id ?? `twc:${e.sourceUrn}>${e.targetUrn}`,
+            e.sourceUrn, e.targetUrn, withExtras.edgeType ?? 'CONTAINS',
+        )
     }
 
     if (nodes.length === 0 && edges.length === 0) return { delta: { nodes, edges }, session }
