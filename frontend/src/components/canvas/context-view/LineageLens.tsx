@@ -502,9 +502,22 @@ export function LineageLens({
   // (pass-through interiors) — the invariant stage is the global
   // enforcement that it didn't remove more than that, checked once,
   // after everything, rather than trusted per-pass.
+  // Full walk: a fetch the DRIVER fired has no click to open a reveal
+  // page (an ⊕ claims its room at click time — see extendWalk), so the
+  // LAYOUT admits every walked node via a derived pinned set. Derived,
+  // never written back into the view state: the share link and the
+  // user's own placements stay theirs, and switching back to "One hop"
+  // returns to the classic reveal-governed picture.
+  const layoutView = useMemo(() => {
+    if (!fullWalkEnabled || !model || model.nodes.length === 0) return view
+    const pinned = new Set(view.pinned)
+    for (const n of model.nodes) pinned.add(n.urn)
+    return { ...view, pinned }
+  }, [fullWalkEnabled, model, view])
+
   const layout = useMemo(() => buildFocusLayout({
     sg,
-    view,
+    view: layoutView,
     query,
     hiddenTypes,
     extendStatus: walk?.extendStatus ?? EMPTY_EXTEND_STATUS,
@@ -512,7 +525,7 @@ export function LineageLens({
     childrenAllStatus,
     walkStatus,
     directionFilter,
-  }), [sg, view, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter])
+  }), [sg, layoutView, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter])
 
   // T23 R2 — pass-through condensation, a pure re-projection over the
   // built layout (never touches population/grain/rank). OFF unless the
@@ -609,6 +622,7 @@ export function LineageLens({
       return { ...base, pinned: next }
     })
   }, [editView])
+
 
   // ── Growing the walk ───────────────────────────────────────────────
 
