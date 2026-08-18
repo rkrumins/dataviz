@@ -60,7 +60,7 @@ import { BuildPanel } from '../create/buildmode/BuildPanel'
 import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { EdgeLegend } from '../EdgeLegend'
 
-import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
+import { useUnifiedTrace, type UseUnifiedTraceResult, type TraceResult } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
@@ -108,7 +108,6 @@ import {
 import { decodeLensShare } from './lens/shareCodec'
 import { useLensWalk } from '@/hooks/useLensWalk'
 import { useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
-import { TraceWalkDock } from './TraceWalkDock'
 
 /** The native canvas trace has no per-edge drilldowns — the closure walk
  *  model is complete at leaf grain. One shared empty map keeps the trace
@@ -1191,27 +1190,8 @@ export function ContextViewCanvas({
   // Trace bottom dock — expanded vs compact. Lifted to the canvas so a
   // global Cmd/Ctrl+I shortcut can toggle it from anywhere.
   const [dockExpanded, setDockExpanded] = useState(false)
-  // Auto-collapse the dock when trace exits so a stale open state doesn't
-  // immediately reappear next time the user starts a trace.
-  useEffect(() => {
-    if (!trace.isTracing && dockExpanded) setDockExpanded(false)
-  }, [trace.isTracing, dockExpanded])
-  // Cmd/Ctrl+I toggles the dock's expanded state while a trace is active.
-  useEffect(() => {
-    if (!trace.isTracing) return
-    const onKey = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement | null
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
-      const isMod = e.metaKey || e.ctrlKey
-      if (!isMod || e.shiftKey) return
-      if (e.key.toLowerCase() === 'i') {
-        e.preventDefault()
-        setDockExpanded(v => !v)
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [trace.isTracing])
+  // The dock's collapse/shortcut effects live further down, after the
+  // native trace session (`traceActive`) they key on is declared.
 
   // Sync ontology-derived lineage edge types into trace config so the trace
   // backend traverses TRANSFORMS, AGGREGATED, and any other ontology-classified
@@ -1588,16 +1568,12 @@ export function ContextViewCanvas({
     setShowLineageFlow(true)
     setTraceShowUpstream(true)
     setTraceShowDownstream(true)
-    // The trace surface stays unobstructed: close the sticky drawer and
-    // keep node clicks from re-opening it for the whole session (exit
-    // restores the normal click-opens-drawer behaviour).
-    const store = useCanvasStore.getState()
-    store.closeNodeDrawer()
-    store.setDrawerSuppressed(true)
+    // Entering a trace collapses the sticky drawer once, so the flow
+    // opens unobstructed — clicking a node re-opens it as usual.
+    useCanvasStore.getState().closeNodeDrawer()
     canvasTrace.start(displayMap.get(nodeId)?.urn ?? nodeId)
   }, [canvasTrace, displayMap])
   const exitCanvasTrace = useCallback(() => {
-    useCanvasStore.getState().setDrawerSuppressed(false)
     canvasTrace.exit()
     resetAllCircuitBreakers()
   }, [canvasTrace])
@@ -1649,16 +1625,6 @@ export function ContextViewCanvas({
     }
   }, [traceActive, traceModel, canvasTrace.tracedUrn, urnToIdMap])
 
-  // Dock stats: what the walk found, by kind and by direction.
-  const traceCensus = useMemo(() => {
-    if (!traceActive || !traceModel) return []
-    const counts = new Map<string, number>()
-    for (const n of traceModel.nodes) {
-      const t = n.entityType ?? 'other'
-      counts.set(t, (counts.get(t) ?? 0) + 1)
-    }
-    return [...counts.entries()].map(([type, count]) => ({ type, count })).sort((a, b) => b.count - a.count)
-  }, [traceActive, traceModel])
   const traceParticipants = useMemo(() => {
     const upstream: Array<{ urn: string; label: string }> = []
     const downstream: Array<{ urn: string; label: string }> = []
@@ -1671,6 +1637,74 @@ export function ContextViewCanvas({
     }
     return { upstream, downstream }
   }, [traceActive, traceModel])
+
+  // The REAL TraceBottomDock, driven by the native walk: an adapter shaped
+  // as UseUnifiedTraceResult. The dormant legacy hook supplies every field
+  // the dock family may touch; the native walk overrides the live ones.
+  // Notably: "Reduce depth & retrace" (the truncation notice's action)
+  // maps to continuing the walk — the closure engine's equivalent.
+  const tracedNodeId = canvasTrace.tracedUrn
+    ? (urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
+    : null
+  const dockTrace = useMemo<UseUnifiedTraceResult>(() => {
+    if (!traceActive || !traceModel || !tracedNodeId) return trace
+    const result: TraceResult = {
+      focusId: tracedNodeId,
+      traceNodes: new Set(canvasTrace.traceNodeUrns),
+      upstreamNodes: new Set(traceModel.upstreamUrns),
+      downstreamNodes: new Set(traceModel.downstreamUrns),
+      traceEdges: new Set(traceModel.lineageEdges.map(e => e.id ?? `${e.sourceUrn}>${e.targetUrn}`)),
+      lineageResult: null,
+      isInherited: false,
+      truncated: traceModel.truncated || (canvasTrace.fullWalkStatus?.budgetHit ?? false),
+      truncationReason: traceModel.truncationReason
+        ?? (canvasTrace.fullWalkStatus?.budgetHit ? 'max_nodes' : undefined),
+    }
+    return {
+      ...trace,
+      isTracing: true,
+      focusId: tracedNodeId,
+      result,
+      error: canvasTrace.walkEntry?.status === 'error' ? canvasTrace.walkEntry.error : null,
+      isLoading: canvasTrace.walkEntry?.status === 'loading' || (canvasTrace.fullWalkStatus?.walking ?? false),
+      upstreamCount: traceParticipants.upstream.length,
+      downstreamCount: traceParticipants.downstream.length,
+      showUpstream: traceShowUpstream,
+      showDownstream: traceShowDownstream,
+      setShowUpstream: setTraceShowUpstream,
+      setShowDownstream: setTraceShowDownstream,
+      statistics: {
+        ...trace.statistics,
+        totalNodes: traceModel.nodes.length,
+        totalEdges: traceModel.lineageEdges.length,
+        upstreamCount: traceParticipants.upstream.length,
+        downstreamCount: traceParticipants.downstream.length,
+      },
+      retrace: async () => { canvasTrace.continueWalk() },
+    }
+  }, [traceActive, traceModel, tracedNodeId, trace, canvasTrace, traceParticipants, traceShowUpstream, traceShowDownstream])
+
+  // Auto-collapse the dock when trace exits so a stale open state doesn't
+  // immediately reappear next time the user starts a trace.
+  useEffect(() => {
+    if (!traceActive && dockExpanded) setDockExpanded(false)
+  }, [traceActive, dockExpanded])
+  // Cmd/Ctrl+I toggles the dock's expanded state while a trace is active.
+  useEffect(() => {
+    if (!traceActive) return
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      const isMod = e.metaKey || e.ctrlKey
+      if (!isMod || e.shiftKey) return
+      if (e.key.toLowerCase() === 'i') {
+        e.preventDefault()
+        setDockExpanded(v => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [traceActive])
 
   // Trace filter — when a trace is active, hides everything outside the trace
   // context (traced URNs + drilldown URNs + their containment ancestors).
@@ -1697,17 +1731,6 @@ export function ContextViewCanvas({
   const renderFlat = traceActive ? filteredFlat : displayFlat
   const renderMap = traceActive ? filteredMap : displayMap
 
-  // Honesty count for the trace bar: flow participants the curated view's
-  // layer-assignment rule keeps off the canvas (deliberate — see
-  // traceMergeSpine's docstring). Zero outside trace mode.
-  const hiddenTraceCount = useMemo(() => {
-    if (!traceActive) return 0
-    let hidden = 0
-    for (const urn of canvasTrace.traceNodeUrns) {
-      if (!renderMap.has(urn) && !renderMap.has(urnToIdMap.get(urn) ?? '')) hidden++
-    }
-    return hidden
-  }, [traceActive, canvasTrace.traceNodeUrns, renderMap, urnToIdMap])
 
   // Suppress parent AGGREGATED edges whose drill currently has at least one
   // finer-level edge visible. Without this the canvas renders the same
@@ -3667,16 +3690,16 @@ export function ContextViewCanvas({
         {/* Trace UI lives in TraceBottomDock at the bottom of canvas-body.
             EntityDrawer keeps the right rail. Both surfaces are independent. */}
         <AnimatePresence>
-          {trace.isTracing && (
+          {traceActive && (
             <TraceBottomDock
-              trace={trace}
+              trace={dockTrace}
               displayMap={displayMap}
               availableEdgeTypes={lineageEdgeTypes}
               granularityOptions={granularityOptions}
               resolveEdgeColor={resolveEdgeColor}
               expanded={dockExpanded}
               onToggleExpanded={() => setDockExpanded(v => !v)}
-              onExit={exitTrace}
+              onExit={exitCanvasTrace}
               onJumpToUrn={(urn) => {
                 const id = urnToIdMap.get(urn) ?? urn
                 startCanvasTrace(id)
@@ -3685,40 +3708,6 @@ export function ContextViewCanvas({
           )}
         </AnimatePresence>
 
-        {/* Native trace dock — bottom-docked stats + controls; the walk
-            fetches and merges by itself, this surface describes the flow
-            (direction counts in the wire colors, census, participants)
-            and holds Flow view / Keep walking / Retry / Exit trace. */}
-        {traceActive && (
-          <TraceWalkDock
-            tracedName={
-              (canvasTrace.tracedUrn
-                ? displayMap.get(urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)?.name
-                  ?? displayMap.get(canvasTrace.tracedUrn)?.name
-                : undefined) ?? canvasTrace.tracedUrn ?? ''
-            }
-            nodeCount={canvasTrace.walkEntry?.model.nodes.length ?? 0}
-            flowCount={canvasTrace.walkEntry?.model.lineageEdges.length ?? 0}
-            upstreamCount={traceParticipants.upstream.length}
-            downstreamCount={traceParticipants.downstream.length}
-            hiddenCount={hiddenTraceCount}
-            typeCensus={traceCensus}
-            upstream={traceParticipants.upstream}
-            downstream={traceParticipants.downstream}
-            showUpstream={traceShowUpstream}
-            showDownstream={traceShowDownstream}
-            onToggleUpstream={() => setTraceShowUpstream(v => !v)}
-            onToggleDownstream={() => setTraceShowDownstream(v => !v)}
-            onJumpToUrn={(urn) => { void revealAndFocus(urnToIdMap.get(urn) ?? urn) }}
-            onOpenFlowView={() => { if (canvasTrace.tracedUrn) openLensAt(canvasTrace.tracedUrn, true) }}
-            walkStatus={canvasTrace.walkEntry?.status ?? 'loading'}
-            walkError={canvasTrace.walkEntry?.error ?? null}
-            status={canvasTrace.fullWalkStatus}
-            onKeepWalking={canvasTrace.continueWalk}
-            onRetry={canvasTrace.retryWalk}
-            onExit={exitCanvasTrace}
-          />
-        )}
 
         {/* Aggregation truncation banner — backend signal that the visible
             edge set was capped. The "computing" and "last computed Xh ago"
@@ -4009,7 +3998,7 @@ export function ContextViewCanvas({
         {/* Layer Strip — docked horizontal navigator: you-are-here chips
             per layer, click-to-jump, add-layer (draft) and Fit. Frame-
             anchored (never in scroll content). */}
-        {/* Hidden while tracing: the TraceWalkDock owns the bottom, and
+        {/* Hidden while tracing: the trace dock owns the bottom, and
             layer navigation is what the trace filter already did. */}
         {!traceActive && (
           <LayerStrip
