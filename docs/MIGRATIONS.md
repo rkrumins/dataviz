@@ -48,17 +48,66 @@ it.** That is the contract Alembic is built around, and it is what makes the rul
 `INSERT`s inside migrations are seeded from `backend/app/config/rbac_seed.py` instead. A database
 with no permissions and no roles comes up looking perfectly healthy and authorises nobody.
 
+## A fresh install is only as new as the image that ran it
+
+The fast path builds the schema from **the ORM inside the image**, then stamps head. Both halves
+come from that image, so they always agree with each other — and neither is checked against the
+repository. An out-of-date `upgrade` image therefore installs an out-of-date schema and marks it
+fully migrated, silently.
+
+`docker-compose.yml` pins `image: synodic-upgrade:local`, and `docker compose up` **reuses an
+existing tag rather than rebuilding it**. A machine with wiped volumes but stale images is
+"brand new" in the only sense that matters to `_is_virgin` — so this is the normal way it happens,
+not an exotic one.
+
+It surfaces as the application failing on schema its own ORM declares —
+`column workspaces.identity_property does not exist` — or as 404s from a frontend calling routes
+the older backend image does not serve. `check` cannot see it, because it compares the image's
+script directory against the pointer that same image wrote. **`verify-schema` is the probe**: it
+compares the live database against the ORM and names what is missing.
+
+Recovery is to rebuild and re-run — the database moves forward on the normal chain from whatever
+revision it was stamped at:
+
+```bash
+docker compose build --no-cache upgrade viz-service frontend
+docker compose up -d --force-recreate
+docker compose run --rm upgrade upgrade
+docker compose run --rm upgrade verify-schema
+```
+
+Verified on 2026-08-18: a database installed by an image nine days stale (stamped
+`20260802_1000_open_publish`, missing `providers` / `workspaces.identity_property`) took six
+revisions to head under a current image and came out `verify-schema`-clean.
+
+One thing re-running does **not** restore: `seed_reference_data` runs only on the virgin install,
+and nothing re-seeds afterwards. Permissions, system roles and grants added to
+`backend/app/config/rbac_seed.py` after a database was created never reach it, and no migration
+inserts them either. The function is idempotent (`ON CONFLICT DO NOTHING`) and reports rows
+actually written, so it is safe to call on every upgrade — it simply is not called today.
+
 ## Writing a migration
 
-**Write plain forward DDL.** `op.add_column(...)`, `op.create_table(...)`. No `if_not_exists`, no
-inspector probing. The database you are migrating does not have your change yet.
+**Guard the DDL; never guard the data.** `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`,
+`CREATE INDEX IF NOT EXISTS`, `if not sa.inspect(bind).has_table(...)` around a `create_table`.
+Every `UPDATE`/`INSERT`, and every `alter_column` that fixes a default or nullability, stays
+**unconditional**.
 
-The 51 migrations carrying hand-rolled guards are history, not a pattern to copy. They were added
-one at a time, each after a fresh environment failed to build, and the guards have a cost that
-took a while to see: **a guarded migration silently no-ops against a `create_all` baseline**, so
-it is never actually exercised. `invites.token_version` is the example — its migration sets
-`server_default="1"`, and on any database where `create_all` had already made the column, the
-guarded `add_column` did nothing and the default was never applied.
+This rule replaces an earlier one ("plain forward DDL, no `if_not_exists`"), which was written on
+the assumption that the fast path made replay impossible. It does not: the `chain-replay` gate
+still runs the whole chain over a `create_all` baseline, and so does any database whose
+`alembic_version` trails its schema. Three migrations written under the old rule —
+`20260801_1200_publish_flow`, `20260801_1500_notifications`, `20260802_1000_open_publish` — failed
+that gate from 2026-08-01 until 2026-08-18, when they were guarded.
+
+The cost the old rule was reacting to is real and the split above is what avoids it: **a guarded
+migration silently no-ops against a `create_all` baseline**, so whatever it guards is never
+exercised. `invites.token_version` is the example — its migration sets `server_default="1"`, and
+on any database where `create_all` had already made the column, the guarded `add_column` did
+nothing and the default was never applied. Guard the `ADD COLUMN` and leave the `alter_column`
+outside the guard and both routes end up identical, which is what the three fixed migrations were
+verified against: a database built at the revision immediately before them ends up with exactly
+the columns, indexes, nullability and defaults the unguarded versions produced.
 
 Two rules that are not optional:
 
