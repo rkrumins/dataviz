@@ -16,7 +16,9 @@ eventually-consistent fan-out that can lag or drop turns "you have
 access" into "you have access and nobody told you". The outbox keeps
 carrying the same events for external consumers.
 
-Plain forward DDL per docs/MIGRATIONS.md.
+Guarded per docs/MIGRATIONS.md ("Guard the DDL; never guard the data"):
+fresh installs already hold this table from ``0001_baseline``'s create_all,
+and the chain-replay route runs this file on top of it.
 """
 from __future__ import annotations
 

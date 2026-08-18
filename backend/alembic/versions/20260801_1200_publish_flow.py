@@ -29,8 +29,12 @@ happened) and ``admin_viewed``, which records a platform admin opening
 a private view they neither created nor were shared on — break-glass
 access stays available and stops being invisible to the owner.
 
-Plain forward DDL per docs/MIGRATIONS.md: fresh installs get these
-columns from ``0001_baseline``'s create_all and never run this file.
+Fresh installs get these columns from ``0001_baseline``'s create_all and
+never run this file, so the DDL below is guarded (docs/MIGRATIONS.md,
+"Guard the DDL; never guard the data") — the chain-replay route does run
+it on top of a baseline that already holds them. The ``alter_column``
+that drops the server default stays outside the guard so both routes
+end up with the same column.
 """
 from __future__ import annotations
 
