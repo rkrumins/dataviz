@@ -15,7 +15,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import type { Node, NodeChange, XYPosition } from '@xyflow/react'
-import { mergeDragPositions } from '../FocusGraphView'
+import { mergeDragPositions, mergeMeasured } from '../FocusGraphView'
 
 const EMPTY: ReadonlyMap<string, XYPosition> = new Map()
 const at = (id: string, x: number, y: number): NodeChange<Node> =>
@@ -62,4 +62,66 @@ describe('mergeDragPositions', () => {
         mergeDragPositions(before, [at('n:a', 99, 99)])
         expect(before.get('n:a')).toEqual({ x: 1, y: 2 })
     })
+})
+
+/**
+ * THE SIZE REACT FLOW HANDS BACK, and why dropping it broke three
+ * separate things.
+ *
+ * `adoptUserNodes` re-adopts a node whenever the object identity for its
+ * id changes and reads `measured` off the object it is GIVEN, not out of
+ * its own lookup. This component rebuilds node objects constantly — a
+ * drag rebuilds the dragged one, a selection rebuilds the selected one,
+ * any layout change rebuilds all of them — so every rebuilt node arrived
+ * with no size and React Flow counted it uninitialized. Reported live:
+ * a dragged card vanished along with its wires (React Flow error 015 in
+ * the console: "trying to drag a node that is not initialized"), the
+ * image export was fitted to a board that measured short, and the lens
+ * sometimes opened blank because `getFitViewNodes` keeps only nodes with
+ * a measured width and height — with none, it fits an empty set and the
+ * viewport lands nowhere near the board.
+ */
+describe('mergeMeasured', () => {
+  const EMPTY: ReadonlyMap<string, { width: number; height: number }> = new Map()
+  const dim = (id: string, width: number, height: number) =>
+    ({ id, type: 'dimensions', dimensions: { width, height } }) as unknown as NodeChange<Node>
+
+  it('keeps the size React Flow reports', () => {
+    const next = mergeMeasured(EMPTY, [dim('a', 290, 36)])
+    expect(next?.get('a')).toEqual({ width: 290, height: 36 })
+  })
+
+  it('returns null when a batch says nothing about sizes, so no state churns', () => {
+    const move = { id: 'a', type: 'position', position: { x: 1, y: 2 } } as unknown as NodeChange<Node>
+    expect(mergeMeasured(EMPTY, [move])).toBeNull()
+  })
+
+  it('returns null when every size is one it already had', () => {
+    const first = mergeMeasured(EMPTY, [dim('a', 290, 36)])!
+    // The identical measurement arriving again must not rebuild the map:
+    // `baseNodes` depends on it, so a fresh map on every batch would
+    // rebuild every node object on the board for nothing.
+    expect(mergeMeasured(first, [dim('a', 290, 36)])).toBeNull()
+  })
+
+  it('IGNORES a zero measurement — a node mid-teardown reports one', () => {
+    // Worse than storing nothing: 0 reads as "measured" at every call
+    // site that checks for a size, including the fit-view filter.
+    expect(mergeMeasured(EMPTY, [dim('a', 0, 0)])).toBeNull()
+    const had = mergeMeasured(EMPTY, [dim('a', 290, 36)])!
+    expect(mergeMeasured(had, [dim('a', 0, 0)])).toBeNull()
+    expect(had.get('a')).toEqual({ width: 290, height: 36 })
+  })
+
+  it('folds a whole batch, which is how they arrive at mount', () => {
+    const next = mergeMeasured(EMPTY, [dim('a', 290, 36), dim('b', 310, 448), dim('c', 240, 64)])!
+    expect(next.size).toBe(3)
+    expect(next.get('b')).toEqual({ width: 310, height: 448 })
+  })
+
+  it('leaves the map it was given untouched', () => {
+    const first = mergeMeasured(EMPTY, [dim('a', 290, 36)])!
+    mergeMeasured(first, [dim('b', 1, 2)])
+    expect(first.has('b')).toBe(false)
+  })
 })

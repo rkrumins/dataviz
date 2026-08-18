@@ -533,6 +533,8 @@ const CONE_RELEASE_MS = 60
 
 /** Shared empty overlay — a fresh Map would churn the nodes memo. */
 const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
+/** Same, for the measured sizes React Flow hands back. */
+const EMPTY_MEASURED: ReadonlyMap<string, { width: number; height: number }> = new Map()
 /** Shared empty trail sets — a caller with no history (the visual
  *  harness) marks nothing, without a fresh Set churning memos. */
 const EMPTY_TRAIL: ReadonlySet<string> = new Set()
@@ -1256,6 +1258,56 @@ export function mergeDragPositions(
     if (change.type !== 'position' || !change.position) continue
     next ??= new Map(prev)
     next.set(change.id, change.position)
+  }
+  return next
+}
+
+/**
+ * HOW BIG EACH CARD ACTUALLY IS, kept where React Flow can find it.
+ *
+ * React Flow measures nodes itself, but when the `nodes` prop is
+ * CONTROLLED it re-adopts a node the moment the object identity for that
+ * id changes — and `adoptUserNodes` reads `measured` off OUR object, not
+ * out of its own lookup:
+ *
+ *     measured: { width: userNode.measured?.width, ... }
+ *
+ * So every node object this component rebuilds arrives with no size, and
+ * React Flow marks it uninitialized. That is what `applyNodeChanges`
+ * quietly does for you in the documented flow, by writing `dimensions`
+ * changes back onto your nodes; this handler kept only `position` ones
+ * and dropped the rest on the floor.
+ *
+ * Three reported bugs, one cause. Dragging a card made a new object for
+ * it, which wiped its size, and the very next drag frame hit
+ * `node.measured.width === undefined` — React Flow error 015 in the
+ * console — after which the card had no valid position and vanished
+ * along with its wires. `getNodesBounds` reads the same field, so the
+ * image export was fitted to a board that measured short. And a fit-view
+ * against nodes that flicker between sized and unsized is a lens that
+ * sometimes opens blank.
+ *
+ * Kept as its own map rather than folding the whole array through
+ * `applyNodeChanges`: sizes arrive in one burst at mount and then almost
+ * never, so this settles immediately and leaves the hot paths (drag,
+ * select) exactly as cheap as they were.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function mergeMeasured(
+  prev: ReadonlyMap<string, { width: number; height: number }>,
+  changes: readonly NodeChange<Node>[],
+): ReadonlyMap<string, { width: number; height: number }> | null {
+  let next: Map<string, { width: number; height: number }> | null = null
+  for (const change of changes) {
+    if (change.type !== 'dimensions' || !change.dimensions) continue
+    const { width, height } = change.dimensions
+    // A node mid-teardown reports 0; storing that would be worse than
+    // storing nothing, because 0 reads as "measured" everywhere.
+    if (!width || !height) continue
+    const cur = (next ?? prev).get(change.id)
+    if (cur && cur.width === width && cur.height === height) continue
+    next ??= new Map(prev)
+    next.set(change.id, { width, height })
   }
   return next
 }
@@ -4155,6 +4207,10 @@ export function FocusGraphView({
     onPin,
   }), [edgeTypeInfo, focalId, visualFor, onSelect, onFocus, onToggleFrame, onFrameScroll, onFrameWheel, onFrameQuery, frameQueryFor, onToggleFrameAll, onRetryFrameAll, onRevealOnCanvas, onOpenDetails, onRowCursor, onIsolate, onDismiss, onRevealMore, onExtend, onPage, seedCountFor, onCondenseRun, onPin])
 
+  /** See `mergeMeasured`: without this, every node object rebuilt here
+   *  reaches React Flow with no size and is treated as uninitialized. */
+  const [measuredById, setMeasuredById] = useState<ReadonlyMap<string, { width: number; height: number }>>(EMPTY_MEASURED)
+
   const baseNodes = useMemo((): Node[] => {
     const minYByBand = new Map<number, number>()
     for (const c of graph.cards) {
@@ -4195,6 +4251,20 @@ export function FocusGraphView({
         position: parent
           ? { x: card.x - parent.x, y: card.y - parent.y }
           : { x: card.x, y: card.y },
+        // HOW BIG THIS CARD IS, stated rather than awaited — see
+        // `mergeMeasured`. React Flow re-adopts a node whenever this
+        // component rebuilds its object and takes `measured` from the
+        // object it is given, so a rebuilt node used to arrive with no
+        // size and count as uninitialized until a ResizeObserver caught
+        // up: error 015 the moment it was dragged, short bounds for the
+        // export, and a fit-view against nothing when the lens opened.
+        //
+        // The layout already decided this card's exact size and writes
+        // it straight onto the element as `width`/`height`, so the
+        // measurement can only ever agree with it. Seeding from it means
+        // a node is never uninitialized, not even on its first frame.
+        // A real measurement, once one arrives, still wins.
+        measured: measuredById.get(card.id) ?? { width: card.w, height: card.h },
         // Rearrange the picture freely; a frame's children move with it
         // rather than out of it, so a table never sheds its columns.
         draggable: parent === undefined,
@@ -4228,6 +4298,7 @@ export function FocusGraphView({
         id: `bl:${band}`,
         type: 'bandLabel',
         position: { x: band * (CARD_W + BAND_GAP), y: minY - 34 },
+        ...(measuredById.get(`bl:${band}`) ? { measured: measuredById.get(`bl:${band}`) } : {}),
         draggable: false,
         selectable: false,
         focusable: false,
@@ -4294,7 +4365,7 @@ export function FocusGraphView({
     }
     return nodes
   }, [graph.cards, graph.bandTotals, graph.hiddenByChipsIn, graph.hiddenByChipsOut, graph.hopsAtCoarserGrain, graph.focusRecovered,
-    graph.modelHasUpstream, graph.modelHasDownstream, ctx, focalFetch, directionFilter])
+    graph.modelHasUpstream, graph.modelHasDownstream, ctx, focalFetch, directionFilter, measuredById])
 
   /**
    * Cards the user has dragged, by card id. The builder keeps producing
@@ -4336,6 +4407,7 @@ export function FocusGraphView({
   const [dragPositions, setDragPositions] = useState<ReadonlyMap<string, XYPosition>>(EMPTY_POSITIONS)
   const onNodesChange = useCallback((changes: NodeChange<Node>[]) => {
     setDragPositions(prev => mergeDragPositions(prev, changes) ?? prev)
+    setMeasuredById(prev => mergeMeasured(prev, changes) ?? prev)
   }, [])
 
   const commitDrag = useCallback((_: unknown, node: Node) => {
