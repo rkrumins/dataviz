@@ -67,7 +67,9 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
     const model = walkEntry?.model ?? null
 
     const sessionRef = useRef(emptyTraceWalkMergeSession())
-    const addedEdgeIds = useRef(new Set<string>()).current
+    // ONE stable Set instance for the whole hook life (state initializer,
+    // never re-set) — see the header's stability contract.
+    const [addedEdgeIds] = useState(() => new Set<string>())
 
     // Delta-merge each model growth into the store. Store writes are
     // external-store writes (zustand), legal in an effect; the session ref
@@ -96,22 +98,18 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         setTracedUrn(null)
     }, [addedEdgeIds])
 
-    // `start` reads the live traced urn from a ref so its identity is
-    // stable across the session (entries close over it once).
-    const tracedUrnRef = useRef<string | null>(null)
-    tracedUrnRef.current = tracedUrn
     const start = useCallback((urn: string) => {
-        if (!urn || tracedUrnRef.current === urn) return
-        if (tracedUrnRef.current) exit()
+        if (!urn || tracedUrn === urn) return
+        if (tracedUrn) exit()
         setTracedUrn(urn)
-    }, [exit])
+    }, [tracedUrn, exit])
 
     const continueWalk = useCallback(() => {
-        if (tracedUrnRef.current) walk.continueFullWalk(tracedUrnRef.current)
-    }, [walk])
+        if (tracedUrn) walk.continueFullWalk(tracedUrn)
+    }, [walk, tracedUrn])
     const retryWalk = useCallback(() => {
-        if (tracedUrnRef.current) walk.retry(tracedUrnRef.current)
-    }, [walk])
+        if (tracedUrn) walk.retry(tracedUrn)
+    }, [walk, tracedUrn])
 
     const traceNodeUrns = useMemo<ReadonlySet<string>>(() => {
         if (!model) return EMPTY_URNS
