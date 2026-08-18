@@ -229,6 +229,54 @@ describe('P0 — perf harness (Task 20)', () => {
         vi.useRealTimers()
       }
     })
+
+    /**
+     * THE SAME SWITCH, THE WAY A POINTER ACTUALLY MAKES IT.
+     *
+     * The test above moves from one card to another with no
+     * `mouseLeave` in between — and a real pointer always fires one.
+     * That gap is exactly how a whole-board fan-out survived a perf
+     * suite written to catch it: the leave handler cleared the cone
+     * outright, so every crossing went cone → null → cone, and `null`
+     * is the one change every card must answer ("is anything isolated
+     * at all?"). MEASURED in a real browser before the fix: 596
+     * `FocusNode` renders and 840 edge renders for one pointer move on
+     * a 151-card board; after it, 8 and 8.
+     *
+     * So this pins the sequence with the leave in it, at the same
+     * generous ceiling as its sibling.
+     */
+    it('walkWideHub: LEAVING one card for the next is a hand-over, not a clear', () => {
+      vi.useFakeTimers()
+      try {
+        resetRenderCounts()
+        const profiler = makeProfilerRecorder()
+        const { container } = renderBoard('walkWideHub', profiler)
+        const reports = nodes(container).filter(n => /report_\d+/.test(n.textContent ?? ''))
+        expect(reports.length).toBeGreaterThanOrEqual(2)
+        const [reportA, reportB] = reports
+
+        act(() => { fireEvent.mouseEnter(reportA) })
+        act(() => { vi.advanceTimersByTime(250) })
+
+        profiler.reset()
+        resetRenderCounts()
+        // The real sequence: the leave, then the enter, then intent.
+        act(() => { fireEvent.mouseLeave(reportA) })
+        act(() => { fireEvent.mouseEnter(reportB) })
+        act(() => { vi.advanceTimersByTime(250) })
+
+        const totalRendered = [...renderCounts.values()].reduce((n, v) => n + v, 0)
+        console.log(
+          `[P1-leave] walkWideHub hand-over: boardNodes=${nodes(container).length} `
+          + `commits=${profiler.commitCount} ms=${profiler.totalMs.toFixed(2)} `
+          + `totalComponentRenders=${totalRendered} (${JSON.stringify(Object.fromEntries(renderCounts))})`,
+        )
+        expect(totalRendered).toBeLessThan(30)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
   })
 
   describe('(d) buildFocusLayout rebuild wall-time', () => {

@@ -62,7 +62,7 @@ describe('edgeGrainVisual', () => {
   const base = {
     onCone: false, offCone: false, seam: false, strong: false, adjacent: false,
     aggregated: false, trail: false, containment: false, reducedMotion: false,
-    tint: '#3b82f6', mutedTint: '#9ca3af',
+    motionDense: false, tint: '#3b82f6', mutedTint: '#9ca3af',
   }
 
   it('a column-certain cone wire: full colour, full weight, SOLID and static — no class at all', () => {
@@ -119,5 +119,25 @@ describe('edgeGrainVisual', () => {
     expect(certain.strokeDasharray).toBeUndefined() // still solid
     expect(coarse.strokeDasharray).toBe('12 8') // still dashed — grain survives motion being off
     expect(coarse.className).toBe('lens-seam-flow') // the class survives too — CSS mutes only its animation
+  })
+
+  it('a board past the motion cap stills its coarse wires but keeps them DASHED', () => {
+    // `stroke-dashoffset` is not compositable, so every drifting wire
+    // repaints the whole edge layer every frame for as long as the cone
+    // is lit — 42 of them at once on the measured wide-hub board. Past
+    // the cap the motion goes and the grain stays, which is the same
+    // trade reduced motion already makes.
+    const still = edgeGrainVisual({ ...base, onCone: true, seam: true, strong: true, motionDense: true })
+    const moving = edgeGrainVisual({ ...base, onCone: true, seam: true, strong: true })
+    expect(still.className).toBe(false) // no animation class — nothing repaints per frame
+    expect(still.strokeDasharray).toBe('12 8') // ...and it still reads as coarse
+    expect(still.stroke).toBe(moving.stroke) // nothing else about it changes
+    expect(still.strokeWidth).toBe(moving.strokeWidth)
+  })
+
+  it('the cap says nothing about a CERTAIN wire — it had no motion to lose', () => {
+    const v = edgeGrainVisual({ ...base, onCone: true, strong: true, motionDense: true })
+    expect(v.className).toBe(false)
+    expect(v.strokeDasharray).toBeUndefined()
   })
 })

@@ -37,6 +37,16 @@ import '../styles/globals.css'
 import { FocusGraphView } from '../components/canvas/context-view/lens/FocusGraphView'
 import { WALK_FIXTURES } from './lensFixtures'
 import { buildWalk } from './buildWalk'
+import { renderCounts, resetRenderCounts } from '../components/canvas/context-view/lens/renderProbe'
+
+/** The render-fan-out probe, reachable from a driving script: how many
+ *  cards actually re-rendered for one hover is the number that decides
+ *  whether browsing feels instant, and it is not visible in a
+ *  screenshot. Harness-only — the probe itself compiles out of PROD. */
+Object.assign(window, {
+  __renderCounts: () => Object.fromEntries(renderCounts),
+  __resetRenderCounts: resetRenderCounts,
+})
 
 /**
  * Steady-state PAINT cost, sampled the only place it is real: a browser

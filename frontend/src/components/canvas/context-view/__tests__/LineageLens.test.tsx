@@ -1453,7 +1453,7 @@ describe('pointing at an element isolates its lineage cone', () => {
     expect(nodeFor('label-d').className).not.toContain(QUIET)
   })
 
-  it('hovering isolates after 250ms of intent, and mouse-leave restores instantly', () => {
+  it('hovering isolates after 250ms of intent, and letting go restores', () => {
     vi.useFakeTimers()
     try {
       renderLens(['b'], siblings())
@@ -1467,8 +1467,47 @@ describe('pointing at an element isolates its lineage cone', () => {
       // No chip while it is only a hover — letting go IS the exit.
       expect(screen.queryByText(/its lineage within this walk/)).toBeNull()
 
+      // The release is deferred by a hair so that moving to the NEXT
+      // card hands the cone over instead of clearing the whole board and
+      // lighting it again (the test below) — it is still gone within a
+      // frame or two of a real departure.
       fireEvent.mouseLeave(nodeFor('label-a'))
+      act(() => { vi.advanceTimersByTime(60) })
       expect(nodeFor('label-d').className).not.toContain(QUIET)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('moving from one card to the next HANDS THE CONE OVER — the board never blanks between them', () => {
+    // The board-wide fact "is anything isolated at all?" is the one
+    // change every card must answer, so passing through "nothing is"
+    // between two hovers re-rendered all 151 cards of the measured
+    // wide-hub board, twice, for a single pointer move. Going straight
+    // from one cone to the next re-renders only the cards whose own
+    // answer changed. Pinned on the observable: `d` is off `a`'s cone,
+    // so it must stay quiet for the whole crossing.
+    vi.useFakeTimers()
+    try {
+      renderLens(['b'], siblings())
+      fireEvent.mouseEnter(nodeFor('label-a'))
+      act(() => { vi.advanceTimersByTime(250) })
+      expect(nodeFor('label-d').className).toContain(QUIET)
+
+      // Leave `a` and arrive at `d` the way a pointer actually does:
+      // the leave first, the enter immediately after.
+      fireEvent.mouseLeave(nodeFor('label-a'))
+      fireEvent.mouseEnter(nodeFor('label-d'))
+      // Past the release, well short of the next card's own intent.
+      act(() => { vi.advanceTimersByTime(61) })
+      // `a`'s cone is still what is drawn — the board did not blank.
+      expect(nodeFor('label-d').className).toContain(QUIET)
+      expect(lit(nodeFor('label-a'))).toBe(true)
+
+      // ...and the hand-over completes on `d`'s own intent.
+      act(() => { vi.advanceTimersByTime(250) })
+      expect(nodeFor('label-d').className).not.toContain(QUIET)
+      expect(lit(nodeFor('label-d'))).toBe(true)
     } finally {
       vi.useRealTimers()
     }
@@ -1491,6 +1530,7 @@ describe('pointing at an element isolates its lineage cone', () => {
 
       // Let go, and the click's own isolation is back — never nothing.
       fireEvent.mouseLeave(nodeFor('label-d'))
+      act(() => { vi.advanceTimersByTime(60) })
       expect(nodeFor('label-d').className).toContain(QUIET)
     } finally {
       vi.useRealTimers()

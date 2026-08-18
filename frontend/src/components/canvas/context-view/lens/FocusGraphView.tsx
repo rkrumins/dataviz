@@ -26,8 +26,10 @@
  *
  * PERF CONTRACT — the graph must stay snappy while browsing, so no
  * frequent interaction may rebuild the node or edge arrays:
- *   • hover   → HoverContext; the edges array keeps its identity and
- *               only the SVG paths re-render.
+ *   • hover   → HoverStore, a `useSyncExternalStore` subscription (it
+ *               was a `Provider`, which re-rendered all 280 edges per
+ *               hover; now only the wires touching the card do) — the
+ *               edges array keeps its identity either way.
  *   • isolate → ConeStore, a `useSyncExternalStore` subscription rather
  *               than a `Provider` value (Task 20, P1) — a `Provider`
  *               re-renders every `useContext` consumer regardless of a
@@ -64,7 +66,6 @@ import {
   Position,
   getBezierPath,
   getStraightPath,
-  getNodesBounds,
   useReactFlow,
   useStore,
   type Edge,
@@ -166,13 +167,51 @@ const NEUTRAL_ACCENT = '#94a3b8'
  * context, a hover re-renders only the edge paths, and a growing walk
  * re-renders only the focal card. The arrays keep their identity.
  */
-const HoverContext = createContext<string | null>(null)
+/**
+ * WHICH CARD THE POINTER IS ON — a subscription store, for the exact
+ * reason `ConeStore` below is one.
+ *
+ * This was a `React.Context` holding the hovered card's id, and every
+ * edge on the board consumed it to answer one boolean about ITSELF:
+ * "does this wire touch the card under the pointer?". A context Provider
+ * notifies every consumer unconditionally, so crossing one card
+ * re-rendered all 280 edges — twice, since the pointer leaving the
+ * previous card is its own value change. MEASURED on the wide-hub board
+ * (`renderProbe`, driven from the harness): 840 edge renders for one
+ * hover. The store answers the same boolean per edge through
+ * `useSyncExternalStore`, so only the wires that actually touch the
+ * card re-render — and setting it re-renders no one, because it is not
+ * component state at all.
+ */
+class HoverStore {
+  private id: string | null = null
+  private readonly listeners = new Set<() => void>()
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  set(next: string | null): void {
+    if (this.id === next) return
+    this.id = next
+    for (const listener of this.listeners) listener()
+  }
+
+  /** A primitive, per the store rule — never the id itself, which would
+   *  read as "changed" for every edge on every move. */
+  touches = (source: string, target: string): boolean =>
+    this.id != null && (this.id === source || this.id === target)
+}
+
+/** Fallback only — `FocusGraphView` always provides its own instance. */
+const HoverStoreContext = createContext<HoverStore>(new HoverStore())
 const ReachContext = createContext<LensReach | null>(null)
 /**
  * THE GRAIN SEAM's "trace columns" (T22, R1) — the walk-hook callbacks
  * an edge needs to dispatch the SAME action a card's own ⊕ would
- * (`actOnPill`), delivered by context for the reason `HoverContext` is:
- * the edge component has no `CardCtx` of its own (only cards do), and
+ * (`actOnPill`), delivered by context because the edge component has no
+ * `CardCtx` of its own (only cards do), and
  * threading it through `edge.data` would put a FUNCTION in data React
  * Flow diffs on every rebuild. `onCondenseRun` (T23 R2) rides the same
  * context for the identical reason — a condensed run's own connector
@@ -224,9 +263,9 @@ interface IsolationSnapshot {
  *
  * One instance per `FocusGraphView` mount (created in a ref, never a
  * module singleton — a lens can have more than one board on screen).
- * `HoverContext`/`ReachContext` are untouched: neither fans out to the
- * whole board the way isolation did, so converting them is not this
- * task's fix.
+ * `HoverStore` above is the same pattern, converted later for the same
+ * measured reason. `ReachContext` is still a `Provider`: it reaches the
+ * focal card alone, so its fan-out is one component.
  */
 class ConeStore {
   private value: IsolationSnapshot | null = null
@@ -426,12 +465,33 @@ function muteColor(hex: string, s = 0.35): string {
  *  information and becomes texture — so only the ones the reader is
  *  pointing at (hovered, selected, on the isolated cone) keep theirs. */
 const LABEL_DENSITY_CAP = 12
+/** How many coarse wires a board may DRIFT at once.
+ *
+ *  The drift is decoration; the dash is the signal — the CSS says so
+ *  itself, in the rule that keeps the dash and drops only the motion
+ *  under reduced motion ("a frozen dash correctly says 'this connection
+ *  is coarser'"). `stroke-dashoffset` is not a compositable property, so
+ *  every drifting wire repaints the board's whole edge layer on every
+ *  frame, forever, for as long as the cone is lit. MEASURED on the
+ *  wide-hub board: one hover lit 42 of them, running perpetually — and a
+ *  profile off the live app showed exactly that shape, every frame
+ *  dropped for 25 seconds straight while the main thread sat idle.
+ *
+ *  Past the cap the wires stay dashed and go still, the same trade
+ *  reduced motion already makes. Same rule as `LABEL_DENSITY_CAP`
+ *  above: a property of the picture, decided once for the board. */
+const SEAM_MOTION_CAP = 10
 
 /** How long a pointer has to REST on something before its lineage is
  *  isolated. Long enough that crossing the board on the way somewhere
  *  else never strobes it; short enough that resting on a card feels like
  *  it answered rather than like it thought about it. */
 const HOVER_INTENT_MS = 250
+/** How long a cone survives the pointer leaving a card, so that moving
+ *  to the NEXT card hands the cone over instead of clearing the board
+ *  and lighting it again. Short enough to read as immediate when the
+ *  pointer really has left. */
+const CONE_RELEASE_MS = 60
 
 /** Shared empty overlay — a fresh Map would churn the nodes memo. */
 const EMPTY_POSITIONS: ReadonlyMap<string, XYPosition> = new Map()
@@ -3003,6 +3063,9 @@ export function edgeGrainVisual(p: {
   trail: boolean
   containment: boolean
   reducedMotion: boolean
+  /** The board draws more coarse wires than it can afford to move —
+   *  see `SEAM_MOTION_CAP`. Stills the drift, never the dash. */
+  motionDense: boolean
   tint: string
   mutedTint: string
 }): { className: string | false; stroke: string; strokeWidth: number; strokeDasharray: string | undefined } {
@@ -3012,8 +3075,10 @@ export function edgeGrainVisual(p: {
     // `.lens-seam-flow`'s own dash survives reduced motion in the CSS
     // (only its animation stops); it is not gated here either, so
     // reduced motion can never strip the grain signal (review round 1's
-    // first bug).
-    className: p.seam && 'lens-seam-flow',
+    // first bug). The DASH itself is inline (`strokeDasharray` below),
+    // which is why a dense board can simply drop the class: the wire
+    // stays coarse-looking and stops costing a repaint per frame.
+    className: p.seam && !p.motionDense && 'lens-seam-flow',
     stroke: p.offCone ? p.mutedTint : p.tint,
     strokeWidth: p.onCone
       ? (p.adjacent ? 3 : 2.25)
@@ -3057,6 +3122,9 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
      *  (T22, R1). Cone-only: read alongside `onCone` below, never on its
      *  own — the un-isolated board's bundles are unchanged. */
     grainCoarse?: boolean
+    /** The board is too busy to move its coarse wires — see
+     *  `SEAM_MOTION_CAP`. Stills the drift; the dash is unaffected. */
+    motionDense?: boolean
     /** The layout found this coarse wire a collision-free slot for its
      *  seam badge (T22, R3 fix round 1) — `false` means every candidate
      *  along the wire's own length collided with an already-placed
@@ -3080,8 +3148,11 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // Hover emphasis is derived here from context: the edges ARRAY stays
   // identity-stable, so sweeping the pointer never rebuilds it (nor
   // makes React Flow reconcile every edge).
-  const hoveredId = useContext(HoverContext)
-  const emphasized = hoveredId != null && (source === hoveredId || target === hoveredId)
+  const hoverStore = useContext(HoverStoreContext)
+  const emphasized = useSyncExternalStore(
+    hoverStore.subscribe,
+    () => hoverStore.touches(source, target),
+  )
   // The isolation — a subscription store rather than context, so a
   // toggle re-renders only the edges whose own on-cone answer changed
   // (Task 20, P1). See ConeStore's doc comment.
@@ -3211,7 +3282,8 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   const visual = edgeGrainVisual({
     onCone, offCone, seam, strong, adjacent,
     aggregated: !!d.aggregated, trail: !!d.trail, containment: d.containment,
-    reducedMotion: !!d.reducedMotion, tint: d.tint, mutedTint: d.mutedTint,
+    reducedMotion: !!d.reducedMotion, motionDense: !!d.motionDense,
+    tint: d.tint, mutedTint: d.mutedTint,
   })
   return (
     <>
@@ -3775,11 +3847,18 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
     setExporting(true)
     try {
       const { toPng } = await import('html-to-image')
-      // Frame children are positioned RELATIVE to their frame, so
-      // feeding them to getNodesBounds would drag the box toward the
-      // origin. They always sit inside their frame's rect anyway, so
-      // the frames already account for them.
-      const bounds = getNodesBounds(rf.getNodes().filter(n => !n.parentId))
+      // THE HOOK'S BOUNDS, NOT THE BARE FUNCTION'S. The standalone
+      // `getNodesBounds` cannot resolve sub-flow geometry without a node
+      // lookup — React Flow says so itself, in a dev warning nobody was
+      // reading — and a board of frames-with-rows is nothing but sub
+      // flows. MEASURED on the wide-hub board: the bare function
+      // returned 740x4904 for a board the DOM puts at 980x5328, so the
+      // export was fitted to a box a whole card narrower and 424px
+      // shorter than the picture, and the difference was cut off. The
+      // instance method resolves every node absolutely and agrees with
+      // the DOM to the pixel, children included — so they are passed in
+      // rather than filtered out.
+      const bounds = rf.getNodesBounds(rf.getNodes())
       const { width, height, vp } = exportFrameFor(bounds)
       const bg = getComputedStyle(document.documentElement).getPropertyValue('--nx-bg-elevated').trim() || '#ffffff'
       const dataUrl = await toPng(viewport, {
@@ -4247,7 +4326,11 @@ export function FocusGraphView({
     return { ...n, selected: sel, ...(pos ? { position: pos } : {}) }
   }), [baseNodes, selectedId, moved, dragPositions])
 
-  const [hoveredId, setHoveredId] = useState<string | null>(null)
+  // Hover is a STORE, not state: the board itself has nothing to redraw
+  // when the pointer moves onto a card — only the wires that touch it
+  // do, and they subscribe. Keeping it in `useState` re-rendered
+  // `FocusGraphView` on every enter and every leave for nothing.
+  const [hoverStore] = useState(() => new HoverStore())
   const edges = useMemo((): Edge[] => {
     const bandById = new Map(graph.cards.map(c => [c.id, c.band]))
     // For THE TRAIL: which urn each card id backs, so a bundle between
@@ -4273,6 +4356,11 @@ export function FocusGraphView({
     // and a cap that only measured the ×N counts would read that board
     // as empty and let all of them through.
     const labelDense = graph.edges.filter(e => e.labelVisible || e.cycleBack).length > LABEL_DENSITY_CAP
+    // How many wires COULD drift if a cone lit all of them — counted
+    // here, off the picture, rather than per hover: which of them is
+    // actually on a cone changes constantly, but how busy the board is
+    // does not (`SEAM_MOTION_CAP`).
+    const motionDense = graph.edges.filter(e => e.grainCoarse).length > SEAM_MOTION_CAP
     return graph.edges.map((e) => {
       // Containment is never drawn as a wire — it NESTS. Every edge on
       // the board is a lineage hop, tinted by the side it lands on.
@@ -4302,6 +4390,7 @@ export function FocusGraphView({
           count: e.count, dimmed: e.dimmed, tint, mutedTint, cycleBack: e.cycleBack, reducedMotion,
           cycleAnchor: e.cycleAnchor, labelVisible: e.labelVisible, labelDense, trail,
           labelT: e.labelT, grainCoarse: e.grainCoarse, seamSlotted: e.seamSlotted, sameAncestorFrame: e.sameAncestorFrame,
+          motionDense,
           inFrameLane: e.inFrameLane,
           sourcePillUp: cardById.get(e.source)?.pillUp ?? null,
           targetPillDown: cardById.get(e.target)?.pillDown ?? null,
@@ -4438,7 +4527,7 @@ export function FocusGraphView({
       )}
     >
       <ReachContext.Provider value={reachValue}>
-      <HoverContext.Provider value={hoveredId}>
+      <HoverStoreContext.Provider value={hoverStore}>
       <IsolationStoreContext.Provider value={isolationStore}>
       <TrailStoreContext.Provider value={trailStore}>
       <FollowContext.Provider value={ctx}>
@@ -4480,16 +4569,29 @@ export function FocusGraphView({
             // them apart here for the hover-preview treatment (frames
             // never get it) reads `card.kind` instead of the node type.
             const nodeCard = (n.data as { card?: FocusCard } | undefined)?.card
-            if (nodeCard && !holdsRows(nodeCard)) setHoveredId(n.id)
+            if (nodeCard && !holdsRows(nodeCard)) hoverStore.set(n.id)
+            // Cancels a pending RELEASE as well as a pending intent —
+            // see the leave handler: card-to-card is a HAND-OVER.
             if (coneHoverTimer.current) clearTimeout(coneHoverTimer.current)
             coneHoverTimer.current = setTimeout(() => setHoverConeId(n.id), HOVER_INTENT_MS)
           }}
           onNodeMouseLeave={() => {
-            setHoveredId(null)
-            // Instantly: a cone that lingers after the pointer has left
-            // is the board answering a question nobody is asking.
-            if (coneHoverTimer.current) { clearTimeout(coneHoverTimer.current); coneHoverTimer.current = null }
-            setHoverConeId(null)
+            hoverStore.set(null)
+            // A HAND-OVER, NOT A DEPARTURE. Clearing the cone here the
+            // moment the pointer left a card meant every card-to-card
+            // move went cone → null → cone, and `null` is the one
+            // change every card on the board must answer ("is anything
+            // isolated at all?"). MEASURED on the wide-hub board: 596
+            // card renders for one hover, on 151 cards. Deferring the
+            // clear by a hair lets the next card's own enter cancel it —
+            // the board goes straight from one cone to the next and only
+            // the cards whose answer actually changed re-render. A real
+            // departure still clears within a frame or two, which is the
+            // "instantly" this used to mean: a cone that lingers after
+            // the pointer has left is the board answering a question
+            // nobody is asking.
+            if (coneHoverTimer.current) clearTimeout(coneHoverTimer.current)
+            coneHoverTimer.current = setTimeout(() => setHoverConeId(null), CONE_RELEASE_MS)
           }}
           proOptions={{ hideAttribution: true }}
           style={{ background: 'transparent' }}
@@ -4591,7 +4693,7 @@ export function FocusGraphView({
       </FollowContext.Provider>
       </TrailStoreContext.Provider>
       </IsolationStoreContext.Provider>
-      </HoverContext.Provider>
+      </HoverStoreContext.Provider>
       </ReachContext.Provider>
     </div>
   )
