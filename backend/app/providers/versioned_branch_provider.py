@@ -169,11 +169,15 @@ class VersionedBranchProvider:
         return TraceResult(**d)
 
     async def expand_aggregated(
-        self, source_urn: str, target_urn: str, next_level: int,
+        self, source_urn: str, target_urn: str, next_level: Optional[int],
         lineage_edge_types: List[str], containment_edge_types: List[str],
         max_nodes: int, timeout_ms: int, use_raw_edges: bool = False,
         include_containment_edges: bool = False,
+        drill_anchor: Optional[str] = None,
     ) -> TraceResult:
+        # `drill_anchor` is accepted for contract parity and ignored: a
+        # branch state replays raw edges rather than reading AGGREGATED
+        # cells, so there is no pair collection to make asymmetric.
         d = await self._svc.expand_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             source_urn=source_urn, target_urn=target_urn, next_level=next_level,

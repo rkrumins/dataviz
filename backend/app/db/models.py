@@ -194,6 +194,43 @@ class ManagementDbConfigORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# platform_settings  (single-row: platform-wide defaults)              #
+# ------------------------------------------------------------------ #
+
+class PlatformSettingsORM(Base):
+    """Platform-wide defaults (single row, id=1).
+
+    The bottom of the node-identity resolution chain: what a data source
+    resolves to when neither it, its provider, nor its workspace says
+    otherwise. Deliberately a DB row rather than an env var — the previous
+    global ``AGGREGATION_NODE_IDENTITY_PROPERTY`` env var was removed as a
+    footgun precisely because it applied everywhere with no audit trail and
+    no way to see what it was doing. A row carries ``updated_by`` and can be
+    changed without a redeploy.
+
+    NULL means "unset" — the code default (``urn`` / ``name``) applies.
+    """
+
+    __tablename__ = "platform_settings"
+
+    id = Column(Integer, primary_key=True, default=1)
+    identity_property = Column(Text, nullable=True)
+    name_property = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=True, onupdate=_now)
+    updated_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_platform_settings_single_row"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PlatformSettings identity={self.identity_property!r} "
+            f"name={self.name_property!r}>"
+        )
+
+
+# ------------------------------------------------------------------ #
 # feature_categories  (definitions: id, label, icon, color, order)     #
 # ------------------------------------------------------------------ #
 
@@ -334,6 +371,14 @@ class ProviderORM(Base):
     permitted_workspaces = Column(Text, nullable=False, default='["*"]')  # JSON list; "*" = all
     extra_config = Column(Text, nullable=True)        # JSON blob
     falkor_max_resident = Column(Integer, nullable=True)  # per-provider FalkorDB cache-eviction budget (max resident graphs); NULL ⇒ unset
+    # Node-identity defaults for every data source hosted on this provider —
+    # the level where they usually belong, because they describe the SHAPE of
+    # the graphs this connection serves (a DataHub export keys nodes by `id`
+    # whichever workspace mounts it). NULL = unset, fall through to the
+    # workspace default, then the platform default. See
+    # ``backend.app.services.node_identity``.
+    identity_property = Column(Text, nullable=True)
+    name_property = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -532,6 +577,14 @@ class WorkspaceORM(Base):
     # Risk that is concentrated in a few SOURCES belongs on the source
     # (see ``WorkspaceDataSourceORM.is_restricted``), not on everyone.
     publish_policy = Column(Text, nullable=False, default="open")
+    # Node-identity defaults for the sources in this workspace — a team-level
+    # policy for graphs a workspace onboards itself. Weaker than the provider's
+    # value on purpose: the provider describes what the data actually looks
+    # like, the workspace only expresses a preference. NULL = unset, fall
+    # through to the platform default. See
+    # ``backend.app.services.node_identity``.
+    identity_property = Column(Text, nullable=True)
+    name_property = Column(Text, nullable=True)
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)

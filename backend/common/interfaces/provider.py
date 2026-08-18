@@ -10,7 +10,7 @@ from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
     LineageResult, GraphSchemaStats, OntologyMetadata,
     ChildrenWithEdgesResult, TopLevelNodesResult,
-    TraceResult,
+    TraceResult, TraceClosureResult,
 )
 
 
@@ -348,13 +348,14 @@ class GraphDataProvider(ABC):
         self,
         source_urn: str,
         target_urn: str,
-        next_level: int,
+        next_level: Optional[int],
         lineage_edge_types: List[str],
         containment_edge_types: List[str],
         max_nodes: int,
         timeout_ms: int,
         use_raw_edges: bool = False,
         include_containment_edges: bool = False,
+        drill_anchor: Optional[str] = None,
     ) -> TraceResult:
         """Drill into an AGGREGATED edge: return finer-level nodes + edges
         within (source_subtree × target_subtree) at ``next_level``.
@@ -365,10 +366,54 @@ class GraphDataProvider(ABC):
         When ``use_raw_edges=True`` (typically for the finest level where
         AGGREGATED == raw lineage), the implementation skips AGGREGATED
         and reads raw lineage edges directly.
+
+        ``drill_anchor`` names the anchor being OPENED. Only that side
+        descends; the partner contributes itself and its whole subtree,
+        so anchors many containment levels apart can still meet. Omit it
+        for the historical symmetric behaviour, which is correct only
+        when the pair is already at comparable depth.
+
+        ``next_level`` may be ``None`` — a caller whose ontology repeats
+        an entity type at two containment depths has no single honest
+        level to send, and providers should drill structurally instead.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement expand_aggregated. "
             "Required for the /trace/expand endpoint."
+        )
+
+    async def trace_closure(
+        self,
+        urn: str,
+        upstream_depth: int,
+        downstream_depth: int,
+        lineage_edge_types: List[str],
+        containment_edge_types: List[str],
+        max_nodes: int,
+        timeout_ms: int,
+        seed_urns: Optional[List[str]] = None,
+        exclude_urns: Optional[List[str]] = None,
+        after_cursor: Optional[str] = None,
+    ) -> TraceClosureResult:
+        """Focus-scoped, regime-independent lineage closure — ONE step of a walk.
+
+        Walks raw lineage edges outward from ``urn`` (upstream + downstream),
+        correct at the finest grain regardless of aggregation regime.
+        Containment is hydrated only to nest results, never used as a
+        lineage hop.
+
+        ``seed_urns`` continues a walk from known lineage participants
+        instead of reseeding from the focus. ``exclude_urns`` are nodes the
+        client already holds — never re-shipped in ``nodes``, but a seam
+        edge into one still is. ``after_cursor`` pages one node's adjacency
+        in one direction instead of walking further.
+
+        Default implementation raises NotImplementedError — override in
+        concrete providers (Neo4j, FalkorDB).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement trace_closure. "
+            "Required for the /trace/closure endpoint."
         )
 
     # ==========================================

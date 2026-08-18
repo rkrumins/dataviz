@@ -15,13 +15,18 @@ ordinary branch path (reused from :class:`VersionedBranchProvider`).
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypeVar
 
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
-    GraphNode, NodeQuery, TopLevelNodesResult, TraceResult,
+    GraphNode, NodeQuery, TopLevelNodesResult, TraceClosureResult, TraceResult,
 )
 from .versioned_branch_provider import VersionedBranchProvider
+
+#: The overlay patches whatever trace shape it is handed and hands the SAME
+#: shape back — a closure in, a closure out. Declaring the base type lost
+#: ``frontierUp``/``frontierDown``/``seedTruncated`` to every static reader.
+_TraceT = TypeVar("_TraceT", bound=TraceResult)
 
 
 class _OverlayDelta:
@@ -117,6 +122,26 @@ class DraftOverlayProvider:
         setter = getattr(self._base, "set_containment_edge_types", None)
         if callable(setter):
             setter(edge_types, from_ontology)
+
+    def set_node_identity(self, identity_property=None, name_property=None) -> None:
+        """Forward the resolved node-identity mapping to the base provider.
+
+        ``ContextEngine._inject_identity`` is ``hasattr``-gated, so without this
+        method a draft read silently skipped the injection: the base FalkorDB
+        provider kept whatever mapping the PREVIOUS source left on it (instances
+        are cached and shared per ``(provider_id, graph_name)``), which is the
+        exact leak ``FalkorDBProvider.set_node_identity``'s "ALWAYS RESET"
+        contract exists to prevent. An id-keyed source read through a draft
+        therefore hydrated as an empty graph.
+
+        Only ``_base`` gets it. ``self._writer`` is a
+        ``VersionedBranchProvider`` reading Postgres graph-version state, where
+        ``urn`` and ``displayName`` are already canonical columns — there is no
+        physical source property to map there.
+        """
+        setter = getattr(self._base, "set_node_identity", None)
+        if callable(setter):
+            setter(identity_property, name_property)
 
     @property
     def name(self) -> str:
@@ -363,18 +388,46 @@ class DraftOverlayProvider:
         return await self._overlay_trace(base)
 
     async def expand_aggregated(
-        self, source_urn: str, target_urn: str, next_level: int,
+        self, source_urn: str, target_urn: str, next_level: Optional[int],
         lineage_edge_types: List[str], containment_edge_types: List[str],
         max_nodes: int, timeout_ms: int, use_raw_edges: bool = False,
         include_containment_edges: bool = False,
+        drill_anchor: Optional[str] = None,
     ) -> TraceResult:
         base = await self._base.expand_aggregated(
             source_urn, target_urn, next_level, lineage_edge_types, containment_edge_types,
             max_nodes, timeout_ms, use_raw_edges=use_raw_edges,
-            include_containment_edges=include_containment_edges)
+            include_containment_edges=include_containment_edges,
+            drill_anchor=drill_anchor)
         return await self._overlay_trace(base)
 
-    async def _overlay_trace(self, base: TraceResult) -> TraceResult:
+    async def trace_closure(
+        self, urn: str, upstream_depth: int, downstream_depth: int,
+        lineage_edge_types: List[str], containment_edge_types: List[str],
+        max_nodes: int, timeout_ms: int, seed_urns: Optional[List[str]] = None,
+        exclude_urns: Optional[List[str]] = None, after_cursor: Optional[str] = None,
+    ) -> TraceClosureResult:
+        # Overlay lineage deltas can make frontier totalCount advisory-stale —
+        # acceptable (it is a cue, not a ledger).
+        #
+        # The base is whatever serves main, and not every one of those reads
+        # closures: a draft on a STALE projection is served by
+        # VersionedBranchProvider, which has no trace_closure at all. Calling
+        # through blindly raised AttributeError — a 500 on a read the API
+        # already has an honest answer for, and the answer every sibling read
+        # on that base gives: "this provider cannot do that", i.e. a 501.
+        fn = getattr(self._base, "trace_closure", None)
+        if fn is None:
+            raise NotImplementedError(
+                f"{getattr(self._base, 'name', type(self._base).__name__)} "
+                "does not support trace_closure")
+        base = await fn(
+            urn, upstream_depth, downstream_depth, lineage_edge_types, containment_edge_types,
+            max_nodes, timeout_ms, seed_urns=seed_urns, exclude_urns=exclude_urns,
+            after_cursor=after_cursor)
+        return await self._overlay_trace(base)
+
+    async def _overlay_trace(self, base: _TraceT) -> _TraceT:
         """Patch a base trace with the draft's lineage delta, bounded to the trace's node scope."""
         d = await self._delta_()
         if not d.lineage_changed and not d.node_remove:

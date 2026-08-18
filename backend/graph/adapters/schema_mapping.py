@@ -129,19 +129,43 @@ class SchemaMapping(BaseModel):
         cls,
         provider_config: Optional[Dict[str, Any]],
         datasource_config: Optional[Dict[str, Any]],
+        node_identity: Optional[Any] = None,
     ) -> "SchemaMapping":
         """Build a SchemaMapping by layering data-source overrides on top of
         provider-level defaults.  DataSource values win on conflict.
+
+        ``node_identity`` is a ``ResolvedNodeIdentity``
+        (``backend.app.services.node_identity``) and, when given, is
+        AUTHORITATIVE for the two fields both mechanisms describe:
+        ``identity_field`` and ``display_name_field``. Those two used to be
+        configurable here AND as columns on the data source, with each store
+        read by a different provider — so the same source could be mapped one
+        way for FalkorDB and another for Neo4j. The resolver has already
+        layered all four scopes (including this ``extra_config``, read as the
+        provider level), so its answer is the whole answer.
+
+        Only EXPLICIT mappings are applied. A resolver result that came out as
+        the platform default leaves this object's own defaults alone, so an
+        existing install whose ``schemaMapping`` says ``displayNameField:
+        "title"`` and which has set nothing in the new scopes keeps reading
+        ``title``.
         """
         base = cls.from_extra_config(provider_config)
-        if not datasource_config or "schemaMapping" not in datasource_config:
+        if datasource_config and "schemaMapping" in datasource_config:
+            override_raw = datasource_config.get("schemaMapping", {})
+            if isinstance(override_raw, str):
+                override_raw = json.loads(override_raw)
+            merged = base.model_dump()
+            merged.update({k: v for k, v in override_raw.items() if v is not None})
+            base = cls(**merged)
+        if node_identity is None:
             return base
-        override_raw = datasource_config.get("schemaMapping", {})
-        if isinstance(override_raw, str):
-            override_raw = json.loads(override_raw)
-        merged = base.model_dump()
-        merged.update({k: v for k, v in override_raw.items() if v is not None})
-        return cls(**merged)
+        resolved = base.model_dump()
+        if getattr(node_identity, "identity_is_mapped", False):
+            resolved["identity_field"] = node_identity.identity_property
+        if getattr(node_identity, "name_is_mapped", False):
+            resolved["display_name_field"] = node_identity.name_property
+        return cls(**resolved)
 
     # ================================================================
     # Field-name resolver  (Synodic canonical name → foreign field)

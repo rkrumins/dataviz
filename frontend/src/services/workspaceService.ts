@@ -12,6 +12,8 @@ const ADMIN_API = '/api/v1/admin/workspaces'
 // Data Source types
 // ============================================================
 
+import type { IdentitySource } from '@/components/dataSource/NodeIdentity'
+
 export interface DataSourceCreateRequest {
     catalogItemId?: string
     ontologyId?: string
@@ -63,10 +65,17 @@ export interface DataSourceResponse {
     isActive: boolean
     projectionMode?: string | null  // null = inherit from provider
     dedicatedGraphName?: string | null  // graph name when dedicated
-    /** URN-equivalent node-identity property. Always populated ("urn" by default). */
+    /** URN-equivalent node-identity property, RESOLVED across all four scopes
+     *  (this source -> its provider -> its workspace -> the platform default).
+     *  Always populated, so this is what is actually in force — not necessarily
+     *  what this source stores. */
     identityProperty?: string
-    /** Node display-name property. Always populated ("name" by default). */
+    /** Node display-name property, resolved the same way. */
     nameProperty?: string
+    /** Which scope each resolved value came from. Anything other than
+     *  'data_source' means this source inherited it. */
+    identityPropertySource?: IdentitySource
+    namePropertySource?: IdentitySource
     /** Provenance: 'managed' = fully managed in-app graph (blank/versioned),
      *  'federated' = external system of record. Null/absent on legacy rows —
      *  resolve with {@link resolveSourceMode}. */
@@ -106,6 +115,10 @@ export interface WorkspaceUpdateRequest {
     isActive?: boolean
     /** workspace:admin only — the server rejects anything else. */
     publishPolicy?: WorkspacePublishPolicy
+    /** Default node-identity mapping for the sources in this workspace.
+     *  Omit to leave untouched; "" clears it back to unset. */
+    identityProperty?: string
+    nameProperty?: string
 }
 
 export interface WorkspaceResponse {
@@ -125,6 +138,10 @@ export interface WorkspaceResponse {
     /** Publication gate for this workspace's views. Absent on servers that
      *  predate the setting — treat a missing value as 'request'. */
     publishPolicy?: WorkspacePublishPolicy
+    /** The workspace's OWN node-identity defaults. Null/absent = it sets none,
+     *  so its sources fall through to the platform default. */
+    identityProperty?: string | null
+    nameProperty?: string | null
     /** Convenience: from primary data source (backward compat) */
     providerId?: string
     graphName?: string

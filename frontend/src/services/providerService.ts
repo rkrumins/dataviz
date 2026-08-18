@@ -46,6 +46,10 @@ export interface ProviderCreateRequest {
     tlsEnabled?: boolean
     extraConfig?: Record<string, any>
     permittedWorkspaces?: string[]
+    /** Default node-identity mapping for every source on this provider.
+     *  Omit to leave untouched; "" clears it back to unset. */
+    identityProperty?: string
+    nameProperty?: string
 }
 
 export interface ProviderUpdateRequest {
@@ -76,6 +80,10 @@ export interface ProviderUpdateRequest {
     isActive?: boolean
     extraConfig?: Record<string, any>
     permittedWorkspaces?: string[]
+    /** Default node-identity mapping for every source on this provider.
+     *  Omit to leave untouched; "" clears it back to unset. */
+    identityProperty?: string
+    nameProperty?: string
 }
 
 export interface ConnectionTestResult {
@@ -122,6 +130,10 @@ export interface ProviderResponse {
     cacheAuthConfigured?: boolean
     /** FalkorDB sentinel-DAEMON credentials stored (write-only, presence flag). */
     sentinelAuthConfigured?: boolean
+    /** The provider's OWN node-identity defaults. Null/absent = it sets none,
+     *  so its sources fall through to their workspace, then the platform. */
+    identityProperty?: string | null
+    nameProperty?: string | null
 }
 
 export interface ProviderStatusResponse {

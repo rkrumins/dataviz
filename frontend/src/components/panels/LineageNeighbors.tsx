@@ -1235,7 +1235,7 @@ function NeighborRow({
   onToggleSelected: (shiftKey: boolean) => void
 }) {
   const [busy, setBusy] = useState(false)
-  const { neighborNode, edgeTypeNorm, neighborId } = record
+  const { neighborNode, edgeTypeNorm, neighborId, alsoTypes } = record
   const isIncoming = direction === 'incoming'
   const accent = isIncoming ? 'text-blue-500' : 'text-green-500'
   const accentBg = isIncoming ? 'bg-blue-500/10' : 'bg-green-500/10'
@@ -1337,6 +1337,9 @@ function NeighborRow({
         )}
       </div>
       <EdgeTypeChip edgeType={edgeTypeNorm} />
+      {/* Relationships folded into this one connection — named here
+          rather than given a duplicate row of their own. */}
+      {alsoTypes.map(t => <EdgeTypeChip key={t} edgeType={t} muted />)}
       {busy ? (
         <LucideIcons.Loader2
           data-testid="reveal-spinner"
@@ -1355,7 +1358,10 @@ function NeighborRow({
   )
 }
 
-function EdgeTypeChip({ edgeType }: { edgeType: string }) {
+/** `muted` marks a relationship folded into the row's primary one —
+ *  present, named, but not competing with the relationship that
+ *  actually describes the connection. */
+function EdgeTypeChip({ edgeType, muted }: { edgeType: string; muted?: boolean }) {
   const schema = useSchemaStore((s) => s.schema)
   const rt = schema?.relationshipTypes.find(
     (r) => r.id.toUpperCase() === edgeType.toUpperCase(),
@@ -1365,7 +1371,11 @@ function EdgeTypeChip({ edgeType }: { edgeType: string }) {
 
   return (
     <span
-      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-semibold uppercase tracking-wide whitespace-nowrap"
+      className={cn(
+        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-semibold uppercase tracking-wide whitespace-nowrap',
+        muted && 'opacity-60',
+      )}
+      title={muted ? `Also connected by ${displayName} — shown as one connection, not two` : undefined}
       style={{ backgroundColor: `${color}1a`, color }}
     >
       <span

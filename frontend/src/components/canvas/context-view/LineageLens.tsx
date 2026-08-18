@@ -1,62 +1,284 @@
 /**
- * LineageLens — ego-graph overlay for "click a node, see its immediate
- * links" regardless of canvas scale or scroll position.
+ * LineageLens — "click an entity, see its lineage", at any canvas scale.
  *
- * The focal entity sits centered; upstream neighbors (data sources) list
- * on the LEFT, downstream (data consumers) on the RIGHT, grouped by
- * entity type with counts. Data flow reads left → right throughout:
- * every connector arrow points toward the consumer side. Clicking a
- * neighbor re-centers the lens on it (breadcrumb trail returns);
- * per-row actions reveal the neighbor on the canvas or open its
- * details; the footer escalates to full Trace.
+ * The focal entity sits centered; upstream (data sources) on the LEFT,
+ * downstream (consumers) on the RIGHT. Data flow reads left → right
+ * throughout. Re-centering on a neighbour is a WALK recorded in a
+ * browser-style focus history (Back/Forward, ←/→ keys, clickable Path
+ * trail — moving the cursor never drops a hop); the SAME body renders at
+ * every depth, so a walk never flips the layout.
  *
- * Data comes from the canvas store (visibleEdges with raw-edges
- * fallback, via the shared deriveNeighborRecords helper) MERGED with
- * on-demand fetched lineage for every visited focal node (see
- * useLensLineage): the lens tells the truth about the DATA SOURCE, not
- * just about what happens to be hydrated on the canvas. Fetched edges
- * that the store already represents — same id, same endpoint pair, or
- * rolled up into an aggregate touching the same endpoint — are deduped
- * so counts stay truthful at one granularity.
+ * EVERY NUMBER ON THE BOARD IS SERVER TRUTH. The lens reads ONE thing:
+ * the accumulated walk model for the current focal (`useLensWalk`), a
+ * client-side union of one-hop closure responses. It does not read the
+ * canvas store at all — what happens to be hydrated on the canvas is a
+ * fact about the canvas, and the lens is asked about the DATA SOURCE.
+ * The pipeline is four pure steps:
+ *
+ *   walk model → buildLensSubgraph → buildFocusLayout → FocusGraphView
+ *
+ * with a per-focal `LensViewState` (what the user has opened, revealed,
+ * searched) as the only other input. Because the layout is a pure
+ * re-projection over the model, expanding a container is free and can
+ * never reach outside the lineage: the model's children are already
+ * scoped to walk participants. The only things that cost a round trip
+ * are ⊕ extend / page (one further hop) and "everything inside" (the
+ * roster of what a container holds, which lineage cannot answer).
  *
  * Styling is dual-theme (black/* light + white/* dark overlay pairs) on
  * a SOLID elevated surface — translucent glass over a busy canvas read
- * as washed-out, especially in light mode. Panel height adapts to
- * content so small neighborhoods don't get a cavernous empty grid.
- * Lens-local ESC handling runs in the capture phase so canvas keyboard
- * shortcuts don't fire underneath.
+ * as washed-out, especially in light mode. Lens-local ESC handling runs
+ * in the capture phase so canvas keyboard shortcuts don't fire
+ * underneath.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
-import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
-import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType, useEntityTypeHierarchyMap } from '@/store/schema'
+import { useRelationshipTypes } from '@/store/schema'
+import { relationshipLabel } from '@/lib/relationshipLabel'
+import type { WalkEntry, LensWalkDir } from '@/hooks/useLensWalk'
+import { emptyWalkModel, type LensWalkNode } from './lens/closure-adapter'
 import {
-  deriveNeighborRecords,
-  mergeSupplementalEdges,
-  buildCanContainClosure,
-  isCoarserGrain,
-  type NeighborRecord,
-} from '@/lib/lineage-neighbors'
-import { EDGE_FETCH_LIMIT } from '@/hooks/useLensLineage'
-import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
+  boundaryFrontierFilter,
+  buildLensSubgraph,
+  distinctSystemCount,
+  rootUrnOf,
+  type LensSubgraph,
+} from './lens/lens-subgraph'
+import {
+  buildFocusLayout,
+  revealKey,
+  viewStateForTransition,
+  initialLensViewState,
+  type LensDirectionFilter,
+  type LensFetchStatus,
+  type LensRoster,
+  type LensViewState,
+  type LensViewTransitionKind,
+} from './lens/focus-layout'
+import { applyCondensation } from './lens/condensation'
+import { enforceLensInvariants } from './lens/invariants'
+import { generateColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
+import { usePreferencesStore } from '@/store/preferences'
+import { useTourStore } from '@/features/tour/tourStore'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
+import { lensFocalOf, lensTransitionKind, type LensHistory } from './lens/lensHistory'
+import { labelOf, edgeLabelFor, orientationHalf, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach, type LensNeighbor } from './lens/focus-cards'
+import { encodeLensShare } from './lens/shareCodec'
+import { FocusGraphView } from './lens/FocusGraphView'
 
-const ROWS_CAP = 200
+/** Leaves one ⊕ extend ships to the server. A hub can stand for
+ *  thousands of participants; the request has to stay a request. */
+const SEED_CAP = 500
 const EMPTY_TYPE_SET: ReadonlySet<string> = new Set()
+const EMPTY_EXTEND_STATUS: ReadonlyMap<string, 'loading' | 'error'> = new Map()
+const EMPTY_ROSTERS: ReadonlyMap<string, LensRoster> = new Map()
+const EMPTY_ROSTER_STATUS: ReadonlyMap<string, LensFetchStatus> = new Map()
+
+/**
+ * One hop-1 neighbour of an anchor, as the walk model reports it — the
+ * same edges the graph body draws, counted the same way, so the two
+ * bodies cannot disagree about what is connected. `LensNeighbor`
+ * (focus-cards.ts) is this same shape plus its containment ROOT — the
+ * list body's own "system" grouping.
+ */
+type WalkNeighbor = LensNeighbor
+
+/**
+ * An anchor's direct neighbours, straight off the walk model —
+ * `sg.focusUrn` for the focal's own orientation sentence, or any other
+ * urn — the list body's own neighbour rows (and, historically, the
+ * not necessarily the focal's own).
+ *
+ * "Hop 1" is structural: a lineage edge with one endpoint on the ANCHOR
+ * SIDE (the anchor plus everything contained in it — a container has no
+ * edges of its own, only its descendants do) and the other outside it.
+ * That is exactly the rule `buildLensSubgraph` uses to number hops from
+ * the FOCUS, generalized here to any anchor so a triage list opened on a
+ * frame's own ⊕ counts the same way that frame's badge already does.
+ *
+ * Exported so the harness (`buildWalk.ts`) can build a triage-list shot
+ * through the SAME function `partnersFor` calls in production, rather
+ * than a second copy that could quietly drift from it.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>, anchorUrn: string = sg.focusUrn): {
+  incoming: WalkNeighbor[]
+  outgoing: WalkNeighbor[]
+} {
+  const focusSide = new Set<string>()
+  const stack = [anchorUrn]
+  while (stack.length > 0) {
+    const urn = stack.pop()!
+    if (focusSide.has(urn) || !sg.nodes.has(urn)) continue
+    focusSide.add(urn)
+    for (const child of sg.nodes.get(urn)!.children) stack.push(child)
+  }
+
+  const build = (dir: 'in' | 'out'): WalkNeighbor[] => {
+    const byUrn = new Map<string, { weight: number; types: Set<string> }>()
+    for (const hop of sg.lineageEdges) {
+      const near = dir === 'in' ? hop.targetUrn : hop.sourceUrn
+      const far = dir === 'in' ? hop.sourceUrn : hop.targetUrn
+      if (!focusSide.has(near) || focusSide.has(far)) continue
+      const entry = byUrn.get(far) ?? { weight: 0, types: new Set<string>() }
+      entry.weight += 1
+      entry.types.add((hop.edgeType ?? '').toUpperCase())
+      byUrn.set(far, entry)
+    }
+    const labelFor = (urn: string) => labelOf(urn, sg.nodes.get(urn)?.node)
+    return [...byUrn.entries()]
+      .map(([urn, { weight, types }]) => {
+        const node = sg.nodes.get(urn)
+        const parentUrn = node?.parent ?? null
+        // T23 R3 — the containment ROOT, not just the immediate parent:
+        // "grouped by system" reads the same "system" the orientation
+        // sentence's own "across N systems" already means
+        // (`distinctSystemCount`), not whatever frame happens to be one
+        // level up.
+        const systemUrn = rootUrnOf(sg, urn)
+        return {
+          urn,
+          label: labelFor(urn),
+          type: (node?.node?.data?.type as string) ?? node?.node?.entityType ?? 'not loaded',
+          weight,
+          edgeTypeNorm: types.size === 1 ? [...types][0] : '',
+          parentUrn,
+          parentLabel: parentUrn ? labelFor(parentUrn) : null,
+          systemUrn,
+          systemLabel: systemUrn === urn ? labelFor(urn) : labelFor(systemUrn),
+        }
+      })
+      .sort((a, b) => b.weight - a.weight || a.label.localeCompare(b.label) || a.urn.localeCompare(b.urn))
+  }
+
+  return { incoming: build('in'), outgoing: build('out') }
+}
+
+/**
+ * The leaves an ⊕ extend is seeded from: the lineage-participating
+ * members of the card's own subtree, in this direction.
+ *
+ * A card stands for everything inside it, so extending a collapsed
+ * table means "walk one hop further from the columns underneath it" —
+ * the server needs those columns by name. Ranked by how much lineage
+ * each already carries so a capped request spends its budget on the
+ * busiest participants.
+ *
+ * A member with NO loaded edges in this direction but a frontier entry
+ * from the server counts too: that is precisely a node whose lineage
+ * has not been fetched yet, and dropping it would seed the request with
+ * everything except the reason it exists.
+ */
+function seedLeavesFor(
+  sg: LensSubgraph<LensWalkNode>,
+  cardUrn: string,
+  dir: 'in' | 'out',
+): string[] {
+  // THE BOUNDARY RULE, the same call the ⊕ counts by, so the seeds and
+  // the badge can never disagree. Focus-relative, exactly like the badge:
+  // a partner card's members all sit outside the focus and are seeded as
+  // they always were; the FOCAL's are seeded only where the picture has
+  // seen them reach out of the focus. Seeded from the rest, a container's
+  // extend re-asks for its own inside — every one of those urns is
+  // already held and excluded, so the fetch returns nothing and the click
+  // delivers nothing (reported live: Snowflake's "+211").
+  const offers = boundaryFrontierFilter(sg, sg.focusUrn, dir)
+  const members: Array<{ urn: string; degree: number }> = []
+  const stack = [cardUrn]
+  const seen = new Set<string>()
+  while (stack.length > 0) {
+    const urn = stack.pop()!
+    if (seen.has(urn)) continue
+    seen.add(urn)
+    const node = sg.nodes.get(urn)
+    if (!node) continue
+    const degree = dir === 'in' ? node.degreeUp : node.degreeDown
+    const frontier = dir === 'in' ? node.frontierUp : node.frontierDown
+    if ((degree > 0 || frontier != null) && offers(urn)) members.push({ urn, degree })
+    for (const child of node.children) stack.push(child)
+  }
+  return members
+    .sort((a, b) => b.degree - a.degree || a.urn.localeCompare(b.urn))
+    .slice(0, SEED_CAP)
+    .map(m => m.urn)
+}
+
+const toWalkDir = (dir: 'in' | 'out'): LensWalkDir => (dir === 'in' ? 'up' : 'down')
+
+/** Every walk affordance the lens hands to the hook. Grouped because
+ *  they are one capability — "grow this focal's model" — and a caller
+ *  holding three of the four would be holding a broken one. */
+export interface LensWalkApi {
+  extend: (cardUrn: string, dir: LensWalkDir, seedLeaves: string[]) => void
+  page: (cardUrn: string, dir: LensWalkDir, cursor: string) => void
+  /** Re-kick a failed INITIAL fetch. A failed extend needs no twin:
+   *  retrying one is the same click on the same pill, so the ⊕ simply
+   *  calls `extend` again and the two can never drift apart. */
+  retry: (focusUrn: string) => void
+}
+
+/**
+ * A restored exploration, applied ONCE to the focal it names — decoded
+ * from a share v2 token (see shareCodec.ts). `revealed`/`opened`/
+ * `collapsed`/`frameAll`/`framePages`/`frameQueries` are exactly a
+ * `LensViewState`'s own fields (`framePages` keeps the wire name it was
+ * minted with and is read as `frameOffsets` — see the codec's own note);
+ * a revealed key whose card never lands in
+ * the fetched model simply no-ops under the population fixpoint — the
+ * same safety `buildFocusLayout` already gives a stale key, so a seed
+ * can never reach outside the walk it is applied to. Frontier EXTENDS
+ * are deliberately not encoded (they cost a round trip); the restored
+ * board just shows their honest pills instead of replaying the fetch. */
+export interface LensWalkSeed {
+  /** Applied once this exact focal's walk entry reaches 'done'. */
+  nodeId: string
+  direction: LensDirectionFilter
+  revealed: Array<[string, number]>
+  opened: string[]
+  collapsed: string[]
+  frameAll: string[]
+  framePages: Array<[string, number]>
+  frameQueries: Array<[string, string]>
+  /** T23 R3 — placements from a v3 share link; `[]` for a v2 one (it
+   *  predates hub triage). */
+  pinned: string[]
+  /** T23 R2 — unfolded connector ids from a v3 share link; `[]` for a v2
+   *  one (it predates condensation, so nothing was ever folded to begin
+   *  with — every run just opens condensed, as it always does). */
+  condensedOpen: string[]
+}
 
 export interface LineageLensProps {
-  /** Focal-node stack; last entry is the current focal. Empty = closed. */
-  lensStack: string[]
+  /** Focus history; entries[cursor] is the current focal. Empty = closed. */
+  history: LensHistory
+  /** The accumulated walk for the CURRENT focal, or null before the
+   *  hook has touched it. Every number the lens shows comes from here. */
+  walk: WalkEntry | null
+  /** Growing that model: one further hop, one further page, or again
+   *  after a failure. */
+  walkApi: LensWalkApi
+  /** A shared exploration to restore, once. Applied to the focal it
+   *  names the moment that focal's walk lands (see LensWalkSeed). */
+  walkSeed?: LensWalkSeed | null
+  /** "What is really inside this entity" per urn — membership, which
+   *  lineage cannot answer (useLensChildren). */
+  childrenAll?: ReadonlyMap<string, LensRoster>
+  childrenAllStatus?: ReadonlyMap<string, LensFetchStatus>
+  /** Fetch (or page further into, or search within) a container's full
+   *  child list. `searchQuery` goes to the server, so Find reaches rows
+   *  that have not been paged to yet. */
+  onLoadAllChildren?: (urn: string, searchQuery?: string) => void
+  onLoadChildrenOf?: (urn: string) => void
   onRecenter: (nodeId: string) => void
+  /** Step the focus history back one hop (non-destructive). */
   onBack: () => void
-  /** Jump the walk back to stack index i (truncates the trail there). */
+  /** Step the focus history forward one hop (non-destructive). */
+  onForward: () => void
+  /** Move the history cursor to entry i without dropping the trail. */
   onJumpTo?: (index: number) => void
-  /** Branch the walk: truncate to hop i, then step into nodeId — lets
-   *  any earlier column change route without restarting the walk. */
-  onWalkTo?: (index: number, nodeId: string) => void
   /** Frame the walked path on the canvas (closes the lens). */
   onShowPathOnCanvas?: (ids: string[]) => void
   onClose: () => void
@@ -65,6 +287,9 @@ export interface LineageLensProps {
   /** Open the entity drawer for a node. */
   onOpenDetails?: (nodeId: string) => void
   /** Reveal a set of neighbors and frame them on the canvas (closes the lens). */
+  /** Place a whole set on the canvas behind the lens. Its only footer
+   *  button was withdrawn (see the Footer below); the prop stays on the
+   *  contract so bringing it back needs no re-plumbing. */
   onLocateAll?: (nodeIds: string[]) => void | Promise<void>
   /** Escalate to a full server trace from the focal node (closes the lens). */
   onTrace?: (nodeId: string) => void
@@ -75,50 +300,56 @@ export interface LineageLensProps {
     loading: boolean
     records: Array<{ urn: string; label: string; direction: 'in' | 'out'; edgeType: string }>
   } | null
-  /** On-demand fetched lineage for visited focal nodes (useLensLineage).
-   *  Lens-local only — never part of the canvas store. */
-  supplementalEdges?: LineageEdge[]
-  supplementalNodes?: Map<string, LineageNode>
-  /** Per-focal fetch status; absent id = no fetch attempted. */
-  fetchStatus?: Map<string, 'loading' | 'done' | 'error'>
-  /** Focal nodes whose fetch hit the per-direction edge cap. */
-  fetchTruncatedIds?: Set<string>
-  onRetryFetch?: (nodeId: string) => void
-  /** Underlying edges fetched per drilled aggregate (aggregate edge id). */
-  drillEdges?: Map<string, LineageEdge[]>
-  drillStatus?: Map<string, 'loading' | 'done' | 'error'>
-  /** Fetch an aggregated row's underlying connections on drill. */
-  onDrillFetch?: (edge: LineageEdge) => void
 }
 
 export function LineageLens({
-  lensStack,
+  history,
+  walk,
+  walkApi,
+  walkSeed = null,
+  childrenAll = EMPTY_ROSTERS,
+  childrenAllStatus = EMPTY_ROSTER_STATUS,
+  onLoadAllChildren,
+  onLoadChildrenOf,
   onRecenter,
   onBack,
+  onForward,
   onJumpTo,
-  onWalkTo,
   onShowPathOnCanvas,
   onClose,
   onRevealOnCanvas,
   onOpenDetails,
-  onLocateAll,
   onTrace,
   externalPreview,
-  supplementalEdges,
-  supplementalNodes,
-  fetchStatus,
-  fetchTruncatedIds,
-  onRetryFetch,
-  drillEdges,
-  drillStatus,
-  onDrillFetch,
 }: LineageLensProps) {
-  const nodeId = lensStack[lensStack.length - 1] ?? null
+  const { entries, cursor } = history
+  const nodeId = lensFocalOf(history)
+  const canBack = cursor > 0
+  const canForward = cursor < entries.length - 1
 
-  const rawEdges = useCanvasStore((s) => s.edges)
-  const visibleEdges = useCanvasStore((s) => s.visibleEdges)
-  const nodes = useCanvasStore((s) => s.nodes)
-  const containmentEdgeTypes = useContainmentEdgeTypes()
+  // T26 R1 — which of the five in-session transition kinds produced the
+  // CURRENT `history`, purely from comparing it against the previous
+  // render's (`lensTransitionKind`, lensHistory.ts — pure history-shape
+  // classification, unit-tested on its own). The React-sanctioned
+  // "adjust state during rendering" pattern (react.dev, "Adjusting some
+  // state when a prop changes"): a plain conditional `setState` call in
+  // the render body itself, never an effect — so it can never lag a
+  // tick behind `nodeId` (React re-renders immediately, before
+  // committing, whenever this branch fires) and is idempotent across a
+  // StrictMode double-render or any re-render where `history` did not
+  // change (the branch only fires when the reference actually differs).
+  const [transitionTrack, setTransitionTrack] = useState<{ history: LensHistory; kind: LensViewTransitionKind }>(
+    () => ({ history, kind: 'lens-open' }),
+  )
+  // Computed fresh for THIS render (not read back off `transitionTrack`,
+  // which will not reflect the `setTransitionTrack` call below until
+  // React's own immediate re-render) — see the pattern's own citation
+  // above for why reading state written this same render is stale.
+  let transitionKind = transitionTrack.kind
+  if (transitionTrack.history !== history) {
+    transitionKind = lensTransitionKind(transitionTrack.history, history)
+    setTransitionTrack({ history, kind: transitionKind })
+  }
 
   // Query is keyed to the focal node — re-centering starts with a fresh
   // filter without needing a reset effect.
@@ -126,177 +357,58 @@ export function LineageLens({
   const query = queryState.nodeId === nodeId ? queryState.q : ''
   const setQuery = (q: string) => setQueryState({ nodeId, q })
 
-  // Lens-local ESC: capture phase so the canvas's document-level keyboard
-  // handler never sees it while the lens is open.
-  useEffect(() => {
-    if (!nodeId) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        e.stopPropagation()
-        onClose()
-        return
-      }
-      // Keyboard walking: ← steps the walk back one hop (never while
-      // typing in the filter input).
-      if (e.key === 'ArrowLeft' && lensStack.length > 1) {
-        const t = e.target as HTMLElement | null
-        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
-        e.preventDefault()
-        e.stopPropagation()
-        onBack()
-      }
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [nodeId, onClose, lensStack.length, onBack])
+  const walkStatus: LensFetchStatus = walk?.status ?? 'loading'
+  const model = walk?.model ?? null
 
-  // Open gate for every canvas-scale memo below: this component is
-  // always mounted, and a closed lens must cost nothing when the
-  // (potentially very large) node/edge sets churn.
-  const lensOpen = lensStack.length > 0
+  // ── The pipeline: model → subgraph → view state → layout ──────────
 
-  const nodeMap = useMemo(() => {
-    const m = new Map<string, LineageNode>()
-    if (!lensOpen) return m
-    // Fetched partners first; store nodes win (they carry full canvas data).
-    if (supplementalNodes) for (const [id, n] of supplementalNodes) m.set(id, n)
-    for (const n of nodes) m.set(n.id, n)
-    return m
-  }, [nodes, supplementalNodes, lensOpen])
-
-  // Store edges (canvas truth) merged with on-demand fetched edges
-  // (data-source truth). A fetched edge is redundant — and skipped —
-  // when the store already represents that connection: identical id,
-  // identical (source, target, edgeType) pair, or rolled up into an
-  // aggregate that shares an endpoint with it (the aggregate row shows
-  // it at coarser granularity, and the drill below resolves it). An
-  // aggregate between two OTHER nodes does NOT cover it — that's
-  // exactly the invisible-lineage case this merge exists to fix.
-  const edges = useMemo(() => {
-    const base = visibleEdges.length > 0 ? visibleEdges : rawEdges
-    if (!supplementalEdges || supplementalEdges.length === 0) return base
-    return mergeSupplementalEdges(base, supplementalEdges)
-  }, [visibleEdges, rawEdges, supplementalEdges])
-
-  // Endpoint index — one O(E) pass per edge-set change so everything
-  // downstream (hop columns, trail metadata, the classic body) works in
-  // O(degree of the node), not O(all edges) per hop. At canvas scale
-  // (100k+ edges, multi-hop walks) the naive full-array scan per hop is
-  // the difference between instant and seconds. The open gate is a
-  // boolean, so opening builds once and walking doesn't rebuild.
-  const edgesByEndpoint = useMemo(() => {
-    const m = new Map<string, LineageEdge[]>()
-    if (!lensOpen) return m
-    const add = (k: string, e: LineageEdge) => {
-      const list = m.get(k)
-      if (list) list.push(e)
-      else m.set(k, [e])
-    }
-    for (const e of edges) {
-      add(e.source, e)
-      if (e.target !== e.source) add(e.target, e)
-    }
-    return m
-  }, [edges, lensOpen])
-
-  // Hop metadata — direction + edge type for each trail transition,
-  // derived from loaded edges. Lets the trail read as a sentence
-  // ("acct_num FEEDS System A") instead of a bare list. Trail length is
-  // small; recomputed only when the walk or edge set changes. null =
-  // connecting edge not loaded (fall back to a neutral separator).
-  const hopMeta = useMemo(() => {
-    const meta: Array<{ downstream: boolean; edgeType: string } | null> = []
-    for (let i = 1; i < lensStack.length; i++) {
-      const prev = lensStack[i - 1]
-      const curr = lensStack[i]
-      let found: { downstream: boolean; edgeType: string } | null = null
-      for (const e of edgesByEndpoint.get(curr) ?? []) {
-        if (e.source === prev && e.target === curr) {
-          found = { downstream: true, edgeType: (e.data?.edgeType as string) || '' }
-          break
-        }
-        if (e.source === curr && e.target === prev) {
-          found = { downstream: false, edgeType: (e.data?.edgeType as string) || '' }
-          break
-        }
-      }
-      meta.push(found)
-    }
-    return meta
-  }, [lensStack, edgesByEndpoint])
-
-  // Deep walks middle-truncate so the endpoints (the part people care
-  // about) stay visible; the gap chip expands the full trail.
-  const [showFullTrail, setShowFullTrail] = useState(false)
-  const TRAIL_CAP = 6
-  const collapseTrail = lensStack.length > TRAIL_CAP && !showFullTrail
-
-  // ── Miller-walk state ──────────────────────────────────────────────
-  // Direction LOCK: a walk follows one flow direction (mixing
-  // directions mid-path makes the trail ambiguous). Locked to the
-  // first hop's direction, overridable via the flip control.
-  const [directionOverride, setDirectionOverride] = useState<'incoming' | 'outgoing' | null>(null)
-  const walkDirection: 'incoming' | 'outgoing' =
-    directionOverride ?? (hopMeta[0] ? (hopMeta[0].downstream ? 'outgoing' : 'incoming') : 'outgoing')
-
-  // Frontier records per hop — the columns' contents. Walk length is
-  // short and this recomputes only when the walk or edge set changes.
-  const hopRecords = useMemo(
-    // Indexed: each hop scans only its own incident edges, not the
-    // whole edge set (deriveNeighborRecords filters by endpoint anyway).
-    () => lensStack.map(id => deriveNeighborRecords(id, edgesByEndpoint.get(id) ?? [], nodeMap, containmentEdgeTypes)),
-    [lensStack, edgesByEndpoint, nodeMap, containmentEdgeTypes],
+  const sg = useMemo(
+    () => buildLensSubgraph(model ?? emptyWalkModel(nodeId ?? '')),
+    [model, nodeId],
   )
 
-  // Containment per hop — a container's relationships often live at
-  // CHILD level, so a walk into one would dead-end on flow edges alone.
-  // Children (containment edges are parent → child) render as a
-  // walkable "Contains" group; O(degree) via the endpoint index.
-  const containmentByHop = useMemo(() => {
-    const m = new Map<string, string[]>()
-    for (const id of lensStack) {
-      if (m.has(id)) continue
-      const children: string[] = []
-      const seen = new Set<string>()
-      for (const e of edgesByEndpoint.get(id) ?? []) {
-        if (!isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) continue
-        if (e.source === id && e.target !== id && !seen.has(e.target)) {
-          seen.add(e.target)
-          children.push(e.target)
-        }
-      }
-      m.set(id, children)
-    }
-    return m
-  }, [lensStack, edgesByEndpoint, containmentEdgeTypes])
-
-  // ── Grain machinery — data-driven from the schema's entity-type
-  // hierarchy. closure(T) = every type T can transitively contain; a
-  // partner is a COARSER-grain rollup relative to a base node when the
-  // partner's type can contain the base's type (e.g. CONTAINER and
-  // DATAPLATFORM vs a DATASET focal). Case-insensitive like the other
-  // schema helpers. Tiny input (schema type list), computed once.
-  const hierarchyMap = useEntityTypeHierarchyMap()
-  const canContainClosure = useMemo(() => buildCanContainClosure(hierarchyMap), [hierarchyMap])
-  const isCoarserThan = useCallback(
-    (partnerType: string | undefined, baseType: string): boolean =>
-      isCoarserGrain(canContainClosure, partnerType, baseType),
-    [canContainClosure],
-  )
-
-  // Containment parent of a node, when known — fetched or loaded
-  // containment edge pointing at it, else the canvas's own assignment.
-  const resolveParent = useCallback((id: string): string | null => {
-    for (const e of edgesByEndpoint.get(id) ?? []) {
-      if (e.target === id && e.source !== id
-        && isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) return e.source
-    }
-    return (nodeMap.get(id)?.data?.parentId as string | undefined) ?? null
-  }, [edgesByEndpoint, containmentEdgeTypes, nodeMap])
+  // T26 R1 — what a fresh transition to THIS focal should show, per
+  // `viewStateForTransition` (focus-layout.ts), the single owner of
+  // every `LensViewState` field's disposition across a transition.
+  // Recomputed only when the model or the transition kind changes, so
+  // it is a stable identity for the layout memo below. No `prev` to
+  // offer: none of the five in-session kinds reads it (T25-C2's own
+  // finding — a transition resets every field fresh), and threading
+  // `viewState` through here would recompute this on every in-view
+  // edit, not just a transition.
+  const freshView = useMemo(() => viewStateForTransition(transitionKind, null, { sg }), [sg, transitionKind])
+  const [viewState, setViewState] = useState<{ nodeId: string | null; view: LensViewState } | null>(null)
+  // Discarded on re-center, exactly like the filter and chip state: a
+  // new focal is a new question, not a continuation of this one — EXCEPT
+  // for a one-time seed restored from a share link (below), which is the
+  // sanctioned way a focal's starting view can be anything but default.
+  //
+  // T25 C2, invariant (b) — the answer to "does an ORDINARY in-session
+  // re-anchor (double-click / Focus-here / breadcrumb — every path runs
+  // through `ctx.onFocus` → the `onRecenter` prop → `lensPush`, one
+  // shared mechanism) actually reset `condensedOpen`/`pinned`, or does
+  // it take some OTHER path where they never reset?" It is NOT the
+  // walkSeed-restoration effect below — that is a SEPARATE, one-time
+  // mechanism that only ever fires for a restored SHARE LINK, and an
+  // ordinary re-anchor never touches it. The reset here is this plain
+  // derived value, re-evaluated on EVERY render, with no effect and no
+  // async gap in between: the moment `nodeId` changes,
+  // `viewState?.nodeId === nodeId` is false on THIS SAME render, so
+  // `view` falls back to a fresh `freshView` atomically — there is no
+  // tick where a stale value from the old focal is live under the new
+  // one. See
+  // `LineageLens.test.tsx`'s "re-anchoring from a walked-through state"
+  // describe block for the pin walking this exact in-session path.
+  const view = viewState?.nodeId === nodeId ? viewState.view : freshView
+  const editView = useCallback((edit: (base: LensViewState) => LensViewState) => {
+    setViewState(prev => ({
+      nodeId,
+      view: edit(prev?.nodeId === nodeId ? prev.view : freshView),
+    }))
+  }, [nodeId, freshView])
 
   // Type-filter chips — lens-local, keyed to the focal (like the text
-  // filter) so re-centering starts clean. Shared across both columns.
+  // filter) so re-centering starts clean.
   const [hiddenTypesState, setHiddenTypesState] = useState<{ nodeId: string | null; types: ReadonlySet<string> }>({ nodeId: null, types: EMPTY_TYPE_SET })
   const hiddenTypes = hiddenTypesState.nodeId === nodeId ? hiddenTypesState.types : EMPTY_TYPE_SET
   const toggleHiddenType = (t: string) => setHiddenTypesState(prev => {
@@ -307,101 +419,825 @@ export function LineageLens({
     return { nodeId, types: next }
   })
 
-  // Parent-group collapse — per-group TOGGLES against a per-column
-  // default (3+ parent groups → start collapsed: dataset-level overview
-  // first), stored as XOR so the default can vary without migrating
-  // state. Keyed to the focal like the other lens-local state.
-  const [collapseState, setCollapseState] = useState<{ nodeId: string | null; keys: ReadonlySet<string> }>({ nodeId: null, keys: EMPTY_TYPE_SET })
-  const collapseToggles = collapseState.nodeId === nodeId ? collapseState.keys : EMPTY_TYPE_SET
-  const toggleCollapse = (k: string) => setCollapseState(prev => {
-    const base = prev.nodeId === nodeId ? prev.keys : EMPTY_TYPE_SET
-    const next = new Set(base)
-    if (next.has(k)) next.delete(k)
-    else next.add(k)
-    return { nodeId, keys: next }
-  })
+  // Direction preset — VIEW-SIDE filter (the fetch always stays 'both';
+  // see focus-layout.ts's `directionFilter`). Per-focal like the other
+  // lens-local state above, so re-centering starts at "Both" again.
+  const [directionState, setDirectionState] = useState<{ nodeId: string | null; dir: LensDirectionFilter }>({ nodeId: null, dir: 'both' })
+  const directionFilter = directionState.nodeId === nodeId ? directionState.dir : 'both'
+  const setDirectionFilter = (dir: LensDirectionFilter) => setDirectionState({ nodeId, dir })
 
-  // ── Containment drill — refine an aggregated row to its constituent
-  // endpoints, resolved LOCALLY from the raw edges the aggregate rolls
-  // up (`data.sourceEdges`). Honest by construction: constituents that
-  // aren't loaded are reported as "+M more", never invented.
-  const rawEdgeById = useMemo(() => {
-    const m = new Map<string, LineageEdge>()
-    for (const e of rawEdges) m.set(e.id, e)
-    // Fetched edges resolve drill constituents the canvas never loaded.
-    if (supplementalEdges) for (const e of supplementalEdges) { if (!m.has(e.id)) m.set(e.id, e) }
-    return m
-  }, [rawEdges, supplementalEdges])
-  const [drilledRows, setDrilledRows] = useState<Set<string>>(() => new Set())
-  const toggleDrill = (key: string) => setDrilledRows(prev => {
-    const next = new Set(prev)
-    if (next.has(key)) next.delete(key)
-    else next.add(key)
-    return next
-  })
-  // Opening a drill with incomplete local coverage fetches the
-  // underlying edges on demand (idempotent per aggregate). Shared by
-  // the walk columns and the classic-mode cards.
-  const toggleDrillWithFetch = (key: string, edge: LineageEdge) => {
-    const aggData = edge.data as { sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
-    if (!drilledRows.has(key) && onDrillFetch && !drillEdges?.has(edge.id)) {
-      let localCount = 0
-      for (const eid of aggData?.sourceEdges ?? []) {
-        if (rawEdgeById.has(eid)) localCount++
-      }
-      if (localCount < (aggData?.sourceEdgeCount ?? 0)) onDrillFetch(edge)
+  const lensViewMode = usePreferencesStore((s) => s.lensViewMode)
+  const setLensViewMode = usePreferencesStore((s) => s.setLensViewMode)
+  const lensFrameChildren = usePreferencesStore((s) => s.lensFrameChildren)
+  const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
+  const condenseSteps = usePreferencesStore((s) => s.lensCondenseSteps)
+  const setCondenseSteps = usePreferencesStore((s) => s.setLensCondenseSteps)
+  const lensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
+  const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
+
+  // Restore a shared exploration — ONCE, the moment the seed's own focal
+  // is the one on screen AND its walk has actually landed (a revealed key
+  // means nothing until the model it points into exists). Guarded by a
+  // ref rather than folded into the nodeId-keyed state above: THAT state
+  // is keyed to "whichever focal is current" and rebuilding it on every
+  // walk-status tick would fight the user's own edits the instant they
+  // made one before the walk settled.
+  const seedAppliedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!walkSeed || walkSeed.nodeId !== nodeId || walkStatus !== 'done') return
+    if (seedAppliedRef.current === nodeId) return
+    seedAppliedRef.current = nodeId
+    // T26 R1 — routed through `viewStateForTransition`, the single owner
+    // of what SURVIVES from a seed vs RESETS (`walkedThrough`/`drawnRank`
+    // re-derive from the replayed model; `viewRadius` defaults to the
+    // restored walk's own fetched depth — see that function's own
+    // per-field disposition for the full reasoning, previously inline
+    // here). No `prev` to offer — this is a one-time restore, not an
+    // edit of whatever view state preceded it.
+    setViewState({
+      nodeId,
+      view: viewStateForTransition('share-restore', null, { sg, seed: walkSeed }),
+    })
+    setDirectionState({ nodeId, dir: walkSeed.direction })
+  }, [walkSeed, nodeId, walkStatus, sg])
+  // T26 — a walkSeed restore PENDING for this exact focal (named by the
+  // seed, not yet reflected in `viewState`) makes the walkedThrough/
+  // drawnRank feedback effects below UNSAFE for one render: `layout`
+  // there is built from `freshView` (the state the seed's own effect
+  // above is about to replace wholesale, in the SAME commit) — React
+  // applies queued updates in effect-DECLARATION order, so a feedback
+  // effect declared after this one would receive the seed's own
+  // freshly-restored view as `prev` and overwrite its `walkedThrough`
+  // with a value computed BEFORE the seed ever ran, silently
+  // re-collapsing containment levels the seed explicitly asked to keep
+  // expanded. Found via the journey suite's own seam step — a restored
+  // share link deep-nesting the reveal state is not reachable through
+  // any ordinary follow control, so no existing pin exercised this
+  // exact interleaving. A plain render-time value (props + state, never
+  // `seedAppliedRef` — reading a ref during render is banned by this
+  // codebase's own lint rule, and would race against the SAME effect
+  // ordering this guard exists to avoid).
+  const seedPendingForFocal = !!walkSeed && walkSeed.nodeId === nodeId && walkStatus === 'done' && viewState?.nodeId !== nodeId
+
+  // T28 R3 — THE PIPELINE'S ORDERED SPINE. Three stages, always in this
+  // order: buildFocusLayout → applyCondensation → enforceLensInvariants
+  // (invariants.ts, always LAST). The window stage (`applyHopWindow`)
+  // that used to sit between condensation and the invariant stage is
+  // gone — the user's own ruling was "focus mode should walk the tree
+  // to eternity," so the board just grows; nothing removes a band
+  // anymore. Condensation is licensed to remove exactly one thing
+  // (pass-through interiors) — the invariant stage is the global
+  // enforcement that it didn't remove more than that, checked once,
+  // after everything, rather than trusted per-pass.
+  const layout = useMemo(() => buildFocusLayout({
+    sg,
+    view,
+    query,
+    hiddenTypes,
+    extendStatus: walk?.extendStatus ?? EMPTY_EXTEND_STATUS,
+    childrenAll,
+    childrenAllStatus,
+    walkStatus,
+    directionFilter,
+  }), [sg, view, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter])
+
+  // T23 R2 — pass-through condensation, a pure re-projection over the
+  // built layout (never touches population/grain/rank). OFF unless the
+  // reader asks for it (the "Steps" control in the header): the default
+  // is the full end-to-end flow, every hop its own card, per the user's
+  // own ruling. Skipping the stage entirely rather than passing an
+  // all-open set keeps the un-condensed board byte-identical to the
+  // layout — no connector edges, no re-condense controls, nothing for a
+  // chip to be drawn over.
+  const condensed = useMemo(
+    () => (condenseSteps ? applyCondensation(layout, view.condensedOpen) : layout),
+    [condenseSteps, layout, view.condensedOpen],
+  )
+  // T26 R2 — the invariant stage: the focal card is drawn (a), the board
+  // is never empty while `layout` still has the focus (b — T17-A's
+  // guarantee, T25-C2's own inline fallback, both relocated here so no
+  // later pass can silently undermine them), every edge endpoint
+  // resolves to a drawn card (c), and no card claims an undrawn frame
+  // (d). `layout` (pre-condensation) is the one fallback stage left now
+  // the window is gone — condensation is licensed to remove interiors,
+  // never the focal, so this is the same "stage immediately before it"
+  // relationship the window used to have with `condensed`. See
+  // invariants.ts's own doc comment for the full contract and the
+  // degradation each violation takes.
+  const boardGraph = useMemo(
+    () => enforceLensInvariants(condensed, layout).graph,
+    [condensed, layout],
+  )
+  // One control, two meanings depending on which side is currently
+  // showing: a condensed run's own connector chip ADDS itself here
+  // (unfolds), and its unfolded boundary's re-condense control REMOVES
+  // itself (folds back) — each control only ever renders in the state
+  // where its own click is the toggle's only possible direction.
+  const toggleCondense = useCallback((connectorId: string) => {
+    editView(base => {
+      const next = new Set(base.condensedOpen)
+      if (next.has(connectorId)) next.delete(connectorId)
+      else next.add(connectorId)
+      return { ...base, condensedOpen: next }
+    })
+  }, [editView])
+
+  // The grain is STICKY: a level once drawn through stays drawn through
+  // while this walk grows, or a second child arriving would turn a level
+  // the picture saw past into a card and swallow what is already on the
+  // board. The layout reports what it walked through; this folds it back
+  // in, grow-only, so it converges in one pass and re-centering (a new
+  // view state) starts clean.
+  useEffect(() => {
+    // See `seedPendingForFocal`'s own doc comment above.
+    if (seedPendingForFocal) return
+    const seen = view.walkedThrough
+    if ([...layout.walkedThrough].every(u => seen.has(u))) return
+    // RATIFIED PATTERN, not an oversight: the layout is a pure function
+    // of the view state, and the two facts below are things it can only
+    // know once it has BUILT — which level it saw through, and which slot
+    // each card took. Feeding them back is the sanctioned way that
+    // converges (grow-only, one extra pass, then a no-op), and it is the
+    // mechanism the free-flow work was signed off on. Restructuring it is
+    // a behavioural change; silencing it here is what keeps this file
+    // GREEN under lint, so the next rules-of-hooks error is visible —
+    // which is the whole lesson of the crash that shipped from here.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    editView(base => ({ ...base, walkedThrough: new Set(layout.walkedThrough) }))
+  }, [layout.walkedThrough, view.walkedThrough, editView, seedPendingForFocal])
+
+  // And so is the ORDER. A card's rank comes from its weight, and weight
+  // grows as the walk does — so a merge re-ordered cards already on the
+  // board, under the pointer of the user whose click caused the merge.
+  // The layout reports the slot each drawn entity holds; this folds it
+  // back, grow-only, so arrivals append instead of shuffling.
+  useEffect(() => {
+    // See `seedPendingForFocal`'s own doc comment above.
+    if (seedPendingForFocal) return
+    if (layout.drawnRank.size === view.drawnRank.size) return
+    // Same ratified layout→view feedback as `walkedThrough` above.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    editView(base => ({ ...base, drawnRank: new Map(layout.drawnRank) }))
+  }, [layout.drawnRank, view.drawnRank, editView, seedPendingForFocal])
+
+  const neighbors = useMemo(() => walkNeighborRecords(sg), [sg])
+  const inConnections = neighbors.incoming.reduce((n, r) => n + r.weight, 0)
+  const outConnections = neighbors.outgoing.reduce((n, r) => n + r.weight, 0)
+
+
+  /** T23 R3 — a triage-list PLACEMENT: admit one or more specific urns
+   *  regardless of rank or reveal budget (`LensViewState.pinned`,
+   *  `buildFocusLayout`'s own admission for it). Grow-only, like every
+   *  other view-state edit here. */
+  const pinEntities = useCallback((urns: readonly string[]) => {
+    editView(base => {
+      const next = new Set(base.pinned)
+      for (const urn of urns) next.add(urn)
+      return { ...base, pinned: next }
+    })
+  }, [editView])
+
+  // ── Growing the walk ───────────────────────────────────────────────
+
+  /** Instant: a page of neighbours already in the model. No fetch. */
+  const revealMore = useCallback((key: string) => {
+    editView(base => {
+      const revealed = new Map(base.revealed)
+      revealed.set(key, (revealed.get(key) ?? 0) + 1)
+      return { ...base, revealed }
+    })
+  }, [editView])
+
+  /**
+   * ONE CLICK, ONE VISIBLE DELIVERY.
+   *
+   * A fetch alone does not put anything on the board. The layout admits a
+   * card's neighbours only where the view state has opened a REVEAL PAGE on
+   * that card, and an extend/page click used to open none — so the response
+   * merged into the model, the card's ×N and the focal's reach both grew,
+   * and the picture did not change. The pill then re-read the model, found
+   * the arrivals sitting there unadmitted, and offered them as a REVEAL: the
+   * reported "+246, click, nothing, +1, click again".
+   *
+   * So the page is opened HERE, at click time, and it is what makes the
+   * fetched cohort render the moment the merge lands.
+   *
+   * THE INVARIANT THAT MAKES THAT SAFE, stated exactly: `pillFor` offers a
+   * fetch only once NOTHING reachable from this card's subtree is still
+   * unadmitted, and the page this opens admits from that same subtree —
+   * one `rankedGroups` call, shared. So at the moment of an extend or page
+   * click the budget has no competitor, and the arrivals are the only
+   * thing it can spend itself on. (It did NOT hold while the pill asked
+   * from what a card visually stands for: an open frame's rows own
+   * themselves, so a frame could offer a fetch with a dozen unrevealed
+   * row-neighbours still queued, and they would take the page instead.)
+   *
+   * A cohort larger than one page still leaves an honest remainder behind;
+   * what it can never do again is deliver nothing.
+   */
+  /**
+   * THE TRAIL's other half. `entries` (focus history) is the walked
+   * PATH; a card the reader grew the board FROM without re-anchoring on
+   * it — an extend or page click — is just as deliberately "walked
+   * through" but never becomes a focal, so it would otherwise leave no
+   * mark. Grown, never reset for the lens's whole open session (like
+   * `entries` itself) — a mark is a record of what happened, not of
+   * what the current focal is.
+   */
+  const [extendAnchors, setExtendAnchors] = useState<ReadonlySet<string>>(new Set())
+  const markAnchor = useCallback((urn: string) => {
+    setExtendAnchors(prev => (prev.has(urn) ? prev : new Set(prev).add(urn)))
+  }, [])
+
+  const extendWalk = useCallback((_key: string, urn: string, dir: 'in' | 'out') => {
+    walkApi.extend(urn, toWalkDir(dir), seedLeavesFor(sg, urn, dir))
+    markAnchor(urn)
+    // Room for what is coming, claimed at CLICK time. This used to wait
+    // for the fetch to land so it could decide between revealing the
+    // page and opening the hub-triage list; the list is gone, so there
+    // is nothing left to decide and nothing to wait for.
+    revealMore(revealKey(dir, urn))
+  }, [walkApi, sg, revealMore, markAnchor])
+
+  // T24 F7 — a stable identity, same reason `extendWalk` needs one: an
+  // inline arrow here would give `FocusGraphView`'s own `ctx` a new
+  // reference every render, and its card memo comparators start with
+  // `a.ctx === b.ctx` — every card would re-render on every tick.
+  const seedCountForCtx = useCallback(
+    (urn: string, dir: 'in' | 'out') => seedLeavesFor(sg, urn, dir).length,
+    [sg],
+  )
+
+  /** The rest of THIS node's adjacency, with the server's own cursor —
+   *  and, for the same reason as `extendWalk`, room to draw what arrives. */
+  const pageWalk = useCallback((urn: string, dir: 'in' | 'out', cursor: string) => {
+    walkApi.page(urn, toWalkDir(dir), cursor)
+    markAnchor(urn)
+    revealMore(revealKey(dir, urn))
+  }, [walkApi, revealMore, markAnchor])
+
+  /** Which cards the LAYOUT opened by itself, so a click on one can
+   *  close it. Read from the built cards rather than re-deriving the
+   *  pass-through-spine rule, which would be a second copy of it. */
+  const autoOpen = useMemo(() => {
+    const open = new Set<string>()
+    for (const card of layout.cards) {
+      if (card.kind === 'frame' && card.nodeId) open.add(card.nodeId)
     }
-    toggleDrill(key)
+    return open
+  }, [layout])
+
+  /** Open / close what a card holds. Pure re-projection over the model
+   *  — the children are already scoped to walk participants, so this can
+   *  never reach outside the lineage and never fetches. */
+  const toggleContents = useCallback((urn: string) => {
+    let opening = false
+    editView(base => {
+      const expanded = new Set(base.expandedContainment)
+      const collapsed = new Set(base.collapsedContainment)
+      // The layout auto-opens pass-through spines, so "is it open" is
+      // not "is it in the set" — an open the user shuts has to be
+      // RECORDED, or the spine would reinstate it on the next build.
+      const isOpen = !collapsed.has(urn) && (expanded.has(urn) || autoOpen.has(urn))
+      opening = !isOpen
+      if (isOpen) {
+        expanded.delete(urn)
+        collapsed.add(urn)
+      } else {
+        expanded.add(urn)
+        collapsed.delete(urn)
+      }
+      // A newly opened frame starts in whichever mode the header says.
+      const showAll = new Set(base.frameShowAll)
+      if (opening && lensFrameChildren === 'all') showAll.add(urn)
+      return { ...base, expandedContainment: expanded, collapsedContainment: collapsed, frameShowAll: showAll }
+    })
+    if (opening && lensFrameChildren === 'all') onLoadAllChildren?.(urn)
+  }, [editView, autoOpen, lensFrameChildren, onLoadAllChildren])
+
+  /** Flip one frame between "only what connects" and "everything
+   *  inside". Turning it on fetches the roster; turning it off keeps
+   *  the answer cached for flipping back. */
+  const toggleFrameAll = useCallback((urn: string) => {
+    let turningOn = false
+    editView(base => {
+      const next = new Set(base.frameShowAll)
+      turningOn = !next.has(urn)
+      if (turningOn) next.add(urn)
+      else next.delete(urn)
+      return { ...base, frameShowAll: next }
+    })
+    if (turningOn) onLoadAllChildren?.(urn)
+  }, [editView, onLoadAllChildren])
+
+  const setFrameQuery = useCallback((urn: string, q: string) => {
+    editView(base => {
+      const queries = new Map(base.frameQueries)
+      if (q) queries.set(urn, q)
+      else queries.delete(urn)
+      // A new search is a new list — start it at the top rather than
+      // leaving the window parked where the matches may not reach.
+      const offsets = new Map(base.frameOffsets)
+      offsets.delete(urn)
+      return { ...base, frameQueries: queries, frameOffsets: offsets }
+    })
+  }, [editView])
+
+  const frameQueryFor = useCallback(
+    (urn: string) => view.frameQueries.get(urn) ?? '',
+    [view.frameQueries],
+  )
+
+  /**
+   * Find, debounced into the server.
+   *
+   * `getChildrenWithEdges` matches displayName/urn server-side, so Find
+   * reaches a column on page 7 of a wide table without paging to it —
+   * an entity the walk never carried at all, not only one paged past.
+   * Connected mode's OWN set is the model already in hand, and the
+   * layout filters it locally for free; but what the walk has NOT
+   * reached is exactly what a Connected-mode Find used to go silent
+   * on (T24 F2), so this reaches the server in BOTH modes once there
+   * is something to ask it.
+   */
+  const frameQueriesNow = view.frameQueries
+  const frameShowAllNow = view.frameShowAll
+  useEffect(() => {
+    if (!onLoadAllChildren) return
+    const urns = new Set([...frameShowAllNow, ...frameQueriesNow.keys()])
+    if (urns.size === 0) return
+    const t = setTimeout(() => {
+      for (const urn of urns) {
+        const showingAll = frameShowAllNow.has(urn)
+        const want = (frameQueriesNow.get(urn) ?? '').trim()
+        // Connected mode has nothing to search until there IS a query —
+        // otherwise its set is the model already in hand, filtered
+        // locally, and asking the server for an unfiltered roster it
+        // will never show is a fetch that answers nothing.
+        if (!showingAll && want === '') continue
+        const have = childrenAll.get(urn)
+        // All mode's own FIRST page arrives via the toggle handler
+        // (`toggleFrameAll`/`toggleContents`) — refetching it here too
+        // would race that fetch and quietly page past it. Connected
+        // mode has no such handler (there is nothing to fetch until a
+        // query exists), so its first fetch has to start here.
+        if (showingAll && !have) continue
+        if (have && (have.query ?? '') === want) continue
+        onLoadAllChildren(urn, want)
+      }
+    }, 300)
+    return () => clearTimeout(t)
+  }, [frameQueriesNow, frameShowAllNow, childrenAll, onLoadAllChildren])
+
+  /**
+   * Rest a frame's scroll window on an absolute row. Fetching is
+   * decoupled from scrolling: one server page backs many rows of travel,
+   * so we only ask when the window nears the end of what is loaded.
+   *
+   * `offset` arrives already clamped by the view (which is the side that
+   * knows how many rows there are), so this only ever records it.
+   */
+  const setFrameOffset = useCallback((urn: string, offset: number) => {
+    let showingAll = false
+    let q = ''
+    editView(base => {
+      showingAll = base.frameShowAll.has(urn)
+      // The rows we scroll into belong to whatever list is on screen.
+      // Asking without the query made the hook see a DIFFERENT question
+      // and refetch the first page unfiltered.
+      q = base.frameQueries.get(urn) ?? ''
+      const offsets = new Map(base.frameOffsets)
+      offsets.set(urn, Math.max(0, offset))
+      return { ...base, frameOffsets: offsets }
+    })
+    if (!showingAll) return
+    // One page is one ask. A scroll crosses the "nearly there" line on
+    // several consecutive steps, and each of them would otherwise fire
+    // its own fetch for the page already on its way.
+    if (childrenAllStatus.get(urn) === 'loading') return
+    const loaded = childrenAll.get(urn)
+    // One SERVER page backs many rows of scrolling, so travelling inside
+    // what is already loaded must not ask for anything. The page is
+    // fetched a windowful BEFORE the reader reaches the end, so the list
+    // keeps moving instead of stopping dead at the last loaded row.
+    const wanted = Math.max(0, offset) + FRAME_WINDOW_ALL * 2
+    if (!loaded || (loaded.hasMore && loaded.children.length < wanted)) onLoadAllChildren?.(urn, q)
+  }, [editView, childrenAll, childrenAllStatus, onLoadAllChildren])
+
+  const retryFrameAll = useCallback(
+    (urn: string) => onLoadAllChildren?.(urn, view.frameQueries.get(urn) ?? ''),
+    [onLoadAllChildren, view.frameQueries],
+  )
+
+  const retryWalk = useCallback(() => { if (nodeId) walkApi.retry(nodeId) }, [nodeId, walkApi])
+
+  const setSelection = useCallback((selection: string | null) => {
+    editView(base => ({ ...base, selection }))
+  }, [editView])
+
+  /**
+   * The card whose lineage cone a CLICK stuck on. Lens-local and keyed to
+   * the focal, like the filter and the chips: a new focal is a new
+   * question, and an isolation on a card that is no longer drawn would be
+   * a dimmed board with nothing lit.
+   *
+   * Held here rather than inside the board because Escape is the LENS's
+   * key, in one place, and it has to be able to clear this in order.
+   */
+  /**
+   * THE TRAIL — cards the reader explicitly walked through: every focal
+   * this session has visited (`entries`) plus every card an extend/page
+   * click grew the board from (`extendAnchors`). Minimal treatment (a
+   * marker + firmer wire), so it costs one Set union and one pass over
+   * consecutive history pairs — no new tracking beyond the history this
+   * lens already keeps and the anchors just above.
+   */
+  const trailUrns = useMemo(
+    () => new Set([...entries, ...extendAnchors]),
+    [entries, extendAnchors],
+  )
+  /** Wires ON the trail: between two CONSECUTIVE focal history entries —
+   *  the hop actually walked, not merely two cards that both happen to
+   *  carry a mark. Keyed unordered (a bundle's drawn direction need not
+   *  match the walk's). */
+  const trailAdjacent = useMemo(() => {
+    const pairs = new Set<string>()
+    for (let i = 1; i < entries.length; i++) {
+      const [a, b] = [entries[i - 1], entries[i]].sort()
+      pairs.add(`${a}|${b}`)
+    }
+    return pairs
+  }, [entries])
+
+  const [isolationState, setIsolationState] = useState<{ nodeId: string | null; cardId: string | null }>({ nodeId: null, cardId: null })
+  const isolatedId = isolationState.nodeId === nodeId ? isolationState.cardId : null
+  const setIsolated = useCallback(
+    (cardId: string | null) => setIsolationState({ nodeId, cardId }),
+    [nodeId],
+  )
+
+  /**
+   * THE DISMISS LADDER — one owner for Escape, and for a click on the
+   * board's own background.
+   *
+   * It dismisses innermost-first: a row's preview is a panel inside the
+   * lens, and closing the whole room out from under what you just opened
+   * is the one behaviour nobody expects. A second capture handler
+   * further in could not do this — mount order decides which of two
+   * runs, and the outer one always wins — so the sequence lives here
+   * rather than being split.
+   */
+  const selection = view.selection
+  /**
+   * ONE layer at a time, innermost first: the preview beside a row, then
+   * the isolated lineage, then the selection, then the room itself.
+   *
+   * Each press (and each click on the board behind everything) undoes
+   * exactly the last thing that was opened — closing the whole room out
+   * from under what you just opened is the one behaviour nobody expects,
+   * and it is just as wrong for a click as it is for a key.
+   *
+   * The PEEK is the selection when the selected card is a ROW; a
+   * selection that is not a row has no panel, so it is a layer further
+   * out. That is the only reason these two share a piece of state.
+   */
+  const peekOpen = selection !== null
+    && layout.cards.some(c => c.nodeId === selection && c.frameId !== null)
+
+  /**
+   * A CLICK ON THE BOARD'S BACKGROUND NEVER CLOSES THE ROOM.
+   *
+   * It peels one layer and stops. This used to fall through to
+   * `onClose()` when nothing was open, which meant that clicking any
+   * empty part of the lens — the board around the cards, the space
+   * inside a frame — threw the whole walk away. Reported live as "if I
+   * click anywhere within a window of Focus Lens it has a tendency to
+   * close randomly"; the empty board is the largest target in the room,
+   * so it was not random at all.
+   *
+   * Returns whether it actually peeled something, so the ONE caller that
+   * may go further (Escape) can tell "I closed a panel" from "there was
+   * nothing left to close".
+   */
+  const dismissLayer = useCallback((): boolean => {
+    if (peekOpen) { setSelection(null); return true }
+    if (isolatedId !== null) { setIsolated(null); return true }
+    if (selection !== null) { setSelection(null); return true }
+    return false
+  }, [peekOpen, isolatedId, selection, setIsolated, setSelection])
+
+  /**
+   * HAS THE READER BUILT ANYTHING WORTH LOSING? Compared against the
+   * state this focal OPENED with (`viewStateForTransition`'s own fresh
+   * value — one reveal each way, the focus's own ancestors expanded),
+   * plus the history: a second entry means they re-anchored at least
+   * once. Anything more than that is a walk somebody spent clicks on.
+   */
+  const openingView = useMemo(() => initialLensViewState(sg), [sg])
+  const hasWalked = entries.length > 1
+    || view.revealed.size > openingView.revealed.size
+    || view.expandedContainment.size > openingView.expandedContainment.size
+    || view.collapsedContainment.size > 0
+    || view.frameShowAll.size > 0
+    || view.condensedOpen.size > 0
+
+  /** What the reader would be throwing away, in their own terms — a
+   *  count of cards is the honest measure of "how far did I get". */
+  const walkSummary = entries.length > 1
+    ? `You have walked ${entries.length} entities and drawn ${layout.cards.length.toLocaleString()} cards.`
+    : `You have drawn ${layout.cards.length.toLocaleString()} cards on this board.`
+
+  /** Leaving the room — from the backdrop, the × or the last Escape.
+   *  Asks first once there is a walk to lose (user, 2026-08-17). */
+  const [confirmClose, setConfirmClose] = useState(false)
+  const requestClose = useCallback(() => {
+    if (hasWalked) { setConfirmClose(true); return }
+    onClose()
+  }, [hasWalked, onClose])
+
+  useEffect(() => {
+    if (!nodeId) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        // The confirmation is itself the innermost layer while it is up:
+        // Escape backs out of the QUESTION, never answers it.
+        if (confirmClose) { setConfirmClose(false); return }
+        if (dismissLayer()) return
+        requestClose()
+        return
+      }
+      // Keyboard walking: ← back one hop, → forward one hop — browser
+      // history semantics. Never while typing in a filter box, and never
+      // while browsing a frame's rows: inside a row list the arrows walk
+      // the list, and a lens that stepped a hop back instead would take
+      // the list away mid-read.
+      if ((e.key === 'ArrowLeft' && canBack) || (e.key === 'ArrowRight' && canForward)) {
+        // `closest` only exists on Elements — a key dispatched straight
+        // at the window has no element to ask.
+        const t = e.target as HTMLElement | null
+        // AN OPTION AS WELL AS ITS LISTBOX, and that is the whole of the
+        // reported unreliability: a frame's rows are not DOM DESCENDANTS
+        // of the list that owns them. React Flow draws every row as the
+        // frame's SIBLING (which is what lets a wire land on one row of a
+        // 400-column table), so the list owns them by id — `aria-owns`
+        // and `aria-activedescendant` — and `closest('[role=listbox]')`
+        // from a row finds nothing at all.
+        //
+        // Rows carry `tabIndex={-1}` and a click focuses one, so the
+        // shape is ordinary: click a row to preview it, press ← expecting
+        // T16's "step back out of the rows", and the LENS stepped a HOP
+        // back instead — the board replaced under a reader who was
+        // browsing a table. (The row's own handler could not have saved
+        // it either: this listener is in the CAPTURE phase, and nothing
+        // dispatched at a sibling ever reaches the list's `onKeyDown`.)
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'
+          || (typeof t.closest === 'function' && t.closest('[role="listbox"],[role="option"]')))) return
+        e.preventDefault()
+        e.stopPropagation()
+        if (e.key === 'ArrowLeft') onBack()
+        else onForward()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [nodeId, canBack, canForward, onBack, onForward, dismissLayer, requestClose, confirmClose])
+
+  // ── Wording ────────────────────────────────────────────────────────
+
+  const relationshipTypes = useRelationshipTypes()
+  const edgeTypeInfo = useMemo<EdgeTypeInfoMap>(() => {
+    const m: EdgeTypeInfoMap = new Map()
+    for (const rt of relationshipTypes) {
+      m.set(rt.id.toUpperCase(), { label: rt.name || relationshipLabel(rt.id), description: rt.description })
+    }
+    return m
+  }, [relationshipTypes])
+
+  // Deep walks middle-truncate so the cursor's neighborhood (the part
+  // people care about) stays visible; the gap chips expand the full trail.
+  const [showFullTrail, setShowFullTrail] = useState(false)
+  const TRAIL_CAP = 6
+  const collapseTrail = entries.length > TRAIL_CAP && !showFullTrail
+
+  const labelFor = useCallback(
+    (urn: string) => labelOf(urn, sg.nodes.get(urn)?.node),
+    [sg],
+  )
+  const parentOf = useCallback(
+    (urn: string) => sg.nodes.get(urn)?.parent ?? null,
+    [sg],
+  )
+
+  // Hop metadata for the trail — direction + relationship for each
+  // transition, so the path reads as a sentence rather than a list.
+  // Only the hops the CURRENT focal's model can vouch for get one; the
+  // rest fall back to a neutral separator, because a walk's earlier
+  // hops live in other focals' models and guessing them would be
+  // inventing lineage.
+  const hopMeta = useMemo(() => {
+    const meta: Array<{ downstream: boolean; edgeType: string } | null> = []
+    for (let i = 1; i < entries.length; i++) {
+      const prev = entries[i - 1]
+      const curr = entries[i]
+      let found: { downstream: boolean; edgeType: string } | null = null
+      for (const e of sg.lineageEdges) {
+        if (e.sourceUrn === prev && e.targetUrn === curr) {
+          found = { downstream: true, edgeType: (e.edgeType ?? '') }
+          break
+        }
+        if (e.sourceUrn === curr && e.targetUrn === prev) {
+          found = { downstream: false, edgeType: (e.edgeType ?? '') }
+          break
+        }
+      }
+      meta.push(found)
+    }
+    return meta
+  }, [entries, sg])
+
+  // Type chips — every type the chips could actually remove. Never the
+  // focus or the containers above it: chipping the focus's own type
+  // would delete the thing you are looking at.
+  const typeChips = useMemo(() => {
+    const kept = new Set<string>([sg.focusUrn])
+    let cursorUrn = sg.nodes.get(sg.focusUrn)?.parent ?? null
+    while (cursorUrn && !kept.has(cursorUrn)) {
+      kept.add(cursorUrn)
+      cursorUrn = sg.nodes.get(cursorUrn)?.parent ?? null
+    }
+    const counts = new Map<string, number>()
+    for (const [urn, node] of sg.nodes) {
+      if (kept.has(urn)) continue
+      const t = (node.node?.data?.type as string) ?? node.node?.entityType ?? 'not loaded'
+      counts.set(t, (counts.get(t) ?? 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  }, [sg])
+
+  // Detail strip for the selected card — its own tallies, from the same
+  // model everything else reads.
+  //
+  // Never for a ROW: a row's click opens the PEEK, anchored beside it,
+  // which says the same things and offers the moves that make sense from
+  // there. Two panels describing one click is one panel too many.
+  const selectedInfo = useMemo(() => {
+    const sel = view.selection
+    const node = sel ? sg.nodes.get(sel) : undefined
+    if (!sel || !node) return null
+    if (layout.cards.some(c => c.nodeId === sel && c.frameId !== null)) return null
+    return {
+      id: sel,
+      label: labelOf(sel, node.node),
+      type: (node.node?.data?.type as string) ?? node.node?.entityType ?? 'not loaded',
+      description: (node.node?.data?.description as string | undefined) ?? null,
+      parentLabel: node.parent ? labelOf(node.parent, sg.nodes.get(node.parent)?.node) : null,
+      inCount: node.degreeUp,
+      outCount: node.degreeDown,
+    }
+  }, [view.selection, sg, layout.cards])
+
+  // ── Share this exploration — the walked path AND the current focal's
+  // exploration (revealed/opened/searched, the direction preset, the
+  // depth control) as a link a colleague can open exactly where you left
+  // it. Encoded on demand, from whatever is on screen right now.
+  const [shareCopied, setShareCopied] = useState(false)
+  // T24 F3 — the PATH bar's own "Copy path" (text) gets the same
+  // copied-state feedback the header's link button already had, so
+  // BOTH of the bar's actions confirm the click rather than one of them
+  // doing so silently.
+  const [pathCopied, setPathCopied] = useState(false)
+  const copyShareLink = () => {
+    const token = encodeLensShare({
+      entries,
+      cursor,
+      mode: lensViewMode,
+      direction: directionFilter,
+      depth: lensInitialDepth,
+      revealed: [...view.revealed],
+      opened: [...view.expandedContainment],
+      collapsed: [...view.collapsedContainment],
+      frameAll: [...view.frameShowAll],
+      framePages: [...view.frameOffsets],
+      frameQueries: [...view.frameQueries],
+      pinned: [...view.pinned],
+      condensedOpen: [...view.condensedOpen],
+    })
+    const url = new URL(window.location.href)
+    url.searchParams.set('lens', token)
+    void navigator.clipboard?.writeText(url.toString())
+    setShareCopied(true)
+    window.setTimeout(() => setShareCopied(false), 1600)
   }
 
-  // Auto-advance: when a hop is pushed, glide the column strip to the
-  // frontier so the newest column is always in view.
-  const walkStripRef = useRef<HTMLDivElement>(null)
+  // ── Guided tour — offered ONCE, the first time the graph body opens
+  // (rich gestures shouldn't be discovered by accident); replayable
+  // from Help on any view afterwards.
+  const lensOpen = entries.length > 0
+  const tourStart = useTourStore((s) => s.start)
+  const tourActive = useTourStore((s) => s.activeTourId)
+  const hasCompletedTour = useTourStore((s) => s.hasCompleted)
   useEffect(() => {
-    const el = walkStripRef.current
-    if (!el) return
-    const raf = requestAnimationFrame(() => el.scrollTo({ left: el.scrollWidth, behavior: 'smooth' }))
-    return () => cancelAnimationFrame(raf)
-  }, [lensStack.length])
+    if (!lensOpen || lensViewMode !== 'graph' || tourActive) return
+    if (hasCompletedTour('lineage-lens')) return
+    try {
+      if (localStorage.getItem('nx-lens-tour-offered')) return
+      localStorage.setItem('nx-lens-tour-offered', '1')
+    } catch {
+      return
+    }
+    // Let the dialog and graph mount so the spotlight targets exist.
+    const t = window.setTimeout(() => tourStart('lineage-lens'), 650)
+    return () => window.clearTimeout(t)
+  }, [lensOpen, lensViewMode, tourActive, hasCompletedTour, tourStart])
 
-  const { incomingRecords, outgoingRecords } = useMemo(
-    () => (nodeId
-      ? deriveNeighborRecords(nodeId, edgesByEndpoint.get(nodeId) ?? [], nodeMap, containmentEdgeTypes)
-      : { incomingRecords: [], outgoingRecords: [] }),
-    [nodeId, edgesByEndpoint, nodeMap, containmentEdgeTypes],
-  )
+  // The focal's own roster, asked for once — the membership half, which
+  // lineage structurally cannot answer.
+  //
+  // Only when the focal could plausibly hold something: the walk found
+  // children inside it, or it declared a childCount. A column focal —
+  // the commonest thing this lens is opened on — holds nothing, and
+  // asking anyway spent a round trip on every hop of every walk. The
+  // gate never costs honesty: with no roster the focal simply does not
+  // claim a total it was never told.
+  const focalHolds = (sg.nodes.get(nodeId ?? '')?.children.length ?? 0) > 0
+    || ((sg.nodes.get(nodeId ?? '')?.node?.data?.childCount as number | undefined) ?? 0) > 0
+  const focalKidsAskedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!nodeId || !onLoadChildrenOf) return
+    if (focalKidsAskedRef.current === nodeId) return
+    if (walkStatus !== 'done' || !focalHolds) return
+    focalKidsAskedRef.current = nodeId
+    onLoadChildrenOf(nodeId)
+  }, [nodeId, onLoadChildrenOf, walkStatus, focalHolds])
+
+  /**
+   * How far the walk has actually reached, and whether that is the
+   * whole story. Not a measurement of its own: these are the entities
+   * the server has NAMED as upstream / downstream of the focus, which
+   * is the number every other surface here is derived from.
+   *
+   * A "+" says the data source has MORE OF THIS SIDE. A frontier entry
+   * on a node inside the focus whose lineage never leaves it says no
+   * such thing — it is the inside having more inside — so the floor is
+   * read through the same boundary rule the ⊕ and its seeds use.
+   * Reported live: the platform Snowflake, whose 51 interior frontier
+   * entries put a "+" on a side its own closure reports as empty.
+   *
+   * Memoized because reading it walks the model twice, and this sits in
+   * a component that re-renders on every keystroke in the filter box.
+   *
+   * ABOVE the `!nodeId` return, with every other hook, and it has to be:
+   * memoizing it BELOW made the hook count depend on whether the lens had
+   * a focal, and React threw "Rendered more hooks than during the
+   * previous render" the moment one arrived. A cap applies to the whole
+   * fetch, so it makes BOTH sides floors; a frontier only makes its own.
+   */
+  const capped = (model?.truncated ?? false) || (model?.seedTruncated ?? false)
+  const reach: LensReach | null = useMemo(() => {
+    if (!model || !nodeId || walkStatus !== 'done') return null
+    const more = (dir: 'in' | 'out'): boolean => {
+      const offers = boundaryFrontierFilter(sg, nodeId, dir)
+      return (dir === 'in' ? model.frontierUp : model.frontierDown).some(f => offers(f.urn))
+    }
+    return {
+      up: model.upstreamUrns.size,
+      down: model.downstreamUrns.size,
+      moreUp: capped || more('in'),
+      moreDown: capped || more('out'),
+      upSystems: distinctSystemCount(sg, model.upstreamUrns),
+      downSystems: distinctSystemCount(sg, model.downstreamUrns),
+    }
+  }, [model, nodeId, sg, walkStatus, capped])
 
   if (!nodeId) return null
 
-  const focalNode = nodeMap.get(nodeId)
+  const focalNode = sg.nodes.get(nodeId)?.node
   const focalLabel = labelOf(nodeId, focalNode)
-  const focalType = (focalNode?.data?.type as string) ?? 'entity'
+  const focalType = (focalNode?.data?.type as string) ?? focalNode?.entityType ?? 'entity'
   const focalColor = generateColorFromType(focalType)
-  const focalFetch = fetchStatus?.get(nodeId)
-  const focalChildren = containmentByHop.get(nodeId) ?? []
+  const focalParentId = parentOf(nodeId)
+  const focalParentLabel = focalParentId ? labelFor(focalParentId) : null
+  // Header display suppresses the parent when the PREVIOUS hop already
+  // is the parent (saying it twice reads as noise).
+  const focalParentInHeader = focalParentId && focalParentId !== entries[cursor - 1]
+    ? focalParentLabel
+    : null
+  const focalChildren = sg.nodes.get(nodeId)?.children ?? []
   const focalChildTotal = Math.max(
     focalChildren.length,
     (focalNode?.data?.childCount as number | undefined) ?? 0,
   )
-  // Containment parent of the focal — breadcrumb context ("ticket_key
-  // in fact_support"). Header display suppresses it when the PREVIOUS
-  // hop already is the parent (saying it twice reads as noise).
-  const focalParentId = resolveParent(nodeId)
-  const focalParentLabel = focalParentId ? labelOf(focalParentId, nodeMap.get(focalParentId)) : null
-  const focalParentInHeader = focalParentId && focalParentId !== lensStack[lensStack.length - 2]
-    ? focalParentLabel
-    : null
 
-  // Headline counts split by grain so units never mix: direct (finer/
-  // peer) connections vs coarser rolled-up summaries of those flows.
-  let focalRollupTotal = 0
-  for (const r of incomingRecords) if (isCoarserThan(r.neighborNode?.data?.type as string | undefined, focalType)) focalRollupTotal++
-  for (const r of outgoingRecords) if (isCoarserThan(r.neighborNode?.data?.type as string | undefined, focalType)) focalRollupTotal++
-  const focalDirectTotal = incomingRecords.length + outgoingRecords.length - focalRollupTotal
-
+  // The header counts what the header's own preset is showing. Under
+  // "Root cause" the board draws no consumers, no downstream pill and no
+  // downstream band — a count line still totalling them is the one number
+  // on screen that describes a different picture.
+  const headerConnections = (directionFilter === 'out' ? 0 : inConnections)
+    + (directionFilter === 'in' ? 0 : outConnections)
   const q = query.trim().toLowerCase()
-  const filterFn = (r: NeighborRecord) =>
-    q === '' || labelOf(r.neighborId, r.neighborNode).toLowerCase().includes(q)
+  const filterFn = (r: WalkNeighbor) => q === '' || r.label.toLowerCase().includes(q)
 
   return createPortal(
     <AnimatePresence>
@@ -413,10 +1249,11 @@ export function LineageLens({
         transition={{ duration: 0.15 }}
         className="fixed inset-0 z-[9990] flex items-center justify-center p-6"
       >
-        {/* Backdrop */}
+        {/* Backdrop — the ONE click outside the room, and the one that
+            asks before throwing a walk away. */}
         <div
           className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-          onClick={onClose}
+          onClick={requestClose}
         />
 
         <motion.div
@@ -424,8 +1261,20 @@ export function LineageLens({
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.97, y: 8 }}
           transition={{ duration: 0.18, ease: 'easeOut' }}
-          className="relative flex flex-col rounded-2xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-2xl shadow-black/40 overflow-hidden"
-          style={{ width: 'min(1000px, 92vw)', maxHeight: 'min(72vh, 780px)', minHeight: 380 }}
+          className="relative flex flex-col rounded-2xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-2xl shadow-black/40 overflow-hidden transition-[width,height,max-height] duration-300"
+          style={
+            // Graph exploration is a "focus room" — as much of the
+            // window as it can take while still reading as a room over
+            // the page, with a RESOLVED height (React Flow needs one).
+            // The pixel caps this used to carry (1800×1100) were what
+            // made it look small on a large display: the board is where
+            // a big graph goes, so it gets the screen. The list keeps
+            // its adaptive height so small neighborhoods don't get a
+            // cavernous empty grid.
+            lensViewMode === 'graph'
+              ? { width: '96vw', height: '94vh' }
+              : { width: 'min(1000px, 92vw)', maxHeight: 'min(72vh, 780px)', minHeight: 380 }
+          }
           role="dialog"
           aria-label={`Connections of ${focalLabel}`}
         >
@@ -447,27 +1296,265 @@ export function LineageLens({
                 )}
               </div>
               <p className="flex items-center gap-1.5 text-[10.5px] text-ink-muted leading-tight">
+                {/* Counted off the same model the board draws — there is
+                    no second set of numbers to reconcile it against. */}
                 <span>
-                  {lensStack.length > 1
-                    ? `Walking ${walkDirection === 'outgoing' ? 'downstream' : 'upstream'} · ${lensStack.length - 1} hop${lensStack.length === 2 ? '' : 's'} · ${(walkDirection === 'outgoing' ? outgoingRecords : incomingRecords).length} at the frontier`
-                    : `${focalDirectTotal} direct connection${focalDirectTotal === 1 ? '' : 's'}${focalRollupTotal > 0 ? ` · ${focalRollupTotal} rolled-up` : ''}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
+                  {`${headerConnections} connection${headerConnections === 1 ? '' : 's'}${focalChildTotal > 0 ? ` · contains ${focalChildTotal}` : ''}`}
                 </span>
-                {focalFetch === 'loading' && (
+                {walkStatus === 'loading' && (
                   <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
                 )}
               </p>
             </div>
-            {lensStack.length > 1 && (
+            {/* History navigation — browser semantics: Back/Forward move
+                the cursor along the walked path without dropping hops.
+                Forward appears only when there is a forward side. */}
+            {canBack && (
               <button
                 type="button"
                 onClick={onBack}
+                title="Step back one hop (←)"
                 className="ml-2 flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
               >
                 <LucideIcons.ArrowLeft className="w-3 h-3" />
                 Back
               </button>
             )}
+            {canForward && (
+              <button
+                type="button"
+                onClick={onForward}
+                title="Step forward one hop (→)"
+                className={cn(
+                  'flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                  canBack ? 'ml-1' : 'ml-2',
+                )}
+              >
+                Forward
+                <LucideIcons.ArrowRight className="w-3 h-3" />
+              </button>
+            )}
             <div className="ml-auto flex items-center gap-2">
+              {/* Gesture guide — the graph's interactions are rich, and
+                  a first-time business user shouldn't have to discover
+                  them by accident. */}
+              <InfoTooltip
+                side="bottom"
+                align="end"
+                content={
+                  <div className="space-y-1 text-left">
+                    <p className="font-semibold text-ink">Exploring lineage</p>
+                    {lensViewMode === 'graph' ? (
+                      <ul className="space-y-0.5 text-ink-muted">
+                        <li><span className="font-medium text-ink">Click</span> a card — inspect it; a row shows a preview</li>
+                        <li><span className="font-medium text-ink">Double-click</span> — focus there</li>
+                        <li><span className="font-medium text-ink">⊕</span> on a card&apos;s outer edge — reveal or fetch its next hop</li>
+                        <li><span className="font-medium text-ink">▸</span> beside a name — what is inside it</li>
+                        <li><span className="font-medium text-ink">Scroll</span> inside an open container — browse its rows</li>
+                        <li><span className="font-medium text-ink">Tab</span> into a container, then <span className="font-medium text-ink">↑ ↓</span> — walk its rows</li>
+                        <li><span className="font-medium text-ink">Enter</span> — preview · <span className="font-medium text-ink">Shift+Enter</span> — focus there</li>
+                        <li><span className="font-medium text-ink">→</span> open a row · <span className="font-medium text-ink">←</span> step back out · <span className="font-medium text-ink">type</span> to find</li>
+                        <li><span className="font-medium text-ink">← / →</span> outside a container — step back / forward</li>
+                        <li><span className="font-medium text-ink">Drag a card</span> — move it; connections follow</li>
+                        <li><span className="font-medium text-ink">Drag · scroll</span> the background — pan and zoom</li>
+                      </ul>
+                    ) : (
+                      <ul className="space-y-0.5 text-ink-muted">
+                        <li><span className="font-medium text-ink">Click</span> a connection — re-center on it</li>
+                        <li><span className="font-medium text-ink">← / →</span> — step back / forward</li>
+                        <li><span className="font-medium text-ink">Hover</span> a row — reveal &amp; details actions</li>
+                      </ul>
+                    )}
+                  </div>
+                }
+              >
+                <button
+                  type="button"
+                  aria-label="How to explore"
+                  className="w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                >
+                  <LucideIcons.HelpCircle className="w-4 h-4" />
+                </button>
+              </InfoTooltip>
+              {/* Share this exploration — the walked path as a link (the
+                  URL param restores it). */}
+              <InfoTooltip side="bottom" content={shareCopied ? 'Link copied' : 'Copy a link to this exploration'}>
+                <button
+                  type="button"
+                  data-tour="lens-share"
+                  onClick={copyShareLink}
+                  aria-label="Copy exploration link"
+                  className={cn(
+                    'w-7 h-7 rounded-md flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                    shareCopied
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]',
+                  )}
+                >
+                  {shareCopied ? <LucideIcons.Check className="w-4 h-4" /> : <LucideIcons.Link2 className="w-4 h-4" />}
+                </button>
+              </InfoTooltip>
+              {/* What a container opens into, by default. Each frame can
+                  still be flipped on its own; this sets the starting
+                  point for the next one you open (persisted).
+                  T24 F6 — this control wears the SAME icons/labels as
+                  the per-frame Connected|All pair on an open frame, but
+                  does something entirely different (seeds only the NEXT
+                  container opened; it never touches one already open) —
+                  reported as reading like a global toggle it is not.
+                  "Next" is the always-visible half of that distinction;
+                  the hover title carries the rest. */}
+              {lensViewMode === 'graph' && (
+                <div
+                  data-tour="lens-children-mode"
+                  role="group"
+                  aria-label="What containers you open next will show"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
+                    Next
+                  </span>
+                  {([
+                    { mode: 'connected', Icon: LucideIcons.Link2, label: 'Connected',
+                      title: 'Containers you open next show only what is on this lineage — this does not change one already open' },
+                    { mode: 'all', Icon: LucideIcons.Rows3, label: 'All',
+                      title: 'Containers you open next show everything inside, with lineage marked where it exists — this does not change one already open' },
+                  ] as const).map(({ mode, Icon, label, title }) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setLensFrameChildren(mode)}
+                      title={title}
+                      aria-pressed={lensFrameChildren === mode}
+                      className={cn(
+                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                        lensFrameChildren === mode
+                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                          : 'text-ink-muted hover:text-ink',
+                      )}
+                    >
+                      <Icon className="w-3 h-3" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Steps — how much of a long path draws. "Every step" is
+                  the default and the honest picture: one card per hop,
+                  all the way out, however far the reader walks.
+                  "Condensed" trades that for a shorter board on very
+                  long chains, folding runs of single pass-through steps
+                  into one "via N steps" connector. Visible rather than
+                  automatic because a folded run has no card to click,
+                  and a reader who never chose it reads the fold as the
+                  lineage having stopped. */}
+              {lensViewMode === 'graph' && (
+                <div
+                  role="group"
+                  aria-label="How much of a long path to show"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
+                    Steps
+                  </span>
+                  {([
+                    { on: false, Icon: LucideIcons.UnfoldHorizontal, label: 'Every step',
+                      title: 'Show the full end-to-end flow — every hop on the path is its own card' },
+                    { on: true, Icon: LucideIcons.FoldHorizontal, label: 'Condensed',
+                      title: 'Fold long runs of single pass-through steps into one "via N steps" connector — click a connector to open that run' },
+                  ] as const).map(({ on, Icon, label, title }) => (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => setCondenseSteps(on)}
+                      title={title}
+                      aria-pressed={condenseSteps === on}
+                      className={cn(
+                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                        condenseSteps === on
+                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                          : 'text-ink-muted hover:text-ink',
+                      )}
+                    >
+                      <Icon className="w-3 h-3" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Direction preset — a VIEW-side filter: the fetch always
+                  stays 'both' at the chosen depth (cache-friendly,
+                  instant toggling, counts stay true), and only what
+                  DRAWS changes. Plain-language labels for business
+                  readers, with the technical direction as the tooltip. */}
+              {lensViewMode === 'graph' && (
+                <div
+                  data-tour="lens-direction"
+                  role="group"
+                  aria-label="Which direction to show"
+                  className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  {([
+                    { dir: 'both', Icon: LucideIcons.ArrowLeftRight, label: 'Both',
+                      title: 'Show upstream and downstream' },
+                    { dir: 'in', Icon: LucideIcons.ArrowDownLeft, label: 'Root cause',
+                      title: 'Show only what feeds this entity — upstream' },
+                    { dir: 'out', Icon: LucideIcons.ArrowUpRight, label: 'Impact',
+                      title: 'Show only what this entity feeds — downstream' },
+                  ] as const).map(({ dir, Icon, label, title }) => (
+                    <button
+                      key={dir}
+                      type="button"
+                      onClick={() => setDirectionFilter(dir)}
+                      title={title}
+                      aria-pressed={directionFilter === dir}
+                      className={cn(
+                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                        directionFilter === dir
+                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                          : 'text-ink-muted hover:text-ink',
+                      )}
+                    >
+                      <Icon className="w-3 h-3" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Graph | List body toggle — the graph is the premium
+                  default; the columns stay one click away (persisted). */}
+              <div data-tour="lens-toggle" className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]">
+                <button
+                  type="button"
+                  onClick={() => setLensViewMode('graph')}
+                  title="Graph — explore lineage interactively"
+                  aria-pressed={lensViewMode === 'graph'}
+                  className={cn(
+                    'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                    lensViewMode === 'graph'
+                      ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                      : 'text-ink-muted hover:text-ink',
+                  )}
+                >
+                  <LucideIcons.Network className="w-3 h-3" />
+                  Graph
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLensViewMode('list')}
+                  title="List — scan all connections as columns"
+                  aria-pressed={lensViewMode === 'list'}
+                  className={cn(
+                    'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                    lensViewMode === 'list'
+                      ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                      : 'text-ink-muted hover:text-ink',
+                  )}
+                >
+                  <LucideIcons.List className="w-3 h-3" />
+                  List
+                </button>
+              </div>
               <div className="relative">
                 <LucideIcons.Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-ink-muted/70" />
                 <input
@@ -489,7 +1576,7 @@ export function LineageLens({
               </div>
               <button
                 type="button"
-                onClick={onClose}
+                onClick={requestClose}
                 aria-label="Close"
                 className="w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
               >
@@ -498,106 +1585,120 @@ export function LineageLens({
             </div>
           </div>
 
-          {/* ── Walk trail — the lens stack as a visible, clickable path.
-              Re-centering is a WALK; this makes the walked route a
-              first-class object: every hop is a chip, clicking an
-              earlier hop jumps the walk back to that point (the spatial
-              generalization of Back). Increment 1 of the Miller-column
-              walk — the current frontier renders below as today's
-              single-focal body. ── */}
-          {lensStack.length > 1 && onJumpTo && (
+          {/* ── Path trail — the focus history as a visible, clickable
+              path. Every visited hop is a chip; the cursor's chip is
+              highlighted and hops AHEAD of the cursor stay visible
+              (dimmed) — clicking any chip moves the cursor there
+              without dropping the trail (browser history, not a
+              destructive stack). ── */}
+          {entries.length > 1 && onJumpTo && (
             <div className="flex items-center gap-1 px-4 py-2 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] overflow-x-auto custom-scrollbar whitespace-nowrap">
               <span className="flex-shrink-0 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ink-muted/60 mr-1">
-                Walk
+                Path
               </span>
-              {(collapseTrail
-                ? [0, -1, ...Array.from({ length: 4 }, (_, k) => lensStack.length - 4 + k)]
-                : lensStack.map((_, i) => i)
-              ).map((i, pos) => {
-                if (i === -1) {
-                  const hidden = lensStack.slice(1, lensStack.length - 4)
+              {(() => {
+                // Middle-truncation window anchored on the CURSOR (not
+                // the tail — after Back the tail is the forward side).
+                let visible: number[]
+                if (!collapseTrail) {
+                  visible = entries.map((_, i) => i)
+                } else {
+                  const start = Math.max(1, cursor - 3)
+                  const end = Math.min(entries.length - 1, cursor + 1)
+                  visible = [0]
+                  if (start > 1) visible.push(-1)
+                  for (let i = start; i <= end; i++) visible.push(i)
+                  if (end < entries.length - 1) visible.push(-2)
+                }
+                return visible.map((i, pos) => {
+                  if (i === -1 || i === -2) {
+                    const hidden = i === -1
+                      ? entries.slice(1, Math.max(1, cursor - 3))
+                      : entries.slice(Math.min(entries.length - 1, cursor + 1) + 1)
+                    return (
+                      <div key={i === -1 ? 'trail-gap' : 'trail-gap-fwd'} className="flex items-center gap-1 flex-shrink-0">
+                        <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />
+                        <button
+                          type="button"
+                          onClick={() => setShowFullTrail(true)}
+                          title={`Show ${hidden.length} hidden hop${hidden.length === 1 ? '' : 's'}: ${hidden.map(labelFor).join(' → ')}`}
+                          className="px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-dashed border-ink-muted/30 transition-colors"
+                        >
+                          … {hidden.length} hop{hidden.length === 1 ? '' : 's'}
+                        </button>
+                      </div>
+                    )
+                  }
+                  const id = entries[i]
+                  const isCurrent = i === cursor
+                  const isForward = i > cursor
+                  const label = labelFor(id)
+                  const chipColor = generateColorFromType(
+                    (sg.nodes.get(id)?.node?.data?.type as string) ?? 'entity',
+                  )
+                  const meta = i > 0 ? hopMeta[i - 1] : null
+                  // Direction arrows only between ADJACENT hops — after a
+                  // gap chip the transition shown isn't the real one.
+                  const adjacent = pos > 0 && visible[pos - 1] === i - 1
+                  // Parent context — "ticket_key · fact_support" — except
+                  // when the previous hop already IS the parent.
+                  const chipParent = parentOf(id)
+                  const chipParentLabel = chipParent && chipParent !== entries[i - 1]
+                    ? labelFor(chipParent)
+                    : null
                   return (
-                    <div key="trail-gap" className="flex items-center gap-1 flex-shrink-0">
-                      <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />
+                    <div key={`${id}-${i}`} className="flex items-center gap-1 flex-shrink-0">
+                      {i > 0 && (
+                        meta && adjacent ? (
+                          <span
+                            className="flex items-center"
+                            title={`${meta.edgeType ? edgeLabelFor(meta.edgeType.toUpperCase(), edgeTypeInfo) : 'Connection'} — walked ${meta.downstream ? 'downstream' : 'upstream'}`}
+                          >
+                            {/* Amber is DOWNSTREAM everywhere else in the
+                                lens — the band arrows, the focal's "out"
+                                tally, the Data Consumers column. Sky
+                                upstream, amber down. */}
+                            {meta.downstream
+                              ? <LucideIcons.MoveRight className={cn('w-3.5 h-3.5 text-amber-500/80', isForward && 'opacity-50')} />
+                              : <LucideIcons.MoveLeft className={cn('w-3.5 h-3.5 text-sky-500/80', isForward && 'opacity-50')} />}
+                          </span>
+                        ) : (
+                          <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />
+                        )
+                      )}
                       <button
                         type="button"
-                        onClick={() => setShowFullTrail(true)}
-                        title={`Show ${hidden.length} hidden hop${hidden.length === 1 ? '' : 's'}: ${hidden.map(id => labelOf(id, nodeMap.get(id))).join(' → ')}`}
-                        className="px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-dashed border-ink-muted/30 transition-colors"
+                        disabled={isCurrent}
+                        onClick={() => onJumpTo(i)}
+                        title={`${isCurrent ? label : `Jump to ${label}`}${chipParentLabel ? ` — in ${chipParentLabel}` : ''}`}
+                        className={cn(
+                          isCurrent
+                            ? 'flex items-center gap-1.5 max-w-[230px] px-2 py-0.5 rounded-md text-[11px] font-semibold text-accent-lineage bg-accent-lineage/12 border border-accent-lineage/30'
+                            : 'flex items-center gap-1.5 max-w-[210px] px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent transition-colors',
+                          // The forward side of the history — where
+                          // Forward leads — dimmed but fully clickable.
+                          isForward && 'opacity-55 hover:opacity-100',
+                        )}
                       >
-                        … {hidden.length} hop{hidden.length === 1 ? '' : 's'}
+                        <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: chipColor }} />
+                        <span className="truncate">{label}</span>
+                        {chipParentLabel && (
+                          <span className="flex-shrink min-w-0 max-w-[90px] truncate text-[9px] font-normal text-ink-muted/60">
+                            · {chipParentLabel}
+                          </span>
+                        )}
                       </button>
                     </div>
                   )
-                }
-                const id = lensStack[i]
-                const isCurrent = i === lensStack.length - 1
-                const label = labelOf(id, nodeMap.get(id))
-                const chipColor = generateColorFromType((nodeMap.get(id)?.data?.type as string) ?? 'entity')
-                const meta = i > 0 ? hopMeta[i - 1] : null
-                const afterGap = collapseTrail && pos === 2
-                // Parent context — "ticket_key · fact_support" — except
-                // when the previous hop already IS the parent.
-                const chipParent = resolveParent(id)
-                const chipParentLabel = chipParent && chipParent !== lensStack[i - 1]
-                  ? labelOf(chipParent, nodeMap.get(chipParent))
-                  : null
-                return (
-                  <div key={`${id}-${i}`} className="flex items-center gap-1 flex-shrink-0">
-                    {i > 0 && (
-                      meta && !afterGap ? (
-                        <span
-                          className="flex items-center"
-                          title={`${meta.edgeType || 'connection'} — walked ${meta.downstream ? 'downstream' : 'upstream'}`}
-                        >
-                          {meta.downstream
-                            ? <LucideIcons.MoveRight className="w-3.5 h-3.5 text-accent-lineage/70" />
-                            : <LucideIcons.MoveLeft className="w-3.5 h-3.5 text-amber-500/80" />}
-                        </span>
-                      ) : (
-                        <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />
-                      )
-                    )}
-                    <button
-                      type="button"
-                      disabled={isCurrent}
-                      onClick={() => onJumpTo(i)}
-                      title={`${isCurrent ? label : `Jump back to ${label}`}${chipParentLabel ? ` — in ${chipParentLabel}` : ''}`}
-                      className={
-                        isCurrent
-                          ? 'flex items-center gap-1.5 max-w-[230px] px-2 py-0.5 rounded-md text-[11px] font-semibold text-accent-lineage bg-accent-lineage/12 border border-accent-lineage/30'
-                          : 'flex items-center gap-1.5 max-w-[210px] px-2 py-0.5 rounded-md text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent transition-colors'
-                      }
-                    >
-                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: chipColor }} />
-                      <span className="truncate">{label}</span>
-                      {chipParentLabel && (
-                        <span className="flex-shrink min-w-0 max-w-[90px] truncate text-[9px] font-normal text-ink-muted/60">
-                          · {chipParentLabel}
-                        </span>
-                      )}
-                    </button>
-                  </div>
-                )
-              })}
-              {/* The walk as a deliverable: present it on the canvas, or
-                  copy it as text for a ticket/finding. */}
+                })
+              })()}
+              {/* The walked path (up to the cursor) as a deliverable:
+                  present it on the canvas, or copy it as text. */}
               <div className="ml-auto flex items-center gap-1 pl-2 flex-shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setDirectionOverride(walkDirection === 'outgoing' ? 'incoming' : 'outgoing')}
-                  title={`Walking ${walkDirection === 'outgoing' ? 'downstream (data consumers)' : 'upstream (data sources)'} — click to flip the walk direction`}
-                  className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold border transition-colors border-black/10 dark:border-white/10 text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
-                >
-                  {walkDirection === 'outgoing'
-                    ? <LucideIcons.MoveRight className="w-3 h-3 text-accent-lineage" />
-                    : <LucideIcons.MoveLeft className="w-3 h-3 text-amber-500" />}
-                  {walkDirection === 'outgoing' ? 'Downstream' : 'Upstream'}
-                </button>
                 {onShowPathOnCanvas && (
                   <button
                     type="button"
-                    onClick={() => { onClose(); onShowPathOnCanvas(lensStack) }}
+                    onClick={() => { onClose(); onShowPathOnCanvas(entries.slice(0, cursor + 1)) }}
                     title="Frame this walked path on the canvas"
                     className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
                   >
@@ -612,488 +1713,287 @@ export function LineageLens({
                     // pasted path carries full context; the qualifier is
                     // dropped when the previous hop already is the parent.
                     void navigator.clipboard?.writeText(
-                      lensStack.map((id, idx) => {
-                        const p = resolveParent(id)
-                        const qualified = p && p !== lensStack[idx - 1]
-                        return qualified
-                          ? `${labelOf(p, nodeMap.get(p))}.${labelOf(id, nodeMap.get(id))}`
-                          : labelOf(id, nodeMap.get(id))
+                      entries.slice(0, cursor + 1).map((id, idx, path) => {
+                        const p = parentOf(id)
+                        return p && p !== path[idx - 1]
+                          ? `${labelFor(p)}.${labelFor(id)}`
+                          : labelFor(id)
                       }).join(' → '),
                     )
+                    setPathCopied(true)
+                    window.setTimeout(() => setPathCopied(false), 1600)
                   }}
-                  title="Copy this path as text (fact_support.ticket_key → System A → …)"
-                  className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                  title="Copy this path as TEXT (fact_support.ticket_key → System A → …) — for a doc or a chat message, not a clickable link"
+                  className={cn(
+                    'flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium transition-colors',
+                    pathCopied
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06]',
+                  )}
                 >
-                  <LucideIcons.Copy className="w-3 h-3" />
-                  Copy path
+                  {pathCopied ? <LucideIcons.Check className="w-3 h-3" /> : <LucideIcons.Copy className="w-3 h-3" />}
+                  {pathCopied ? 'Copied' : 'Copy path'}
+                </button>
+                {/* T24 F3 — the working share link (`copyShareLink`, same
+                    codec as the header's Link2 button) lived ONLY in the
+                    header, invisible from here — a reader scanning the
+                    path for "how do I share this" found only the TEXT
+                    action beside it. Same call, same URL; a distinct
+                    label and icon keep text-vs-link from reading as one
+                    offer twice. */}
+                <button
+                  type="button"
+                  onClick={copyShareLink}
+                  title="Copy a LINK to this view — opens exactly where you are now, for a colleague to click"
+                  className={cn(
+                    'flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium transition-colors',
+                    shareCopied
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06]',
+                  )}
+                >
+                  {shareCopied ? <LucideIcons.Check className="w-3 h-3" /> : <LucideIcons.Link2 className="w-3 h-3" />}
+                  {shareCopied ? 'Copied' : 'Copy link to this view'}
                 </button>
               </div>
             </div>
           )}
 
-          {/* ── Fetch narration — the lens fetches each visited node's
-              lineage from the data source on demand; a failed or capped
-              fetch is SAID, never silently rendered as "no connections". ── */}
-          {focalFetch === 'error' && (
+          {/* ── Walk narration — a failed or capped walk is SAID, never
+              silently rendered as "no connections". ── */}
+          {walkStatus === 'error' && (
             <div className="flex items-center gap-2 px-4 py-1.5 border-b border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
               <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
-              <span>Couldn&apos;t fetch this entity&apos;s lineage from the data source — showing only what&apos;s already loaded on the canvas.</span>
-              {onRetryFetch && (
-                <button
-                  type="button"
-                  onClick={() => onRetryFetch(nodeId)}
-                  className="ml-auto flex-shrink-0 font-semibold hover:underline"
-                >
-                  Retry
-                </button>
-              )}
+              <span>
+                Couldn&apos;t fetch this entity&apos;s lineage from the data source
+                {walk?.error ? ` — ${walk.error}` : '.'}
+              </span>
+              <button
+                type="button"
+                onClick={retryWalk}
+                className="ml-auto flex-shrink-0 font-semibold hover:underline"
+              >
+                Retry
+              </button>
             </div>
           )}
-          {focalFetch === 'done' && fetchTruncatedIds?.has(nodeId) && (
+          {walkStatus === 'done' && (model?.truncated || model?.seedTruncated) && (
             <div className="flex items-center gap-2 px-4 py-1.5 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] text-[10.5px] text-ink-muted">
               <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
-              <span>Large neighborhood — showing the first {EDGE_FETCH_LIMIT} connections per direction from the data source. Use the filter to narrow.</span>
+              <span>
+                Large neighbourhood — the data source stopped early
+                {model?.truncationReason ? ` (${model.truncationReason})` : ''}, so these counts are floors.
+                Use ⊕ to walk further, or the filter to narrow.
+              </span>
             </div>
           )}
 
-          {/* ── Walk body (Miller columns) — one column per hop, oldest
-              on the left, the current frontier widest on the right. Each
-              column lists its hop's frontier in the LOCKED direction;
-              the row you walked into is highlighted, and clicking a row
-              in an earlier column BRANCHES the walk from that hop.
-              Complexity stays constant: path + frontier, never a tree. ── */}
-          {lensStack.length > 1 && onWalkTo ? (
-            <div ref={walkStripRef} className="flex-1 flex min-h-0 overflow-x-auto custom-scrollbar divide-x divide-black/[0.06] dark:divide-white/[0.06]">
-              {lensStack.map((hopId, i) => {
-                const recsAll = walkDirection === 'outgoing'
-                  ? hopRecords[i].outgoingRecords
-                  : hopRecords[i].incomingRecords
-                // Dedupe per neighbor (multiple edge types bundle to ×N).
-                const byNeighbor = new Map<string, { rec: NeighborRecord; n: number }>()
-                for (const r of recsAll) {
-                  const cur = byNeighbor.get(r.neighborId)
-                  if (cur) cur.n += 1
-                  else byNeighbor.set(r.neighborId, { rec: r, n: 1 })
-                }
-                const isLast = i === lensStack.length - 1
-                const walkedInto = !isLast ? lensStack[i + 1] : null
-                const hopType = (nodeMap.get(hopId)?.data?.type as string) ?? 'entity'
-                // Finer/peer rows first; coarser-grain rollups demoted to
-                // the end (visible, badged — never silently dropped).
-                const rowsFiner: Array<{ rec: NeighborRecord; n: number; coarser: boolean }> = []
-                const rowsCoarser: Array<{ rec: NeighborRecord; n: number; coarser: boolean }> = []
-                for (const { rec, n } of byNeighbor.values()) {
-                  if (isLast && !filterFn(rec)) continue
-                  const coarser = isCoarserThan(rec.neighborNode?.data?.type as string | undefined, hopType)
-                  ;(coarser ? rowsCoarser : rowsFiner).push({ rec, n, coarser })
-                }
-                const rows = [...rowsFiner, ...rowsCoarser].slice(0, 200)
-                // Grain chips (frontier column) + lens-global hidden-type
-                // filter, and the same parent-dataset grouping the classic
-                // columns use — the frontier reads "which datasets, via
-                // which fields", not a wall of bare names.
-                const typeCounts = new Map<string, number>()
-                for (const { rec } of byNeighbor.values()) {
-                  const t = (rec.neighborNode?.data?.type as string) ?? 'not loaded'
-                  typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1)
-                }
-                const hopChips: Array<[string, number]> = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])
-                let hopHiddenCount = 0
-                const shownRows: typeof rows = []
-                for (const it of rows) {
-                  const t = (it.rec.neighborNode?.data?.type as string) ?? 'not loaded'
-                  if (hiddenTypes.has(t)) { hopHiddenCount++; continue }
-                  shownRows.push(it)
-                }
-                const walkGroupMap = new Map<string, { kind: 'parent' | 'type'; key: string; rows: typeof rows }>()
-                const rollupRows: typeof rows = []
-                for (const it of shownRows) {
-                  if (it.coarser) { rollupRows.push(it); continue }
-                  const p = resolveParent(it.rec.neighborId)
-                  const useParent = !!p && p !== hopId
-                  const mk = useParent ? `p:${p}` : `t:${(it.rec.neighborNode?.data?.type as string) ?? 'not loaded'}`
-                  let g = walkGroupMap.get(mk)
-                  if (!g) {
-                    g = {
-                      kind: useParent ? 'parent' : 'type',
-                      key: useParent ? (p as string) : ((it.rec.neighborNode?.data?.type as string) ?? 'not loaded'),
-                      rows: [],
-                    }
-                    walkGroupMap.set(mk, g)
-                  }
-                  g.rows.push(it)
-                }
-                const hopGroups = [...walkGroupMap.values()].sort((a, b) => b.rows.length - a.rows.length)
-                const hopLabel = labelOf(hopId, nodeMap.get(hopId))
-                const hopColor = generateColorFromType((nodeMap.get(hopId)?.data?.type as string) ?? 'entity')
-                const hopFetch = fetchStatus?.get(hopId)
-                const hopChildren = (containmentByHop.get(hopId) ?? [])
-                  .filter(cid => !isLast || q === '' || labelOf(cid, nodeMap.get(cid)).toLowerCase().includes(q))
-                const hopChildTotal = Math.max(
-                  hopChildren.length,
-                  (nodeMap.get(hopId)?.data?.childCount as number | undefined) ?? 0,
-                )
+          {/* ── Body — the SAME layout at every depth: re-centering
+              swaps the focal in place instead of flipping to a
+              different presentation. Two bodies, one model: the
+              interactive hop-band GRAPH (default) or the classic
+              two-column LIST, switched from the header toggle. ── */}
+          {lensViewMode === 'graph' ? (
+          <div className="flex-1 min-h-0 flex flex-col">
+            {/* Type chips — an explicit, reversible filter, and hidden
+                counts stay visible (never silent loss). */}
+            {(typeChips.length > 1 || layout.hiddenByChips > 0) && (
+              <div className="flex-shrink-0 flex flex-wrap items-center gap-x-2 gap-y-1 px-3 pt-2 pb-1">
+                {typeChips.length > 1 && (
+                  <TypeChips chips={typeChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} />
+                )}
+                {layout.hiddenByChips > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-md bg-black/[0.04] dark:bg-white/[0.06] text-[9.5px] text-ink-muted">
+                    {layout.hiddenByChips} hidden by the type chips
+                  </span>
+                )}
+              </div>
+            )}
+            <div data-tour="lens-graph" className="relative flex-1 min-h-0">
+              <FocusGraphView
+                graph={boardGraph}
+                focalId={nodeId}
+                // 'unsupported' deliberately passes NOTHING: the
+                // empty-direction whispers are a claim about what the
+                // data source SAID, and it was never asked.
+                focalFetch={walkStatus === 'unsupported' ? undefined : walkStatus}
+                focalReach={reach}
+                exportName={focalLabel}
+                directionFilter={directionFilter}
+                selectedId={view.selection}
+                isolatedId={isolatedId}
+                trailUrns={trailUrns}
+                trailAdjacent={trailAdjacent}
+                reducedMotion={reducedMotion}
+                edgeTypeInfo={edgeTypeInfo}
+                onSelect={setSelection}
+                onIsolate={setIsolated}
+                onDismiss={dismissLayer}
+                onFocus={onRecenter}
+                onToggleFrame={toggleContents}
+                onFrameScroll={setFrameOffset}
+                onFrameQuery={setFrameQuery}
+                frameQueryFor={frameQueryFor}
+                onToggleFrameAll={toggleFrameAll}
+                onRetryFrameAll={retryFrameAll}
+                onRevealOnCanvas={onRevealOnCanvas}
+                onOpenDetails={onOpenDetails}
+                // The affordances only exist once the focal's own model
+                // is in hand — `useLensWalk` ignores an extend before
+                // that by design, so offering one would be a dead click.
+                onRevealMore={walkStatus === 'done' ? revealMore : undefined}
+                onExtend={walkStatus === 'done' ? extendWalk : undefined}
+                onPage={walkStatus === 'done' ? pageWalk : undefined}
+                // T24 F7 — the exact count a frame-level ⊕'s own click
+                // would seed the walk from: the SAME call `extendWalk`
+                // makes, so the hover text can never claim a number the
+                // request itself would not back up.
+                seedCountFor={walkStatus === 'done' ? seedCountForCtx : undefined}
+                onCondenseRun={toggleCondense}
+                onPin={pinEntities}
+              />
+              {/* Status surfaces — a lone focal card floating in space
+                  explains nothing. */}
+              {walkStatus === 'loading' && (
+                <div className="absolute inset-x-0 bottom-8 z-10 flex justify-center pointer-events-none">
+                  <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-canvas-elevated/95 border border-black/[0.07] dark:border-white/[0.08] shadow-sm text-[11px] text-ink-muted">
+                    <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
+                    Walking the lineage from the data source…
+                  </div>
+                </div>
+              )}
+              {walkStatus === 'unsupported' && (
+                <div className="absolute inset-x-0 bottom-8 z-10 flex justify-center pointer-events-none">
+                  <div className="flex items-center gap-2 max-w-[520px] px-3.5 py-2 rounded-lg bg-canvas-elevated/95 border border-black/[0.07] dark:border-white/[0.08] shadow-sm text-[11px] text-ink-muted">
+                    <LucideIcons.CircleSlash className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted/50" />
+                    This data source can&apos;t walk lineage — Focus mode needs a provider that
+                    answers lineage queries.
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* ── Detail strip — single click inspects; focusing stays a
+                deliberate second gesture. ── */}
+            <AnimatePresence>
+              {selectedInfo && (() => {
+                const selColor = generateColorFromType(selectedInfo.type)
                 return (
                   <motion.div
-                    key={`walk-col-${hopId}-${i}`}
-                    initial={{ opacity: 0, x: 24 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ duration: 0.18, ease: 'easeOut' }}
-                    className={isLast
-                      ? 'flex-1 min-w-[300px] flex flex-col min-h-0 bg-accent-lineage/[0.03]'
-                      : 'w-[230px] flex-shrink-0 flex flex-col min-h-0'}
+                    key={selectedInfo.id}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    transition={{ duration: reducedMotion ? 0 : 0.16, ease: 'easeOut' }}
+                    className="flex items-center gap-3 px-4 py-2.5 border-t border-black/[0.08] dark:border-white/[0.08] bg-black/[0.02] dark:bg-white/[0.03]"
                   >
-                    <div className="flex items-center gap-1.5 px-3 py-2 border-b border-black/[0.06] dark:border-white/[0.06]">
-                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: hopColor }} />
-                      <span className="truncate text-[11.5px] font-semibold text-ink">{hopLabel}</span>
-                      {(() => {
-                        const hp = resolveParent(hopId)
-                        return hp && hp !== lensStack[i - 1] ? (
-                          <span className="flex-shrink min-w-0 max-w-[40%] truncate text-[9.5px] text-ink-muted/60">
-                            · {labelOf(hp, nodeMap.get(hp))}
-                          </span>
-                        ) : null
-                      })()}
-                      <span className="ml-auto flex-shrink-0 flex items-center gap-1 text-[10px] tabular-nums text-ink-muted/70">
-                        {hopFetch === 'loading' && (
-                          <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
-                        )}
-                        {byNeighbor.size}
-                      </span>
+                    <div
+                      className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+                      style={{ backgroundColor: `${selColor}1f` }}
+                    >
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: selColor }} />
                     </div>
-                    <div className="flex-1 overflow-y-auto custom-scrollbar py-1">
-                      {/* IIFE so the row renderer can be shared by the
-                          parent groups, type groups, and rollup tier
-                          without hoisting its many closures into props. */}
-                      {(() => {
-                      const renderWalkRow = ({ rec, n, coarser }: { rec: NeighborRecord; n: number; coarser: boolean }, showParentHint: boolean) => {
-                        const rid = rec.neighborId
-                        const active = rid === walkedInto
-                        const rowColor = generateColorFromType((rec.neighborNode?.data?.type as string) ?? 'entity')
-                        // Parent breadcrumb — a bare field name isn't
-                        // identifying; say which dataset it belongs to.
-                        // Omitted inside parent groups (the header says it)
-                        // and when the parent IS this hop.
-                        const rowParent = showParentHint ? resolveParent(rid) : null
-                        const rowParentLabel = rowParent && rowParent !== hopId
-                          ? labelOf(rowParent, nodeMap.get(rowParent))
-                          : null
-                        const aggData = rec.edge.data as { isAggregated?: boolean; sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
-                        const drillKey = `${i}:${rid}`
-                        const canDrill = !!aggData?.isAggregated
-                          && ((aggData.sourceEdges?.length ?? 0) > 0 || (aggData.sourceEdgeCount ?? 0) > 1)
-                        const drilled = canDrill && drilledRows.has(drillKey)
-                        // Constituents = locally loaded raw edges ∪ edges
-                        // fetched on demand for this drill, deduped by id.
-                        const drillState = drilled ? drillStatus?.get(rec.edge.id) : undefined
-                        let constituents: LineageEdge[] = []
-                        let missing = 0
-                        if (drilled) {
-                          const local = (aggData?.sourceEdges ?? [])
-                            .map(eid => rawEdgeById.get(eid))
-                            .filter((e): e is LineageEdge => !!e)
-                          const seenConstituent = new Set(local.map(e => e.id))
-                          const fetched = (drillEdges?.get(rec.edge.id) ?? []).filter(e => !seenConstituent.has(e.id))
-                          const all = [...local, ...fetched]
-                          constituents = all.slice(0, 50)
-                          missing = Math.max(0, Math.max(aggData?.sourceEdgeCount ?? 0, all.length) - constituents.length)
-                        }
-                        return (
-                          // content-visibility: offscreen walk rows skip
-                          // layout+paint (frontiers can reach 200 rows).
-                          <div key={rid} className="[content-visibility:auto] [contain-intrinsic-size:auto_30px]">
-                            <div className="flex items-stretch">
-                              <button
-                                type="button"
-                                onClick={() => (isLast ? onRecenter(rid) : onWalkTo(i, rid))}
-                                title={isLast
-                                  ? `Walk into ${labelOf(rid, rec.neighborNode)}`
-                                  : `Branch the walk here — continue from ${labelOf(rid, rec.neighborNode)}`}
-                                className={
-                                  active
-                                    ? 'flex-1 min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-semibold text-accent-lineage bg-accent-lineage/10 border-l-2 border-accent-lineage'
-                                    : `flex-1 min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] border-l-2 border-transparent transition-colors${coarser ? ' opacity-70 hover:opacity-100' : ''}`
-                                }
-                              >
-                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: rowColor }} />
-                                <span className="truncate">{labelOf(rid, rec.neighborNode)}</span>
-                                {rowParentLabel && (
-                                  <span className="flex-shrink min-w-0 max-w-[45%] truncate text-[9px] text-ink-muted/50">
-                                    · {rowParentLabel}
-                                  </span>
-                                )}
-                                {n > 1 && <span className="flex-shrink-0 text-[9.5px] tabular-nums text-ink-muted/60">×{n}</span>}
-                                {coarser && (
-                                  <span
-                                    className="flex-shrink-0 flex items-center"
-                                    title="A coarser-grain summary of finer flows — not an additional connection"
-                                  >
-                                    <LucideIcons.Layers className="w-2.5 h-2.5 text-ink-muted/40" />
-                                  </span>
-                                )}
-                                <LucideIcons.ChevronRight className={`ml-auto w-3 h-3 flex-shrink-0 ${active ? 'text-accent-lineage' : 'text-ink-muted/30'}`} />
-                              </button>
-                              {canDrill && (
-                                <button
-                                  type="button"
-                                  onClick={() => toggleDrillWithFetch(drillKey, rec.edge)}
-                                  title={drilled
-                                    ? 'Collapse back to the rolled-up connection'
-                                    : `Refine — see the ${(aggData?.sourceEdgeCount ?? 0).toLocaleString()} underlying connection${(aggData?.sourceEdgeCount ?? 0) === 1 ? '' : 's'} this rolls up`}
-                                  className="flex-shrink-0 px-1.5 flex items-center text-ink-muted/50 hover:text-ink transition-colors"
-                                >
-                                  <LucideIcons.ChevronDown className={`w-3 h-3 transition-transform ${drilled ? '' : '-rotate-90'}`} />
-                                </button>
-                              )}
-                            </div>
-                            {/* Refined constituents — the aggregate's real
-                                endpoints, resolved from loaded raw edges.
-                                Unloaded remainder reported, never invented. */}
-                            {drilled && (
-                              <div className="ml-4 pl-2 border-l border-dashed border-black/[0.10] dark:border-white/[0.12] pb-1">
-                                {constituents.map(e => {
-                                  const otherId = walkDirection === 'outgoing' ? e.target : e.source
-                                  const nearId = walkDirection === 'outgoing' ? e.source : e.target
-                                  const oColor = generateColorFromType((nodeMap.get(otherId)?.data?.type as string) ?? 'entity')
-                                  return (
-                                    <div
-                                      key={e.id}
-                                      className="flex items-center gap-1.5 px-2 py-1 min-w-0 text-[10.5px] text-ink/90"
-                                      title={`${labelOf(nearId, nodeMap.get(nearId))} → ${labelOf(otherId, nodeMap.get(otherId))}${(e.data?.edgeType as string) ? ` (${e.data?.edgeType as string})` : ''}`}
-                                    >
-                                      <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ backgroundColor: oColor }} />
-                                      <span className="truncate">{labelOf(otherId, nodeMap.get(otherId))}</span>
-                                    </div>
-                                  )
-                                })}
-                                {drillState === 'loading' && (
-                                  <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-ink-muted/70">
-                                    <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" />
-                                    Fetching underlying connections…
-                                  </div>
-                                )}
-                                {drillState === 'error' && (
-                                  <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-400">
-                                    <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
-                                    <span>Couldn&apos;t fetch the underlying connections.</span>
-                                    {onDrillFetch && (
-                                      <button
-                                        type="button"
-                                        onClick={() => onDrillFetch(rec.edge)}
-                                        className="font-semibold hover:underline"
-                                      >
-                                        Retry
-                                      </button>
-                                    )}
-                                  </div>
-                                )}
-                                {constituents.length === 0 && drillState !== 'loading' && drillState !== 'error' && (
-                                  <p className="px-2 py-1 text-[10px] text-ink-muted/70 italic leading-snug">
-                                    {drillState === 'done'
-                                      ? 'No underlying connections found between these entities.'
-                                      : 'Constituent connections aren’t loaded — drill this edge on the canvas to fetch them.'}
-                                  </p>
-                                )}
-                                {missing > 0 && constituents.length > 0 && drillState !== 'loading' && (
-                                  <p className="px-2 py-0.5 text-[10px] text-ink-muted/60">
-                                    +{missing.toLocaleString()} more (showing the first {constituents.length})
-                                  </p>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        )
-                      }
-                      return (
-                        <>
-                          {isLast && hopChips.length > 1 && (
-                            <TypeChips chips={hopChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} className="px-3 pb-1.5 pt-0.5" />
-                          )}
-                          {hopGroups.map(g => {
-                            if (g.kind === 'parent') {
-                              const pLabel = labelOf(g.key, nodeMap.get(g.key))
-                              const pColor = generateColorFromType((nodeMap.get(g.key)?.data?.type as string) ?? 'entity')
-                              const headerActive = g.key === walkedInto
-                              // Same collapse rule as the classic columns:
-                              // 3+ parent groups start collapsed, searching
-                              // (frontier filter) force-expands, and the
-                              // group holding the hop you walked into stays
-                              // open so the trail never hides itself.
-                              const defaultCollapsed = hopGroups.filter(gr => gr.kind === 'parent').length >= 3
-                              const collapseKey = `w${i}:p:${g.key}`
-                              const holdsWalkedInto = !!walkedInto && g.rows.some(it => it.rec.neighborId === walkedInto)
-                              const collapsed = !(isLast && q !== '') && !holdsWalkedInto
-                                && (defaultCollapsed !== collapseToggles.has(collapseKey))
-                              return (
-                                <div key={`pg-${g.key}`} className="mb-0.5">
-                                  {/* The WHOLE row toggles collapse (big
-                                      target); walking into the parent lives
-                                      on the dedicated arrow button. */}
-                                  <div className="flex items-center gap-1 px-1.5 mb-0.5 min-w-0">
-                                    <button
-                                      type="button"
-                                      onClick={() => toggleCollapse(collapseKey)}
-                                      title={collapsed ? `Expand ${g.rows.length} connection${g.rows.length === 1 ? '' : 's'}` : 'Collapse group'}
-                                      className={cn(
-                                        'flex-1 min-w-0 flex items-center gap-1.5 px-1.5 py-1.5 rounded-md text-left transition-colors bg-black/[0.03] dark:bg-white/[0.04] hover:bg-black/[0.06] dark:hover:bg-white/[0.07]',
-                                        headerActive && 'bg-accent-lineage/[0.08]',
-                                      )}
-                                    >
-                                      <LucideIcons.ChevronDown className={cn('w-4 h-4 flex-shrink-0 text-ink-muted transition-transform', collapsed && '-rotate-90')} />
-                                      <LucideIcons.FolderTree className="w-3 h-3 flex-shrink-0 text-ink-muted/70" />
-                                      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: pColor }} />
-                                      <span className={cn('min-w-0 truncate text-[11.5px] font-semibold', headerActive ? 'text-accent-lineage' : 'text-ink')}>
-                                        {pLabel}
-                                      </span>
-                                      <span className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07] text-[9.5px] font-semibold tabular-nums text-ink-muted">
-                                        {g.rows.length}
-                                      </span>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => (isLast ? onRecenter(g.key) : onWalkTo(i, g.key))}
-                                      title={`Walk into ${pLabel}`}
-                                      className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors"
-                                    >
-                                      <LucideIcons.ArrowRight className="w-3.5 h-3.5" />
-                                    </button>
-                                  </div>
-                                  {!collapsed && g.rows.map(it => renderWalkRow(it, false))}
-                                </div>
-                              )
-                            }
-                            const tgUnloaded = g.key === 'not loaded'
-                            return (
-                              <div key={`tg-${g.key}`} className="mb-0.5">
-                                <div
-                                  className="flex items-center gap-1.5 px-3 pt-1.5 pb-0.5"
-                                  title={tgUnloaded ? 'Referenced by lineage, but the entity details couldn’t be resolved from the data source.' : undefined}
-                                >
-                                  {tgUnloaded
-                                    ? <LucideIcons.HelpCircle className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
-                                    : <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: generateColorFromType(g.key) }} />}
-                                  <span className="text-[9px] font-bold uppercase tracking-[0.1em] text-ink-muted/70">{tgUnloaded ? 'Unresolved' : g.key}</span>
-                                  <span className="text-[9.5px] tabular-nums text-ink-muted/50">{g.rows.length}</span>
-                                </div>
-                                {g.rows.map(it => renderWalkRow(it, true))}
-                              </div>
-                            )
-                          })}
-                          {rollupRows.length > 0 && (
-                            <div className="mt-1 pt-1 border-t border-dashed border-black/[0.08] dark:border-white/[0.10]">
-                              <div
-                                className="flex items-center gap-1.5 px-3 py-1"
-                                title="Coarser-grain summaries (containers, platforms) of the flows above — not additional connections"
-                              >
-                                <LucideIcons.Layers className="w-3 h-3 text-ink-muted/50" />
-                                <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/60">Rollups</span>
-                                <span className="text-[9.5px] tabular-nums text-ink-muted/50">{rollupRows.length}</span>
-                              </div>
-                              {rollupRows.map(it => renderWalkRow(it, true))}
-                            </div>
-                          )}
-                          {hopHiddenCount > 0 && (
-                            <p className="px-3 py-1 text-[10px] text-ink-muted/60">
-                              {hopHiddenCount} hidden by the type chips
-                            </p>
-                          )}
-                        </>
-                      )
-                      })()}
-                      {/* Contained entities — the containment descent that
-                          keeps a walk alive when a container carries its
-                          relationships at child level. Stepping into a
-                          child is a normal walk hop (trail + branch). */}
-                      {hopChildren.length > 0 && (
-                        <div className={byNeighbor.size > 0 ? 'mt-1 pt-1 border-t border-black/[0.05] dark:border-white/[0.05]' : ''}>
-                          <div className="flex items-center gap-1.5 px-3 py-1">
-                            <LucideIcons.FolderTree className="w-3 h-3 text-ink-muted/60" />
-                            <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/70">Contains</span>
-                            <span className="text-[9.5px] tabular-nums text-ink-muted/60">{hopChildTotal}</span>
-                          </div>
-                          {hopChildren.slice(0, 100).map(cid => {
-                            const active = cid === walkedInto
-                            const cColor = generateColorFromType((nodeMap.get(cid)?.data?.type as string) ?? 'entity')
-                            return (
-                              <button
-                                key={`child-${cid}`}
-                                type="button"
-                                onClick={() => (isLast ? onRecenter(cid) : onWalkTo(i, cid))}
-                                title={`Step into ${labelOf(cid, nodeMap.get(cid))} — walk its lineage`}
-                                className={
-                                  active
-                                    ? 'w-full min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-semibold text-accent-lineage bg-accent-lineage/10 border-l-2 border-accent-lineage [content-visibility:auto] [contain-intrinsic-size:auto_30px]'
-                                    : 'w-full min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] border-l-2 border-transparent transition-colors [content-visibility:auto] [contain-intrinsic-size:auto_30px]'
-                                }
-                              >
-                                <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
-                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: cColor }} />
-                                <span className="truncate">{labelOf(cid, nodeMap.get(cid))}</span>
-                                <LucideIcons.ChevronRight className={`ml-auto w-3 h-3 flex-shrink-0 ${active ? 'text-accent-lineage' : 'text-ink-muted/30'}`} />
-                              </button>
-                            )
-                          })}
-                          {hopChildTotal > Math.min(hopChildren.length, 100) && (
-                            <p className="px-3 py-0.5 text-[10px] text-ink-muted/60">
-                              +{(hopChildTotal - Math.min(hopChildren.length, 100)).toLocaleString()} more contained
-                            </p>
-                          )}
-                        </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="flex items-center gap-1.5 min-w-0 text-[12.5px] font-semibold text-ink leading-tight">
+                        <span className="truncate">{selectedInfo.label}</span>
+                        <span
+                          className="flex-shrink-0 px-1.5 py-px rounded text-[8.5px] font-bold uppercase tracking-wide"
+                          style={{ backgroundColor: `${selColor}1f`, color: selColor }}
+                        >
+                          {selectedInfo.type}
+                        </span>
+                      </p>
+                      <p className="flex items-center gap-2 text-[10px] text-ink-muted leading-tight tabular-nums">
+                        {selectedInfo.parentLabel && (
+                          <span className="flex items-center gap-1 min-w-0">
+                            <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/60" />
+                            <span className="truncate max-w-[180px]">{selectedInfo.parentLabel}</span>
+                          </span>
+                        )}
+                        <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
+                          <LucideIcons.ArrowDownLeft className="w-3 h-3" />
+                          {selectedInfo.inCount} in
+                        </span>
+                        <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                          <LucideIcons.ArrowUpRight className="w-3 h-3" />
+                          {selectedInfo.outCount} out
+                        </span>
+                        {selectedInfo.description && (
+                          <span className="min-w-0 truncate max-w-[420px] italic text-ink-muted/70">
+                            {selectedInfo.description}
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => onRecenter(selectedInfo.id)}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-accent-lineage/15 border border-accent-lineage/40 text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/25 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                      >
+                        <LucideIcons.Focus className="w-3 h-3" />
+                        Focus here
+                      </button>
+                      {onRevealOnCanvas && (
+                        <button
+                          type="button"
+                          onClick={() => void onRevealOnCanvas(selectedInfo.id)}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                        >
+                          <LucideIcons.Crosshair className="w-3 h-3" />
+                          Reveal on canvas
+                        </button>
                       )}
-                      {byNeighbor.size === 0 && hopChildren.length > 0 && hopFetch !== 'loading' && (
-                        <p className="px-3 pt-2 pb-1 text-[10.5px] text-ink-muted/60 italic leading-snug">
-                          No direct {walkDirection === 'outgoing' ? 'downstream' : 'upstream'} connections —
-                          step into a contained entity to keep walking, or flip the direction.
-                        </p>
+                      {onOpenDetails && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenDetails(selectedInfo.id)}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                        >
+                          <LucideIcons.PanelRight className="w-3 h-3" />
+                          Details
+                        </button>
                       )}
-                      {byNeighbor.size === 0 && hopChildren.length === 0 && (
-                        hopFetch === 'loading' ? (
-                          <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-ink-muted/70">
-                            <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
-                            Fetching lineage…
-                          </div>
-                        ) : (
-                          <p className="px-3 py-3 text-[11px] text-ink-muted/70 italic leading-snug">
-                            {hopFetch === 'done'
-                              // A completed fetch makes this a claim about the
-                              // data source, not about what happens to be loaded.
-                              ? <>No {walkDirection === 'outgoing' ? 'downstream' : 'upstream'} connections in the data source — the walk ends here, or flip the direction.</>
-                              : <>No {walkDirection === 'outgoing' ? 'downstream' : 'upstream'} connections loaded here — the walk ends, or flip the direction.</>}
-                          </p>
-                        )
+                      {onTrace && (
+                        <button
+                          type="button"
+                          onClick={() => { onClose(); onTrace(selectedInfo.id) }}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                        >
+                          <LucideIcons.GitBranch className="w-3 h-3" />
+                          Trace
+                        </button>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => setSelection(null)}
+                        aria-label="Clear selection"
+                        className="w-6 h-6 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                      >
+                        <LucideIcons.X className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   </motion.div>
                 )
-              })}
-            </div>
+              })()}
+            </AnimatePresence>
+          </div>
           ) : (
           // minmax(0,1fr): a bare `1fr` track keeps min-width:auto, so a
-          // long unbroken field name blows the track past the dialog edge
-          // (no scroll → unusable). minmax(0,…) lets the track shrink and
-          // the rows' `truncate` take over.
+          // long unbroken field name blows the track past the dialog
+          // edge (no scroll → unusable). minmax(0,…) lets the track
+          // shrink and the rows' `truncate` take over.
           <div className="flex-1 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] min-h-0">
             <NeighborColumn
               title="Data Sources"
               subtitle="Upstream"
-              records={incomingRecords.filter(filterFn)}
-              totalCount={incomingRecords.length}
+              rows={neighbors.incoming.filter(filterFn)}
+              totalConnections={inConnections}
               direction="incoming"
-              fetchState={focalFetch}
-              nodeMap={nodeMap}
-              resolveParent={resolveParent}
-              isCoarser={(t) => isCoarserThan(t, focalType)}
+              walkStatus={walkStatus}
               hiddenTypes={hiddenTypes}
               onToggleType={toggleHiddenType}
-              collapseToggles={collapseToggles}
-              onToggleCollapse={toggleCollapse}
               searching={q !== ''}
-              rawEdgeById={rawEdgeById}
-              drilledRows={drilledRows}
-              onToggleDrill={toggleDrillWithFetch}
-              drillEdges={drillEdges}
-              drillStatus={drillStatus}
-              onDrillFetch={onDrillFetch}
+              edgeTypeInfo={edgeTypeInfo}
               onRecenter={onRecenter}
               onRevealOnCanvas={onRevealOnCanvas}
               onOpenDetails={onOpenDetails}
@@ -1102,7 +2002,7 @@ export function LineageLens({
             {/* Focal card */}
             <div className="flex flex-col items-center justify-center px-5 py-6">
               <div className="flex items-center">
-                <FlowRail color={focalColor} active={incomingRecords.length > 0} />
+                <FlowRail color={focalColor} active={inConnections > 0} />
                 <div
                   className="w-60 rounded-xl border-2 px-4 py-3.5 bg-canvas-elevated"
                   style={{
@@ -1134,48 +2034,53 @@ export function LineageLens({
                   <div className="flex items-center gap-3 mt-2.5 pt-2 border-t border-black/[0.07] dark:border-white/[0.08] text-[11px] font-medium tabular-nums">
                     <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
                       <LucideIcons.ArrowDownLeft className="w-3.5 h-3.5" />
-                      {incomingRecords.length} in
+                      {inConnections} in
                     </span>
                     <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
                       <LucideIcons.ArrowUpRight className="w-3.5 h-3.5" />
-                      {outgoingRecords.length} out
+                      {outConnections} out
                     </span>
                   </div>
+                  <ReachLine reach={reach} loading={walkStatus === 'loading'} />
                 </div>
-                <FlowRail color={focalColor} active={outgoingRecords.length > 0} />
+                <FlowRail color={focalColor} active={outConnections > 0} />
               </div>
 
-              {/* Contained entities — the descent that keeps exploration
-                  alive when a container's relationships live at child
-                  level. Clicking steps the walk INTO the child. */}
+              {/* Contained entities that are ON this lineage — the
+                  descent that keeps exploration alive when a container's
+                  relationships live at child level. */}
               {focalChildren.length > 0 && (
                 <div className="w-60 mt-4 min-h-0">
                   <div className="flex items-center gap-1.5 mb-1">
                     <LucideIcons.FolderTree className="w-3 h-3 text-ink-muted/60" />
                     <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/70">Contains</span>
-                    <span className="text-[9.5px] tabular-nums text-ink-muted/60">{focalChildTotal}</span>
+                    <span className="text-[9.5px] tabular-nums text-ink-muted/60">
+                      {focalChildren.length} on this lineage{focalChildTotal > focalChildren.length ? ` · of ${focalChildTotal}` : ''}
+                    </span>
                   </div>
                   <div className="max-h-36 overflow-y-auto custom-scrollbar flex flex-col">
                     {focalChildren.slice(0, 50).map(cid => {
-                      const cColor = generateColorFromType((nodeMap.get(cid)?.data?.type as string) ?? 'entity')
+                      const cColor = generateColorFromType(
+                        (sg.nodes.get(cid)?.node?.data?.type as string) ?? 'entity',
+                      )
                       return (
                         <button
                           key={`focal-child-${cid}`}
                           type="button"
                           onClick={() => onRecenter(cid)}
-                          title={`Step into ${labelOf(cid, nodeMap.get(cid))} — walk its lineage`}
+                          title={`Step into ${labelFor(cid)} — walk its lineage`}
                           className="w-full min-w-0 flex items-center gap-1.5 px-2 py-1.5 rounded-md text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] transition-colors"
                         >
                           <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
                           <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: cColor }} />
-                          <span className="truncate">{labelOf(cid, nodeMap.get(cid))}</span>
+                          <span className="truncate">{labelFor(cid)}</span>
                           <LucideIcons.ChevronRight className="ml-auto w-3 h-3 flex-shrink-0 text-ink-muted/30" />
                         </button>
                       )
                     })}
-                    {focalChildTotal > Math.min(focalChildren.length, 50) && (
+                    {focalChildren.length > 50 && (
                       <p className="px-2 py-0.5 text-[10px] text-ink-muted/60">
-                        +{(focalChildTotal - Math.min(focalChildren.length, 50)).toLocaleString()} more contained
+                        +{(focalChildren.length - 50).toLocaleString()} more on this lineage
                       </p>
                     )}
                   </div>
@@ -1186,24 +2091,14 @@ export function LineageLens({
             <NeighborColumn
               title="Data Consumers"
               subtitle="Downstream"
-              records={outgoingRecords.filter(filterFn)}
-              totalCount={outgoingRecords.length}
+              rows={neighbors.outgoing.filter(filterFn)}
+              totalConnections={outConnections}
               direction="outgoing"
-              fetchState={focalFetch}
-              nodeMap={nodeMap}
-              resolveParent={resolveParent}
-              isCoarser={(t) => isCoarserThan(t, focalType)}
+              walkStatus={walkStatus}
               hiddenTypes={hiddenTypes}
               onToggleType={toggleHiddenType}
-              collapseToggles={collapseToggles}
-              onToggleCollapse={toggleCollapse}
               searching={q !== ''}
-              rawEdgeById={rawEdgeById}
-              drilledRows={drilledRows}
-              onToggleDrill={toggleDrillWithFetch}
-              drillEdges={drillEdges}
-              drillStatus={drillStatus}
-              onDrillFetch={onDrillFetch}
+              edgeTypeInfo={edgeTypeInfo}
               onRecenter={onRecenter}
               onRevealOnCanvas={onRevealOnCanvas}
               onOpenDetails={onOpenDetails}
@@ -1266,39 +2161,103 @@ export function LineageLens({
           {/* Footer */}
           <div className="flex items-center gap-2 px-4 py-2.5 border-t border-black/[0.08] dark:border-white/[0.08]">
             <p className="text-[10.5px] text-ink-muted/80">
-              Click a connection to re-center · Esc to close
+              {lensViewMode === 'graph'
+                ? 'Click a card to inspect · ⊕ to walk a hop · ▸ to open what is inside · Scroll or ↑↓ inside it · Enter to preview, Shift+Enter to focus · Esc to close'
+                : 'Click a connection to re-center · Esc to close'}
             </p>
-            <div className="ml-auto flex items-center gap-2">
-              {onLocateAll && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const ids = [...new Set([...incomingRecords, ...outgoingRecords].map(r => r.neighborId))]
-                    onClose()
-                    void onLocateAll(ids)
-                  }}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-                >
-                  <LucideIcons.Frame className="w-3 h-3" />
-                  Reveal all on canvas
-                </button>
-              )}
-              {onTrace && (
-                <button
-                  type="button"
-                  onClick={() => { onClose(); onTrace(nodeId) }}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-accent-lineage/15 border border-accent-lineage/40 text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/25 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-                >
-                  <LucideIcons.GitBranch className="w-3 h-3" />
-                  Trace from here
-                </button>
-              )}
-            </div>
+            {/* The footer's two actions — "Reveal N on canvas" and "Trace
+                from here" — are withdrawn for now (user, 2026-08-17).
+                Both LEAVE the lens to do something to the canvas behind
+                it, which is a different job from walking lineage, and
+                both sat where a reader's eye lands after a long walk.
+                The per-card "Show on the canvas behind" action still
+                offers the first one for a single entity, which is the
+                shape anyone actually asked for. `onLocateAll`/`onTrace`
+                stay wired for their other callers (the peek, the
+                coarser-grain rows) so bringing these back is a JSX
+                change, not a re-plumb. */}
           </div>
+
+          {/* LEAVING THE ROOM. A walk is work — hops fetched one click at
+              a time, containers opened, a path followed — and it lives
+              only while the lens is open. So the way OUT asks, once
+              there is something to lose. (The board's own background
+              never gets here at all: it peels a layer and stops.) */}
+          {confirmClose && (
+            <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
+              <div
+                role="alertdialog"
+                aria-modal="true"
+                aria-label="Leave this walk?"
+                className="w-[380px] rounded-xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-2xl shadow-black/40 p-4"
+              >
+                <p className="text-[13px] font-semibold text-ink">Leave this walk?</p>
+                <p className="mt-1 text-[11.5px] text-ink-muted leading-relaxed">
+                  {walkSummary} Closing the lens starts over from {focalLabel}.
+                </p>
+                <div className="mt-3.5 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    autoFocus
+                    onClick={() => setConfirmClose(false)}
+                    className="px-3 py-1.5 rounded-lg text-[11.5px] font-semibold text-ink bg-black/[0.05] dark:bg-white/[0.08] hover:bg-black/[0.09] dark:hover:bg-white/[0.13] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                  >
+                    Keep exploring
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setConfirmClose(false); onClose() }}
+                    className="px-3 py-1.5 rounded-lg text-[11.5px] font-semibold text-white bg-rose-600 hover:bg-rose-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/40"
+                  >
+                    Close the lens
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </motion.div>
       </motion.div>
     </AnimatePresence>,
     document.body,
+  )
+}
+
+/**
+ * How far the walk has reached, on the focal card.
+ *
+ * Two counts and one qualifier — and the qualifier is the honest half:
+ * a walk that still has an open frontier has seen SOME of the lineage,
+ * so the numbers are floors and say so. The old strip measured a
+ * bounded transitive trace of its own, which counted different things
+ * from everything beside it and could not be reconciled with them.
+ */
+function ReachLine({ reach, loading }: { reach: LensReach | null; loading: boolean }) {
+  if (loading) {
+    return (
+      <p className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted/70">
+        <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/60" />
+        Walking the lineage…
+      </p>
+    )
+  }
+  if (!reach) return null
+  return (
+    <p
+      className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted"
+      title={reach.moreUp || reach.moreDown
+        ? 'What this walk has reached so far. A + marks a floor rather than a total — more exists that way. Use ⊕ on a card to walk further.'
+        : 'Everything connected to this entity, upstream and downstream, as far as the data source goes.'}
+    >
+      <LucideIcons.Radar className="w-3 h-3 flex-shrink-0 text-accent-lineage/70" />
+      {/* ONE span, ONE ellipsis — two independently-truncating spans cut
+          mid-word on each half at once on a narrow card (see the graph
+          body's own `orientationHalf` note for the reported shape). */}
+      <span className="truncate min-w-0 tabular-nums">
+        {orientationHalf('Fed by', 'source', 'upstream', reach.up, reach.moreUp, reach.upSystems, 'No upstream sources')}
+        {' · '}
+        {orientationHalf('feeds', 'consumer', 'downstream', reach.down, reach.moreDown, reach.downSystems, 'feeds nothing downstream')}
+      </span>
+    </p>
   )
 }
 
@@ -1314,23 +2273,10 @@ function FlowRail({ color, active }: { color: string; active: boolean }) {
   )
 }
 
-function labelOf(id: string, node: LineageNode | undefined): string {
-  const data = node?.data as Record<string, unknown> | undefined
-  return (data?.label as string)
-    ?? (data?.businessLabel as string)
-    // URN-derived fallback for an as-yet-unresolved neighbor. Split on
-    // structural punctuation too (`,` `(` `)`) so nested URNs like
-    // `urn:…:(…,field_name)` yield `field_name`, never a stray `)` or a
-    // comma-joined blob.
-    ?? id.split(/[:/.,()]/).filter(Boolean).pop()
-    ?? id
-}
-
-/** Entity-type filter chips — shared by the classic columns and the
- *  walk frontier. An OFF chip goes ghost (dashed border, dimmed, EyeOff)
- *  but keeps its count: filtering is an explicit, visible, reversible
- *  choice — never a strikethrough that reads as broken, never silent
- *  loss. */
+/** Entity-type filter chips. An OFF chip goes ghost (dashed border,
+ *  dimmed, EyeOff) but keeps its count: filtering is an explicit,
+ *  visible, reversible choice — never a strikethrough that reads as
+ *  broken, never silent loss. */
 function TypeChips({
   chips,
   hiddenTypes,
@@ -1353,8 +2299,8 @@ function TypeChips({
             type="button"
             onClick={() => onToggle(t)}
             title={off
-              ? `${t} hidden — click to show these ${n} connection${n === 1 ? '' : 's'} again`
-              : `Click to hide ${t} connections (${n})`}
+              ? `${t} hidden — click to show these ${n} entit${n === 1 ? 'y' : 'ies'} again`
+              : `Click to hide ${t} entities (${n})`}
             className={cn(
               'flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[9px] font-semibold uppercase tracking-wide transition-all',
               off
@@ -1373,121 +2319,70 @@ function TypeChips({
   )
 }
 
-/** Drill payload for an aggregated (×N) row — computed by the column,
- *  rendered by the row. Same refine semantics as the walk columns. */
-interface NeighborRowDrill {
-  drilled: boolean
-  onToggle: () => void
-  /** Locally loaded ∪ on-demand fetched underlying edges, deduped. */
-  constituents: LineageEdge[]
-  missing: number
-  state?: 'loading' | 'done' | 'error'
-  onRetry?: () => void
-}
-
-/** One neighbor row — shared by parent groups, type groups, and the
- *  rollup tier so the interaction contract stays identical everywhere. */
+/** One neighbour row — the same entity the graph body draws as a card,
+ *  with the same weight on it. */
 function NeighborRow({
   r,
   isIn,
-  accentColor,
-  rollup,
-  drill,
-  nodeMap,
+  edgeTypeInfo,
   onRecenter,
   onRevealOnCanvas,
   onOpenDetails,
 }: {
-  r: NeighborRecord
+  r: WalkNeighbor
   isIn: boolean
-  accentColor: string
-  /** Coarser-grain summary row — muted, badged, never counted as more data. */
-  rollup?: boolean
-  /** Present when the row is a drillable aggregate. */
-  drill?: NeighborRowDrill
-  nodeMap: Map<string, LineageNode>
+  edgeTypeInfo?: EdgeTypeInfoMap
   onRecenter: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
 }) {
-  const edgeColor = generateEdgeColorFromType(r.edgeTypeNorm)
-  const aggCount = (r.edge.data as { sourceEdgeCount?: number } | undefined)?.sourceEdgeCount
-  const bundleCount = (r.edge as { edgeCount?: number }).edgeCount
-    ?? (r.edge.data as { edgeCount?: number } | undefined)?.edgeCount
-    ?? aggCount
-  const unloaded = !r.neighborNode
+  const accentColor = r.type === 'not loaded' ? '#94a3b8' : generateColorFromType(r.type)
   return (
-    <div className="min-w-0">
     <div
       role="button"
       tabIndex={0}
       className={cn(
         // content-visibility skips layout+paint for offscreen rows —
-        // lightweight virtualization; columns can hold 200 cards.
+        // lightweight virtualization; columns can hold hundreds of rows.
         // transition-colors (not -all): animating every property makes
         // hover sweeps during scroll recompute layout per row.
         'group relative flex items-center gap-2 rounded-lg border px-2.5 py-2 cursor-pointer transition-colors [content-visibility:auto] [contain-intrinsic-size:auto_58px] border-black/[0.07] dark:border-white/[0.08] hover:border-accent-lineage/50 hover:shadow-sm bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] min-w-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-        rollup && 'opacity-75 hover:opacity-100',
       )}
       style={{ borderLeftWidth: 3, borderLeftColor: accentColor }}
-      onClick={() => onRecenter(r.neighborId)}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRecenter(r.neighborId) } }}
-      title={`Re-center on ${labelOf(r.neighborId, r.neighborNode)}`}
+      onClick={() => onRecenter(r.urn)}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRecenter(r.urn) } }}
+      title={`Re-center on ${r.label}`}
     >
       <div className="flex-1 min-w-0">
         <p className="flex items-center gap-1.5 min-w-0 text-[12px] font-medium text-ink leading-snug">
-          <span className="truncate">{labelOf(r.neighborId, r.neighborNode)}</span>
-          {rollup && (
-            <span
-              className="flex-shrink-0 flex items-center gap-0.5 px-1 py-px rounded bg-black/[0.05] dark:bg-white/[0.07] text-[8.5px] font-semibold uppercase tracking-wide text-ink-muted/70"
-              title="A coarser-grain summary of finer flows — not an additional connection"
-            >
-              <LucideIcons.Layers className="w-2.5 h-2.5" />
-              rollup
-            </span>
-          )}
+          <span className="truncate">{r.label}</span>
         </p>
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug">
-          <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ backgroundColor: edgeColor }} />
-          <span className="truncate uppercase tracking-wide">{r.edgeTypeNorm || 'relationship'}</span>
-          {drill ? (
-            // The ×N badge IS the drill toggle — same refine gesture as
-            // the walk columns (stopPropagation: card click re-centers).
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); drill.onToggle() }}
-              title={drill.drilled
-                ? 'Collapse back to the rolled-up connection'
-                : `Refine — see the ${(aggCount ?? bundleCount ?? 0).toLocaleString()} underlying connection${(aggCount ?? bundleCount ?? 0) === 1 ? '' : 's'} this rolls up`}
-              className="flex items-center gap-0.5 tabular-nums font-semibold text-ink-muted hover:text-accent-lineage transition-colors"
-            >
-              ×{(bundleCount ?? 0).toLocaleString()}
-              <LucideIcons.ChevronDown className={cn('w-2.5 h-2.5 transition-transform', !drill.drilled && '-rotate-90')} />
-            </button>
-          ) : (
-            bundleCount != null && bundleCount > 1 && (
-              <span className="tabular-nums font-semibold text-ink-muted">×{bundleCount.toLocaleString()}</span>
-            )
-          )}
-          {unloaded && <span className="italic">· not on canvas</span>}
+          <span
+            className="truncate uppercase tracking-wide"
+            title={edgeTypeInfo?.get(r.edgeTypeNorm)?.description}
+          >
+            {r.edgeTypeNorm ? edgeLabelFor(r.edgeTypeNorm, edgeTypeInfo) : 'several relationships'}
+          </span>
+          {/* No ×N. It is the same within-model accumulator the cards
+              lost — and this surface has no wire for it to live on, which
+              is where a weight belongs. The peek states an entity's flows
+              in words, scoped to the walk. */}
         </p>
       </div>
       {/* Flow direction cue: data always travels left → right. Hover
           actions ALWAYS dock on the right (docking them left covered
           the label/chevron); only the right-side chevron (incoming
-          rows) swaps out for them — the left chevron keeps its place. */}
+          rows) swaps out for them. */}
       <LucideIcons.ChevronRight
-        className={cn('w-3.5 h-3.5 flex-shrink-0', isIn ? 'order-last group-hover:hidden' : 'order-first')}
-        style={{ color: `${edgeColor}99` }}
+        className={cn('w-3.5 h-3.5 flex-shrink-0 text-ink-muted/50', isIn ? 'order-last group-hover:hidden' : 'order-first')}
       />
-      <span className={cn(
-        'hidden group-hover:flex flex-shrink-0 order-last items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5',
-      )}>
+      <span className="hidden group-hover:flex flex-shrink-0 order-last items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5">
         {onRevealOnCanvas && (
           <InfoTooltip side="top" content="Reveal on canvas">
             <button
               type="button"
-              onClick={(e) => { e.stopPropagation(); void onRevealOnCanvas(r.neighborId) }}
+              onClick={(e) => { e.stopPropagation(); void onRevealOnCanvas(r.urn) }}
               className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
             >
               <LucideIcons.Crosshair className="w-3 h-3" />
@@ -1498,7 +2393,7 @@ function NeighborRow({
           <InfoTooltip side="top" content="Open details">
             <button
               type="button"
-              onClick={(e) => { e.stopPropagation(); onOpenDetails(r.neighborId) }}
+              onClick={(e) => { e.stopPropagation(); onOpenDetails(r.urn) }}
               className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
             >
               <LucideIcons.PanelRight className="w-3 h-3" />
@@ -1507,197 +2402,73 @@ function NeighborRow({
         )}
       </span>
     </div>
-    {/* Refined constituents — the aggregate's real endpoints, local ∪
-        fetched, mirroring the walk-column drill exactly. */}
-    {drill?.drilled && (
-      <div className="ml-4 mt-0.5 pl-2 border-l border-dashed border-black/[0.10] dark:border-white/[0.12] pb-1">
-        {drill.constituents.map(e => {
-          const otherId = isIn ? e.source : e.target
-          const oColor = generateColorFromType((nodeMap.get(otherId)?.data?.type as string) ?? 'entity')
-          return (
-            <div
-              key={e.id}
-              className="flex items-center gap-1.5 px-2 py-1 min-w-0 text-[10.5px] text-ink/90"
-              title={`${labelOf(e.source, nodeMap.get(e.source))} → ${labelOf(e.target, nodeMap.get(e.target))}${(e.data?.edgeType as string) ? ` (${e.data?.edgeType as string})` : ''}`}
-            >
-              <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ backgroundColor: oColor }} />
-              <span className="truncate">{labelOf(otherId, nodeMap.get(otherId))}</span>
-            </div>
-          )
-        })}
-        {drill.state === 'loading' && (
-          <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-ink-muted/70">
-            <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" />
-            Fetching underlying connections…
-          </div>
-        )}
-        {drill.state === 'error' && (
-          <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-400">
-            <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
-            <span>Couldn&apos;t fetch the underlying connections.</span>
-            {drill.onRetry && (
-              <button type="button" onClick={drill.onRetry} className="font-semibold hover:underline">
-                Retry
-              </button>
-            )}
-          </div>
-        )}
-        {drill.constituents.length === 0 && drill.state !== 'loading' && drill.state !== 'error' && (
-          <p className="px-2 py-1 text-[10px] text-ink-muted/70 italic leading-snug">
-            {drill.state === 'done'
-              ? 'No underlying connections found between these entities.'
-              : 'Constituent connections aren’t loaded — drill this edge on the canvas to fetch them.'}
-          </p>
-        )}
-        {drill.missing > 0 && drill.constituents.length > 0 && drill.state !== 'loading' && (
-          <p className="px-2 py-0.5 text-[10px] text-ink-muted/60">
-            +{drill.missing.toLocaleString()} more (showing the first {drill.constituents.length})
-          </p>
-        )}
-      </div>
-    )}
-    </div>
   )
 }
 
+/**
+ * One direction's neighbours as a scannable column.
+ *
+ * Grouped by their containment PARENT when the walk knows one — the
+ * column then reads "which datasets feed me, via which fields", which
+ * is the structural story the graph body tells by nesting.
+ */
 function NeighborColumn({
   title,
   subtitle,
-  records,
-  totalCount,
+  rows,
+  totalConnections,
   direction,
-  fetchState,
-  nodeMap,
-  resolveParent,
-  isCoarser,
+  walkStatus,
   hiddenTypes,
   onToggleType,
-  collapseToggles,
-  onToggleCollapse,
   searching,
-  rawEdgeById,
-  drilledRows,
-  onToggleDrill,
-  drillEdges,
-  drillStatus,
-  onDrillFetch,
+  edgeTypeInfo,
   onRecenter,
   onRevealOnCanvas,
   onOpenDetails,
 }: {
   title: string
   subtitle: string
-  records: NeighborRecord[]
-  totalCount: number
+  rows: WalkNeighbor[]
+  totalConnections: number
   direction: 'incoming' | 'outgoing'
-  /** On-demand fetch status for the focal node — keeps an in-flight
-   *  fetch from reading as "no connections". */
-  fetchState?: 'loading' | 'done' | 'error'
-  nodeMap: Map<string, LineageNode>
-  /** Containment parent of a node, when known (fetched or loaded). */
-  resolveParent: (id: string) => string | null
-  /** True when the given entity type is a COARSER grain than the focal
-   *  (its type can transitively contain the focal's type) — those rows
-   *  are summaries of finer flows, demoted to the rollup tier. */
-  isCoarser: (type: string | undefined) => boolean
+  walkStatus: LensFetchStatus
   hiddenTypes: ReadonlySet<string>
   onToggleType: (type: string) => void
-  /** Per-group collapse toggles (XOR against the column default). */
-  collapseToggles: ReadonlySet<string>
-  onToggleCollapse: (key: string) => void
-  /** Text filter active — auto-expand every group so matches can't
-   *  hide inside a collapsed one (that would be silent loss). */
+  /** Text filter active — every group expands so matches can't hide
+   *  inside a collapsed one (that would be silent loss). */
   searching: boolean
-  /** Drill machinery — same refine semantics as the walk columns. */
-  rawEdgeById: Map<string, LineageEdge>
-  drilledRows: Set<string>
-  onToggleDrill: (key: string, edge: LineageEdge) => void
-  drillEdges?: Map<string, LineageEdge[]>
-  drillStatus?: Map<string, 'loading' | 'done' | 'error'>
-  onDrillFetch?: (edge: LineageEdge) => void
+  edgeTypeInfo?: EdgeTypeInfoMap
   onRecenter: (nodeId: string) => void
   onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
   onOpenDetails?: (nodeId: string) => void
 }) {
-  // Three-way organization, replacing the flat by-type grouping:
-  //  1. finer/peer rows grouped by their PARENT dataset when known —
-  //     the column reads "which datasets feed me, via which fields";
-  //  2. rows with no known parent grouped by entity type (as before);
-  //  3. coarser-grain rows demoted to a labeled Rollups tier — visible
-  //     (never silently dropped) but muted and explained, because they
-  //     summarize the finer flows above rather than add connections.
-  const { typeChips, groups, rollups, hiddenCount } = useMemo(() => {
+  const { typeChips, groups, hiddenCount } = useMemo(() => {
     const typeCounts = new Map<string, number>()
-    for (const r of records) {
-      const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
-      typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1)
-    }
+    for (const r of rows) typeCounts.set(r.type, (typeCounts.get(r.type) ?? 0) + 1)
     const typeChips = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])
     let hiddenCount = 0
-    const shown: NeighborRecord[] = []
-    for (const r of records) {
-      const t = (r.neighborNode?.data?.type as string) ?? 'not loaded'
-      if (hiddenTypes.has(t)) { hiddenCount++; continue }
-      if (shown.length < ROWS_CAP) shown.push(r)
+    const shown: WalkNeighbor[] = []
+    for (const r of rows) {
+      if (hiddenTypes.has(r.type)) { hiddenCount++; continue }
+      shown.push(r)
     }
-    const rollups: NeighborRecord[] = []
-    const finer: NeighborRecord[] = []
+    const groupMap = new Map<string, { key: string; label: string; rows: WalkNeighbor[] }>()
     for (const r of shown) {
-      if (isCoarser(r.neighborNode?.data?.type as string | undefined)) rollups.push(r)
-      else finer.push(r)
-    }
-    const groupMap = new Map<string, { kind: 'parent' | 'type'; key: string; rows: NeighborRecord[] }>()
-    for (const r of finer) {
-      const parent = resolveParent(r.neighborId)
-      const mapKey = parent ? `p:${parent}` : `t:${(r.neighborNode?.data?.type as string) ?? 'not loaded'}`
+      const mapKey = r.parentUrn ? `p:${r.parentUrn}` : `t:${r.type}`
       let g = groupMap.get(mapKey)
       if (!g) {
-        g = {
-          kind: parent ? 'parent' : 'type',
-          key: parent ?? ((r.neighborNode?.data?.type as string) ?? 'not loaded'),
-          rows: [],
-        }
+        g = { key: r.parentUrn ?? r.type, label: r.parentLabel ?? r.type, rows: [] }
         groupMap.set(mapKey, g)
       }
       g.rows.push(r)
     }
     const groups = [...groupMap.values()].sort((a, b) => b.rows.length - a.rows.length)
-    return { typeChips, groups, rollups, hiddenCount }
-  }, [records, hiddenTypes, isCoarser, resolveParent])
+    return { typeChips, groups, hiddenCount }
+  }, [rows, hiddenTypes])
 
   const isIn = direction === 'incoming'
-  const allFilteredOff = records.length > 0 && groups.length === 0 && rollups.length === 0
-
-  // Drill payload for an aggregated row — local raw edges ∪ on-demand
-  // fetched, mirroring the walk-column computation exactly.
-  const buildDrill = (r: NeighborRecord): NeighborRowDrill | undefined => {
-    const aggData = r.edge.data as { isAggregated?: boolean; sourceEdgeCount?: number; sourceEdges?: string[] } | undefined
-    const canDrill = !!aggData?.isAggregated
-      && ((aggData.sourceEdges?.length ?? 0) > 0 || (aggData.sourceEdgeCount ?? 0) > 1)
-    if (!canDrill) return undefined
-    const key = `c:${direction}:${r.edge.id}`
-    const drilled = drilledRows.has(key)
-    let constituents: LineageEdge[] = []
-    let missing = 0
-    if (drilled) {
-      const local = (aggData.sourceEdges ?? [])
-        .map(eid => rawEdgeById.get(eid))
-        .filter((e): e is LineageEdge => !!e)
-      const seenConstituent = new Set(local.map(e => e.id))
-      const fetched = (drillEdges?.get(r.edge.id) ?? []).filter(e => !seenConstituent.has(e.id))
-      const all = [...local, ...fetched]
-      constituents = all.slice(0, 50)
-      missing = Math.max(0, Math.max(aggData.sourceEdgeCount ?? 0, all.length) - constituents.length)
-    }
-    return {
-      drilled,
-      onToggle: () => onToggleDrill(key, r.edge),
-      constituents,
-      missing,
-      state: drilled ? drillStatus?.get(r.edge.id) : undefined,
-      onRetry: onDrillFetch ? () => onDrillFetch(r.edge) : undefined,
-    }
-  }
+  const allFilteredOff = rows.length > 0 && groups.length === 0
 
   return (
     <div className={cn(
@@ -1720,180 +2491,144 @@ function NeighborColumn({
             ? 'bg-sky-500/10 text-sky-600 dark:text-sky-400'
             : 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
         )}>
-          {totalCount}
+          {totalConnections}
         </span>
       </div>
-      {/* Grain/type chips — one per entity type present, click to
-          toggle. An off chip stays visible with its count (explicit
-          user choice, not silent loss). */}
       {typeChips.length > 1 && (
         <TypeChips chips={typeChips} hiddenTypes={hiddenTypes} onToggle={onToggleType} className="px-3 pb-1.5 flex-shrink-0" />
       )}
       <div className="flex-1 overflow-y-auto custom-scrollbar px-2.5 pb-3">
         {allFilteredOff && (
           <p className="px-2 py-6 text-center text-[11px] text-ink-muted/70 leading-snug">
-            All {totalCount} connection{totalCount === 1 ? '' : 's'} hidden by the type chips above.
+            All {rows.length} hidden by the type chips above.
           </p>
         )}
-        {records.length === 0 && (
-          totalCount === 0 && fetchState === 'loading' ? (
+        {rows.length === 0 && (
+          walkStatus === 'loading' ? (
             <div className="flex flex-col items-center gap-2 px-2 py-10 text-center">
               <LucideIcons.Loader2 className="w-5 h-5 animate-spin text-accent-lineage/60" />
               <p className="text-[11px] text-ink-muted/70 leading-snug">
-                Fetching {isIn ? 'upstream sources' : 'downstream consumers'} from the data source…
+                Walking {isIn ? 'upstream sources' : 'downstream consumers'} from the data source…
               </p>
             </div>
           ) : (
             <div className="flex flex-col items-center gap-2 px-2 py-10 text-center">
               <LucideIcons.CircleSlash className="w-5 h-5 text-ink-muted/40" />
               <p className="text-[11px] text-ink-muted/70 leading-snug">
-                {totalCount === 0
-                  // Post-fetch this is a data-source claim, not a canvas one.
-                  ? fetchState === 'done'
+                {searching
+                  ? 'No matches for this filter'
+                  : walkStatus === 'done'
+                    // Post-walk this is a claim about the DATA SOURCE.
                     ? `No ${isIn ? 'upstream sources' : 'downstream consumers'} in the data source`
-                    : `No ${isIn ? 'upstream sources' : 'downstream consumers'} on this canvas`
-                  : 'No matches for this filter'}
+                    : walkStatus === 'unsupported'
+                      ? 'This data source can’t walk lineage'
+                      : `Couldn’t reach the data source for ${isIn ? 'upstream sources' : 'downstream consumers'}`}
               </p>
             </div>
           )
         )}
-        {groups.map((g, _gi, allGroups) => {
-          if (g.kind === 'parent') {
-            const parentLabel = labelOf(g.key, nodeMap.get(g.key))
-            const parentColor = generateColorFromType((nodeMap.get(g.key)?.data?.type as string) ?? 'entity')
-            // 3+ parent groups → start collapsed (dataset-level overview
-            // first); toggles XOR the default. Searching expands all.
-            const defaultCollapsed = allGroups.filter(gr => gr.kind === 'parent').length >= 3
-            const collapseKey = `${direction}:p:${g.key}`
-            const collapsed = !searching && (defaultCollapsed !== collapseToggles.has(collapseKey))
-            return (
-              <div key={`p-${g.key}`} className="mb-2.5">
-                {/* Parent-dataset header — the structural story ("which
-                    datasets feed me, via which fields"). The WHOLE row
-                    toggles collapse (a 20px chevron alone was unusable);
-                    navigation lives on the dedicated re-center button. */}
-                <div className="flex items-center gap-1 mb-1 min-w-0">
-                  <button
-                    type="button"
-                    onClick={() => onToggleCollapse(collapseKey)}
-                    title={collapsed ? `Expand ${g.rows.length} connection${g.rows.length === 1 ? '' : 's'}` : 'Collapse group'}
-                    className="flex-1 min-w-0 flex items-center gap-2 px-2 py-2 rounded-lg text-left bg-black/[0.03] dark:bg-white/[0.04] hover:bg-black/[0.06] dark:hover:bg-white/[0.07] transition-colors"
-                  >
-                    <LucideIcons.ChevronDown className={cn('w-4 h-4 flex-shrink-0 text-ink-muted transition-transform', collapsed && '-rotate-90')} />
-                    <LucideIcons.FolderTree className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted/70" />
-                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: parentColor }} />
-                    <span className="min-w-0 truncate text-[12px] font-semibold text-ink">{parentLabel}</span>
-                    <span className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07] text-[10px] font-semibold tabular-nums text-ink-muted">
-                      {g.rows.length}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onRecenter(g.key)}
-                    title={`Re-center on ${parentLabel}`}
-                    className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors"
-                  >
-                    <LucideIcons.Crosshair className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                {!collapsed && (
-                  <div className="flex flex-col gap-1">
-                    {g.rows.map((r, i) => (
-                      <NeighborRow
-                        key={`${r.edge.id}-${i}`}
-                        r={r}
-                        isIn={isIn}
-                        accentColor={r.neighborNode ? generateColorFromType((r.neighborNode.data?.type as string) ?? 'entity') : '#94a3b8'}
-                        drill={buildDrill(r)}
-                        nodeMap={nodeMap}
-                        onRecenter={onRecenter}
-                        onRevealOnCanvas={onRevealOnCanvas}
-                        onOpenDetails={onOpenDetails}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            )
-          }
-          const unloaded = g.key === 'not loaded'
-          const typeColor = unloaded ? '#94a3b8' : generateColorFromType(g.key)
-          return (
-            <div key={`t-${g.key}`} className="mb-2.5">
-              <div
-                className="flex items-center gap-1.5 px-1.5 py-1"
-                title={unloaded
-                  ? 'Referenced by lineage, but the entity details couldn’t be resolved from the data source.'
-                  : undefined}
-              >
-                {unloaded
-                  ? <LucideIcons.HelpCircle className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
-                  : <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: typeColor }} />}
-                <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/80">
-                  {unloaded ? 'Unresolved' : g.key}
-                </span>
-                <span className="text-[9.5px] tabular-nums text-ink-muted/60">{g.rows.length}</span>
-              </div>
-              <div className="flex flex-col gap-1">
-                {g.rows.map((r, i) => (
-                  <NeighborRow
-                    key={`${r.edge.id}-${i}`}
-                    r={r}
-                    isIn={isIn}
-                    accentColor={typeColor}
-                    drill={buildDrill(r)}
-                    nodeMap={nodeMap}
-                    onRecenter={onRecenter}
-                    onRevealOnCanvas={onRevealOnCanvas}
-                    onOpenDetails={onOpenDetails}
-                  />
-                ))}
-              </div>
-            </div>
-          )
-        })}
-        {/* Rollup tier — coarser-grain summaries (containers, platforms)
-            of the flows above. Visible and labeled, never silently
-            dropped — but demoted so they can't read as extra data. */}
-        {rollups.length > 0 && (
-          <div className="mt-1 pt-1.5 border-t border-dashed border-black/[0.08] dark:border-white/[0.10]">
-            <div
-              className="flex items-center gap-1.5 px-1.5 py-1"
-              title="Coarser-grain summaries (containers, platforms) of the flows above — not additional connections"
-            >
-              <LucideIcons.Layers className="w-3 h-3 text-ink-muted/50" />
-              <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/60">Rollups</span>
-              <span className="text-[9.5px] tabular-nums text-ink-muted/50">{rollups.length}</span>
-            </div>
-            <div className="flex flex-col gap-1">
-              {rollups.map((r, i) => (
-                <NeighborRow
-                  key={`${r.edge.id}-${i}`}
-                  r={r}
-                  isIn={isIn}
-                  accentColor={r.neighborNode ? generateColorFromType((r.neighborNode.data?.type as string) ?? 'entity') : '#94a3b8'}
-                  rollup
-                  drill={buildDrill(r)}
-                  nodeMap={nodeMap}
-                  onRecenter={onRecenter}
-                  onRevealOnCanvas={onRevealOnCanvas}
-                  onOpenDetails={onOpenDetails}
-                />
-              ))}
-            </div>
-          </div>
-        )}
+        {groups.map(g => (
+          <NeighborGroup
+            key={g.key}
+            group={g}
+            isIn={isIn}
+            direction={direction}
+            searching={searching}
+            groupCount={groups.length}
+            edgeTypeInfo={edgeTypeInfo}
+            onRecenter={onRecenter}
+            onRevealOnCanvas={onRevealOnCanvas}
+            onOpenDetails={onOpenDetails}
+          />
+        ))}
         {hiddenCount > 0 && !allFilteredOff && (
           <p className="px-2 py-1.5 text-[10px] text-ink-muted/60">
-            {hiddenCount} connection{hiddenCount === 1 ? '' : 's'} hidden by the type chips
-          </p>
-        )}
-        {records.length > ROWS_CAP && (
-          <p className="px-2 py-1.5 text-[10px] text-ink-muted/70">
-            +{records.length - ROWS_CAP} more — use the filter to narrow
+            {hiddenCount} hidden by the type chips
           </p>
         )}
       </div>
+    </div>
+  )
+}
+
+/** One parent group — collapsible, because 3+ of them means the useful
+ *  first read is "which datasets feed me", not every field at once. */
+function NeighborGroup({
+  group,
+  isIn,
+  direction,
+  searching,
+  groupCount,
+  edgeTypeInfo,
+  onRecenter,
+  onRevealOnCanvas,
+  onOpenDetails,
+}: {
+  group: { key: string; label: string; rows: WalkNeighbor[] }
+  isIn: boolean
+  direction: 'incoming' | 'outgoing'
+  searching: boolean
+  groupCount: number
+  edgeTypeInfo?: EdgeTypeInfoMap
+  onRecenter: (nodeId: string) => void
+  onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
+  onOpenDetails?: (nodeId: string) => void
+}) {
+  // 3+ groups → start collapsed (dataset-level overview first); the
+  // toggle XORs that default so it never needs migrating. Searching
+  // expands everything.
+  const [toggled, setToggled] = useState(false)
+  const collapsed = !searching && (groupCount >= 3) !== toggled
+  const parentColor = generateColorFromType(group.rows[0]?.type ?? 'entity')
+  // Connections, not rows: the column header counts them, the focal
+  // card counts them, and a row states its own ×N. One unit, so the
+  // three numbers on screen add up.
+  const groupConnections = group.rows.reduce((n, r) => n + r.weight, 0)
+  return (
+    <div className="mb-2.5">
+      <div className="flex items-center gap-1 mb-1 min-w-0">
+        <button
+          type="button"
+          onClick={() => setToggled(t => !t)}
+          aria-expanded={!collapsed}
+          title={collapsed ? `Expand ${group.rows.length} entit${group.rows.length === 1 ? 'y' : 'ies'}` : 'Collapse group'}
+          className="flex-1 min-w-0 flex items-center gap-2 px-2 py-2 rounded-lg text-left bg-black/[0.03] dark:bg-white/[0.04] hover:bg-black/[0.06] dark:hover:bg-white/[0.07] transition-colors"
+        >
+          <LucideIcons.ChevronDown className={cn('w-4 h-4 flex-shrink-0 text-ink-muted transition-transform', collapsed && '-rotate-90')} />
+          <LucideIcons.FolderTree className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted/70" />
+          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: parentColor }} />
+          <span className="min-w-0 truncate text-[12px] font-semibold text-ink">{group.label}</span>
+          <span
+            className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07] text-[10px] font-semibold tabular-nums text-ink-muted"
+            title={`${groupConnections} connection${groupConnections === 1 ? '' : 's'} from ${group.rows.length} entit${group.rows.length === 1 ? 'y' : 'ies'}`}
+          >
+            {groupConnections}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => onRecenter(group.key)}
+          title={`Re-center on ${group.label}`}
+          className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors"
+        >
+          <LucideIcons.Crosshair className="w-3.5 h-3.5" />
+        </button>
+      </div>
+      {!collapsed && (
+        <div className="flex flex-col gap-1">
+          {group.rows.map(r => (
+            <NeighborRow
+              key={`${direction}-${r.urn}`}
+              r={r}
+              isIn={isIn}
+              edgeTypeInfo={edgeTypeInfo}
+              onRecenter={onRecenter}
+              onRevealOnCanvas={onRevealOnCanvas}
+              onOpenDetails={onOpenDetails}
+            />
+          ))}
+        </div>
+      )}
     </div>
   )
 }

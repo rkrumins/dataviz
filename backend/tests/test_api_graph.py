@@ -22,6 +22,9 @@ from backend.common.models.graph import (
     EdgeQuery,
     OntologyMetadata,
     TopLevelNodesResult,
+    TraceClosureResult,
+    TraceFocus,
+    TraceFrontierNode,
 )
 from backend.app.services.context_engine import ContextEngine
 
@@ -136,10 +139,52 @@ class _StubProvider(GraphDataProvider):
     async def delete_edge(self, edge_id) -> bool:
         return True
 
+    async def trace_closure(
+        self, urn, upstream_depth, downstream_depth,
+        lineage_edge_types, containment_edge_types, max_nodes, timeout_ms,
+        seed_urns=None, exclude_urns=None, after_cursor=None,
+    ) -> TraceClosureResult:
+        # Deterministic scoped closure: the focus + its downstream lineage
+        # edge, plus one synthetic frontier entry so response tests can
+        # assert on frontierUp[0].totalCount / nextCursor.
+        return TraceClosureResult(
+            nodes=list(self._nodes.values()),
+            edges=list(self._edges),
+            containmentEdges=[],
+            upstreamUrns=set(),
+            downstreamUrns={e.target_urn for e in self._edges},
+            focus=TraceFocus(urn=urn, level=0, entityType="dataset"),
+            effectiveLevel=0,
+            isInherited=False,
+            inheritedFromUrn=None,
+            truncated=False,
+            truncationReason=None,
+            frontierUp=[TraceFrontierNode(urn="urn:frontier:up1", totalCount=7, nextCursor="e:42")],
+            frontierDown=[],
+            seedTruncated=False,
+        )
+
 
 class _UnavailableProvider(_StubProvider):
     async def search_nodes(self, query: str, limit: int = 10, **kw) -> List[GraphNode]:
         raise OSError("connection refused")
+
+
+class _NotImplementedClosureProvider(_StubProvider):
+    async def trace_closure(self, *args, **kwargs) -> TraceClosureResult:
+        raise NotImplementedError("stub does not support trace_closure")
+
+
+class _BaseWithoutClosure:
+    """A base that does not have the method AT ALL — which is what serves a
+    draft on a stale projection (VersionedBranchProvider). `hasattr` is the
+    whole difference from the stub above, and it is the difference between
+    an honest 501 and an AttributeError 500."""
+
+    name = "base-without-closure"
+
+    def set_containment_edge_types(self, edge_types, from_ontology: bool = False) -> None:
+        pass
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────
@@ -229,6 +274,313 @@ async def test_trace_downstream_only(graph_client):
         json={"urn": urn, "direction": "downstream", "depth": 2},
     )
     assert resp.status_code == 410
+
+
+# ── POST /trace/closure ──────────────────────────────────────────────
+
+async def test_trace_closure_returns_scoped_lineage(graph_client):
+    """POST /trace/closure runs the focus-scoped closure through the real
+    engine + route (stub only at the provider boundary) and returns the
+    scoped lineage subgraph as a 200, with the frontier surfaced under its
+    camelCase wire aliases and the health header set."""
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.headers.get("X-Provider-Health") == "unknown"
+    body = resp.json()
+    assert "nodes" in body and "edges" in body
+    assert len(body["edges"]) >= 1
+    assert body["truncated"] is False
+    assert body["frontierUp"][0]["totalCount"] == 7
+    assert body["frontierUp"][0]["nextCursor"] == "e:42"
+    assert body["seedTruncated"] is False
+
+
+async def test_trace_closure_after_cursor_with_seed_urns_422(graph_client):
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "upstream", "upstreamDepth": 1, "afterCursor": "e:1", "seedUrns": [urn]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_trace_closure_after_cursor_with_exclude_urns_422(graph_client):
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "upstream", "upstreamDepth": 1, "afterCursor": "e:1", "excludeUrns": [urn]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_trace_closure_after_cursor_with_direction_both_422(graph_client):
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "both", "afterCursor": "e:1"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_trace_closure_after_cursor_with_wrong_active_depth_422(graph_client):
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "upstream", "upstreamDepth": 2, "afterCursor": "e:1"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_trace_closure_unknown_direction_422(graph_client):
+    """The wire rejects it too, not just the model — a misspelt direction
+    used to page the OPPOSITE side of the graph and answer 200."""
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "upstrem", "upstreamDepth": 1, "afterCursor": "e:1"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_trace_closure_after_cursor_bad_format_422(graph_client):
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "upstream", "upstreamDepth": 1, "afterCursor": "not-a-cursor"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_trace_closure_provider_not_implemented_returns_501(test_client: AsyncClient):
+    """A provider that doesn't support trace_closure maps to 501, not a
+    500, on the scope-is-None / direct-compute path — this mock engine
+    carries no workspace scope, same as `graph_client`, so `_cache_scope`
+    returns None and `GraphCache.get_or_compute` is never called. See
+    test_trace_closure_provider_not_implemented_returns_501_through_cache_wrapper
+    below for the same proof through the real cache wrapper."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints.graph import get_context_engine
+
+    mock_engine = ContextEngine(provider=_NotImplementedClosureProvider())
+    urn = _get_sample_urn(mock_engine)
+
+    async def _override():
+        return mock_engine
+
+    app.dependency_overrides[get_context_engine] = _override
+    try:
+        resp = await test_client.post(
+            "/api/v1/test-ws/graph/trace/closure",
+            json={"urn": urn},
+        )
+    finally:
+        app.dependency_overrides.pop(get_context_engine, None)
+
+    assert resp.status_code == 501
+    assert resp.json()["detail"]["code"] == "trace_closure_unsupported"
+
+
+async def test_trace_closure_on_a_draft_whose_base_cannot_do_it_returns_501(test_client: AsyncClient):
+    """A DRAFT read, where the overlay's base has no trace_closure.
+
+    The overlay HAS the method — so the engine's own `getattr` guard passes
+    and hands the call straight through — and the pass-through then reached
+    for a method its base does not have. That is an AttributeError, i.e. a
+    500 on the one read path (a draft on a stale projection) where the
+    answer is simply "this provider cannot do that". Every sibling read on
+    that base already says so with a 501; this one now does too."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints.graph import get_context_engine
+    from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+
+    overlay = DraftOverlayProvider(
+        _BaseWithoutClosure(), svc=None, graph_id="g1", branch_id="draft1",
+    )
+    mock_engine = ContextEngine(provider=overlay)
+
+    async def _override():
+        return mock_engine
+
+    app.dependency_overrides[get_context_engine] = _override
+    try:
+        resp = await test_client.post(
+            "/api/v1/test-ws/graph/trace/closure",
+            json={"urn": "urn:li:dataset:(a,b,c)"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_context_engine, None)
+
+    assert resp.status_code == 501
+    assert resp.json()["detail"]["code"] == "trace_closure_unsupported"
+
+
+# `graph_client`'s mock engine has no workspace/data-source scope, so every
+# test above hits `_cache_scope`'s None branch and never reaches
+# `GraphCache.get_or_compute` — the two tests below give the engine a real
+# scope (same technique as the `top_level_client` fixture) and swap in a
+# real `GraphCache` backed by a minimal mocked redis client (same technique
+# as test_graph_cache.py's `_make_redis()`, not the trivial passthrough
+# `_PassthroughGraphCache` uses) so the response has genuinely round-tripped
+# through `GraphCache.get_or_compute` — generation read, cache-miss lookup,
+# `result.model_dump_json()`, `cache_redis.set()` — the thing that actually
+# exercises `model_cls=TraceClosureResult` as a new subclass usage and the
+# try/except's placement around the real (not bypassed) call.
+
+def _make_scoped_engine_and_cache(provider):
+    from backend.app.services.graph_cache import GraphCache
+
+    engine = ContextEngine(provider=provider)
+    engine._workspace_id = "ws1"
+    engine._data_source_id = "ds1"
+
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)  # unconditional cache miss
+    redis.set = AsyncMock(return_value=True)
+    return engine, GraphCache(redis), redis
+
+
+async def test_trace_closure_returns_scoped_lineage_through_cache_wrapper(test_client: AsyncClient, monkeypatch):
+    """Success path through the real GraphCache.get_or_compute: the
+    frontier (and its totalCount/nextCursor) and seedTruncated must
+    survive the serialize/cache-write round trip, not just a direct
+    compute() call."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    mock_engine, real_cache, redis = _make_scoped_engine_and_cache(_StubProvider())
+    urn = _get_sample_urn(mock_engine)
+
+    async def _override():
+        return mock_engine
+
+    app.dependency_overrides[graph_module.get_context_engine] = _override
+    monkeypatch.setattr(graph_module, "get_graph_cache", lambda: real_cache)
+    try:
+        resp = await test_client.post(
+            "/api/v1/test-ws/graph/trace/closure",
+            json={"urn": urn},
+        )
+    finally:
+        app.dependency_overrides.pop(graph_module.get_context_engine, None)
+
+    assert resp.status_code == 200, resp.text
+    # Proof this ran through get_or_compute, not the scope-is-None bypass:
+    # the generation/cache-lookup GET and the primary+LKG cache SET both fired.
+    assert redis.get.await_count >= 1
+    assert redis.set.await_count >= 1
+    body = resp.json()
+    assert body["frontierUp"][0]["totalCount"] == 7
+    assert body["frontierUp"][0]["nextCursor"] == "e:42"
+    assert body["seedTruncated"] is False
+
+
+async def test_trace_closure_cache_hit_deserializes_the_subclass(test_client: AsyncClient, monkeypatch):
+    """The READ half of the round trip. Both wrapper tests around this one
+    always MISS, so `model_cls=TraceClosureResult` is only ever exercised on
+    the write side — nothing reaches `model_validate_json`, where the subclass
+    is actually reconstructed. That branch is where a `TraceResult` would
+    validate this very payload happily and silently drop frontierUp /
+    frontierDown / seedTruncated: a served-from-cache walk with no '+N more'
+    affordances and no cut flag, indistinguishable from a finished one. So
+    serve a cached document carrying values the stub provider could never
+    produce, and require them back."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    mock_engine, real_cache, redis = _make_scoped_engine_and_cache(_StubProvider())
+    urn = _get_sample_urn(mock_engine)
+
+    cached = TraceClosureResult(
+        nodes=[], edges=[], containmentEdges=[],
+        upstreamUrns=set(), downstreamUrns=set(),
+        focus=TraceFocus(urn=urn, level=0, entityType="dataset"),
+        effectiveLevel=0, isInherited=False, inheritedFromUrn=None,
+        truncated=True, truncationReason="max_nodes",
+        frontierUp=[TraceFrontierNode(urn="urn:cached:hub", totalCount=61, nextCursor="e:900")],
+        frontierDown=[],
+        seedTruncated=True,
+    ).model_dump_json(by_alias=True)
+    # get_or_compute reads the generation counter first, the cache key second.
+    redis.get.side_effect = [b"7", cached]
+
+    async def _override():
+        return mock_engine
+
+    app.dependency_overrides[graph_module.get_context_engine] = _override
+    monkeypatch.setattr(graph_module, "get_graph_cache", lambda: real_cache)
+    try:
+        resp = await test_client.post(
+            "/api/v1/test-ws/graph/trace/closure",
+            json={"urn": urn},
+        )
+    finally:
+        app.dependency_overrides.pop(graph_module.get_context_engine, None)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Served from the cache, never recomputed: the stub's own closure ships
+    # nodes/edges and the frontier urn:frontier:up1, and would have written back.
+    assert redis.set.await_count == 0
+    assert body["nodes"] == [] and body["edges"] == []
+    # The subclass fields survived the deserialize — the whole point.
+    assert body["frontierUp"] == [
+        {"urn": "urn:cached:hub", "totalCount": 61, "nextCursor": "e:900"}
+    ]
+    assert body["seedTruncated"] is True
+    assert body["truncationReason"] == "max_nodes"
+
+
+async def test_trace_closure_provider_not_implemented_returns_501_through_cache_wrapper(test_client: AsyncClient, monkeypatch):
+    """Same scope-resolving setup as the success case above, but with the
+    NotImplementedError-raising provider: proves the endpoint's
+    try/except wraps the REAL get_or_compute call (whose own exception
+    handling re-raises through a singleflight future) rather than only
+    the scope-is-None direct-compute shortcut the sibling 501 test above
+    exercises."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    mock_engine, real_cache, redis = _make_scoped_engine_and_cache(_NotImplementedClosureProvider())
+    urn = _get_sample_urn(mock_engine)
+
+    async def _override():
+        return mock_engine
+
+    app.dependency_overrides[graph_module.get_context_engine] = _override
+    monkeypatch.setattr(graph_module, "get_graph_cache", lambda: real_cache)
+    try:
+        resp = await test_client.post(
+            "/api/v1/test-ws/graph/trace/closure",
+            json={"urn": urn},
+        )
+    finally:
+        app.dependency_overrides.pop(graph_module.get_context_engine, None)
+
+    assert resp.status_code == 501
+    assert resp.json()["detail"]["code"] == "trace_closure_unsupported"
+    # Reached (and raised inside) the real cache flow, not the bypass: the
+    # generation/cache-lookup GET fired; no result ever reached the SET side.
+    assert redis.get.await_count >= 1
+    assert redis.set.await_count == 0
 
 
 # ── GET /nodes/{urn} ──────────────────────────────────────────────────

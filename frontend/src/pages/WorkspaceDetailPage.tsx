@@ -30,6 +30,7 @@ import { AddDataSourceWizard } from '@/components/admin/workspace/AddDataSourceW
 import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
 import { DataSourceGridCard } from '@/components/admin/workspace/DataSourceGridCard'
+import { WorkspaceNodeIdentityDefaults } from '@/components/admin/workspace/WorkspaceNodeIdentityDefaults'
 import { WorkspaceCardSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { DataSourceDetailPanel } from '@/components/admin/workspace/DataSourceDetailPanel'
 import WorkspaceViewsSection from '@/components/admin/workspace/WorkspaceViewsSection'
@@ -227,9 +228,9 @@ export function WorkspaceDetailPage() {
         if (nameChanged || identityChanged || namePropChanged) {
             await workspaceService.updateDataSource(wsId, dsId, {
                 ...(nameChanged ? { dedicatedGraphName: pending.dedicatedGraphName || undefined } : {}),
-                // Empty string clears back to the default "urn" server-side.
+                // Empty string clears the override server-side, so the source
+                // inherits from its provider / workspace / the platform again.
                 ...(identityChanged ? { identityProperty: pending.identityProperty } : {}),
-                // Empty string clears back to the default "name" server-side.
                 ...(namePropChanged ? { nameProperty: pending.nameProperty } : {}),
             })
         }
@@ -473,6 +474,15 @@ export function WorkspaceDetailPage() {
                             </p>
                         </div>
                     </div>
+
+                    {/* Workspace-level default, above the grid it governs. */}
+                    <WorkspaceNodeIdentityDefaults
+                        wsId={wsId!}
+                        identityProperty={workspace.identityProperty}
+                        nameProperty={workspace.nameProperty}
+                        canEdit={canManageDataSources}
+                        onSaved={reload}
+                    />
 
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-lg font-bold text-ink">Data Sources</h3>

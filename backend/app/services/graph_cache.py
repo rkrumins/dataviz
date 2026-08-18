@@ -146,6 +146,7 @@ _DEFAULT_AGGREGATED_TTL = _clamped_int_env("GRAPH_CACHE_AGGREGATED_TTL_S", 900, 
 # The same gen counter (bumped on writes) invalidates trace entries.
 _DEFAULT_TRACE_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
 _DEFAULT_TRACE_EXPAND_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_EXPAND_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_TRACE_CLOSURE_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_CLOSURE_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
 # Top-level nodes change only when a write inside the workspace shuffles
 # containment — gen counter bumps invalidate. Small payloads, hot path.
 _DEFAULT_TOP_LEVEL_TTL = _clamped_int_env("GRAPH_CACHE_TOP_LEVEL_TTL_S", 600, lo=_TTL_LO, hi=_TTL_HI)
@@ -203,6 +204,7 @@ ENDPOINT_CHILDREN = "children-with-edges"
 ENDPOINT_AGGREGATED = "aggregated"
 ENDPOINT_TRACE = "trace"
 ENDPOINT_TRACE_EXPAND = "trace-expand"
+ENDPOINT_TRACE_CLOSURE = "trace-closure"
 ENDPOINT_TOP_LEVEL = "top-level"
 # Key namespace for the top-level *total count* side-cache (a bare int,
 # not a response payload). Not in _ENABLED_ENDPOINTS — it shares the
@@ -219,6 +221,7 @@ _ENABLED_ENDPOINTS = {
     ENDPOINT_AGGREGATED: _flag("GRAPH_CACHE_ENABLED_AGGREGATED", default=True),
     ENDPOINT_TRACE: _flag("GRAPH_CACHE_ENABLED_TRACE", default=True),
     ENDPOINT_TRACE_EXPAND: _flag("GRAPH_CACHE_ENABLED_TRACE_EXPAND", default=True),
+    ENDPOINT_TRACE_CLOSURE: _flag("GRAPH_CACHE_ENABLED_TRACE_CLOSURE", default=True),
     ENDPOINT_TOP_LEVEL: _flag("GRAPH_CACHE_ENABLED_TOP_LEVEL", default=True),
     ENDPOINT_LAYER_ASSIGNMENT: _flag("GRAPH_CACHE_ENABLED_LAYER_ASSIGNMENT", default=True),
     ENDPOINT_CANVAS_BOOTSTRAP: _flag("GRAPH_CACHE_ENABLED_CANVAS_BOOTSTRAP", default=True),
@@ -741,6 +744,8 @@ def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:
         return _DEFAULT_TRACE_TTL
     if endpoint == ENDPOINT_TRACE_EXPAND:
         return _DEFAULT_TRACE_EXPAND_TTL
+    if endpoint == ENDPOINT_TRACE_CLOSURE:
+        return _DEFAULT_TRACE_CLOSURE_TTL
     if endpoint == ENDPOINT_TOP_LEVEL:
         return _DEFAULT_TOP_LEVEL_TTL
     if endpoint == ENDPOINT_LAYER_ASSIGNMENT:
@@ -776,6 +781,29 @@ def _is_empty_result(result: BaseModel) -> bool:
     return False
 
 
+def _has_unprobed_frontier(result: BaseModel) -> bool:
+    """A closure whose degree probe never ran.
+
+    ``trace_closure`` drops the probe wave when the deadline is close, and
+    logs-and-continues when it fails. Both leave the frontier shipped with
+    ``totalCount=None`` on every entry — honest ("unknown", never zero"),
+    but it is the DEGRADED form of the answer: the lens can only draw a
+    countless chevron where it would otherwise say "+8 more". Pinning that
+    for the full TTL makes one slow moment the workspace's answer for five
+    minutes, and writing it to LKG makes it the answer for an outage.
+
+    Only when EVERY entry across a non-empty frontier is countless — a
+    partial probe (cap, or a single failed degree bucket) is a complete
+    enough answer, and the walk itself is unaffected either way.
+    """
+    up = getattr(result, "frontier_up", None)
+    down = getattr(result, "frontier_down", None)
+    if up is None and down is None:
+        return False
+    entries = [*(up or []), *(down or [])]
+    return bool(entries) and all(getattr(e, "total_count", None) is None for e in entries)
+
+
 def _is_incomplete_result(result: BaseModel) -> bool:
     """Truncated/degraded/stale results must not be pinned for the full
     TTL as if they were complete — cache them only for the negative
@@ -789,7 +817,7 @@ def _is_incomplete_result(result: BaseModel) -> bool:
     ):
         if obj is not None and (getattr(obj, "truncated", False) or getattr(obj, "stale", False)):
             return True
-    return False
+    return _has_unprobed_frontier(result)
 
 
 async def invalidate_aggregated_reads(

@@ -51,6 +51,53 @@ export const nameCoalesceExpr = (v: string | null | undefined): string => {
     return n === 'name' ? 'n.name' : `coalesce(n.displayName, n.${n})`
 }
 
+/** Where a resolved mapping came from — mirrors the backend's provenance
+ *  strings (`backend/app/services/node_identity.py`). */
+export type IdentitySource = 'data_source' | 'provider' | 'workspace' | 'global' | 'default'
+
+/** Human label for each inherited scope. `data_source` and `default` are absent
+ *  because neither reads as "inherited from" anything. */
+const SOURCE_LABELS: Partial<Record<IdentitySource, string>> = {
+    provider: 'the provider',
+    workspace: 'the workspace',
+    global: 'the platform default',
+}
+
+/** True when the value in force was set somewhere ABOVE this data source. */
+export const isInherited = (source?: IdentitySource): boolean =>
+    !!source && source in SOURCE_LABELS
+
+/** The provenance line beside a field: either "inherited from X", or — when
+ *  this level is the one overriding — the way back to inheriting.
+ *
+ *  Clearing sends an empty string, which the API stores as NULL rather than as
+ *  the literal default, so the value falls through to whatever is underneath.
+ *  Without this control the only way to stop overriding would be to type the
+ *  inherited value by hand, which pins it and silently stops tracking. */
+function inheritNote(
+    source: IdentitySource | undefined,
+    canEdit: boolean,
+    onReset: () => void,
+) {
+    if (isInherited(source)) {
+        return (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider bg-sky-500/10 text-sky-500">
+                INHERITED FROM {SOURCE_LABELS[source!]!.replace(/^the /, '').toUpperCase()}
+            </span>
+        )
+    }
+    if (source !== 'data_source' || !canEdit) return null
+    return (
+        <button
+            type="button"
+            onClick={onReset}
+            className="text-[10px] text-ink-muted hover:text-violet-500 underline underline-offset-2 transition-colors"
+        >
+            Reset to inherited
+        </button>
+    )
+}
+
 const PRESETS = ['urn', 'id', 'name']
 const NAME_PRESETS = ['name', 'title', 'label']
 // Property names most likely to BE the identity — surfaced first in suggestions.
@@ -144,7 +191,35 @@ interface NodeIdentityFieldProps {
      *  a second section for the node display-name property is rendered. */
     nameValue?: string
     onNameChange?: (v: string) => void
+    /** Which scope this control edits. Changes the copy: a provider- or
+     *  workspace-level control sets a DEFAULT for the sources under it, which is
+     *  a materially different statement from mapping one graph. */
+    scope?: 'dataSource' | 'workspace' | 'provider' | 'platform'
+    /** Provenance of the values in `value` / `nameValue`, from the API. Only
+     *  meaningful at data-source scope, where a value may have been inherited. */
+    identitySource?: IdentitySource
+    nameSource?: IdentitySource
 }
+
+/** Scope-specific framing for the disclosure header. */
+const SCOPE_COPY = {
+    dataSource: {
+        title: 'Node Identity & Display Name',
+        blurb: 'this source',
+    },
+    workspace: {
+        title: 'Default Node Identity & Display Name',
+        blurb: 'every source in this workspace that does not set its own',
+    },
+    provider: {
+        title: 'Default Node Identity & Display Name',
+        blurb: 'every source on this provider that does not set its own',
+    },
+    platform: {
+        title: 'Platform Node Identity & Display Name',
+        blurb: 'every source that does not set its own, or inherit one from its provider or workspace',
+    },
+} as const
 
 export function NodeIdentityField({
     value,
@@ -156,9 +231,15 @@ export function NodeIdentityField({
     defaultOpen,
     nameValue,
     onNameChange,
+    scope = 'dataSource',
+    identitySource,
+    nameSource,
 }: NodeIdentityFieldProps) {
     const nameEnabled = typeof onNameChange === 'function'
     const nameOverridden = isNameOverridden(nameValue)
+    const identityInherited = isInherited(identitySource)
+    const nameInherited = isInherited(nameSource)
+    const copy = SCOPE_COPY[scope]
     const [open, setOpen] = useState(
         defaultOpen ?? (isIdentityOverridden(value) || nameOverridden),
     )
@@ -200,16 +281,20 @@ export function NodeIdentityField({
                 </div>
                 <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-sm font-medium text-ink">{nameEnabled ? 'Node Identity & Display Name' : 'Node Identity Property'}</span>
+                        <span className="text-sm font-medium text-ink">{nameEnabled ? copy.title : 'Node Identity Property'}</span>
                         <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-violet-500/10 text-violet-500 tracking-wider">ADVANCED</span>
-                        {(overridden || nameOverridden) && (
+                        {(identityInherited || nameInherited) ? (
+                            <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-sky-500/10 text-sky-500 tracking-wider">INHERITED</span>
+                        ) : (overridden || nameOverridden) && (
                             <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-500/10 text-amber-500 tracking-wider">MAPPED</span>
                         )}
                     </div>
                     <p className="text-[11px] text-ink-muted mt-0.5 truncate">
-                        {overridden
-                            ? <>Identity falls back to <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">{normalized}</code> when a node has no <code className="font-mono text-[10px]">urn</code></>
-                            : <>Using the platform default — nodes identified by <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">urn</code></>}
+                        {identityInherited
+                            ? <>Inherited from {SOURCE_LABELS[identitySource!]} — nodes identified by <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">{normalized}</code></>
+                            : overridden
+                                ? <>Identity falls back to <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">{normalized}</code> when a node has no <code className="font-mono text-[10px]">urn</code></>
+                                : <>Using the platform default — nodes identified by <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">urn</code></>}
                     </p>
                 </div>
                 <ChevronDown className={cn('w-4 h-4 text-ink-muted transition-transform flex-shrink-0', open && 'rotate-180')} />
@@ -227,14 +312,25 @@ export function NodeIdentityField({
                         <p>
                             Onboarded third-party graphs often key their nodes by a differently-named property
                             (e.g. <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">id</code>) and carry no <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">urn</code>.
-                            Map that property here and the platform resolves identity at read time —
-                            <strong className="text-ink"> without</strong> rewriting your graph, so the source can keep updating independently.
+                            Map that property here and it applies to {copy.blurb}.
+                        </p>
+                        <p>
+                            Reads resolve the mapping <strong className="text-ink">immediately</strong>. Aggregation
+                            additionally copies the mapped values onto <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">urn</code> and <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">displayName</code> on
+                            its next run — writes and rollup edges key on those properties directly and cannot be
+                            resolved on the fly. Only values it filled in are ever rewritten; a node that already
+                            carries its own <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">urn</code> is never touched.
+                            A read-only source or a dedicated projection is never written to at all — it will read
+                            correctly, but won't gain rollup edges.
                         </p>
                     </div>
 
                     {/* Presets + free-form input */}
                     <div>
-                        <label className="block text-[11px] font-medium text-ink-secondary mb-1.5">URN-equivalent property</label>
+                        <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                            <label className="block text-[11px] font-medium text-ink-secondary">URN-equivalent property</label>
+                            {inheritNote(identitySource, canEdit, () => onChange(''))}
+                        </div>
                         <div className="flex items-center gap-1.5 mb-2 flex-wrap">
                             {PRESETS.map(preset =>
                                 chip(preset === 'urn' ? 'urn (default)' : preset, normalized === preset, () => onChange(preset)))}
@@ -283,11 +379,12 @@ export function NodeIdentityField({
                     {nameEnabled && (
                         <div className="pt-3 border-t border-glass-border space-y-2">
                             <div>
-                                <div className="flex items-center gap-2 mb-1">
+                                <div className="flex items-center gap-2 mb-1 flex-wrap">
                                     <label className="block text-[11px] font-medium text-ink-secondary">Display-name property</label>
-                                    {nameOverridden && (
+                                    {!nameInherited && nameOverridden && (
                                         <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-500/10 text-amber-500 tracking-wider">MAPPED</span>
                                     )}
+                                    {inheritNote(nameSource, canEdit, () => onNameChange!(''))}
                                 </div>
                                 <p className="text-[11px] text-ink-muted mb-2 leading-relaxed">
                                     The label the platform shows for a node comes from <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">displayName</code>.

@@ -9,10 +9,10 @@ FalkorDB>=1.6.2
 redis>=8.1.0
 
 # Management DB — Postgres v16 only (dev parity with prod; no SQLite branch)
-sqlalchemy>=2.0.51
+sqlalchemy>=2.0.52
 asyncpg>=0.31.0          # PostgreSQL async driver — runtime
-psycopg2-binary>=2.9.9   # PostgreSQL sync driver — Alembic migrations
-alembic>=1.18.5          # Schema migrations
+psycopg2-binary>=2.9.12   # PostgreSQL sync driver — Alembic migrations
+alembic>=1.19.1          # Schema migrations
 
 # Security (credential encryption + authentication)
 cryptography>=48.0.1     # >=48.0.1: GHSA-537c-gmf6-5ccf + prior OpenSSL-bundle advisories
@@ -36,12 +36,12 @@ python-dotenv>=1.2.2     # >=1.2.2: GHSA-mf9w-mj56-hr94 (set_key follows symlink
 # Graph adapter dependencies
 neo4j>=5.14.0            # Neo4j async driver (Phase 4)
 httpx>=0.28.1            # DataHub GraphQL HTTP client + async test client
-google-cloud-spanner>=3.69.0                 # Spanner Graph adapter (bundles spanner_admin_database_v1 for CREATE TABLE / CREATE PROPERTY GRAPH bootstrap)
+google-cloud-spanner>=3.69.1                 # Spanner Graph adapter (bundles spanner_admin_database_v1 for CREATE TABLE / CREATE PROPERTY GRAPH bootstrap)
 anyio>=4.14.2                                 # Threadpool used by Spanner async/sync seam
 
 # Structured logging
 python-json-logger>=4.1.0
 
-greenlet>=3.5.4          # pin off floor: 3.1.x ships cp313 wheels; SQLAlchemy async seam needs it
+greenlet>=3.5.5          # pin off floor: 3.1.x ships cp313 wheels; SQLAlchemy async seam needs it
 python-multipart>=0.0.32 # >=0.0.31: path traversal, multipart/urlencoded DoS series (GHSA-wp53-j4wj-2cfg ... GHSA-v9pg-7xvm-68hf)
 openpyxl>=3.1.5          # .xlsx import/export adapter (bulk import/export) — pure-Python read+write

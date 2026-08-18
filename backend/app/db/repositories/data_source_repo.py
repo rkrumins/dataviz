@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..models import WorkspaceDataSourceORM
+from backend.app.services.node_identity import load_node_identity
 from backend.common.models.management import (
     DataSourceCreateRequest,
     DataSourceUpdateRequest,
@@ -26,7 +27,28 @@ logger = logging.getLogger(__name__)
 # ORM → Pydantic conversion                                           #
 # ------------------------------------------------------------------ #
 
-def _to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
+def _effective(identity, attr: str, row, fallback: str) -> str:
+    """Resolved value, or this row's own column when no resolution was passed."""
+    if identity is not None:
+        return getattr(identity, attr)
+    return (getattr(row, attr, None) or fallback)
+
+
+def _source(identity, attr: str, row, column: str) -> str:
+    if identity is not None:
+        return getattr(identity, attr)
+    return "data_source" if getattr(row, column, None) else "default"
+
+
+def _to_response(row: WorkspaceDataSourceORM, identity=None) -> DataSourceResponse:
+    """Serialize a data source.
+
+    ``identity`` is the row's mapping resolved across all four scopes
+    (``backend.app.services.node_identity``). Callers that hold a session
+    resolve it and pass it in; without it the response falls back to this row's
+    own columns, which is correct for a source that overrides them and reports
+    the platform default otherwise — the pre-scopes behaviour.
+    """
     # Resolve display label: explicit label → catalog item name → graph_name → None
     resolved_label = row.label
     if not resolved_label and row.graph_name:
@@ -51,9 +73,12 @@ def _to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         # secrets left over from before the request-boundary validator existed
         # (or a sibling field like the legacy redisUrl). Redact on the way out.
         extraConfig=redact_extra_config(json.loads(row.extra_config) if row.extra_config else None),
-        # NULL / unset → "urn" so clients never special-case the default.
-        identityProperty=(getattr(row, "identity_property", None) or "urn"),
-        nameProperty=(getattr(row, "name_property", None) or "name"),
+        # The RESOLVED mapping — never NULL, so clients never special-case the
+        # default — plus which scope it came from.
+        identityProperty=_effective(identity, "identity_property", row, "urn"),
+        nameProperty=_effective(identity, "name_property", row, "name"),
+        identityPropertySource=_source(identity, "identity_source", row, "identity_property"),
+        namePropertySource=_source(identity, "name_source", row, "name_property"),
         sourceMode=row.source_mode,
         writeBackEnabled=bool(row.write_back_enabled),
         createdAt=row.created_at,
@@ -84,7 +109,12 @@ async def list_data_sources(
         .where(WorkspaceDataSourceORM.workspace_id == workspace_id, _live())
         .order_by(WorkspaceDataSourceORM.created_at)
     )
-    return [_to_response(r) for r in result.scalars().all()]
+    rows = list(result.scalars().all())
+    # Resolve each row's mapping so the list reports what is actually in force.
+    # The per-row cost is three keyed gets that all hit the session identity map
+    # after the first source (one workspace, usually one provider) plus an
+    # in-process-cached platform row — not N round-trips.
+    return [_to_response(r, await load_node_identity(session, r)) for r in rows]
 
 
 async def list_data_sources_for_workspaces(
@@ -110,7 +140,9 @@ async def get_data_source(
         .where(WorkspaceDataSourceORM.id == ds_id, _live())
     )
     row = result.scalar_one_or_none()
-    return _to_response(row) if row else None
+    if not row:
+        return None
+    return _to_response(row, await load_node_identity(session, row))
 
 
 async def get_data_source_orm(
@@ -222,7 +254,7 @@ async def create_data_source(
     )
     session.add(row)
     await session.flush()
-    return _to_response(row)
+    return _to_response(row, await load_node_identity(session, row))
 
 
 async def update_data_source(
@@ -253,16 +285,18 @@ async def update_data_source(
     if req.extra_config is not None:
         row.extra_config = json.dumps(req.extra_config) if req.extra_config else None
     if req.identity_property is not None:
-        # Editable across the whole lifecycle. Empty string clears back to the
-        # default ("urn") rather than persisting a meaningless empty identity.
-        row.identity_property = req.identity_property.strip() or "urn"
+        # Editable across the whole lifecycle. Empty string clears to NULL —
+        # "unset", which falls through to the provider, then the workspace, then
+        # the platform default. Storing the literal "urn" instead (as this did
+        # before the other scopes existed) would pin the source to the default
+        # forever and make "clear this override" the one thing you could not do.
+        row.identity_property = req.identity_property.strip() or None
     if getattr(req, "name_property", None) is not None:
-        # Empty string clears back to the default "name".
-        row.name_property = req.name_property.strip() or "name"
+        row.name_property = req.name_property.strip() or None
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
-    return _to_response(row)
+    return _to_response(row, await load_node_identity(session, row))
 
 
 async def soft_delete_data_source(
@@ -297,7 +331,7 @@ async def restore_data_source(
     row.deleted_by = None
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
-    return _to_response(row)
+    return _to_response(row, await load_node_identity(session, row))
 
 
 async def list_deleted_data_sources(

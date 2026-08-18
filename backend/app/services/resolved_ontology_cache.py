@@ -51,6 +51,7 @@ class _Entry:
     generation: int
     resolved: Any  # ResolvedOntology
     alignment: Any  # SourceAlignment | None
+    identity: Any  # ResolvedNodeIdentity | None
     ts: float
 
 
@@ -89,8 +90,15 @@ async def current_generation(
 
 async def lookup(
     workspace_id: Optional[str], data_source_id: Optional[str],
-) -> Optional[Tuple[Any, Any]]:
-    """``(resolved, alignment)`` on a generation-fresh, TTL-fresh hit; else None."""
+) -> Optional[Tuple[Any, Any, Any]]:
+    """``(resolved, alignment, identity)`` on a generation-fresh, TTL-fresh hit;
+    else None.
+
+    ``identity`` rides along because it is invalidated by exactly the same
+    events as the alignment (a data-source edit, and now a provider / workspace
+    / platform-default edit, all of which bump the generation) and is needed by
+    the same injection step — caching it separately would mean a second lookup
+    and a second way for the two to disagree."""
     gen = await current_generation(workspace_id, data_source_id)
     if gen is None:
         return None
@@ -100,7 +108,7 @@ async def lookup(
         and entry.generation == gen
         and (time.monotonic() - entry.ts) < TTL_SECS
     ):
-        return entry.resolved, entry.alignment
+        return entry.resolved, entry.alignment, entry.identity
     return None
 
 
@@ -110,13 +118,14 @@ def store(
     generation: int,
     resolved: Any,
     alignment: Any,
+    identity: Any = None,
 ) -> None:
     """Cache a finished resolution under the generation observed BEFORE the
     resolve began — a bump that raced the resolve leaves the entry stale and
     the next lookup re-resolves (never serves across an invalidation)."""
     _entries[_key(workspace_id, data_source_id)] = _Entry(
         generation=generation, resolved=resolved, alignment=alignment,
-        ts=time.monotonic(),
+        identity=identity, ts=time.monotonic(),
     )
 
 

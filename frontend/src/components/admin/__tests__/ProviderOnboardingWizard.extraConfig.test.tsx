@@ -231,7 +231,10 @@ describe('credentialsClear on daemon-auth mode change (edit submit)', () => {
     )
 
     // Open Advanced and switch the daemon auth away from dedicated.
-    fireEvent.click(await screen.findByRole('button', { name: /advanced/i }))
+    // Exact name, not /advanced/i: the connection step also renders
+    // NodeIdentityField, whose collapsed trigger carries an "ADVANCED" badge
+    // in its accessible name, so a substring match is ambiguous.
+    fireEvent.click(await screen.findByRole('button', { name: 'Advanced' }))
     const authSelect = screen.getByDisplayValue('Dedicated daemon credentials')
     fireEvent.change(authSelect, { target: { value: 'none' } })
 

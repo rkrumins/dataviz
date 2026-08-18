@@ -2702,6 +2702,9 @@ class AggregationService:
             SimpleNamespace(entity_type_definitions=entity_defs)
         )
 
+        from backend.app.services.node_identity import load_node_identity
+        identity = await load_node_identity(session, ds)
+
         return {
             "ontology_id": ds.ontology_id,
             "ontology_fingerprint": report.fingerprint,
@@ -2712,12 +2715,15 @@ class AggregationService:
             "containment_edge_types": containment_types,
             "lineage_edge_types": lineage_types,
             "entity_type_levels": entity_type_levels,
-            # URN-equivalent for this physical graph. Frozen onto the job so a
-            # mid-lifecycle change to the data source's identity_property is
-            # picked up by the NEXT run. Default "urn" for every existing source.
-            "identity_property": getattr(ds, "identity_property", None) or "urn",
-            # Node display-name property, frozen likewise. Default "name".
-            "name_property": getattr(ds, "name_property", None) or "name",
+            # URN-equivalent + display-name property for this physical graph,
+            # RESOLVED across all four scopes (data source → provider →
+            # workspace → platform default) rather than read off the data
+            # source alone, so a mapping declared once on the provider reaches
+            # every source it hosts. Frozen onto the job here so a
+            # mid-lifecycle change anywhere in that chain is picked up by the
+            # NEXT run and the worker stays stateless.
+            "identity_property": identity.identity_property,
+            "name_property": identity.name_property,
         }
 
     async def _replay_fingerprint_matches(

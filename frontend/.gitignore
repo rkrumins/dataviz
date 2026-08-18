@@ -31,7 +31,7 @@ lerna-debug.log*
 # TypeScript
 *.tsbuildinfo
 
-# Agent visual-testing screenshots (generated, never source)
+
+# Generated visual output — regenerate with `npm run harness:shot`.
 .harness/
 .superpowers-shots/
-

@@ -160,6 +160,32 @@
     }
   }
 
+  @keyframes lens-flow {
+    from {
+      stroke-dashoffset: 32;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  /* THE GRAIN SEAM (T24, F8; landed in review round 1 — an earlier draft
+     also animated certain, column-true wires with a tight 9/7 dash, but
+     on the real curved, bundled boards this exists to fix, that solid
+     base and this one's dashed base were not reliably tellable apart at
+     a glance, exactly what the F8 honesty pin exists to catch). A coarse
+     (table-grain) wire on an isolated cone gets the ONLY motion a cone
+     ever carries — a slow drift in the direction the data flows, full
+     colour, full weight, its own bold open dash — while a certain wire
+     stays solid and static, so grain is legible from the base stroke
+     alone regardless of motion. The dash survives reduced motion; only
+     the drift stops — a frozen dash correctly says "this connection is
+     coarser," which stays true whether or not anything is moving. */
+  .lens-seam-flow {
+    stroke-dasharray: 12 8;
+    animation: lens-flow 1.6s linear infinite;
+  }
+
   /* === Cinematic Trace Mode ===
      When `data-trace-active="true"` is set on a canvas root, the focus
      node pulses with an accent-lineage halo and trace-incident edges get
@@ -713,6 +739,7 @@
 @media (prefers-reduced-motion: reduce) {
   .nx-edge-animated,
   .nx-edge-expanding,
+  .lens-seam-flow,
   .skeleton,
   .lineage-pulse,
   .lineage-pulse::after,
@@ -726,6 +753,7 @@
 }
 :root.reduce-motion .nx-edge-animated,
 :root.reduce-motion .nx-edge-expanding,
+:root.reduce-motion .lens-seam-flow,
 :root.reduce-motion .skeleton,
 :root.reduce-motion .lineage-pulse,
 :root.reduce-motion .lineage-pulse::after,

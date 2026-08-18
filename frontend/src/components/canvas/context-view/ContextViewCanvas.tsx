@@ -47,6 +47,7 @@ import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { useRevealNode } from '@/hooks/useRevealNode'
+import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
@@ -94,8 +95,19 @@ import { LayerColumn } from './LayerColumn'
 import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom } from './fitZoom'
-import { LineageLens } from './LineageLens'
-import { useLensLineage } from '@/hooks/useLensLineage'
+import { LineageLens, type LensWalkSeed } from './LineageLens'
+import {
+  EMPTY_LENS_HISTORY,
+  lensFocalOf,
+  lensPush,
+  lensBackward,
+  lensForwardStep,
+  lensJump,
+  type LensHistory,
+} from './lens/lensHistory'
+import { decodeLensShare } from './lens/shareCodec'
+import { useLensWalk } from '@/hooks/useLensWalk'
+import { useLensChildren } from '@/hooks/useLensChildren'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -2208,64 +2220,6 @@ export function ContextViewCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortedLayers, sortOverrides, viewDefaultSortMode])
 
-  // Reveal-and-focus: clicking a neighbor in the drawer's Lineage section
-  // expands collapsed ancestors (lazy-loading from the backend if needed),
-  // then scrolls the now-visible target into view. Works during trace mode
-  // because visibility here is governed by parentMap + expandedNodes, not
-  // by trace state directly. See [useRevealNode](../../../hooks/useRevealNode.ts).
-  const revealAndFocus = useRevealNode({
-    parentMap,
-    setExpandedNodes,
-    loadChildren: loadChildrenSorted,
-    provider,
-    focus: (id: string) => {
-      const el = document.getElementById(`layer-node-${id}`)
-      el?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center',
-        inline: 'center',
-      })
-    },
-  })
-
-  // Multi-locate: reveal each target with skipFocus so per-node scrolls
-  // don't fight each other during the cascade, then compute the
-  // horizontal bounding-box of all revealed targets and centre the union
-  // in the layered scroll container. Vertical seek defers to the first
-  // target's scrollIntoView — vertical union centring would risk scrolling
-  // past important rows in tall columns.
-  const locateManyOnCanvas = useCallback(
-    async (ids: string[]) => {
-      await Promise.allSettled(
-        ids.map((id) => revealAndFocus(id, { skipFocus: true })),
-      )
-      // Let any expand-driven re-layout commit before measuring.
-      await new Promise<void>((r) => requestAnimationFrame(() => r()))
-
-      const container = horizontalScrollRef.current
-      if (!container) return
-      const els = ids
-        .map((id) => document.getElementById(`layer-node-${id}`))
-        .filter((el): el is HTMLElement => !!el)
-      if (els.length === 0) return
-
-      const containerRect = container.getBoundingClientRect()
-      const rects = els.map((el) => el.getBoundingClientRect())
-      const minLeft = Math.min(...rects.map((r) => r.left))
-      const maxRight = Math.max(...rects.map((r) => r.right))
-      const unionCenterX = (minLeft + maxRight) / 2
-      const viewportCenterX = containerRect.left + containerRect.width / 2
-      const horizontalDelta = unionCenterX - viewportCenterX
-
-      container.scrollTo({
-        left: container.scrollLeft + horizontalDelta,
-        behavior: 'smooth',
-      })
-      els[0]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    },
-    [revealAndFocus],
-  )
-
   // Registry of per-column imperative geometry APIs, keyed by layer id.
   // Identity-stable Map (state initializer, never re-set) — columns
   // register/unregister via effect; the edge overlay reads it
@@ -2283,6 +2237,44 @@ export function ContextViewCanvas({
     revealPulseRef.current += 1
     setRevealTarget({ id: nodeId, pulse: revealPulseRef.current })
   }, [])
+
+  // Reveal-and-focus: clicking a neighbor in the drawer's Lineage section
+  // expands collapsed ancestors (lazy-loading from the backend if needed),
+  // then scrolls the now-visible target into view. Works during trace mode
+  // because visibility here is governed by parentMap + expandedNodes, not
+  // by trace state directly. See [useRevealNode](../../../hooks/useRevealNode.ts).
+  //
+  // T24 F5 — `focus` used to scrollIntoView a plain
+  // `document.getElementById` lookup, which returns null for any row the
+  // virtualizer has not rendered (below the overscan window) — an
+  // off-window "Reveal on canvas" click silently did nothing.
+  // `scrollHitIntoView` is the same virtualizer-aware pulse
+  // `revealSearchHit` already used, below.
+  const revealAndFocus = useRevealNode({
+    parentMap,
+    setExpandedNodes,
+    loadChildren: loadChildrenSorted,
+    provider,
+    focus: scrollHitIntoView,
+  })
+
+  // Multi-locate (T24 F5): reveal each target (expanding collapsed
+  // ancestors), then walk each one through the SAME virtualizer-aware
+  // pulse `scrollHitIntoView` uses for a single hit — the old approach
+  // queried the DOM for the whole set up front, which only ever found
+  // whatever ALREADY happened to be rendered, so a target below the
+  // overscan window silently never arrived, with zero feedback that
+  // anything had failed. Extracted to `useLocateManyOnCanvas` (own file,
+  // own tests) for the same reason `useRevealNode`/`useRevealSearchHit`
+  // are hooks rather than inline closures here: this component has no
+  // test harness of its own to reach the logic through.
+  const locateManyOnCanvas = useLocateManyOnCanvas({
+    revealAndFocus,
+    scrollHitIntoView,
+    getElementById: (id) => document.getElementById(`layer-node-${id}`),
+    getScrollContainer: () => horizontalScrollRef.current,
+    showToast: (type, message) => { useToastStore.getState().addToast({ type, message }) },
+  })
 
   // Reveal callback for advanced-search hits and pin clicks. Walks the
   // ancestor chain, expanding each step so the deep hit becomes
@@ -3069,27 +3061,101 @@ export function ContextViewCanvas({
     aggDetailStatus.truncatedIds.forEach(id => { void loadMoreAggregatedDetail(id) })
   }, [aggDetailStatus.truncatedIds, loadMoreAggregatedDetail])
 
-  // ── Lineage Lens — ego-graph overlay (focal stack; empty = closed) ────
-  const [lensStack, setLensStack] = useState<string[]>([])
-  const openLens = useCallback((nodeId: string) => setLensStack([nodeId]), [])
-  const lensRecenter = useCallback((nodeId: string) => setLensStack(prev => [...prev, nodeId]), [])
-  const lensBack = useCallback(() => setLensStack(prev => prev.slice(0, -1)), [])
-  // Walk-trail jump: truncate the walk back to hop i (spatial Back).
-  const lensJumpTo = useCallback((index: number) => setLensStack(prev => prev.slice(0, index + 1)), [])
-  // Miller-column branch: truncate to hop i, then step into nodeId.
-  const lensWalkTo = useCallback((index: number, nodeId: string) =>
-    setLensStack(prev => [...prev.slice(0, index + 1), nodeId]), [])
-  const lensClose = useCallback(() => setLensStack([]), [])
-  // On-demand lineage for every visited focal node — the lens tells the
-  // truth about the DATA SOURCE, not just what's hydrated on the canvas.
-  // Lens-local (never written to the canvas store), cached per session.
-  const lensLineage = useLensLineage(lensStack, provider, lineageEdgeTypes)
+  // ── Lineage Lens — ego-graph overlay (focus history; empty = closed).
+  // Browser-style back/forward: moving the cursor never drops entries;
+  // focusing a NEW node truncates the forward side first (the same
+  // invariant as the staged-changes undo/redo).
+  // Shared exploration links (?lens=…): decoded ONCE during the first
+  // render so the lens opens directly on the shared picture (no
+  // un-restored flash); the param strip and mode apply — external-
+  // system updates — happen in the mount effect below. Malformed
+  // tokens decode to null and the canvas opens normally.
+  const [initialLensShare] = useState(() => {
+    const raw = new URLSearchParams(window.location.search).get('lens')
+    return raw ? decodeLensShare(raw) : null
+  })
+  const [lensHistory, setLensHistory] = useState<LensHistory>(() => (
+    initialLensShare
+      ? { entries: initialLensShare.entries, cursor: initialLensShare.cursor }
+      : EMPTY_LENS_HISTORY
+  ))
+  const openLens = useCallback((nodeId: string) => {
+    setLensHistory({ entries: [nodeId], cursor: 0 })
+  }, [])
+  const lensRecenter = useCallback((nodeId: string) => setLensHistory(h => lensPush(h, nodeId)), [])
+  const lensBack = useCallback(() => setLensHistory(lensBackward), [])
+  const lensForward = useCallback(() => setLensHistory(lensForwardStep), [])
+  // Path-trail jump: move the cursor to hop i without dropping the trail.
+  const lensJumpTo = useCallback((index: number) => setLensHistory(h => lensJump(h, index)), [])
+  const lensClose = useCallback(() => setLensHistory(EMPTY_LENS_HISTORY), [])
+  // The lens reads ONE thing: the accumulated walk model for whichever
+  // focal it is on. Server-lazy — one closure fetch on open, then a
+  // further hop per ⊕ — cached per focal for the whole lens session, so
+  // stepping Back is instant. Lens-local: never written to the canvas
+  // store.
+  const lensFocal = lensFocalOf(lensHistory)
+  const userLensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
+  // A share v2/v3 link's `depth` overrides the pref for exactly the
+  // RESTORED focal's initial fetch: useLensWalk's own cache guard
+  // (`startedRef`) means this can only ever matter for that ONE fetch —
+  // once it has fired (or for any other focal), the user's own
+  // preference is what's in effect, so this never becomes a silent,
+  // permanent override for the rest of the session.
+  const lensInitialDepth = initialLensShare && (initialLensShare.v === 2 || initialLensShare.v === 3) && lensFocal === initialLensShare.entries[initialLensShare.cursor]
+    ? initialLensShare.depth
+    : userLensInitialDepth
+  const lensWalk = useLensWalk(lensFocal, provider, lensInitialDepth)
+  // The rest of a restored exploration — applied once, inside the lens,
+  // to the same focal the depth override above targets.
+  const lensWalkSeed = useMemo<LensWalkSeed | null>(() => {
+    if (!initialLensShare || (initialLensShare.v !== 2 && initialLensShare.v !== 3)) return null
+    const { entries, cursor, direction, revealed, opened, collapsed, frameAll, framePages, frameQueries } = initialLensShare
+    // T23 — a v2 link predates placements/condensed-open; the graceful
+    // degrade is the same shape a fresh focal opens with (nothing
+    // placed, everything condensed). T28 R3 — a v3 link's own
+    // `railWindow` field still decodes (old links keep restoring) but is
+    // no longer read into the seed — the window it named is gone.
+    const { pinned, condensedOpen } = initialLensShare.v === 3
+      ? initialLensShare
+      : { pinned: [], condensedOpen: [] }
+    return { nodeId: entries[cursor], direction, revealed, opened, collapsed, frameAll, framePages, frameQueries, pinned, condensedOpen }
+  }, [initialLensShare])
+  // "What is really inside this entity" — membership, which the lineage
+  // walk structurally cannot answer (it only ever knows the
+  // participants). A separate, separately-paged fetch for that reason.
+  const lensChildren = useLensChildren(lensFocal, provider)
+  // PERF: both hooks return a fresh object literal every render while
+  // the methods inside are stable useCallbacks. Depending on the OBJECT
+  // made each handler below new on every render, which changed the
+  // Lens's card context identity — and both card memo comparators start
+  // with `a.ctx === b.ctx &&`, so the content comparison was never
+  // reached and every card re-rendered on every canvas tick. It also
+  // churned the deps of the in-frame search debounce, which could keep
+  // the 300ms timer resetting forever. Depend on the methods.
+  const { extend: lensExtend, page: lensPage, retry: lensRetryWalk } = lensWalk
+  const lensWalkApi = useMemo(
+    () => ({ extend: lensExtend, page: lensPage, retry: lensRetryWalk }),
+    [lensExtend, lensPage, lensRetryWalk],
+  )
+  const { walkFor: lensWalkFor } = lensWalk
+  const lensWalkEntry = lensFocal ? lensWalkFor(lensFocal) : null
+  const { loadAllChildren: loadLensAllChildren, loadChildrenOf: loadLensChildrenOf } = lensChildren
   useEffect(() => {
     focusLensRef.current = () => {
       const target = selectedNodeId ?? drawerNodeId
-      if (target) setLensStack([target])
+      if (target) setLensHistory({ entries: [target], cursor: 0 })
     }
   }, [selectedNodeId, drawerNodeId])
+  // Finish consuming the share link: strip the param (so refreshes and
+  // copied URLs stay clean) and apply the shared body mode.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (!params.has('lens')) return
+    params.delete('lens')
+    const qs = params.toString()
+    window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
+    if (initialLensShare) usePreferencesStore.getState().setLensViewMode(initialLensShare.mode)
+  }, [initialLensShare])
 
   // ── Anchor Rail — the selected node's off-screen partners docked as
   // proxy chips in their owning columns. The overlay computes the
@@ -3839,20 +3905,19 @@ export function ContextViewCanvas({
 
         {/* Lineage Lens — ego-graph overlay (portal to body). */}
         <LineageLens
-          lensStack={lensStack}
-          supplementalEdges={lensLineage.supplementalEdges}
-          supplementalNodes={lensLineage.supplementalNodes}
-          fetchStatus={lensLineage.status}
-          fetchTruncatedIds={lensLineage.truncatedIds}
-          onRetryFetch={lensLineage.retry}
-          drillEdges={lensLineage.drillEdges}
-          drillStatus={lensLineage.drillStatus}
-          onDrillFetch={lensLineage.fetchDrill}
-          externalPreview={externalPreview && lensStack[lensStack.length - 1] === externalPreview.nodeId ? externalPreview : null}
+          history={lensHistory}
+          walk={lensWalkEntry}
+          walkApi={lensWalkApi}
+          walkSeed={lensWalkSeed}
+          childrenAll={lensChildren.allResults}
+          childrenAllStatus={lensChildren.allStatus}
+          onLoadChildrenOf={loadLensChildrenOf}
+          onLoadAllChildren={loadLensAllChildren}
+          externalPreview={externalPreview && lensFocalOf(lensHistory) === externalPreview.nodeId ? externalPreview : null}
           onRecenter={lensRecenter}
           onBack={lensBack}
+          onForward={lensForward}
           onJumpTo={lensJumpTo}
-          onWalkTo={lensWalkTo}
           onShowPathOnCanvas={(ids) => {
             // Presenting a walk IS a frame action — same chrome, same exit.
             const focal = ids[ids.length - 1]
@@ -3873,7 +3938,7 @@ export function ContextViewCanvas({
             // the canvas focus matches what the lens was showing (guarded:
             // selectNode toggles OFF when re-selecting the current
             // selection).
-            const focal = lensStack[lensStack.length - 1]
+            const focal = lensFocalOf(lensHistory)
             if (focal) {
               const { selectedNodeIds, selectNode } = useCanvasStore.getState()
               if (!(selectedNodeIds.length === 1 && selectedNodeIds[0] === focal)) selectNode(focal)
@@ -4167,7 +4232,7 @@ export function ContextViewCanvas({
             onTraceDown={(nodeId) => traceDownstreamWithSmartLevel(nodeId)}
             onFullTrace={(nodeId) => traceFullLineageWithSmartLevel(nodeId)}
             onFocusNode={revealAndFocus}
-            onLocateMany={locateManyOnCanvas}
+            onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
           />
         )}
         {!builderOpen && !buildOpen && !drawerNodeId && isEdgePanelOpen && (

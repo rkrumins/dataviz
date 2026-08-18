@@ -81,7 +81,10 @@ export function getEntityVisual(
 ): EntityVisualConfig {
   if (!schemaOrState?.schema) return entityVisualFallback(typeId)
   const entityType = schemaOrState.schema.entityTypes.find((et) => et.id === typeId)
-  if (!entityType) return entityVisualFallback(typeId)
+  // A type the ontology defines but hasn't STYLED has no `visual` block.
+  // Returning it undefined broke this function's declared contract and
+  // crashed callers on `visual.color`; fall back like an unknown type.
+  if (!entityType?.visual) return entityVisualFallback(typeId)
   return entityType.visual
 }
 
