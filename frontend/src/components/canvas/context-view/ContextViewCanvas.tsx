@@ -108,6 +108,8 @@ import {
 import { decodeLensShare } from './lens/shareCodec'
 import { useLensWalk } from '@/hooks/useLensWalk'
 import { useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
+import { computeTraceVisibleUrns } from '@/hooks/lib/traceViewFilter'
+import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
 
 /** The native canvas trace has no per-edge drilldowns — the closure walk
  *  model is complete at leaf grain. One shared empty map keeps the trace
@@ -1562,12 +1564,18 @@ export function ContextViewCanvas({
   // on every trace start so a new trace always opens with the whole flow.
   const [traceShowUpstream, setTraceShowUpstream] = useState(true)
   const [traceShowDownstream, setTraceShowDownstream] = useState(true)
+  // Hop-depth limits — VIEW-side (the walk fetched everything; ≥ the
+  // walk's own fetch depth means unlimited). Reset on trace start.
+  const [traceDepthUp, setTraceDepthUp] = useState(FULL_WALK_INITIAL_DEPTH)
+  const [traceDepthDown, setTraceDepthDown] = useState(FULL_WALK_INITIAL_DEPTH)
   const startCanvasTrace = useCallback((nodeId: string) => {
     // A trace with the flow overlay off is a contradiction — tracing IS
     // asking to see the flow.
     setShowLineageFlow(true)
     setTraceShowUpstream(true)
     setTraceShowDownstream(true)
+    setTraceDepthUp(FULL_WALK_INITIAL_DEPTH)
+    setTraceDepthDown(FULL_WALK_INITIAL_DEPTH)
     // Entering a trace collapses the sticky drawer once, so the flow
     // opens unobstructed — clicking a node re-opens it as usual.
     useCanvasStore.getState().closeNodeDrawer()
@@ -1585,28 +1593,39 @@ export function ContextViewCanvas({
     startTraceRef.current = startCanvasTrace
     toggleTraceRef.current = startCanvasTrace
   }, [startCanvasTrace])
-  // Everything on the flow expands upfront — derived, never written, so
-  // exiting trace restores the user's own expansion for free.
-  const expandedForRender = useMemo(() => (
-    traceActive && canvasTrace.expansionUrns.size > 0
-      ? new Set([...expandedNodes, ...canvasTrace.expansionUrns])
-      : expandedNodes
-  ), [traceActive, expandedNodes, canvasTrace.expansionUrns])
-
-  // The dock's direction toggles narrow WHAT RENDERS, never what was
-  // walked: the focus and its host containers always stay.
+  // The dock's direction toggles and the hop-depth limits narrow WHAT
+  // RENDERS, never what was walked — the full flow stays in memory, so
+  // "2 up / 3 down" answers instantly with no refetch. Hiding a
+  // direction hides its whole branch, containers included; the focus
+  // and its own subtree always stay (computeTraceVisibleUrns).
   const traceVisibleUrns = useMemo<ReadonlySet<string>>(() => {
-    if (!traceActive || !traceModel || (traceShowUpstream && traceShowDownstream)) {
-      return canvasTrace.traceNodeUrns
-    }
-    const out = new Set<string>()
-    for (const u of canvasTrace.traceNodeUrns) {
-      const isUp = traceModel.upstreamUrns.has(u)
-      const isDown = traceModel.downstreamUrns.has(u)
-      if ((isUp && traceShowUpstream) || (isDown && traceShowDownstream) || (!isUp && !isDown)) out.add(u)
+    if (!traceActive || !traceModel || !canvasTrace.tracedUrn) return canvasTrace.traceNodeUrns
+    // Always computed (no unlimited shortcut): the result is also the
+    // spine-aware set the expansion filter intersects against — a raw
+    // traceNodeUrns lacks ancestors that were never model nodes.
+    return computeTraceVisibleUrns({
+      model: traceModel,
+      focusUrn: canvasTrace.tracedUrn,
+      showUpstream: traceShowUpstream,
+      showDownstream: traceShowDownstream,
+      upstreamDepth: traceDepthUp >= FULL_WALK_INITIAL_DEPTH ? Infinity : traceDepthUp,
+      downstreamDepth: traceDepthDown >= FULL_WALK_INITIAL_DEPTH ? Infinity : traceDepthDown,
+    })
+  }, [traceActive, traceModel, canvasTrace.tracedUrn, canvasTrace.traceNodeUrns, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])
+
+  // Everything on the flow expands upfront — derived, never written, so
+  // exiting trace restores the user's own expansion for free. Filtered
+  // to the VISIBLE set: expanding the host of a hidden branch is what
+  // used to let the legacy filter's pass-through fallback resurrect the
+  // pruned nodes.
+  const expandedForRender = useMemo(() => {
+    if (!traceActive || canvasTrace.expansionUrns.size === 0) return expandedNodes
+    const out = new Set(expandedNodes)
+    for (const u of canvasTrace.expansionUrns) {
+      if (traceVisibleUrns.has(u)) out.add(u)
     }
     return out
-  }, [traceActive, traceModel, canvasTrace.traceNodeUrns, traceShowUpstream, traceShowDownstream])
+  }, [traceActive, expandedNodes, canvasTrace.expansionUrns, traceVisibleUrns])
 
   // The flow-direction picture for LineageFlowOverlay — the SAME styling
   // contract the legacy trace drove (cyan upstream, amber downstream,
@@ -1673,6 +1692,15 @@ export function ContextViewCanvas({
       showDownstream: traceShowDownstream,
       setShowUpstream: setTraceShowUpstream,
       setShowDownstream: setTraceShowDownstream,
+      // Depth is a VIEW limit on the walked flow — setConfig applies it
+      // instantly, and the retrace the dock fires afterwards is a no-op
+      // continue (nothing to refetch).
+      config: { ...trace.config, upstreamDepth: traceDepthUp, downstreamDepth: traceDepthDown },
+      setConfig: (cfg) => {
+        if (cfg.upstreamDepth !== undefined) setTraceDepthUp(cfg.upstreamDepth)
+        if (cfg.downstreamDepth !== undefined) setTraceDepthDown(cfg.downstreamDepth)
+        trace.setConfig(cfg)
+      },
       statistics: {
         ...trace.statistics,
         totalNodes: traceModel.nodes.length,
@@ -1682,7 +1710,7 @@ export function ContextViewCanvas({
       },
       retrace: async () => { canvasTrace.continueWalk() },
     }
-  }, [traceActive, traceModel, tracedNodeId, trace, canvasTrace, traceParticipants, traceShowUpstream, traceShowDownstream])
+  }, [traceActive, traceModel, tracedNodeId, trace, canvasTrace, traceParticipants, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])
 
   // Auto-collapse the dock when trace exits so a stale open state doesn't
   // immediately reappear next time the user starts a trace.
@@ -3619,13 +3647,13 @@ export function ContextViewCanvas({
         onStartTrace={() => { if (selectedNodeIds[0]) startCanvasTrace(selectedNodeIds[0]) }}
         onExitTrace={exitCanvasTrace}
         lineageReady={hydrationPhase === 'complete'}
-        traceUpstreamDepth={trace.config.upstreamDepth}
-        traceDownstreamDepth={trace.config.downstreamDepth}
+        traceUpstreamDepth={traceDepthUp}
+        traceDownstreamDepth={traceDepthDown}
         onSetTraceDepth={(dir, value) => {
-          // Apply the new depth, then re-fetch when a trace is active so
-          // the canvas reflects the change without a manual re-trace.
-          trace.setConfig(dir === 'upstream' ? { upstreamDepth: value } : { downstreamDepth: value })
-          if (trace.isTracing) void trace.retrace()
+          // A VIEW limit on the already-walked flow — applies instantly,
+          // no refetch (the walk holds the whole flow in memory).
+          if (dir === 'upstream') setTraceDepthUp(value)
+          else setTraceDepthDown(value)
         }}
         onOpenAdvancedSearch={(seedQuery) => {
           // Toggle the panel. When the user escalates from the

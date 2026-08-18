@@ -13,6 +13,7 @@ import { useMemo } from 'react'
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
+import { computeTraceVisibleUrns } from '@/hooks/lib/traceViewFilter'
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { useCanvasStore } from '@/store/canvas'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -87,18 +88,36 @@ function hierarchyFixture() {
 const EMPTY_DRILLDOWNS: Map<string, TraceV2Result> = new Map()
 
 /** ContextViewCanvas's native-trace block, and nothing else. */
-function useSeam(provider: GraphDataProvider, fixture: ReturnType<typeof hierarchyFixture>) {
+function useSeam(
+  provider: GraphDataProvider,
+  fixture: ReturnType<typeof hierarchyFixture>,
+  view: { showUp?: boolean; showDown?: boolean; depthUp?: number; depthDown?: number } = {},
+) {
+  const { showUp = true, showDown = true, depthUp = Infinity, depthDown = Infinity } = view
   const canvasTrace = useCanvasTraceWalk(provider)
   const traceActive = canvasTrace.isTracing
-  const expandedForRender = useMemo(() => (
-    traceActive && canvasTrace.expansionUrns.size > 0
-      ? new Set([...canvasTrace.expansionUrns])
-      : new Set<string>()
-  ), [traceActive, canvasTrace.expansionUrns])
+  const traceModel = canvasTrace.walkEntry?.model ?? null
+  // Verbatim from ContextViewCanvas: direction+depth narrow what renders.
+  const traceVisibleUrns = useMemo<ReadonlySet<string>>(() => {
+    if (!traceActive || !traceModel || !canvasTrace.tracedUrn) return canvasTrace.traceNodeUrns
+    return computeTraceVisibleUrns({
+      model: traceModel, focusUrn: canvasTrace.tracedUrn,
+      showUpstream: showUp, showDownstream: showDown,
+      upstreamDepth: depthUp, downstreamDepth: depthDown,
+    })
+  }, [traceActive, traceModel, canvasTrace, showUp, showDown, depthUp, depthDown])
+  const expandedForRender = useMemo(() => {
+    if (!traceActive || canvasTrace.expansionUrns.size === 0) return new Set<string>()
+    const out = new Set<string>()
+    for (const u of canvasTrace.expansionUrns) {
+      if (traceVisibleUrns.has(u)) out.add(u)
+    }
+    return out
+  }, [traceActive, canvasTrace.expansionUrns, traceVisibleUrns])
   const filtered = useTraceFilteredHierarchy({
     ...fixture,
     isTracing: traceActive,
-    traceNodes: canvasTrace.traceNodeUrns,
+    traceNodes: traceVisibleUrns,
     drilldowns: EMPTY_DRILLDOWNS,
     expandedNodes: expandedForRender,
   })
@@ -184,6 +203,84 @@ describe('canvas trace seam', () => {
     // by reference — the browse picture, untouched.
     expect(result.current.filtered.filteredFlat).toBe(fixture.displayFlat)
     expect(result.current.hiddenTraceCount).toBe(0)
+  })
+
+  it('upstream-only view: the downstream branch AND its host containers leave the canvas, and the fallback cannot resurrect them', async () => {
+    // The walk brings one upstream (colA in T1) and one downstream
+    // (colD in TD) participant; hiding downstream must remove colD, TD,
+    // and never relax them back in via TD's expansion.
+    const { provider } = providerByUrn({
+      F: () => closureResult({
+        ...estate(),
+        nodes: [...estate().nodes, gn('colD'), gn('TD', 'dataset')],
+        edges: [...estate().edges, hop('F', 'colD', 'e-down')],
+        containmentEdges: [...estate().containmentEdges, holds('TD', 'colD'), holds('PLAT', 'TD')],
+        downstreamUrns: new Set(['colD', 'TD']),
+      }),
+    })
+    const fixture = (() => {
+      const base = hierarchyFixture()
+      const colD = hnode('colD')
+      const td = hnode('TD', [colD])
+      const plat = base.displayMap.get('PLAT')!
+      plat.children.push(td)
+      base.displayFlat.push(td, colD)
+      base.displayMap.set('TD', td)
+      base.displayMap.set('colD', colD)
+      base.parentMap.set('TD', 'PLAT')
+      base.parentMap.set('colD', 'TD')
+      base.childMap.set('TD', ['colD'])
+      base.childMap.get('PLAT')!.push('TD')
+      return base
+    })()
+    const { result } = renderHook(() => useSeam(provider, fixture, { showDown: false }))
+    act(() => result.current.canvasTrace.start('F'))
+    await waitFor(() => expect(result.current.canvasTrace.fullWalkStatus?.exhausted).toBe(true))
+
+    const rendered = [...result.current.filtered.filteredMap.keys()].sort()
+    expect(rendered).toEqual(['F', 'PLAT', 'T1', 'colA'])
+    expect(result.current.expandedForRender.has('TD')).toBe(false)
+  })
+
+  it('hop-depth view limit: depth 1 upstream hides the second hop, instantly and without a refetch', async () => {
+    // colB feeds colA feeds F: two upstream hops.
+    const { provider, traceClosure } = providerByUrn({
+      F: () => closureResult({
+        ...estate(),
+        nodes: [...estate().nodes, gn('colB'), gn('T2', 'dataset')],
+        edges: [...estate().edges, hop('colB', 'colA', 'e2')],
+        containmentEdges: [...estate().containmentEdges, holds('T2', 'colB'), holds('PLAT', 'T2')],
+        upstreamUrns: new Set(['colA', 'colB']),
+      }),
+    })
+    const fixture = (() => {
+      const base = hierarchyFixture()
+      const colB = hnode('colB')
+      const t2 = hnode('T2', [colB])
+      base.displayMap.get('PLAT')!.children.push(t2)
+      base.displayFlat.push(t2, colB)
+      base.displayMap.set('T2', t2)
+      base.displayMap.set('colB', colB)
+      base.parentMap.set('T2', 'PLAT')
+      base.parentMap.set('colB', 'T2')
+      base.childMap.set('T2', ['colB'])
+      base.childMap.get('PLAT')!.push('T2')
+      return base
+    })()
+    const { result, rerender } = renderHook(
+      ({ depthUp }: { depthUp: number }) => useSeam(provider, fixture, { depthUp }),
+      { initialProps: { depthUp: Infinity } },
+    )
+    act(() => result.current.canvasTrace.start('F'))
+    await waitFor(() => expect(result.current.canvasTrace.fullWalkStatus?.exhausted).toBe(true))
+    const calls = traceClosure.mock.calls.length
+    expect(result.current.filtered.filteredMap.has('colB')).toBe(true)
+
+    rerender({ depthUp: 1 })
+    expect(result.current.filtered.filteredMap.has('colA')).toBe(true)
+    expect(result.current.filtered.filteredMap.has('colB')).toBe(false)
+    expect(result.current.filtered.filteredMap.has('T2')).toBe(false)
+    expect(traceClosure).toHaveBeenCalledTimes(calls)   // view-only — zero refetches
   })
 
   it('a participant whose chain reaches no known anchor merges but does not render — and is counted', async () => {
