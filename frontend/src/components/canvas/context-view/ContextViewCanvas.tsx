@@ -46,6 +46,7 @@ import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
+import { TraceWalkIndicator, type TraceWalkPhase } from './TraceWalkIndicator'
 import { useRevealNode } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
@@ -1573,6 +1574,44 @@ export function ContextViewCanvas({
   const canvasTrace = useCanvasTraceWalk(provider)
   const traceActive = canvasTrace.isTracing
   const traceModel = canvasTrace.walkEntry?.model ?? null
+  // The walk-status capsule over the board ("your trace is being
+  // calculated"): phase derived from the walk session. The settled state
+  // shows once and self-dismisses; paused/stalled can be dismissed by
+  // hand (the partial flow stays) and RE-ARM when the walk resumes —
+  // the dock owns permanent stats.
+  const [traceSettledDismissed, setTraceSettledDismissed] = useState(false)
+  const [traceParkedDismissed, setTraceParkedDismissed] = useState(false)
+  useEffect(() => {
+    setTraceSettledDismissed(false)
+    setTraceParkedDismissed(false)
+  }, [canvasTrace.tracedUrn])
+  useEffect(() => {
+    if (canvasTrace.fullWalkStatus?.walking) setTraceParkedDismissed(false)
+  }, [canvasTrace.fullWalkStatus?.walking])
+  const traceWalkPhase = useMemo<TraceWalkPhase | null>(() => {
+    if (!traceActive) return null
+    const st = canvasTrace.walkEntry?.status
+    if (st === 'error') return 'error'
+    if (st === 'unsupported') return null
+    const fw = canvasTrace.fullWalkStatus
+    if (!st || st === 'loading') return 'preparing'
+    if (fw?.walking) return (traceModel?.nodes.length ?? 0) > 1 ? 'walking' : 'preparing'
+    if (fw?.budgetHit) return traceParkedDismissed ? null : 'paused'
+    if (fw?.stalled) return traceParkedDismissed ? null : 'stalled'
+    if (fw?.exhausted) return traceSettledDismissed ? null : 'settled'
+    return null
+  }, [traceActive, canvasTrace.walkEntry?.status, canvasTrace.fullWalkStatus, traceModel, traceSettledDismissed, traceParkedDismissed])
+  useEffect(() => {
+    if (traceWalkPhase !== 'settled') return
+    const t = window.setTimeout(() => setTraceSettledDismissed(true), 2200)
+    return () => window.clearTimeout(t)
+  }, [traceWalkPhase])
+  const traceWalkLabel = useMemo(() => {
+    if (!canvasTrace.tracedUrn) return ''
+    const id = canvasTrace.tracedUrn
+    const node = nodes.find(n => n.id === id)
+    return node?.data?.label || id.split(':').pop() || id
+  }, [canvasTrace.tracedUrn, nodes])
   // Direction visibility — the dock's upstream/downstream toggles. Reset
   // on every trace start so a new trace always opens with the whole flow.
   const [traceShowUpstream, setTraceShowUpstream] = useState(true)
@@ -3868,6 +3907,37 @@ export function ContextViewCanvas({
           )}
         </AnimatePresence>
 
+        {/* The trace walk-status capsule — floats over the board from the
+            instant a trace starts, so the canvas never sits silent while
+            the flow is being computed. Not portaled (see the stranded
+            portal-AnimatePresence defect class); wrapper is inert, only
+            the capsule's own buttons take the pointer. Centered by flex,
+            never by transform — motion owns the transform channel. */}
+        <AnimatePresence>
+          {traceWalkPhase && (
+            <motion.div
+              key="trace-walk-indicator"
+              className="absolute top-3 inset-x-0 z-40 flex justify-center pointer-events-none"
+              initial={{ opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.15 }}
+            >
+              <TraceWalkIndicator
+                label={traceWalkLabel}
+                phase={traceWalkPhase}
+                nodeCount={traceModel?.nodes.length ?? 0}
+                flowCount={traceModel?.lineageEdges.length ?? 0}
+                upCount={traceModel?.upstreamUrns.size ?? 0}
+                downCount={traceModel?.downstreamUrns.size ?? 0}
+                onCancel={exitCanvasTrace}
+                onContinue={canvasTrace.continueWalk}
+                onRetry={canvasTrace.retryWalk}
+                onDismiss={() => setTraceParkedDismissed(true)}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Aggregation truncation banner — backend signal that the visible
             edge set was capped. The "computing" and "last computed Xh ago"
