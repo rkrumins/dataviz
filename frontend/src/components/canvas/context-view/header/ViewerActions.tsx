@@ -16,6 +16,7 @@
  * opens/resumes a draft; being on a draft IS edit mode.
  */
 
+import { useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -26,6 +27,7 @@ import { TraceDepthControl } from '../TraceDepthControl'
 import { PropertyManagerButton } from '../../property-manager/PropertyManagerButton'
 import { DisplayMenu } from './DisplayMenu'
 import { ImportExportMenu } from './ImportExportMenu'
+import { TraceHistoryPanel, type TraceHistoryPanelEntry } from './TraceHistoryPanel'
 
 export interface ComprehensionToolsProps {
   // Lineage flow
@@ -63,6 +65,12 @@ export interface ComprehensionToolsProps {
   traceUpstreamDepth: number
   traceDownstreamDepth: number
   onSetTraceDepth: (dir: 'upstream' | 'downstream', value: number) => void
+  /** Trace trails in this view (newest first) — powers the "pick up
+   *  where you left off" launcher under the Trace Lineage control.
+   *  Optional: hosts that don't wire history keep the classic button. */
+  traceHistory?: TraceHistoryPanelEntry[]
+  onResumeTraceHistory?: (index: number) => void
+  onClearTraceHistory?: () => void
 
   // Property Manager — optional so canvases that don't wire it omit the button.
   onTogglePropertyManager?: () => void
@@ -106,8 +114,14 @@ export function ComprehensionTools({
   onImport,
   onExport,
   isDraft,
+  traceHistory = [],
+  onResumeTraceHistory,
+  onClearTraceHistory,
 }: ComprehensionToolsProps) {
   const { showToast } = useToast()
+  const [traceHistoryOpen, setTraceHistoryOpen] = useState(false)
+  const traceLauncherRef = useRef<HTMLDivElement>(null)
+  const hasTraceHistory = traceHistory.length > 0 && !!onResumeTraceHistory
 
   // The server now REFUSES POST /graph/trace* when this is off (feature_gate.py), so leaving
   // the button here would hand the user an action that 403s. HIDDEN, not disabled: a greyed-out
@@ -216,21 +230,66 @@ export function ComprehensionTools({
           />
         </button>
       ) : (
-        <button
-          data-tour="canvas-trace"
-          onClick={canTrace ? onStartTrace : undefined}
-          disabled={!canTrace}
-          title={canTrace ? 'Trace lineage of selected entity' : 'Select a single entity to trace its lineage'}
-          className={cn(
-            "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
-            canTrace
-              ? "bg-gradient-to-r from-accent-lineage/20 to-purple-500/10 text-accent-lineage border border-accent-lineage/40 hover:from-accent-lineage/30 hover:to-purple-500/20 hover:border-accent-lineage/60 dark:hover:shadow-lg dark:hover:shadow-accent-lineage/20"
-              : "bg-black/[0.03] border border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/40 cursor-not-allowed"
+        // Split control. Main zone: traces the selection; with NOTHING
+        // selected it opens the trail launcher instead of being a dead
+        // disabled button (an empty state is an invitation to act) —
+        // hard-disabled only when there is nothing to trace AND no trail
+        // to resume. Chevron zone: the launcher, any time trails exist.
+        <div ref={traceLauncherRef} className="relative flex items-stretch">
+          <button
+            data-tour="canvas-trace"
+            onClick={
+              canTrace
+                ? onStartTrace
+                : hasTraceHistory
+                  ? () => setTraceHistoryOpen(v => !v)
+                  : undefined
+            }
+            disabled={!canTrace && !hasTraceHistory}
+            title={
+              canTrace
+                ? 'Trace lineage of selected entity'
+                : hasTraceHistory
+                  ? 'Resume a previous trace'
+                  : 'Select a single entity to trace its lineage'
+            }
+            className={cn(
+              "flex items-center gap-2 px-4 py-2 text-sm font-medium transition-all duration-300",
+              hasTraceHistory ? "rounded-l-xl border-r-0" : "rounded-xl",
+              (canTrace || hasTraceHistory)
+                ? "bg-gradient-to-r from-accent-lineage/20 to-purple-500/10 text-accent-lineage border border-accent-lineage/40 hover:from-accent-lineage/30 hover:to-purple-500/20 hover:border-accent-lineage/60 dark:hover:shadow-lg dark:hover:shadow-accent-lineage/20"
+                : "rounded-xl bg-black/[0.03] border border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/40 cursor-not-allowed"
+            )}
+          >
+            <LucideIcons.Workflow className="w-4 h-4" strokeWidth={2.2} />
+            <span>Trace Lineage</span>
+          </button>
+          {hasTraceHistory && (
+            <button
+              type="button"
+              aria-label="Trace history"
+              aria-haspopup="menu"
+              aria-expanded={traceHistoryOpen}
+              onClick={() => setTraceHistoryOpen(v => !v)}
+              title="Pick up where you left off"
+              className={cn(
+                "flex items-center px-1.5 rounded-r-xl border border-l-accent-lineage/20 text-sm transition-all duration-300",
+                "bg-gradient-to-r from-accent-lineage/20 to-purple-500/10 text-accent-lineage border-accent-lineage/40 hover:from-accent-lineage/30 hover:to-purple-500/20 hover:border-accent-lineage/60",
+              )}
+            >
+              <LucideIcons.ChevronDown className={cn('w-3.5 h-3.5 transition-transform', traceHistoryOpen && 'rotate-180')} />
+            </button>
           )}
-        >
-          <LucideIcons.Workflow className="w-4 h-4" strokeWidth={2.2} />
-          <span>Trace Lineage</span>
-        </button>
+          {traceHistoryOpen && (
+            <TraceHistoryPanel
+              entries={traceHistory}
+              onResume={(index) => { setTraceHistoryOpen(false); onResumeTraceHistory?.(index) }}
+              onClear={() => { setTraceHistoryOpen(false); onClearTraceHistory?.() }}
+              onClose={() => setTraceHistoryOpen(false)}
+              triggerRef={traceLauncherRef}
+            />
+          )}
+        </div>
       )}
 
       {/* Trace Depth — visible only during an active trace. Sits right

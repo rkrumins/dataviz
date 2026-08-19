@@ -1754,6 +1754,24 @@ export function ContextViewCanvas({
   const tracedNodeId = canvasTrace.tracedUrn
     ? (urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
     : null
+  // Launcher entries for the header's "pick up where you left off"
+  // panel: resolved labels, direction mode, STACK index (newest first).
+  const headerTraceHistory = useMemo(() => (
+    traceHistory.entries.map((e, i) => ({
+      index: i,
+      label: displayMap.get(urnToIdMap.get(e.urn) ?? e.focusId)?.name
+        ?? displayMap.get(e.focusId)?.name
+        ?? e.urn.split(/[:/]/).pop()
+        ?? e.urn,
+      mode: (e.view.showUpstream && e.view.showDownstream ? 'both' : e.view.showUpstream ? 'up' : 'down') as 'up' | 'down' | 'both',
+      timestamp: e.timestamp,
+    })).reverse()
+  ), [traceHistory, displayMap, urnToIdMap])
+  const resumeTraceHistory = useCallback((index: number) => {
+    traceHistoryGo(traceHistoryJump(traceHistory, index))
+  }, [traceHistoryGo, traceHistory])
+  const clearTraceHistory = useCallback(() => setTraceHistory(emptyTraceHistory()), [])
+
   // Legacy-shaped history entries for the dock's Recent popover.
   const dockHistoryEntries = useMemo(() => [...traceHistory.entries].reverse().map(e => ({
     focusId: e.focusId,
@@ -3754,6 +3772,9 @@ export function ContextViewCanvas({
         lineageReady={hydrationPhase === 'complete'}
         traceUpstreamDepth={traceDepthUp}
         traceDownstreamDepth={traceDepthDown}
+        traceHistory={headerTraceHistory}
+        onResumeTraceHistory={resumeTraceHistory}
+        onClearTraceHistory={clearTraceHistory}
         onSetTraceDepth={(dir, value) => {
           // A VIEW limit on the already-walked flow — applies instantly,
           // no refetch (the walk holds the whole flow in memory).

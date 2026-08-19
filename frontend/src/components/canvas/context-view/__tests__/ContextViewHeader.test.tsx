@@ -176,3 +176,35 @@ describe('ContextViewHeader — view title (calm-view default)', () => {
     expect(screen.getByRole('button', { name: 'View options' })).toBeInTheDocument()
   })
 })
+
+describe('ContextViewHeader — Trace Lineage launcher (history)', () => {
+  const history = [
+    { index: 0, label: 'Snowflake', mode: 'both' as const, timestamp: Date.now() - 60_000 },
+  ]
+
+  it('with no selection and no history, the button stays disabled', () => {
+    render(<ContextViewHeader {...baseProps({ canTrace: false })} />)
+    expect(screen.getByRole('button', { name: /trace lineage/i })).toBeDisabled()
+  })
+
+  it('with no selection but history, the button is ENABLED and opens the launcher', () => {
+    const props = baseProps({ canTrace: false, traceHistory: history, onResumeTraceHistory: vi.fn() })
+    render(<ContextViewHeader {...props} />)
+    const btn = screen.getByRole('button', { name: /trace lineage/i })
+    expect(btn).toBeEnabled()
+    fireEvent.click(btn)
+    expect(screen.getByText(/pick up where you left off/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Snowflake'))
+    expect(props.onResumeTraceHistory).toHaveBeenCalledWith(0)
+    expect(props.onStartTrace).not.toHaveBeenCalled()
+  })
+
+  it('with a selection, the main zone traces and the chevron opens the launcher', () => {
+    const props = baseProps({ canTrace: true, traceHistory: history, onResumeTraceHistory: vi.fn() })
+    render(<ContextViewHeader {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: /trace lineage/i }))
+    expect(props.onStartTrace).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: /trace history/i }))
+    expect(screen.getByText(/pick up where you left off/i)).toBeInTheDocument()
+  })
+})
