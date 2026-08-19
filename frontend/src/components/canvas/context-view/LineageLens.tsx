@@ -809,18 +809,26 @@ export function LineageLens({
         // will never show is a fetch that answers nothing.
         if (!showingAll && want === '') continue
         const have = childrenAll.get(urn)
-        // All mode's own FIRST page arrives via the toggle handler
-        // (`toggleFrameAll`/`toggleContents`) — refetching it here too
-        // would race that fetch and quietly page past it. Connected
-        // mode has no such handler (there is nothing to fetch until a
-        // query exists), so its first fetch has to start here.
-        if (showingAll && !have) continue
+        // A missing FIRST page is fetched here unless one is already in
+        // flight (the toggle handlers fire it at click time and mark
+        // 'loading' synchronously — the race this guard exists for).
+        // This used to skip ANY missing first page, assuming a click
+        // always preceded showAll — but the Contents=All FOCAL seed and
+        // a share link's restored frameAll set arrive with no click, so
+        // their rosters were never fetched and a focused container drew
+        // only its flow rows ("only the 1st of my 10 children shows",
+        // 2026-08-19).
+        if (showingAll && !have && childrenAllStatus.get(urn) === 'loading') continue
+        if (showingAll && !have) {
+          onLoadAllChildren(urn)
+          continue
+        }
         if (have && (have.query ?? '') === want) continue
         onLoadAllChildren(urn, want)
       }
     }, 300)
     return () => clearTimeout(t)
-  }, [frameQueriesNow, frameShowAllNow, childrenAll, onLoadAllChildren])
+  }, [frameQueriesNow, frameShowAllNow, childrenAll, childrenAllStatus, onLoadAllChildren])
 
   /**
    * Rest a frame's scroll window on an absolute row. Fetching is

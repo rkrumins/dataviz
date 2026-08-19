@@ -3198,3 +3198,54 @@ describe('labelFitsRun — the badge and the wire agree', () => {
         expect(bundle.labelVisible).toBe(true)
     })
 })
+
+describe('focal container-of-containers in All mode (2026-08-19: "only the 1st node\'s children show")', () => {
+    /** F ⊃ m1..m10, each mid ⊃ leaves; lineage runs through m1's leaf
+     *  only. The walk model carries F, m1 and its leaf (the flow); the
+     *  roster knows all ten mids. Focusing F with Contents=All must show
+     *  ALL TEN mids — the flow one populated, the other nine as quiet
+     *  rows — never just the first. */
+    function nestedEstate() {
+        const mids = Array.from({ length: 10 }, (_, i) => `m${i + 1}`)
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F', 'NODE'), wnode('m1', 'NODE'), wnode('leaf1', 'ITEM'), wnode('src', 'ITEM')],
+            hops: [['src', 'leaf1']],
+            contains: [['F', 'm1'], ['m1', 'leaf1']],
+        })
+        const roster = {
+            children: mids.map(m => wnode(m, 'NODE')),
+            hasMore: false,
+            total: 10,
+        }
+        const view = {
+            ...initialLensViewState(sg),
+            frameShowAll: new Set(['F']),
+        }
+        return { sg, roster, view, mids }
+    }
+
+    it('draws every mid-level child of the focal: the flow one populated, the other nine as rows', () => {
+        const { sg, roster, view, mids } = nestedEstate()
+        const g = layout(sg, view, {
+            childrenAll: new Map([['F', roster]]),
+            childrenAllStatus: new Map([['F', 'done']]),
+        })
+        for (const m of mids) {
+            expect(cardFor(g, m), `${m} must be on the board`).toBeTruthy()
+        }
+        // (m1's own leaf population needs the component's settle pass —
+        // the sticky-grain double render — so a single-pass layout call
+        // deliberately doesn't assert it; lensSeam covers that side.)
+    })
+
+    it('counts the window over ALL rows, not just the connected one', () => {
+        const { sg, roster, view } = nestedEstate()
+        const g = layout(sg, view, {
+            childrenAll: new Map([['F', roster]]),
+            childrenAllStatus: new Map([['F', 'done']]),
+        })
+        const focal = cardFor(g, 'F')!
+        expect(focal.frameRows.length).toBe(10)
+    })
+})
