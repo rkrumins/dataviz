@@ -3921,6 +3921,11 @@ export function ContextViewCanvas({
               expanded={dockExpanded}
               onToggleExpanded={() => setDockExpanded(v => !v)}
               onExit={exitCanvasTrace}
+              onOpenLens={() => {
+                // The Lens bridge: same traced entity, presented as the
+                // hop-ordered end-to-end flow (full walk on).
+                if (canvasTrace.tracedUrn) openLensAt(canvasTrace.tracedUrn, true)
+              }}
               onJumpToUrn={(urn) => {
                 const id = urnToIdMap.get(urn) ?? urn
                 startCanvasTrace(id)

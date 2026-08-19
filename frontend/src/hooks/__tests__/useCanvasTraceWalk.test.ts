@@ -146,9 +146,10 @@ describe('useCanvasTraceWalk', () => {
     act(() => result.current.start('F'))
     await waitFor(() => expect(result.current.traceNodeUrns.has('colA')).toBe(true))
     expect(result.current.traceNodeUrns.has('F')).toBe(true)
-    // Final ruling: colA's CARD is T1 (leaf → parent), revealed CLOSED —
-    // only PLAT above it expands; the projection rolls the hop up to T1.
-    expect([...result.current.expansionUrns].sort()).toEqual(['PLAT'])
+    // Fourth-and-final ruling: partners start TOP-MOST (PLAT closed, the
+    // hop rolled up onto it); only the FOCUS's chain auto-opens, and F is
+    // already a root — so nothing expands.
+    expect([...result.current.expansionUrns].sort()).toEqual([])
     expect(result.current.addedEdgeIds).toBe(idleSet)   // stable identity
     await waitFor(() => expect(result.current.addedEdgeIds.has('e1')).toBe(true))
   })

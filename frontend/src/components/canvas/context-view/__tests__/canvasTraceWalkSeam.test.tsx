@@ -143,7 +143,7 @@ const storeNodeIds = () => useCanvasStore.getState().nodes.map(n => n.id).sort()
 const storeEdgeIds = () => useCanvasStore.getState().edges.map(e => e.id).sort()
 
 describe('canvas trace seam', () => {
-  it('a trace draws the whole flow upfront with zero interactions: store holds every hop, the filter keeps only the flow and its hosts, expansion reveals every CARD closed', async () => {
+  it('a trace draws the whole flow upfront with zero interactions: store holds every hop, the filter keeps only the flow and its hosts, partners start TOP-MOST', async () => {
     const { provider } = providerByUrn({ F: estate })
     const { result } = renderHook(() => useSeam(provider, hierarchyFixture()))
     act(() => result.current.canvasTrace.start('F'))
@@ -155,11 +155,11 @@ describe('canvas trace seam', () => {
     // The filter keeps the flow + host containers, prunes the siblings.
     const rendered = [...result.current.filtered.filteredMap.keys()].sort()
     expect(rendered).toEqual(['F', 'PLAT', 'T1', 'colA'])
-    // 2026-08-19 final ruling: the trace is a FILTER — participant CARDS
-    // are revealed CLOSED (colA's card is T1; only PLAT above it opens),
-    // and the edge projection rolls colA→F up to the T1 card. The user
-    // drills from there.
-    expect([...result.current.expandedForRender].sort()).toEqual(['PLAT'])
+    // 2026-08-19 fourth-and-final ruling ("BFS to top most entities, then
+    // expand"): partners start at their TOP-MOST roots, closed — PLAT
+    // stays shut with colA→F rolled up onto it; only the FOCUS's own
+    // chain would auto-open, and F is already a root.
+    expect([...result.current.expandedForRender].sort()).toEqual([])
     expect(result.current.hiddenTraceCount).toBe(0)
   })
 

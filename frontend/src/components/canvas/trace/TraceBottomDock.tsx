@@ -24,6 +24,9 @@ export interface TraceBottomDockProps {
   onToggleExpanded: () => void
   onExit: () => void
   onJumpToUrn: (urn: string) => void
+  /** Open the Lineage Lens on the traced entity (optional — the "Flow
+   *  view" button renders only when the host wires it). */
+  onOpenLens?: () => void
   /** Browser-style trace history (optional — the ←/→ pair renders only
    *  when the host wires it; legacy hosts stay untouched). */
   onHistoryBack?: () => void
@@ -73,6 +76,7 @@ export function TraceBottomDock({
   onToggleExpanded,
   onExit,
   onJumpToUrn,
+  onOpenLens,
   onHistoryBack,
   onHistoryForward,
   canHistoryBack = false,
@@ -240,6 +244,7 @@ export function TraceBottomDock({
           expanded={expanded}
           onToggleExpanded={onToggleExpanded}
           onExit={onExit}
+          onOpenLens={onOpenLens}
           onHistoryBack={onHistoryBack}
           onHistoryForward={onHistoryForward}
           canHistoryBack={canHistoryBack}

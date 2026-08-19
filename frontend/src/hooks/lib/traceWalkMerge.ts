@@ -137,32 +137,25 @@ export function traceExpansionUrns(model: LensWalkModel, focusUrn: string): Set<
             hasChildren.add(e.sourceUrn)
         }
     }
-    // THE TRACE IS A FILTER, NOT AN EXPLOSION (2026-08-19 final ruling,
-    // third same-day iteration): every lineage-relevant CARD becomes
-    // visible and stays CLOSED — the user drills from there. A
-    // participant's card is itself when it holds children, or its
-    // immediate parent when it is a LEAF (a column reads as its table's
-    // rolled-up wire — useEdgeProjection rolls hops up to the closed
-    // cards, so the flow still reads end to end). Expansion covers the
-    // ancestors STRICTLY ABOVE each card: enough to reveal it, never its
-    // interior. (The first iteration expanded only hop-1 partners' chains
-    // — a leaf-grain flow expanded nothing; the second opened EVERY
-    // chain — a 388-participant walk splayed the whole estate.)
-    const seeds = new Set<string>([focusUrn])
-    for (const e of model.lineageEdges) {
-        if (e.sourceUrn) seeds.add(e.sourceUrn)
-        if (e.targetUrn) seeds.add(e.targetUrn)
-    }
+    // TOP-MOST FIRST (2026-08-19 fourth-and-final ruling: "just show BFS
+    // to top most entities — that can then be expanded"): partners
+    // present at their TOP-MOST entity grain — roots closed, the whole
+    // flow rolled up onto them by useEdgeProjection — and every user
+    // expansion refines the grain (the projection re-rolls per
+    // expansion). The ONLY auto-expansion is the FOCUS's own chain: the
+    // traced card must be visible even when traced from search/drawer.
+    // (Iteration one expanded hop-1 partners' chains — a leaf-grain flow
+    // expanded nothing; two opened EVERY chain — a 388-participant walk
+    // splayed the estate; three revealed every participant card — deep
+    // flows still dragged whole trees open.)
+    const card = hasChildren.has(focusUrn) ? focusUrn : (childToParent.get(focusUrn) ?? focusUrn)
     const out = new Set<string>()
-    for (const seed of seeds) {
-        const card = hasChildren.has(seed) ? seed : (childToParent.get(seed) ?? seed)
-        const seen = new Set<string>([card])
-        let cursor = childToParent.get(card)
-        while (cursor && !seen.has(cursor)) {
-            seen.add(cursor)
-            out.add(cursor)
-            cursor = childToParent.get(cursor)
-        }
+    const seen = new Set<string>([card])
+    let cursor = childToParent.get(card)
+    while (cursor && !seen.has(cursor)) {
+        seen.add(cursor)
+        out.add(cursor)
+        cursor = childToParent.get(cursor)
     }
     return out
 }

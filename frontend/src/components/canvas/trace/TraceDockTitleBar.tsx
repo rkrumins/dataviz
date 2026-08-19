@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Focus,
   X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -25,6 +26,9 @@ export interface TraceDockTitleBarProps {
   expanded: boolean
   onToggleExpanded: () => void
   onExit: () => void
+  /** Open the Lineage Lens on the traced entity — the hop-ordered,
+   *  end-to-end flow narrative (renders only when the host wires it). */
+  onOpenLens?: () => void
   /** Browser-style trace history — rendered only when wired. */
   onHistoryBack?: () => void
   onHistoryForward?: () => void
@@ -60,6 +64,7 @@ export function TraceDockTitleBar({
   expanded,
   onToggleExpanded,
   onExit,
+  onOpenLens,
   onHistoryBack,
   onHistoryForward,
   canHistoryBack = false,
@@ -257,6 +262,21 @@ export function TraceDockTitleBar({
       </LayoutGroup>
 
       <div className="flex-1 min-w-2" />
+
+      {/* The Lens bridge — the same walk, presented as the hop-ordered
+          flow narrative ("show it like the Lens, from the top"). */}
+      {onOpenLens && (
+        <button
+          type="button"
+          data-trace-control
+          onClick={onOpenLens}
+          title="Open this trace in the Lineage Lens — the end-to-end flow, hop by hop"
+          className="shrink-0 inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border text-[11px] font-medium text-ink-muted hover:text-ink bg-white/[0.06] border-white/[0.12] hover:bg-white/[0.12] transition-colors"
+        >
+          <Focus className="w-3.5 h-3.5" />
+          Flow view
+        </button>
+      )}
 
       {/* Trace history ←/→ — browser semantics over this view's traces
           (renders only when the host wires the history). */}

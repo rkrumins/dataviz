@@ -146,19 +146,18 @@ describe('computeTraceWalkDelta — merge rules', () => {
 })
 
 describe('traceExpansionUrns', () => {
-  // 2026-08-19 FINAL RULING (third same-day iteration — the trace is a
-  // FILTER, not an explosion): every lineage-relevant CARD becomes
-  // visible and stays CLOSED; the user drills. A participant's card is
-  // itself when it holds children, or its immediate parent when it is a
-  // LEAF (a column reads as its table's rolled-up wire, not as an open
-  // row). Expansion therefore covers the ancestors STRICTLY ABOVE each
-  // card — enough to reveal it, never its interior. The edge projection
-  // rolls leaf hops up to the closed cards (useEdgeProjection), so the
-  // flow still reads end to end.
-  it('reveals every participant CARD closed: only ancestors above the cards expand', () => {
+  // 2026-08-19 FOURTH-AND-FINAL RULING ("shouldn't we just show BFS to
+  // top most entities? That can then be expanded"): the trace presents
+  // PARTNERS at their TOP-MOST entity grain — roots closed, the whole
+  // flow rolled up onto them by the edge projection — and the user
+  // expands to refine the grain (the projection re-rolls per expansion).
+  // The ONLY auto-expansion is the FOCUS's own ancestor chain: the traced
+  // card must be visible even when traced from search/drawer, while
+  // everything else starts top-most.
+  it('expands ONLY the focus chain; partners present at their top-most roots', () => {
     // c1 (leaf in T under P) is traced; c2 (leaf in T2) feeds it; far
-    // (leaf in TFAR) is two hops away. Cards: T, T2, TFAR — all closed;
-    // only P (above T) must expand to reveal them.
+    // (leaf in TFAR) is two hops away. Focus card = T (c1 is a leaf), so
+    // P opens to reveal it. T2 and TFAR stay top-most closed.
     const m = model({
       nodes: [wnode('c1'), wnode('c2'), wnode('far'), wnode('T', 'dataset'), wnode('P', 'container'), wnode('T2', 'dataset'), wnode('TFAR', 'dataset')],
       lineageEdges: [hop('c2', 'c1', 'e1'), hop('far', 'c2', 'e2')],
@@ -167,25 +166,26 @@ describe('traceExpansionUrns', () => {
     expect([...traceExpansionUrns(m, 'c1')].sort()).toEqual(['P'])
   })
 
-  it('a TABLE focus whose COLUMNS carry the hops: tables are closed cards, wires roll up', () => {
+  it('a deep focus opens its whole chain; deep partners still start at their roots', () => {
+    // Focus cAB1 in A⊃cA1⊃cAB1⊃cB1; cB1 flows to cB2 in C⊃cA2⊃cAB2⊃cB2.
+    const m = model({
+      nodes: [wnode('A'), wnode('cA1'), wnode('cAB1'), wnode('cB1'), wnode('C'), wnode('cA2'), wnode('cAB2'), wnode('cB2')],
+      lineageEdges: [hop('cB1', 'cB2', 'e1')],
+      containmentEdges: [holds('A', 'cA1'), holds('cA1', 'cAB1'), holds('cAB1', 'cB1'), holds('C', 'cA2'), holds('cA2', 'cAB2'), holds('cAB2', 'cB2')],
+    })
+    // Focus cAB1 has children → its card is itself → A and cA1 open.
+    // Partner tree C stays a single closed root card.
+    expect([...traceExpansionUrns(m, 'cAB1')].sort()).toEqual(['A', 'cA1'])
+  })
+
+  it('a LEAF focus reveals its parent card (never its own interior)', () => {
     const m = model({
       nodes: [wnode('TBL', 'dataset'), wnode('c1'), wnode('c2'), wnode('T2', 'dataset'), wnode('P', 'container')],
       lineageEdges: [hop('c2', 'c1', 'e1')],
       containmentEdges: [holds('P', 'TBL'), holds('TBL', 'c1'), holds('T2', 'c2')],
     })
-    // TBL's card = itself (has children) → P above it expands; T2's card
-    // = itself (holds c2) → nothing above. Neither TBL nor T2 opens.
-    expect([...traceExpansionUrns(m, 'TBL')].sort()).toEqual(['P'])
-  })
-
-  it('a container-grain participant (manual estates) is revealed the same way', () => {
-    // Authored flow at layer grain: L1 → L2, both under platform PM.
-    const m = model({
-      nodes: [wnode('L1', 'layer'), wnode('L2', 'layer'), wnode('PM', 'container'), wnode('x1'), wnode('x2')],
-      lineageEdges: [hop('L1', 'L2', 'e1')],
-      containmentEdges: [holds('PM', 'L1'), holds('PM', 'L2'), holds('L1', 'x1'), holds('L2', 'x2')],
-    })
-    expect([...traceExpansionUrns(m, 'L1')].sort()).toEqual(['PM'])
+    // Focus c1 is a leaf → its card is TBL → only P opens. T2 stays root.
+    expect([...traceExpansionUrns(m, 'c1')].sort()).toEqual(['P'])
   })
 
   it('is cycle-safe', () => {
@@ -194,8 +194,8 @@ describe('traceExpansionUrns', () => {
       lineageEdges: [hop('b', 'a', 'e1')],
       containmentEdges: [holds('a', 'b'), holds('b', 'a')],
     })
-    // Terminates; the chain walk simply contributes what it saw.
-    expect([...traceExpansionUrns(cyclic, 'a')].sort()).toEqual(['a', 'b'])
+    // Terminates; the focus-chain climb simply contributes what it saw.
+    expect([...traceExpansionUrns(cyclic, 'a')].sort()).toEqual(['b'])
   })
 })
 
