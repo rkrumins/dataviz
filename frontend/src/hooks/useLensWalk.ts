@@ -52,6 +52,11 @@ const FULL_WALK_AUTO_GRANTS = 24
  *  the driver re-fetches the WHOLE walk with a bigger page budget
  *  (excludes keep known nodes off the wire) instead of chasing entries. */
 const ESCALATION_MIN_FRONTIER = 24
+/** BULK frontier draining (2026-08-20 — reported live as "500+ continuous
+ *  requests"): cursor-less (depth-exhausted) frontier entries drain as
+ *  ONE request per direction carrying up to this many anchors via
+ *  seedUrns (wire cap 500), instead of one request per anchor. */
+const FULL_WALK_BATCH_SIZE = 200
 /** Page-budget ladder: default → ×3 per escalation, capped by the
  *  server's TRACE_MAX_NODES_HARD. */
 const PAGE_BUDGET_START = 2000
@@ -268,6 +273,9 @@ export function useLensWalk(
         /** Escalation merges replace the frontier/truncation wholesale —
          *  see mergeClosures' ctx doc. */
         replaceFrontier?: boolean,
+        /** Bulk merges clear every batched anchor's frontier entry — the
+         *  response is authoritative for all of them. */
+        clearFrontierRoots?: readonly string[],
     ) => {
         if (!focusUrn) return
         if (typeof provider?.traceClosure !== 'function') return   // unsupported: nothing to extend/page
@@ -303,7 +311,7 @@ export function useLensWalk(
                 // by design (nesting needs chains); merge dedupes, so
                 // accumulation is bounded by distinct participants, not by
                 // request count.
-                const merged = mergeClosures(entry.model, res, { rootUrn: cardUrn, direction: dir, replaceFrontier })
+                const merged = mergeClosures(entry.model, res, { rootUrn: cardUrn, direction: dir, replaceFrontier, clearFrontierRoots })
                 return setEntry(prev, cacheKey, withExtendStatus({ ...entry, model: merged }, statusKey, null))
             })
         } catch {
@@ -373,6 +381,21 @@ export function useLensWalk(
         }), `escalate:${walkFocusUrn}`, true)
     }, [provider, runFrontierOp])
 
+    // ONE request draining MANY depth-exhausted frontier anchors: seeds
+    // carry the anchors, the focus anchors the request (rootUrn is the
+    // first anchor so the seedCursor guard stays untouched), and the
+    // merge clears every batched entry — the response re-reports any
+    // still open.
+    const bulkExtend = useCallback((walkFocusUrn: string, dir: LensWalkDir, anchors: string[]) => {
+        void runFrontierOp(anchors[0], dir, (baseModel) => ({
+            urn: walkFocusUrn,
+            direction: dir === 'up' ? 'upstream' : 'downstream',
+            ...depthFields(dir, 1),
+            seedUrns: anchors,
+            excludeUrns: knownUrns(baseModel).slice(0, 2000),
+        }), `bulk:${dir}:${walkFocusUrn}`, false, anchors)
+    }, [runFrontierOp])
+
     // ── Full walk (trace mode) ─────────────────────────────────────────
     // The hook itself follows every frontier the server reports — the same
     // extend/page ops an ⊕ click fires, driven to exhaustion. Reactive
@@ -438,10 +461,41 @@ export function useLensWalk(
             escalate(focusUrn, nextBudget)
             return
         }
+        // BULK drain: wide sets of cursor-less anchors go as ONE request
+        // per direction. Cursored entries stay per-anchor (their `e:`
+        // paging is per-adjacency by contract).
+        const bulkFor = (frontierList: LensWalkModel['frontierUp'], dir: LensWalkDir): string[] | null => {
+            if (entry.extendStatus.has(`bulk:${dir}:${focusUrn}`)) return null
+            const anchors: string[] = []
+            for (const fr of frontierList) {
+                if (fr.nextCursor !== null) continue
+                if (entry.extendStatus.has(`${dir}:${fr.urn}`)) continue
+                anchors.push(fr.urn)
+                if (anchors.length >= FULL_WALK_BATCH_SIZE) break
+            }
+            return anchors.length > FULL_WALK_CONCURRENCY ? anchors : null
+        }
+        const bulkUp = bulkFor(entry.model.frontierUp, 'up')
+        const bulkDown = bulkFor(entry.model.frontierDown, 'down')
+        if (bulkUp || bulkDown) {
+            setFullWalkMeta(prev => {
+                const cur = prev.get(cacheKey) ?? { grants: 1, requests: 0 }
+                const next = new Map(prev)
+                next.set(cacheKey, { ...cur, requests: cur.requests + (bulkUp ? 1 : 0) + (bulkDown ? 1 : 0) })
+                return next
+            })
+            if (bulkUp) bulkExtend(focusUrn, 'up', bulkUp)
+            if (bulkDown) bulkExtend(focusUrn, 'down', bulkDown)
+            return
+        }
         const ops: Array<{ urn: string; dir: LensWalkDir; cursor: string | null }> = []
         const collect = (frontierList: LensWalkModel['frontierUp'], dir: LensWalkDir) => {
+            const bulkInFlight = entry.extendStatus.has(`bulk:${dir}:${focusUrn}`)
             for (const fr of frontierList) {
                 if (ops.length >= slots) return
+                // Cursor-less entries belong to an in-flight bulk drain —
+                // don't double-fetch them per-anchor meanwhile.
+                if (fr.nextCursor === null && bulkInFlight) continue
                 if (entry.extendStatus.has(`${dir}:${fr.urn}`)) continue
                 ops.push({ urn: fr.urn, dir, cursor: fr.nextCursor })
             }
@@ -462,7 +516,7 @@ export function useLensWalk(
             if (op.cursor !== null) page(op.urn, op.dir, op.cursor)
             else extend(op.urn, op.dir, [op.urn])
         }
-    }, [fullWalk, focusUrn, provider, state, fullWalkMeta, extend, page, pageSeeds, escalate])
+    }, [fullWalk, focusUrn, provider, state, fullWalkMeta, extend, page, pageSeeds, escalate, bulkExtend])
 
     const fullWalkFor = useCallback((urn: string): FullWalkStatus | null => {
         if (!fullWalk) return null

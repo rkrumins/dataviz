@@ -155,11 +155,11 @@ function mergeFrontier(
     existing: ReadonlyArray<LensFrontierEntry>,
     incoming: ReadonlyArray<LensFrontierEntry>,
     clearRoot: boolean,
-    rootUrn: string,
+    roots: readonly string[],
 ): LensFrontierEntry[] {
     const byUrn = new Map<string, LensFrontierEntry>()
     for (const f of existing) byUrn.set(f.urn, f)
-    if (clearRoot) byUrn.delete(rootUrn)
+    if (clearRoot) for (const r of roots) byUrn.delete(r)
     for (const f of incoming) byUrn.set(f.urn, f)
     return [...byUrn.values()].sort((a, b) => a.urn.localeCompare(b.urn))
 }
@@ -184,6 +184,11 @@ export function mergeClosures(
          *  entries the bigger walk swallowed must not linger for the
          *  driver to chase. */
         replaceFrontier?: boolean
+        /** BULK merges (one request draining MANY frontier anchors via
+         *  seedUrns): every batched anchor's frontier entry is cleared —
+         *  the response is authoritative for all of them and re-reports
+         *  any that are still open. Defaults to [rootUrn]. */
+        clearFrontierRoots?: readonly string[]
     },
 ): LensWalkModel {
     const incoming = toLensClosure(response, model.focusUrn)
@@ -219,10 +224,10 @@ export function mergeClosures(
         downstreamUrns,
         frontierUp: ctx.replaceFrontier
             ? [...incoming.frontierUp].sort((a, b) => a.urn.localeCompare(b.urn))
-            : mergeFrontier(model.frontierUp, incoming.frontierUp, clearUp, ctx.rootUrn),
+            : mergeFrontier(model.frontierUp, incoming.frontierUp, clearUp, ctx.clearFrontierRoots ?? [ctx.rootUrn]),
         frontierDown: ctx.replaceFrontier
             ? [...incoming.frontierDown].sort((a, b) => a.urn.localeCompare(b.urn))
-            : mergeFrontier(model.frontierDown, incoming.frontierDown, clearDown, ctx.rootUrn),
+            : mergeFrontier(model.frontierDown, incoming.frontierDown, clearDown, ctx.clearFrontierRoots ?? [ctx.rootUrn]),
         truncated: ctx.replaceFrontier ? incoming.truncated : (model.truncated || incoming.truncated),
         truncationReason: ctx.replaceFrontier
             ? incoming.truncationReason

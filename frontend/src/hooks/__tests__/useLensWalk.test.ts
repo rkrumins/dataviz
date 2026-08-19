@@ -545,14 +545,16 @@ describe('useLensWalk — full walk', () => {
     expect(result.current.fullWalkFor('a')).toBeNull()
   })
 
-  it('holds at most FULL_WALK_CONCURRENCY frontier ops in flight', async () => {
+  it('holds at most FULL_WALK_CONCURRENCY per-anchor ops in flight (CURSORED entries page per anchor)', async () => {
+    // Cursored entries stay per-anchor by contract (`e:` paging is
+    // per-adjacency); cursor-less sets this wide would bulk instead.
     const spokes = Array.from({ length: 6 }, (_, i) => `s${i}`)
     const hang = () => new Promise<never>(() => {})
     const { provider, traceClosure } = providerByUrn({
       a: () => closureResult({
         focus: f('a'),
         nodes: [gn('a'), ...spokes.map(s => gn(s))],
-        frontierUp: spokes.map(s => frontier(s)),
+        frontierUp: spokes.map(s => ({ urn: s, totalCount: 5, nextCursor: 'e:0' })),
       }),
       ...Object.fromEntries(spokes.map(s => [s, hang])),
     })
@@ -734,6 +736,67 @@ describe('useLensWalk — ESCALATION: a capped walk re-fetches BIGGER instead of
     const { result } = renderHook(() => useLensWalk('F', provider, 1, true))
     await waitFor(() => expect(result.current.walkFor('F')!.model.nodes.some(n => n.urn === 'deeper')).toBe(true))
     expect(traceClosure.mock.calls.every(c => !(c[0] as Record<string, unknown>).maxNodes)).toBe(true)
+  })
+})
+
+describe('useLensWalk — BULK frontier draining (2026-08-20: no more one-request-per-anchor storms)', () => {
+  const f = (urn: string) => ({ urn, level: 0, entityType: 'dataset' })
+
+  it('a wide cursor-less frontier drains in ONE batched request, not one per anchor', async () => {
+    // 30 depth-exhausted frontier entries (NOT max_nodes-truncated, so the
+    // escalation lane stays out of the way). The old lane fired 30
+    // per-anchor extends — reported live as 500+ continuous requests.
+    const wide = Array.from({ length: 30 }, (_, i) => ({ urn: `fr${i}`, totalCount: 2, nextCursor: null }))
+    const calls: Array<Record<string, unknown>> = []
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      calls.push(req)
+      if (req.seedUrns) {
+        return closureResult({ focus: f('F'), nodes: [gn('bulk1'), gn('bulk2')] })
+      }
+      return closureResult({
+        focus: f('F'), nodes: [gn('F'), gn('n1')],
+        frontierUp: wide,
+      })
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result } = renderHook(() => useLensWalk('F', provider, 1, true))
+
+    await waitFor(() => expect(result.current.fullWalkFor('F')?.exhausted).toBe(true))
+    expect(traceClosure).toHaveBeenCalledTimes(2)
+    const batch = calls[1]!
+    expect(batch.urn).toBe('F')
+    expect((batch.seedUrns as string[]).sort()).toEqual(wide.map(w => w.urn).sort())
+    expect(batch.direction).toBe('upstream')
+    // The batched anchors left the frontier — nothing lingers to re-chase.
+    expect(result.current.walkFor('F')!.model.frontierUp).toHaveLength(0)
+    expect(result.current.walkFor('F')!.model.nodes.some(n => n.urn === 'bulk1')).toBe(true)
+  })
+
+  it('a still-open anchor RE-REPORTED by the batch response keeps its frontier entry', async () => {
+    const wide = Array.from({ length: 10 }, (_, i) => ({ urn: `fr${i}`, totalCount: 2, nextCursor: null }))
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      if (req.seedUrns) {
+        const seeds = req.seedUrns as string[]
+        if (seeds.includes('fr0')) {
+          // fr0's adjacency was budget-cut mid-batch: it comes back as an
+          // OPEN frontier entry with a cursor and must be paged onward.
+          return closureResult({
+            focus: f('F'), nodes: [gn('bulk1')],
+            frontierUp: [{ urn: 'fr0', totalCount: 9, nextCursor: 'e:5' }],
+          })
+        }
+        return closureResult({ focus: f('F'), nodes: [gn('paged')] })
+      }
+      return closureResult({ focus: f('F'), nodes: [gn('F'), gn('n1')], frontierUp: wide })
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result } = renderHook(() => useLensWalk('F', provider, 1, true))
+    // The driver batches, sees fr0 re-reported with a cursor, pages it.
+    await waitFor(() => expect(result.current.walkFor('F')!.model.nodes.some(n => n.urn === 'bulk1')).toBe(true))
+    await waitFor(() => {
+      const st = result.current.fullWalkFor('F')
+      expect(st?.exhausted || st?.walking).toBe(true)
+    })
   })
 })
 

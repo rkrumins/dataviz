@@ -251,7 +251,6 @@ export function ContextViewCanvas({
   const addNodes = useCanvasStore((s) => s.addNodes)
   const addEdges = useCanvasStore((s) => s.addEdges)
   const setVisibleEdges = useCanvasStore((s) => s.setVisibleEdges)
-  const removeEdgesByNodeIds = useCanvasStore((s) => s.removeEdgesByNodeIds)
   const removeStoreEdges = useCanvasStore((s) => s.removeEdges)
   const removeStoreNodes = useCanvasStore((s) => s.removeNodes)
   const selectNode = useCanvasStore((s) => s.selectNode)
@@ -3102,11 +3101,16 @@ export function ContextViewCanvas({
           for (const id of subtreeIds) next.delete(id)
           return next
         })
-      } else if (traceActive) {
-        // Trace mode: keep the merged lineage/containment edges (addedEdgeIds);
-        // useTraceFilteredHierarchy hides non-context nodes.
-        removeEdgesByNodeIds(subtreeIds, canvasTrace.addedEdgeIds)
       }
+      // Trace mode (2026-08-20): collapse is PURELY VISUAL — nothing is
+      // removed from the store. The old edge-cleanup here preserved only
+      // trace-MERGED edges and dropped the browse-loaded containment
+      // inside the subtree — but those chains are exactly what
+      // useTraceFilteredHierarchy walks to keep an entity registered as
+      // hosting the flow: break them and the filter prunes the entity
+      // from the render tree ("I collapse it and it just disappears").
+      // `expandedNodes` alone hides the rows; re-expand re-renders from
+      // the intact store, and the walk's mesh survives untouched.
       // else — the subtree carries UNSAVED work: leave it FULLY intact in the
       // store (no node or edge removal). The visual collapse is driven by
       // `expandedNodes` alone, so the rows are hidden regardless; keeping every
@@ -3131,7 +3135,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeEdgesByNodeIds, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, canvasTrace.addedEdgeIds, trace.isTracing, autoDrillOnExpand])
+  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand])
 
 
 
