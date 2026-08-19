@@ -23,6 +23,7 @@ function run(opts: {
   sortedLayers: ViewLayerConfig[]
   assignments?: Record<string, { layerId: string }>
   entityScope?: 'all' | 'curated'
+  traceFallbackLayerId?: string
 }) {
   const nodeMap = new Map<string, TestNode>(opts.nodes.map(n => [n.id, n]))
   const { result } = renderHook(() =>
@@ -38,6 +39,7 @@ function run(opts: {
       assignments: opts.assignments as never,
       entityScope: opts.entityScope,
       branchCreatedUrns: new Set(),
+      traceFallbackLayerId: opts.traceFallbackLayerId,
     }),
   )
   return result.current
@@ -90,6 +92,44 @@ describe('useLayerAssignment — unassignedNodes surfacing', () => {
       nodes: [node('a', 'domain'), node('b', 'domain')],
       sortedLayers: [layer('L1', 0, ['domain'])],
     })
+    expect(res.unassignedNodes).toHaveLength(0)
+  })
+})
+
+describe('useLayerAssignment — the trace lane (2026-08-19: in trace mode, the flow is the picture)', () => {
+  // A trace on a curated view walks a flow whose participants mostly live
+  // OUTSIDE the wizard's assignments. Dropping them (the curated rule)
+  // silenced entire 300KB closures on 1M+ graphs — the board stayed empty
+  // while "N connections outside this view" exploded. While tracing, the
+  // canvas passes a virtual lane id; roots the view cannot place route
+  // there instead of vanishing. Outside trace the option is absent and
+  // curated drop semantics are untouched.
+  it('curated scope: an unlisted root routes to the trace lane instead of dropping', () => {
+    const res = run({
+      nodes: [node('a', 'domain'), node('foreignPlat', 'dataPlatform')],
+      sortedLayers: [
+        layer('L1', 0, ['domain']),
+        layer('__trace_flow__', 99, []),
+      ],
+      assignments: { a: { layerId: 'L1' } },
+      entityScope: 'curated',
+      traceFallbackLayerId: '__trace_flow__',
+    })
+    expect(res.nodeLayerMap.get('a')).toBe('L1')
+    expect(res.nodeLayerMap.get('foreignPlat')).toBe('__trace_flow__')
+    expect(res.unassignedNodes).toHaveLength(0)
+  })
+
+  it('open scope without a showUnassigned layer: the trace lane is the last resort', () => {
+    const res = run({
+      nodes: [node('a', 'domain'), node('orphan', 'mystery-type')],
+      sortedLayers: [
+        layer('L1', 0, ['domain']),
+        layer('__trace_flow__', 99, []),
+      ],
+      traceFallbackLayerId: '__trace_flow__',
+    })
+    expect(res.nodeLayerMap.get('orphan')).toBe('__trace_flow__')
     expect(res.unassignedNodes).toHaveLength(0)
   })
 })

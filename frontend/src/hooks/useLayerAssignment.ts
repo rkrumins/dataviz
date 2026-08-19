@@ -65,6 +65,16 @@ export interface UseLayerAssignmentOptions {
    * can't be an ephemeral state.
    */
   sortOverrides?: ReadonlyMap<string, LayerNodeSortAlgo>
+  /**
+   * TRACE MODE ONLY (2026-08-19: in trace, the flow is the picture): a
+   * virtual lane id that catches roots this view cannot place, INCLUDING
+   * in curated scope — a traced flow on a curated view mostly lives
+   * outside the wizard's assignments, and dropping it silenced entire
+   * closures on 1M+ graphs. Must name a layer present in `sortedLayers`;
+   * the canvas passes it only while a trace session is active, so browse
+   * keeps closed-scope drop semantics untouched.
+   */
+  traceFallbackLayerId?: string
 }
 
 export interface UseLayerAssignmentResult {
@@ -99,6 +109,7 @@ export function useLayerAssignment({
   branchCreatedUrns: branchCreatedUrnsOption,
   defaultNodeSortMode,
   sortOverrides,
+  traceFallbackLayerId,
 }: UseLayerAssignmentOptions): UseLayerAssignmentResult {
 
   // Branch-created delta: URNs created in the active branch's draft. Read from
@@ -259,9 +270,14 @@ export function useLayerAssignment({
     // silently vanishing from the canvas. Curated views keep their
     // closed-scope drop semantics (the wizard is the source of truth
     // there); the canvas surfaces the count separately.
-    const unassignedFallbackLayerId = !viewIsCurated
+    //
+    // TRACE MODE (2026-08-19): while a trace session is live the canvas
+    // passes `traceFallbackLayerId` — the virtual "On this lineage" lane.
+    // It is the last resort in BOTH scopes: a traced flow is the picture
+    // the user asked for, and curated drop was silencing entire closures.
+    const unassignedFallbackLayerId = (!viewIsCurated
       ? sortedLayers.find(l => l.showUnassigned === true)?.id
-      : undefined
+      : undefined) ?? traceFallbackLayerId
 
     // Iterative top-down traversal (prevents stack overflow on deep hierarchies)
     // HARD RULE: Containment children ALWAYS inherit parent's layer (no override).
@@ -326,6 +342,10 @@ export function useLayerAssignment({
             const nodeUrn = (nodeMap.get(nodeId)?.data?.urn as string | undefined) ?? nodeId
             if (branchCreatedDelta.has(nodeUrn)) myLayerId = nodeLayerId
           }
+          // TRACE MODE: a root the closed scope would drop routes to the
+          // virtual lane while a trace session is live — see the option's
+          // doc; the traced flow must never be censored by curation.
+          if (!myLayerId && traceFallbackLayerId) myLayerId = traceFallbackLayerId
         } else {
           // 2c. Open-scope ('all'): fall back to backend → node property → rules → inheritance so
           //     the user has data to start from (canonical assignments already handled above).
@@ -535,7 +555,7 @@ export function useLayerAssignment({
 
     return grouped
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope, defaultNodeSortMode, sortOverrides])
+  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope, defaultNodeSortMode, sortOverrides, traceFallbackLayerId])
 
   // Flatten logical/physical nodes for search and lookup
   const { displayFlat, displayMap } = useMemo(() => {

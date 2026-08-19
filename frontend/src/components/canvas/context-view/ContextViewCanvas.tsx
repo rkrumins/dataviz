@@ -129,6 +129,16 @@ import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
  *  model is complete at leaf grain. One shared empty map keeps the trace
  *  filter's memo quiet. */
 const EMPTY_DRILLDOWNS: Map<string, TraceV2Result> = new Map()
+
+/** The ephemeral trace lane — see `assignmentLayers` below. Ordered last,
+ *  indigo like the trace identity, and never persisted anywhere. */
+const TRACE_FLOW_LANE: ViewLayerConfig = {
+  id: '__trace_flow__',
+  name: 'On this lineage',
+  entityTypes: [],
+  order: Number.MAX_SAFE_INTEGER,
+  color: '#6366f1',
+}
 import { useLensChildren } from '@/hooks/useLensChildren'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
@@ -1529,15 +1539,37 @@ export function ContextViewCanvas({
   }, [])
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
+  // ── NATIVE canvas trace — Trace = the canvas shows the whole flow ──
+  // upfront (Lens = interactive investigation; the two coexist). Every
+  // trace affordance starts this session; the walk engine fetches to the
+  // ends and useCanvasTraceWalk delta-merges each wave into the store.
+  // Declared HERE, above layer assignment, because placement needs the
+  // trace lane while a session is live.
+  const canvasTrace = useCanvasTraceWalk(provider)
+  const traceActive = canvasTrace.isTracing
+  const traceModel = canvasTrace.walkEntry?.model ?? null
+
+  // The virtual "On this lineage" lane (2026-08-19): while tracing, roots
+  // this view's curation cannot place land here instead of vanishing — a
+  // 300KB closure on a 1M-node graph was merging and then rendering as an
+  // EMPTY board plus "2,194 connections outside this view". The lane is
+  // ephemeral: never in `sortedLayers` (so config writers and the strip
+  // never see it), gone the moment the trace exits.
+  const assignmentLayers = useMemo(
+    () => (traceActive ? [...sortedLayers, TRACE_FLOW_LANE] : sortedLayers),
+    [traceActive, sortedLayers],
+  )
+
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
   const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes } = useLayerAssignment({
-    nodes, sortedLayers, nodeEdgeFingerprint,
+    nodes, sortedLayers: assignmentLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
     assignments: activeReferenceLayout.assignments,
     entityScope: activeEntityScope,
     defaultNodeSortMode: activeReferenceLayout.defaultNodeSortMode,
     sortOverrides,
+    traceFallbackLayerId: traceActive ? TRACE_FLOW_LANE.id : undefined,
   })
 
   // Live per-layer visual roots for custom-order seeding (ref, not a dep, so the
@@ -1567,13 +1599,8 @@ export function ContextViewCanvas({
     nodeLayerMap, sortedLayers, assignEntityToLayer, parentMap, setExpandedNodes, currentLayout, persistReferenceLayout,
   }
 
-  // ── NATIVE canvas trace — Trace = the canvas shows the whole flow ──
-  // upfront (Lens = interactive investigation; the two coexist). Every
-  // trace affordance starts this session; the walk engine fetches to the
-  // ends and useCanvasTraceWalk delta-merges each wave into the store.
-  const canvasTrace = useCanvasTraceWalk(provider)
-  const traceActive = canvasTrace.isTracing
-  const traceModel = canvasTrace.walkEntry?.model ?? null
+  // (canvasTrace/traceActive/traceModel are declared ABOVE the layer
+  // assignment call — the trace lane must exist before placement runs.)
   // The walk-status capsule over the board ("your trace is being
   // calculated"): phase derived from the walk session. The settled state
   // shows once and self-dismisses; paused/stalled can be dismissed by
@@ -4434,7 +4461,12 @@ export function ContextViewCanvas({
               height: `calc((100% - var(--canvas-hsb, 0px)) / ${canvasZoom})`,
             }}
           >
-            {sortedLayers.map((layer) => (
+            {/* The trace lane renders as a real column, but only while it
+                actually holds flow the curation could not place. */}
+            {(traceActive && (renderByLayer.get(TRACE_FLOW_LANE.id)?.length ?? 0) > 0
+              ? [...sortedLayers, TRACE_FLOW_LANE]
+              : sortedLayers
+            ).map((layer) => (
               <LayerColumn
                 key={layer.id}
                 layer={layer}
