@@ -818,6 +818,7 @@ export function RegistryAssets() {
         assetName: string
         dataSources: Array<{ id: string; projectionMode?: string | null }>
         initialValue: AggregationOverridesValue
+        defaultFinePairs?: 'auto' | 'true' | 'false'
     } | null>(null)
 
     // Eager, global per-provider counts for the sidebar badges + Catalog
@@ -961,6 +962,7 @@ export function RegistryAssets() {
                     timeoutMinutes: PRESET_TIMEOUT_MINUTES,
                     tuning: settings?.tuning ?? undefined,
                 },
+                defaultFinePairs: settings?.envMaterializeFinePairs ?? undefined,
             })
         } catch (e: any) {
             hideLoading('reaggregate')
@@ -1694,6 +1696,7 @@ export function RegistryAssets() {
                     maxRetries: 3,
                     timeoutMinutes: PRESET_TIMEOUT_MINUTES,
                 }}
+                defaultFinePairs={reaggregateCtx?.defaultFinePairs}
                 onConfirmRetrigger={handleConfirmReaggregate}
             />
 

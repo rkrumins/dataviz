@@ -13,7 +13,11 @@ data:
   AGGREGATION_JOB_TIMEOUT_SECS: "7200"
   # Progress-aware watchdog: kill only on no-forward-progress (stall) or
   # the wall-clock safety net — never a progressing multi-hour job.
-  AGGREGATION_STALL_TIMEOUT_SECS: "900"
+  # Matches what the UI trigger paths send; the machine-queued rebuilds
+  # (reconciliation, Refresh rollups, projector heal) send nothing and get
+  # this. Keep it below 2x AGGREGATION_JOB_TIMEOUT_SECS above, or the
+  # control plane's stale-job backstop starts failing wedged jobs first.
+  AGGREGATION_STALL_TIMEOUT_SECS: "10800"
   AGGREGATION_JOB_MAX_WALL_SECS: "86400"
   # Cross-pod concurrent aggregation-write budget per FalkorDB endpoint.
   FALKORDB_ENDPOINT_WRITE_SLOTS: "2"

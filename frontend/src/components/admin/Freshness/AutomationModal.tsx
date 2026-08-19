@@ -51,7 +51,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { useToast } from '@/components/ui/toast'
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
-import { aggregationService, type AggregationCadence } from '@/services/aggregationService'
+import { aggregationService, type AggregationCadence, type AggregationTuning } from '@/services/aggregationService'
 import type { FreshnessSummary } from '@/services/freshnessService'
 import {
     CADENCE_LABEL, CHECK_PRESETS, COOLDOWN_PRESETS, DETECTORS, DETECT_PRESETS,
@@ -247,6 +247,11 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
     const [cap, setCap] = useState('')
     const [shrinkPct, setShrinkPct] = useState('')
     const [detectors, setDetectors] = useState<string[]>([])
+    /** Rollup storage for every rebuild this stage queues. Two states only —
+     *  `true` and `'auto'` — both written explicitly, never by clearing the
+     *  key: an absent key means "inherit", and inheritance cannot walk a
+     *  stored `true` back to Auto. */
+    const [finePairs, setFinePairs] = useState<true | 'auto'>('auto')
 
     // Closed by default: the essentials are the pipeline, and everything here
     // is a tuning knob that most readers open this modal without needing.
@@ -275,6 +280,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         policy?.shrinkTolerancePct, policy?.detectors,
         cadence?.probeEnabled, cadence?.probeIntervalSecs,
         cadence?.driftAutoRebuild, cadence?.rebuildMinIntervalSecs,
+        settingsQ.data?.tuning?.materializeFinePairs,
     ])
 
     // Read through a ref inside ``requestClose``: that callback is the argument
@@ -362,6 +368,13 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         setProbeSecs(cadence?.probeIntervalSecs ?? null)
         setDriftAuto(cadence?.driftAutoRebuild ?? settingsQ.data.envDriftAutoRebuild ?? true)
         setCooldownSecs(cadence?.rebuildMinIntervalSecs ?? null)
+        // Same rule as the toggles above: the stored default if there is one,
+        // otherwise whatever the server says it resolves to. `false` is not
+        // reachable from this control, so it seeds as Auto — the honest
+        // reading, since forcing the diagonal is not "always full detail".
+        const resolvedFine = settingsQ.data.tuning?.materializeFinePairs
+            ?? settingsQ.data.envMaterializeFinePairs
+        setFinePairs(resolvedFine === true || resolvedFine === 'true' ? true : 'auto')
         setSeededSig(remoteSig)
         setSeeded(true)
     }, [open, dirty, policy, settingsQ.data, cadence, remoteSig])
@@ -373,8 +386,12 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         set(v)
     }
 
-    const saveCadence = useMutation({
-        mutationFn: (body: AggregationCadence) => aggregationService.putAggregationCadence(body),
+    // Rollup storage is the third link, and the terminal one: it writes
+    // `tuning_json` where the other two write `cadence_json` and the
+    // reconciliation policy. All three land in the same settings row, which is
+    // why they are sequenced rather than raced.
+    const saveTuning = useMutation({
+        mutationFn: (body: AggregationTuning) => aggregationService.putAggregationSettings(body),
         onSuccess: () => {
             void qc.invalidateQueries({ queryKey: SETTINGS_KEY })
             // The controls now hold what the server holds, so the modal may go
@@ -383,6 +400,21 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
             setDirty(false)
             showToast('success', 'Automation saved. Takes effect within a minute.')
             onClose()
+        },
+        onError: (e: Error) => showToast(
+            'error',
+            `Watch policy and cadence saved, but the rollup storage default did not: ${
+                e.message || 'unknown error'
+            }. Save again to retry it.`,
+        ),
+    })
+    const saveCadence = useMutation({
+        mutationFn: (body: AggregationCadence) => aggregationService.putAggregationCadence(body),
+        onSuccess: () => {
+            // Only `materializeFinePairs` is sent. The server MERGES `tuning`,
+            // so the workspace Defaults dialog's caps and floors survive this
+            // write untouched — a read-modify-write here would race them.
+            saveTuning.mutate({ materializeFinePairs: finePairs })
         },
         // The policy PUT that precedes this one has already landed (see
         // onSave), so a generic "could not save" would be a lie about half
@@ -839,6 +871,51 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                                 </span>
                                             </SettingRow>
 
+                                            {/* Not a toggle: neither state is the absence of the
+                                                other, and "off" would have to mean Auto — a mode
+                                                with its own behaviour, not a disabled feature. It
+                                                sits in Act because it governs what the rebuilds
+                                                this stage queues actually write. */}
+                                            <SettingRow
+                                                label="Rollup storage"
+                                                hint={finePairs === true
+                                                    ? 'Every combination is pre-created, so no drill comes back thin. A graph whose rollups would exceed the write budget fails instead — and because forcing full detail skips the up-front estimate, it fails part-way through.'
+                                                    : 'Full detail wherever it fits what the graph store can hold; above that, the diagonal is stored and finer granularities are derived at read time. Slower drills on the largest graphs, but it degrades instead of failing.'}
+                                            >
+                                                <span
+                                                    className="flex shrink-0 rounded-lg border border-glass-border p-0.5"
+                                                    role="radiogroup"
+                                                    aria-label="Rollup storage"
+                                                >
+                                                    {([
+                                                        ['auto', 'Auto'] as const,
+                                                        ['full', 'Full detail'] as const,
+                                                    ]).map(([id, label]) => {
+                                                        const selected = (id === 'full') === (finePairs === true)
+                                                        return (
+                                                            <button
+                                                                key={id}
+                                                                type="button"
+                                                                role="radio"
+                                                                aria-checked={selected}
+                                                                disabled={!isAdmin}
+                                                                onClick={() => edit(setFinePairs)(id === 'full' ? true : 'auto')}
+                                                                className={cn(
+                                                                    'rounded-md px-2.5 py-1 text-[12px] transition-colors duration-150',
+                                                                    'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                                                    selected
+                                                                        ? 'bg-indigo-500/10 text-ink font-medium'
+                                                                        : 'text-ink-muted hover:text-ink-secondary',
+                                                                    !isAdmin && 'cursor-not-allowed opacity-60',
+                                                                )}
+                                                            >
+                                                                {label}
+                                                            </button>
+                                                        )
+                                                    })}
+                                                </span>
+                                            </SettingRow>
+
                                             {/* The breaker's limit is deploy-owned and the API does
                                                 not report it, so this states the rule and the live
                                                 count rather than inventing a number. */}
@@ -935,16 +1012,16 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                         <button
                                             type="button"
                                             onClick={onSave}
-                                            disabled={saveRecon.isPending || saveCadence.isPending}
+                                            disabled={saveRecon.isPending || saveCadence.isPending || saveTuning.isPending}
                                             className={cn(
                                                 'flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-medium transition-colors duration-150',
                                                 'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
-                                                saveRecon.isPending || saveCadence.isPending
+                                                saveRecon.isPending || saveCadence.isPending || saveTuning.isPending
                                                     ? 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed'
                                                     : 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white hover:brightness-110 shadow-md',
                                             )}
                                         >
-                                            {(saveRecon.isPending || saveCadence.isPending) && (
+                                            {(saveRecon.isPending || saveCadence.isPending || saveTuning.isPending) && (
                                                 <Loader2 className="w-4 h-4 animate-spin" />
                                             )}
                                             Save

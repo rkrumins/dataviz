@@ -2788,6 +2788,15 @@ class FalkorDBProvider(GraphDataProvider):
             # Operator escape hatch forces the cube CONTRACT (mixed-level
             # derivation off) without discarding the resolved timestamp
             # or stamp version.
+            #
+            # The default here stays "false" even though the pipeline's
+            # ``_materialize_fine_pairs_mode`` now defaults to "true", and
+            # the asymmetry is deliberate: this is a READ, and every run
+            # stamps the regime it actually used onto ``_AggMeta``. An unset
+            # env var means "believe the stamp", which is right whichever way
+            # the write default points — a graph last built under "auto" that
+            # fell back to the diagonal must keep deriving mixed levels. Only
+            # an EXPLICIT setting overrides the stamp.
             meta = meta._replace(regime="cube")
         self._agg_meta_cached = (meta, now)
         return meta

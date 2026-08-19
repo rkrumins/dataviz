@@ -6,17 +6,28 @@ import { authFetch } from './apiClient';
  * self-tuning defaults. These are caps/floors, not fixed values.
  */
 export interface AggregationTuning {
-  scanRangeWidth?: number;      // 10,000 .. 5,000,000
-  maxPendingPairs?: number;     // 50,000 .. 50,000,000
-  applyChunk?: number;          // 1,000 .. 200,000
-  deleteChunk?: number;         // 100 .. 50,000
-  writePacingRatio?: number;    // 0 .. 10
-  extractConcurrency?: number;  // 1 .. 4
+  // `null` means "clear this default" — the settings PUT merges `tuning`, so a
+  // key that is simply absent is left as-is and only an explicit null removes
+  // it. Omitting a key from a per-job request still means "inherit".
+  scanRangeWidth?: number | null;      // 10,000 .. 5,000,000
+  maxPendingPairs?: number | null;     // 50,000 .. 50,000,000
+  applyChunk?: number | null;          // 1,000 .. 200,000
+  deleteChunk?: number | null;         // 100 .. 50,000
+  writePacingRatio?: number | null;    // 0 .. 10
+  extractConcurrency?: number | null;  // 1 .. 4
   materializeLeafPairs?: boolean;
-  /** Legacy full-cube mode: materialize leaf-involving AND mixed-level pairs (scales with raw edges; can OOM FalkorDB). */
-  materializeFinePairs?: boolean;
+  /**
+   * Rollup storage. `true` (the shipped default) pre-creates every
+   * ancestor-pair combination and FAILS the job above the write budget;
+   * `'auto'` stores the full cube only while it fits the cube ceiling and
+   * falls back to the depth-diagonal + on-demand reads above it. Absent
+   * means "inherit" — the stored global default, then the env default —
+   * which is why "Auto" must be sent as `'auto'` and never by omitting the
+   * key: omission cannot override a stored `true`.
+   */
+  materializeFinePairs?: boolean | 'auto';
   /** Hard write budget: fail the job instead of writing more :AGGREGATED edges than this. */
-  maxMaterializedEdges?: number; // 10,000 .. 50,000,000
+  maxMaterializedEdges?: number | null; // 10,000 .. 50,000,000
 }
 
 export interface AggregationTriggerRequest {
@@ -185,6 +196,8 @@ export interface AggregationSettingsResponse {
   envDriftAutoRebuild?: boolean | null;
   envProbeEnabled?: boolean | null;
   envProbeIntervalSecs?: number | null;
+  /** Tri-state, so a string: "auto" is a third mode, not a missing bool. */
+  envMaterializeFinePairs?: 'auto' | 'true' | 'false' | null;
   updatedAt?: string | null;
   updatedBy?: string | null;
 }

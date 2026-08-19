@@ -13,11 +13,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { automationWarnings } from './automationCopy'
 
 const {
-    getAggregationSettings, putAggregationCadence, listJobsGlobal, permissionFn,
+    getAggregationSettings, putAggregationCadence, putAggregationSettings,
+    listJobsGlobal, permissionFn,
     getReconciliation, putReconciliation, reconcileNow,
 } = vi.hoisted(() => ({
     getAggregationSettings: vi.fn(),
     putAggregationCadence: vi.fn(),
+    putAggregationSettings: vi.fn(),
     listJobsGlobal: vi.fn(),
     permissionFn: vi.fn(),
     getReconciliation: vi.fn(),
@@ -54,7 +56,10 @@ vi.mock('@/services/aggregationService', async () => {
     const actual = await vi.importActual<typeof import('@/services/aggregationService')>('@/services/aggregationService')
     return {
         ...actual,
-        aggregationService: { ...actual.aggregationService, getAggregationSettings, putAggregationCadence, listJobsGlobal },
+        aggregationService: {
+            ...actual.aggregationService,
+            getAggregationSettings, putAggregationCadence, putAggregationSettings, listJobsGlobal,
+        },
     }
 })
 
@@ -77,6 +82,7 @@ const SETTINGS = {
     tuning: null, cadence: null,
     envRebuildMinIntervalSecs: 900, envDriftAutoRebuild: true,
     envProbeEnabled: true, envProbeIntervalSecs: 60,
+    envMaterializeFinePairs: 'true' as const,
 }
 
 /** Force the mounted reconciliation query to refetch — stands in for the 60s
@@ -110,6 +116,10 @@ beforeEach(() => {
     // The impact line fires a debounced dry sweep; keep it resolvable so a
     // slow assertion cannot land on an unmocked promise.
     reconcileNow.mockResolvedValue({ run: null, findings: [], skipped: false })
+    // The last link of the save chain. It is what closes the modal, so an
+    // unresolved one turns every "Save succeeded" assertion below into a
+    // test that passes without the save ever finishing.
+    putAggregationSettings.mockResolvedValue({ tuning: null, cadence: null })
 })
 
 describe('automationWarnings', () => {
@@ -436,6 +446,65 @@ describe('admin automation save', () => {
                 probeEnabled: true, probeIntervalSecs: null,
             },
         ))
+    })
+
+    it('rollup storage: Save writes it, and sends only that key', async () => {
+        // `tuning` is MERGED server-side, so sending one key is the whole
+        // point: the workspace Defaults dialog owns the caps and floors in the
+        // same column, and a read-modify-write here would race it.
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        putAggregationCadence.mockResolvedValue({ tuning: null, cadence: null })
+        const onClose = vi.fn()
+        wrap(<AutomationModal open onClose={onClose} isAdmin summary={null} />)
+
+        await userEvent.click(await screen.findByRole('button', { name: 'Advanced Act settings' }))
+        const auto = await screen.findByRole('radio', { name: 'Auto' })
+        await userEvent.click(auto)
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        await waitFor(() => expect(putAggregationSettings).toHaveBeenCalledWith(
+            { materializeFinePairs: 'auto' },
+        ))
+        // Terminal link: it is what closes the modal, so this also proves the
+        // chain actually reached the end rather than stalling on link two.
+        await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+    })
+
+    it('rollup storage: Auto is sent as a value, never by dropping the key', async () => {
+        // The bug the tri-state exists for. An absent key means "inherit", and
+        // inheritance cannot walk a stored `true` back — the modal would have
+        // shown Auto while every rebuild ran full detail.
+        getAggregationSettings.mockResolvedValue({
+            ...SETTINGS, tuning: { materializeFinePairs: true },
+        })
+        putAggregationCadence.mockResolvedValue({ tuning: null, cadence: null })
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
+
+        await userEvent.click(await screen.findByRole('button', { name: 'Advanced Act settings' }))
+        await waitFor(() =>
+            expect(screen.getByRole('radio', { name: 'Full detail' })).toHaveAttribute('aria-checked', 'true'))
+
+        await userEvent.click(screen.getByRole('radio', { name: 'Auto' }))
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        await waitFor(() => expect(putAggregationSettings).toHaveBeenCalled())
+        const sent = putAggregationSettings.mock.calls[0][0]
+        expect(sent.materializeFinePairs).toBe('auto')
+        expect('materializeFinePairs' in sent).toBe(true)
+    })
+
+    it('rollup storage: with nothing stored, it seeds from the env default', async () => {
+        // Same rule as every other control here: `persisted ?? envDefault`,
+        // never a hardcoded guess. Seeding Auto against a deploy that resolves
+        // full detail would make an unrelated Save silently flip the fleet.
+        getAggregationSettings.mockResolvedValue({
+            ...SETTINGS, tuning: null, envMaterializeFinePairs: 'auto',
+        })
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
+
+        await userEvent.click(await screen.findByRole('button', { name: 'Advanced Act settings' }))
+        await waitFor(() =>
+            expect(screen.getByRole('radio', { name: 'Auto' })).toHaveAttribute('aria-checked', 'true'))
     })
 
     it('no persisted cadence: a plain Save round-trips the env defaults (no drift clobber)', async () => {

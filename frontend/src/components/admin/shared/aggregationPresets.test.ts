@@ -25,10 +25,12 @@ describe('aggregation config presets', () => {
         }
     })
 
-    it('never forces full-detail rollup storage on any profile', () => {
-        // `materializeFinePairs` is `boolean | undefined` and Auto is only
-        // expressible by OMITTING the key. Setting it true would force the
-        // full cube — the mode that OOMs a multi-million-edge instance.
+    it('expresses no rollup-storage choice on any profile', () => {
+        // A profile says how hard to lean on the provider, not where the
+        // rollups live. Setting the key here would make picking a profile
+        // silently overwrite a fleet-wide storage decision — in either
+        // direction, since an absent key now means INHERIT (the stored global,
+        // then the env default) rather than Auto.
         for (const preset of CONFIG_PRESETS) {
             expect(preset.tuning.materializeFinePairs, preset.id).toBeUndefined()
             expect(Object.hasOwn(preset.tuning, 'materializeFinePairs'), preset.id).toBe(false)

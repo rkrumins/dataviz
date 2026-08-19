@@ -26,9 +26,10 @@ Environment variables:
     WORKER_CONCURRENCY         Max parallel jobs (default: 4)
     MAX_CONCURRENT_PER_GRAPH   Max parallel jobs per graph (default: 2)
     AGGREGATION_STALL_TIMEOUT_SECS  Kill a job with NO forward progress
-                               for this long (default: 900). Replaces the
+                               for this long (default: 10800). Replaces the
                                old fixed per-job timeout — a progressing
-                               job is never killed by a timer.
+                               job is never killed by a timer. A job row's
+                               ``timeout_secs`` overrides it per job.
     AGGREGATION_JOB_MAX_WALL_SECS   Absolute wall-clock safety net
                                (default: 86400)
     FALKORDB_ENDPOINT_WRITE_SLOTS   Cross-pod concurrent aggregation write
