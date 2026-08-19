@@ -37,6 +37,10 @@ describe('isDrawableLineageType', () => {
     expect(NON_DRAWABLE_EDGE_TYPES.has('AGGREGATED')).toBe(true)
   })
 
+  it('excludes AGGREGATED whatever the schema casing — old cached schemas served lowercase ids', () => {
+    expect(isDrawableLineageType(rt('aggregated', [], [], { isLineage: true }), [])).toBe(false)
+  })
+
   it('excludes containment types — by flag or by containmentEdgeTypes membership', () => {
     expect(isDrawableLineageType(rt('CONTAINS', [], [], { isContainment: true }), [])).toBe(false)
     expect(isDrawableLineageType(rt('BELONGS_TO', [], []), ['BELONGS_TO'])).toBe(false)

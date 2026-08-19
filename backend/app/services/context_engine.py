@@ -1816,7 +1816,10 @@ class ContextEngine:
                 rel_def.is_containment = is_containment
 
             result.append(RelationshipTypeDefinition(
-                id=rel_id.lower(),
+                # VERBATIM casing (parity with build_synthetic_schema): the
+                # schema id must equal the declared/physical relationship
+                # type — the canvas stamps it onto writes (2026-08-19).
+                id=rel_id,
                 name=rel_def.name or rel_id.title(),
                 description=rel_def.description or f"Relationship type: {rel_id}",
                 sourceTypes=(stat.source_types if stat else None) or rel_def.source_types,

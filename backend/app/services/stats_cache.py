@@ -449,7 +449,13 @@ async def build_synthetic_schema(
     relationship_types: list[dict] = []
     for rel_id, rel_def in resolved.relationship_type_definitions.items():
         relationship_types.append({
-            "id": rel_id.lower(),
+            # VERBATIM, never lowercased: the id is what the canvas stamps
+            # onto staged edges, and FalkorDB matches relationship types
+            # case-sensitively — a cased variant ('has' vs the declared
+            # 'HAS') rode every save request until the server-side
+            # canonicalizer caught it (2026-08-19). One casing everywhere:
+            # ontology = schema = physical graph.
+            "id": rel_id,
             "name": rel_def.name or rel_id.title(),
             "description": rel_def.description or f"Relationship type: {rel_id}",
             "sourceTypes": rel_def.source_types,

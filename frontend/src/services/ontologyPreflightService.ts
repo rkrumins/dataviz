@@ -202,7 +202,7 @@ export function isDrawableLineageType(
   rt: RelationshipTypeSchema,
   containmentEdgeTypes: string[],
 ): boolean {
-  if (NON_DRAWABLE_EDGE_TYPES.has(rt.id)) return false
+  if (NON_DRAWABLE_EDGE_TYPES.has(rt.id.toUpperCase())) return false
   const containmentSet = new Set(containmentEdgeTypes.map((t) => t.toUpperCase()))
   const isContainment = rt.isContainment ?? containmentSet.has(rt.id.toUpperCase())
   if (isContainment) return false
@@ -302,7 +302,7 @@ export function validateDrawnEdge(ctx: DrawnEdgeContext): EdgeValidation {
     return { allowed: false, reason: 'Containment is set by adding a child or using “Move to”, not by drawing an edge.' }
   }
   if (!rt) return { allowed: false, reason: `“${edgeType}” isn’t a relationship in the ontology.` }
-  if (NON_DRAWABLE_EDGE_TYPES.has(rt.id)) return { allowed: false, reason: `“${rt.id}” can’t be drawn by hand.` }
+  if (NON_DRAWABLE_EDGE_TYPES.has(rt.id.toUpperCase())) return { allowed: false, reason: `“${rt.id}” can’t be drawn by hand.` }
   if (!endpointOk(sourceType, rt.sourceTypes)) {
     return { allowed: false, reason: endpointReason('source', sourceType ?? '?', rt, ctx.entityTypes) }
   }
