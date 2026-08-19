@@ -1568,12 +1568,16 @@ export function ContextViewCanvas({
   // walk's own fetch depth means unlimited). Reset on trace start.
   const [traceDepthUp, setTraceDepthUp] = useState(FULL_WALK_INITIAL_DEPTH)
   const [traceDepthDown, setTraceDepthDown] = useState(FULL_WALK_INITIAL_DEPTH)
-  const startCanvasTrace = useCallback((nodeId: string) => {
+  // `direction` presets the VIEW (the dock's ↑/⇅/↓ mode — Root Cause /
+  // Impact / Full Lineage); the walk itself always fetches both ways, so
+  // switching mode afterwards is instant. Re-tracing the SAME node with
+  // a different direction just flips the view — the walk cache stays.
+  const startCanvasTrace = useCallback((nodeId: string, direction: 'up' | 'down' | 'both' = 'both') => {
     // A trace with the flow overlay off is a contradiction — tracing IS
     // asking to see the flow.
     setShowLineageFlow(true)
-    setTraceShowUpstream(true)
-    setTraceShowDownstream(true)
+    setTraceShowUpstream(direction !== 'down')
+    setTraceShowDownstream(direction !== 'up')
     setTraceDepthUp(FULL_WALK_INITIAL_DEPTH)
     setTraceDepthDown(FULL_WALK_INITIAL_DEPTH)
     // Entering a trace collapses the sticky drawer once, so the flow
@@ -4373,9 +4377,9 @@ export function ContextViewCanvas({
           <EntityDrawer
             key="entity-drawer"
             onFocusConnections={openLens}
-            onTraceUp={(nodeId) => startCanvasTrace(nodeId)}
-            onTraceDown={(nodeId) => startCanvasTrace(nodeId)}
-            onFullTrace={(nodeId) => startCanvasTrace(nodeId)}
+            onTraceUp={(nodeId) => startCanvasTrace(nodeId, 'up')}
+            onTraceDown={(nodeId) => startCanvasTrace(nodeId, 'down')}
+            onFullTrace={(nodeId) => startCanvasTrace(nodeId, 'both')}
             onFocusNode={revealAndFocus}
             onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
           />
