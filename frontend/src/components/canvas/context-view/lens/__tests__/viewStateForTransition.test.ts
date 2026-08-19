@@ -132,3 +132,24 @@ describe('viewStateForTransition — share-restore SURVIVES the seed\'s fields, 
         expect(viewStateForTransition('share-restore', null, { sg, seed: null })).toEqual(initialLensViewState(sg))
     })
 })
+
+describe('frameChildrenMode — the focal opens showing ALL its children when the header says All', () => {
+    it("mode 'all' seeds frameShowAll with the focal, so its whole roster draws (not just flow rows)", () => {
+        const v = viewStateForTransition('lens-open', null, { sg: subgraph('F') }, 'all')
+        expect(v.frameShowAll.has('F')).toBe(true)
+    })
+
+    it("mode 'connected' (and omitted) keeps the honest flow-only default", () => {
+        expect(viewStateForTransition('lens-open', null, { sg: subgraph('F') }, 'connected').frameShowAll.size).toBe(0)
+        expect(viewStateForTransition('lens-open', null, { sg: subgraph('F') }).frameShowAll.size).toBe(0)
+    })
+
+    it('share-restore keeps the LINK\'s frameAll verbatim — the mode never rewrites a shared picture', () => {
+        const seed: LensViewSeed = {
+            revealed: [], opened: [], collapsed: [], frameAll: ['X'],
+            framePages: [], frameQueries: [], pinned: [], condensedOpen: [],
+        }
+        const v = viewStateForTransition('share-restore', null, { sg: subgraph('F'), seed }, 'all')
+        expect([...v.frameShowAll]).toEqual(['X'])
+    })
+})

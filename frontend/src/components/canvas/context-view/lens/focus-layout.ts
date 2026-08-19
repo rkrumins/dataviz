@@ -254,6 +254,12 @@ export function viewStateForTransition(
     kind: LensViewTransitionKind,
     _prev: LensViewState | null,
     nextFocal: { sg: LensSubgraph<LensWalkNode>; seed?: LensViewSeed | null },
+    /** The header's Contents preference. 'all' seeds `frameShowAll` with
+     *  the FOCAL, so a focused container opens showing its whole roster
+     *  rather than only the flow-participating rows ("I focused it — show
+     *  me everything it holds", 2026-08-19 ruling). Share-restore ignores
+     *  it: a link replays ITS OWN picture. */
+    frameChildrenMode: 'connected' | 'all' = 'connected',
 ): LensViewState {
     const fresh: LensViewState = {
         selection: null,
@@ -263,7 +269,7 @@ export function viewStateForTransition(
         ]),
         expandedContainment: new Set([...focusAncestorChain(nextFocal.sg), nextFocal.sg.focusUrn]),
         collapsedContainment: new Set(),
-        frameShowAll: new Set(),
+        frameShowAll: new Set(frameChildrenMode === 'all' ? [nextFocal.sg.focusUrn] : []),
         walkedThrough: new Set(),
         drawnRank: new Map(),
         frameQueries: new Map(),

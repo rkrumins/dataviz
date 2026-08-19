@@ -389,7 +389,14 @@ export function LineageLens({
   // finding — a transition resets every field fresh), and threading
   // `viewState` through here would recompute this on every in-view
   // edit, not just a transition.
-  const freshView = useMemo(() => viewStateForTransition(transitionKind, null, { sg }), [sg, transitionKind])
+  // Subscribed HERE (before its later siblings) because the fresh view
+  // consumes it: the Contents preference decides whether a focal opens
+  // showing its whole roster or only its flow rows.
+  const lensFrameChildren = usePreferencesStore((s) => s.lensFrameChildren)
+  const freshView = useMemo(
+    () => viewStateForTransition(transitionKind, null, { sg }, lensFrameChildren),
+    [sg, transitionKind, lensFrameChildren],
+  )
   const [viewState, setViewState] = useState<{ nodeId: string | null; view: LensViewState } | null>(null)
   // Discarded on re-center, exactly like the filter and chip state: a
   // new focal is a new question, not a continuation of this one — EXCEPT
@@ -441,7 +448,6 @@ export function LineageLens({
 
   const lensViewMode = usePreferencesStore((s) => s.lensViewMode)
   const setLensViewMode = usePreferencesStore((s) => s.setLensViewMode)
-  const lensFrameChildren = usePreferencesStore((s) => s.lensFrameChildren)
   const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
   const condenseSteps = usePreferencesStore((s) => s.lensCondenseSteps)
   const setCondenseSteps = usePreferencesStore((s) => s.setLensCondenseSteps)

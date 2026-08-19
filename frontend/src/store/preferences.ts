@@ -378,7 +378,7 @@ export const usePreferencesStore = create<PreferencesState>()(
       // Lineage Lens body mode
       lensViewMode: 'graph',
       setLensViewMode: (lensViewMode) => set({ lensViewMode }),
-      lensFrameChildren: 'connected',
+      lensFrameChildren: 'all',
       setLensFrameChildren: (lensFrameChildren) => set({ lensFrameChildren }),
       lensCondenseSteps: false,
       setLensCondenseSteps: (lensCondenseSteps) => set({ lensCondenseSteps }),
@@ -404,6 +404,17 @@ export const usePreferencesStore = create<PreferencesState>()(
     }),
     {
       name: 'nexus-preferences',
+      // v1 (2026-08-19): lensFrameChildren default flipped 'connected' →
+      // 'all' ("I focused it — show me everything it holds"). The whole
+      // state persists (no partialize), so without this one-time migrate
+      // every existing browser would keep the old default forever. An
+      // explicit choice made AFTER this ships persists at v1 untouched.
+      version: 1,
+      migrate: (persisted, version) => {
+        const state = persisted as Record<string, unknown>
+        if (version < 1) return { ...state, lensFrameChildren: 'all' }
+        return state
+      },
     }
   )
 )
