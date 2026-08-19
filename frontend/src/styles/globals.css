@@ -223,8 +223,13 @@
     display: flex;
     align-items: center;
     gap: 3px;
-    width: 72px;
     height: 4px;
+  }
+  /* The capsule's origin glyph shares the traced node's pulse identity
+     (trace-pulse family) at capsule scale. */
+  .nx-trace-origin-pulse {
+    box-shadow: 0 0 8px 1px rgba(99, 102, 241, 0.6);
+    animation: trace-pulse 2.4s ease-in-out infinite;
   }
   .nx-trace-sounding-origin {
     width: 4px;
@@ -254,7 +259,8 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .nx-trace-sounding-up,
-    .nx-trace-sounding-down {
+    .nx-trace-sounding-down,
+    .nx-trace-origin-pulse {
       animation: none;
     }
   }

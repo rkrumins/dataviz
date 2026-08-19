@@ -1575,10 +1575,19 @@ export function ContextViewCanvas({
   const traceActive = canvasTrace.isTracing
   const traceModel = canvasTrace.walkEntry?.model ?? null
   // The walk-status capsule over the board ("your trace is being
-  // calculated"): phase derived from the walk session; the settled state
-  // shows once and self-dismisses — the dock owns permanent stats.
+  // calculated"): phase derived from the walk session. The settled state
+  // shows once and self-dismisses; paused/stalled can be dismissed by
+  // hand (the partial flow stays) and RE-ARM when the walk resumes —
+  // the dock owns permanent stats.
   const [traceSettledDismissed, setTraceSettledDismissed] = useState(false)
-  useEffect(() => { setTraceSettledDismissed(false) }, [canvasTrace.tracedUrn])
+  const [traceParkedDismissed, setTraceParkedDismissed] = useState(false)
+  useEffect(() => {
+    setTraceSettledDismissed(false)
+    setTraceParkedDismissed(false)
+  }, [canvasTrace.tracedUrn])
+  useEffect(() => {
+    if (canvasTrace.fullWalkStatus?.walking) setTraceParkedDismissed(false)
+  }, [canvasTrace.fullWalkStatus?.walking])
   const traceWalkPhase = useMemo<TraceWalkPhase | null>(() => {
     if (!traceActive) return null
     const st = canvasTrace.walkEntry?.status
@@ -1587,11 +1596,11 @@ export function ContextViewCanvas({
     const fw = canvasTrace.fullWalkStatus
     if (!st || st === 'loading') return 'preparing'
     if (fw?.walking) return (traceModel?.nodes.length ?? 0) > 1 ? 'walking' : 'preparing'
-    if (fw?.budgetHit) return 'paused'
-    if (fw?.stalled) return 'stalled'
+    if (fw?.budgetHit) return traceParkedDismissed ? null : 'paused'
+    if (fw?.stalled) return traceParkedDismissed ? null : 'stalled'
     if (fw?.exhausted) return traceSettledDismissed ? null : 'settled'
     return null
-  }, [traceActive, canvasTrace.walkEntry?.status, canvasTrace.fullWalkStatus, traceModel, traceSettledDismissed])
+  }, [traceActive, canvasTrace.walkEntry?.status, canvasTrace.fullWalkStatus, traceModel, traceSettledDismissed, traceParkedDismissed])
   useEffect(() => {
     if (traceWalkPhase !== 'settled') return
     const t = window.setTimeout(() => setTraceSettledDismissed(true), 2200)
@@ -3919,8 +3928,12 @@ export function ContextViewCanvas({
                 phase={traceWalkPhase}
                 nodeCount={traceModel?.nodes.length ?? 0}
                 flowCount={traceModel?.lineageEdges.length ?? 0}
+                upCount={traceModel?.upstreamUrns.size ?? 0}
+                downCount={traceModel?.downstreamUrns.size ?? 0}
+                onCancel={exitCanvasTrace}
                 onContinue={canvasTrace.continueWalk}
                 onRetry={canvasTrace.retryWalk}
+                onDismiss={() => setTraceParkedDismissed(true)}
               />
             </motion.div>
           )}
