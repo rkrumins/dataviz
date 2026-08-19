@@ -49,6 +49,7 @@ function model(parts: Partial<Omit<LensWalkModel, 'focusUrn'>>): LensWalkModel {
     truncated: false,
     truncationReason: null,
     seedTruncated: false,
+    seedCursor: null,
     ...parts,
   }
 }

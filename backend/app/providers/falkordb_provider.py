@@ -7196,6 +7196,7 @@ class FalkorDBProvider(GraphDataProvider):
         seed_urns: Optional[List[str]] = None,
         exclude_urns: Optional[List[str]] = None,
         after_cursor: Optional[str] = None,
+        seed_cursor: Optional[str] = None,
     ) -> TraceClosureResult:
         """Focus-scoped, regime-independent lineage closure — ONE step of a walk.
 
@@ -7296,6 +7297,10 @@ class FalkorDBProvider(GraphDataProvider):
                     properties={},
                 )
 
+        # Seed-page resume point ("s:<last-descendant-urn>"): set only by the
+        # container-seed path when its keyset page capped; the hub-paging and
+        # explicit-seed paths have no descendant pages of their own.
+        next_seed_after: Optional[str] = None
         if after_cursor is not None:
             # ---- paging shape: one node, one direction, one page ----------
             # No seed walk and no BFS: the client is draining a single hub it
@@ -7399,8 +7404,16 @@ class FalkorDBProvider(GraphDataProvider):
                 # hops, and the client gets a board of nodes with no lineage on
                 # it — the one thing a lineage view must never be.
                 seed_limit = max(1, max_nodes // 2)
-                seed, seed_capped = await self._collect_lineage_seed(
+                # "s:<last-descendant-urn>" — the keyset resume point a capped
+                # page shipped as seedCursor. Malformed cursors read as page 1.
+                seed_after = (
+                    seed_cursor[2:]
+                    if seed_cursor and seed_cursor.startswith("s:") and len(seed_cursor) > 2
+                    else None
+                )
+                seed, seed_capped, next_seed_after = await self._collect_lineage_seed(
                     urn, focus_label, ltypes, ctypes, seed_limit, seed_timeout,
+                    after_urn=seed_after,
                 )
             # A capped seed makes the response partial, but it must NOT stop the
             # walk: the flag is folded into truncation_reason at the return, not
@@ -7669,6 +7682,7 @@ class FalkorDBProvider(GraphDataProvider):
             frontierUp=frontier_up,
             frontierDown=frontier_down,
             seedTruncated=seed_truncated,
+            seedCursor=(f"s:{next_seed_after}" if next_seed_after else None),
         )
 
     async def expand_aggregated(
@@ -8443,7 +8457,8 @@ class FalkorDBProvider(GraphDataProvider):
         ctypes: List[str],
         cap: int,
         timeout_secs: float,
-    ) -> Tuple[List[Tuple[str, str]], bool]:
+        after_urn: Optional[str] = None,
+    ) -> Tuple[List[Tuple[str, str]], bool, Optional[str]]:
         """The nodes to START the closure BFS from.
 
         Lineage lives at the leaves, never on containers. A LEAF focus is its
@@ -8456,12 +8471,16 @@ class FalkorDBProvider(GraphDataProvider):
         leaves than that spills to the lazy/coarse path — handled by the
         caller's ``max_nodes`` truncation + cursor).
 
-        Returns ``(seed, seed_capped)`` where ``seed`` is a list of
-        ``(urn, entity_type_label)`` pairs (already label-bucketed for
-        index-seeking sub-queries — no extra label lookup) and
-        ``seed_capped`` is True when the descendants query returned exactly
-        its ``cap`` LIMIT (more lineage-bearing descendants may exist than
-        were returned — the caller reports ``seedTruncated``).
+        Returns ``(seed, seed_capped, next_after)`` where ``seed`` is a list
+        of ``(urn, entity_type_label)`` pairs (already label-bucketed for
+        index-seeking sub-queries — no extra label lookup), ``seed_capped``
+        is True when the descendants query returned exactly its ``cap``
+        LIMIT (more lineage-bearing descendants may exist than were
+        returned — the caller reports ``seedTruncated``), and ``next_after``
+        is the LAST descendant urn of a capped page — the keyset resume
+        point the caller wraps as ``seedCursor``. Descendants are ordered by
+        urn (deterministic paging); ``after_urn`` continues past a previous
+        page (the focus-self seed is first-page only).
 
         The caller's ``exclude_urns`` deliberately plays NO part here: it
         governs what is re-SHIPPED, never where the walk STARTS. Dropping a
@@ -8470,7 +8489,7 @@ class FalkorDBProvider(GraphDataProvider):
         ``trace_closure``, which is the same rule on the explicit-seed path.
         """
         if not ltypes:
-            return [(focus_urn, focus_label)], False
+            return [(focus_urn, focus_label)], False, None
 
         rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
         per_query_timeout = max(0.6, min(1.5, timeout_secs))
@@ -8486,20 +8505,31 @@ class FalkorDBProvider(GraphDataProvider):
         # unioned in Python — a cursor role, not a filter:
         #   (1) does the focus itself carry lineage?         → LEAF focus
         #   (2) which containment descendants carry lineage? → CONTAINER focus
-        queries: List[Tuple[str, Dict[str, Any]]] = [(
+        # A seed-page CONTINUATION (after_urn) re-collects only descendants
+        # past the keyset boundary; the focus-self seed belongs to page one.
+        queries: List[Tuple[str, Dict[str, Any]]] = [] if after_urn else [(
             f"MATCH (f{label_clause} {{urn: $urn}}) WHERE (f)-[:{rel_alt}]-() "
             "RETURN f.urn AS urn, labels(f)[0] AS label",
             {"urn": focus_urn},
         )]
+        descendants_idx = len(queries)
         if ctypes:
             ct_alt = "|".join(_sanitize_label(t) for t in ctypes)
             hops = self._containment_hop_bound()
+            # ORDER BY urn makes the page deterministic and the keyset
+            # (`d.urn > $after`) a true resume point — SKIP-free, so a deep
+            # page costs the same as the first.
+            after_clause = "AND d.urn > $after " if after_urn else ""
             queries.append((
                 f"MATCH (f{label_clause} {{urn: $urn}})-[c:{ct_alt}*1..{hops}]->(d) "
-                f"WHERE (d)-[:{rel_alt}]-() "
-                "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label LIMIT $cap",
-                {"urn": focus_urn, "cap": cap},
+                f"WHERE (d)-[:{rel_alt}]-() {after_clause}"
+                "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label "
+                "ORDER BY urn LIMIT $cap",
+                {"urn": focus_urn, "cap": cap, **({"after": after_urn} if after_urn else {})},
             ))
+        elif after_urn:
+            # No containment types ⇒ no descendant pages exist to resume.
+            return [], False, None
 
         async def _run_seed(c: str, prm: Dict[str, Any]):
             try:
@@ -8515,12 +8545,22 @@ class FalkorDBProvider(GraphDataProvider):
         results = await asyncio.gather(*(_run_seed(c, prm) for c, prm in queries))
         if all(r is None for r in results):
             # Every probe errored — degrade to the focus itself rather than
-            # reporting "no lineage", which would be a lie.
-            return [(focus_urn, focus_label)], False
+            # reporting "no lineage", which would be a lie. (A continuation
+            # degrades to an EMPTY page instead: re-seeding the focus would
+            # re-derive page one's hops under a page-two cursor.)
+            if after_urn:
+                return [], False, None
+            return [(focus_urn, focus_label)], False, None
 
         seed_capped = False
-        if ctypes and len(results) > 1 and results[1] is not None:
-            seed_capped = len(results[1].result_set or []) == cap
+        next_after: Optional[str] = None
+        d_result = results[descendants_idx] if len(results) > descendants_idx else None
+        if ctypes and d_result is not None:
+            d_rows = d_result.result_set or []
+            seed_capped = len(d_rows) == cap
+            if seed_capped and d_rows:
+                last = d_rows[-1][0]
+                next_after = str(last) if last else None
 
         seed: List[Tuple[str, str]] = []
         seen: Set[str] = set()
@@ -8533,7 +8573,7 @@ class FalkorDBProvider(GraphDataProvider):
                     continue
                 seen.add(u)
                 seed.append((u, (row[1] if len(row) > 1 else None) or ""))
-        return seed, seed_capped
+        return seed, seed_capped, next_after
 
     async def _descendant_lineage_seed(
         self,

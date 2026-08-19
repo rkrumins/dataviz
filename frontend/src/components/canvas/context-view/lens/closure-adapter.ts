@@ -86,6 +86,9 @@ export interface LensWalkModel {
     readonly truncationReason: string | null
     /** The initial seed fetch itself was capped, before any walk happened. */
     readonly seedTruncated: boolean
+    /** Resume point for the FOCUS's own capped contents ("s:<urn>"), or
+     *  null when fully seeded. Advanced only by focus-anchored merges. */
+    readonly seedCursor: string | null
 }
 
 /** The zero-value walk model a hook starts from before any response has
@@ -103,6 +106,7 @@ export function emptyWalkModel(focusUrn: string): LensWalkModel {
         truncated: false,
         truncationReason: null,
         seedTruncated: false,
+        seedCursor: null,
     }
 }
 
@@ -126,6 +130,7 @@ export function toLensClosure(
         truncated: res.truncated,
         truncationReason: res.truncationReason ?? null,
         seedTruncated: res.seedTruncated,
+        seedCursor: res.seedCursor ?? null,
     }
 }
 
@@ -208,5 +213,11 @@ export function mergeClosures(
         truncated: model.truncated || incoming.truncated,
         truncationReason: model.truncationReason ?? incoming.truncationReason,
         seedTruncated: model.seedTruncated || incoming.seedTruncated,
+        // The focus-contents cursor belongs to FOCUS-anchored responses
+        // (the initial fetch and its seed-page continuations): those are
+        // authoritative — they advance it, and drain it to null when a
+        // page comes back uncapped. A card-anchored extend/page knows
+        // nothing about the focus's contents and must not touch it.
+        seedCursor: ctx.rootUrn === model.focusUrn ? incoming.seedCursor : model.seedCursor,
     }
 }

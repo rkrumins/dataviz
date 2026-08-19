@@ -904,6 +904,16 @@ async def trace_closure(
         if not _TRACE_CLOSURE_AFTER_CURSOR_RE.match(request.after_cursor):
             raise HTTPException(status_code=422, detail="afterCursor must match ^e:\\d+$")
 
+    if request.seed_cursor is not None:
+        # A seed-page continuation re-collects the FOCUS's own contents past
+        # the keyset boundary — it has no meaning combined with hub paging
+        # (a different cursor space) or an explicit seed list (which skips
+        # the container seed walk entirely).
+        if request.after_cursor is not None or request.seed_urns:
+            raise HTTPException(status_code=422, detail="seedCursor cannot be combined with afterCursor or seedUrns")
+        if not request.seed_cursor.startswith("s:") or len(request.seed_cursor) <= 2:
+            raise HTTPException(status_code=422, detail="seedCursor must match ^s:.+$")
+
     await _enforce_fair_share(engine, ENDPOINT_TRACE_CLOSURE)
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
 

@@ -59,7 +59,7 @@ function estate(): LensWalkModel {
     upstreamUrns: new Set(['up1_c', 'UP1', 'up2_c', 'UP2']),
     downstreamUrns: new Set(['down1_c', 'D1', 'down2_c', 'D2', 'down3_c', 'D3', 'REP']),
     frontierUp: [], frontierDown: [],
-    truncated: false, truncationReason: null, seedTruncated: false,
+    truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
   }
 }
 

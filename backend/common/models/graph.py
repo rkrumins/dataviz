@@ -189,6 +189,14 @@ class TraceClosureRequest(BaseModel):
     seed_urns: Optional[List[str]] = Field(None, alias="seedUrns", max_length=500)
     exclude_urns: Optional[List[str]] = Field(None, alias="excludeUrns", max_length=2000)
     after_cursor: Optional[str] = Field(None, alias="afterCursor")          # "e:<edge-id>"; hub paging
+    # Seed-page continuation (2026-08-19): a CONTAINER focus with more
+    # lineage-bearing descendants than the seed reserve used to truncate its
+    # own contents with no way to resume — the one non-resumable cap. The
+    # cursor is "s:<last-descendant-urn>" from the previous response's
+    # seedCursor; the continuation collects the NEXT keyset page of
+    # descendants (urn > cursor) and walks from those. Mutually exclusive
+    # with afterCursor and seedUrns (endpoint-validated).
+    seed_cursor: Optional[str] = Field(None, alias="seedCursor")
 
     class Config:
         populate_by_name = True
@@ -357,6 +365,10 @@ class TraceClosureResult(TraceResult):
     frontier_up: List[TraceFrontierNode] = Field(default_factory=list, alias="frontierUp")
     frontier_down: List[TraceFrontierNode] = Field(default_factory=list, alias="frontierDown")
     seed_truncated: bool = Field(False, alias="seedTruncated")     # container seed walk hit the cap
+    # Resume point for a capped container seed walk: "s:<last-descendant-urn>",
+    # or None when the focus's contents are fully seeded. Send back as the
+    # request's seedCursor to walk the next page of contents.
+    seed_cursor: Optional[str] = Field(None, alias="seedCursor")
 
 
 class TraceResultV2(TraceResult):

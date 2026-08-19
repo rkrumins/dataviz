@@ -90,6 +90,10 @@ export interface LensWalkData {
     /** Re-kick a failed extend (same request shape and precondition as
      *  `extend`). */
     retryExtend: (cardUrn: string, dir: LensWalkDir, seedLeaves: string[]) => void
+    /** Page the FOCUS's own capped contents further (the model's
+     *  `seedCursor`). Focus-anchored, both directions, excludes what is
+     *  held. Same 'done'-entry precondition as `extend`. */
+    pageSeeds: (focusUrn: string) => void
     /** Full-walk status for `urn`'s entry, or null when the mode is off or
      *  the entry was never touched. */
     fullWalkFor: (urn: string) => FullWalkStatus | null
@@ -310,6 +314,25 @@ export function useLensWalk(
         }))
     }, [runFrontierOp])
 
+    // The focus's own contents page: focus-anchored, both directions at
+    // the entry's fetched depth, resuming the model's seedCursor. Uses
+    // the SAME single-flight/status machinery as extend/page (statusKey
+    // 'seed:<focus>'), so the click is acknowledged and never doubled.
+    const pageSeeds = useCallback((walkFocusUrn: string) => {
+        const cacheKey = cacheKeyFor(provider, walkFocusUrn)
+        const entry = stateRef.current.get(cacheKey)
+        const cursor = entry?.model.seedCursor
+        if (!cursor) return
+        void runFrontierOp(walkFocusUrn, 'up', (baseModel) => ({
+            urn: walkFocusUrn,
+            direction: 'both',
+            upstreamDepth: entry.depth,
+            downstreamDepth: entry.depth,
+            seedCursor: cursor,
+            excludeUrns: knownUrns(baseModel).slice(0, 2000),
+        }))
+    }, [provider, runFrontierOp])
+
     // ── Full walk (trace mode) ─────────────────────────────────────────
     // The hook itself follows every frontier the server reports — the same
     // extend/page ops an ⊕ click fires, driven to exhaustion. Reactive
@@ -330,6 +353,17 @@ export function useLensWalk(
         let slots = FULL_WALK_CONCURRENCY
         for (const v of entry.extendStatus.values()) if (v === 'loading') slots--
         if (slots <= 0) return
+        // The focus's own capped contents page FIRST — nothing else can
+        // complete the picture of the thing the user asked about.
+        if (entry.model.seedCursor && !entry.extendStatus.has(`up:${focusUrn}`)) {
+            setFullWalkMeta(prev => {
+                const next = new Map(prev)
+                next.set(cacheKey, { grants: meta.grants, requests: meta.requests + 1 })
+                return next
+            })
+            pageSeeds(focusUrn)
+            return
+        }
         const ops: Array<{ urn: string; dir: LensWalkDir; cursor: string | null }> = []
         const collect = (frontierList: LensWalkModel['frontierUp'], dir: LensWalkDir) => {
             for (const fr of frontierList) {
@@ -354,7 +388,7 @@ export function useLensWalk(
             if (op.cursor !== null) page(op.urn, op.dir, op.cursor)
             else extend(op.urn, op.dir, [op.urn])
         }
-    }, [fullWalk, focusUrn, provider, state, fullWalkMeta, extend, page])
+    }, [fullWalk, focusUrn, provider, state, fullWalkMeta, extend, page, pageSeeds])
 
     const fullWalkFor = useCallback((urn: string): FullWalkStatus | null => {
         if (!fullWalk) return null
@@ -367,6 +401,7 @@ export function useLensWalk(
         let anyLoading = false
         for (const v of entry.extendStatus.values()) if (v === 'loading') anyLoading = true
         const frontierCount = entry.model.frontierUp.length + entry.model.frontierDown.length
+            + (entry.model.seedCursor ? 1 : 0)
         if (frontierCount === 0) return { walking: anyLoading, exhausted: !anyLoading, budgetHit: false, stalled: false }
         const overBudget = entry.model.nodes.length >= FULL_WALK_NODE_BUDGET * meta.grants
             || meta.requests >= FULL_WALK_REQUEST_CAP * meta.grants
@@ -374,6 +409,7 @@ export function useLensWalk(
         const hasCandidate =
             entry.model.frontierUp.some(fr => !entry.extendStatus.has(`up:${fr.urn}`))
             || entry.model.frontierDown.some(fr => !entry.extendStatus.has(`down:${fr.urn}`))
+            || (entry.model.seedCursor != null && !entry.extendStatus.has(`up:${urn}`))
         if (anyLoading || hasCandidate) return { walking: true, exhausted: false, budgetHit: false, stalled: false }
         return { walking: false, exhausted: false, budgetHit: false, stalled: true }
     }, [fullWalk, provider, state, fullWalkMeta])
@@ -426,5 +462,5 @@ export function useLensWalk(
 
     const retry = useCallback((urn: string) => { void runFetch(urn) }, [runFetch])
 
-    return { walkFor, retry, extend, page, retryExtend: extend, fullWalkFor, continueFullWalk }
+    return { walkFor, retry, extend, page, retryExtend: extend, pageSeeds, fullWalkFor, continueFullWalk }
 }

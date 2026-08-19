@@ -77,6 +77,7 @@ function walkModel(focusUrn: string, parts: Partial<Omit<LensWalkModel, 'focusUr
     truncated: false,
     truncationReason: null,
     seedTruncated: false,
+    seedCursor: null,
     ...parts,
   }
 }

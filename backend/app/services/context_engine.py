@@ -1386,6 +1386,7 @@ class ContextEngine:
                 seed_urns=req.seed_urns,
                 exclude_urns=req.exclude_urns,
                 after_cursor=req.after_cursor,
+                seed_cursor=req.seed_cursor,
             )
 
     # ------------------------------------------------------------------ #

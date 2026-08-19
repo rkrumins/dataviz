@@ -44,7 +44,7 @@ const hop = (source: string, target: string) => ({ id: `h:${source}>${target}`, 
 function walkModel(focusUrn: string, parts: Partial<Omit<LensWalkModel, 'focusUrn'>>): LensWalkModel {
   return {
     focusUrn, nodes: [], lineageEdges: [], containmentEdges: [], upstreamUrns: new Set(), downstreamUrns: new Set(),
-    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, ...parts,
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null, ...parts,
   }
 }
 
