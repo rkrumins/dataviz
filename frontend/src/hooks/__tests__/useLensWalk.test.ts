@@ -10,7 +10,12 @@ import { resolve } from 'node:path'
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { describe, expect, it, vi, beforeAll } from 'vitest'
 
-import { useLensWalk } from '../useLensWalk'
+import {
+  useLensWalk,
+  FULL_WALK_INITIAL_DEPTH,
+  FULL_WALK_NODE_BUDGET,
+  FULL_WALK_CONCURRENCY,
+} from '../useLensWalk'
 import type { GraphDataProvider, TraceV2Result, LensClosureExtras, GraphNode } from '@/providers/GraphDataProvider'
 
 const FOCUS_URN = 'urn:li:table:t_orders'
@@ -393,5 +398,168 @@ describe('useLensWalk — fetched depth', () => {
     const { result } = renderHook(() => useLensWalk('a', provider, 2))
     await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('done'))
     expect(result.current.walkFor('a')!.depth).toBe(2)
+  })
+})
+
+// ── Full walk (trace mode) — the hook itself follows every frontier the ───
+// server reports until the flow is exhausted or the node budget is hit.
+// Contract: deep initial fetch, auto-extend (seeded with the frontier node
+// itself) for depth-exhausted entries, auto-page for cursor entries, honest
+// budgetHit/stalled states, "continue" resumes both, toggling off cancels.
+
+describe('useLensWalk — full walk', () => {
+  const f = (urn: string) => ({ urn, level: 0, entityType: 'table' })
+  const frontier = (urn: string, totalCount = 1, nextCursor: string | null = null) =>
+    ({ urn, totalCount, nextCursor })
+
+  function providerByUrn(responses: Record<string, () => TraceV2Result & LensClosureExtras | Promise<TraceV2Result & LensClosureExtras>>) {
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      const impl = responses[req.urn as string]
+      if (!impl) throw new Error(`unexpected call: ${JSON.stringify(req)}`)
+      return impl()
+    })
+    return { provider: { traceClosure } as unknown as GraphDataProvider, traceClosure }
+  }
+
+  it('fetches the initial closure DEEP, regardless of the one-hop preference', async () => {
+    const { provider, traceClosure } = providerByUrn({
+      a: () => closureResult({ focus: f('a') }),
+    })
+    renderHook(() => useLensWalk('a', provider, 1, true))
+    await waitFor(() => expect(traceClosure).toHaveBeenCalledTimes(1))
+    expect(traceClosure).toHaveBeenCalledWith({
+      urn: 'a', direction: 'both', upstreamDepth: FULL_WALK_INITIAL_DEPTH, downstreamDepth: FULL_WALK_INITIAL_DEPTH,
+    })
+  })
+
+  it('auto-extends a depth-exhausted frontier entry, seeded with the frontier node itself, then reports exhausted', async () => {
+    const { provider, traceClosure } = providerByUrn({
+      a: () => closureResult({ focus: f('a'), nodes: [gn('a'), gn('b')], frontierUp: [frontier('b')] }),
+      b: () => closureResult({ focus: f('b'), nodes: [gn('c')] }),
+    })
+    const { result } = renderHook(() => useLensWalk('a', provider, 1, true))
+    await waitFor(() => expect(result.current.fullWalkFor('a')?.exhausted).toBe(true))
+
+    expect(traceClosure).toHaveBeenCalledTimes(2)
+    expect(traceClosure.mock.calls[1]![0]).toEqual({
+      urn: 'b', direction: 'upstream', upstreamDepth: 1, downstreamDepth: 0,
+      seedUrns: ['b'], excludeUrns: ['a', 'b'],
+    })
+    expect(result.current.walkFor('a')!.model.nodes.map(n => n.urn).sort()).toEqual(['a', 'b', 'c'])
+  })
+
+  it('auto-pages a frontier entry that carries a cursor', async () => {
+    const { provider, traceClosure } = providerByUrn({
+      a: () => closureResult({ focus: f('a'), nodes: [gn('a'), gn('h')], frontierDown: [frontier('h', 9, 'e:7')] }),
+      h: () => closureResult({ focus: f('h'), nodes: [gn('x')] }),
+    })
+    const { result } = renderHook(() => useLensWalk('a', provider, 1, true))
+    await waitFor(() => expect(result.current.fullWalkFor('a')?.exhausted).toBe(true))
+
+    expect(traceClosure.mock.calls[1]![0]).toEqual({
+      urn: 'h', direction: 'downstream', upstreamDepth: 0, downstreamDepth: 1, afterCursor: 'e:7',
+    })
+  })
+
+  it('keeps walking hop after hop until every frontier drains', async () => {
+    const { provider, traceClosure } = providerByUrn({
+      a: () => closureResult({ focus: f('a'), nodes: [gn('a'), gn('b')], frontierUp: [frontier('b')] }),
+      b: () => closureResult({ focus: f('b'), nodes: [gn('c')], frontierUp: [frontier('c')] }),
+      c: () => closureResult({ focus: f('c'), nodes: [] }),
+    })
+    const { result } = renderHook(() => useLensWalk('a', provider, 1, true))
+    await waitFor(() => expect(result.current.fullWalkFor('a')?.exhausted).toBe(true))
+
+    expect(traceClosure).toHaveBeenCalledTimes(3)
+    expect(result.current.walkFor('a')!.model.nodes.map(n => n.urn).sort()).toEqual(['a', 'b', 'c'])
+  })
+
+  it('does nothing when the mode is off: frontiers stay pills, fullWalkFor is null', async () => {
+    const { provider, traceClosure } = providerByUrn({
+      a: () => closureResult({ focus: f('a'), nodes: [gn('a'), gn('b')], frontierUp: [frontier('b')] }),
+    })
+    const { result } = renderHook(() => useLensWalk('a', provider))
+    await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('done'))
+    await new Promise(r => setTimeout(r, 20))
+
+    expect(traceClosure).toHaveBeenCalledTimes(1)
+    expect(result.current.fullWalkFor('a')).toBeNull()
+  })
+
+  it('stops at the node budget with frontiers remaining, and "continue" resumes', async () => {
+    const many = Array.from({ length: FULL_WALK_NODE_BUDGET }, (_, i) => gn(`n${i}`))
+    const { provider, traceClosure } = providerByUrn({
+      a: () => closureResult({ focus: f('a'), nodes: many, frontierUp: [frontier('n0')] }),
+      n0: () => closureResult({ focus: f('n0'), nodes: [gn('deeper')] }),
+    })
+    const { result } = renderHook(() => useLensWalk('a', provider, 1, true))
+    await waitFor(() => expect(result.current.fullWalkFor('a')?.budgetHit).toBe(true))
+    expect(traceClosure).toHaveBeenCalledTimes(1)
+
+    act(() => result.current.continueFullWalk('a'))
+    await waitFor(() => expect(result.current.fullWalkFor('a')?.exhausted).toBe(true))
+    expect(result.current.walkFor('a')!.model.nodes.some(n => n.urn === 'deeper')).toBe(true)
+  })
+
+  it('never auto-retries a failed frontier op: reports stalled, and "continue" gives it another attempt', async () => {
+    let fail = true
+    const { provider, traceClosure } = providerByUrn({
+      a: () => closureResult({ focus: f('a'), nodes: [gn('a'), gn('b')], frontierUp: [frontier('b')] }),
+      b: () => {
+        if (fail) throw new Error('backend down')
+        return closureResult({ focus: f('b'), nodes: [gn('c')] })
+      },
+    })
+    const { result } = renderHook(() => useLensWalk('a', provider, 1, true))
+    await waitFor(() => expect(result.current.fullWalkFor('a')?.stalled).toBe(true))
+    expect(traceClosure).toHaveBeenCalledTimes(2)
+    await new Promise(r => setTimeout(r, 20))
+    expect(traceClosure).toHaveBeenCalledTimes(2)
+
+    fail = false
+    act(() => result.current.continueFullWalk('a'))
+    await waitFor(() => expect(result.current.fullWalkFor('a')?.exhausted).toBe(true))
+    expect(result.current.walkFor('a')!.model.nodes.some(n => n.urn === 'c')).toBe(true)
+  })
+
+  it('toggling the mode off cancels the walk: in-flight results land, nothing new fires', async () => {
+    let resolveB: ((v: TraceV2Result & LensClosureExtras) => void) | undefined
+    const { provider, traceClosure } = providerByUrn({
+      a: () => closureResult({ focus: f('a'), nodes: [gn('a'), gn('b')], frontierUp: [frontier('b')] }),
+      b: () => new Promise<TraceV2Result & LensClosureExtras>(resolve => { resolveB = resolve }),
+      c: () => closureResult({ focus: f('c'), nodes: [] }),
+    })
+    const { result, rerender } = renderHook(
+      ({ walk }: { walk: boolean }) => useLensWalk('a', provider, 1, walk),
+      { initialProps: { walk: true } },
+    )
+    await waitFor(() => expect(traceClosure).toHaveBeenCalledTimes(2))
+
+    rerender({ walk: false })
+    act(() => {
+      resolveB?.(closureResult({ focus: f('b'), nodes: [gn('c2')], frontierUp: [frontier('c')] }))
+    })
+    // The landed hop is kept, but the frontier it opened is NOT followed.
+    await waitFor(() => expect(result.current.walkFor('a')!.model.nodes.some(n => n.urn === 'c2')).toBe(true))
+    await new Promise(r => setTimeout(r, 20))
+    expect(traceClosure).toHaveBeenCalledTimes(2)
+    expect(result.current.fullWalkFor('a')).toBeNull()
+  })
+
+  it('holds at most FULL_WALK_CONCURRENCY frontier ops in flight', async () => {
+    const spokes = Array.from({ length: 6 }, (_, i) => `s${i}`)
+    const hang = () => new Promise<never>(() => {})
+    const { provider, traceClosure } = providerByUrn({
+      a: () => closureResult({
+        focus: f('a'),
+        nodes: [gn('a'), ...spokes.map(s => gn(s))],
+        frontierUp: spokes.map(s => frontier(s)),
+      }),
+      ...Object.fromEntries(spokes.map(s => [s, hang])),
+    })
+    renderHook(() => useLensWalk('a', provider, 1, true))
+    await waitFor(() => expect(traceClosure).toHaveBeenCalledTimes(1 + FULL_WALK_CONCURRENCY))
+    await new Promise(r => setTimeout(r, 20))
+    expect(traceClosure).toHaveBeenCalledTimes(1 + FULL_WALK_CONCURRENCY)
   })
 })

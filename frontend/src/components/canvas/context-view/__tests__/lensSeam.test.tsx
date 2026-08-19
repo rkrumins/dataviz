@@ -103,25 +103,30 @@ function makeProvider() {
  * ContextViewCanvas's lens block, and nothing else: the same focal
  * derivation, the same share-depth rule, the same walk-api memo.
  */
-function LensSeam({ provider, share, history: opened, prefDepth = 1, onRender }: {
+function LensSeam({ provider, share, history: opened, prefDepth = 1, fullWalk = false, onRender }: {
   provider: GraphDataProvider
   share?: { v: 2; entries: string[]; cursor: number; depth: number } | null
   /** Where the trail already is — a link opens AT the share's cursor,
    *  and every re-center after that moves it on. */
   history?: LensHistory
   prefDepth?: number
+  /** Opened as a TRACE — the canvas's openTraceLens path. */
+  fullWalk?: boolean
   onRender?: (api: object) => void
 }) {
   const [history, setHistory] = useState<LensHistory>(() => (
     opened ?? (share ? { entries: share.entries, cursor: share.cursor } : { entries: ['F'], cursor: 0 })
   ))
+  // Verbatim from ContextViewCanvas: trace entries open with the full
+  // walk ON; the header toggle switches either way.
+  const [fullWalkOn, setFullWalkOn] = useState(fullWalk)
   const focal = lensFocalOf(history)
   // Verbatim from ContextViewCanvas: a share v2 link's depth overrides
   // the preference for exactly the RESTORED focal's initial fetch.
   const initialDepth = share && share.v === 2 && focal === share.entries[share.cursor]
     ? share.depth
     : prefDepth
-  const walk = useLensWalk(focal, provider, initialDepth)
+  const walk = useLensWalk(focal, provider, initialDepth, fullWalkOn)
   const { extend, page, retry } = walk
   const walkApi = useMemo(() => ({ extend, page, retry }), [extend, page, retry])
   onRender?.(walkApi)
@@ -145,6 +150,10 @@ function LensSeam({ provider, share, history: opened, prefDepth = 1, onRender }:
       onForward={() => setHistory(lensForwardStep)}
       onJumpTo={(i) => setHistory(h => lensJump(h, i))}
       onClose={() => {}}
+      fullWalkEnabled={fullWalkOn}
+      fullWalkStatus={focal ? walk.fullWalkFor(focal) : null}
+      onFullWalkToggle={setFullWalkOn}
+      onFullWalkContinue={() => { if (focal) walk.continueFullWalk(focal) }}
     />
   )
 }
@@ -468,5 +477,47 @@ describe('lens seam — history navigation lands on a rendered board', () => {
     await act(async () => { await Promise.resolve() })
     expect(drawn('charlie')).toBe(true)
     expect(traceClosure).toHaveBeenCalledTimes(fetches)
+  })
+})
+
+// ── Trace = the Lens walked to the ends ──────────────────────────────
+// The canvas's openTraceLens path: the lens opens with the full walk ON
+// and the SEAM (real hook, real adapter, real layout) must deliver the
+// whole flow with ZERO ⊕ clicks — the design's acceptance journey.
+
+describe('lens seam — trace (full walk)', () => {
+  it('a trace entry draws the whole flow with zero ⊕ clicks, deep-fetched, and says so', async () => {
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      // The page of F's downstream cursor and the a_status extend both
+      // drain (empty frontiers); only b_amount's extend has more flow.
+      if (req.afterCursor) return bareEstate('F')
+      if (req.urn === 'F') return estate()
+      if (req.urn === 'b_amount') {
+        return {
+          ...bareEstate('b_amount'),
+          nodes: [gn('u2', 'dataset', 'deep_source')],
+          edges: [ge('u2', 'b_amount')],
+        }
+      }
+      return bareEstate(req.urn as string)
+    })
+    const provider = { scopeKey: 'ws1', traceClosure } as unknown as GraphDataProvider
+
+    render(<LensSeam provider={provider} fullWalk />)
+    await screen.findAllByText('collaterals')
+
+    // The hop past the initial closure arrives without ANY interaction.
+    await screen.findAllByText('deep_source')
+    // …and the walk announces it finished the flow.
+    await screen.findByText(/full flow drawn/i)
+
+    // Deep initial fetch (trace mode), then exactly the three frontier
+    // ops the estate advertised: b_amount ⊕, a_status ⊕, F's page.
+    expect(traceClosure).toHaveBeenCalledTimes(4)
+    expect(traceClosure.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({ urn: 'F', upstreamDepth: 25, downstreamDepth: 25 }),
+    )
+    // The header mode toggle reflects the trace entry.
+    expect(screen.getByRole('button', { name: /full flow/i })).toHaveAttribute('aria-pressed', 'true')
   })
 })
