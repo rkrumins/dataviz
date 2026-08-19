@@ -24,6 +24,12 @@ export interface TraceBottomDockProps {
   onToggleExpanded: () => void
   onExit: () => void
   onJumpToUrn: (urn: string) => void
+  /** Browser-style trace history (optional — the ←/→ pair renders only
+   *  when the host wires it; legacy hosts stay untouched). */
+  onHistoryBack?: () => void
+  onHistoryForward?: () => void
+  canHistoryBack?: boolean
+  canHistoryForward?: boolean
 }
 
 const COMPACT_HEIGHT = 64
@@ -67,6 +73,10 @@ export function TraceBottomDock({
   onToggleExpanded,
   onExit,
   onJumpToUrn,
+  onHistoryBack,
+  onHistoryForward,
+  canHistoryBack = false,
+  canHistoryForward = false,
 }: TraceBottomDockProps) {
   const [expandedHeight, setExpandedHeight] = useState(lastExpandedHeight)
   const [tab, setTab] = useState<TraceDockTab>('overview')
@@ -230,6 +240,10 @@ export function TraceBottomDock({
           expanded={expanded}
           onToggleExpanded={onToggleExpanded}
           onExit={onExit}
+          onHistoryBack={onHistoryBack}
+          onHistoryForward={onHistoryForward}
+          canHistoryBack={canHistoryBack}
+          canHistoryForward={canHistoryForward}
         />
 
         {/* Drill-back breadcrumb — visible whenever one or more drills are

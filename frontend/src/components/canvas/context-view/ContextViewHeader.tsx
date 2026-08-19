@@ -24,6 +24,7 @@ import type { HierarchyNode } from './types'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { HeaderSearch, HeaderSearchResults } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
+import type { TraceHistoryPanelEntry } from './header/TraceHistoryPanel'
 import { EditorActions } from './header/EditorActions'
 import { ViewTitleMenu } from './header/ViewTitleMenu'
 
@@ -68,6 +69,14 @@ export interface ContextViewHeaderProps {
   traceUpstreamDepth: number
   traceDownstreamDepth: number
   onSetTraceDepth: (dir: 'upstream' | 'downstream', value: number) => void
+
+  /** Trace trails in this view (newest first) — the "pick up where you
+   *  left off" launcher under the Trace Lineage control. Optional. */
+  traceHistory?: TraceHistoryPanelEntry[]
+  onResumeTraceHistory?: (index: number) => void
+  onClearTraceHistory?: () => void
+  /** Open the Lineage Lens on the current selection. Optional. */
+  onOpenLens?: () => void
 
   // Mode — Published (View) vs. an open draft (Edit). `isDraft` picks the
   // right-hand cluster; `canManage`/`canEnterEdit` shape the Edit entry.
@@ -165,6 +174,10 @@ export function ContextViewHeader({
   traceUpstreamDepth,
   traceDownstreamDepth,
   onSetTraceDepth,
+  traceHistory,
+  onResumeTraceHistory,
+  onClearTraceHistory,
+  onOpenLens,
   isDraft,
   canManage,
   canEnterEdit,
@@ -230,6 +243,10 @@ export function ContextViewHeader({
     traceUpstreamDepth,
     traceDownstreamDepth,
     onSetTraceDepth,
+    traceHistory,
+    onResumeTraceHistory,
+    onClearTraceHistory,
+    onOpenLens,
     onTogglePropertyManager,
     propertyManagerOpen,
     // Import / Export live in the shared cluster so the combined dropdown shows in BOTH modes; the

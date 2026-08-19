@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, LayoutGroup } from 'framer-motion'
 import {
+  ArrowLeft,
+  ArrowRight,
   ArrowUp,
   ArrowDown,
   ArrowUpDown,
@@ -23,6 +25,11 @@ export interface TraceDockTitleBarProps {
   expanded: boolean
   onToggleExpanded: () => void
   onExit: () => void
+  /** Browser-style trace history — rendered only when wired. */
+  onHistoryBack?: () => void
+  onHistoryForward?: () => void
+  canHistoryBack?: boolean
+  canHistoryForward?: boolean
 }
 
 type Direction = 'up' | 'both' | 'down'
@@ -53,6 +60,10 @@ export function TraceDockTitleBar({
   expanded,
   onToggleExpanded,
   onExit,
+  onHistoryBack,
+  onHistoryForward,
+  canHistoryBack = false,
+  canHistoryForward = false,
 }: TraceDockTitleBarProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const recentTriggerRef = useRef<HTMLButtonElement>(null)
@@ -246,6 +257,45 @@ export function TraceDockTitleBar({
       </LayoutGroup>
 
       <div className="flex-1 min-w-2" />
+
+      {/* Trace history ←/→ — browser semantics over this view's traces
+          (renders only when the host wires the history). */}
+      {(onHistoryBack || onHistoryForward) && (
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            data-trace-control
+            onClick={onHistoryBack}
+            disabled={!canHistoryBack}
+            title="Previous trace in this view"
+            aria-label="Previous trace"
+            className={cn(
+              'inline-flex items-center justify-center w-8 h-8 rounded-lg border transition-colors',
+              canHistoryBack
+                ? 'text-ink-muted hover:text-ink bg-white/[0.06] border-white/[0.12] hover:bg-white/[0.12]'
+                : 'text-ink-muted/30 border-white/[0.06] cursor-default',
+            )}
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            data-trace-control
+            onClick={onHistoryForward}
+            disabled={!canHistoryForward}
+            title="Next trace in this view"
+            aria-label="Next trace"
+            className={cn(
+              'inline-flex items-center justify-center w-8 h-8 rounded-lg border transition-colors',
+              canHistoryForward
+                ? 'text-ink-muted hover:text-ink bg-white/[0.06] border-white/[0.12] hover:bg-white/[0.12]'
+                : 'text-ink-muted/30 border-white/[0.06] cursor-default',
+            )}
+          >
+            <ArrowRight className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Recent popover trigger */}
       {recentCount > 0 && (
