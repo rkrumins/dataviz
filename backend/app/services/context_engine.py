@@ -1365,9 +1365,20 @@ class ContextEngine:
         # asked for, at this one seam: the provider hands the same list to
         # its BFS, its cursor page AND its degree probe, so the counts the
         # frontier reports stay consistent with the edges that shipped.
-        edge_types = _real_lineage_types(
-            req.lineage_edge_types or list(resolved.lineage_edge_types or [])
-        )
+        declared_types = req.lineage_edge_types or list(resolved.lineage_edge_types or [])
+        edge_types = _real_lineage_types(declared_types)
+        if not edge_types and declared_types:
+            # The nothing-left case (REPORTED LIVE 2026-08-19): a source
+            # whose ONLY lineage vocabulary IS the synthetic type — the
+            # canvas editor's non-drawable guard was case-broken, so
+            # manual/blank models carry authored flow written as
+            # :AGGREGATED and nothing else. Filtering here handed the
+            # provider an EMPTY list and the walk was guaranteed to find
+            # nothing (canvas showed the flow, lens showed a bare focus).
+            # The double-count the filter prevents needs a REAL flow under
+            # the rollup; this source has none — walk the only lineage
+            # truth it has.
+            edge_types = [t for t in declared_types if t]
         containment_types = list(resolved.containment_edge_types or [])
         max_nodes = min(req.max_nodes or ContextEngine.TRACE_MAX_NODES, ContextEngine.TRACE_MAX_NODES)
         fn = getattr(self.provider, "trace_closure", None)

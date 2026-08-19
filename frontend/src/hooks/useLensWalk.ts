@@ -244,13 +244,17 @@ export function useLensWalk(
         cardUrn: string,
         dir: LensWalkDir,
         buildRequest: (baseModel: LensWalkModel) => TraceClosureRequest,
+        /** Own status key for ops that are NOT a directional extend/page of
+         *  the card — the seed page must never collide with the focus's
+         *  real `up:` pill (either would block the other). */
+        statusKeyOverride?: string,
     ) => {
         if (!focusUrn) return
         if (typeof provider?.traceClosure !== 'function') return   // unsupported: nothing to extend/page
         const cacheKey = cacheKeyFor(provider, focusUrn)
         const startEntry = stateRef.current.get(cacheKey)
         if (startEntry?.status !== 'done') return
-        const statusKey = `${dir}:${cardUrn}`
+        const statusKey = statusKeyOverride ?? `${dir}:${cardUrn}`
         const flightKey = `${cacheKey}|${statusKey}`
         if (inFlightRef.current.has(flightKey)) return
         inFlightRef.current.add(flightKey)
@@ -330,7 +334,7 @@ export function useLensWalk(
             downstreamDepth: entry.depth,
             seedCursor: cursor,
             excludeUrns: knownUrns(baseModel).slice(0, 2000),
-        }))
+        }), `seed:${walkFocusUrn}`)
     }, [provider, runFrontierOp])
 
     // ── Full walk (trace mode) ─────────────────────────────────────────
@@ -355,7 +359,7 @@ export function useLensWalk(
         if (slots <= 0) return
         // The focus's own capped contents page FIRST — nothing else can
         // complete the picture of the thing the user asked about.
-        if (entry.model.seedCursor && !entry.extendStatus.has(`up:${focusUrn}`)) {
+        if (entry.model.seedCursor && !entry.extendStatus.has(`seed:${focusUrn}`)) {
             setFullWalkMeta(prev => {
                 const next = new Map(prev)
                 next.set(cacheKey, { grants: meta.grants, requests: meta.requests + 1 })
@@ -409,7 +413,7 @@ export function useLensWalk(
         const hasCandidate =
             entry.model.frontierUp.some(fr => !entry.extendStatus.has(`up:${fr.urn}`))
             || entry.model.frontierDown.some(fr => !entry.extendStatus.has(`down:${fr.urn}`))
-            || (entry.model.seedCursor != null && !entry.extendStatus.has(`up:${urn}`))
+            || (entry.model.seedCursor != null && !entry.extendStatus.has(`seed:${urn}`))
         if (anyLoading || hasCandidate) return { walking: true, exhausted: false, budgetHit: false, stalled: false }
         return { walking: false, exhausted: false, budgetHit: false, stalled: true }
     }, [fullWalk, provider, state, fullWalkMeta])

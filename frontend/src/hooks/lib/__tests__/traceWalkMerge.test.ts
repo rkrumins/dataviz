@@ -146,15 +146,34 @@ describe('computeTraceWalkDelta — merge rules', () => {
 })
 
 describe('traceExpansionUrns', () => {
-  it('expands the traced node and its DIRECT flow partners — not the whole walk', () => {
-    // c1 (in T under P) is traced; c2 (in T2) feeds it directly; far
-    // (in TFAR) is two hops away and must stay collapsed.
+  // 2026-08-19 RULING (reverses the 2026-08-18 "restrained expansion"):
+  // trace = the whole flow at its most granular grain, upfront. EVERY
+  // participant's containment chain expands — the earlier direct-partners-
+  // only version left hops 2..N collapsed as container bundles, and on the
+  // common estate where lineage lives on LEAF DESCENDANTS of the traced
+  // entity (columns under a table) it expanded nothing at all ("doesn't
+  // even show anything for 3 level hop").
+  it('expands the containment chain of EVERY participant in the walk', () => {
+    // c1 (in T under P) is traced; c2 (in T2) feeds it; far (in TFAR) is
+    // two hops away and must be granular too.
     const m = model({
       nodes: [wnode('c1'), wnode('c2'), wnode('far'), wnode('T', 'dataset'), wnode('P', 'container'), wnode('T2', 'dataset'), wnode('TFAR', 'dataset')],
       lineageEdges: [hop('c2', 'c1', 'e1'), hop('far', 'c2', 'e2')],
       containmentEdges: [holds('P', 'T'), holds('T', 'c1'), holds('T2', 'c2'), holds('TFAR', 'far')],
     })
-    expect([...traceExpansionUrns(m, 'c1')].sort()).toEqual(['P', 'T', 'T2'])
+    expect([...traceExpansionUrns(m, 'c1')].sort()).toEqual(['P', 'T', 'T2', 'TFAR'])
+  })
+
+  it('a TABLE focus whose COLUMNS carry the hops still opens every chain', () => {
+    // No lineage edge touches the traced urn itself — the flow lives one
+    // grain below. The direct-partners version returned nothing here,
+    // which rendered the entire trace as "just a filter that did nothing".
+    const m = model({
+      nodes: [wnode('TBL', 'dataset'), wnode('c1'), wnode('c2'), wnode('T2', 'dataset'), wnode('P', 'container')],
+      lineageEdges: [hop('c2', 'c1', 'e1')],
+      containmentEdges: [holds('P', 'TBL'), holds('TBL', 'c1'), holds('T2', 'c2')],
+    })
+    expect([...traceExpansionUrns(m, 'TBL')].sort()).toEqual(['P', 'T2', 'TBL'])
   })
 
   it('is cycle-safe', () => {

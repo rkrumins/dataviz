@@ -1876,25 +1876,43 @@ export function LineageLens({
               </button>
             </div>
           )}
+          {/* The partial-picture strip. The old copy announced a cap in
+              engine jargon ("stopped early (max_nodes)") and offered no way
+              onward — read as "your lineage is gone". This one states what
+              IS on the board, says more exists, and hands over the levers:
+              page the focus's own contents (seedCursor), or hand the whole
+              neighbourhood to the full-flow walker ("Load everything" =
+              the header's Full flow switch — counts then resolve as the
+              walk drains every frontier, with the budget/stall strips
+              below narrating the journey). */}
           {walkStatus === 'done' && (model?.truncated || model?.seedTruncated) && (
             <div className="flex items-center gap-2 px-4 py-1.5 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] text-[10.5px] text-ink-muted">
               <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
               <span>
-                Large neighbourhood — the data source stopped early
-                {model?.truncationReason ? ` (${model.truncationReason})` : ''}, so these counts are floors.
-                Use ⊕ to walk further, or the filter to narrow.
+                {`Partial picture — ${model?.upstreamUrns.size ?? 0} upstream · ${model?.downstreamUrns.size ?? 0} downstream on the board`}
+                {model?.seedTruncated ? ', contents partially loaded' : ''}
+                {'. More exists at the source.'}
               </span>
-              {/* The focus's own contents page (seedCursor): the one cap
-                  that used to be unresumable. One click = one page. */}
-              {model?.seedCursor && walkApi.pageSeeds && nodeId && (
-                <button
-                  type="button"
-                  onClick={() => walkApi.pageSeeds?.(nodeId)}
-                  className="ml-auto flex-shrink-0 font-semibold hover:underline"
-                >
-                  Load more contents
-                </button>
-              )}
+              <span className="ml-auto flex items-center gap-3 flex-shrink-0">
+                {model?.seedCursor && walkApi.pageSeeds && nodeId && (
+                  <button
+                    type="button"
+                    onClick={() => walkApi.pageSeeds?.(nodeId)}
+                    className="font-semibold hover:underline"
+                  >
+                    Load more contents
+                  </button>
+                )}
+                {onFullWalkToggle && !fullWalkEnabled && (
+                  <button
+                    type="button"
+                    onClick={() => onFullWalkToggle(true)}
+                    className="font-semibold hover:underline"
+                  >
+                    Load everything
+                  </button>
+                )}
+              </span>
             </div>
           )}
           {/* Full walk stopped short of the ends — say WHY and offer the

@@ -116,6 +116,7 @@ def test_trace_closure_request_alias_round_trip():
         "seedUrns": ["s1", "s2"],
         "excludeUrns": ["x1"],
         "afterCursor": "e:123",
+        "seedCursor": None,
     }
     from_alias = TraceClosureRequest.model_validate(alias_payload)
 
@@ -129,6 +130,7 @@ def test_trace_closure_request_alias_round_trip():
         "seed_urns": ["s1", "s2"],
         "exclude_urns": ["x1"],
         "after_cursor": "e:123",
+        "seed_cursor": None,
     }
     from_snake = TraceClosureRequest.model_validate(snake_payload)
 
@@ -504,3 +506,34 @@ def test_synthetic_type_is_matched_however_the_graph_spells_it():
         {"urn": "u1", "lineageEdgeTypes": ["Aggregated", "flows_to", "aggregated"]},
     )))
     assert provider.calls[0]["lineage_edge_types"] == ["flows_to"]
+
+
+class _OntologyWithOnlySyntheticType(_Ontology):
+    # The manual/blank-model shape REPORTED LIVE (2026-08-19): the canvas
+    # editor's non-drawable guard was case-broken, so authored flow edges
+    # were written as :AGGREGATED — leaving graphs (e.g. manual_lineage)
+    # whose ONLY physical lineage vocabulary IS the synthetic type. The
+    # filter then handed the provider an EMPTY list, and the walk was
+    # guaranteed to find nothing: the canvas showed the flow, the lens
+    # showed a bare focus card.
+    lineage_edge_types = ["AGGREGATED"]
+
+
+def test_a_source_whose_only_lineage_vocabulary_is_synthetic_walks_it():
+    # When filtering the synthetic type would leave NOTHING to walk, the
+    # rollup grain is the only lineage truth this source has — walk it.
+    # The double-count the filter exists to prevent needs a real flow
+    # UNDER the rollup, and this source has none.
+    provider = _CapturingClosureProvider()
+    eng = _engine_with_ontology(provider, _OntologyWithOnlySyntheticType())
+    _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate({"urn": "u1"})))
+    assert provider.calls[0]["lineage_edge_types"] == ["AGGREGATED"]
+
+
+def test_a_source_with_any_real_type_still_filters_the_synthetic_one():
+    # The rescue is ONLY for the nothing-left case — one real type present
+    # and the filter behaves exactly as before.
+    provider = _CapturingClosureProvider()
+    eng = _engine_with_ontology(provider, _OntologyWithSyntheticTypes())
+    _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate({"urn": "u1"})))
+    assert "AGGREGATED" not in provider.calls[0]["lineage_edge_types"]

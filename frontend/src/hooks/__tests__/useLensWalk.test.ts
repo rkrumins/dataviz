@@ -611,4 +611,62 @@ describe('useLensWalk — full walk follows the seed cursor (focus contents page
     await waitFor(() => expect(result.current.walkFor('F')!.model.nodes.some(n => n.urn === 'w2')).toBe(true))
     expect(result.current.walkFor('F')!.model.seedCursor).toBeNull()
   })
+
+  it("pageSeeds marks its OWN 'seed:' status key — a genuine upstream extend of the focus is not blocked", async () => {
+    let releaseSeedPage: (() => void) | null = null
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      if (req.seedCursor) {
+        await new Promise<void>(r => { releaseSeedPage = r })
+        return closureResult({ focus: f('F'), nodes: [gn('w2')], seedCursor: null })
+      }
+      if (req.seedUrns) {
+        return closureResult({ focus: f('F'), nodes: [gn('up1')] })
+      }
+      return closureResult({ focus: f('F'), nodes: [gn('F'), gn('w1')], seedTruncated: true, seedCursor: 's:w1' })
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result } = renderHook(() => useLensWalk('F', provider))
+    await waitFor(() => expect(result.current.walkFor('F')?.status).toBe('done'))
+
+    act(() => result.current.pageSeeds('F'))
+    await waitFor(() => expect(result.current.walkFor('F')!.extendStatus.get('seed:F')).toBe('loading'))
+    expect(result.current.walkFor('F')!.extendStatus.has('up:F')).toBe(false)
+
+    // The focus's upstream ⊕ still works while the contents page is in flight.
+    act(() => result.current.extend('F', 'up', ['F']))
+    await waitFor(() => expect(result.current.walkFor('F')!.model.nodes.some(n => n.urn === 'up1')).toBe(true))
+
+    act(() => { releaseSeedPage?.() })
+    await waitFor(() => expect(result.current.walkFor('F')!.model.nodes.some(n => n.urn === 'w2')).toBe(true))
+  })
+})
+
+describe('useLensWalk — "Load everything" flips full walk on MID-SESSION', () => {
+  const f = (urn: string) => ({ urn, level: 0, entityType: 'dataset' })
+
+  it('a one-hop session re-rendered with fullWalk=true walks its existing frontier to exhaustion', async () => {
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      if (req.seedUrns) {
+        // The frontier extend: closes the walk (no further frontier).
+        return closureResult({ focus: f('F'), nodes: [gn('up2')] })
+      }
+      return closureResult({
+        focus: f('F'), nodes: [gn('F'), gn('up1')],
+        frontierUp: [{ urn: 'up1', totalCount: 5, nextCursor: null }],
+      })
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result, rerender } = renderHook(
+      ({ fw }: { fw: boolean }) => useLensWalk('F', provider, 1, fw),
+      { initialProps: { fw: false } },
+    )
+    await waitFor(() => expect(result.current.walkFor('F')?.status).toBe('done'))
+    await new Promise(r => setTimeout(r, 20))
+    expect(traceClosure).toHaveBeenCalledTimes(1)   // one-hop never auto-follows
+    expect(result.current.fullWalkFor('F')).toBeNull()
+
+    rerender({ fw: true })
+    await waitFor(() => expect(result.current.fullWalkFor('F')?.exhausted).toBe(true))
+    expect(result.current.walkFor('F')!.model.nodes.map(n => n.urn).sort()).toEqual(['F', 'up1', 'up2'])
+  })
 })
