@@ -486,17 +486,16 @@ describe('useLensWalk — full walk', () => {
     expect(result.current.fullWalkFor('a')).toBeNull()
   })
 
-  it('stops at the node budget with frontiers remaining, and "continue" resumes', async () => {
+  it('a budget park inside the auto-grant ceiling continues by itself', async () => {
+    // One grant's worth of nodes with a frontier left: previously this
+    // parked and asked ("Keep walking"); now the engine grants itself
+    // onward and finishes — the 2026-08-19 no-pedaling ruling.
     const many = Array.from({ length: FULL_WALK_NODE_BUDGET }, (_, i) => gn(`n${i}`))
-    const { provider, traceClosure } = providerByUrn({
+    const { provider } = providerByUrn({
       a: () => closureResult({ focus: f('a'), nodes: many, frontierUp: [frontier('n0')] }),
       n0: () => closureResult({ focus: f('n0'), nodes: [gn('deeper')] }),
     })
     const { result } = renderHook(() => useLensWalk('a', provider, 1, true))
-    await waitFor(() => expect(result.current.fullWalkFor('a')?.budgetHit).toBe(true))
-    expect(traceClosure).toHaveBeenCalledTimes(1)
-
-    act(() => result.current.continueFullWalk('a'))
     await waitFor(() => expect(result.current.fullWalkFor('a')?.exhausted).toBe(true))
     expect(result.current.walkFor('a')!.model.nodes.some(n => n.urn === 'deeper')).toBe(true)
   })
@@ -638,6 +637,50 @@ describe('useLensWalk — full walk follows the seed cursor (focus contents page
 
     act(() => { releaseSeedPage?.() })
     await waitFor(() => expect(result.current.walkFor('F')!.model.nodes.some(n => n.urn === 'w2')).toBe(true))
+  })
+})
+
+describe('useLensWalk — the walk continues HANDS-FREE past budget parks (2026-08-19: no "Keep walking" pedaling, on ANY surface)', () => {
+  const f = (urn: string) => ({ urn, level: 0, entityType: 'dataset' })
+
+  it('a budget park auto-grants and the walk reaches exhaustion with zero clicks', async () => {
+    // Initial response alone exceeds one budget grant (1000 nodes); a
+    // frontier remains. The driver must grant itself onward and finish.
+    const bigNodes = [gn('F'), ...Array.from({ length: 1100 }, (_, i) => gn(`n${i}`))]
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      if (req.seedUrns) {
+        return closureResult({ focus: f('n0'), nodes: [gn('deeper')] })
+      }
+      return closureResult({
+        focus: f('F'), nodes: bigNodes,
+        frontierUp: [{ urn: 'n0', totalCount: 1, nextCursor: null }],
+      })
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result } = renderHook(() => useLensWalk('F', provider, 1, true))
+
+    await waitFor(() => expect(result.current.fullWalkFor('F')?.exhausted).toBe(true))
+    expect(traceClosure).toHaveBeenCalledTimes(2)
+    expect(result.current.walkFor('F')!.model.nodes.some(n => n.urn === 'deeper')).toBe(true)
+  })
+
+  it('budgetHit is never surfaced while auto-grants remain', async () => {
+    const bigNodes = [gn('F'), ...Array.from({ length: 1100 }, (_, i) => gn(`n${i}`))]
+    let sawBudgetHit = false
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      if (req.seedUrns) return closureResult({ focus: f('n0'), nodes: [gn('deeper')] })
+      return closureResult({
+        focus: f('F'), nodes: bigNodes,
+        frontierUp: [{ urn: 'n0', totalCount: 1, nextCursor: null }],
+      })
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result } = renderHook(() => useLensWalk('F', provider, 1, true))
+    await waitFor(() => {
+      if (result.current.fullWalkFor('F')?.budgetHit) sawBudgetHit = true
+      expect(result.current.fullWalkFor('F')?.exhausted).toBe(true)
+    })
+    expect(sawBudgetHit).toBe(false)
   })
 })
 

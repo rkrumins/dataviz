@@ -342,10 +342,23 @@ export function useLayerAssignment({
             const nodeUrn = (nodeMap.get(nodeId)?.data?.urn as string | undefined) ?? nodeId
             if (branchCreatedDelta.has(nodeUrn)) myLayerId = nodeLayerId
           }
-          // TRACE MODE: a root the closed scope would drop routes to the
-          // virtual lane while a trace session is live — see the option's
-          // doc; the traced flow must never be censored by curation.
-          if (!myLayerId && traceFallbackLayerId) myLayerId = traceFallbackLayerId
+          // TRACE MODE (2026-08-19 Solidatus ruling: "full lineage whilst
+          // RETAINING their layers"): while a trace session is live, a
+          // root the closed scope would drop first resolves through its
+          // NATURAL chain — the layer stamped on the node itself, then
+          // the backend's assignment, then the view's type rules — and
+          // only a root with no natural home lands in the virtual lane.
+          // One catch-all column for the whole flow read as "completely
+          // disjointed"; curated drop semantics outside trace are
+          // untouched.
+          if (!myLayerId && traceFallbackLayerId) {
+            const backendAssignment = effectiveAssignments.get(nodeId)
+            myLayerId = nodeLayerId
+              ?? (backendAssignment?.layerId && validLayerIds.has(backendAssignment.layerId)
+                ? backendAssignment.layerId : undefined)
+              ?? ruleAssignments.get(nodeId)
+              ?? traceFallbackLayerId
+          }
         } else {
           // 2c. Open-scope ('all'): fall back to backend → node property → rules → inheritance so
           //     the user has data to start from (canonical assignments already handled above).

@@ -132,4 +132,68 @@ describe('useLayerAssignment — the trace lane (2026-08-19: in trace mode, the 
     expect(res.nodeLayerMap.get('orphan')).toBe('__trace_flow__')
     expect(res.unassignedNodes).toHaveLength(0)
   })
+
+  // 2026-08-19 Solidatus ruling ("full lineage whilst RETAINING their
+  // layers"): while tracing, a curated-unlisted root first resolves
+  // through its NATURAL chain — the layer stamped on the node itself,
+  // then the view's type rules — and only a root with no natural home
+  // falls into the trace lane. Everything piling into one catch-all
+  // column read as "completely disjointed".
+  it('trace + curated: a root with its OWN stamped layerAssignment retains that layer', () => {
+    const stamped: TestNode = { id: 'foreign', data: { urn: 'foreign', type: 'dataset', label: 'foreign', layerAssignment: 'L2' } }
+    const res = run({
+      nodes: [node('a', 'domain'), stamped],
+      sortedLayers: [
+        layer('L1', 0, ['domain']),
+        layer('L2', 1, []),
+        layer('__trace_flow__', 99, []),
+      ],
+      assignments: { a: { layerId: 'L1' } },
+      entityScope: 'curated',
+      traceFallbackLayerId: '__trace_flow__',
+    })
+    expect(res.nodeLayerMap.get('foreign')).toBe('L2')
+  })
+
+  it('trace + curated: a root matching a layer TYPE RULE retains that layer', () => {
+    const res = run({
+      nodes: [node('a', 'domain'), node('foreignTable', 'dataset')],
+      sortedLayers: [
+        layer('L1', 0, ['domain']),
+        layer('LTables', 1, ['dataset']),
+        layer('__trace_flow__', 99, []),
+      ],
+      assignments: { a: { layerId: 'L1' } },
+      entityScope: 'curated',
+      traceFallbackLayerId: '__trace_flow__',
+    })
+    expect(res.nodeLayerMap.get('foreignTable')).toBe('LTables')
+  })
+
+  it('trace + curated: only a root with NO natural home lands in the lane', () => {
+    const res = run({
+      nodes: [node('a', 'domain'), node('homeless', 'mystery-type')],
+      sortedLayers: [
+        layer('L1', 0, ['domain']),
+        layer('LTables', 1, ['dataset']),
+        layer('__trace_flow__', 99, []),
+      ],
+      assignments: { a: { layerId: 'L1' } },
+      entityScope: 'curated',
+      traceFallbackLayerId: '__trace_flow__',
+    })
+    expect(res.nodeLayerMap.get('homeless')).toBe('__trace_flow__')
+  })
+
+  it('WITHOUT a trace, curated drop semantics are untouched by natural resolution', () => {
+    const stamped: TestNode = { id: 'foreign', data: { urn: 'foreign', type: 'dataset', label: 'foreign', layerAssignment: 'L2' } }
+    const res = run({
+      nodes: [node('a', 'domain'), stamped],
+      sortedLayers: [layer('L1', 0, ['domain']), layer('L2', 1, [])],
+      assignments: { a: { layerId: 'L1' } },
+      entityScope: 'curated',
+    })
+    expect(res.nodeLayerMap.has('foreign')).toBe(false)
+    expect(res.unassignedNodes.map(n => n.id)).toEqual(['foreign'])
+  })
 })

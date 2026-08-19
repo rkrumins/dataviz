@@ -39,6 +39,12 @@ export const FULL_WALK_CONCURRENCY = 4
  *  either clears its entry or advances its cursor, so this should be
  *  unreachable — it exists so a server bug cannot become a request loop). */
 const FULL_WALK_REQUEST_CAP = 300
+/** Budget grants the ENGINE applies by itself before ever asking the user
+ *  (2026-08-19 ruling: "I click trace and this happens behind the scenes
+ *  automatically" — no "Keep walking" pedaling on ANY surface). ~25k nodes
+ *  hands-free; only past the ceiling does budgetHit surface, as the true
+ *  runaway valve, and each manual continue grants one more unit. */
+const FULL_WALK_AUTO_GRANTS = 24
 
 /** Where the full walk stands for one focal. At most one of
  *  exhausted/budgetHit/stalled is true; all false only while walking. */
@@ -352,8 +358,21 @@ export function useLensWalk(
         const entry = state.get(cacheKey)
         if (entry?.status !== 'done') return
         const meta = fullWalkMeta.get(cacheKey) ?? { grants: 1, requests: 0 }
-        if (entry.model.nodes.length >= FULL_WALK_NODE_BUDGET * meta.grants) return
-        if (meta.requests >= FULL_WALK_REQUEST_CAP * meta.grants) return
+        // Hands-free continuation: a budget park inside the auto-grant
+        // ceiling grants itself onward (a state write in an effect is fine
+        // here — it strictly advances `grants`, so it cannot cascade).
+        const parked = entry.model.nodes.length >= FULL_WALK_NODE_BUDGET * meta.grants
+            || meta.requests >= FULL_WALK_REQUEST_CAP * meta.grants
+        if (parked) {
+            if (meta.grants >= FULL_WALK_AUTO_GRANTS) return
+            setFullWalkMeta(prev => {
+                const cur = prev.get(cacheKey) ?? { grants: 1, requests: 0 }
+                const next = new Map(prev)
+                next.set(cacheKey, { grants: cur.grants + 1, requests: cur.requests })
+                return next
+            })
+            return
+        }
         let slots = FULL_WALK_CONCURRENCY
         for (const v of entry.extendStatus.values()) if (v === 'loading') slots--
         if (slots <= 0) return
@@ -409,7 +428,15 @@ export function useLensWalk(
         if (frontierCount === 0) return { walking: anyLoading, exhausted: !anyLoading, budgetHit: false, stalled: false }
         const overBudget = entry.model.nodes.length >= FULL_WALK_NODE_BUDGET * meta.grants
             || meta.requests >= FULL_WALK_REQUEST_CAP * meta.grants
-        if (overBudget) return { walking: anyLoading, exhausted: false, budgetHit: !anyLoading, stalled: false }
+        if (overBudget) {
+            // Inside the auto-grant ceiling a park is invisible — the
+            // driver is about to grant itself onward, so the surfaces
+            // keep narrating "walking" instead of asking.
+            if (meta.grants < FULL_WALK_AUTO_GRANTS) {
+                return { walking: true, exhausted: false, budgetHit: false, stalled: false }
+            }
+            return { walking: anyLoading, exhausted: false, budgetHit: !anyLoading, stalled: false }
+        }
         const hasCandidate =
             entry.model.frontierUp.some(fr => !entry.extendStatus.has(`up:${fr.urn}`))
             || entry.model.frontierDown.some(fr => !entry.extendStatus.has(`down:${fr.urn}`))
