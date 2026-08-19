@@ -109,6 +109,19 @@ import { decodeLensShare } from './lens/shareCodec'
 import { useLensWalk } from '@/hooks/useLensWalk'
 import { useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
 import { computeTraceVisibleUrns } from '@/hooks/lib/traceViewFilter'
+import {
+  emptyTraceHistory,
+  pushTraceFocal,
+  updateCurrentTraceView,
+  traceHistoryBack,
+  traceHistoryForward,
+  traceHistoryJump,
+  currentTraceEntry,
+  serializeTraceHistory,
+  hydrateTraceHistory,
+  type TraceHistoryStack,
+  type TraceHistoryEntryRecord,
+} from '@/hooks/lib/traceHistoryStack'
 import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
 
 /** The native canvas trace has no per-edge drilldowns — the closure walk
@@ -1568,23 +1581,95 @@ export function ContextViewCanvas({
   // walk's own fetch depth means unlimited). Reset on trace start.
   const [traceDepthUp, setTraceDepthUp] = useState(FULL_WALK_INITIAL_DEPTH)
   const [traceDepthDown, setTraceDepthDown] = useState(FULL_WALK_INITIAL_DEPTH)
+
+  // ── Trace history — browser-style back/forward over this user's traces
+  // in THIS view, persisted to localStorage (per user, per view; capped).
+  // Entries record the focal AND how it was viewed (direction + depths),
+  // so back restores the trace as the user left it. Session cache makes
+  // restores instant while the canvas stays mounted; across sessions a
+  // restore refetches like any trace.
+  const authUserId = useAuthStore((s) => s.user?.id ?? 'anon')
+  const traceHistoryKey = `nx:trace-history:v1:${authUserId}:${activeView?.id ?? 'no-view'}`
+  const [traceHistory, setTraceHistory] = useState<TraceHistoryStack>(() =>
+    hydrateTraceHistory(typeof localStorage === 'undefined' ? null : localStorage.getItem(traceHistoryKey)))
+  // Re-hydrate when the user/view (and so the key) changes.
+  const traceHistoryKeyRef = useRef(traceHistoryKey)
+  useEffect(() => {
+    if (traceHistoryKeyRef.current === traceHistoryKey) return
+    traceHistoryKeyRef.current = traceHistoryKey
+    setTraceHistory(hydrateTraceHistory(localStorage.getItem(traceHistoryKey)))
+  }, [traceHistoryKey])
+  // Persist on every change (last-write-wins across tabs — history is a
+  // convenience, never a source of truth).
+  useEffect(() => {
+    try {
+      localStorage.setItem(traceHistoryKeyRef.current, serializeTraceHistory(traceHistory))
+    } catch { /* storage full/blocked — history stays in-memory */ }
+  }, [traceHistory])
+  // Low-level entry shared by fresh traces and history restores. A trace
+  // with the flow overlay off is a contradiction — tracing IS asking to
+  // see the flow — and entering one collapses the sticky drawer once, so
+  // the flow opens unobstructed (clicking a node re-opens it as usual).
+  const beginTrace = useCallback((urn: string) => {
+    setShowLineageFlow(true)
+    useCanvasStore.getState().closeNodeDrawer()
+    canvasTrace.start(urn)
+  }, [canvasTrace])
+
   // `direction` presets the VIEW (the dock's ↑/⇅/↓ mode — Root Cause /
   // Impact / Full Lineage); the walk itself always fetches both ways, so
   // switching mode afterwards is instant. Re-tracing the SAME node with
-  // a different direction just flips the view — the walk cache stays.
+  // a different direction just flips the view — the walk cache stays,
+  // and the history records ONE entry per focal (the flip updates it).
   const startCanvasTrace = useCallback((nodeId: string, direction: 'up' | 'down' | 'both' = 'both') => {
-    // A trace with the flow overlay off is a contradiction — tracing IS
-    // asking to see the flow.
-    setShowLineageFlow(true)
-    setTraceShowUpstream(direction !== 'down')
-    setTraceShowDownstream(direction !== 'up')
-    setTraceDepthUp(FULL_WALK_INITIAL_DEPTH)
-    setTraceDepthDown(FULL_WALK_INITIAL_DEPTH)
-    // Entering a trace collapses the sticky drawer once, so the flow
-    // opens unobstructed — clicking a node re-opens it as usual.
-    useCanvasStore.getState().closeNodeDrawer()
-    canvasTrace.start(displayMap.get(nodeId)?.urn ?? nodeId)
-  }, [canvasTrace, displayMap])
+    const urn = displayMap.get(nodeId)?.urn ?? nodeId
+    const view = {
+      showUpstream: direction !== 'down',
+      showDownstream: direction !== 'up',
+      depthUp: FULL_WALK_INITIAL_DEPTH,
+      depthDown: FULL_WALK_INITIAL_DEPTH,
+    }
+    setTraceShowUpstream(view.showUpstream)
+    setTraceShowDownstream(view.showDownstream)
+    setTraceDepthUp(view.depthUp)
+    setTraceDepthDown(view.depthDown)
+    setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeId, view, timestamp: Date.now() }))
+    beginTrace(urn)
+  }, [displayMap, beginTrace])
+
+  // History restore: the entry's own view params, no push (back/forward
+  // move the cursor, they never rewrite the trail).
+  const restoreTraceEntry = useCallback((entry: TraceHistoryEntryRecord) => {
+    setTraceShowUpstream(entry.view.showUpstream)
+    setTraceShowDownstream(entry.view.showDownstream)
+    setTraceDepthUp(entry.view.depthUp)
+    setTraceDepthDown(entry.view.depthDown)
+    beginTrace(entry.urn)
+  }, [beginTrace])
+  const traceHistoryGo = useCallback((next: TraceHistoryStack) => {
+    if (next === traceHistory) return
+    setTraceHistory(next)
+    const entry = currentTraceEntry(next)
+    if (entry) restoreTraceEntry(entry)
+  }, [traceHistory, restoreTraceEntry])
+  const traceBack = useCallback(() => traceHistoryGo(traceHistoryBack(traceHistory)), [traceHistoryGo, traceHistory])
+  const traceForward = useCallback(() => traceHistoryGo(traceHistoryForward(traceHistory)), [traceHistoryGo, traceHistory])
+
+  // Every view-param change while tracing is recorded on the CURRENT
+  // history entry, so back/forward restore the trace as it was left.
+  // Called from the setters' own event paths (never an effect).
+  const recordTraceView = useCallback((partial: Partial<{ showUpstream: boolean; showDownstream: boolean; depthUp: number; depthDown: number }>) => {
+    setTraceHistory(h => {
+      const cur = currentTraceEntry(h)
+      if (!cur || cur.urn !== canvasTrace.tracedUrn) return h
+      return updateCurrentTraceView(h, {
+        showUpstream: partial.showUpstream ?? traceShowUpstream,
+        showDownstream: partial.showDownstream ?? traceShowDownstream,
+        depthUp: partial.depthUp ?? traceDepthUp,
+        depthDown: partial.depthDown ?? traceDepthDown,
+      })
+    })
+  }, [canvasTrace.tracedUrn, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])
   const exitCanvasTrace = useCallback(() => {
     canvasTrace.exit()
     resetAllCircuitBreakers()
@@ -1669,6 +1754,13 @@ export function ContextViewCanvas({
   const tracedNodeId = canvasTrace.tracedUrn
     ? (urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
     : null
+  // Legacy-shaped history entries for the dock's Recent popover.
+  const dockHistoryEntries = useMemo(() => [...traceHistory.entries].reverse().map(e => ({
+    focusId: e.focusId,
+    focusUrn: e.urn,
+    timestamp: e.timestamp,
+    config: { ...trace.config, upstreamDepth: e.view.depthUp, downstreamDepth: e.view.depthDown },
+  })), [traceHistory, trace.config])
   const dockTrace = useMemo<UseUnifiedTraceResult>(() => {
     if (!traceActive || !traceModel || !tracedNodeId) return trace
     const result: TraceResult = {
@@ -1694,8 +1786,8 @@ export function ContextViewCanvas({
       downstreamCount: traceParticipants.downstream.length,
       showUpstream: traceShowUpstream,
       showDownstream: traceShowDownstream,
-      setShowUpstream: setTraceShowUpstream,
-      setShowDownstream: setTraceShowDownstream,
+      setShowUpstream: (show) => { setTraceShowUpstream(show); recordTraceView({ showUpstream: show }) },
+      setShowDownstream: (show) => { setTraceShowDownstream(show); recordTraceView({ showDownstream: show }) },
       // Depth is a VIEW limit on the walked flow — setConfig applies it
       // instantly, and the retrace the dock fires afterwards is a no-op
       // continue (nothing to refetch).
@@ -1703,8 +1795,17 @@ export function ContextViewCanvas({
       setConfig: (cfg) => {
         if (cfg.upstreamDepth !== undefined) setTraceDepthUp(cfg.upstreamDepth)
         if (cfg.downstreamDepth !== undefined) setTraceDepthDown(cfg.downstreamDepth)
+        recordTraceView({ depthUp: cfg.upstreamDepth, depthDown: cfg.downstreamDepth })
         trace.setConfig(cfg)
       },
+      // History — the dock's Recent popover + back/forward, fed from the
+      // per-view stack (newest first for the list).
+      traceHistory: dockHistoryEntries,
+      jumpToHistoryEntry: async (entry) => {
+        const idx = traceHistory.entries.findIndex(e => e.urn === entry.focusUrn && e.timestamp === entry.timestamp)
+        if (idx >= 0) traceHistoryGo(traceHistoryJump(traceHistory, idx))
+      },
+      clearTraceHistory: () => setTraceHistory(emptyTraceHistory()),
       statistics: {
         ...trace.statistics,
         totalNodes: traceModel.nodes.length,
@@ -1714,7 +1815,7 @@ export function ContextViewCanvas({
       },
       retrace: async () => { canvasTrace.continueWalk() },
     }
-  }, [traceActive, traceModel, tracedNodeId, trace, canvasTrace, traceParticipants, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])
+  }, [traceActive, traceModel, tracedNodeId, trace, canvasTrace, traceParticipants, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown, dockHistoryEntries, traceHistory, traceHistoryGo, recordTraceView])
 
   // Auto-collapse the dock when trace exits so a stale open state doesn't
   // immediately reappear next time the user starts a trace.
@@ -3658,6 +3759,7 @@ export function ContextViewCanvas({
           // no refetch (the walk holds the whole flow in memory).
           if (dir === 'upstream') setTraceDepthUp(value)
           else setTraceDepthDown(value)
+          recordTraceView(dir === 'upstream' ? { depthUp: value } : { depthDown: value })
         }}
         onOpenAdvancedSearch={(seedQuery) => {
           // Toggle the panel. When the user escalates from the
@@ -3736,6 +3838,10 @@ export function ContextViewCanvas({
                 const id = urnToIdMap.get(urn) ?? urn
                 startCanvasTrace(id)
               }}
+              onHistoryBack={traceBack}
+              onHistoryForward={traceForward}
+              canHistoryBack={traceHistory.cursor > 0}
+              canHistoryForward={traceHistory.cursor < traceHistory.entries.length - 1}
             />
           )}
         </AnimatePresence>

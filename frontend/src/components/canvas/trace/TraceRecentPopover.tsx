@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { Clock } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -86,19 +87,32 @@ export function TraceRecentPopover({
     }
   }
 
-  return (
+  // PORTALED, anchored ABOVE the trigger: the dock's shell is
+  // overflow-hidden and bottom-anchored, so an in-flow `top-full`
+  // popover is entirely clipped in COMPACT mode (reported live
+  // 2026-08-19 — "clicking Recent does nothing"). Fixed positioning
+  // from the trigger's rect escapes the shell; opening upward keeps it
+  // on-screen from a bottom dock. No AnimatePresence/exit — an
+  // interrupted exit must never strand an invisible click-blocker.
+  const [anchor, setAnchor] = useState<{ right: number; bottom: number } | null>(null)
+  useEffect(() => {
+    const rect = triggerRef.current?.getBoundingClientRect()
+    if (rect) setAnchor({ right: window.innerWidth - rect.right, bottom: window.innerHeight - rect.top + 6 })
+  }, [triggerRef])
+  if (!anchor) return null
+
+  return createPortal(
     <motion.div
       ref={popoverRef}
       data-canvas-interactive
       role="menu"
       aria-label="Recent trace focuses"
-      initial={{ opacity: 0, y: -4, scale: 0.98 }}
+      initial={{ opacity: 0, y: 4, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: -4, scale: 0.98 }}
       transition={{ duration: 0.15, ease: 'easeOut' }}
       onKeyDown={onKeyDown}
+      style={{ position: 'fixed', right: anchor.right, bottom: anchor.bottom, zIndex: 1000 }}
       className={cn(
-        'absolute right-0 top-full mt-1 z-[60]',
         'min-w-[260px] max-w-[320px] py-1 rounded-xl',
         'bg-canvas-elevated/98 backdrop-blur-2xl',
         'border border-glass-border shadow-glass-lg',
@@ -152,6 +166,7 @@ export function TraceRecentPopover({
           )
         })}
       </div>
-    </motion.div>
+    </motion.div>,
+    document.body,
   )
 }
