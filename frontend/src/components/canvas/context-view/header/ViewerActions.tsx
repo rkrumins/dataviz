@@ -71,6 +71,10 @@ export interface ComprehensionToolsProps {
   traceHistory?: TraceHistoryPanelEntry[]
   onResumeTraceHistory?: (index: number) => void
   onClearTraceHistory?: () => void
+  /** Open the Lineage Lens on the current selection (same gating as
+   *  Trace: a single non-logical entity). Optional — hosts that don't
+   *  wire the lens show no button. */
+  onOpenLens?: () => void
 
   // Property Manager — optional so canvases that don't wire it omit the button.
   onTogglePropertyManager?: () => void
@@ -117,6 +121,7 @@ export function ComprehensionTools({
   traceHistory = [],
   onResumeTraceHistory,
   onClearTraceHistory,
+  onOpenLens,
 }: ComprehensionToolsProps) {
   const { showToast } = useToast()
   const [traceHistoryOpen, setTraceHistoryOpen] = useState(false)
@@ -198,6 +203,29 @@ export function ComprehensionTools({
              disabled when no entity selected.
           …and a fourth: the feature is switched off, in which case there is no state to show —
           the button is gone, because the server will refuse the request anyway. */}
+      {/* Focus Lens — the investigation surface, one step before a full
+          trace: open the Lens on the selection and walk its connections
+          hop by hop. Same gating as Trace (single non-logical entity);
+          same feature flag (the lens rides the same trace backend). */}
+      {traceEnabled && onOpenLens && !traceActive && (
+        <button
+          onClick={canTrace ? onOpenLens : undefined}
+          disabled={!canTrace}
+          title={canTrace
+            ? 'Open the Lineage Lens — walk this entity’s connections hop by hop'
+            : 'Select a single entity to focus its connections'}
+          className={cn(
+            "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
+            canTrace
+              ? "bg-gradient-to-r from-teal-500/15 to-accent-lineage/10 text-teal-700 dark:text-teal-300 border border-teal-500/40 hover:from-teal-500/25 hover:to-accent-lineage/20 hover:border-teal-400/60 dark:hover:shadow-lg dark:hover:shadow-teal-500/20"
+              : "bg-black/[0.03] border border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/40 cursor-not-allowed"
+          )}
+        >
+          <LucideIcons.Focus className="w-4 h-4" strokeWidth={2.2} />
+          <span>Focus Lens</span>
+        </button>
+      )}
+
       {!traceEnabled ? null : traceActive ? (
         <button
           data-tour="canvas-trace"

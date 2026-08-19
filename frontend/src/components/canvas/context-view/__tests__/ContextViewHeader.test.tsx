@@ -208,3 +208,25 @@ describe('ContextViewHeader — Trace Lineage launcher (history)', () => {
     expect(screen.getByText(/pick up where you left off/i)).toBeInTheDocument()
   })
 })
+
+describe('ContextViewHeader — Focus Lens launcher', () => {
+  it('with a selection, Focus Lens opens the lens on it', () => {
+    const props = baseProps({ canTrace: true, onOpenLens: vi.fn() })
+    render(<ContextViewHeader {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: /focus lens/i }))
+    expect(props.onOpenLens).toHaveBeenCalledTimes(1)
+  })
+
+  it('without a selection, Focus Lens is disabled with guidance', () => {
+    const props = baseProps({ canTrace: false, onOpenLens: vi.fn() })
+    render(<ContextViewHeader {...props} />)
+    const btn = screen.getByRole('button', { name: /focus lens/i })
+    expect(btn).toBeDisabled()
+    expect(btn).toHaveAttribute('title', expect.stringMatching(/select a single entity/i))
+  })
+
+  it('hosts that do not wire the lens see no button', () => {
+    render(<ContextViewHeader {...baseProps()} />)
+    expect(screen.queryByRole('button', { name: /focus lens/i })).toBeNull()
+  })
+})

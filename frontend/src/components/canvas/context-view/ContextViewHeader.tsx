@@ -75,6 +75,8 @@ export interface ContextViewHeaderProps {
   traceHistory?: TraceHistoryPanelEntry[]
   onResumeTraceHistory?: (index: number) => void
   onClearTraceHistory?: () => void
+  /** Open the Lineage Lens on the current selection. Optional. */
+  onOpenLens?: () => void
 
   // Mode — Published (View) vs. an open draft (Edit). `isDraft` picks the
   // right-hand cluster; `canManage`/`canEnterEdit` shape the Edit entry.
@@ -175,6 +177,7 @@ export function ContextViewHeader({
   traceHistory,
   onResumeTraceHistory,
   onClearTraceHistory,
+  onOpenLens,
   isDraft,
   canManage,
   canEnterEdit,
@@ -243,6 +246,7 @@ export function ContextViewHeader({
     traceHistory,
     onResumeTraceHistory,
     onClearTraceHistory,
+    onOpenLens,
     onTogglePropertyManager,
     propertyManagerOpen,
     // Import / Export live in the shared cluster so the combined dropdown shows in BOTH modes; the

@@ -3775,6 +3775,7 @@ export function ContextViewCanvas({
         traceHistory={headerTraceHistory}
         onResumeTraceHistory={resumeTraceHistory}
         onClearTraceHistory={clearTraceHistory}
+        onOpenLens={() => { if (selectedNodeIds[0]) openLens(selectedNodeIds[0]) }}
         onSetTraceDepth={(dir, value) => {
           // A VIEW limit on the already-walked flow — applies instantly,
           // no refetch (the walk holds the whole flow in memory).
