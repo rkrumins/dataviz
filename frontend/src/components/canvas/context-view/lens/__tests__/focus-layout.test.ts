@@ -3198,3 +3198,91 @@ describe('labelFitsRun — the badge and the wire agree', () => {
         expect(bundle.labelVisible).toBe(true)
     })
 })
+
+describe('focal container-of-containers in All mode (2026-08-19: "only the 1st node\'s children show")', () => {
+    /** F ⊃ m1..m10, each mid ⊃ leaves; lineage runs through m1's leaf
+     *  only. The walk model carries F, m1 and its leaf (the flow); the
+     *  roster knows all ten mids. Focusing F with Contents=All must show
+     *  ALL TEN mids — the flow one populated, the other nine as quiet
+     *  rows — never just the first. */
+    function nestedEstate() {
+        const mids = Array.from({ length: 10 }, (_, i) => `m${i + 1}`)
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [wnode('F', 'NODE'), wnode('m1', 'NODE'), wnode('leaf1', 'ITEM'), wnode('src', 'ITEM')],
+            hops: [['src', 'leaf1']],
+            contains: [['F', 'm1'], ['m1', 'leaf1']],
+        })
+        const roster = {
+            children: mids.map(m => wnode(m, 'NODE')),
+            hasMore: false,
+            total: 10,
+        }
+        const view = {
+            ...initialLensViewState(sg),
+            frameShowAll: new Set(['F']),
+        }
+        return { sg, roster, view, mids }
+    }
+
+    it('draws every mid-level child of the focal: the flow one populated, the other nine as rows', () => {
+        const { sg, roster, view, mids } = nestedEstate()
+        const g = layout(sg, view, {
+            childrenAll: new Map([['F', roster]]),
+            childrenAllStatus: new Map([['F', 'done']]),
+        })
+        for (const m of mids) {
+            expect(cardFor(g, m), `${m} must be on the board`).toBeTruthy()
+        }
+        // (m1's own leaf population needs the component's settle pass —
+        // the sticky-grain double render — so a single-pass layout call
+        // deliberately doesn't assert it; lensSeam covers that side.)
+    })
+
+    it('counts the window over ALL rows, not just the connected one', () => {
+        const { sg, roster, view } = nestedEstate()
+        const g = layout(sg, view, {
+            childrenAll: new Map([['F', roster]]),
+            childrenAllStatus: new Map([['F', 'done']]),
+        })
+        const focal = cardFor(g, 'F')!
+        expect(focal.frameRows.length).toBe(10)
+    })
+})
+
+describe('deep focus subtree — the spine descends to every hop carrier (2026-08-19: "Node ⊃ 100 ⊃ 100 ⊃ 100")', () => {
+    /** F ⊃ m1 ⊃ T1 ⊃ colA (colA fed by src): the level the answer lives
+     *  at sits TWO containers down. A fresh focus must open the path to
+     *  it — every container between the focus and a hop carrier draws as
+     *  an OPEN frame with its lineage rows, no clicks. Partner-side grain
+     *  is untouched (that is the journey suite's contract). */
+    function deepEstate() {
+        return subgraph({
+            focus: 'F',
+            nodes: [
+                wnode('F', 'NODE'), wnode('m1', 'NODE'), wnode('T1', 'NODE'),
+                wnode('colA', 'ITEM'), wnode('src', 'ITEM'), wnode('SRCP', 'NODE'),
+            ],
+            hops: [['src', 'colA']],
+            contains: [['F', 'm1'], ['m1', 'T1'], ['T1', 'colA'], ['SRCP', 'src']],
+        })
+    }
+
+    it('draws the whole containment path to the carrier, open, with the carrier row visible', () => {
+        const g = layout(deepEstate())
+        const m1 = cardFor(g, 'm1')
+        const t1 = cardFor(g, 'T1')
+        expect(m1, 'm1 must be on the board').toBeTruthy()
+        expect(t1, 'T1 must be on the board').toBeTruthy()
+        expect(cardFor(g, 'colA'), 'the hop carrier row must be drawn').toBeTruthy()
+        // …and open as frames, not shut chevrons.
+        expect(t1!.childrenOpen).toBe(true)
+    })
+
+    it('a container the user explicitly SHUT stays shut', () => {
+        const sg = deepEstate()
+        const g = layout(sg, shut(initialLensViewState(sg), 'm1'))
+        expect(cardFor(g, 'colA')).toBeFalsy()
+        expect(cardFor(g, 'm1')).toBeTruthy()
+    })
+})

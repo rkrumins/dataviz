@@ -2919,3 +2919,44 @@ describe('the lens survives gaining and losing its focal', () => {
 // decision: an extend now claims its page at CLICK time, against the
 // focal it was clicked on, and `useLensWalk`'s own session guard drops a
 // response that outlives its focal. Nothing is left here to race.
+
+// 2026-08-19 — "focal ⊃ 10 nodes ⊃ 100 each shows only the 1st". The
+// Contents=All seed puts the FOCAL in frameShowAll with NO click, and the
+// roster effect deliberately skipped the first fetch for showAll members
+// (assuming the toggle handler had fired it) — so the focal's roster was
+// never fetched and only the flow-carrying child drew. The effect must
+// fetch a missing first page itself whenever nothing is in flight.
+describe('Contents=All focal seed — the roster actually FETCHES', () => {
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'all' }))
+  afterEach(() => usePreferencesStore.setState({ lensFrameChildren: 'connected' }))
+
+  it('a focal seeded into All mode requests its full roster without any click', async () => {
+    const onLoadAllChildren = vi.fn()
+    renderLens(['F'], doneWalk(collateralsEstate()), { onLoadAllChildren })
+    await vi.waitFor(() => expect(onLoadAllChildren).toHaveBeenCalledWith('F'), { timeout: 1500 })
+  })
+
+  it('but never re-fires while that first fetch is already in flight', async () => {
+    const onLoadAllChildren = vi.fn()
+    renderLens(['F'], doneWalk(collateralsEstate()), {
+      onLoadAllChildren,
+      childrenAllStatus: new Map([['F', 'loading']]),
+    })
+    await new Promise(r => setTimeout(r, 500))
+    expect(onLoadAllChildren).not.toHaveBeenCalled()
+  })
+
+  // 2026-08-19, the 673-request storm: a FAILED first fetch leaves the
+  // page missing with status 'error' — refiring on "missing" turns one
+  // backend failure into an endless children-with-edges loop (the
+  // poll-chain-leak class). A failure is an answer: never auto-retry.
+  it.each(['error', 'unsupported'] as const)('and never auto-retries after %s — a failure is an answer', async (status) => {
+    const onLoadAllChildren = vi.fn()
+    renderLens(['F'], doneWalk(collateralsEstate()), {
+      onLoadAllChildren,
+      childrenAllStatus: new Map([['F', status]]),
+    })
+    await new Promise(r => setTimeout(r, 500))
+    expect(onLoadAllChildren).not.toHaveBeenCalled()
+  })
+})

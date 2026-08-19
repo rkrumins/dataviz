@@ -404,6 +404,19 @@ export const usePreferencesStore = create<PreferencesState>()(
     }),
     {
       name: 'nexus-preferences',
+      // v1 (2026-08-19 am): lensFrameChildren default flipped to 'all'.
+      // v2 (2026-08-19 pm, USER RULING): back to 'connected' — Connected
+      // is the default lens story ("only what is on this lineage"), now
+      // COMPLETE because a fresh focus opens its whole lineage-carrying
+      // subtree; All stays one click away. The whole state persists (no
+      // partialize), so each default change needs a one-time migrate; an
+      // explicit choice made AFTER v2 ships persists untouched.
+      version: 2,
+      migrate: (persisted, version) => {
+        const state = persisted as Record<string, unknown>
+        if (version < 2) return { ...state, lensFrameChildren: 'connected' }
+        return state
+      },
     }
   )
 )

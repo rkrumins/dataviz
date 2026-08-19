@@ -389,7 +389,14 @@ export function LineageLens({
   // finding — a transition resets every field fresh), and threading
   // `viewState` through here would recompute this on every in-view
   // edit, not just a transition.
-  const freshView = useMemo(() => viewStateForTransition(transitionKind, null, { sg }), [sg, transitionKind])
+  // Subscribed HERE (before its later siblings) because the fresh view
+  // consumes it: the Contents preference decides whether a focal opens
+  // showing its whole roster or only its flow rows.
+  const lensFrameChildren = usePreferencesStore((s) => s.lensFrameChildren)
+  const freshView = useMemo(
+    () => viewStateForTransition(transitionKind, null, { sg }, lensFrameChildren),
+    [sg, transitionKind, lensFrameChildren],
+  )
   const [viewState, setViewState] = useState<{ nodeId: string | null; view: LensViewState } | null>(null)
   // Discarded on re-center, exactly like the filter and chip state: a
   // new focal is a new question, not a continuation of this one — EXCEPT
@@ -441,7 +448,6 @@ export function LineageLens({
 
   const lensViewMode = usePreferencesStore((s) => s.lensViewMode)
   const setLensViewMode = usePreferencesStore((s) => s.setLensViewMode)
-  const lensFrameChildren = usePreferencesStore((s) => s.lensFrameChildren)
   const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
   const condenseSteps = usePreferencesStore((s) => s.lensCondenseSteps)
   const setCondenseSteps = usePreferencesStore((s) => s.setLensCondenseSteps)
@@ -803,18 +809,28 @@ export function LineageLens({
         // will never show is a fetch that answers nothing.
         if (!showingAll && want === '') continue
         const have = childrenAll.get(urn)
-        // All mode's own FIRST page arrives via the toggle handler
-        // (`toggleFrameAll`/`toggleContents`) — refetching it here too
-        // would race that fetch and quietly page past it. Connected
-        // mode has no such handler (there is nothing to fetch until a
-        // query exists), so its first fetch has to start here.
-        if (showingAll && !have) continue
+        // A missing FIRST page is fetched here only when it was NEVER
+        // ASKED FOR (no status at all). This used to skip ANY missing
+        // first page, assuming a click always preceded showAll — but the
+        // Contents=All FOCAL seed and a share link's restored frameAll
+        // arrive with no click, so their rosters were never fetched and
+        // a focused container drew only its flow rows ("only the 1st of
+        // my 10 children shows", 2026-08-19). The guard is the STATUS,
+        // not the missing page: 'loading' is the toggle handler's own
+        // in-flight fetch, and 'error'/'unsupported' are ANSWERS —
+        // refiring on "still missing" turned one backend failure into a
+        // 673-request children-with-edges storm (the poll-chain-leak
+        // class; never auto-retry).
+        if (showingAll && !have) {
+          if (childrenAllStatus.get(urn) === undefined) onLoadAllChildren(urn)
+          continue
+        }
         if (have && (have.query ?? '') === want) continue
         onLoadAllChildren(urn, want)
       }
     }, 300)
     return () => clearTimeout(t)
-  }, [frameQueriesNow, frameShowAllNow, childrenAll, onLoadAllChildren])
+  }, [frameQueriesNow, frameShowAllNow, childrenAll, childrenAllStatus, onLoadAllChildren])
 
   /**
    * Rest a frame's scroll window on an absolute row. Fetching is
