@@ -213,6 +213,51 @@
     0%, 100% { opacity: 0.55; transform: scale(1); }
     50%      { opacity: 1;    transform: scale(1.05); }
   }
+  /* The trace indicator's SOUNDING LINE: from a center origin, a cyan
+     filament reaches left (upstream) and an amber one right (downstream)
+     while the walk computes — the trace metaphor in the wire colors the
+     flow will land in. The glint travels OUTWARD from the origin on each
+     side; under reduced motion the travel freezes but the filaments (and
+     their colors) remain — same contract as the lens seam class. */
+  .nx-trace-sounding {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    width: 72px;
+    height: 4px;
+  }
+  .nx-trace-sounding-origin {
+    width: 4px;
+    height: 4px;
+    border-radius: 9999px;
+    background: rgba(99, 102, 241, 0.9);
+    flex: none;
+  }
+  .nx-trace-sounding-up,
+  .nx-trace-sounding-down {
+    flex: 1;
+    height: 2px;
+    border-radius: 9999px;
+    background-size: 200% 100%;
+    animation: nx-trace-sounding-glint 1.6s linear infinite;
+  }
+  .nx-trace-sounding-up {
+    background-image: linear-gradient(to left, rgba(6, 182, 212, 0.85), rgba(6, 182, 212, 0.2), rgba(6, 182, 212, 0.85));
+    animation-direction: reverse;
+  }
+  .nx-trace-sounding-down {
+    background-image: linear-gradient(to right, rgba(245, 158, 11, 0.85), rgba(245, 158, 11, 0.2), rgba(245, 158, 11, 0.85));
+  }
+  @keyframes nx-trace-sounding-glint {
+    0%   { background-position: 0% 0; }
+    100% { background-position: -200% 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .nx-trace-sounding-up,
+    .nx-trace-sounding-down {
+      animation: none;
+    }
+  }
   .nx-edge-trace {
     /* Tighter glow — original `0 0 6px ... 0.7` extended visibly past the
        stroke and read as overlapping the node bodies during trace. The
