@@ -378,7 +378,7 @@ export const usePreferencesStore = create<PreferencesState>()(
       // Lineage Lens body mode
       lensViewMode: 'graph',
       setLensViewMode: (lensViewMode) => set({ lensViewMode }),
-      lensFrameChildren: 'all',
+      lensFrameChildren: 'connected',
       setLensFrameChildren: (lensFrameChildren) => set({ lensFrameChildren }),
       lensCondenseSteps: false,
       setLensCondenseSteps: (lensCondenseSteps) => set({ lensCondenseSteps }),
@@ -404,15 +404,17 @@ export const usePreferencesStore = create<PreferencesState>()(
     }),
     {
       name: 'nexus-preferences',
-      // v1 (2026-08-19): lensFrameChildren default flipped 'connected' →
-      // 'all' ("I focused it — show me everything it holds"). The whole
-      // state persists (no partialize), so without this one-time migrate
-      // every existing browser would keep the old default forever. An
-      // explicit choice made AFTER this ships persists at v1 untouched.
-      version: 1,
+      // v1 (2026-08-19 am): lensFrameChildren default flipped to 'all'.
+      // v2 (2026-08-19 pm, USER RULING): back to 'connected' — Connected
+      // is the default lens story ("only what is on this lineage"), now
+      // COMPLETE because a fresh focus opens its whole lineage-carrying
+      // subtree; All stays one click away. The whole state persists (no
+      // partialize), so each default change needs a one-time migrate; an
+      // explicit choice made AFTER v2 ships persists untouched.
+      version: 2,
       migrate: (persisted, version) => {
         const state = persisted as Record<string, unknown>
-        if (version < 1) return { ...state, lensFrameChildren: 'all' }
+        if (version < 2) return { ...state, lensFrameChildren: 'connected' }
         return state
       },
     }

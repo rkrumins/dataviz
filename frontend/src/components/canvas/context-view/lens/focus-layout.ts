@@ -729,6 +729,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const spine = new Set<string>()
     const walkedThrough = new Set<string>()
     const spineSeen = new Set<string>()
+    const focusSubtree = new Set(subtreeOf(sg.focusUrn))
     const openThrough = (urn: string) => {
         if (spineSeen.has(urn) || !population.has(urn)) return
         spineSeen.add(urn)
@@ -749,6 +750,20 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // counted, searchable and paged in place — and draw it. Never
         // above the focus, where nothing is drawn at all (R1).
         if (!above && kids.some(isLeafHopCarrier)) { spine.add(urn); return }
+        // FOCUS-SUBTREE DESCENT (2026-08-19 ruling: "Node ⊃ 100 ⊃ 100 ⊃
+        // 100 — show all the nodes that have lineage and their children").
+        // Inside the focus's own subtree, the level the answer lives at
+        // can sit several containers down; every container on the path to
+        // a hop carrier opens as a DRAWN frame (never walked-through
+        // chrome — these are the focus's contents, not pass-through
+        // levels) and the descent continues until the carrier level's own
+        // rows show. Bounded by the walk model; an explicit user shut
+        // (collapsedContainment) still wins at the `expanded` merge below.
+        if (!above && focusSubtree.has(urn)) {
+            spine.add(urn)
+            for (const kid of kids) openThrough(kid)
+            return
+        }
         // Otherwise chrome, and seen through: a level above the focus, or
         // a PASS-THROUGH the data source has not itself named as a
         // lineage end. Sticky, because the population only grows: a level
@@ -762,6 +777,10 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         }
     }
     for (const group of admittedGroups) openThrough(group.root)
+    // The focus's own contents join the walk: without this entry the
+    // descent above is unreachable (openThrough skips the focus itself,
+    // and focus children are not admitted-group roots).
+    for (const kid of childrenInPopulation(sg.focusUrn)) openThrough(kid)
 
     const expanded = new Set<string>([...view.expandedContainment, ...spine])
     for (const urn of view.collapsedContainment) expanded.delete(urn)

@@ -166,8 +166,15 @@ describe('T26 R4 — the journey acceptance suite (walkSharedPlatform)', () => {
   it('SPOTLIGHT A FRAME — clicking a container isolates what it and its rows touch', () => {
     renderLens(['REPORTING'], doneWalk(sharedPlatform()))
     // rpt_revenue is a frame (holds four columns) with its own upstream
-    // wire via rv_customer/rv_order → dim_customer.
-    fireEvent.click(screen.getByText('rpt_revenue_daily'))
+    // wire via rv_customer/rv_order → dim_customer. Since the focus-
+    // subtree descent (2026-08-19) it opens UPFRONT, and an open frame's
+    // header sets the name beside its count chip — the exact-text click
+    // gives way to a click inside the frame's header (the count chip),
+    // which bubbles to the header's select+isolate handler exactly as a
+    // pointer press on the card does.
+    const rptCard = [...document.querySelectorAll('.react-flow__node')]
+      .find(n => n.textContent?.startsWith('rpt_revenue_daily'))!
+    fireEvent.click(within(rptCard as HTMLElement).getByText(/4 on this lineage/))
     expect(screen.getByText(/its lineage within this walk/)).toBeTruthy()
     assertBoardShows('rpt_revenue_daily')
     assertStrataCoherent(errorSpy)

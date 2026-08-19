@@ -3249,3 +3249,40 @@ describe('focal container-of-containers in All mode (2026-08-19: "only the 1st n
         expect(focal.frameRows.length).toBe(10)
     })
 })
+
+describe('deep focus subtree — the spine descends to every hop carrier (2026-08-19: "Node ⊃ 100 ⊃ 100 ⊃ 100")', () => {
+    /** F ⊃ m1 ⊃ T1 ⊃ colA (colA fed by src): the level the answer lives
+     *  at sits TWO containers down. A fresh focus must open the path to
+     *  it — every container between the focus and a hop carrier draws as
+     *  an OPEN frame with its lineage rows, no clicks. Partner-side grain
+     *  is untouched (that is the journey suite's contract). */
+    function deepEstate() {
+        return subgraph({
+            focus: 'F',
+            nodes: [
+                wnode('F', 'NODE'), wnode('m1', 'NODE'), wnode('T1', 'NODE'),
+                wnode('colA', 'ITEM'), wnode('src', 'ITEM'), wnode('SRCP', 'NODE'),
+            ],
+            hops: [['src', 'colA']],
+            contains: [['F', 'm1'], ['m1', 'T1'], ['T1', 'colA'], ['SRCP', 'src']],
+        })
+    }
+
+    it('draws the whole containment path to the carrier, open, with the carrier row visible', () => {
+        const g = layout(deepEstate())
+        const m1 = cardFor(g, 'm1')
+        const t1 = cardFor(g, 'T1')
+        expect(m1, 'm1 must be on the board').toBeTruthy()
+        expect(t1, 'T1 must be on the board').toBeTruthy()
+        expect(cardFor(g, 'colA'), 'the hop carrier row must be drawn').toBeTruthy()
+        // …and open as frames, not shut chevrons.
+        expect(t1!.childrenOpen).toBe(true)
+    })
+
+    it('a container the user explicitly SHUT stays shut', () => {
+        const sg = deepEstate()
+        const g = layout(sg, shut(initialLensViewState(sg), 'm1'))
+        expect(cardFor(g, 'colA')).toBeFalsy()
+        expect(cardFor(g, 'm1')).toBeTruthy()
+    })
+})
