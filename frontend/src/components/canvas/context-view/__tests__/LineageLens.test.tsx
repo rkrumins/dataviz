@@ -1004,21 +1004,15 @@ describe('what the lens says while it cannot answer', () => {
     expect(screen.queryByText(/No upstream sources in the data source/)).toBeNull()
   })
 
-  it('says when the picture is partial — plain counts, never a reason token', () => {
-    // The strip's full contract (counts, levers, no jargon) is pinned in
-    // LineageLens.fullWalk.test.tsx; this suite keeps the older, broader
-    // promise: a capped walk is SAID, never silently rendered as "no
-    // connections".
+  it('says when the data source stopped early, so the counts read as floors', () => {
     const model = walkModel('F', {
       nodes: [wnode('F'), wnode('u')],
       lineageEdges: [hop('u', 'F')],
-      upstreamUrns: new Set(['u']),
       truncated: true,
       truncationReason: 'node budget reached',
     })
     renderLens(['F'], doneWalk(model))
-    expect(screen.getByText(/partial picture — 1 upstream · 0 downstream on the board/i)).toBeTruthy()
-    expect(screen.queryByText(/node budget reached/)).toBeNull()
+    expect(screen.getByText(/stopped early \(node budget reached\)/)).toBeTruthy()
   })
 })
 
