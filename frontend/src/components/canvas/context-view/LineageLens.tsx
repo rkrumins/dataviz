@@ -218,6 +218,10 @@ export interface LensWalkApi {
    *  retrying one is the same click on the same pill, so the ⊕ simply
    *  calls `extend` again and the two can never drift apart. */
   retry: (focusUrn: string) => void
+  /** Page the FOCUS's own capped contents (the model's seedCursor) —
+   *  the "Load more contents" affordance on the floors strip. Optional
+   *  so older hosts keep compiling. */
+  pageSeeds?: (focusUrn: string) => void
 }
 
 /**
@@ -1880,6 +1884,17 @@ export function LineageLens({
                 {model?.truncationReason ? ` (${model.truncationReason})` : ''}, so these counts are floors.
                 Use ⊕ to walk further, or the filter to narrow.
               </span>
+              {/* The focus's own contents page (seedCursor): the one cap
+                  that used to be unresumable. One click = one page. */}
+              {model?.seedCursor && walkApi.pageSeeds && nodeId && (
+                <button
+                  type="button"
+                  onClick={() => walkApi.pageSeeds?.(nodeId)}
+                  className="ml-auto flex-shrink-0 font-semibold hover:underline"
+                >
+                  Load more contents
+                </button>
+              )}
             </div>
           )}
           {/* Full walk stopped short of the ends — say WHY and offer the

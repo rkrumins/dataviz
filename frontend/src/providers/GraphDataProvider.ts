@@ -553,6 +553,11 @@ export interface TraceClosureRequest {
      *  further. "e:<edge id>" — the next id to consider; "e:0" starts
      *  from the top. */
     afterCursor?: string
+    /** Resume a capped container seed walk: the previous response's
+     *  `seedCursor` ("s:<last-descendant-urn>"). The continuation seeds
+     *  the NEXT keyset page of the focus's lineage-bearing contents and
+     *  walks from those. Mutually exclusive with afterCursor/seedUrns. */
+    seedCursor?: string
 }
 
 /** One frontier boundary node as the closure wire ships it — pre-normalization.
@@ -570,6 +575,10 @@ export interface LensClosureExtras {
     frontierUp: TraceClosureFrontierNode[]
     frontierDown: TraceClosureFrontierNode[]
     seedTruncated: boolean
+    /** Resume point for a capped container seed walk ("s:<urn>"), or
+     *  null/absent when the focus's contents are fully seeded. Send back
+     *  as the request's `seedCursor` for the next page of contents. */
+    seedCursor?: string | null
 }
 
 /**

@@ -50,6 +50,7 @@ function walkModel(
     truncated: false,
     truncationReason: null,
     seedTruncated: false,
+    seedCursor: null,
     ...parts,
   }
 }

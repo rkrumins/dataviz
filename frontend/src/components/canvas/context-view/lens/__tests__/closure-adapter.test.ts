@@ -300,3 +300,33 @@ describe('mergeClosures — node payload', () => {
         expect(m2.nodes.find(n => n.urn === urn)?.data.childCount).toBe(9)
     })
 })
+
+describe('seedCursor — the focus-contents resume point', () => {
+  const base = (over: Partial<TraceV2Result & LensClosureExtras> = {}): TraceV2Result & LensClosureExtras => ({
+    nodes: [], edges: [], containmentEdges: [],
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    focus: { urn: 'F', level: 0, entityType: 'dataset' },
+    effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+    truncated: false, truncationReason: null,
+    frontierUp: [], frontierDown: [], seedTruncated: false,
+    ...over,
+  })
+
+  it('rides into the model and merges authoritatively for FOCUS-anchored responses', () => {
+    let m = toLensClosure(base({ seedTruncated: true, seedCursor: 's:w3' }), 'F')
+    expect(m.seedCursor).toBe('s:w3')
+
+    // A focus-anchored continuation ADVANCES the cursor…
+    m = mergeClosures(m, base({ seedTruncated: true, seedCursor: 's:w6' }), { rootUrn: 'F', direction: 'both' })
+    expect(m.seedCursor).toBe('s:w6')
+    // …and drains it when the page came back uncapped.
+    m = mergeClosures(m, base({ seedCursor: null }), { rootUrn: 'F', direction: 'both' })
+    expect(m.seedCursor).toBeNull()
+  })
+
+  it('a CARD-anchored extend never touches the focus-contents cursor', () => {
+    let m = toLensClosure(base({ seedCursor: 's:w3' }), 'F')
+    m = mergeClosures(m, base({ seedCursor: null }), { rootUrn: 'someCard', direction: 'up' })
+    expect(m.seedCursor).toBe('s:w3')
+  })
+})

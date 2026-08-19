@@ -563,3 +563,52 @@ describe('useLensWalk — full walk', () => {
     expect(traceClosure).toHaveBeenCalledTimes(1 + FULL_WALK_CONCURRENCY)
   })
 })
+
+describe('useLensWalk — full walk follows the seed cursor (focus contents pages)', () => {
+  const f = (urn: string) => ({ urn, level: 0, entityType: 'dataset' })
+
+  it('auto-pages a capped container seed until it drains, focus-anchored with excludes', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      calls.push(req)
+      if (!req.seedCursor) {
+        return closureResult({ focus: f('F'), nodes: [gn('F'), gn('w1')], seedTruncated: true, seedCursor: 's:w1' })
+      }
+      if (req.seedCursor === 's:w1') {
+        return closureResult({ focus: f('F'), nodes: [gn('w2')], seedTruncated: true, seedCursor: 's:w2' })
+      }
+      return closureResult({ focus: f('F'), nodes: [gn('w3')], seedCursor: null })
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result } = renderHook(() => useLensWalk('F', provider, 1, true))
+
+    await waitFor(() => expect(result.current.fullWalkFor('F')?.exhausted).toBe(true))
+    expect(traceClosure).toHaveBeenCalledTimes(3)
+    expect(result.current.walkFor('F')!.model.nodes.map(n => n.urn).sort()).toEqual(['F', 'w1', 'w2', 'w3'])
+    // The continuation is FOCUS-anchored, both directions, with excludes.
+    const second = calls[1]!
+    expect(second.urn).toBe('F')
+    expect(second.seedCursor).toBe('s:w1')
+    expect(second.direction).toBe('both')
+    expect(second.excludeUrns).toEqual(expect.arrayContaining(['F', 'w1']))
+    // The drained model keeps no cursor.
+    expect(result.current.walkFor('F')!.model.seedCursor).toBeNull()
+  })
+
+  it('one-hop mode exposes pageSeeds for the manual "Load more contents" affordance', async () => {
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      if (!req.seedCursor) {
+        return closureResult({ focus: f('F'), nodes: [gn('F'), gn('w1')], seedTruncated: true, seedCursor: 's:w1' })
+      }
+      return closureResult({ focus: f('F'), nodes: [gn('w2')], seedCursor: null })
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result } = renderHook(() => useLensWalk('F', provider))
+    await waitFor(() => expect(result.current.walkFor('F')?.status).toBe('done'))
+    expect(traceClosure).toHaveBeenCalledTimes(1)   // one-hop never auto-pages
+
+    act(() => result.current.pageSeeds('F'))
+    await waitFor(() => expect(result.current.walkFor('F')!.model.nodes.some(n => n.urn === 'w2')).toBe(true))
+    expect(result.current.walkFor('F')!.model.seedCursor).toBeNull()
+  })
+})

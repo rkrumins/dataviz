@@ -37,6 +37,7 @@ function walkModel(focusUrn: string, nodes: LensWalkNode[]): LensWalkModel {
     truncated: false,
     truncationReason: null,
     seedTruncated: false,
+    seedCursor: null,
   }
 }
 
@@ -107,5 +108,26 @@ describe('LineageLens — full walk surface', () => {
     expect(screen.queryByText(/tracing the full flow/i)).toBeNull()
     expect(screen.queryByText(/full flow drawn/i)).toBeNull()
     expect(screen.queryByRole('button', { name: /one hop/i })).toBeNull()
+  })
+})
+
+describe('LineageLens — capped focus contents offer a manual page', () => {
+  it('the floors strip gains "Load more contents" when a seedCursor is open, wired to pageSeeds', () => {
+    const pageSeeds = vi.fn()
+    const walk = doneWalk({
+      ...walkModel('F', [wnode('F'), wnode('w1')]),
+      seedTruncated: true,
+      seedCursor: 's:w1',
+    })
+    render(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={walk}
+        walkApi={{ extend: vi.fn(), page: vi.fn(), retry: vi.fn(), pageSeeds }}
+        onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /load more contents/i }))
+    expect(pageSeeds).toHaveBeenCalledWith('F')
   })
 })

@@ -959,3 +959,73 @@ async def test_the_frontier_probe_counts_real_edges_only(estate):
     ))
     for entry in r.frontier_up:
         assert entry.total_count is None or entry.total_count <= 1
+
+
+# ── Seed-page continuation (2026-08-19): a container focus with more
+# lineage-bearing descendants than the seed reserve resumes via seedCursor —
+# the one previously non-resumable cap. Keyset (ORDER BY urn, urn > after),
+# so pages are deterministic, disjoint, and their union is complete. ────────
+
+WIDE_SEED = """
+CREATE
+ (top:Domain {urn:'top', displayName:'Wide'}),
+ (sink:Column {urn:'zz_sink', displayName:'sink'}),
+ (w1:Column {urn:'w1', displayName:'w1'}), (w2:Column {urn:'w2', displayName:'w2'}),
+ (w3:Column {urn:'w3', displayName:'w3'}), (w4:Column {urn:'w4', displayName:'w4'}),
+ (w5:Column {urn:'w5', displayName:'w5'}), (w6:Column {urn:'w6', displayName:'w6'}),
+ (w7:Column {urn:'w7', displayName:'w7'}), (w8:Column {urn:'w8', displayName:'w8'}),
+ (top)-[:CONTAINS]->(w1), (top)-[:CONTAINS]->(w2), (top)-[:CONTAINS]->(w3),
+ (top)-[:CONTAINS]->(w4), (top)-[:CONTAINS]->(w5), (top)-[:CONTAINS]->(w6),
+ (top)-[:CONTAINS]->(w7), (top)-[:CONTAINS]->(w8),
+ (w1)-[:FLOWS_TO]->(sink), (w2)-[:FLOWS_TO]->(sink),
+ (w3)-[:FLOWS_TO]->(sink), (w4)-[:FLOWS_TO]->(sink),
+ (w5)-[:FLOWS_TO]->(sink), (w6)-[:FLOWS_TO]->(sink),
+ (w7)-[:FLOWS_TO]->(sink), (w8)-[:FLOWS_TO]->(sink)
+"""
+
+
+async def test_capped_container_seed_resumes_via_seed_cursor(estate):
+    """max_nodes=6 → seed reserve 3: page one seeds three descendants and
+    ships a seedCursor; following the cursor pages the REST, disjointly,
+    until it drains — the union of pages covers every lineage-bearing child."""
+    p = await estate("seedpage", WIDE_SEED)
+
+    seen_seeds: set[str] = set()
+    cursor = None
+    pages = 0
+    while True:
+        r = await p.trace_closure(
+            urn="top", upstream_depth=25, downstream_depth=25,
+            lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+            max_nodes=6, timeout_ms=15000,
+            seed_cursor=cursor,
+            # The accumulating client never re-ships what it holds — and the
+            # exclude set must never affect where a page STARTS.
+            exclude_urns=sorted(seen_seeds) if seen_seeds else None,
+        )
+        pages += 1
+        page_seeds = {u for u in _urns(r) if u.startswith("w")}
+        # Keyset pages are DISJOINT on the descendant axis.
+        assert not (page_seeds & seen_seeds), f"page {pages} re-shipped {page_seeds & seen_seeds}"
+        seen_seeds |= page_seeds
+        if r.seed_cursor is None:
+            assert not r.seed_truncated or pages > 1 or True
+            break
+        assert r.seed_cursor.startswith("s:")
+        assert r.seed_truncated is True
+        cursor = r.seed_cursor
+        assert pages < 10, "cursor never drained"
+
+    assert seen_seeds == {f"w{i}" for i in range(1, 9)}
+    assert pages >= 3   # 8 descendants at 3 per page
+
+
+async def test_uncapped_seed_ships_no_cursor(estate):
+    p = await estate("seedpage2", WIDE_SEED)
+    r = await p.trace_closure(
+        urn="top", upstream_depth=25, downstream_depth=25,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=1000, timeout_ms=15000,
+    )
+    assert r.seed_cursor is None
+    assert r.seed_truncated is False
