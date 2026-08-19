@@ -45,6 +45,17 @@ const FULL_WALK_REQUEST_CAP = 300
  *  hands-free; only past the ceiling does budgetHit surface, as the true
  *  runaway valve, and each manual continue grants one more unit. */
 const FULL_WALK_AUTO_GRANTS = 24
+/** ESCALATION (2026-08-19, MEASURED on solidatus_perf_large): one
+ *  6000-node BFS takes 1.9s while draining the same flow through
+ *  per-anchor frontier waves needs ~2,300 round trips — minutes. When a
+ *  page comes back max_nodes-truncated with a frontier wider than this,
+ *  the driver re-fetches the WHOLE walk with a bigger page budget
+ *  (excludes keep known nodes off the wire) instead of chasing entries. */
+const ESCALATION_MIN_FRONTIER = 24
+/** Page-budget ladder: default → ×3 per escalation, capped by the
+ *  server's TRACE_MAX_NODES_HARD. */
+const PAGE_BUDGET_START = 2000
+const PAGE_BUDGET_MAX = 10_000
 
 /** Where the full walk stands for one focal. At most one of
  *  exhausted/budgetHit/stalled is true; all false only while walking. */
@@ -168,7 +179,7 @@ export function useLensWalk(
     // Full-walk bookkeeping per cacheKey: budget grants ("Keep walking"
     // adds one) and requests issued (for the request-cap failsafe). Render
     // state, not a ref — budgetHit must be derivable at render time.
-    const [fullWalkMeta, setFullWalkMeta] = useState<Map<string, { grants: number; requests: number }>>(() => new Map())
+    const [fullWalkMeta, setFullWalkMeta] = useState<Map<string, { grants: number; requests: number; pageBudget?: number }>>(() => new Map())
     // Permanent per-cacheKey guard: added before the fetch, removed only on
     // error (so an explicit retry can re-enter). A 'done' or 'unsupported'
     // entry stays marked forever — cache hit, never refetched.
@@ -254,6 +265,9 @@ export function useLensWalk(
          *  the card — the seed page must never collide with the focus's
          *  real `up:` pill (either would block the other). */
         statusKeyOverride?: string,
+        /** Escalation merges replace the frontier/truncation wholesale —
+         *  see mergeClosures' ctx doc. */
+        replaceFrontier?: boolean,
     ) => {
         if (!focusUrn) return
         if (typeof provider?.traceClosure !== 'function') return   // unsupported: nothing to extend/page
@@ -289,7 +303,7 @@ export function useLensWalk(
                 // by design (nesting needs chains); merge dedupes, so
                 // accumulation is bounded by distinct participants, not by
                 // request count.
-                const merged = mergeClosures(entry.model, res, { rootUrn: cardUrn, direction: dir })
+                const merged = mergeClosures(entry.model, res, { rootUrn: cardUrn, direction: dir, replaceFrontier })
                 return setEntry(prev, cacheKey, withExtendStatus({ ...entry, model: merged }, statusKey, null))
             })
         } catch {
@@ -343,6 +357,22 @@ export function useLensWalk(
         }), `seed:${walkFocusUrn}`)
     }, [provider, runFrontierOp])
 
+    // The escalation re-fetch: the WHOLE walk again at a bigger page
+    // budget, focus-anchored both ways; excludes keep known nodes off the
+    // wire and the merge replaces frontier/truncation wholesale.
+    const escalate = useCallback((walkFocusUrn: string, budget: number) => {
+        const entry = stateRef.current.get(cacheKeyFor(provider, walkFocusUrn))
+        const depth = entry?.depth ?? FULL_WALK_INITIAL_DEPTH
+        void runFrontierOp(walkFocusUrn, 'up', (baseModel) => ({
+            urn: walkFocusUrn,
+            direction: 'both',
+            upstreamDepth: depth,
+            downstreamDepth: depth,
+            maxNodes: budget,
+            excludeUrns: knownUrns(baseModel).slice(0, 2000),
+        }), `escalate:${walkFocusUrn}`, true)
+    }, [provider, runFrontierOp])
+
     // ── Full walk (trace mode) ─────────────────────────────────────────
     // The hook itself follows every frontier the server reports — the same
     // extend/page ops an ⊕ click fires, driven to exhaustion. Reactive
@@ -387,6 +417,27 @@ export function useLensWalk(
             pageSeeds(focusUrn)
             return
         }
+        // ESCALATION before frontier chasing: a max_nodes-truncated page
+        // with a wide frontier means the flow is far bigger than the page
+        // — ONE bigger re-walk beats hundreds of per-anchor round trips.
+        const frontierWidth = entry.model.frontierUp.length + entry.model.frontierDown.length
+        const pageBudget = meta.pageBudget ?? PAGE_BUDGET_START
+        if (
+            entry.model.truncationReason === 'max_nodes'
+            && frontierWidth >= ESCALATION_MIN_FRONTIER
+            && pageBudget < PAGE_BUDGET_MAX
+            && !entry.extendStatus.has(`escalate:${focusUrn}`)
+        ) {
+            const nextBudget = Math.min(pageBudget * 3, PAGE_BUDGET_MAX)
+            setFullWalkMeta(prev => {
+                const cur = prev.get(cacheKey) ?? { grants: 1, requests: 0 }
+                const next = new Map(prev)
+                next.set(cacheKey, { ...cur, requests: cur.requests + 1, pageBudget: nextBudget })
+                return next
+            })
+            escalate(focusUrn, nextBudget)
+            return
+        }
         const ops: Array<{ urn: string; dir: LensWalkDir; cursor: string | null }> = []
         const collect = (frontierList: LensWalkModel['frontierUp'], dir: LensWalkDir) => {
             for (const fr of frontierList) {
@@ -411,7 +462,7 @@ export function useLensWalk(
             if (op.cursor !== null) page(op.urn, op.dir, op.cursor)
             else extend(op.urn, op.dir, [op.urn])
         }
-    }, [fullWalk, focusUrn, provider, state, fullWalkMeta, extend, page, pageSeeds])
+    }, [fullWalk, focusUrn, provider, state, fullWalkMeta, extend, page, pageSeeds, escalate])
 
     const fullWalkFor = useCallback((urn: string): FullWalkStatus | null => {
         if (!fullWalk) return null

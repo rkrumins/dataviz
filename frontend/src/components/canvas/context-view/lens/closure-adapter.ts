@@ -175,7 +175,16 @@ function mergeFrontier(
 export function mergeClosures(
     model: LensWalkModel,
     response: TraceV2Result & LensClosureExtras,
-    ctx: { rootUrn: string; direction: 'up' | 'down' | 'both' },
+    ctx: {
+        rootUrn: string
+        direction: 'up' | 'down' | 'both'
+        /** ESCALATION merges (a focus-anchored re-walk with a BIGGER page
+         *  budget): the response re-ran the WHOLE walk, so its frontier
+         *  and truncation verdict replace the model's wholesale — stale
+         *  entries the bigger walk swallowed must not linger for the
+         *  driver to chase. */
+        replaceFrontier?: boolean
+    },
 ): LensWalkModel {
     const incoming = toLensClosure(response, model.focusUrn)
 
@@ -208,10 +217,16 @@ export function mergeClosures(
         containmentEdges: [...containmentByKey.values()],
         upstreamUrns,
         downstreamUrns,
-        frontierUp: mergeFrontier(model.frontierUp, incoming.frontierUp, clearUp, ctx.rootUrn),
-        frontierDown: mergeFrontier(model.frontierDown, incoming.frontierDown, clearDown, ctx.rootUrn),
-        truncated: model.truncated || incoming.truncated,
-        truncationReason: model.truncationReason ?? incoming.truncationReason,
+        frontierUp: ctx.replaceFrontier
+            ? [...incoming.frontierUp].sort((a, b) => a.urn.localeCompare(b.urn))
+            : mergeFrontier(model.frontierUp, incoming.frontierUp, clearUp, ctx.rootUrn),
+        frontierDown: ctx.replaceFrontier
+            ? [...incoming.frontierDown].sort((a, b) => a.urn.localeCompare(b.urn))
+            : mergeFrontier(model.frontierDown, incoming.frontierDown, clearDown, ctx.rootUrn),
+        truncated: ctx.replaceFrontier ? incoming.truncated : (model.truncated || incoming.truncated),
+        truncationReason: ctx.replaceFrontier
+            ? incoming.truncationReason
+            : (model.truncationReason ?? incoming.truncationReason),
         seedTruncated: model.seedTruncated || incoming.seedTruncated,
         // The focus-contents cursor belongs to FOCUS-anchored responses
         // (the initial fetch and its seed-page continuations): those are

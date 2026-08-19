@@ -684,6 +684,59 @@ describe('useLensWalk — the walk continues HANDS-FREE past budget parks (2026-
   })
 })
 
+describe('useLensWalk — ESCALATION: a capped walk re-fetches BIGGER instead of chasing the frontier', () => {
+  const f = (urn: string) => ({ urn, level: 0, entityType: 'dataset' })
+
+  it('max_nodes truncation with a wide frontier escalates to ONE big page and finishes', async () => {
+    // MEASURED (2026-08-19, solidatus_perf_large): one 6000-node BFS =
+    // 1.9s; draining the same flow through per-anchor frontier waves =
+    // ~2,300 round trips. The driver must fire ONE escalated re-fetch,
+    // not thirty extends.
+    const wideFrontier = Array.from({ length: 30 }, (_, i) => ({ urn: `fr${i}`, totalCount: 5, nextCursor: null }))
+    const calls: Array<Record<string, unknown>> = []
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      calls.push(req)
+      if (req.maxNodes) {
+        // The escalated re-walk: uncapped, frontier fully swallowed.
+        return closureResult({ focus: f('F'), nodes: [gn('deep1'), gn('deep2')] })
+      }
+      return closureResult({
+        focus: f('F'), nodes: [gn('F'), gn('n1')],
+        truncated: true, truncationReason: 'max_nodes',
+        frontierUp: wideFrontier,
+      })
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result } = renderHook(() => useLensWalk('F', provider, 1, true))
+
+    await waitFor(() => expect(result.current.fullWalkFor('F')?.exhausted).toBe(true))
+    expect(traceClosure).toHaveBeenCalledTimes(2)
+    const esc = calls[1]!
+    expect(esc.urn).toBe('F')
+    expect(esc.maxNodes).toBe(6000)
+    expect(esc.direction).toBe('both')
+    expect(esc.excludeUrns).toEqual(expect.arrayContaining(['F', 'n1']))
+    // The stale 30-entry frontier is gone — no per-anchor extends fired.
+    expect(result.current.walkFor('F')!.model.frontierUp).toHaveLength(0)
+    expect(result.current.walkFor('F')!.model.truncated).toBe(false)
+  })
+
+  it('a NARROW frontier is cheaper to drain directly — no escalation', async () => {
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      if (req.seedUrns) return closureResult({ focus: f('a1'), nodes: [gn('deeper')] })
+      return closureResult({
+        focus: f('F'), nodes: [gn('F'), gn('a1')],
+        truncated: true, truncationReason: 'max_nodes',
+        frontierUp: [{ urn: 'a1', totalCount: 1, nextCursor: null }],
+      })
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result } = renderHook(() => useLensWalk('F', provider, 1, true))
+    await waitFor(() => expect(result.current.walkFor('F')!.model.nodes.some(n => n.urn === 'deeper')).toBe(true))
+    expect(traceClosure.mock.calls.every(c => !(c[0] as Record<string, unknown>).maxNodes)).toBe(true)
+  })
+})
+
 describe('useLensWalk — "Load everything" flips full walk on MID-SESSION', () => {
   const f = (urn: string) => ({ urn, level: 0, entityType: 'dataset' })
 

@@ -1380,7 +1380,7 @@ class ContextEngine:
             # truth it has.
             edge_types = [t for t in declared_types if t]
         containment_types = list(resolved.containment_edge_types or [])
-        max_nodes = min(req.max_nodes or ContextEngine.TRACE_MAX_NODES, ContextEngine.TRACE_MAX_NODES)
+        max_nodes = min(req.max_nodes or ContextEngine.TRACE_MAX_NODES, ContextEngine.TRACE_MAX_NODES_HARD)
         fn = getattr(self.provider, "trace_closure", None)
         if fn is None:
             raise NotImplementedError("provider does not support trace_closure")
@@ -1645,6 +1645,13 @@ class ContextEngine:
     # tunes both backend layers and stays in sync with the frontend.
     import os as _os
     TRACE_MAX_NODES: int = int(_os.getenv("TRACE_MAX_NODES", "2000"))
+    # The closure walk's ESCALATION ceiling (2026-08-19): a caller may ask
+    # for pages larger than the default — MEASURED on solidatus_perf_large:
+    # one 6000-node BFS takes 1.9s while draining the same flow through
+    # per-anchor frontier waves needs ~2,300 round trips (minutes). The
+    # full-walk driver escalates its page budget up to this hard cap;
+    # requests without maxNodes keep the default above.
+    TRACE_MAX_NODES_HARD: int = int(_os.getenv("TRACE_MAX_NODES_HARD", "10000"))
     # Engine budget sits BELOW the HTTP middleware tier by the headroom,
     # so the engine's truncated-200 (timeout/max_nodes/ancestors_failed)
     # always beats the middleware 504.

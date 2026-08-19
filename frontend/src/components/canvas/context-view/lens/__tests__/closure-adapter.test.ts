@@ -330,3 +330,43 @@ describe('seedCursor — the focus-contents resume point', () => {
     expect(m.seedCursor).toBe('s:w3')
   })
 })
+
+describe('mergeClosures — ESCALATION (a bigger re-walk is authoritative for the whole picture)', () => {
+  const base = (over: Partial<TraceV2Result & LensClosureExtras> = {}): TraceV2Result & LensClosureExtras => ({
+    nodes: [], edges: [], containmentEdges: [],
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    focus: { urn: 'F', level: 0, entityType: 'dataset' },
+    effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+    truncated: false, truncationReason: null,
+    frontierUp: [], frontierDown: [], seedTruncated: false,
+    ...over,
+  })
+
+  it('replaceFrontier: the incoming frontier and truncation REPLACE the stale ones wholesale', () => {
+    let m = toLensClosure(base({
+      truncated: true, truncationReason: 'max_nodes',
+      frontierUp: [{ urn: 'a', totalCount: 5, nextCursor: 'e:0' }, { urn: 'b', totalCount: 2, nextCursor: null }],
+      frontierDown: [{ urn: 'c', totalCount: 1, nextCursor: null }],
+    }), 'F')
+    m = mergeClosures(m, base({
+      frontierUp: [{ urn: 'z', totalCount: 9, nextCursor: null }],
+      frontierDown: [],
+    }), { rootUrn: 'F', direction: 'both', replaceFrontier: true })
+    // Stale entries (a, b, c) are GONE — the re-walk swallowed them.
+    expect(m.frontierUp.map(f => f.urn)).toEqual(['z'])
+    expect(m.frontierDown).toHaveLength(0)
+    // Truncation is the re-walk's verdict, not an OR with history.
+    expect(m.truncated).toBe(false)
+    expect(m.truncationReason).toBeNull()
+  })
+
+  it('without replaceFrontier, merge semantics are unchanged (union + OR)', () => {
+    let m = toLensClosure(base({
+      truncated: true, truncationReason: 'max_nodes',
+      frontierUp: [{ urn: 'a', totalCount: 5, nextCursor: null }],
+    }), 'F')
+    m = mergeClosures(m, base({ frontierUp: [{ urn: 'z', totalCount: 9, nextCursor: null }] }), { rootUrn: 'x', direction: 'up' })
+    expect(m.frontierUp.map(f => f.urn).sort()).toEqual(['a', 'z'])
+    expect(m.truncated).toBe(true)
+  })
+})
