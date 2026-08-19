@@ -131,3 +131,54 @@ describe('LineageLens — capped focus contents offer a manual page', () => {
     expect(pageSeeds).toHaveBeenCalledWith('F')
   })
 })
+
+describe('LineageLens — the partial-picture strip tells the truth and offers the way to ALL of it', () => {
+  const cappedWalk = () => doneWalk({
+    ...walkModel('F', [wnode('F'), wnode('up1'), wnode('up2'), wnode('down1')]),
+    upstreamUrns: new Set(['up1', 'up2']),
+    downstreamUrns: new Set(['down1']),
+    truncated: true,
+    truncationReason: 'max_nodes',
+  })
+
+  it('states per-direction on-board counts in plain language, not a reason token', () => {
+    render(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={cappedWalk()}
+        walkApi={{ extend: vi.fn(), page: vi.fn(), retry: vi.fn() }}
+        onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
+      />,
+    )
+    expect(screen.getByText(/2 upstream · 1 downstream on the board/i)).toBeInTheDocument()
+    expect(screen.queryByText(/max_nodes/)).toBeNull()
+  })
+
+  it('offers "Load everything", wired to the full-flow switch', () => {
+    const onFullWalkToggle = vi.fn()
+    render(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={cappedWalk()}
+        walkApi={{ extend: vi.fn(), page: vi.fn(), retry: vi.fn() }}
+        fullWalkEnabled={false} fullWalkStatus={null} onFullWalkToggle={onFullWalkToggle}
+        onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /load everything/i }))
+    expect(onFullWalkToggle).toHaveBeenCalledWith(true)
+  })
+
+  it('does not offer "Load everything" once the full walk is already on', () => {
+    render(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={cappedWalk()}
+        walkApi={{ extend: vi.fn(), page: vi.fn(), retry: vi.fn() }}
+        fullWalkEnabled fullWalkStatus={null} onFullWalkToggle={vi.fn()}
+        onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: /load everything/i })).toBeNull()
+  })
+})

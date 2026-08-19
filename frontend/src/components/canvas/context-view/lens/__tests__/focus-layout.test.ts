@@ -3289,4 +3289,31 @@ describe('deep focus subtree — FOCUS +1 (2026-08-19, re-refined: children are 
         expect(t1!.childrenOpen, 'and is itself a closed door').toBe(false)
         expect(cardFor(g, 'colA'), 'colA still waits behind T1').toBeFalsy()
     })
+
+    /** The Snowflake shape the closed-door default must NOT silence: the
+     *  focus platform P holds layer containers A and B, whose LEAF
+     *  contents carry the actual hops (a1 → b1). With A and B closed
+     *  rows, the flow must re-project onto them — a board with rows and
+     *  no wires reads as "no lineage at all", which is a lie. */
+    it('flow between the leaves of two CLOSED sibling rows re-projects onto the rows', () => {
+        const sg = subgraph({
+            focus: 'P',
+            nodes: [
+                wnode('P', 'NODE'), wnode('A', 'NODE'), wnode('B', 'NODE'),
+                wnode('a1', 'ITEM'), wnode('b1', 'ITEM'),
+            ],
+            hops: [['a1', 'b1']],
+            contains: [['P', 'A'], ['P', 'B'], ['A', 'a1'], ['B', 'b1']],
+        })
+        const g = layout(sg)
+        const a = cardFor(g, 'A')
+        const b = cardFor(g, 'B')
+        expect(a, 'A is a row on the board').toBeTruthy()
+        expect(b, 'B is a row on the board').toBeTruthy()
+        expect(a!.childrenOpen, 'A stays a closed door').toBe(false)
+        expect(
+            g.edges.some(e => e.source === a!.id && e.target === b!.id),
+            'the a1→b1 hop draws as an A→B wire',
+        ).toBe(true)
+    })
 })
