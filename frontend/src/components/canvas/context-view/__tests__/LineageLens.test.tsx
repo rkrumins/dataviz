@@ -2945,4 +2945,18 @@ describe('Contents=All focal seed — the roster actually FETCHES', () => {
     await new Promise(r => setTimeout(r, 500))
     expect(onLoadAllChildren).not.toHaveBeenCalled()
   })
+
+  // 2026-08-19, the 673-request storm: a FAILED first fetch leaves the
+  // page missing with status 'error' — refiring on "missing" turns one
+  // backend failure into an endless children-with-edges loop (the
+  // poll-chain-leak class). A failure is an answer: never auto-retry.
+  it.each(['error', 'unsupported'] as const)('and never auto-retries after %s — a failure is an answer', async (status) => {
+    const onLoadAllChildren = vi.fn()
+    renderLens(['F'], doneWalk(collateralsEstate()), {
+      onLoadAllChildren,
+      childrenAllStatus: new Map([['F', status]]),
+    })
+    await new Promise(r => setTimeout(r, 500))
+    expect(onLoadAllChildren).not.toHaveBeenCalled()
+  })
 })

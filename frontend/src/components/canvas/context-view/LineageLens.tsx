@@ -809,18 +809,20 @@ export function LineageLens({
         // will never show is a fetch that answers nothing.
         if (!showingAll && want === '') continue
         const have = childrenAll.get(urn)
-        // A missing FIRST page is fetched here unless one is already in
-        // flight (the toggle handlers fire it at click time and mark
-        // 'loading' synchronously — the race this guard exists for).
-        // This used to skip ANY missing first page, assuming a click
-        // always preceded showAll — but the Contents=All FOCAL seed and
-        // a share link's restored frameAll set arrive with no click, so
-        // their rosters were never fetched and a focused container drew
-        // only its flow rows ("only the 1st of my 10 children shows",
-        // 2026-08-19).
-        if (showingAll && !have && childrenAllStatus.get(urn) === 'loading') continue
+        // A missing FIRST page is fetched here only when it was NEVER
+        // ASKED FOR (no status at all). This used to skip ANY missing
+        // first page, assuming a click always preceded showAll — but the
+        // Contents=All FOCAL seed and a share link's restored frameAll
+        // arrive with no click, so their rosters were never fetched and
+        // a focused container drew only its flow rows ("only the 1st of
+        // my 10 children shows", 2026-08-19). The guard is the STATUS,
+        // not the missing page: 'loading' is the toggle handler's own
+        // in-flight fetch, and 'error'/'unsupported' are ANSWERS —
+        // refiring on "still missing" turned one backend failure into a
+        // 673-request children-with-edges storm (the poll-chain-leak
+        // class; never auto-retry).
         if (showingAll && !have) {
-          onLoadAllChildren(urn)
+          if (childrenAllStatus.get(urn) === undefined) onLoadAllChildren(urn)
           continue
         }
         if (have && (have.query ?? '') === want) continue
