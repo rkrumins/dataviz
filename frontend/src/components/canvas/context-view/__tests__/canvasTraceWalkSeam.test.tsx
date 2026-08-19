@@ -143,7 +143,7 @@ const storeNodeIds = () => useCanvasStore.getState().nodes.map(n => n.id).sort()
 const storeEdgeIds = () => useCanvasStore.getState().edges.map(e => e.id).sort()
 
 describe('canvas trace seam', () => {
-  it('a trace draws the whole flow upfront with zero interactions: store holds every hop, the filter keeps only the flow and its hosts, expansion covers every chain', async () => {
+  it('a trace draws the whole flow upfront with zero interactions: store holds every hop, the filter keeps only the flow and its hosts, expansion reveals every CARD closed', async () => {
     const { provider } = providerByUrn({ F: estate })
     const { result } = renderHook(() => useSeam(provider, hierarchyFixture()))
     act(() => result.current.canvasTrace.start('F'))
@@ -155,12 +155,15 @@ describe('canvas trace seam', () => {
     // The filter keeps the flow + host containers, prunes the siblings.
     const rendered = [...result.current.filtered.filteredMap.keys()].sort()
     expect(rendered).toEqual(['F', 'PLAT', 'T1', 'colA'])
-    // Everything on the flow is expanded, derived from the model alone.
-    expect([...result.current.expandedForRender].sort()).toEqual(['PLAT', 'T1'])
+    // 2026-08-19 final ruling: the trace is a FILTER — participant CARDS
+    // are revealed CLOSED (colA's card is T1; only PLAT above it opens),
+    // and the edge projection rolls colA→F up to the T1 card. The user
+    // drills from there.
+    expect([...result.current.expandedForRender].sort()).toEqual(['PLAT'])
     expect(result.current.hiddenTraceCount).toBe(0)
   })
 
-  it('budget journey: cap → Keep walking → exhausted, store complete', async () => {
+  it('budget journey: cap → AUTO-grant → exhausted with zero clicks, store complete', async () => {
     const nodes: GraphNode[] = [gn('F', 'dataset')]
     const containment: Array<ReturnType<typeof holds>> = []
     for (let i = 0; i < 1100; i++) {
@@ -181,11 +184,12 @@ describe('canvas trace seam', () => {
     const { result } = renderHook(() => useSeam(provider, hierarchyFixture()))
     act(() => result.current.canvasTrace.start('F'))
 
-    await waitFor(() => expect(result.current.canvasTrace.fullWalkStatus?.budgetHit).toBe(true))
-    expect(traceClosure).toHaveBeenCalledTimes(1)
-
-    act(() => result.current.canvasTrace.continueWalk())
+    // 2026-08-19 ruling: no "Keep walking" pedaling — the canvas trace
+    // AUTO-GRANTS through budget parks (up to a hard ceiling) while the
+    // capsule narrates. The walk reaches exhaustion with ZERO clicks,
+    // and budgetHit is never surfaced while auto-grants remain.
     await waitFor(() => expect(result.current.canvasTrace.fullWalkStatus?.exhausted).toBe(true))
+    expect(traceClosure).toHaveBeenCalledTimes(2)
     expect(useCanvasStore.getState().nodes.some(n => n.id === 'deeper')).toBe(true)
   })
 

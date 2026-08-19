@@ -130,15 +130,24 @@ export function computeTraceWalkDelta(opts: {
  */
 export function traceExpansionUrns(model: LensWalkModel, focusUrn: string): Set<string> {
     const childToParent = new Map<string, string>()
+    const hasChildren = new Set<string>()
     for (const e of model.containmentEdges) {
-        if (e.sourceUrn && e.targetUrn) childToParent.set(e.targetUrn, e.sourceUrn)
+        if (e.sourceUrn && e.targetUrn) {
+            childToParent.set(e.targetUrn, e.sourceUrn)
+            hasChildren.add(e.sourceUrn)
+        }
     }
-    // EVERY participant's chain opens (2026-08-19 ruling, reversing the
-    // restrained direct-partners-only version): trace shows the whole
-    // flow at its most granular grain, upfront. The restrained version
-    // also expanded NOTHING when the flow lived on leaf descendants of
-    // the traced entity (no hop touches the focus urn itself), which
-    // rendered the entire trace as a filter that did nothing.
+    // THE TRACE IS A FILTER, NOT AN EXPLOSION (2026-08-19 final ruling,
+    // third same-day iteration): every lineage-relevant CARD becomes
+    // visible and stays CLOSED — the user drills from there. A
+    // participant's card is itself when it holds children, or its
+    // immediate parent when it is a LEAF (a column reads as its table's
+    // rolled-up wire — useEdgeProjection rolls hops up to the closed
+    // cards, so the flow still reads end to end). Expansion covers the
+    // ancestors STRICTLY ABOVE each card: enough to reveal it, never its
+    // interior. (The first iteration expanded only hop-1 partners' chains
+    // — a leaf-grain flow expanded nothing; the second opened EVERY
+    // chain — a 388-participant walk splayed the whole estate.)
     const seeds = new Set<string>([focusUrn])
     for (const e of model.lineageEdges) {
         if (e.sourceUrn) seeds.add(e.sourceUrn)
@@ -146,8 +155,9 @@ export function traceExpansionUrns(model: LensWalkModel, focusUrn: string): Set<
     }
     const out = new Set<string>()
     for (const seed of seeds) {
-        const seen = new Set<string>([seed])
-        let cursor = childToParent.get(seed)
+        const card = hasChildren.has(seed) ? seed : (childToParent.get(seed) ?? seed)
+        const seen = new Set<string>([card])
+        let cursor = childToParent.get(card)
         while (cursor && !seen.has(cursor)) {
             seen.add(cursor)
             out.add(cursor)

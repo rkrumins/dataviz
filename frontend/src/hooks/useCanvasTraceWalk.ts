@@ -20,6 +20,13 @@
  * keeps memo dependency arrays quiet.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
+/** Budget grants auto-applied before the capsule ever asks (2026-08-19
+ *  ruling: no "Keep walking" pedaling — the trace just loads while the
+ *  capsule narrates). With FULL_WALK_NODE_BUDGET per grant this walks
+ *  ~25k nodes hands-free; the ceiling is the true runaway safety valve,
+ *  and only past it does the paused capsule ask the user. */
+const TRACE_AUTO_GRANTS = 24
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
 import {
@@ -63,8 +70,27 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
     const walk = useLensWalk(tracedUrn, provider, FULL_WALK_INITIAL_DEPTH, true)
 
     const walkEntry = tracedUrn ? walk.walkFor(tracedUrn) : null
-    const fullWalkStatus = tracedUrn ? walk.fullWalkFor(tracedUrn) : null
+    const rawWalkStatus = tracedUrn ? walk.fullWalkFor(tracedUrn) : null
     const model = walkEntry?.model ?? null
+
+    // Auto-grant through budget parks (async — never a synchronous
+    // setState-in-effect): each park schedules one more grant until the
+    // ceiling. While grants remain, the surfaced status masks the park as
+    // "still walking", so the capsule narrates instead of asking.
+    const [autoGrants, setAutoGrants] = useState(0)
+    useEffect(() => {
+        if (!tracedUrn || !rawWalkStatus?.budgetHit || autoGrants >= TRACE_AUTO_GRANTS) return
+        const urn = tracedUrn
+        const t = window.setTimeout(() => {
+            setAutoGrants(g => g + 1)
+            walk.continueFullWalk(urn)
+        }, 0)
+        return () => window.clearTimeout(t)
+    }, [tracedUrn, rawWalkStatus?.budgetHit, autoGrants, walk])
+    const fullWalkStatus = useMemo<FullWalkStatus | null>(() => {
+        if (!rawWalkStatus?.budgetHit || autoGrants >= TRACE_AUTO_GRANTS) return rawWalkStatus
+        return { ...rawWalkStatus, budgetHit: false, walking: true }
+    }, [rawWalkStatus, autoGrants])
 
     const sessionRef = useRef(emptyTraceWalkMergeSession())
     // ONE stable Set instance for the whole hook life (state initializer,
@@ -96,12 +122,14 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         sessionRef.current = emptyTraceWalkMergeSession()
         addedEdgeIds.clear()
         setTracedUrn(null)
+        setAutoGrants(0)
     }, [addedEdgeIds])
 
     const start = useCallback((urn: string) => {
         if (!urn || tracedUrn === urn) return
         if (tracedUrn) exit()
         setTracedUrn(urn)
+        setAutoGrants(0)
     }, [tracedUrn, exit])
 
     const continueWalk = useCallback(() => {

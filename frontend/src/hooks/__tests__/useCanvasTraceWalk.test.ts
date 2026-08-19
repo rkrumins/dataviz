@@ -146,7 +146,9 @@ describe('useCanvasTraceWalk', () => {
     act(() => result.current.start('F'))
     await waitFor(() => expect(result.current.traceNodeUrns.has('colA')).toBe(true))
     expect(result.current.traceNodeUrns.has('F')).toBe(true)
-    expect([...result.current.expansionUrns].sort()).toEqual(['PLAT', 'T1'])
+    // Final ruling: colA's CARD is T1 (leaf → parent), revealed CLOSED —
+    // only PLAT above it expands; the projection rolls the hop up to T1.
+    expect([...result.current.expansionUrns].sort()).toEqual(['PLAT'])
     expect(result.current.addedEdgeIds).toBe(idleSet)   // stable identity
     await waitFor(() => expect(result.current.addedEdgeIds.has('e1')).toBe(true))
   })

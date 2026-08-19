@@ -146,34 +146,46 @@ describe('computeTraceWalkDelta — merge rules', () => {
 })
 
 describe('traceExpansionUrns', () => {
-  // 2026-08-19 RULING (reverses the 2026-08-18 "restrained expansion"):
-  // trace = the whole flow at its most granular grain, upfront. EVERY
-  // participant's containment chain expands — the earlier direct-partners-
-  // only version left hops 2..N collapsed as container bundles, and on the
-  // common estate where lineage lives on LEAF DESCENDANTS of the traced
-  // entity (columns under a table) it expanded nothing at all ("doesn't
-  // even show anything for 3 level hop").
-  it('expands the containment chain of EVERY participant in the walk', () => {
-    // c1 (in T under P) is traced; c2 (in T2) feeds it; far (in TFAR) is
-    // two hops away and must be granular too.
+  // 2026-08-19 FINAL RULING (third same-day iteration — the trace is a
+  // FILTER, not an explosion): every lineage-relevant CARD becomes
+  // visible and stays CLOSED; the user drills. A participant's card is
+  // itself when it holds children, or its immediate parent when it is a
+  // LEAF (a column reads as its table's rolled-up wire, not as an open
+  // row). Expansion therefore covers the ancestors STRICTLY ABOVE each
+  // card — enough to reveal it, never its interior. The edge projection
+  // rolls leaf hops up to the closed cards (useEdgeProjection), so the
+  // flow still reads end to end.
+  it('reveals every participant CARD closed: only ancestors above the cards expand', () => {
+    // c1 (leaf in T under P) is traced; c2 (leaf in T2) feeds it; far
+    // (leaf in TFAR) is two hops away. Cards: T, T2, TFAR — all closed;
+    // only P (above T) must expand to reveal them.
     const m = model({
       nodes: [wnode('c1'), wnode('c2'), wnode('far'), wnode('T', 'dataset'), wnode('P', 'container'), wnode('T2', 'dataset'), wnode('TFAR', 'dataset')],
       lineageEdges: [hop('c2', 'c1', 'e1'), hop('far', 'c2', 'e2')],
       containmentEdges: [holds('P', 'T'), holds('T', 'c1'), holds('T2', 'c2'), holds('TFAR', 'far')],
     })
-    expect([...traceExpansionUrns(m, 'c1')].sort()).toEqual(['P', 'T', 'T2', 'TFAR'])
+    expect([...traceExpansionUrns(m, 'c1')].sort()).toEqual(['P'])
   })
 
-  it('a TABLE focus whose COLUMNS carry the hops still opens every chain', () => {
-    // No lineage edge touches the traced urn itself — the flow lives one
-    // grain below. The direct-partners version returned nothing here,
-    // which rendered the entire trace as "just a filter that did nothing".
+  it('a TABLE focus whose COLUMNS carry the hops: tables are closed cards, wires roll up', () => {
     const m = model({
       nodes: [wnode('TBL', 'dataset'), wnode('c1'), wnode('c2'), wnode('T2', 'dataset'), wnode('P', 'container')],
       lineageEdges: [hop('c2', 'c1', 'e1')],
       containmentEdges: [holds('P', 'TBL'), holds('TBL', 'c1'), holds('T2', 'c2')],
     })
-    expect([...traceExpansionUrns(m, 'TBL')].sort()).toEqual(['P', 'T2', 'TBL'])
+    // TBL's card = itself (has children) → P above it expands; T2's card
+    // = itself (holds c2) → nothing above. Neither TBL nor T2 opens.
+    expect([...traceExpansionUrns(m, 'TBL')].sort()).toEqual(['P'])
+  })
+
+  it('a container-grain participant (manual estates) is revealed the same way', () => {
+    // Authored flow at layer grain: L1 → L2, both under platform PM.
+    const m = model({
+      nodes: [wnode('L1', 'layer'), wnode('L2', 'layer'), wnode('PM', 'container'), wnode('x1'), wnode('x2')],
+      lineageEdges: [hop('L1', 'L2', 'e1')],
+      containmentEdges: [holds('PM', 'L1'), holds('PM', 'L2'), holds('L1', 'x1'), holds('L2', 'x2')],
+    })
+    expect([...traceExpansionUrns(m, 'L1')].sort()).toEqual(['PM'])
   })
 
   it('is cycle-safe', () => {
