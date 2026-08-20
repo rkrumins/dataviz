@@ -30,6 +30,7 @@ import { aggregationService } from '@/services/aggregationService'
 import { VocabAlignmentWarning } from '@/components/admin/workspace/VocabAlignmentWarning'
 import { isIdentityOverridden, normalizeIdentity, isNameOverridden, normalizeName } from '@/components/dataSource/NodeIdentity'
 import { PhysicalAlignmentSection } from './PhysicalAlignmentSection'
+import { HistoryCard } from './history/HistoryCard'
 
 export interface DataSourceProfileContext {
     wsId: string
@@ -396,6 +397,13 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
                     {stats ? `${compactNum(stats.edgeCount)} relationships across ${compactNum(stats.nodeCount)} entities` : '—'}
                 </p>
             </Card>
+
+            {/* ── History — keyed on the data source, so only the
+                workspace-context frames can show it (a catalog item nobody has
+                onboarded has no counts to have a history of). ── */}
+            {context && (
+                <HistoryCard dataSourceId={context.dataSourceId} catalogId={catalogId} />
+            )}
 
             {/* ── Enhanced (workspace-context): alignment + aggregation + vocab ── */}
             {context?.ontologyId && (

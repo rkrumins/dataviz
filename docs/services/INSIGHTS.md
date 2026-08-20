@@ -35,6 +35,8 @@ collection facets and a discovery path:
   provider, so the registry UI can browse a provider's assets before a data
   source is created.
 
+Every counts write also **captures a history snapshot** — see below.
+
 For large graphs, the counts lane also **materializes a top-level-nodes payload**
 into Postgres so the entry-list endpoint serves pages from the DB instead of
 running an expensive live roots query per request, and a **cache warmer**
@@ -107,6 +109,60 @@ serving Postgres rows marked `status=stale`, and the admission GCRA fails open.
 All Redis state here is advisory — lost claims and queue entries heal within a
 scheduler tick; Postgres rows are the only authority.
 
+## Counts history
+
+`data_source_stats` is one row per data source, upserted in place: it answers
+"how big is this graph now" and destroys the previous answer on every write.
+`data_source_count_snapshots` is its append-only twin — what a source looked
+like at a point in time, per label, with the delta against the observation it
+replaced. It is what makes "did an external loader delete half of this on
+Tuesday" answerable.
+
+**Where capture happens.** Not in a collector, but inside
+`stats_repo.upsert_data_source_stats_counts` / `upsert_data_source_stats` —
+the functions every lane already writes through (counts poll, deep profile,
+drift probe, reconcile sweep, and two app write paths). Capturing in one
+collector would give a history whose meaning depended on which lane happened to
+observe a change; capturing at the write gives one series with one definition.
+The row being overwritten is already in memory, so the delta costs no extra
+read, and the capture runs in the caller's transaction, so history can never
+disagree with the current-state row about what was observed.
+
+**Why it is gated.** The drift probe writes every 60s. A row per write would be
+~43k rows per source per month describing a graph that mostly did not change.
+So a snapshot is written when `counts_digest` moves, and otherwise at most once
+per `INSIGHTS_HISTORY_HEARTBEAT_SECS`. The heartbeat is not optional padding:
+without it an idle month is a gap, and a gap reads as lost data.
+
+**What a failed collection writes: nothing.** Capture is reached only after the
+provider has answered. A FalkorDB pod rotation makes the collection raise
+upstream — in `_run_guarded`'s retry, the circuit breaker, or the admission
+gate's soft-retry — so no row is written and no phantom zero enters the series.
+A *genuinely* empty graph is different: the provider verifies absence via
+`EXISTS` before reporting zero, so that zero is real, and recording it is the
+point.
+
+**Retention** runs on the stream-trim tick behind its own cadence gate, and has
+two passes. The age cutoff bounds how far back the table goes; the per-source
+cap bounds how much one source thrashing under a broken loader can contribute,
+which the age cutoff alone cannot. Both defaults can be overridden live via
+`PUT /api/v1/admin/platform/history-retention` — `persisted ?? env`, so a no-op
+save round-trips the real default rather than pinning it.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/v1/admin/insights/data-sources/{id}/history` | Counts over time for one source, per label, with deltas. Accepts a catalog-item id too. |
+| GET | `/api/v1/admin/insights/providers/{id}/history` | The same series rolled up across a provider's onboarded sources. |
+| GET/PUT | `/api/v1/admin/platform/history-retention` | Read / set the retention policy. |
+
+Both history reads take `from`, `to` and `grain` (`raw` \| `hour` \| `day` \|
+`auto`) and return the standard `{ data, meta }` envelope. `auto` picks the
+grain from the window width and errs toward `raw` — the value of the view is
+seeing the exact moment something changed. At hour/day grain each bucket also
+carries its min and max, because a downsample that keeps only the closing value
+would hide a drop that happened and recovered inside the bucket, which is
+precisely the event this exists to surface.
+
 ## Key endpoints
 
 The web tier exposes an admin surface under `/api/v1/admin/insights` (all routes
@@ -156,6 +212,11 @@ Scheduler / worker tunables (defaults in parentheses):
 | `STATS_HEALTH_PORT` | `8092` | Liveness endpoint port (also `--health-port`). |
 | `INSIGHTS_TRIM_INTERVAL_SECS` | `3600` | Stream-trim cadence. |
 | `INSIGHTS_COUNTS_PARITY_CHECK` | `0` | Diagnostic: run direct count scans alongside the deep facet and log divergence. |
+| `INSIGHTS_HISTORY_ENABLED` | `true` | Master switch for counts-history capture. |
+| `INSIGHTS_HISTORY_HEARTBEAT_SECS` | `3600` | Continuity snapshot when nothing changed. |
+| `INSIGHTS_HISTORY_RETENTION_DAYS` | `90` | Snapshot age cutoff (product floor is 30, with headroom). |
+| `INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE` | `5000` | Per-source snapshot cap, applied alongside the age cutoff. |
+| `INSIGHTS_HISTORY_PURGE_INTERVAL_SECS` | `3600` | Snapshot purge cadence. |
 
 Per-provider admission knobs (`bucket_capacity`, `refill_per_sec`) are stored in
 `provider_admission_config` and tuned live via the `PUT /admission/{provider_id}`
@@ -169,6 +230,10 @@ In the registry / assets UI, a `RefreshControl` pill renders
 cache-only reads let the frontend render a placeholder with an ETA chip while a
 job is `computing`. A stuck pipeline (Redis down) surfaces as a
 "background refresh paused" affordance when a read comes back `unavailable`.
+The counts history appears as a **Last 30 days** card in the data source
+profile and, behind it, a full history view at
+`/datasources/{catalogId}/history` — counts over time by label, a change
+ledger, and a per-provider rollup.
 Providers that fail repeatedly show as degraded via the rolling success window.
 
 ## Limitations
@@ -184,3 +249,10 @@ Providers that fail repeatedly show as degraded via the rolling success window.
   loses in-flight queue entries, which heal on the next tick but do not replay.
 - Top-level materialization and cache warming are best-effort optimizations that
   only engage above a size threshold; they never block or fail a counts write.
+- Counts history begins at the first capture, not at the data source's creation
+  — there is no backfill, because the observations simply were not recorded. The
+  history API reports `coverage_from` so the UI can say so rather than letting a
+  short series read as data loss.
+- History resolution is bounded by the capture cadence: a change is recorded
+  when a lane next observes it, which for a FalkorDB source is the 60s probe and
+  for everything else the counts poll.

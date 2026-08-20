@@ -39,10 +39,10 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -803,4 +803,513 @@ async def get_insights_config() -> InsightsConfigResponse:
         job_max_retries=resilience.INSIGHTS_JOB_MAX_RETRIES,
         discovery_refresh_interval_secs=resilience.DISCOVERY_REFRESH_INTERVAL_SECS,
         ui_stale_threshold_secs=resilience.INSIGHTS_UI_STALE_THRESHOLD_SECS,
+    )
+
+
+# ── Counts history ──────────────────────────────────────────────────
+#
+# Unlike the discovery reads above, these are not cache-only reads of a
+# volatile row — they read ``data_source_count_snapshots``, which is durable
+# and append-only. Nothing here can enqueue work: the history either exists or
+# has not been captured yet, and no amount of provider IO would change that.
+# The envelope is kept anyway so the frontend's StatusChip, recovery and
+# polling machinery work unchanged across every insights read.
+
+_DEFAULT_HISTORY_WINDOW_DAYS = 30
+
+# Above this many raw points a window is downsampled even when the caller
+# asked for "auto". Chosen to stay well under the point count where a
+# hand-rolled SVG path starts costing layout time, not for payload size.
+_AUTO_RAW_POINT_BUDGET = 720
+
+
+class HistoryPoint(BaseModel):
+    """One observation. ``node_min``/``node_max`` are the bucket extremes and
+    are populated only at hour/day grain, where a single closing value would
+    otherwise hide a drop that happened and recovered inside the bucket."""
+
+    at: str
+    node_count: int
+    edge_count: int
+    entity_type_counts: dict
+    edge_type_counts: dict
+    node_delta: Optional[int] = None
+    edge_delta: Optional[int] = None
+    node_min: Optional[int] = None
+    node_max: Optional[int] = None
+    lane: str
+    capture_reason: str
+
+
+class LabelSeriesSummary(BaseModel):
+    """One label's arc across the window, for the legend and the ledger.
+
+    ``state`` is the reading a person wants: ``new`` and ``gone`` are the two
+    that matter most, because a label appearing or disappearing is the shape a
+    broken loader makes.
+    """
+
+    label: str
+    first: int
+    last: int
+    delta: int
+    state: str  # steady | grew | shrank | new | gone
+    points: list
+
+
+class HistoryDrop(BaseModel):
+    """The largest single negative movement in the window."""
+
+    at: str
+    label: Optional[str] = None
+    before: int
+    after: int
+    delta: int
+
+
+class HistorySummary(BaseModel):
+    node_first: int
+    node_last: int
+    node_delta: int
+    node_pct_change: Optional[float] = None
+    edge_first: int
+    edge_last: int
+    edge_delta: int
+    edge_pct_change: Optional[float] = None
+    snapshots: int
+    changed_snapshots: int
+    labels_added: list
+    labels_removed: list
+    largest_drop: Optional[HistoryDrop] = None
+    # Oldest snapshot held for this source at ANY age. Without it a series
+    # that simply started last Tuesday is indistinguishable from one that lost
+    # everything before Tuesday.
+    coverage_from: Optional[str] = None
+    retention_days: int
+
+
+class CountHistoryPayload(BaseModel):
+    data_source_id: str
+    from_: str = Field(alias="from")
+    to: str
+    grain: str
+    points: list
+    labels: list
+    edge_labels: list
+    summary: HistorySummary
+
+    class Config:
+        populate_by_name = True
+
+
+class ProviderSeriesEntry(BaseModel):
+    data_source_id: str
+    name: str
+    points: list
+
+
+class ProviderHistoryPayload(BaseModel):
+    provider_id: str
+    from_: str = Field(alias="from")
+    to: str
+    grain: str
+    #: Bucket-aligned totals across every source on the provider.
+    totals: list
+    sources: list
+    retention_days: int
+
+    class Config:
+        populate_by_name = True
+
+
+def _history_window(frm: Optional[str], to: Optional[str]) -> tuple:
+    """Resolve the requested window, defaulting to the last 30 days.
+
+    Bad input widens rather than narrows: a malformed ``from`` falls back to
+    the default window instead of 400-ing, because a history view that
+    refuses to render is worse than one showing a month.
+    """
+    now = datetime.now(timezone.utc)
+    end = _parse_iso(to) or now
+    start = _parse_iso(frm) or (end - timedelta(days=_DEFAULT_HISTORY_WINDOW_DAYS))
+    if start > end:
+        start, end = end, start
+    return start.isoformat(), end.isoformat()
+
+
+def _auto_grain(frm: str, to: str) -> str:
+    """Pick a grain from the window width so the default view is readable
+    without the caller having to reason about point counts.
+
+    Errs toward raw: the whole value of this feature is seeing the exact
+    moment something changed, and a downsample that smooths that away is a
+    worse default than a slightly denser chart.
+    """
+    start, end = _parse_iso(frm), _parse_iso(to)
+    if start is None or end is None:
+        return "hour"
+    hours = max(1.0, (end - start).total_seconds() / 3600.0)
+    if hours <= 48:
+        return "raw"
+    if hours <= 24 * 14:
+        return "hour"
+    return "day"
+
+
+def _pct_change(first: int, last: int) -> Optional[float]:
+    """None rather than a fake number when the baseline is zero — a graph that
+    grew from 0 to 40,000 did not grow by a percentage."""
+    if not first:
+        return None
+    return round(((last - first) / first) * 100.0, 2)
+
+
+def _label_summaries(points: list, key: str) -> list:
+    """Per-label series across the window.
+
+    A label absent from a snapshot is 0 for that point, not a gap: the probe
+    lane drops zero-count buckets rather than reporting ``{"Label": 0}``, so
+    absence IS zero and treating it as missing data would draw a hole where a
+    deletion happened.
+    """
+    labels: list = []
+    seen: dict = {}
+    for point in points:
+        for label in (point.get(key) or {}):
+            seen.setdefault(label, True)
+    for label in sorted(seen):
+        series = [int((p.get(key) or {}).get(label, 0) or 0) for p in points]
+        first, last = series[0], series[-1]
+        if first == 0 and last > 0:
+            state = "new"
+        elif first > 0 and last == 0:
+            state = "gone"
+        elif last > first:
+            state = "grew"
+        elif last < first:
+            state = "shrank"
+        else:
+            state = "steady"
+        labels.append(LabelSeriesSummary(
+            label=label, first=first, last=last, delta=last - first,
+            state=state, points=series,
+        ).model_dump())
+    labels.sort(key=lambda item: (-abs(item["delta"]), item["label"]))
+    return labels
+
+
+def _largest_drop(rows: list) -> Optional[HistoryDrop]:
+    """The worst single negative movement, and which label carried most of it.
+
+    This is the answer to "when did the external process have issues" — the
+    one number a person scans the page for.
+    """
+    worst = None
+    for row in rows:
+        delta = row.node_delta
+        if delta is None or delta >= 0:
+            continue
+        if worst is None or delta < worst.node_delta:
+            worst = row
+    if worst is None:
+        return None
+
+    label = None
+    biggest = 0
+    try:
+        deltas = json.loads(worst.type_deltas or "{}")
+    except (TypeError, ValueError):
+        deltas = {}
+    nodes = deltas.get("nodes", {}) if isinstance(deltas, dict) else {}
+    for name, count in (nodes.get("removed") or {}).items():
+        if int(count or 0) > biggest:
+            label, biggest = name, int(count or 0)
+    for name, pair in (nodes.get("changed") or {}).items():
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        lost = int(pair[0] or 0) - int(pair[1] or 0)
+        if lost > biggest:
+            label, biggest = name, lost
+
+    before = int(worst.node_count or 0) - int(worst.node_delta or 0)
+    return HistoryDrop(
+        at=worst.captured_at,
+        label=label,
+        before=before,
+        after=int(worst.node_count or 0),
+        delta=int(worst.node_delta or 0),
+    )
+
+
+def _history_envelope(payload: Any, *, provider_id: str, asset_name: str,
+                      updated_at: Optional[datetime], has_data: bool) -> dict:
+    """Envelope for a durable read.
+
+    ``computing`` here means "capture has not produced a row for this source
+    yet", not "a job is running" — there is no job to wait on, but it is the
+    status the frontend already renders as a patient placeholder, and it is
+    the truthful one: history will appear on its own.
+    """
+    return _build_envelope(
+        payload=payload,
+        status="fresh" if has_data else "computing",
+        source="cache" if has_data else "none",
+        provider_id=provider_id,
+        asset_name=asset_name,
+        updated_at=updated_at,
+        age_secs=_age_seconds(updated_at),
+        refreshing=False,
+        job_id=None,
+        provider_health="unknown",
+        last_error=None,
+    )
+
+
+async def _resolve_history_scope(session: AsyncSession, ds_id: str) -> str:
+    """Accept a catalog-item id where a data source id is expected.
+
+    The per-data-source history page is routed by catalog id (``cat_…``), which
+    is the identity the rest of the Data Source surface uses, while history is
+    keyed on the workspace data source (``ds_…``) that observes it. Resolving
+    here rather than making the page pass an extra query param is what keeps a
+    bare ``/datasources/<id>/history`` link working when someone shares it.
+
+    Two separate reads, never a JOIN: the catalog row is the provider domain's
+    and the snapshots are the stats domain's, and the map says cross-domain
+    references are by id only. Falls through unchanged when the id does not
+    resolve — an unknown id then reports "no history yet", which is both true
+    and the same answer a real-but-unobserved source gets.
+    """
+    from backend.app.db.models import CatalogItemORM
+    from backend.app.db.repositories import stats_history_repo
+
+    if not ds_id.startswith("cat_"):
+        return ds_id
+    item = await session.get(CatalogItemORM, ds_id)
+    if item is None or not item.source_identifier:
+        return ds_id
+    resolved = await stats_history_repo.latest_data_source_for_graph(
+        session, item.provider_id, item.source_identifier,
+    )
+    return resolved or ds_id
+
+
+@router.get(
+    "/data-sources/{ds_id}/history",
+    summary="Historical entity counts for one data source",
+)
+async def get_data_source_history(
+    ds_id: str = Path(..., description="Workspace data source id"),
+    frm: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = Query(None),
+    grain: Optional[str] = Query(None, description="raw | hour | day | auto"),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Counts over time for one data source, per label, with deltas.
+
+    A pure read of durable snapshot rows — no provider IO, no enqueue. An
+    empty result is reported as ``computing`` rather than 404: a source whose
+    first snapshot has not landed yet is a normal, self-resolving state, and a
+    404 would read as "this source does not exist".
+    """
+    from backend.app.db.repositories import stats_history_repo
+
+    ds_id = await _resolve_history_scope(session, ds_id)
+    window_from, window_to = _history_window(frm, to)
+    resolved_grain = (
+        _auto_grain(window_from, window_to)
+        if grain in (None, "", "auto")
+        else stats_history_repo.normalize_grain(grain)
+    )
+
+    rows = await stats_history_repo.list_snapshots(
+        session, ds_id, frm=window_from, to=window_to, grain=resolved_grain,
+    )
+    # An "auto" caller asked for a readable chart, not a specific grain — so a
+    # raw window that turned out denser than expected is downsampled rather
+    # than shipped. An explicit grain is always honoured.
+    if (
+        grain in (None, "", "auto")
+        and resolved_grain == "raw"
+        and len(rows) > _AUTO_RAW_POINT_BUDGET
+    ):
+        resolved_grain = "hour"
+        rows = await stats_history_repo.list_snapshots(
+            session, ds_id, frm=window_from, to=window_to, grain=resolved_grain,
+        )
+
+    extremes = await stats_history_repo.bucket_extremes(
+        session, ds_id, frm=window_from, to=window_to, grain=resolved_grain,
+    )
+    width = 13 if resolved_grain == "hour" else 10
+
+    points = []
+    for row in rows:
+        bucket = (row.captured_at or "")[:width] if resolved_grain != "raw" else None
+        low, high = extremes.get(bucket, (None, None)) if bucket else (None, None)
+        points.append(HistoryPoint(
+            at=row.captured_at,
+            node_count=int(row.node_count or 0),
+            edge_count=int(row.edge_count or 0),
+            entity_type_counts=stats_history_repo.loads_counts(row.entity_type_counts),
+            edge_type_counts=stats_history_repo.loads_counts(row.edge_type_counts),
+            node_delta=row.node_delta,
+            edge_delta=row.edge_delta,
+            node_min=low,
+            node_max=high,
+            lane=row.lane or "poll",
+            capture_reason=row.capture_reason or "changed",
+        ).model_dump())
+
+    labels = _label_summaries(points, "entity_type_counts")
+    edge_labels = _label_summaries(points, "edge_type_counts")
+    policy = await stats_history_repo.resolve_history_policy(session)
+
+    node_first = points[0]["node_count"] if points else 0
+    node_last = points[-1]["node_count"] if points else 0
+    edge_first = points[0]["edge_count"] if points else 0
+    edge_last = points[-1]["edge_count"] if points else 0
+
+    summary = HistorySummary(
+        node_first=node_first,
+        node_last=node_last,
+        node_delta=node_last - node_first,
+        node_pct_change=_pct_change(node_first, node_last),
+        edge_first=edge_first,
+        edge_last=edge_last,
+        edge_delta=edge_last - edge_first,
+        edge_pct_change=_pct_change(edge_first, edge_last),
+        snapshots=len(points),
+        changed_snapshots=sum(
+            1 for p in points if p["capture_reason"] in ("changed", "first")
+        ),
+        labels_added=[l["label"] for l in labels if l["state"] == "new"],
+        labels_removed=[l["label"] for l in labels if l["state"] == "gone"],
+        # Computed from the RAW rows, never the downsampled points: a drop is
+        # exactly the thing a downsample can average away, and the marker has
+        # to point at the moment it actually happened.
+        largest_drop=_largest_drop(await stats_history_repo.list_snapshots(
+            session, ds_id, frm=window_from, to=window_to, grain="raw",
+        )),
+        coverage_from=await stats_history_repo.oldest_captured_at(session, ds_id),
+        retention_days=policy.retention_days,
+    )
+
+    payload = CountHistoryPayload(
+        data_source_id=ds_id,
+        **{"from": window_from},
+        to=window_to,
+        grain=resolved_grain,
+        points=points,
+        labels=labels,
+        edge_labels=edge_labels,
+        summary=summary,
+    ).model_dump(by_alias=True)
+
+    return _history_envelope(
+        payload,
+        provider_id="",
+        asset_name=ds_id,
+        updated_at=_parse_iso(points[-1]["at"]) if points else None,
+        has_data=bool(points),
+    )
+
+
+@router.get(
+    "/providers/{provider_id}/history",
+    summary="Historical entity counts across a provider's data sources",
+)
+async def get_provider_history(
+    provider_id: str = Path(..., description="Provider id"),
+    frm: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = Query(None),
+    grain: Optional[str] = Query(None, description="hour | day | auto"),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """The same series rolled up across every onboarded source on a provider.
+
+    Sources are observed at independent times, so the points are aligned onto
+    shared buckets and each source's last known value is carried forward into
+    buckets it was not observed in. Carrying forward is the honest choice: a
+    source that was not polled in a given hour did not drop to zero, and a
+    stacked chart that implied it did would invent an outage.
+
+    ``graph_name`` is the display name rather than the data source label —
+    it is denormalised onto the snapshot, so the rollup stays inside the stats
+    domain and still names sources that have since been removed.
+    """
+    from backend.app.db.repositories import stats_history_repo
+
+    window_from, window_to = _history_window(frm, to)
+    resolved_grain = (
+        _auto_grain(window_from, window_to)
+        if grain in (None, "", "auto")
+        else stats_history_repo.normalize_grain(grain)
+    )
+    # The rollup is always bucketed: raw across N sources is N interleaved
+    # time axes, which no stacked chart can render honestly.
+    if resolved_grain == "raw":
+        resolved_grain = "hour"
+    width = 13 if resolved_grain == "hour" else 10
+
+    rows = await stats_history_repo.provider_snapshots(
+        session, provider_id, frm=window_from, to=window_to,
+    )
+
+    # bucket -> ds_id -> (node_count, edge_count), last write per bucket wins.
+    grid: dict = {}
+    names: dict = {}
+    for row in rows:
+        bucket = (row.captured_at or "")[:width]
+        grid.setdefault(bucket, {})[row.data_source_id] = (
+            int(row.node_count or 0), int(row.edge_count or 0),
+        )
+        names.setdefault(
+            row.data_source_id, row.graph_name or row.data_source_id,
+        )
+
+    buckets = sorted(grid)
+    carried: dict = {}
+    totals = []
+    per_source: dict = {ds: [] for ds in names}
+    for bucket in buckets:
+        carried.update(grid[bucket])
+        node_total = sum(v[0] for v in carried.values())
+        edge_total = sum(v[1] for v in carried.values())
+        totals.append({
+            "at": bucket, "node_count": node_total, "edge_count": edge_total,
+            "sources": len(carried),
+        })
+        for ds_id in names:
+            nodes, edges = carried.get(ds_id, (0, 0))
+            per_source[ds_id].append({
+                "at": bucket, "node_count": nodes, "edge_count": edges,
+            })
+
+    policy = await stats_history_repo.resolve_history_policy(session)
+    sources = [
+        ProviderSeriesEntry(
+            data_source_id=ds_id, name=names[ds_id], points=per_source[ds_id],
+        ).model_dump()
+        for ds_id in sorted(
+            names, key=lambda d: -(per_source[d][-1]["node_count"] if per_source[d] else 0),
+        )
+    ]
+
+    payload = ProviderHistoryPayload(
+        provider_id=provider_id,
+        **{"from": window_from},
+        to=window_to,
+        grain=resolved_grain,
+        totals=totals,
+        sources=sources,
+        retention_days=policy.retention_days,
+    ).model_dump(by_alias=True)
+
+    return _history_envelope(
+        payload,
+        provider_id=provider_id,
+        asset_name="",
+        updated_at=_parse_iso(rows[-1].captured_at) if rows else None,
+        has_data=bool(totals),
     )

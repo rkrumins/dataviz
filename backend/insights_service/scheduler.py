@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -369,7 +370,92 @@ async def run_trim_scheduler(shutdown: asyncio.Event) -> None:
         except Exception as exc:
             logger.error("purge_reconcile failed: %s", exc, exc_info=True)
 
+        # Counts-history retention rides the same tick but keeps its own
+        # cadence gate, so retention can be tuned without changing how often
+        # Redis housekeeping runs.
+        try:
+            await _maybe_purge_count_history()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("history_purge failed: %s", exc, exc_info=True)
+
     logger.info("Trim scheduler stopped")
+
+
+# ── counts-history retention ────────────────────────────────────────
+
+# Cadence gate for the history purge, checked on each trim tick. Its own
+# knob rather than the trim interval: one is Redis housekeeping, the other
+# is how long an audit trail is kept, and an operator tuning the second
+# should not have to think about the first.
+_HISTORY_PURGE_INTERVAL_SECS = float(
+    resilience.INSIGHTS_HISTORY_PURGE_INTERVAL_SECS
+)
+
+# Rows deleted per pass. Matches refresh_token_gc's batch: big enough that
+# a backlog drains in a few ticks, small enough that no single statement
+# holds a long lock on a hot table.
+_HISTORY_PURGE_BATCH = 5000
+
+_history_purge_state: dict = {
+    "last_run_monotonic": 0.0,
+    "last_run_at": None,
+    "last_by_age": 0,
+    "last_over_cap": 0,
+    "last_error": None,
+}
+
+
+def get_history_purge_status() -> dict:
+    """Last history-purge outcome, for the /health payload. Mirrors
+    ``get_discovery_scheduler_status()``'s shape."""
+    return {
+        "last_run_at": _history_purge_state["last_run_at"],
+        "last_by_age": _history_purge_state["last_by_age"],
+        "last_over_cap": _history_purge_state["last_over_cap"],
+        "last_error": _history_purge_state["last_error"],
+        "interval_secs": _HISTORY_PURGE_INTERVAL_SECS,
+    }
+
+
+async def _maybe_purge_count_history() -> None:
+    """Purge ``data_source_count_snapshots`` by age and per-source cap.
+
+    Never raises — the caller logs, but a retention pass failing is not worth
+    interrupting stream hygiene for, and the next tick retries. Idempotent: a
+    second pass over a clean table deletes nothing.
+
+    Batched, and deliberately NOT drained in a loop here: a very large backlog
+    (a retention window shortened from 90 days to 7, say) drains over
+    successive ticks instead of holding one long transaction against a table
+    the counts path is actively writing to.
+    """
+    from backend.app.db.repositories import stats_history_repo
+
+    now = time.monotonic()
+    last = _history_purge_state["last_run_monotonic"]
+    if last and (now - last) < _HISTORY_PURGE_INTERVAL_SECS:
+        return
+    _history_purge_state["last_run_monotonic"] = now
+
+    async with get_jobs_session() as session:
+        policy = await stats_history_repo.resolve_history_policy(session)
+        result = await stats_history_repo.purge_snapshots(
+            session, policy, batch=_HISTORY_PURGE_BATCH,
+        )
+        await session.commit()
+
+    _history_purge_state["last_run_at"] = datetime.now(timezone.utc).isoformat()
+    _history_purge_state["last_by_age"] = result["by_age"]
+    _history_purge_state["last_over_cap"] = result["over_cap"]
+    _history_purge_state["last_error"] = None
+    if result["by_age"] or result["over_cap"]:
+        logger.info(
+            "history_purge: removed %d by age (>%dd) and %d over cap (>%d/source)",
+            result["by_age"], policy.retention_days,
+            result["over_cap"], policy.max_rows_per_source,
+        )
 
 
 # A purge row stuck at pending/running with no update for this long has

@@ -39,3 +39,13 @@ data:
   STATS_POLL_TIMEOUT_SECS: {{ .Values.config.stats.pollTimeoutSecs | quote }}
   STATS_POLL_TIMEOUT_LARGE_SECS: {{ .Values.config.stats.pollTimeoutLargeSecs | quote }}
   STATS_POLL_LARGE_THRESHOLD: {{ .Values.config.stats.pollLargeThreshold | quote }}
+  # Counts history — the append-only record behind the per-source history
+  # UI. Captured inside the existing counts write, so no extra provider
+  # I/O; change-gated plus a heartbeat so the 60s probe lane does not
+  # write a row per probe. Retention is purged by age AND per-source cap,
+  # and an admin can override both live in Platform settings.
+  INSIGHTS_HISTORY_ENABLED: {{ .Values.config.history.enabled | quote }}
+  INSIGHTS_HISTORY_HEARTBEAT_SECS: {{ .Values.config.history.heartbeatSecs | quote }}
+  INSIGHTS_HISTORY_RETENTION_DAYS: {{ .Values.config.history.retentionDays | quote }}
+  INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE: {{ .Values.config.history.maxRowsPerSource | quote }}
+  INSIGHTS_HISTORY_PURGE_INTERVAL_SECS: {{ .Values.config.history.purgeIntervalSecs | quote }}

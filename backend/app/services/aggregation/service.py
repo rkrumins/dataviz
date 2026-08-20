@@ -2491,6 +2491,7 @@ class AggregationService:
                 edge_count=int(getattr(stats, "total_edges", 0) or 0),
                 entity_type_counts=json.dumps(entity),
                 edge_type_counts=json.dumps(edges),
+                lane="sweep",
             )
             factory = self._session_factory
             if factory is not None:

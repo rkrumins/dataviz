@@ -269,6 +269,42 @@ STATS_CACHE_ABSOLUTE_EXPIRY_SECS: int = int(os.getenv("STATS_CACHE_ABSOLUTE_EXPI
 STATS_SERVICE_LAGGING_THRESHOLD_SECS: int = int(os.getenv("STATS_SERVICE_LAGGING_THRESHOLD_SECS", "60"))
 STATS_SERVICE_UNREACHABLE_THRESHOLD_SECS: int = int(os.getenv("STATS_SERVICE_UNREACHABLE_THRESHOLD_SECS", "600"))
 
+# ── Counts history (data_source_count_snapshots) ────────────────────
+# The append-only twin of data_source_stats: what a source looked like at
+# a point in time, per label, with the delta against the previous
+# observation. Capture happens inside the stats repo's counts write, so
+# every lane (probe, poll, deep, sweep, app writes) feeds one series and
+# no new provider I/O is added anywhere.
+#
+# These live here rather than in insights_service/config.py because BOTH
+# tiers read them: the web tier captures on its own write paths and serves
+# the history API, the insights service captures and purges.
+INSIGHTS_HISTORY_ENABLED: bool = os.getenv("INSIGHTS_HISTORY_ENABLED", "true").lower() == "true"
+
+# Continuity row when nothing changed. Capture is change-gated on
+# counts_digest, so a graph nobody is writing to would otherwise leave a
+# 30-day hole that reads identically to "we lost the data". One row an
+# hour is ~720/source/month — cheap enough to be unconditional, dense
+# enough that a flat line is provably flat.
+INSIGHTS_HISTORY_HEARTBEAT_SECS: int = int(os.getenv("INSIGHTS_HISTORY_HEARTBEAT_SECS", "3600"))
+
+# Age purge. 90 days against a 30-day product requirement: the extra
+# headroom is what lets someone investigating a month-old incident still
+# see the month BEFORE it, which is usually the actual question.
+INSIGHTS_HISTORY_RETENTION_DAYS: int = int(os.getenv("INSIGHTS_HISTORY_RETENTION_DAYS", "90"))
+
+# Per-source row cap, applied alongside (not instead of) the age cutoff.
+# The age cutoff alone is unbounded in the bad case — a source thrashing
+# under a broken loader can change every 60s probe, which is 43k rows a
+# month. This is the backstop that keeps one pathological source from
+# dominating the table.
+INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE: int = int(os.getenv("INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE", "5000"))
+
+# Purge cadence. Its own knob rather than being pinned to the stream-trim
+# interval it currently rides on, so retention can be tuned without
+# touching Redis housekeeping.
+INSIGHTS_HISTORY_PURGE_INTERVAL_SECS: int = int(os.getenv("INSIGHTS_HISTORY_PURGE_INTERVAL_SECS", "3600"))
+
 # ── Discovery (pre-registration asset cache) ────────────────────────
 # Cadence for the background ``run_discovery_scheduler`` coroutine.
 # Each tick fans out enqueue calls for every active provider's

@@ -48,6 +48,7 @@ from .redis_streams import (
 from .scheduler import (
     get_discovery_scheduler_status,
     get_due_backlog,
+    get_history_purge_status,
     get_scheduler_status,
     run_discovery_scheduler,
     run_scheduler,
@@ -96,6 +97,7 @@ _REQUIRED_TABLES = (
     "workspace_data_sources",
     "data_source_polling_configs",
     "data_source_stats",
+    "data_source_count_snapshots",
 )
 
 
@@ -306,6 +308,7 @@ async def main(args: argparse.Namespace) -> None:
             "kinds": dispatcher.registered_kinds(),
             "scheduler": get_scheduler_status(),
             "discovery_scheduler": get_discovery_scheduler_status(),
+            "history_purge": get_history_purge_status(),
             **_health_snapshot,
         },
     )

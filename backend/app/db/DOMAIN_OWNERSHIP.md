@@ -40,7 +40,7 @@ each domain as a well-fenced module in one service.
 | **ontology** | `ontologies`, `ontology_audit_log`, `ontology_source_mappings` | Versioned + immutable audit log. `revision` is the optimistic concurrency token. |
 | **visualization** | `context_models`, `views`, `view_favourites` | References ontology + workspace by ID only. `ontology_digest` captures schema fingerprint at save time. |
 | **aggregation** | `aggregation_jobs`, `data_source_polling_configs`, `reconcile_runs` | Job lifecycle. Hot writes (checkpoints). `reconcile_runs` is one row per reconciliation sweep (not per data source), trimmed to 30 days. |
-| **stats** | `data_source_stats` | Read-mostly cache. Tolerant of staleness. |
+| **stats** | `data_source_stats`, `data_source_count_snapshots` | `data_source_stats` is a read-mostly cache, tolerant of staleness. `data_source_count_snapshots` is its append-only twin — one row per observed change (plus an hourly heartbeat), purged by age and per-source cap. It carries denormalised `workspace_id`/`provider_id` so the per-provider rollup never JOINs out of this domain. |
 | **platform** | `feature_flags`, `feature_categories`, `feature_definitions`, `feature_registry_meta`, `announcements`, `announcement_config`, `management_db_config`, `schema_migrations` | Reference + global config. |
 | **events** | `outbox_events` | Cross-domain contract. Every domain writes here; consumers drain. |
 | **legacy (deprecated)** | `graph_connections` | Do not write to it. Slated for removal. |
@@ -58,7 +58,7 @@ already:
 | workspace → catalog item | `workspace_data_sources.catalog_item_id` | Same pattern. |
 | aggregation → workspace | `aggregation_jobs.data_source_id` | Aggregation resolves workspace via `workspace_data_sources.workspace_id` today (lint-flagged cross-domain JOIN in `service.py:list_jobs_global`). When a real tenant-filtering query is needed, add a denormalised `workspace_id` column then — not before. |
 | visualization → workspace | `views.workspace_id`, `views.data_source_id` | `views` owns its own `workspace_id` FK (intra-schema). |
-| stats → workspace | `data_source_stats.data_source_id` | Stats does not need workspace awareness today. |
+| stats → workspace | `data_source_stats.data_source_id`, `data_source_count_snapshots.{data_source_id,workspace_id}` | `data_source_stats` does not need workspace awareness. The snapshot table denormalises `workspace_id`/`provider_id` at capture time — the "add a denormalised column when a real tenant-filtering query is needed" case above — so the per-provider history rollup reads the stats domain alone. It also has no FK: an audit trail must outlive the row it describes. |
 | identity → identity | `user_roles.user_id`, `user_approvals.user_id` | Intra-domain — keep DB FK forever. |
 | visualization → visualization | `views.context_model_id`, `view_favourites.view_id` | Intra-domain. |
 | ontology → ontology | `ontology_audit_log.ontology_id`, `ontology_source_mappings.ontology_id` | Intra-domain. |

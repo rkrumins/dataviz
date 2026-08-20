@@ -66,3 +66,137 @@ export interface AssetStatsPayload {
     entityTypeCounts: Record<string, number>
     edgeTypeCounts: Record<string, number>
 }
+
+/** Historical entity counts.
+ *
+ *  Mirrors `HistoryPoint` / `LabelSeriesSummary` / `HistorySummary` /
+ *  `CountHistoryPayload` / `ProviderHistoryPayload` in
+ *  `backend/app/api/v1/endpoints/insights.py`. snake_case on the wire, like
+ *  the rest of the insights surface. */
+
+/** One observation of a data source's counts.
+ *
+ *  `node_min`/`node_max` are the extremes within the bucket and are present
+ *  only at hour/day grain — a single closing value per bucket would hide a
+ *  drop that happened and recovered inside it, which is the exact event this
+ *  view exists to surface.
+ *
+ *  `node_delta` is relative to the previous snapshot, and is null on the first
+ *  one (there is no predecessor a reader could open). */
+export interface HistoryPoint {
+    at: string
+    node_count: number
+    edge_count: number
+    entity_type_counts: Record<string, number>
+    edge_type_counts: Record<string, number>
+    node_delta: number | null
+    edge_delta: number | null
+    node_min: number | null
+    node_max: number | null
+    /** Which collection lane observed it. */
+    lane: 'probe' | 'poll' | 'deep' | 'sweep' | 'write'
+    /** `heartbeat` rows are continuity, not events — the change ledger filters
+     *  them out so a reader sees movement rather than ticks. */
+    capture_reason: 'first' | 'changed' | 'heartbeat'
+}
+
+export interface LabelSeriesSummary {
+    label: string
+    first: number
+    last: number
+    delta: number
+    state: 'steady' | 'grew' | 'shrank' | 'new' | 'gone'
+    /** One value per point in the window; absence in a snapshot is 0, not a
+     *  gap — the probe lane drops zero-count buckets rather than reporting
+     *  them, so absence IS zero. */
+    points: number[]
+}
+
+/** The largest single negative movement in the window, computed from the raw
+ *  rows rather than the downsampled points. */
+export interface HistoryDrop {
+    at: string
+    label: string | null
+    before: number
+    after: number
+    delta: number
+}
+
+export interface HistorySummary {
+    node_first: number
+    node_last: number
+    node_delta: number
+    node_pct_change: number | null
+    edge_first: number
+    edge_last: number
+    edge_delta: number
+    edge_pct_change: number | null
+    snapshots: number
+    changed_snapshots: number
+    labels_added: string[]
+    labels_removed: string[]
+    largest_drop: HistoryDrop | null
+    /** Oldest snapshot held at ANY age. Without it, a series that simply
+     *  started last Tuesday reads identically to one that lost everything
+     *  before Tuesday. */
+    coverage_from: string | null
+    retention_days: number
+}
+
+export interface CountHistoryPayload {
+    data_source_id: string
+    from: string
+    to: string
+    grain: 'raw' | 'hour' | 'day'
+    points: HistoryPoint[]
+    labels: LabelSeriesSummary[]
+    edge_labels: LabelSeriesSummary[]
+    summary: HistorySummary
+}
+
+export interface ProviderHistoryTotal {
+    at: string
+    node_count: number
+    edge_count: number
+    /** How many sources had been observed at least once by this bucket. */
+    sources: number
+}
+
+export interface ProviderSeriesEntry {
+    data_source_id: string
+    name: string
+    points: Array<{ at: string; node_count: number; edge_count: number }>
+}
+
+export interface ProviderHistoryPayload {
+    provider_id: string
+    from: string
+    to: string
+    grain: 'hour' | 'day'
+    totals: ProviderHistoryTotal[]
+    sources: ProviderSeriesEntry[]
+    retention_days: number
+}
+
+/** Mirrors `HistoryRetentionResponse` in
+ *  `backend/app/api/v1/endpoints/platform_settings.py`. This one IS camelCase
+ *  — it is a platform-settings route, not an insights envelope. */
+export interface HistoryRetentionPolicy {
+    /** null = inheriting the env default. */
+    retentionDays: number | null
+    maxRowsPerSource: number | null
+    heartbeatSecs: number | null
+    envRetentionDays: number
+    envMaxRowsPerSource: number
+    envHeartbeatSecs: number
+    effectiveRetentionDays: number
+    effectiveMaxRowsPerSource: number
+    effectiveHeartbeatSecs: number
+    enabled: boolean
+}
+
+export interface HistoryRetentionUpdate {
+    retentionDays?: number
+    maxRowsPerSource?: number
+    heartbeatSecs?: number
+}

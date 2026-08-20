@@ -36,6 +36,7 @@ const AdminAudit = lazyWithRetry(() => import('@/components/admin/AdminAudit').t
 const AdminTelemetry = lazyWithRetry(() => import('@/components/admin/AdminTelemetry/index').then(m => ({ default: m.AdminTelemetry })))
 const IngestionPage = lazyWithRetry(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const DataSourceOverviewPage = lazyWithRetry(() => import('@/pages/DataSourceOverviewPage').then(m => ({ default: m.DataSourceOverviewPage })))
+const DataSourceHistoryPage = lazyWithRetry(() => import('@/pages/DataSourceHistoryPage').then(m => ({ default: m.DataSourceHistoryPage })))
 const WorkspacesPage = lazyWithRetry(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
 const WorkspaceDetailPage = lazyWithRetry(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
 const WorkspaceReviewsPage = lazyWithRetry(() => import('@/pages/WorkspaceReviewsPage').then(m => ({ default: m.WorkspaceReviewsPage })))
@@ -165,6 +166,9 @@ export const router = createBrowserRouter([
       // Reached from the Ingestion → Data Sources list; content self-gates
       // via permission-scoped catalog reads.
       { path: 'datasources/:catalogId', element: <Lazy><DataSourceOverviewPage /></Lazy> },
+      // Counts over time for that data source. Same gating as the
+      // overview above — it self-gates through permission-scoped reads.
+      { path: 'datasources/:catalogId/history', element: <Lazy><DataSourceHistoryPage /></Lazy> },
 
       // Top-level Workspaces (listing + detail/management). Workspace visuals
       // are view-driven — see /views and /explorer; there is no standalone canvas.

@@ -1,8 +1,9 @@
 """Platform-wide defaults.
 
-Currently just the node-identity mapping — the bottom of the resolution chain
-in ``backend.app.services.node_identity``, applied to every data source that
-does not resolve one from its own row, its provider, or its workspace.
+Two of them: the node-identity mapping — the bottom of the resolution chain in
+``backend.app.services.node_identity``, applied to every data source that does
+not resolve one from its own row, its provider, or its workspace — and the
+counts-history retention policy.
 
 This is the level an operator reaches for when a whole deployment's graphs are
 shaped the same way (everything keys on ``id``, everything names on ``title``),
@@ -134,3 +135,128 @@ async def put_node_identity_defaults(
         await invalidate_node_identity(session, scopes, "platform_identity_changed")
 
     return _to_response(await session.get(PlatformSettingsORM, 1))
+
+
+# ── Counts-history retention ────────────────────────────────────────
+#
+# Same "persisted ?? default" contract as the node-identity block above, for
+# the same reason: retention is a knob an operator reaches for in response to
+# something (a table growing faster than expected, an audit that needs a
+# longer window), and making that a redeploy — with nobody recorded as having
+# done it — is exactly the failure mode ``platform_settings`` exists to fix.
+
+_UNSET = -1
+
+
+class HistoryRetentionRequest(BaseModel):
+    """Partial update. Absent = untouched; ``-1`` = clear back to the env
+    default. ``-1`` rather than ``null`` as the clear sentinel because absent
+    and null are indistinguishable over JSON for an optional int, and the
+    difference between "don't touch this" and "reset this" is the whole point
+    of a partial update."""
+
+    retention_days: Optional[int] = Field(None, alias="retentionDays", ge=_UNSET)
+    max_rows_per_source: Optional[int] = Field(
+        None, alias="maxRowsPerSource", ge=_UNSET)
+    heartbeat_secs: Optional[int] = Field(None, alias="heartbeatSecs", ge=_UNSET)
+
+    class Config:
+        populate_by_name = True
+
+
+class HistoryRetentionResponse(BaseModel):
+    #: What is persisted. ``None`` = inheriting the env default.
+    retention_days: Optional[int] = Field(None, alias="retentionDays")
+    max_rows_per_source: Optional[int] = Field(None, alias="maxRowsPerSource")
+    heartbeat_secs: Optional[int] = Field(None, alias="heartbeatSecs")
+    #: The env defaults behind them, so the editor seeds from the real value
+    #: and a no-op save round-trips it instead of pinning what the UI rendered.
+    env_retention_days: int = Field(0, alias="envRetentionDays")
+    env_max_rows_per_source: int = Field(0, alias="envMaxRowsPerSource")
+    env_heartbeat_secs: int = Field(0, alias="envHeartbeatSecs")
+    #: What is actually in force right now, after the ?? and the clamps.
+    effective_retention_days: int = Field(0, alias="effectiveRetentionDays")
+    effective_max_rows_per_source: int = Field(0, alias="effectiveMaxRowsPerSource")
+    effective_heartbeat_secs: int = Field(0, alias="effectiveHeartbeatSecs")
+    #: False when INSIGHTS_HISTORY_ENABLED is off — the editor then explains
+    #: that nothing is being captured rather than showing live-looking knobs.
+    enabled: bool = True
+
+    class Config:
+        populate_by_name = True
+
+
+async def _history_response(session: AsyncSession) -> HistoryRetentionResponse:
+    from backend.app.db.repositories import stats_history_repo
+
+    policy = await stats_history_repo.resolve_history_policy(session)
+    return HistoryRetentionResponse(
+        retentionDays=policy.persisted_retention_days,
+        maxRowsPerSource=policy.persisted_max_rows_per_source,
+        heartbeatSecs=policy.persisted_heartbeat_secs,
+        envRetentionDays=policy.env_retention_days,
+        envMaxRowsPerSource=policy.env_max_rows_per_source,
+        envHeartbeatSecs=policy.env_heartbeat_secs,
+        effectiveRetentionDays=policy.retention_days,
+        effectiveMaxRowsPerSource=policy.max_rows_per_source,
+        effectiveHeartbeatSecs=policy.heartbeat_secs,
+        enabled=policy.enabled,
+    )
+
+
+@router.get(
+    "/history-retention",
+    response_model=HistoryRetentionResponse,
+    summary="Get the counts-history retention policy",
+    dependencies=[Depends(_REQUIRES_SYSTEM_ADMIN)],
+)
+async def get_history_retention(
+    session: AsyncSession = Depends(get_db_session),
+):
+    return await _history_response(session)
+
+
+@router.put(
+    "/history-retention",
+    response_model=HistoryRetentionResponse,
+    summary="Set the counts-history retention policy",
+    dependencies=[Depends(_REQUIRES_SYSTEM_ADMIN)],
+)
+async def put_history_retention(
+    req: HistoryRetentionRequest = Body(...),
+    user: User = Depends(_REQUIRES_SYSTEM_ADMIN),
+    session: AsyncSession = Depends(get_db_session),
+):
+    from backend.app.db.repositories.stats_history_repo import (
+        invalidate_history_policy_cache,
+    )
+
+    row = await session.get(PlatformSettingsORM, 1)
+    if row is None:
+        row = PlatformSettingsORM(id=1)
+        session.add(row)
+
+    for field, column in (
+        ("retention_days", "history_retention_days"),
+        ("max_rows_per_source", "history_max_rows_per_source"),
+        ("heartbeat_secs", "history_heartbeat_secs"),
+    ):
+        value = getattr(req, field)
+        if value is None:
+            continue
+        setattr(row, column, None if value == _UNSET else value)
+
+    row.updated_at = datetime.now(timezone.utc).isoformat()
+    row.updated_by = getattr(user, "id", None)
+    await session.commit()
+
+    # Same-process readers see it immediately; other pods are bounded by the
+    # policy memo's 30s TTL. Nothing needs re-aggregating — unlike the
+    # node-identity defaults above, this changes only how long rows are kept.
+    invalidate_history_policy_cache()
+    logger.info(
+        "Counts-history retention updated by %s: days=%s rows=%s heartbeat=%s",
+        getattr(user, "id", None), row.history_retention_days,
+        row.history_max_rows_per_source, row.history_heartbeat_secs,
+    )
+    return await _history_response(session)

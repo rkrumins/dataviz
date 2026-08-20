@@ -216,6 +216,14 @@ class PlatformSettingsORM(Base):
     id = Column(Integer, primary_key=True, default=1)
     identity_property = Column(Text, nullable=True)
     name_property = Column(Text, nullable=True)
+    # Counts-history retention, same "NULL means unset" semantics as the
+    # identity columns above: unset falls through to the INSIGHTS_HISTORY_*
+    # env defaults. Here rather than in env alone for the reason this table
+    # exists at all — retention is the kind of knob an operator changes in
+    # response to something, and a row carries ``updated_by``.
+    history_retention_days = Column(Integer, nullable=True)
+    history_max_rows_per_source = Column(Integer, nullable=True)
+    history_heartbeat_secs = Column(Integer, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 
@@ -1036,6 +1044,14 @@ class DataSourceStatsORM(Base):
     counts_digest = Column(Text, nullable=True)
     last_probed_at = Column(Text, nullable=True)
 
+    # Counts-history cadence marker. The history capture is change-gated on
+    # ``counts_digest``; this is what lets it also emit a continuity row when
+    # nothing has changed for a while, without a second query — the row is
+    # already loaded by the upsert that would capture. Same role
+    # ``last_probed_at`` plays for the probe lane. NULL until the first
+    # snapshot lands.
+    last_snapshot_at = Column(Text, nullable=True)
+
     __table_args__ = (
         Index("ix_ds_stats_probe_due", "last_probed_at"),
     )
@@ -1045,6 +1061,99 @@ class DataSourceStatsORM(Base):
 
     def __repr__(self) -> str:
         return f"<DataSourceStats ds_id={self.data_source_id!r}>"
+
+
+# ------------------------------------------------------------------ #
+# data_source_count_snapshots (historical entity counts)               #
+# ------------------------------------------------------------------ #
+
+class DataSourceCountSnapshotORM(Base):
+    """One observation of a data source's entity/edge counts, kept forever
+    (until purged) instead of overwritten.
+
+    ``data_source_stats`` answers "how big is this graph NOW" and destroys the
+    previous answer on every write. This table is the append-only twin: what
+    the graph looked like at a point in time, broken down per label, with the
+    delta against the observation it replaced. It is what makes "an external
+    loader deleted half of this on Tuesday" a question anyone can answer.
+
+    **Not written on every counts poll.** Capture is change-gated on
+    ``counts_digest`` plus a heartbeat — see
+    ``stats_history_repo.maybe_capture_snapshot``. A source polled every 60s by
+    the drift probe produces a row when something actually moves and one
+    continuity row an hour otherwise, not 1,440 identical rows a day.
+
+    **No foreign key**, deliberately, and unlike ``data_source_stats``: this is
+    an audit trail, and the history of a source that was removed is exactly the
+    history someone comes looking for. ``data_source_id`` is a logical
+    reference, the same convention ``refresh_events`` already uses. Purge is
+    the only thing that deletes rows here.
+    """
+
+    __tablename__ = "data_source_count_snapshots"
+
+    id = Column(Text, primary_key=True, default=lambda: f"snp_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(Text, nullable=False)
+    captured_at = Column(Text, nullable=False, default=_now)
+
+    # Denormalised rollup keys. DOMAIN_OWNERSHIP.md sanctions exactly this
+    # ("add a denormalised workspace_id column when a real tenant-filtering
+    # query is needed") and here it earns its keep twice: the per-provider
+    # rollup reads this table alone instead of JOINing out of the stats domain
+    # into workspace/provider, and a row still names what it described after
+    # the data source row is gone.
+    workspace_id = Column(Text, nullable=True)
+    provider_id = Column(Text, nullable=True)
+    graph_name = Column(Text, nullable=True)
+
+    node_count = Column(Integer, nullable=False, default=0)
+    edge_count = Column(Integer, nullable=False, default=0)
+    entity_type_counts = Column(Text, nullable=False, default="{}")  # JSON {label: n}
+    edge_type_counts = Column(Text, nullable=False, default="{}")    # JSON {type: n}
+    # The same digest ``data_source_stats.counts_digest`` carries, stored beside
+    # the counts it describes so "did this observation differ from the last
+    # one" stays answerable from this table alone.
+    counts_digest = Column(Text, nullable=False, default="")
+
+    # Which collection lane observed it. Kept because the lanes have very
+    # different cost and cadence, and "only the hourly sweep ever sees this
+    # source" is a real diagnosis.
+    lane = Column(Text, nullable=False, default="poll")
+    # Why the row exists. ``heartbeat`` rows are continuity, not events — the
+    # change ledger filters to ``changed`` so a reader sees movement, not ticks.
+    # NOT named ``trigger``: that is a reserved word in SQL.
+    capture_reason = Column(Text, nullable=False, default="changed")
+
+    # Deltas against the observation this one replaced. NULL on the first
+    # snapshot of a source, which has nothing to be a delta from.
+    prev_captured_at = Column(Text, nullable=True)
+    node_delta = Column(Integer, nullable=True)
+    edge_delta = Column(Integer, nullable=True)
+    # JSON: {"nodes": {"added": {lbl: n}, "removed": {lbl: n},
+    #                  "changed": {lbl: [before, after]}}, "edges": {...}}
+    # Stored rather than derived on read so a purged neighbour cannot silently
+    # change what a surviving row says happened.
+    type_deltas = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_dscs_ds_captured", "data_source_id", "captured_at"),
+        Index("ix_dscs_captured", "captured_at"),
+        Index("ix_dscs_provider_captured", "provider_id", "captured_at"),
+        CheckConstraint(
+            "lane IN ('probe', 'poll', 'deep', 'sweep', 'write')",
+            name="ck_dscs_lane",
+        ),
+        CheckConstraint(
+            "capture_reason IN ('first', 'changed', 'heartbeat')",
+            name="ck_dscs_reason",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataSourceCountSnapshot ds_id={self.data_source_id!r} "
+            f"at={self.captured_at!r} nodes={self.node_count}>"
+        )
 
 
 # ------------------------------------------------------------------ #

@@ -521,6 +521,7 @@ async def add_data_source(
                     edge_count=int(payload.get("edgeCount") or 0),
                     entity_type_counts=_json.dumps(payload.get("entityTypeCounts", {})),
                     edge_type_counts=_json.dumps(payload.get("edgeTypeCounts", {})),
+                    lane="write",
                 )
         except Exception:
             pass  # seed is a bonus; the poll below is the real refresh

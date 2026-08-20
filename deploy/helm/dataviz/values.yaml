@@ -60,6 +60,17 @@ config:
     pollTimeoutLargeSecs: "600"
     pollLargeThreshold: "100000"
 
+  # Counts history (data_source_count_snapshots). retentionDays is the age
+  # cutoff; maxRowsPerSource bounds what one source thrashing under a broken
+  # loader can contribute, which the age cutoff alone cannot. Both are
+  # overridable live by an admin — these are the defaults.
+  history:
+    enabled: "true"
+    heartbeatSecs: "3600"
+    retentionDays: "90"
+    maxRowsPerSource: "5000"
+    purgeIntervalSecs: "3600"
+
 # ── Secrets ───────────────────────────────────────────────────────────
 # create=true renders a Secret from the values below. For production prefer
 # create=false + an existingSecret you created out-of-band (kubectl/SealedSecret).
