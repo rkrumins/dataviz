@@ -8,12 +8,15 @@
  * wherever the graph says instead of where THE VIEW places it.
  *
  * So every chain is anchored at the HIGHEST ancestor the view actually places
- * (`resolveRootLayer`), and ancestors above that anchor are dropped. A chain
- * with no placeable ancestor is never invented into a synthetic lane: it is
- * counted in `outsideView` and reported as a number.
+ * — decided by the canvas's OWN placement chain and rule engine
+ * (`resolveRootLayer` / `buildLayerRules`) — and ancestors above that anchor
+ * are dropped. A chain with no placeable ancestor is never invented into a
+ * synthetic lane: it is counted in `outsideView` and reported as a number.
  *
- * Two kinds of card:
- *  • PARTICIPANTS — on the lineage (focus/up/down/both).
+ * Three kinds of card:
+ *  • THE FOCUS SIDE — the focus and everything inside it. What the reader is
+ *    looking at, never a partner of itself: never counted, never scoped away.
+ *  • PARTNERS — what the lineage led to (up/down/both). The counts count these.
  *  • HOSTS — containment ancestors between an anchor and a participant. They
  *    host, they nest, they are never counted as being on the lineage.
  *
@@ -25,9 +28,10 @@
  */
 import { buildLensSubgraph } from '@/components/canvas/context-view/lens/lens-subgraph'
 import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
+import { resolveLayerAssignment, type GraphNode } from '@/providers/GraphDataProvider'
 import type { HierarchyNode } from '@/types/hierarchy'
 import type { ViewLayerConfig } from '@/types/schema'
-import { resolveRootLayer } from './resolveRootLayer'
+import { buildLayerRules, resolveRootLayer } from './resolveRootLayer'
 
 export interface TraceCard {
   id: string
@@ -46,6 +50,9 @@ export interface TraceCard {
   expanded: boolean
   /** Min lineage hop from the focus subtree (null = host only). */
   hop: number | null
+  /** `'focus'` is the focus SIDE — the focus and everything inside it, which
+   *  is what the reader is looking at rather than something the lineage led
+   *  to. Never a partner: never counted, never scoped away. */
   role: 'focus' | 'up' | 'down' | 'both' | 'host'
   /** The walk node's payload, passed through untouched, so the hierarchy
    *  adapter can hand the canvas renderer the same `data` it always gets. */
@@ -71,12 +78,26 @@ export interface TraceViewInputs {
   /** ≥ 25 ⇒ unlimited. */
   depthUp: number
   depthDown: number
+  /** The rest of the canvas's placement chain, so the overlay anchors a node
+   *  exactly where the canvas behind it would. All optional: omit for a view
+   *  that places purely by assignments and rules. */
+  placement?: {
+    /** The backend's effective assignments, urn → layerId. */
+    backendAssignments?: ReadonlyMap<string, string>
+    /** Open scope only: the layer opting in via `showUnassigned`. */
+    unassignedFallbackLayerId?: string
+    /** URNs created in the active branch's draft — the only nodes a CURATED
+     *  view lets a stamped `layerAssignment` place. */
+    branchCreatedUrns?: ReadonlySet<string>
+  }
 }
 
 export interface TraceView {
   lanes: TraceLane[]
   visible: Set<string>
-  /** Participants whose whole ancestor chain is unplaceable by this view. */
+  /** How many CHAINS this view cannot place anywhere — keyed by the top of
+   *  each unplaceable chain, so a warehouse whose six columns are all outside
+   *  the view counts once. Computed before direction/depth scoping. */
   outsideView: number
   counts: { up: number; down: number }
 }
@@ -99,24 +120,54 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
     frontierDown: i.model.frontierDown,
   })
 
+  // THE FOCUS SIDE: the focus and everything inside it. `buildLensSubgraph`
+  // seeds that whole subtree at hop 0 in BOTH directions, which would read as
+  // role 'both' — as if the focus's own columns were partners of themselves.
+  // They are what the reader is looking at, so they are 'focus': never
+  // counted as a partner, never scoped away by a direction toggle.
+  const focusSide = new Set<string>()
+  const focusStack = [i.focusUrn]
+  while (focusStack.length > 0) {
+    const urn = focusStack.pop()!
+    if (focusSide.has(urn) || !sg.nodes.has(urn)) continue
+    focusSide.add(urn)
+    for (const child of sg.nodes.get(urn)!.children) focusStack.push(child)
+  }
+
   // A hop-1 partner known ONLY through a rollup — the container-grain
   // statement the raw subgraph cannot make, because the raw hops land on
-  // that container's columns rather than on the container itself.
-  const rollupPartners = new Set<string>()
+  // that container's columns rather than on the container itself. The edge's
+  // OWN direction says which side it is on: a rollup INTO the focus comes
+  // from upstream, one out of it goes downstream.
+  const rollupUp = new Set<string>()
+  const rollupDown = new Set<string>()
   for (const e of i.model.lineageEdges) {
     if (e.kind !== 'rollup') continue
-    if (e.sourceUrn === i.focusUrn) rollupPartners.add(e.targetUrn)
-    if (e.targetUrn === i.focusUrn) rollupPartners.add(e.sourceUrn)
+    if (e.targetUrn === i.focusUrn) rollupUp.add(e.sourceUrn)
+    if (e.sourceUrn === i.focusUrn) rollupDown.add(e.targetUrn)
   }
 
   const roleBy = new Map<string, TraceCard['role']>()
-  const hopBy = new Map<string, number | null>()
+  // Per-direction hops, kept apart on purpose: an upstream distance is only
+  // ever measured against depthUp and a downstream one against depthDown.
+  const hopUpBy = new Map<string, number | null>()
+  const hopDownBy = new Map<string, number | null>()
   for (const [urn, n] of sg.nodes) {
-    const up = n.hopUp !== null || i.model.upstreamUrns.has(urn)
-    const down = n.hopDown !== null || i.model.downstreamUrns.has(urn)
-    roleBy.set(urn, n.isFocus ? 'focus' : up && down ? 'both' : up ? 'up' : down ? 'down' : 'host')
-    const hops = [n.hopUp, n.hopDown].filter((h): h is number => h !== null)
-    hopBy.set(urn, hops.length > 0 ? Math.min(...hops) : rollupPartners.has(urn) ? 1 : null)
+    const hopUp = n.hopUp ?? (rollupUp.has(urn) ? 1 : null)
+    const hopDown = n.hopDown ?? (rollupDown.has(urn) ? 1 : null)
+    hopUpBy.set(urn, hopUp)
+    hopDownBy.set(urn, hopDown)
+    if (focusSide.has(urn)) {
+      roleBy.set(urn, 'focus')
+      continue
+    }
+    const up = hopUp !== null || i.model.upstreamUrns.has(urn)
+    const down = hopDown !== null || i.model.downstreamUrns.has(urn)
+    roleBy.set(urn, up && down ? 'both' : up ? 'up' : down ? 'down' : 'host')
+  }
+  const hopOf = (urn: string): number | null => {
+    const hops = [hopUpBy.get(urn) ?? null, hopDownBy.get(urn) ?? null].filter((h): h is number => h !== null)
+    return hops.length > 0 ? Math.min(...hops) : null
   }
   const participants = [...sg.nodes.keys()].filter(u => roleBy.get(u) !== 'host')
 
@@ -130,18 +181,50 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
   }
   const byLabel = (a: string, b: string): number => cmp(labelOf(a), labelOf(b)) || cmp(a, b)
 
-  // PLACEMENT: climb to the HIGHEST ancestor the view places. Rules only bite
-  // in an open view — `resolveRootLayer` closes a curated view to its own
-  // explicit assignments, which is why `snowflake` stays chrome.
-  const ruleFor = (type: string): string | undefined => i.layers.find(l => l.entityTypes.includes(type))?.id
+  // PLACEMENT: climb to the HIGHEST ancestor the view places, deciding each
+  // step with the canvas's OWN chain and the canvas's OWN rule engine — a
+  // hand-rolled `entityTypes.includes` lookalike would place trace cards
+  // somewhere the canvas behind them does not. Rules only bite in an open
+  // view — `resolveRootLayer` closes a curated view to its explicit
+  // assignments, which is why `snowflake` stays chrome.
+  const rules = buildLayerRules([...i.layers].sort((a, b) => a.order - b.order))
+  const validLayerIds = new Set(i.layers.map(l => l.id))
+  const dataOf = (urn: string): Record<string, unknown> =>
+    (sg.nodes.get(urn)?.node.data ?? {}) as Record<string, unknown>
+  // The GraphNode the rule engine matches on — the same mapping the canvas
+  // hook feeds it (useLayerAssignment.ts), so identical inputs match
+  // identically.
+  const graphNodeOf = (urn: string): GraphNode => {
+    const data = dataOf(urn)
+    return {
+      urn: (data.urn as string) || urn,
+      entityType: (data.type as string) || '',
+      displayName: (data.label as string) || (data.businessLabel as string) || urn,
+      properties: data,
+      tags: (data.classifications as string[]) || [],
+    }
+  }
   const layerCache = new Map<string, string | undefined>()
   const layerFor = (urn: string): string | undefined => {
     if (layerCache.has(urn)) return layerCache.get(urn)
+    const stamped = dataOf(urn).layerAssignment
     const layer = resolveRootLayer({
-      nodeId: urn, nodeUrn: urn, nodeLayerProp: undefined, instanceAssignment: undefined,
-      explicitAssignment: i.assignments[urn]?.layerId, viewIsCurated: i.viewIsCurated, branchCreated: false,
-      backendAssignment: undefined, ruleAssignment: ruleFor(typeOf(urn)), inheritedLayerId: undefined,
-      unassignedFallbackLayerId: undefined,
+      nodeId: urn,
+      nodeUrn: urn,
+      // Validated exactly as the hook validates it: a stamped layer that no
+      // longer names a layer of this view cannot strand the node.
+      nodeLayerProp: typeof stamped === 'string' && validLayerIds.has(stamped) ? stamped : undefined,
+      instanceAssignment: undefined,          // a live drag is canvas state, not the overlay's
+      explicitAssignment: i.assignments[urn]?.layerId,
+      viewIsCurated: i.viewIsCurated,
+      branchCreated: i.placement?.branchCreatedUrns?.has(urn) ?? false,
+      backendAssignment: i.placement?.backendAssignments?.get(urn),
+      ruleAssignment: resolveLayerAssignment(graphNodeOf(urn), rules),
+      // Anchors are ROOTS by construction — the climb stops at the highest
+      // placed ancestor — so containment inheritance (and an assignment's
+      // `inheritsChildren`) cannot apply to one.
+      inheritedLayerId: undefined,
+      unassignedFallbackLayerId: i.placement?.unassignedFallbackLayerId,
     })
     layerCache.set(urn, layer)
     return layer
@@ -149,14 +232,20 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
 
   const anchorOf = new Map<string, string>()        // participant → its anchor
   const laneOfAnchor = new Map<string, string>()    // anchor → layerId
-  let outsideView = 0
+  // CHAINS, not participants: a warehouse whose six columns are all outside
+  // the view is ONE thing the reader cannot see, not six. Keyed by the top of
+  // the unplaceable chain, and counted BEFORE scoping — what the view cannot
+  // show does not depend on which direction toggle is currently on.
+  const anchorlessChains = new Set<string>()
   for (const p of participants) {
     let anchor: string | null = null
     let anchorLayer: string | undefined
+    let top = p
     let cursor: string | null = p
     const guard = new Set<string>()
     while (cursor && !guard.has(cursor)) {
       guard.add(cursor)
+      top = cursor
       const layer = layerFor(cursor)
       if (layer) { anchor = cursor; anchorLayer = layer }   // keep climbing: HIGHEST placed wins
       cursor = sg.nodes.get(cursor)?.parent ?? null
@@ -165,23 +254,23 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
       anchorOf.set(p, anchor)
       laneOfAnchor.set(anchor, anchorLayer)
     } else {
-      outsideView += 1
+      anchorlessChains.add(top)
     }
   }
 
   // SCOPE: a participant survives its direction being on and its hop being
   // within that direction's depth. A host has no direction of its own — it
   // survives only by hosting something that survived (below).
+  // Each direction is judged on ITS OWN hop — an upstream distance never
+  // stands in for a downstream one — and a 'both' node survives if EITHER
+  // enabled direction admits it.
   const within = (hop: number | null, depth: number): boolean =>
     depth >= UNLIMITED_DEPTH || (hop !== null && hop <= depth)
   const inScope = (urn: string): boolean => {
     const role = roleBy.get(urn)
     if (role === 'focus') return true
-    const n = sg.nodes.get(urn)
-    if (!n) return false
-    const hop = hopBy.get(urn) ?? null
-    const up = i.showUpstream && within(n.hopUp ?? hop, i.depthUp)
-    const down = i.showDownstream && within(n.hopDown ?? hop, i.depthDown)
+    const up = i.showUpstream && within(hopUpBy.get(urn) ?? null, i.depthUp)
+    const down = i.showDownstream && within(hopDownBy.get(urn) ?? null, i.depthDown)
     return role === 'up' ? up : role === 'down' ? down : role === 'both' ? up || down : false
   }
   const scoped = new Set(participants.filter(p => anchorOf.has(p) && inScope(p)))
@@ -230,9 +319,9 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
         childCount: childCountOf(sg.nodes.get(urn)?.node),
         onLineage: inside,
         expanded: i.traceExpansion.has(urn),
-        hop: hopBy.get(urn) ?? null,
+        hop: hopOf(urn),
         role: roleBy.get(urn) ?? 'host',
-        data: (sg.nodes.get(urn)?.node.data ?? {}) as Record<string, unknown>,
+        data: dataOf(urn),
       })
       return inside + (scoped.has(urn) ? 1 : 0)
     }
@@ -265,7 +354,7 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
     if (role === 'down' || role === 'both') down += 1
   }
 
-  return { lanes, visible, outsideView, counts: { up, down } }
+  return { lanes, visible, outsideView: anchorlessChains.size, counts: { up, down } }
 }
 
 /** The GRAPH's child count, at face value. `?? 0` and never `children.length`:
@@ -280,10 +369,22 @@ function childCountOf(node: LensWalkNode | undefined): number {
  * Adapter for `LayerColumn`: each lane → the `HierarchyNode` trees the canvas
  * already knows how to render, with the trace's own counts on `data` so the
  * renderer reads chevrons and "N on this lineage" from one place.
+ *
+ * The VISIBLE tree only: a closed card emits no children, so a partner renders
+ * closed exactly as the reader left it. Its `data.childCount` is still the
+ * graph's count, which is what keeps the chevron there to be clicked.
  */
 export function lanesToHierarchy(lanes: TraceLane[]): Array<{ layerId: string; nodes: HierarchyNode[] }> {
-  const toHierarchy = (lane: TraceLane, urn: string, parentId: string | undefined): HierarchyNode => {
+  const toHierarchy = (lane: TraceLane, urn: string, parentId: string | undefined, seen: Set<string>): HierarchyNode => {
+    seen.add(urn)
     const card = lane.cards.get(urn)!
+    const children: HierarchyNode[] = []
+    if (card.expanded) {
+      for (const kid of lane.childrenOf.get(urn) ?? []) {
+        if (seen.has(kid) || !lane.cards.has(kid)) continue   // containment-cycle guard
+        children.push(toHierarchy(lane, kid, urn, seen))
+      }
+    }
     return {
       id: card.id,
       typeId: card.type,
@@ -295,7 +396,7 @@ export function lanesToHierarchy(lanes: TraceLane[]): Array<{ layerId: string; n
         traceRole: card.role,
         traceHop: card.hop,
       },
-      children: (lane.childrenOf.get(urn) ?? []).map(kid => toHierarchy(lane, kid, urn)),
+      children,
       ...(parentId === undefined ? {} : { parentId }),
       depth: card.depth,
       urn: card.urn,
@@ -303,8 +404,11 @@ export function lanesToHierarchy(lanes: TraceLane[]): Array<{ layerId: string; n
       tags: [],
     }
   }
-  return lanes.map(lane => ({
-    layerId: lane.layerId,
-    nodes: lane.roots.map(root => toHierarchy(lane, root.id, undefined)),
-  }))
+  return lanes.map(lane => {
+    const seen = new Set<string>()
+    return {
+      layerId: lane.layerId,
+      nodes: lane.roots.map(root => toHierarchy(lane, root.id, undefined, seen)),
+    }
+  })
 }

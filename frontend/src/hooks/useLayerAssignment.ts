@@ -14,12 +14,11 @@ import {
   type GraphNode,
   resolveLayerAssignment,
   type LayerAssignmentRule,
-  type EntityType,
 } from '@/providers/GraphDataProvider'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { compareOrderKeys } from '@/utils/orderKeys'
 import { useBranchCreatedDelta } from './useBranchCreatedDelta'
-import { resolveRootLayer } from './lib/resolveRootLayer'
+import { buildLayerRules, resolveRootLayer } from './lib/resolveRootLayer'
 
 // ============================================
 // Types
@@ -107,45 +106,9 @@ export function useLayerAssignment({
   const liveBranchCreatedUrns = useBranchCreatedDelta()
   const branchCreatedDelta = branchCreatedUrnsOption ?? liveBranchCreatedUrns
 
-  // Build layer assignment rules
-  const layerRules = useMemo<LayerAssignmentRule[]>(() => {
-    const generatedRules: LayerAssignmentRule[] = []
-
-    sortedLayers.forEach(layer => {
-      // 1. Explicit rules from config
-      if (layer.rules) {
-        layer.rules.forEach(rule => {
-          generatedRules.push({
-            id: rule.id,
-            layerId: layer.id,
-            entityTypes: (rule.entityTypes ?? []) as EntityType[],
-            tags: rule.tags,
-            urnPattern: rule.urnPattern,
-            propertyMatch: rule.propertyMatch,
-            priority: rule.priority
-          })
-        })
-      }
-
-      // 2. Auto-generate entity-type rules from layer.entityTypes.
-      // When a layer declares entityTypes: ['glossary', 'term'], nodes of those
-      // types are automatically routed here — this is the primary ontology-driven
-      // assignment mechanism. Explicit entity assignments and rules above take
-      // precedence (higher priority values win in resolveLayerAssignment).
-      if (layer.entityTypes && layer.entityTypes.length > 0) {
-        layer.entityTypes.forEach((entityType, idx) => {
-          generatedRules.push({
-            id: `${layer.id}-type-${entityType}`,
-            layerId: layer.id,
-            entityTypes: [entityType],
-            priority: layer.order * 10 + idx,
-          })
-        })
-      }
-    })
-
-    return generatedRules
-  }, [sortedLayers])
+  // Build layer assignment rules (shared with the trace overlay — see
+  // buildLayerRules in lib/resolveRootLayer)
+  const layerRules = useMemo<LayerAssignmentRule[]>(() => buildLayerRules(sortedLayers), [sortedLayers])
 
   // Core Logic: Group nodes by layer with Deep Inheritance support
   const nodesByLayer = useMemo(() => {
