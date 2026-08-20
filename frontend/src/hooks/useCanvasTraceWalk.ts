@@ -39,8 +39,10 @@ const EMPTY_URNS: ReadonlySet<string> = new Set()
 export interface CanvasTraceWalk {
     isTracing: boolean
     tracedUrn: string | null
-    /** Trace this urn. A different urn exits the current session first. */
-    start: (urn: string) => void
+    /** Trace this urn. A different urn exits the current session first.
+     *  `grain: 'coarse'` = the scale-safe roots+1 picture (container
+     *  foci); omitted/'fine' = the leaf-grain closure (leaf foci). */
+    start: (urn: string, grain?: 'coarse' | 'fine') => void
     /** Purge everything the trace merged; back to browse. */
     exit: () => void
     /** Status/error/model for the trace bar and counts. */
@@ -60,7 +62,8 @@ export interface CanvasTraceWalk {
 
 export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTraceWalk {
     const [tracedUrn, setTracedUrn] = useState<string | null>(null)
-    const walk = useLensWalk(tracedUrn, provider, FULL_WALK_INITIAL_DEPTH, true)
+    const [traceGrain, setTraceGrain] = useState<'coarse' | 'fine' | undefined>(undefined)
+    const walk = useLensWalk(tracedUrn, provider, FULL_WALK_INITIAL_DEPTH, true, traceGrain)
 
     const walkEntry = tracedUrn ? walk.walkFor(tracedUrn) : null
     // Hands-free continuation lives in the ENGINE (useLensWalk auto-grants
@@ -101,9 +104,10 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         setTracedUrn(null)
     }, [addedEdgeIds])
 
-    const start = useCallback((urn: string) => {
+    const start = useCallback((urn: string, grain?: 'coarse' | 'fine') => {
         if (!urn || tracedUrn === urn) return
         if (tracedUrn) exit()
+        setTraceGrain(grain)
         setTracedUrn(urn)
     }, [tracedUrn, exit])
 

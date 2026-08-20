@@ -197,6 +197,11 @@ class TraceClosureRequest(BaseModel):
     # descendants (urn > cursor) and walks from those. Mutually exclusive
     # with afterCursor and seedUrns (endpoint-validated).
     seed_cursor: Optional[str] = Field(None, alias="seedCursor")
+    # GRAIN-ADAPTIVE trace (2026-08-20): 'coarse' asks for the flow at
+    # ROOTS + ONE LEVEL DOWN from the materialised rollup lane — instant
+    # and complete at that grain on any graph size; expansion refines
+    # locally. Omitted/'fine' = the raw leaf-grain closure walk.
+    grain: Optional[Literal["coarse", "fine"]] = Field(None, alias="grain")
 
     class Config:
         populate_by_name = True

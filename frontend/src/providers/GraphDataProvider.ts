@@ -558,6 +558,10 @@ export interface TraceClosureRequest {
      *  the NEXT keyset page of the focus's lineage-bearing contents and
      *  walks from those. Mutually exclusive with afterCursor/seedUrns. */
     seedCursor?: string
+    /** GRAIN-ADAPTIVE trace (2026-08-20): 'coarse' = the flow at ROOTS +
+     *  ONE LEVEL DOWN from the rollup lane — instant and complete at that
+     *  grain on any graph size. Omitted/'fine' = the leaf-grain closure. */
+    grain?: 'coarse' | 'fine'
 }
 
 /** One frontier boundary node as the closure wire ships it — pre-normalization.

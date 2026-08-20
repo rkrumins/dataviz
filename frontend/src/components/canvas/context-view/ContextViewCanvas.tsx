@@ -128,7 +128,6 @@ import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
 /** The native canvas trace has no per-edge drilldowns — the closure walk
  *  model is complete at leaf grain. One shared empty map keeps the trace
  *  filter's memo quiet. */
-const EMPTY_DRILLDOWNS: Map<string, TraceV2Result> = new Map()
 
 /** The ephemeral trace lane — see `assignmentLayers` below. Ordered last,
  *  indigo like the trace identity, and never persisted anywhere. */
@@ -1677,8 +1676,15 @@ export function ContextViewCanvas({
   const beginTrace = useCallback((urn: string) => {
     setShowLineageFlow(true)
     useCanvasStore.getState().closeNodeDrawer()
-    canvasTrace.start(urn)
-  }, [canvasTrace])
+    // GRAIN-ADAPTIVE (2026-08-20 rework): a CONTAINER focus traces at the
+    // scale-safe coarse grain — roots + one level down from the rollup
+    // lane, instant and complete at that grain; expansion refines
+    // locally. A LEAF focus keeps the certified fine closure.
+    const node = displayMap.get(urn)
+    const hasChildren = (childMap.get(urn)?.length ?? 0) > 0
+      || ((node?.data?.childCount as number | undefined) ?? 0) > 0
+    canvasTrace.start(urn, hasChildren ? 'coarse' : 'fine')
+  }, [canvasTrace, displayMap, childMap])
 
   // `direction` presets the VIEW (the dock's ↑/⇅/↓ mode — Root Cause /
   // Impact / Full Lineage); the walk itself always fetches both ways, so
@@ -1933,8 +1939,9 @@ export function ContextViewCanvas({
     isTracing: traceActive,
     traceNodes: traceVisibleUrns,
     // The closure walk model is already complete at leaf grain — there
-    // are no per-edge drilldowns in the native trace.
-    drilldowns: EMPTY_DRILLDOWNS,
+    // Drilldowns reveal refined slices in BOTH modes — the native coarse
+    // trace refines via the same expandAggregated drill cache.
+    drilldowns: trace.drilldowns,
     parentMap,
     childMap,
     expandedNodes: expandedForRender,
@@ -2887,7 +2894,9 @@ export function ContextViewCanvas({
   // single merged result. The drilldowns cache still keys per (s, t, lvl)
   // so re-expanding a previously-drilled node remains a no-op.
   const autoDrillOnExpand = useCallback(async (nodeId: string) => {
-    if (!trace.isTracing) return
+    // Legacy AND native sessions refine on expand: the coarse (roots+1)
+    // trace drills its rollup edges one grain finer per opened container.
+    if (!trace.isTracing && !traceActive) return
     const node = nodes.find(n => n.id === nodeId)
     if (!node) return
     const nodeUrn = (node.data?.urn as string) ?? nodeId
@@ -2962,7 +2971,7 @@ export function ContextViewCanvas({
         // result; the historical reason this was disabled (canvas
         // overload) no longer applies.
         await loadChildrenSorted(nodeId)
-        if (trace.isTracing) {
+        if (trace.isTracing || traceActive) {
           // Fire-and-forget: drill runs in the background and merges into
           // the canvas as it returns. No await — the children are already
           // visible from loadChildren above.

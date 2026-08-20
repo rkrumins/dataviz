@@ -829,3 +829,25 @@ describe('useLensWalk — "Load everything" flips full walk on MID-SESSION', () 
     expect(result.current.walkFor('F')!.model.nodes.map(n => n.urn).sort()).toEqual(['F', 'up1', 'up2'])
   })
 })
+
+describe('useLensWalk — GRAIN-ADAPTIVE (2026-08-20: coarse roots+1 for containers)', () => {
+  const f = (urn: string) => ({ urn, level: 0, entityType: 'dataset' })
+
+  it("grain 'coarse' rides the initial fetch and its escalations", async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+      calls.push(req)
+      if (req.maxNodes) return closureResult({ focus: f('F'), nodes: [gn('more')] })
+      return closureResult({
+        focus: f('F'), nodes: [gn('F'), gn('R1')],
+        truncated: true, truncationReason: 'max_nodes',
+        frontierUp: Array.from({ length: 30 }, (_, i) => ({ urn: `r${i}`, totalCount: 1, nextCursor: null })),
+      })
+    })
+    const provider = { traceClosure } as unknown as GraphDataProvider
+    const { result } = renderHook(() => useLensWalk('F', provider, 1, true, 'coarse'))
+    await waitFor(() => expect(result.current.fullWalkFor('F')?.exhausted).toBe(true))
+    expect(calls[0]!.grain).toBe('coarse')
+    expect(calls[1]!.grain).toBe('coarse')   // the escalation keeps the grain
+  })
+})

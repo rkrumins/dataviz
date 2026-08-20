@@ -179,6 +179,11 @@ export function useLensWalk(
     /** Trace mode: fetch the initial closure DEEP and auto-follow every
      *  frontier until the flow is exhausted or the node budget is hit. */
     fullWalk = false,
+    /** GRAIN-ADAPTIVE (2026-08-20): 'coarse' fetches the flow at ROOTS +
+     *  ONE LEVEL DOWN from the rollup lane — the scale-safe initial
+     *  picture for container foci; expansion refines locally. Applies to
+     *  the initial fetch and escalations of this session. */
+    grain: 'coarse' | 'fine' | undefined = undefined,
 ): LensWalkData {
     const [state, setState] = useState<Map<string, WalkEntry>>(() => new Map())
     // Full-walk bookkeeping per cacheKey: budget grants ("Keep walking"
@@ -227,6 +232,7 @@ export function useLensWalk(
         try {
             const res = await provider.traceClosure({
                 urn, direction: 'both', upstreamDepth: effectiveDepth, downstreamDepth: effectiveDepth,
+                ...(grain ? { grain } : {}),
             })
             if (session !== sessionRef.current) return   // lens closed mid-flight
             setState(prev => setEntry(prev, cacheKey, {
@@ -242,7 +248,7 @@ export function useLensWalk(
                 depth: effectiveDepth,
             }))
         }
-    }, [provider, initialDepth, fullWalk])
+    }, [provider, initialDepth, fullWalk, grain])
 
     /** Shared by `extend` and `page`: both fetch one further hop from a
      *  specific card+direction and merge the response into the CURRENT
@@ -377,9 +383,10 @@ export function useLensWalk(
             upstreamDepth: depth,
             downstreamDepth: depth,
             maxNodes: budget,
+            ...(grain ? { grain } : {}),
             excludeUrns: knownUrns(baseModel).slice(0, 2000),
         }), `escalate:${walkFocusUrn}`, true)
-    }, [provider, runFrontierOp])
+    }, [provider, runFrontierOp, grain])
 
     // ONE request draining MANY depth-exhausted frontier anchors: seeds
     // carry the anchors, the focus anchors the request (rootUrn is the

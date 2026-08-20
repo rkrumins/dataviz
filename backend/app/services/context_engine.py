@@ -1381,6 +1381,25 @@ class ContextEngine:
             edge_types = [t for t in declared_types if t]
         containment_types = list(resolved.containment_edge_types or [])
         max_nodes = min(req.max_nodes or ContextEngine.TRACE_MAX_NODES, ContextEngine.TRACE_MAX_NODES_HARD)
+
+        # GRAIN-ADAPTIVE dispatch (2026-08-20): 'coarse' = the flow at
+        # ROOTS + ONE LEVEL DOWN from the rollup lane — the scale-safe
+        # initial picture. Providers without a rollup lane (drafts) fall
+        # through to the fine walk, which is draft-scale anyway.
+        if req.grain == "coarse":
+            coarse_fn = getattr(self.provider, "trace_closure_coarse", None)
+            if coarse_fn is not None:
+                async with self._trace_semaphore():
+                    return await coarse_fn(
+                        urn=req.urn,
+                        upstream_depth=req.upstream_depth if req.direction in ("upstream", "both") else 0,
+                        downstream_depth=req.downstream_depth if req.direction in ("downstream", "both") else 0,
+                        aggregated_edge_type="AGGREGATED",
+                        containment_edge_types=containment_types,
+                        max_nodes=max_nodes,
+                        timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
+                    )
+
         fn = getattr(self.provider, "trace_closure", None)
         if fn is None:
             raise NotImplementedError("provider does not support trace_closure")

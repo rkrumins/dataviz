@@ -7685,6 +7685,161 @@ class FalkorDBProvider(GraphDataProvider):
             seedCursor=(f"s:{next_seed_after}" if next_seed_after else None),
         )
 
+    async def trace_closure_coarse(
+        self,
+        urn: str,
+        upstream_depth: int,
+        downstream_depth: int,
+        aggregated_edge_type: str,
+        containment_edge_types: List[str],
+        max_nodes: int,
+        timeout_ms: int,
+    ) -> TraceClosureResult:
+        """The GRAIN-ADAPTIVE initial trace (2026-08-20 rework): the flow at
+        ROOTS + ONE LEVEL DOWN, read from the materialised rollup lane —
+        instant and complete at that grain, however big the graph.
+
+        Rationale (measured): a leaf-grain closure of a large estate can be
+        100k+ nodes — un-renderable and minutes of client work — while the
+        rollup mesh at the top two grains is small on ANY graph. The canvas
+        presents this picture upfront (per the user's "Roots + 1 level down,
+        fully end to end" ruling) and each expansion refines ONE container's
+        slice a grain finer. One-shot contract: no cursors, no frontier;
+        ``max_nodes`` still guards a pathological rollup mesh, said via
+        ``truncated``.
+        """
+        ct_alt = "|".join(_sanitize_label(t) for t in containment_edge_types if t)
+        agg = _sanitize_label(aggregated_edge_type)
+        per_q = max(0.6, min(2.0, timeout_ms / 1000.0))
+
+        def _empty() -> TraceClosureResult:
+            return TraceClosureResult(
+                nodes=[], edges=[], containmentEdges=[],
+                upstreamUrns=set(), downstreamUrns=set(),
+                focus=TraceFocus(urn=urn, level=0, entityType=""),
+                effectiveLevel=0, isInherited=False, inheritedFromUrn=None,
+                truncated=False, truncationReason=None,
+                frontierUp=[], frontierDown=[], seedTruncated=False, seedCursor=None,
+            )
+
+        focus_node = await self.get_node(urn)
+        if focus_node is None or not ct_alt:
+            return _empty()
+        sl = _sanitize_label(focus_node.entity_type) if focus_node.entity_type else ""
+        lbl = f":{sl}" if sl else ""
+
+        # The focus's ROOT: itself when nothing contains it, else the top of
+        # its containment chain.
+        root_urn = urn
+        try:
+            res = await self._ro_query(
+                f"MATCH (n{lbl} {{urn: $urn}})<-[:{ct_alt}*1..16]-(r) "
+                f"WHERE NOT ()-[:{ct_alt}]->(r) RETURN r.urn LIMIT 1",
+                params={"urn": urn}, timeout=per_q, op="trace.coarse_root",
+            )
+            if res.result_set:
+                root_urn = res.result_set[0][0]
+        except Exception as exc:
+            logger.warning("trace_closure_coarse: root climb failed for %s: %s", urn, exc)
+
+        # Seeds at the top two grains: the root + its rollup-carrying
+        # direct children (children without flow contribute nothing).
+        seeds = {root_urn}
+        try:
+            res = await self._ro_query(
+                f"MATCH (r {{urn: $root}})-[:{ct_alt}]->(c) "
+                f"WHERE (c)-[:{agg}]-() RETURN c.urn LIMIT $cap",
+                params={"root": root_urn, "cap": max(1, max_nodes // 2)},
+                timeout=per_q, op="trace.coarse_seed",
+            )
+            for row in (res.result_set or []):
+                seeds.add(row[0])
+        except Exception as exc:
+            logger.warning("trace_closure_coarse: seed collect failed for %s: %s", root_urn, exc)
+
+        # BFS over the rollup lane, both directions, FAR endpoint restricted
+        # to depth ≤ 1 (a root, or a child of a root). `gp IS NULL` says
+        # exactly that: no grandparent exists.
+        discovered = set(seeds)
+        upstream_urns: set = set()
+        downstream_urns: set = set()
+        edges_by_id: Dict[str, GraphEdge] = {}
+        contain_pairs: set = set()
+        truncation: Optional[str] = None
+        up_frontier, down_frontier = list(seeds), list(seeds)
+
+        async def _hop(frontier: List[str], downstream: bool) -> List[str]:
+            nonlocal truncation
+            arrow_l, arrow_r = ("-", "->") if downstream else ("<-", "-")
+            cy = (
+                f"MATCH (s){arrow_l}[e:{agg}]{arrow_r}(t) WHERE s.urn IN $frontier "
+                f"OPTIONAL MATCH (p)-[:{ct_alt}]->(t) "
+                f"OPTIONAL MATCH (gp)-[:{ct_alt}]->(p) "
+                "WITH s, e, t, p, gp WHERE gp IS NULL "
+                "RETURN DISTINCT s.urn, t.urn, id(e), p.urn LIMIT $lim"
+            )
+            nxt: List[str] = []
+            try:
+                res = await self._ro_query(
+                    cy, params={"frontier": frontier, "lim": max(1, max_nodes) * 4},
+                    timeout=per_q, op="trace.coarse_hop",
+                )
+            except Exception as exc:
+                logger.warning("trace_closure_coarse: hop failed: %s", exc)
+                return []
+            for s_urn, t_urn, eid, p_urn in (res.result_set or []):
+                src, tgt = (s_urn, t_urn) if downstream else (t_urn, s_urn)
+                edges_by_id[str(eid)] = GraphEdge(
+                    id=str(eid), sourceUrn=src, targetUrn=tgt,
+                    edgeType=aggregated_edge_type, properties={},
+                )
+                if p_urn:
+                    contain_pairs.add((p_urn, t_urn))
+                if t_urn in discovered:
+                    continue
+                if len(discovered) >= max_nodes:
+                    truncation = "max_nodes"
+                    break
+                discovered.add(t_urn)
+                (downstream_urns if downstream else upstream_urns).add(t_urn)
+                nxt.append(t_urn)
+            return nxt
+
+        for hop in range(1, max(upstream_depth, downstream_depth) + 1):
+            if truncation or (not up_frontier and not down_frontier):
+                break
+            up_frontier = await _hop(up_frontier, downstream=False) if hop <= upstream_depth and up_frontier else []
+            if truncation:
+                break
+            down_frontier = await _hop(down_frontier, downstream=True) if hop <= downstream_depth and down_frontier else []
+
+        # Level-1 seeds nest under the root; discovered level-1 nodes nest
+        # under the parents the hop query reported. Ship every parent too.
+        for s in seeds - {root_urn}:
+            contain_pairs.add((root_urn, s))
+        ship = set(discovered) | {p for p, _ in contain_pairs}
+        nodes = await self.get_nodes_batch(list(ship))
+
+        return TraceClosureResult(
+            nodes=nodes,
+            edges=[e for e in edges_by_id.values()
+                   if e.source_urn in ship and e.target_urn in ship],
+            containmentEdges=[
+                GraphEdge(id=f"containment:{p}>{c}", sourceUrn=p, targetUrn=c,
+                          edgeType=(containment_edge_types[0] if containment_edge_types else "CONTAINS"),
+                          properties={})
+                for (p, c) in sorted(contain_pairs)
+            ],
+            upstreamUrns=upstream_urns,
+            downstreamUrns=downstream_urns,
+            focus=TraceFocus(urn=urn, level=0, entityType=focus_node.entity_type or ""),
+            effectiveLevel=0, isInherited=False, inheritedFromUrn=None,
+            truncated=truncation is not None,
+            truncationReason=truncation,
+            frontierUp=[], frontierDown=[],
+            seedTruncated=False, seedCursor=None,
+        )
+
     async def expand_aggregated(
         self,
         source_urn: str,

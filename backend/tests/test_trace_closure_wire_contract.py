@@ -117,6 +117,7 @@ def test_trace_closure_request_alias_round_trip():
         "excludeUrns": ["x1"],
         "afterCursor": "e:123",
         "seedCursor": None,
+        "grain": None,
     }
     from_alias = TraceClosureRequest.model_validate(alias_payload)
 
@@ -131,6 +132,7 @@ def test_trace_closure_request_alias_round_trip():
         "exclude_urns": ["x1"],
         "after_cursor": "e:123",
         "seed_cursor": None,
+        "grain": None,
     }
     from_snake = TraceClosureRequest.model_validate(snake_payload)
 
@@ -539,6 +541,41 @@ def test_a_source_whose_only_lineage_vocabulary_is_synthetic_walks_it():
     eng = _engine_with_ontology(provider, _OntologyWithOnlySyntheticType())
     _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate({"urn": "u1"})))
     assert provider.calls[0]["lineage_edge_types"] == ["AGGREGATED"]
+
+
+class _CoarseCapableProvider(_CapturingClosureProvider):
+    async def trace_closure_coarse(self, **kwargs):
+        self.calls.append({"COARSE": True, **kwargs})
+        return TraceClosureResult(
+            nodes=[], edges=[], containmentEdges=[],
+            upstreamUrns=set(), downstreamUrns=set(),
+            focus=TraceFocus(urn=kwargs["urn"], level=0, entityType="x"),
+            effectiveLevel=0, isInherited=False, inheritedFromUrn=None,
+            truncated=False, truncationReason=None,
+        )
+
+
+def test_grain_coarse_dispatches_to_the_rollup_walk():
+    provider = _CoarseCapableProvider()
+    eng = _make_engine(provider)
+    _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate(
+        {"urn": "u1", "grain": "coarse", "upstreamDepth": 5, "downstreamDepth": 5},
+    )))
+    call = provider.calls[0]
+    assert call.get("COARSE") is True
+    assert call["aggregated_edge_type"] == "AGGREGATED"
+    assert call["upstream_depth"] == 5
+
+
+def test_grain_coarse_falls_back_to_fine_when_the_provider_has_no_rollup_lane():
+    # Drafts have no materialised rollups — the fine walk serves them
+    # (draft-scale is small by nature).
+    provider = _CapturingClosureProvider()
+    eng = _make_engine(provider)
+    _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate(
+        {"urn": "u1", "grain": "coarse"},
+    )))
+    assert "lineage_edge_types" in provider.calls[0]   # the FINE closure ran
 
 
 def test_a_source_with_any_real_type_still_filters_the_synthetic_one():

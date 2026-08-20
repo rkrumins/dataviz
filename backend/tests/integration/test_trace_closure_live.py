@@ -1029,3 +1029,74 @@ async def test_uncapped_seed_ships_no_cursor(estate):
     )
     assert r.seed_cursor is None
     assert r.seed_truncated is False
+
+
+# --------------------------------------------------------------------- #
+# COARSE (grain-adaptive) walk — the Solidatus-scale rework (2026-08-20) #
+#                                                                        #
+# A trace on a big estate must NOT load the leaf-grain everything: the   #
+# initial picture is the flow at ROOTS + ONE LEVEL DOWN, read from the   #
+# materialised :AGGREGATED rollups — instant and complete at that grain  #
+# — and expansion refines locally. This estate carries the flow at all   #
+# three grains; coarse must ship exactly the top two and nothing finer.  #
+# --------------------------------------------------------------------- #
+
+COARSE_ESTATE = """
+CREATE (ra:layer {urn: 'RA', displayName: 'RA'}),
+       (rb:layer {urn: 'RB', displayName: 'RB'}),
+       (rc:layer {urn: 'RC', displayName: 'RC'}),
+       (rd:layer {urn: 'RD', displayName: 'RD'}),
+       (a1:object {urn: 'a1', displayName: 'a1'}),
+       (b1:object {urn: 'b1', displayName: 'b1'}),
+       (c1:object {urn: 'c1', displayName: 'c1'}),
+       (d1:object {urn: 'd1', displayName: 'd1'}),
+       (aa1:attribute {urn: 'aa1', displayName: 'aa1'}),
+       (bb1:attribute {urn: 'bb1', displayName: 'bb1'}),
+       (ra)-[:CONTAINS]->(a1), (rb)-[:CONTAINS]->(b1),
+       (rc)-[:CONTAINS]->(c1), (rd)-[:CONTAINS]->(d1),
+       (a1)-[:CONTAINS]->(aa1), (b1)-[:CONTAINS]->(bb1),
+       (aa1)-[:TRANSFORMS]->(bb1),
+       (a1)-[:AGGREGATED]->(b1), (b1)-[:AGGREGATED]->(c1), (c1)-[:AGGREGATED]->(d1),
+       (ra)-[:AGGREGATED]->(rb), (rb)-[:AGGREGATED]->(rc), (rc)-[:AGGREGATED]->(rd)
+"""
+
+
+async def test_coarse_walk_ships_roots_plus_one_level_and_nothing_finer(estate):
+    p = await estate("coarse", COARSE_ESTATE)
+    r = await p.trace_closure_coarse(
+        urn="a1", upstream_depth=25, downstream_depth=25,
+        aggregated_edge_type="AGGREGATED", containment_edge_types=CTYPES,
+        max_nodes=2000, timeout_ms=15000,
+    )
+    urns = {n.urn for n in r.nodes}
+    # Roots + one level down, fully end to end.
+    assert {"RA", "RB", "RC", "RD", "a1", "b1", "c1", "d1"} <= urns
+    # NOTHING finer: the leaf grain stays unloaded until expansion.
+    assert "aa1" not in urns and "bb1" not in urns
+    edge_ids_by_pair = {(e.source_urn, e.target_urn) for e in r.edges}
+    assert ("a1", "b1") in edge_ids_by_pair and ("c1", "d1") in edge_ids_by_pair
+    assert ("ra", "rb") not in edge_ids_by_pair  # urns are upper-case here
+    assert ("RA", "RB") in edge_ids_by_pair
+    # No raw leaf edge leaks into the coarse picture.
+    assert not any(e.edge_type == "TRANSFORMS" for e in r.edges)
+    # Containment ships for nesting: every level-1 node under its root.
+    contain_pairs = {(e.source_urn, e.target_urn) for e in r.containment_edges}
+    assert {("RA", "a1"), ("RB", "b1"), ("RC", "c1"), ("RD", "d1")} <= contain_pairs
+    # One-shot completeness: no cursors, no frontier, not truncated.
+    assert r.frontier_up == [] and r.frontier_down == []
+    assert r.truncated is False and r.seed_cursor is None
+    # Directions computed at the coarse grain.
+    assert "b1" in r.downstream_urns and "d1" in r.downstream_urns
+
+
+async def test_coarse_walk_respects_direction_depths(estate):
+    p = await estate("coarse2", COARSE_ESTATE)
+    r = await p.trace_closure_coarse(
+        urn="b1", upstream_depth=1, downstream_depth=0,
+        aggregated_edge_type="AGGREGATED", containment_edge_types=CTYPES,
+        max_nodes=2000, timeout_ms=15000,
+    )
+    urns = {n.urn for n in r.nodes}
+    assert "a1" in urns          # 1 hop upstream at level-1 grain
+    assert "c1" not in urns      # downstream off
+    assert "d1" not in urns
