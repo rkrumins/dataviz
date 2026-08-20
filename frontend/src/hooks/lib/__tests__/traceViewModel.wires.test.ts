@@ -17,7 +17,7 @@ import { buildTraceView } from '../traceViewModel'
 import { buildLedger, pairKey } from '../traceWireLedger'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
 import type { TraceViewInputs, TraceWire } from '../traceViewModel'
-import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
+import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
 
 type Estate = ReturnType<typeof cfoEstate>
 
@@ -235,6 +235,70 @@ describe('buildTraceView — wires, grain rule', () => {
   })
 })
 
+/**
+ * The reviewer's case for inner-first accounting: a container with a sibling
+ * the fine rollup says nothing about. C ⊃ {d1, d2}, d1 ⊃ d1.c, X ⊃ X.c, one
+ * raw hop d1.c → X.c, and rollups d1 → X (weight 1) and C → X (weight 3).
+ * With C open and d1/X closed, the visible cards are exactly C, d1, d2, X.
+ */
+const siblingEstate = (opts: { raw: boolean }) => {
+  const node = (urn: string, type: string, childCount = 0): LensWalkNode => ({
+    id: urn, type: 'default', position: { x: 0, y: 0 },
+    data: { urn, label: urn, type, childCount }, urn, displayName: urn, entityType: type,
+  }) as unknown as LensWalkNode
+  const rawEdge = { id: 'r:d1.c>X.c', sourceUrn: 'd1.c', targetUrn: 'X.c', edgeType: 'TRANSFORMS', kind: 'raw' as const, weight: null }
+  const model: LensWalkModel = {
+    focusUrn: 'X',
+    nodes: [node('C', 'container', 2), node('d1', 'dataset', 1), node('d2', 'dataset', 0),
+      node('d1.c', 'schemaField'), node('X', 'dataset', 1), node('X.c', 'schemaField')],
+    containmentEdges: [
+      { sourceUrn: 'C', targetUrn: 'd1' }, { sourceUrn: 'C', targetUrn: 'd2' },
+      { sourceUrn: 'd1', targetUrn: 'd1.c' }, { sourceUrn: 'X', targetUrn: 'X.c' },
+    ],
+    lineageEdges: [
+      ...(opts.raw ? [rawEdge] : []),
+      { id: 'g:d1>X', sourceUrn: 'd1', targetUrn: 'X', edgeType: 'AGGREGATED', kind: 'rollup' as const, weight: 1 },
+      { id: 'g:C>X', sourceUrn: 'C', targetUrn: 'X', edgeType: 'AGGREGATED', kind: 'rollup' as const, weight: 3 },
+    ],
+    upstreamUrns: new Set(['C', 'd1', 'd2', 'd1.c']),
+    downstreamUrns: new Set(), frontierUp: [], frontierDown: [], truncated: false, truncationReason: null,
+    seedTruncated: false, seedCursor: null,
+  }
+  const base: TraceViewInputs = {
+    model, focusUrn: 'X',
+    layers: [{ id: 'src', name: 'Source', order: 0, entityTypes: [] }, { id: 'dst', name: 'Dest', order: 1, entityTypes: [] }],
+    assignments: { C: { layerId: 'src' }, X: { layerId: 'dst' } },
+    viewIsCurated: true, traceExpansion: new Set(['C']),
+    showUpstream: true, showDownstream: true, depthUp: 25, depthDown: 25,
+  }
+  return base
+}
+
+describe('inner-first accounting — the sibling a fine rollup says nothing about', () => {
+  it('vouched raw detail wins the whole cone; a stale W is not a flow', () => {
+    const v = buildTraceView(siblingEstate({ raw: true }))
+    expect([...v.visible].sort()).toEqual(['C', 'X', 'd1', 'd2'])
+    // d1→X (W1) and C→X (W3) both hold the one raw hop, and the default
+    // ledger vouches for it, so both are dropped: W=3 over one loaded flow
+    // is aggregation staleness, not two flows d2 is hiding.
+    expect(v.wires.map(desc)).toEqual(['d1>X:raw:1'])
+  })
+
+  it('coarse-only: the outer cone reports what the inner one did not', () => {
+    const v = buildTraceView(siblingEstate({ raw: false }))
+    // d1→X states 1. C→X counts 3 and 1 is already stated, so it draws the
+    // OTHER 2 — the flows through d2, which no finer rollup mentions.
+    expect(v.wires.map(desc)).toEqual(['C>X:residual:2', 'd1>X:rollup:1'])
+  })
+
+  it('partial: the floor applies at the finest grain, the remainder above it', () => {
+    const v = buildTraceView({ ...siblingEstate({ raw: true }), completePairs: new Set() })
+    // d1→X: R=1, nothing stated inside → max(1, 1−1) = 1. C→X: R=1 plus the
+    // 1 just stated = 2 of its 3, so 1 remains.
+    expect(v.wires.map(desc)).toEqual(['C>X:residual:1', 'd1>X:raw:1', 'd1>X:residual:1'])
+  })
+})
+
 describe('buildLedger', () => {
   const e = cfoEstate()
 
@@ -259,8 +323,23 @@ describe('buildLedger', () => {
     const some = buildLedger(e.model, new Set([pairKey('orders', 'aov')]))
     expect(some.state('orders', 'aov')).toBe('complete')
     expect(some.state('REPORTING', 'cfo')).toBe('partial')
-    // Omitted entirely = Stage 1's "the model IS the fine closure".
+    // Omitted entirely = Stage 1's "the model IS the fine closure", so what
+    // is vouched for is exactly what HAS raw detail. A pair with none is
+    // 'none' rather than 'complete': vouching for it would let a rollup be
+    // dropped as redundant against evidence that does not exist.
     expect(buildLedger(e.model).state('orders', 'aov')).toBe('complete')
-    expect(buildLedger(e.model).state('orders', 'rpt')).toBe('complete')
+    expect(buildLedger(e.model).state('orders', 'rpt')).toBe('none')
+  })
+
+  it('counts the edges it is given, so the ledger and the projection agree', () => {
+    // A dangling hop the subgraph would drop must not inflate the cone.
+    const withDangling: LensWalkModel = {
+      ...e.model,
+      lineageEdges: [...e.model.lineageEdges,
+        { id: 'r:ghost>aov.avg', sourceUrn: 'ghost', targetUrn: 'aov.avg', edgeType: 'TRANSFORMS', kind: 'raw' as const, weight: null }],
+    }
+    const raw = withDangling.lineageEdges.filter(x => x.kind !== 'rollup')
+    expect(buildLedger(withDangling).rawCount('ghost', 'aov')).toBe(1)
+    expect(buildLedger(withDangling, undefined, raw.filter(x => x.sourceUrn !== 'ghost')).rawCount('ghost', 'aov')).toBe(0)
   })
 })

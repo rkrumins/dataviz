@@ -370,7 +370,10 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
     sg,
     model: i.model,
     visible,
-    ledger: buildLedger(i.model, i.completePairs),
+    // The SUBGRAPH's edges, not the model's: the ledger and the projection
+    // must count the same hops, and the subgraph is what dropped the
+    // dangling ones.
+    ledger: buildLedger(i.model, i.completePairs, sg.lineageEdges),
   })
 
   return { lanes, visible, wires, outsideView: anchorlessChains.size, counts: { up, down } }
