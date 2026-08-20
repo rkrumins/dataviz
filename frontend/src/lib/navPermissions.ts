@@ -54,6 +54,10 @@ export const DEFAULT_SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpe
     // gate edit affordances separately.
     ingestion:  { kind: 'anyPerm', perms: ['system:admin', 'system:org-admin', 'workspace:provider:read', 'workspace:datasource:manage'] },
     schema:     { kind: 'anyPerm', perms: ['system:admin', 'system:org-admin', 'workspace:ontology:read'] },
+    // Business analytics is read by two audiences that don't imply each
+    // other: auditors (system:audit:read) and cross-workspace operators
+    // (system:org-admin). The route gate says the same via requires_any.
+    analytics:  { kind: 'anyPerm', perms: ['system:admin', 'system:org-admin', 'system:audit:read'] },
     admin:      { kind: 'anyPerm', perms: ['system:admin', 'system:groups:manage'] },
 }
 

@@ -21,6 +21,7 @@ const Dashboard = lazyWithRetry(() => import('@/components/dashboard/Dashboard')
 const ViewPage = lazyWithRetry(() => import('@/pages/ViewPage').then(m => ({ default: m.ViewPage })))
 const ViewsGallery = lazyWithRetry(() => import('@/pages/ViewsGallery').then(m => ({ default: m.ViewsGallery })))
 const ExplorerPage = lazyWithRetry(() => import('@/pages/ExplorerPage').then(m => ({ default: m.ExplorerPage })))
+const AnalyticsPage = lazyWithRetry(() => import('@/pages/AnalyticsPage').then(m => ({ default: m.AnalyticsPage })))
 const AdminPage = lazyWithRetry(() => import('@/pages/AdminPage').then(m => ({ default: m.AdminPage })))
 const AdminOverview = lazyWithRetry(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
 const AdminInfrastructure = lazyWithRetry(() => import('@/components/admin/AdminInfrastructure').then(m => ({ default: m.AdminInfrastructure })))
@@ -158,6 +159,17 @@ export const router = createBrowserRouter([
         element: (
           <RequireNav group="sidebar" sectionKey="ingestion">
             <Lazy><IngestionPage /></Lazy>
+          </RequireNav>
+        ),
+      },
+      // Platform analytics — growth, engagement, and per-workspace insights.
+      // Gated on the same anyPerm spec the sidebar item uses, so the section
+      // and its route can never disagree about who may see it.
+      {
+        path: 'analytics',
+        element: (
+          <RequireNav group="sidebar" sectionKey="analytics">
+            <Lazy><AnalyticsPage /></Lazy>
           </RequireNav>
         ),
       },

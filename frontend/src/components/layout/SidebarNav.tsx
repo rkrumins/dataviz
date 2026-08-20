@@ -6,6 +6,7 @@ import {
   Boxes,
   DatabaseZap,
   Layers,
+  LineChart,
   Shield,
   PanelLeftClose,
   PanelLeftOpen,
@@ -54,6 +55,7 @@ const NAV_ITEMS_CONFIG: Omit<NavItemConfig, 'badge'>[] = [
   { id: 'workspaces', label: 'Workspaces', icon: Boxes, description: 'Manage isolated data environments', color: { bg: 'bg-blue-500/10', text: 'text-blue-500', border: 'border-blue-500/20', hoverBg: 'group-hover:bg-blue-500/10' } },
   { id: 'ingestion', label: 'Ingestion', icon: DatabaseZap, description: 'Connect sources and import data', color: { bg: 'bg-emerald-500/10', text: 'text-emerald-500', border: 'border-emerald-500/20', hoverBg: 'group-hover:bg-emerald-500/10' } },
   { id: 'schema', label: 'Semantic Layers', icon: Layers, description: 'Define and manage ontology models', color: { bg: 'bg-amber-500/10', text: 'text-amber-500', border: 'border-amber-500/20', hoverBg: 'group-hover:bg-amber-500/10' } },
+  { id: 'analytics', label: 'Analytics', icon: LineChart, description: 'Growth, engagement, and platform insights', color: { bg: 'bg-cyan-500/10', text: 'text-cyan-500', border: 'border-cyan-500/20', hoverBg: 'group-hover:bg-cyan-500/10' } },
   { id: 'admin', label: 'Administration', icon: Shield, description: 'System settings, users, and health', color: { bg: 'bg-slate-500/10', text: 'text-slate-500', border: 'border-slate-500/20', hoverBg: 'group-hover:bg-slate-500/10' } },
 ]
 
@@ -521,6 +523,7 @@ export function SidebarNav() {
       case 'workspaces': navigate('/workspaces'); break
       case 'ingestion': navigate('/ingestion'); break
       case 'schema': navigate('/schema'); break
+      case 'analytics': navigate('/analytics'); break
       // Navigate to /admin (no sub-route). AdminPage's ``isRoot``
       // branch redirects to the first sub-page the current user can
       // see — so a delegated groups-admin lands on /admin/groups,
@@ -539,6 +542,7 @@ export function SidebarNav() {
   const workspacesVisible = useNavPermission(useSidebarSpec('workspaces'))
   const ingestionVisible  = useNavPermission(useSidebarSpec('ingestion'))
   const schemaVisible     = useNavPermission(useSidebarSpec('schema'))
+  const analyticsVisible  = useNavPermission(useSidebarSpec('analytics'))
   const adminVisible      = useNavPermission(useSidebarSpec('admin'))
 
   const visibility: Record<NavigationTab, boolean> = {
@@ -547,6 +551,7 @@ export function SidebarNav() {
     workspaces: workspacesVisible,
     ingestion:  ingestionVisible,
     schema:     schemaVisible,
+    analytics:  analyticsVisible,
     admin:      adminVisible,
   }
 

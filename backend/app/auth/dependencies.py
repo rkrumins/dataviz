@@ -662,3 +662,60 @@ def requires(
     _dependency.workspace_any = workspace_any  # type: ignore[attr-defined]
 
     return _dependency
+
+
+def requires_any(*permissions: str) -> Callable:
+    """Build a FastAPI dependency that admits any ONE of ``permissions``.
+
+    The global-permission sibling of :func:`requires`. Some surfaces are
+    legitimately reachable from more than one direction — platform analytics is
+    read by auditors holding ``system:audit:read`` and by cross-workspace
+    operators holding ``system:org-admin``, and neither implies the other.
+    Expressing that as a single ``requires(...)`` would mean picking one
+    audience and locking the other out.
+
+    This mirrors the ``anyPerm`` nav spec the catalogue already serves
+    (``NavSpecAnyPerm``), so the sidebar's visibility rule and the route's gate
+    can state the same thing.
+
+    Global permissions only — there is no workspace-scoped variant, because no
+    caller needs one yet. Add it when one does.
+    """
+    if not permissions:
+        raise ValueError("requires_any() needs at least one permission")
+
+    async def _dependency(
+        user: User = Depends(get_current_user),
+        claims: PermissionClaims = Depends(get_permission_claims),
+        session: AsyncSession = Depends(get_db_session),
+    ) -> User:
+        if any(has_permission(claims, perm) for perm in permissions):
+            return user
+
+        scope_obj = {"type": "global", "id": None}
+        await _audit_access_denied(
+            session,
+            user_id=user.id,
+            permission=permissions[0],
+            scope_obj=scope_obj,
+        )
+        joined = " or ".join(permissions)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "missing_permission",
+                "permission": permissions[0],
+                "permissions": list(permissions),
+                "scope": scope_obj,
+                "message": f"Missing permission: {joined}",
+            },
+        )
+
+    # Same introspection tags ``requires`` sets, so the nav-catalogue drift test
+    # still sees a real gate on routes protected this way.
+    _dependency.required_permission = permissions[0]  # type: ignore[attr-defined]
+    _dependency.required_permissions = tuple(permissions)  # type: ignore[attr-defined]
+    _dependency.workspace_param = None  # type: ignore[attr-defined]
+    _dependency.workspace_any = False  # type: ignore[attr-defined]
+
+    return _dependency

@@ -23,6 +23,7 @@ from .endpoints import (
     audit,
     branding,
     telemetry,
+    analytics,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -97,6 +98,12 @@ api_router.include_router(
 )
 api_router.include_router(
     telemetry.admin_router, prefix="/admin/telemetry", tags=["admin:telemetry"],
+)
+
+# Platform analytics — business insights (growth, engagement, per-workspace).
+# Gated inside the module on system:audit:read OR system:org-admin.
+api_router.include_router(
+    analytics.router, prefix="/admin/analytics", tags=["admin:analytics"],
 )
 
 # ── RBAC Phase 2 admin surface ───────────────────────────────────────

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from ..models import (
+    ProductEventORM,
     ViewORM,
     ViewFavouriteORM,
     ViewVisitORM,
@@ -1237,6 +1238,21 @@ async def record_view_visit(
         existing.visited_at = now
     else:
         session.add(ViewVisitORM(view_id=view_id, user_id=user_id, visited_at=now))
+
+    # The row above is an UPSERT — it holds this user's LAST visit, not a
+    # history, so it can answer "who has seen this view" but never "how many
+    # opens on Tuesday". Analytics needs the second question, so the open is
+    # ALSO appended to the immutable product-event log.
+    #
+    # The payload carries the view id and nothing else. Its workspace is
+    # already knowable from the view itself, and resolving it here would put a
+    # second SELECT on a path that runs every time anyone opens anything;
+    # analytics maps view → workspace once, at read time, instead.
+    session.add(ProductEventORM(
+        event_type="view.opened",
+        actor_id=user_id,
+        payload=json.dumps({"viewId": view_id}),
+    ))
     await session.flush()
 
 

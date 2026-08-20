@@ -58,6 +58,10 @@ _SIDEBAR: dict[str, tuple[str, NavSpec]] = {
     # separately by the manage perm at the component level.
     "ingestion":  ("Ingestion",     NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "workspace:provider:read", "workspace:datasource:manage"])),
     "schema":     ("Semantic Layers", NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "workspace:ontology:read"])),
+    # Business analytics is read by two audiences that do not imply each
+    # other: auditors (system:audit:read) and cross-workspace operators
+    # (system:org-admin). The route gate says the same thing via requires_any.
+    "analytics":  ("Analytics",     NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "system:audit:read"])),
     "admin":      ("Administration", NavSpecAnyPerm(perms=["system:admin", "system:groups:manage"])),
 }
 
