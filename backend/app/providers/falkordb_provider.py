@@ -9298,27 +9298,59 @@ class FalkorDBProvider(GraphDataProvider):
         # scan/seek for the whole batch. The pair-bounded branch
         # post-filters Cartesian results down to the requested pairs.
         if pairs:
-            s_urns = sorted({s for s, _ in pairs})
-            t_urns = sorted({t for _, t in pairs})
-            allowed_pairs: Set[Tuple[str, str]] = set(pairs)
-            cypher = (
-                f"MATCH (s)-[r:{rel_alt}]->(t) "
-                "WHERE s.urn IN $sUrns AND t.urn IN $tUrns "
-                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
-                "type(r) AS edgeType, id(r) AS edgeId"
-            )
-            try:
-                result = await self._ro_query(
-                    cypher,
-                    params={"sUrns": s_urns, "tUrns": t_urns},
-                    timeout=2.0,
+            # CHUNKED + NEVER-EMPTY (2026-08-20): one set×set query over a
+            # full-walk's ~2,000 pairs on a 1.2M-node graph blew the 2s
+            # timeout and the exception path silently returned [] — the
+            # trace shipped participants WITHOUT the containment that
+            # placement/nesting need ("completely disjointed" on the big
+            # estates, while the Lens's small per-click pair sets fit the
+            # budget). Pairs now resolve in bounded chunks, and any chunk
+            # that still fails SYNTHESIZES its edges straight from the
+            # ancestor chains — the chains are the truth; the query only
+            # decorates real ids/types onto them.
+            all_pairs = sorted(pairs)
+            out: List[GraphEdge] = []
+            CHUNK_PAIRS = 400
+            for i in range(0, len(all_pairs), CHUNK_PAIRS):
+                chunk = all_pairs[i:i + CHUNK_PAIRS]
+                chunk_set: Set[Tuple[str, str]] = set(chunk)
+                s_urns = sorted({s for s, _ in chunk})
+                t_urns = sorted({t for _, t in chunk})
+                cypher = (
+                    f"MATCH (s)-[r:{rel_alt}]->(t) "
+                    "WHERE s.urn IN $sUrns AND t.urn IN $tUrns "
+                    "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                    "type(r) AS edgeType, id(r) AS edgeId"
                 )
-            except Exception as exc:
-                logger.warning(
-                    "trace_at_level: containment edge pair-fetch failed "
-                    "(%d pairs): %s", len(pairs), exc,
-                )
-                return []
+                resolved: Set[Tuple[str, str]] = set()
+                try:
+                    result = await self._ro_query(
+                        cypher,
+                        params={"sUrns": s_urns, "tUrns": t_urns},
+                        timeout=2.0,
+                    )
+                    for row in (result.result_set or []):
+                        if (row[0], row[1]) not in chunk_set:
+                            continue
+                        resolved.add((row[0], row[1]))
+                        out.append(GraphEdge(
+                            id=str(row[3]), sourceUrn=row[0], targetUrn=row[1],
+                            edgeType=str(row[2]), properties={},
+                        ))
+                except Exception as exc:
+                    logger.warning(
+                        "trace: containment pair-fetch chunk failed "
+                        "(%d pairs) — synthesizing from chains: %s",
+                        len(chunk), exc,
+                    )
+                for (s, t) in chunk:
+                    if (s, t) in resolved:
+                        continue
+                    out.append(GraphEdge(
+                        id=f"containment:{s}>{t}", sourceUrn=s, targetUrn=t,
+                        edgeType=ctypes[0], properties={},
+                    ))
+            return out
         else:
             allowed_pairs = None  # type: ignore[assignment]  # no post-filter
             # Cold-cache fallback. Still rel-typed (avoids the OR-on-type
