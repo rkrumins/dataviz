@@ -30,7 +30,7 @@ Evidence-backed, not self-flagellation — each item is a design constraint belo
 
 - R1 **Initial picture** for a container focus: the focus's own chain open; its **direct** feeders/consumers as **closed cards at their own grain** with rolled wires and honest counts. Nothing else auto-opens.
 - R2 **Fetch**: coarse roots+1 picture first (instant), then the hands-free engine fills the **complete** leaf-grain closure in the background; expansions answer from memory; a lazy drill covers grains the model lacks; the ~25k-node ceiling asks once.
-- R3 **Placement**: traced entities sit in their **real layers** (stamped assignment → the view's type rules); a trace-only lane appears only for roots the view genuinely has no rule for. Nothing is ever orphaned.
+- R3 **Placement (revised 22:15)**: **there is NO trace lane.** Everything traced is already in the view (the user's test view == the whole data source); a synthetic "unmapped" layer is a non-realistic artefact. Each traced chain is anchored at the **highest node the view itself places** (explicit assignment, stamped assignment, or a layer rule) — exactly where browse would put it — and ancestors above that anchor are not drawn (they are chrome, as in browse). A chain with no placeable node at ANY level is genuinely outside the view: it is COUNTED in the existing "outside this view" chip, never drawn in a fake lane. On a view that equals its source that count must be zero — if it is not, that is a placement bug to surface, not to hide.
 - R4 **Harness first.**
 - Standing: recursive Node⊃Node⊃Node containment; `childCount` counted from the graph, never the property; no "Keep walking" pedaling inside the ceiling; the capsule narrates; collapse is visual and re-rolls wires.
 
@@ -70,7 +70,7 @@ Inputs: `LensWalkModel`, `focusUrn`, `layers: ViewLayerConfig[]`, `assignments/r
 Steps (each a pure function with its own tests):
 1. **Participants & hops** — BFS hop distances from the focus subtree over `lineageEdges` (reuse `traceViewFilter`), direction/depth scoping; containers inherit min descendant distance.
 2. **Trees** — build containment trees from `model.containmentEdges` for every participant chain up to its top-most root (full chains always: C1 ⇒ no spine/anchor rules needed; nothing can orphan).
-3. **Placement** — run the layer rules over the trees' ROOTS (stamped → rules); unplaceable roots → `__trace_flow__` lane (R3).
+3. **Placement** — for each chain, walk from the participant UP and pick the **highest ancestor the view places** (explicit assignment → stamped assignment → type rule; the same priority chain `useLayerAssignment` uses in browse). That node becomes the lane root; ancestors above it are dropped from the tree (chrome). A chain with no placeable node is counted as outside-the-view, not drawn (R3). **Why the old lane filled up despite full view coverage:** the previous design anchored at the graph's absolute top-most root (e.g. the platform), which the view never assigns — browse anchors at the container below it.
 4. **Visibility** — a card is visible iff every ancestor is in `traceExpansion`; **initial expansion = focus chain only** (R1). Each visible card carries `grain = depth` and `childCount` (from the model/graph).
 5. **Wire projection** — every lineage edge maps each endpoint to its **nearest visible ancestor**; same-(src,dst) projections bundle with `count`; an edge whose projected endpoints coincide is dropped (internal to a closed card — shown as the card's "N on this lineage" count); edges leaving the scoped set are counted, not drawn. Grain of a wire = max(grain of its two projected ends). Coarse-only wires (from the rollup lane) are marked `coarse` so the overlay can use the existing dashed language.
 6. **Counts** — per card: on-this-lineage descendants; per lane: roots; global: up/down participants, hiddenByLayer (type-chip hidden).
@@ -89,7 +89,7 @@ Determinism: same inputs → identical output (sorted by urn); idempotent across
 - Collapse re-rolls: the exact inverse; nothing removed from any model.
 - Recursive Node⊃Node⊃Node: each level keeps its chevron; expansion to any depth; wires follow.
 - Direction toggles & depths scope the VIEW instantly, no refetch.
-- Never orphaned: every visible card has a visible parent or is a lane root.
+- Never orphaned: every visible card has a visible parent or is the lane root the VIEW placed; no synthetic lane exists.
 
 ## 4. Harness first (R4) — `frontend/src/components/canvas/context-view/__tests__/traceCanvas.harness.test.tsx`
 Renders the REAL `ContextViewCanvas` with a stubbed provider and three fixtures shaped from the user's estates:
@@ -103,11 +103,12 @@ Scale-class changes are additionally certified live on `solidatus-test-large` (p
 2. Expand `int_clean_orders_t2` → its fields appear; wires now point field→(chart field or dashboard, whichever is visible); collapse → back.
 3. Expand the dashboard's charts → wires refine to chart fields; every visible wire has lineage beneath it; none missing (count parity with the Lens on the same focus).
 4. Node⊃Node⊃Node estate: 3+ levels expandable, chevrons everywhere, wires at every grain.
-5. `solidatus-test-large` container: coarse picture ≤2s, background fill hands-free, no "On this lineage" pile (only genuinely rule-less roots), no orphans.
+5. `solidatus-test-large` container: coarse picture ≤2s, background fill hands-free, **no synthetic lane at all**; every traced card in the layer browse would show it in; "outside this view" count == 0 on a full-coverage view.
 
 ## 6. Risks & mitigations
 - Coarse (rollup) wires vs fine wires double-drawing → VM draws fine wires only where the model holds them, coarse elsewhere (per projected pair), never both.
 - `LayerColumn` assumes store-backed HierarchyNodes → adapter builds identical shapes; harness asserts chevrons/counts.
+- Placement anchor mismatch (graph root vs view-assigned grain) → harness fixture mirrors the screenshot: platform ⊃ container ⊃ dataset ⊃ field with the VIEW assigning the container; assert the container is the lane root and the platform is not drawn.
 - Memory ceiling on giant flows → capsule asks once; VM never holds more than the model.
 - Service restarts mid-session → announced, never silent (C5).
 
