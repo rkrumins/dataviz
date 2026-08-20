@@ -29,7 +29,7 @@ Evidence-backed, not self-flagellation — each item is a design constraint belo
 ## 2. Rulings (user, 2026-08-20, binding)
 
 - R1 **Initial picture** for a container focus: the focus's own chain open; its **direct** feeders/consumers as **closed cards at their own grain** with rolled wires and honest counts. Nothing else auto-opens.
-- R2 **Fetch**: coarse roots+1 picture first (instant), then the hands-free engine fills the **complete** leaf-grain closure in the background; expansions answer from memory; a lazy drill covers grains the model lacks; the ~25k-node ceiling asks once.
+- R2 **Fetch (revised per architecture review)**: a **focus-anchored coarse hop-1** first (the rollup edges incident to the focus's own card at the VIEW's anchor grain — "what feeds this item directly", instant), then the hands-free engine fills the **complete** leaf-grain closure in the background; expansions answer from memory; a lazy drill covers grains the model lacks; the ~25k-node ceiling asks once. The old roots+1 walk anchored at the graph ROOT is withdrawn: for a dashboard inside Tableau it returned *Tableau's* lineage, at a chrome grain the view cannot draw.
 - R3 **Placement (revised 22:15)**: **there is NO trace lane.** Everything traced is already in the view (the user's test view == the whole data source); a synthetic "unmapped" layer is a non-realistic artefact. Each traced chain is anchored at the **highest node the view itself places** (explicit assignment, stamped assignment, or a layer rule) — exactly where browse would put it — and ancestors above that anchor are not drawn (they are chrome, as in browse). A chain with no placeable node at ANY level is genuinely outside the view: it is COUNTED in the existing "outside this view" chip, never drawn in a fake lane. On a view that equals its source that count must be zero — if it is not, that is a placement bug to surface, not to hide.
 - R4 **Harness first.**
 - Standing: recursive Node⊃Node⊃Node containment; `childCount` counted from the graph, never the property; no "Keep walking" pedaling inside the ceiling; the capsule narrates; collapse is visual and re-rolls wires.
@@ -62,17 +62,17 @@ Evidence-backed, not self-flagellation — each item is a design constraint belo
 ### 3.1 Data layer (salvaged, certified — `backup/native-canvas-trace-2026-08-20`)
 Cherry-pick, not re-derive: hands-free engine auto-grants (`bcac85a7`), escalation lane + `TRACE_MAX_NODES_HARD` (`bb6bd866`), bulk frontier drain (`10c05fd2`), containment chunking + chain synthesis (`0d7a9f02`), index-anchored coarse walk (`9a284230`+`9474c113`), structural drill (`d5d03550`), `childCount` from the graph (`0f6bac43`+`7c36a4d5`), versioned closure (`41556de3`), AGGREGATED-only vocabulary rescue (`583f858f`). **Not salvaged:** anything that wrote into `canvas.nodes` or `useLayerAssignment`'s curated branch (the lane fallback inside placement, `traceExpansionUrns`, store merge in `useCanvasTraceWalk`).
 
-Fetch sequence per trace: `grain:'coarse'` page (roots+1, ~0.3s) → render → fine closure in background (escalation/bulk) → model complete → expansions from memory. A container whose finer grain is not yet in the model drills lazily (`expandAggregated` structural) while the capsule shows "refining".
+Fetch sequence per trace — an explicit **phase machine** in the driver (coarse → fine → complete | ceiling): (1) `grain:'coarse'` request `{urn: focus, anchorDepth|anchorTypes from the view}` — hop-1 rollup partners of the focus's card at the view's anchor grain, **with `weight`** (~0.3s) → render; (2) fine closure in background (escalation/bulk), merges **coalesced** (≤1 per frame), **AbortController** cancels server work on exit/re-focus, per-focal model cache is an **LRU(3)**; (3) model complete, or the ceiling asks once. Deeper hops come ONLY from the fine walk (rollup transitivity ≠ leaf transitivity — a coarse BFS past hop 1 admits paths that do not exist at leaf grain). A container whose finer grain is not yet in the model drills lazily (`expandAggregated` structural) while the capsule shows "refining"; drills merge into the MODEL with their pair ledger entry.
 
 ### 3.2 `TraceViewModel` (pure; `frontend/src/hooks/lib/traceViewModel.ts`)
 Inputs: `LensWalkModel`, `focusUrn`, `layers: ViewLayerConfig[]`, `assignments/rules` (the same inputs `useLayerAssignment` consumes), `traceExpansion: Set<urn>`, `showUp/showDown`, `depthUp/depthDown`, `hiddenTypes`.
 
 Steps (each a pure function with its own tests):
-1. **Participants & hops** — BFS hop distances from the focus subtree over `lineageEdges` (reuse `traceViewFilter`), direction/depth scoping; containers inherit min descendant distance.
+1. **Participants & hops** — **consume `buildLensSubgraph`** (parent/children/depth/hopUp/hopDown/degrees) so parity with the Lens is structural, not asserted; `traceViewFilter` becomes a thin predicate over the subgraph (its own BFS is deleted). Hops and depth scoping run over **raw edges only**; a rollup-only hop-1 partner gets hop 1.
 2. **Trees** — build containment trees from `model.containmentEdges` for every participant chain up to its top-most root (full chains always: C1 ⇒ no spine/anchor rules needed; nothing can orphan).
-3. **Placement** — for each chain, walk from the participant UP and pick the **highest ancestor the view places** (explicit assignment → stamped assignment → type rule; the same priority chain `useLayerAssignment` uses in browse). That node becomes the lane root; ancestors above it are dropped from the tree (chrome). A chain with no placeable node is counted as outside-the-view, not drawn (R3). **Why the old lane filled up despite full view coverage:** the previous design anchored at the graph's absolute top-most root (e.g. the platform), which the view never assigns — browse anchors at the container below it.
+3. **Placement** — **extract `resolveRootLayer()` from `useLayerAssignment`** (never re-implement it): the real chain is instanceAssignment → explicit → *curated scope: rules never place, stamped only for branch-created* → open scope: backend `effectiveAssignments` → stamped → rule → inherit → `showUnassigned` layer (a view-configured lane — honoured, not "synthetic"), plus HARD-RULE child inheritance and `inheritsChildren:false`. For each chain, the highest ancestor that resolver places is the lane root; ancestors above are chrome. A **placement-parity test** runs browse's `useLayerAssignment` on the same fixture and compares `nodeLayerMap` per traced node. That node becomes the lane root; ancestors above it are dropped from the tree (chrome). A chain with no placeable node is counted as outside-the-view, not drawn (R3). **Why the old lane filled up despite full view coverage:** the previous design anchored at the graph's absolute top-most root (e.g. the platform), which the view never assigns — browse anchors at the container below it.
 4. **Visibility** — a card is visible iff every ancestor is in `traceExpansion`; **initial expansion = focus chain only** (R1). Each visible card carries `grain = depth` and `childCount` (from the model/graph).
-5. **Wire projection** — every lineage edge maps each endpoint to its **nearest visible ancestor**; same-(src,dst) projections bundle with `count`; an edge whose projected endpoints coincide is dropped (internal to a closed card — shown as the card's "N on this lineage" count); edges leaving the scoped set are counted, not drawn. Grain of a wire = max(grain of its two projected ends). Coarse-only wires (from the rollup lane) are marked `coarse` so the overlay can use the existing dashed language.
+5. **Wire projection — the GRAIN RULE.** The model's edges are **typed**: `{kind:'raw'} | {kind:'rollup', srcDepth, tgtDepth, weight}` (no mixed list — the engine filters rollups out of the fine closure precisely to avoid the "5 in / 4 out" double count, and the worker materialises a rollup cell per level PAIR, so one flow appears as root↔root, root↔child, child↔root, child↔child). **Raw** edges re-project via `projectLensEdges` (nearest visible ancestor, directional bundling, `isLeafEdge`), dropping ancestor↔descendant projections and coincident endpoints (those become the card's "N on this lineage" count). **Rollup** edges are NEVER re-projected: drawn only when both endpoints ARE the visible cards. A **per-pair ledger** `{pairKey → complete | partial}` (fed by the driver and drills) decides, per visible pair: raw wires when complete; rollup wire when no raw evidence; raw wires **plus a residual rollup wire `W − R`** when partial (browse's `isResidual` semantics). Wires emit the overlay's existing `bundle-*` shape: node-ID endpoints, `edgeCount`, `isBundled`, `isAggregated`/coarse styling. Rollup counts are "≈W" while aggregation stamps are stale; raw always wins.
 6. **Counts** — per card: on-this-lineage descendants; per lane: roots; global: up/down participants, hiddenByLayer (type-chip hidden).
 
 Determinism: same inputs → identical output (sorted by urn); idempotent across model growth (a grown model only ADDS).
@@ -143,11 +143,11 @@ proportional to what you have looked at, not to the graph.
 ### 8.2 Server budgets (all index-anchored; a full scan is a bug)
 | Path | Mechanism | Budget |
 |---|---|---|
-| Coarse roots+1 | label-bucketed frontier hops, `gp IS NULL` depth≤1 filter, rollup lane | ≤ 2 s cold, ≤ 0.5 s warm |
+| Coarse hop-1 (focus-anchored, view anchor grain) | label-bucketed, rollup lane, ships `weight` | ≤ 2 s cold, ≤ 0.5 s warm (measured roots+1 variant: 1.85 s / 296 ms) |
 | Fine closure page | escalation pages 2k → 6k → 10k (`TRACE_MAX_NODES_HARD`), excludes keep known nodes off the wire | ≤ 2 s per page (measured 1.9 s @ 6k) |
-| Frontier tail | bulk drains, 200 seeds/request | ≤ 12 requests per 2,300 anchors (was 2,300) |
+| Frontier tail | bulk drains, 200 seeds/request, per direction | ≤ 24 requests per 2,300 anchors (12 per direction; was 2,300) |
 | Containment | 400-pair chunks + chain synthesis on timeout | **never empty**; ≤ 2 s per chunk |
-| Drill on expand | structural `expandAggregated`, `nextLevel:null` | ≤ 300 ms |
+| Drill on expand | structural `expandAggregated`, `nextLevel:null`; `_edges_between_sets_once` must be label-bucketed (it anchors with an unlabeled `urn IN` today) | ≤ 300 ms (measured 254 ms on the rollup path; raw fallback uncertified) |
 | `childCount` | live `count(child)` per batch, label-bucketed | included in the batch query; never the property |
 | Cache | redis 300 s + LKG keyed on the full request | repeat traces serve in ms |
 Hard rule: no per-anchor request storms; the capsule counts requests and the
@@ -169,15 +169,13 @@ harness asserts the request count per journey.
   trace walks to depth 3, not 25.
 
 ### 8.4 Rendering budgets
-- Cards: `LayerColumn`'s row virtualisation stays in force; a container's
-  rows window at 8 with "N more" (the Lens's `FRAME_WINDOW` idiom) — a
-  1,000-child table never mounts 1,000 rows.
+- Cards: `LayerColumn`'s row virtualisation stays in force. Row windowing at 8 with "N more" is a **new `LayerColumn` change** scoped in the plan (no such window exists today; trace currently suppresses load-more at `LayerColumn.tsx:437`).
 - Wires: projected onto visible cards and **bundled with counts**; the overlay
   never draws more than the viewport's wires (viewport culling on both cards
   and wires; hit-testing already degrades past `HIT_DENSITY_LIMIT`). Data is
   never dropped to meet a draw budget — it is bundled.
 - Frame budget: expand/collapse paints within one frame after the ≤ 16 ms VM
-  step; the coarse picture paints ≤ 1 s after the click on the 1.23M graph.
+  step; the coarse picture paints ≤ 2 s cold / ≤ 0.5 s warm after the click on the 1.23M graph (one number everywhere).
 
 ### 8.5 Expand / collapse / focus semantics at scale
 - **Expand**: if the model holds the finer grain → pure VM refinement, no
@@ -203,14 +201,12 @@ harness asserts the request count per journey.
 - Long-task monitor in the harness during background fill (no task > 50 ms).
 
 ### 8.7 Acceptance additions
-6. On `solidatus-test-large`: trace a layer → coarse picture ≤ 1 s; background
+6. On `solidatus-test-large`: trace a layer → coarse picture ≤ 2 s cold; background
    fill proceeds with the board fully interactive; expanding any container
    refines its wires in ≤ 300 ms (lazy) or instantly (in-model); collapsing
    re-rolls instantly; the capsule's request count stays ≤ 16 for the whole
    session; memory stays under the ceiling with the capsule asking once past it.
-7. Wire parity with the Lens: for the same focus, the set of flows drawn (at
-   any grain) matches the Lens's walked flows — no lineage missing, none
-   invented.
+7. Wire parity with the Lens **for raw-derived wires**: Σ wire counts per pair == raw edges in the scoped model, never exceeding it where raw and rollup coexist; rollup wires are labelled as such and never drawn where raw evidence for that pair is complete.
 
 
 ## 9. Integration contract (from the independent integration audit, 2026-08-20)
@@ -297,3 +293,63 @@ journeys as FalkorDB (the fixes exist on the backup branch — `41556de3`).
 - **Keep**: `traceViewFilter.test.ts` (VM step 1 reuses it),
   `traceHistoryStack.test.ts` (extended for `traceExpansion`),
   `TraceHistoryPanel.test.tsx`, `traceMergeSpine.test.ts` (legacy hosts).
+
+
+## 10. Architecture-review resolutions (independent greenfield review, 2026-08-20)
+
+Verdict received: **overlay architecture right; three blocking defects in the
+grain/fetch model** — each resolved inline above and summarised here so the
+plan cannot lose them.
+
+1. **Coarse fetch was anchored on the graph ROOT** (`trace_closure_coarse`
+   climbs to the root and seeds root+children) → for a dashboard in Tableau it
+   returns Tableau's lineage, undrawable at chrome grain. **Resolved**:
+   focus-anchored hop-1 at the view's anchor grain (R2, §3.1); deeper hops
+   fine-only.
+2. **Chrome-grain rollups cannot be projected DOWN** (platform↔platform has
+   no visible ancestor under a dataset-anchored view). **Resolved** by (1)
+   and by the rule that rollup edges are never re-projected.
+3. **Grain not first-class at the edge level** (one mixed `lineageEdges`
+   list; hop BFS, parity and bundling over mixed grains). **Resolved**: typed
+   edges, raw-only BFS, per-pair ledger with residual `W−R` (§3.2 step 5),
+   `weight` shipped by the coarse walk.
+
+Reuse rulings adopted: VM consumes `buildLensSubgraph` + `projectLensEdges`;
+`focus-layout` NOT used (borrow `holdsThings`, count-honesty, `boundaryHops`);
+`useEdgeProjection`'s bidirectional-collapse / reverse-flow / hover-delegation
+passes extracted as pure functions shared with browse, projection bypassed;
+`resolveRootLayer()` extracted from `useLayerAssignment`; `traceWalkMerge`,
+`traceMergeSpine`, the `useCanvasTraceWalk` store merge and
+`traceExpansionUrns` deleted; `useTraceFilteredHierarchy` bypassed until
+`useUnifiedTrace` is retired. **New engine**: only the `TraceViewModel`
+(placement, lanes, grain rule, ledger) — no new walk, projection or layout.
+
+Driver adaptations (the coarse response's empty frontier currently reads as
+`exhausted`, so "fine fill in background" has no path today): explicit
+coarse→fine phase machine; coalesced merges; `AbortController` on exit and
+re-focus; per-focal LRU(3); request-count capsule; note that
+`excludeUrns.slice(0,2000)` re-ships hydration past 2k known nodes and the
+cache key includes `excludeUrns` so continuations never hit redis — accepted
+for v1, ticketed.
+
+Store-write guards: every `LayerColumn`/canvas callback that can write the
+store must be trace-gated and listed in the plan — double-click, search-
+children, load-more, reorder, drag, edge connect (the auto-drill effects are
+gated; the others are not today).
+
+### 10.1 Harness gates (added)
+- **Canary**: the harness module must report ≥ N tests run (`LineageLens.test.tsx`
+  silently runs 0 today because `html-to-image` is not installed).
+- **Store-write spy**: zero `useCanvasStore` writes during a trace; store
+  snapshot byte-identical after exit.
+- **Count parity per pair and per grain**: Σ wire counts == raw edges in the
+  scoped model; never both raw and rollup for a complete pair.
+- **Topology**: every wire's endpoints are visible cards, none
+  ancestor↔descendant; every visible card's parent is visible or it is a lane
+  root.
+- **Placement parity** vs browse's `useLayerAssignment` on the same fixture.
+- **DOM chevrons** for containers with graph-counted `childCount`.
+- **Real-browser probe** (CDP recipe; `&perf=1` reducedMotion trap;
+  `window.__renderCounts()`) on the CFO fixture for paint, long tasks and
+  render fan-out — jsdom cannot paint wires, so VM-level assertions are
+  necessary but not sufficient.
