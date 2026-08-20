@@ -353,3 +353,48 @@ gated; the others are not today).
   `window.__renderCounts()`) on the CFO fixture for paint, long tasks and
   render fan-out — jsdom cannot paint wires, so VM-level assertions are
   necessary but not sufficient.
+
+## 11. In-scope fixes (user ruling 2026-08-20: fix them in THIS build, not tickets)
+
+Every defect the two reviews surfaced ships in this build with a pin.
+
+| # | Defect (evidence) | Fix in this build | Pin |
+|---|---|---|---|
+| F1 | ESC never exits the native trace (`onExitTrace` → idle legacy `exitTrace`) | `onExitTrace` → overlay exit | harness: ESC ends trace, store snapshot identical |
+| F2 | Dock direction arrows zero depth + `retrace`→`continueWalk` (storm vector) | adapter: depth 0 = hidden; `retrace` no-op for view changes | harness: 20 toggles → 0 requests |
+| F3 | Header presets 50/100 + dock slider 50 exceed wire `le=25` | cap fetch at 25; >25 view-only, labelled | unit: request depth never > 25 |
+| F4 | Dead dock controls (`lineageEdgeTypes`, level) in native mode | hidden in native mode (edge-type filter as a follow-up ticket is the ONLY deferral, explicitly) | dock test |
+| F5 | `FlatTreeItem` trace count/chevron from `children.length` | graph-counted `childCount` + "N on this lineage" | harness DOM chevrons |
+| F6 | `LayerColumn` suppresses "N more" in trace; no 8-row window | VM-bounded window at 8 with "N more" | harness: 1,000-child container mounts ≤ 8 rows |
+| F7 | "outside this view" chip per-selection & suppressed | VM `outsideView` surfaced in capsule/dock | harness: == 0 on full-coverage fixture |
+| F8 | History lacks `traceExpansion` | entry carries `traceExpansion` + focus | traceHistoryStack test: exact picture restore |
+| F9 | Reveal / search / focus auto-scroll write `expandedNodes` in trace | route to `traceExpansion` + VM cards | harness |
+| F10 | Drafts: `seed_cursor` TypeError; versioned: 501 | cherry-pick `41556de3`; add `grain` passthrough | backend suites + live |
+| F11 | Coarse walk anchored at graph root; drops `weight` | focus-anchored hop-1 at view anchor; ships `weight` | live test on CFO-shaped estate |
+| F12 | `_edges_between_sets_once` unlabeled `urn IN` scan | label-bucket it | live certification (raw fallback timed) |
+| F13 | Coarse response reads `exhausted` → no fine fill | driver phase machine | hook tests |
+| F14 | No abort on exit/re-focus; unbounded focal cache | `AbortController`; LRU(3) | hook tests |
+| F15 | `excludeUrns.slice(0,2000)` re-ships hydration; cache key includes excludes | keep v1 (documented); measure re-ship bytes in certification | — |
+| F16 | Harness/module canary (`LineageLens.test.tsx` runs 0 tests; `html-to-image` missing) | install the dep (`npm i html-to-image@1.11.13`) + canary assertion in every harness file | canary |
+| F17 | Store-writing `LayerColumn` callbacks not trace-gated (dbl-click, search-children, load-more, reorder, drag, connect) | gate all, listed | store-write spy |
+| F18 | `childCount` from the property (drift) | cherry-pick `0f6bac43` + `7c36a4d5` | backend tests |
+| F19 | Containment pair-fetch 2 s timeout → empty | cherry-pick `0d7a9f02` | live |
+| F20 | AGGREGATED-only sources blank | cherry-pick `583f858f` | wire test |
+
+## 12. Non-regression guarantees for the canvas (binding)
+
+- **G1 Layout untouched.** Browse layout, node positions, column order, and
+  the store are byte-identical before and after a trace (store snapshot +
+  `nodeLayerMap` parity pins). Trace mode reads the store; it never writes.
+- **G2 Containment at any depth.** Harness fixtures at depth 1, 3 and 10
+  (recursive Node⊃…⊃Node): every level keeps its chevron (graph-counted),
+  expands lazily, collapses visually, and wires re-project at every level.
+- **G3 Lazy load is correct and bounded.** Expanding a card never fetches
+  more than that card's slice; expand-in-model = 0 requests; expand-lazy =
+  exactly 1 drill; collapse = 0 requests; re-expand = 0 requests.
+- **G4 End-to-end for the traced node.** For whatever node is traced, the
+  scoped model holds its complete closure (to the ceiling), and every path
+  the Lens would walk is represented by a wire at some visible grain — the
+  parity gate (§8.7 #7) enforces it per pair.
+- **G5 Performance budgets are tests** (§8.6) and scale-class changes are
+  certified live on `solidatus-test-large` before merge.
