@@ -2901,8 +2901,11 @@ export function ContextViewCanvas({
     if (!node) return
     const nodeUrn = (node.data?.urn as string) ?? nodeId
     const entityType = (node.data?.type as string) ?? ''
+    // A level-less type still drills: the server's STRUCTURAL descent
+    // ("one containment step below the pair") covers ontologies whose
+    // types carry no hierarchy.level — without this, expanding such a
+    // node during a coarse trace revealed children but never their edges.
     const currentLevel = entityTypeLevels.get(entityType)
-    if (currentLevel === undefined) return  // not a leveled entity (logical/tag/etc)
 
     // Find AGGREGATED edges incident to this node (canvas-store edges already
     // carry the trace result's edges via the post-trace merge).

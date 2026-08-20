@@ -501,7 +501,9 @@ export interface ExpandAggregatedBatchRequest {
     pairs: Array<{
         sourceUrn: URN
         targetUrn: URN
-        nextLevel: number | string
+        /** null = STRUCTURAL drill (one containment step below the pair)
+         *  for types without a hierarchy.level. */
+        nextLevel: number | string | null
     }>
     lineageEdgeTypes?: string[] | null
     includeContainmentEdges?: boolean

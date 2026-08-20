@@ -125,7 +125,7 @@ export interface TraceHistoryEntry {
 
 /** Drill-down state — keyed by `${sourceUrn}->${targetUrn}@${atLevel}`. */
 export type DrilldownKey = string
-export const drilldownKey = (sourceUrn: string, targetUrn: string, atLevel: number): DrilldownKey =>
+export const drilldownKey = (sourceUrn: string, targetUrn: string, atLevel: number | 'structural'): DrilldownKey =>
     `${sourceUrn}->${targetUrn}@${atLevel}`
 
 /**
@@ -221,7 +221,7 @@ export interface TraceState {
      * /trace/expand-batch) and merges into the drilldowns cache.
      */
     expandAggregatedEdgesBatch: (
-        pairs: Array<{ sourceUrn: string; targetUrn: string; currentLevel: number }>,
+        pairs: Array<{ sourceUrn: string; targetUrn: string; currentLevel?: number }>,
         provider: GraphDataProvider,
     ) => Promise<TraceV2Result | null>
     /** Collapse a previously-opened drilldown (reverts to the original AGGREGATED edge). */
@@ -436,11 +436,15 @@ export const useTraceStore = create<TraceState>((set, get) => ({
 
         // Per-pair cache check: filter to pairs whose drilldown isn't already
         // materialised. If everything is cached, no network call.
-        const keysByPair = new Map<string, { sourceUrn: string; targetUrn: string; nextLevel: number }>()
-        const uncached: Array<{ sourceUrn: string; targetUrn: string; nextLevel: number }> = []
+        // A pair whose type has no hierarchy.level drills STRUCTURALLY —
+        // the server treats nextLevel: null as "one containment step below
+        // the pair" by design ("a caller that cannot name a level is not
+        // confused").
+        const keysByPair = new Map<string, { sourceUrn: string; targetUrn: string; nextLevel: number | null }>()
+        const uncached: Array<{ sourceUrn: string; targetUrn: string; nextLevel: number | null }> = []
         for (const p of pairs) {
-            const nextLevel = p.currentLevel + 1
-            const key = drilldownKey(p.sourceUrn, p.targetUrn, nextLevel)
+            const nextLevel = p.currentLevel !== undefined ? p.currentLevel + 1 : null
+            const key = drilldownKey(p.sourceUrn, p.targetUrn, nextLevel ?? 'structural')
             keysByPair.set(key, { sourceUrn: p.sourceUrn, targetUrn: p.targetUrn, nextLevel })
             if (!drilldowns.has(key)) uncached.push({ sourceUrn: p.sourceUrn, targetUrn: p.targetUrn, nextLevel })
         }
@@ -517,7 +521,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
             const next = new Map(get().drilldowns)
             if (merged) {
                 for (const p of uncached) {
-                    const key = drilldownKey(p.sourceUrn, p.targetUrn, p.nextLevel)
+                    const key = drilldownKey(p.sourceUrn, p.targetUrn, p.nextLevel ?? 'structural')
                     next.set(key, merged)
                 }
                 set({ drilldowns: next })
@@ -763,7 +767,7 @@ export interface UseUnifiedTraceResult {
     /** Drill into an AGGREGATED edge */
     expandAggregatedEdge: (sourceUrn: string, targetUrn: string, currentLevel: number) => Promise<TraceV2Result | null>
     /** Batched drill — one provider call for many edges */
-    expandAggregatedEdgesBatch: (pairs: Array<{ sourceUrn: string; targetUrn: string; currentLevel: number }>) => Promise<TraceV2Result | null>
+    expandAggregatedEdgesBatch: (pairs: Array<{ sourceUrn: string; targetUrn: string; currentLevel?: number }>) => Promise<TraceV2Result | null>
     /** Collapse a drilldown by key */
     collapseDrilldown: (key: DrilldownKey) => void
 
@@ -903,7 +907,7 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
     // Batched drill — provider-bound wrapper used by autoDrillOnExpand to
     // collapse N concurrent /trace/expand requests into one /trace/expand-batch.
     const expandAggregatedEdgesBatch = useCallback(async (
-        pairs: Array<{ sourceUrn: string; targetUrn: string; currentLevel: number }>,
+        pairs: Array<{ sourceUrn: string; targetUrn: string; currentLevel?: number }>,
     ): Promise<TraceV2Result | null> => {
         if (!provider) return null
         return expandAggregatedEdgesBatchAction(pairs, provider)
