@@ -358,7 +358,7 @@ git diff --cached --stat && git commit -m "test(trace): estate fixtures — CFO 
 - Test: `frontend/src/hooks/lib/__tests__/traceViewModel.cards.test.ts`
 
 **Interfaces:**
-- Consumes: `buildLensSubgraph` (`lens-subgraph.ts`) — input `{ focusUrn, nodes, lineageEdges, containmentEdges, frontierUp, frontierDown }`, output exposes per-urn `parent`, `children`, `depth`, `hopUp`, `hopDown` (read the file to confirm field names before coding); `resolveRootLayer` (Task 3).
+- Consumes: `buildLensSubgraph(input)` (`lens-subgraph.ts:133`) — input `LensSubgraphInput { focusUrn, nodes, lineageEdges, containmentEdges, frontierUp, frontierDown }`, returns `LensSubgraph { focusUrn, nodes: Map<string, LensSubgraphNode>, roots: string[], lineageEdges }`; each `LensSubgraphNode` has `urn, node (the LensWalkNode: entityType, displayName, data.childCount), parent: string|null, children: string[], depth, isLeaf, up, down, isFocus, hopUp: number|null, hopDown: number|null, degreeUp, degreeDown`. Access is `sg.nodes.get(urn)`. Also `resolveRootLayer` (Task 3).
 - Produces:
 ```ts
 export interface TraceCard {
@@ -379,7 +379,10 @@ export interface TraceViewInputs {
 }
 export interface TraceView { lanes: TraceLane[]; visible: Set<string>; outsideView: number; counts: { up: number; down: number } }
 export function buildTraceView(i: TraceViewInputs): TraceView
+/** Adapter for LayerColumn: each lane → HierarchyNode trees (id, data: {...card.node.data, childCount, onLineage, traceRole}, children). */
+export function lanesToHierarchy(lanes: TraceLane[]): Array<{ layerId: string; nodes: HierarchyNode[] }>
 ```
+(`HierarchyNode` is the canvas's existing tree type — import it from where `useTraceFilteredHierarchy` imports it.)
 Rules: (1) participants & hops from the subgraph over **raw** edges only; rollup-only hop-1 partners get hop 1; (2) for each participant, climb `parent` to the highest ancestor `resolveRootLayer` places (inputs from `assignments`/`layers` rules by `entityTypes`); ancestors above are dropped; no placeable ancestor ⇒ chain counted in `outsideView`; (3) a card is visible iff it is a lane root or every ancestor ∈ `traceExpansion`; the initial expansion is the caller's responsibility (Task 7 seeds the focus chain); (4) direction/depth scope: a card is in scope iff (role allowed by toggles) and (hop ≤ depth for its direction) or it hosts an in-scope descendant; (5) lanes sorted by `layers.order`, roots by label, children by label — deterministic.
 
 - [ ] **Step 1: Failing tests (CFO estate)**
@@ -427,19 +430,36 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
   const sg = buildLensSubgraph({ focusUrn: i.focusUrn, nodes: i.model.nodes,
     lineageEdges: i.model.lineageEdges.filter(e => e.kind !== 'rollup'), containmentEdges: i.model.containmentEdges,
     frontierUp: i.model.frontierUp, frontierDown: i.model.frontierDown })
-  const parent = (u: string) => sg.node(u)?.parent ?? null          // adapt to the real accessor
-  // hop + role per participant (raw hops from sg; rollup hop-1 partners get hop 1)
-  // ... roleOf(u), hopOf(u)
+  const parent = (u: string) => sg.nodes.get(u)?.parent ?? null
+  const rollupPartners = new Set<string>()          // hop-1 partners known only through rollups
+  for (const e of i.model.lineageEdges) if (e.kind === 'rollup') {
+    if (e.sourceUrn === i.focusUrn) rollupPartners.add(e.targetUrn)
+    if (e.targetUrn === i.focusUrn) rollupPartners.add(e.sourceUrn)
+  }
+  const roleOf = (u: string): TraceCard['role'] => {
+    const n = sg.nodes.get(u)!
+    if (n.isFocus) return 'focus'
+    const up = n.hopUp !== null || i.model.upstreamUrns.has(u)
+    const down = n.hopDown !== null || i.model.downstreamUrns.has(u)
+    return up && down ? 'both' : up ? 'up' : down ? 'down' : 'host'
+  }
+  const hopOf = (u: string): number | null => {
+    const n = sg.nodes.get(u)!
+    const hops = [n.hopUp, n.hopDown].filter((h): h is number => h !== null)
+    if (hops.length) return Math.min(...hops)
+    return rollupPartners.has(u) ? 1 : null
+  }
+  const participants = [...sg.nodes.keys()].filter(u => roleOf(u) !== 'host')
   const ruleFor = (type: string) => i.layers.find(l => l.entityTypes.includes(type))?.id
   const placed = new Map<string, string>()   // anchor urn → layerId
   let outsideView = 0
   for (const p of participants) {
     let anchor: string | null = null; let cur: string | null = p
     while (cur) {
-      const n = sg.node(cur)!
+      const n = sg.nodes.get(cur)!
       const layer = resolveRootLayer({ nodeId: cur, nodeUrn: cur, nodeLayerProp: undefined,
         instanceAssignment: undefined, explicitAssignment: i.assignments[cur]?.layerId, viewIsCurated: i.viewIsCurated,
-        branchCreated: false, backendAssignment: undefined, ruleAssignment: ruleFor(n.entityType), inheritedLayerId: undefined,
+        branchCreated: false, backendAssignment: undefined, ruleAssignment: ruleFor(n.node.entityType ?? ''), inheritedLayerId: undefined,
         unassignedFallbackLayerId: undefined })
       if (layer) { anchor = cur; placed.set(cur, layer) }     // keep climbing: HIGHEST placed wins
       cur = parent(cur)
@@ -471,7 +491,7 @@ git diff --cached --stat && git commit -m "feat(trace): TraceViewModel — cards
 - Test: `frontend/src/hooks/lib/__tests__/traceViewModel.wires.test.ts`
 
 **Interfaces:**
-- Consumes: `projectLensEdges` (`lens-subgraph.ts` — read its signature; it takes the subgraph, the visible set and returns projected edges with `count`).
+- Consumes: `projectLensEdges(sg, population, visible)` (`lens-subgraph.ts:505`) → `ProjectedLensEdge[]` with `{ sourceUrn, targetUrn, weight /* raw hops bundled */, isLeafEdge, edgeTypeNorm }`; it draws each raw hop between the nearest VISIBLE ancestors of its endpoints, hides hops internal to one collapsed container, and only draws hops whose BOTH endpoints are in `population`. Pass `population` = every urn in `i.model.nodes`, `visible` = `TraceView.visible`. Build `sg` from **raw** edges only (Task 5 already does) so rollups are never re-projected.
 - Produces:
 ```ts
 export interface TraceWire { id: string; source: string; target: string; edgeCount: number; isBundled: boolean
@@ -481,7 +501,7 @@ export function pairKey(src: string, dst: string): string          // `${src}>${
 export interface PairLedger { state(src: string, dst: string): PairState; rawCount(src: string, dst: string): number }
 export function buildLedger(model: LensWalkModel, completePairs: ReadonlySet<string>): PairLedger
 ```
-`TraceView.wires: TraceWire[]` added. Grain rule per visible pair (after projection): raw edges re-project via `projectLensEdges` (drop ancestor↔descendant and self pairs); rollup edges draw only when both endpoints ARE visible cards; if the pair has raw evidence and ledger = `complete` ⇒ raw only; `none` ⇒ rollup (`edgeCount = weight ?? 1`); `partial` ⇒ raw + one `residual` wire with `edgeCount = weight − rawCount` (≥1). In Stage 1 `completePairs` = all pairs (the model is the fine closure); Stage 2's driver feeds the real ledger.
+`TraceView.wires: TraceWire[]` added. Grain rule per visible pair: raw evidence per pair = `projectLensEdges(...)` bundles keyed `${sourceUrn}>${targetUrn}` (`edgeCount = weight`, `kind: 'raw'`, `isBundled = !isLeafEdge`); rollup edges draw only when BOTH `sourceUrn` and `targetUrn` ARE visible cards (a rollup is never re-anchored); if the pair has raw evidence and ledger = `complete` ⇒ raw only; `none` ⇒ rollup (`edgeCount = weight ?? 1`); `partial` ⇒ raw + one `residual` wire with `edgeCount = weight − rawCount` (≥1). In Stage 1 `completePairs` = all pairs (the model is the fine closure); Stage 2's driver feeds the real ledger.
 
 - [ ] **Step 1: Failing tests**
 
@@ -558,7 +578,56 @@ it('CFO trace: dashboard chain open, partners closed with counts, two rolled wir
 })
 ```
 
-- [ ] **Step 2: Run → FAIL.** — [ ] **Step 3: Implement `useTraceOverlay` and the harness.** — [ ] **Step 4: Harness test still RED** (canvas not swapped yet) — that is expected; commit the hook + harness with the harness test marked `it.todo` → **No:** keep it failing and proceed to Task 8 in the same commit series; commit after Task 8 turns it green. Commit the hook alone here: `feat(trace): useTraceOverlay — derived expansion state over the pure view model`.
+- [ ] **Step 2: Run → FAIL** (harness module missing).
+
+- [ ] **Step 3: Implement `useTraceOverlay`**
+
+```ts
+// frontend/src/hooks/useTraceOverlay.ts
+import { useCallback, useMemo, useState } from 'react'
+import { buildTraceView, type TraceView } from './lib/traceViewModel'
+import { buildLensSubgraph, focusAncestorChain } from '@/components/canvas/context-view/lens/lens-subgraph'
+// (args/TraceOverlay types from the Interfaces block above)
+export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
+  // Derived state keyed by focus: when the focus changes, the expansion is
+  // re-seeded DURING RENDER (React "adjusting state on prop change"), never
+  // in an effect — react-hooks/set-state-in-effect is enforced.
+  const [exp, setExp] = useState<{ forFocus: string | null; set: Set<string> }>({ forFocus: null, set: new Set() })
+  const seeded = useMemo(() => {
+    if (!a.model || !a.focusUrn) return new Set<string>()
+    const sg = buildLensSubgraph({ focusUrn: a.focusUrn, nodes: a.model.nodes, lineageEdges: [], containmentEdges: a.model.containmentEdges, frontierUp: [], frontierDown: [] })
+    return new Set([...focusAncestorChain(sg), a.focusUrn])
+  }, [a.model, a.focusUrn])
+  if (exp.forFocus !== a.focusUrn) setExp({ forFocus: a.focusUrn, set: seeded })
+  const traceExpansion = exp.forFocus === a.focusUrn ? exp.set : seeded
+
+  const view = useMemo<TraceView | null>(() => (a.model && a.focusUrn
+    ? buildTraceView({ model: a.model, focusUrn: a.focusUrn, layers: a.layers, assignments: a.assignments, viewIsCurated: a.viewIsCurated,
+        traceExpansion, showUpstream: a.showUpstream, showDownstream: a.showDownstream, depthUp: a.depthUp, depthDown: a.depthDown })
+    : null), [a.model, a.focusUrn, a.layers, a.assignments, a.viewIsCurated, traceExpansion, a.showUpstream, a.showDownstream, a.depthUp, a.depthDown])
+
+  const toggle = useCallback((id: string) => setExp(p => { const s = new Set(p.set); s.has(id) ? s.delete(id) : s.add(id); return { ...p, set: s } }), [])
+  const expandPath = useCallback((ids: readonly string[]) => setExp(p => ({ ...p, set: new Set([...p.set, ...ids]) })), [])
+  const exit = useCallback(() => setExp({ forFocus: null, set: new Set() }), [])
+  return { active: !!a.focusUrn && !!a.model, view, traceExpansion, toggle, expandPath, exit }
+}
+```
+(`focusAncestorChain(sg)` at `lens-subgraph.ts:293` returns `Set<string>` of ancestor urns, focus excluded.)
+
+- [ ] **Step 4: Implement the harness** (`renderCanvasWithTrace`, `startTrace`, `visibleCardIds`, `chevron`, `wires`, `storeWrites`, `snapshotStore`, `pressEscape`, `isTracing`). The store-write spy:
+
+```ts
+const writes = { count: 0 }
+const unsub = useCanvasStore.subscribe((s, prev) => { if (s.nodes !== prev.nodes || s.edges !== prev.edges) writes.count += 1 })
+```
+Reset `writes.count = 0` after `startTrace` resolves the initial closure so browse hydration writes are excluded.
+
+- [ ] **Step 5: Run the harness test** — it stays RED until Task 8 swaps the canvas (expected). Commit the hook and harness now, with the harness test file included:
+
+```bash
+git add frontend/src/hooks/useTraceOverlay.ts frontend/src/test/canvasHarness.tsx frontend/src/components/canvas/context-view/__tests__/traceCanvas.harness.test.tsx
+git diff --cached --stat && git commit -m "feat(trace): useTraceOverlay + canvas harness (store-write spy, canary) — red until the canvas swap"
+```
 
 ---
 
@@ -573,7 +642,50 @@ it('CFO trace: dashboard chain open, partners closed with counts, two rolled wir
 
 Steps (each a commit-able slice):
 - [ ] **8a** `useCanvasTraceWalk`: delete the merge effect, `sessionRef`, `addedEdgeIds`; `exit` only clears `tracedUrn`. Update `useCanvasTraceWalk.test.ts` to assert the store is untouched. Run → green. Commit `refactor(trace): walk controller no longer merges into the store`.
-- [ ] **8b** `ContextViewCanvas`: `const overlay = useTraceOverlay({...})`; in trace mode `renderByLayer = overlay.view.lanes` (adapted to `HierarchyNode` trees: `id`, `data: {...card, childCount, onLineage}`, `children` from `childrenOf`), `visibleLineageEdges = overlay.view.wires` (bypass `useEdgeProjection` and `useTraceFilteredHierarchy` when `overlay.active`); `toggleNode` → `overlay.toggle(id)` and **return** before any store write; `onExitTrace` → `overlay.exit()` + `canvasTrace.exit()` (F1); reveal/search/auto-scroll → `overlay.expandPath` (F9); gate dbl-click, search-children, load-more, reorder, drag, edge-connect callbacks with `if (overlay.active) return` (F17). Run the harness → green; `npx vitest run` full; tsc 61; eslint baseline. Commit `feat(trace): canvas renders the trace overlay — store untouched, ESC exits`.
+- [ ] **8b** `ContextViewCanvas` swap. The seams (line numbers on `main` b4acafe7):
+
+```ts
+// L1573 — after `const canvasTrace = useCanvasTraceWalk(provider)`
+const overlay = useTraceOverlay({
+  model: traceModel, focusUrn: canvasTrace.tracedUrn, layers: viewLayers, assignments: explicitLayerAssignments,
+  viewIsCurated, showUpstream: traceShowUpstream, showDownstream: traceShowDownstream,
+  depthUp: traceDepthUp, depthDown: traceDepthDown,
+})
+// (`viewLayers`, `explicitLayerAssignments`, `viewIsCurated` are the values already passed to useLayerAssignment — reuse those identifiers.)
+
+// L1690-1717 — DELETE `traceVisibleUrns` and `expandedForRender`; trace visibility now lives in overlay.view.
+
+// L1867 — useTraceFilteredHierarchy: pass `isTracing: false` (the VM already scoped); after it:
+const renderByLayer = overlay.active && overlay.view
+  ? lanesToHierarchy(overlay.view.lanes)          // pure adapter in traceViewModel.ts: TraceLane → { layerId, nodes: HierarchyNode[] }
+  : browseByLayer
+
+// L3108 — useEdgeProjection: keep for browse; in trace mode:
+const visibleLineageEdges = overlay.active && overlay.view
+  ? overlay.view.wires.map(w => ({ id: w.id, source: w.source, target: w.target, edgeCount: w.edgeCount, isBundled: w.isBundled, kind: w.kind }))
+  : browseVisibleLineageEdges
+// Remove the `traceAddedEdgeIds` prop and the trace-bundling block from the useEdgeProjection call.
+
+// L2856 — toggleNode: FIRST statement
+if (overlay.active) { overlay.toggle(nodeId); return }
+
+// L1674 — exit: overlay.exit() then canvasTrace.exit(). Also: ESC handler (F1) →
+useEffect(() => {
+  if (!overlay.active) return
+  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onExitTrace() }
+  window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey)
+}, [overlay.active, onExitTrace])
+
+// L3041-3043 — collapse branch: `if (overlay.active) return` is already guaranteed by the toggleNode gate; delete the `removeEdgesByNodeIds(subtreeIds, canvasTrace.addedEdgeIds)` line.
+// L466-474 legacy `exitTrace` (useUnifiedTrace) untouched in Stage 1 (Stage 4 retires it).
+```
+F9: `revealNode`/search-result/auto-scroll call sites that today `setExpandedNodes` → when `overlay.active`, compute the containment chain from `overlay.view` (card `parentId` walk) and call `overlay.expandPath(chain)` instead. F17: add `if (overlay.active) return` at the top of `onNodeDoubleClick`, `loadMoreChildren`, `onReorderNodes`, `onNodeDragStop`, `onConnect`.
+
+Run: the harness → green; `npx vitest run`; `npx tsc --noEmit | grep -c "error TS"` → 61; `npx eslint src/components/canvas/context-view/ContextViewCanvas.tsx | tail -1` → ≤ 65 problems. Commit:
+```bash
+git add frontend/src/components/canvas/context-view/ContextViewCanvas.tsx frontend/src/hooks/lib/traceViewModel.ts frontend/src/components/canvas/context-view/__tests__/traceCanvas.harness.test.tsx
+git diff --cached --stat && git commit -m "feat(trace): canvas renders the trace overlay — store untouched, ESC exits"
+```
 - [ ] **8c** `FlatTreeItem` F5 + `LayerColumn` trace-mode header "N on this lineage" from `data.onLineage`. Harness asserts chevrons + count text. Commit.
 - [ ] **8d** Delete `traceWalkMerge.ts` + test; re-host the seam journeys (budget/hands-free/exhausted; upstream-only hides hosts; depth-1 view instant; exit restores) in the harness file. Commit `chore(trace): remove the store-merge path`.
 
