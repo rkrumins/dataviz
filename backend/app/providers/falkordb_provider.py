@@ -7742,12 +7742,24 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception as exc:
             logger.warning("trace_closure_coarse: root climb failed for %s: %s", urn, exc)
 
+        # Label lookup is ALWAYS index-seek based (the unlabeled `urn IN`
+        # anchor is a FULL SCAN per hop on FalkorDB — the exact trap that
+        # made the first cut of this walk minutes-slow on a 1.2M graph).
+        async def _labels_of(urns: List[str]) -> Dict[str, str]:
+            try:
+                resolved = await self._resolve_urn_labels_bulk(urns)
+                return {u: l for u, l in resolved.items() if l}
+            except Exception:
+                return {}
+
         # Seeds at the top two grains: the root + its rollup-carrying
         # direct children (children without flow contribute nothing).
         seeds = {root_urn}
+        root_lbl_map = await _labels_of([root_urn])
+        r_lbl = f":{_sanitize_label(root_lbl_map[root_urn])}" if root_urn in root_lbl_map else lbl
         try:
             res = await self._ro_query(
-                f"MATCH (r {{urn: $root}})-[:{ct_alt}]->(c) "
+                f"MATCH (r{r_lbl} {{urn: $root}})-[:{ct_alt}]->(c) "
                 f"WHERE (c)-[:{agg}]-() RETURN c.urn LIMIT $cap",
                 params={"root": root_urn, "cap": max(1, max_nodes // 2)},
                 timeout=per_q, op="trace.coarse_seed",
@@ -7771,38 +7783,49 @@ class FalkorDBProvider(GraphDataProvider):
         async def _hop(frontier: List[str], downstream: bool) -> List[str]:
             nonlocal truncation
             arrow_l, arrow_r = ("-", "->") if downstream else ("<-", "-")
-            cy = (
-                f"MATCH (s){arrow_l}[e:{agg}]{arrow_r}(t) WHERE s.urn IN $frontier "
-                f"OPTIONAL MATCH (p)-[:{ct_alt}]->(t) "
-                f"OPTIONAL MATCH (gp)-[:{ct_alt}]->(p) "
-                "WITH s, e, t, p, gp WHERE gp IS NULL "
-                "RETURN DISTINCT s.urn, t.urn, id(e), p.urn LIMIT $lim"
-            )
+            # Label-bucketed anchoring: one INDEX-SEEK query per label
+            # group in the frontier (never an unlabeled scan).
+            frontier_labels = await _labels_of(frontier)
+            buckets: Dict[str, List[str]] = {}
+            for u in frontier:
+                l = frontier_labels.get(u)
+                if l:
+                    buckets.setdefault(_sanitize_label(l), []).append(u)
             nxt: List[str] = []
-            try:
-                res = await self._ro_query(
-                    cy, params={"frontier": frontier, "lim": max(1, max_nodes) * 4},
-                    timeout=per_q, op="trace.coarse_hop",
+            for l, batch in buckets.items():
+                cy = (
+                    f"MATCH (s:{l}){arrow_l}[e:{agg}]{arrow_r}(t) WHERE s.urn IN $frontier "
+                    f"OPTIONAL MATCH (p)-[:{ct_alt}]->(t) "
+                    f"OPTIONAL MATCH (gp)-[:{ct_alt}]->(p) "
+                    "WITH s, e, t, p, gp WHERE gp IS NULL "
+                    "RETURN DISTINCT s.urn, t.urn, id(e), p.urn LIMIT $lim"
                 )
-            except Exception as exc:
-                logger.warning("trace_closure_coarse: hop failed: %s", exc)
-                return []
-            for s_urn, t_urn, eid, p_urn in (res.result_set or []):
-                src, tgt = (s_urn, t_urn) if downstream else (t_urn, s_urn)
-                edges_by_id[str(eid)] = GraphEdge(
-                    id=str(eid), sourceUrn=src, targetUrn=tgt,
-                    edgeType=aggregated_edge_type, properties={},
-                )
-                if p_urn:
-                    contain_pairs.add((p_urn, t_urn))
-                if t_urn in discovered:
+                try:
+                    res = await self._ro_query(
+                        cy, params={"frontier": batch, "lim": max(1, max_nodes) * 4},
+                        timeout=per_q, op="trace.coarse_hop",
+                    )
+                except Exception as exc:
+                    logger.warning("trace_closure_coarse: hop failed: %s", exc)
                     continue
-                if len(discovered) >= max_nodes:
-                    truncation = "max_nodes"
+                for s_urn, t_urn, eid, p_urn in (res.result_set or []):
+                    src, tgt = (s_urn, t_urn) if downstream else (t_urn, s_urn)
+                    edges_by_id[str(eid)] = GraphEdge(
+                        id=str(eid), sourceUrn=src, targetUrn=tgt,
+                        edgeType=aggregated_edge_type, properties={},
+                    )
+                    if p_urn:
+                        contain_pairs.add((p_urn, t_urn))
+                    if t_urn in discovered:
+                        continue
+                    if len(discovered) >= max_nodes:
+                        truncation = "max_nodes"
+                        break
+                    discovered.add(t_urn)
+                    (downstream_urns if downstream else upstream_urns).add(t_urn)
+                    nxt.append(t_urn)
+                if truncation:
                     break
-                discovered.add(t_urn)
-                (downstream_urns if downstream else upstream_urns).add(t_urn)
-                nxt.append(t_urn)
             return nxt
 
         for hop in range(1, max(upstream_depth, downstream_depth) + 1):
@@ -7817,7 +7840,22 @@ class FalkorDBProvider(GraphDataProvider):
         # under the parents the hop query reported. Ship every parent too.
         for s in seeds - {root_urn}:
             contain_pairs.add((root_urn, s))
-        ship = set(discovered) | {p for p, _ in contain_pairs}
+        # The FOCUS's own chain always ships — the traced node may sit
+        # deeper than the coarse grain, and the client's filter/glow
+        # anchor on it (a coarse picture without the traced node in it
+        # reads as "my trace vanished").
+        focus_chain: List[str] = []
+        if root_urn != urn:
+            try:
+                chains = await self._compute_and_store_ancestors_bulk([urn])
+                focus_chain = chains.get(urn, []) or []
+            except Exception:
+                focus_chain = []
+            prev = urn
+            for anc in focus_chain:
+                contain_pairs.add((anc, prev))
+                prev = anc
+        ship = set(discovered) | {p for p, _ in contain_pairs} | {urn, root_urn} | set(focus_chain)
         nodes = await self.get_nodes_batch(list(ship))
 
         return TraceClosureResult(
