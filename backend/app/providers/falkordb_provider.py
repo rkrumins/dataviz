@@ -703,7 +703,13 @@ def _node_from_props(
             properties=user_props,
             tags=json.loads(props["tags"]) if isinstance(props.get("tags"), str) else (props.get("tags") or []),
             layerAssignment=props.get("layerAssignment"),
-            childCount=props.get("childCount"),
+            # DETERMINISTIC childCount (2026-08-20 ruling): the stored
+            # property is an ingest-time snapshot that drifts as the graph
+            # changes — it is NEVER a truth source. childCount is set ONLY
+            # by the read paths that count real containment edges live
+            # (get_nodes, get_nodes_batch, get_node, children fetches);
+            # a path that cannot compute reports unknown, not stale.
+            childCount=None,
             sourceSystem=props.get("sourceSystem"),
             lastSyncedAt=props.get("lastSyncedAt"),
         )
@@ -2909,25 +2915,49 @@ class FalkorDBProvider(GraphDataProvider):
     async def get_node(self, urn: str) -> Optional[GraphNode]:
         await self._ensure_connected()
 
+        # DETERMINISTIC childCount: counted live from real containment
+        # edges when types are configured — never the stored property.
+        try:
+            _ct_types = self._get_containment_edge_types() or []
+        except Exception:
+            # Unconfigured provider (probes, pre-ontology warmup): degrade
+            # to the bare form — childCount reports unknown, never stale.
+            _ct_types = []
+        ct = "|".join(_sanitize_label(t) for t in _ct_types if t)
+        count_clause = (
+            f" OPTIONAL MATCH (n)-[:{ct}]->(child) RETURN n, count(child) as childCount"
+            if ct else " RETURN n"
+        )
+
+        def _from_row(row) -> Optional[GraphNode]:
+            if ct and isinstance(row, (list, tuple)) and len(row) >= 2:
+                node = self._extract_node_from_result([row[0]])
+                if node is not None:
+                    node.child_count = int(row[1])
+                    if node.properties is not None:
+                        node.properties['childCount'] = int(row[1])
+                return node
+            return self._extract_node_from_result(row)
+
         # Try label-aware lookup first (index-assisted, 10-50x faster)
         label = await self._get_cached_label(urn)
         if label:
             result = await self._ro_query(
-                f"MATCH (n:{_sanitize_label(label)} {{urn: $urn}}) RETURN n",
+                f"MATCH (n:{_sanitize_label(label)} {{urn: $urn}}){count_clause}",
                 params={"urn": urn},
                 op="nodes.get",
             )
             if result.result_set and len(result.result_set) > 0:
-                return self._extract_node_from_result(result.result_set[0])
+                return _from_row(result.result_set[0])
 
         # Fallback: label-less scan (still works, just slower)
         result = await self._ro_query(
-            "MATCH (n) WHERE n.urn = $urn RETURN n",
+            f"MATCH (n) WHERE n.urn = $urn{count_clause}",
             params={"urn": urn},
             op="nodes.get_unlabeled",
         )
         if result.result_set and len(result.result_set) > 0:
-            node = self._extract_node_from_result(result.result_set[0])
+            node = _from_row(result.result_set[0])
             # Backfill the cache for next time
             if node:
                 await self._cache_urn_label(urn, str(node.entity_type))
@@ -9613,9 +9643,11 @@ class FalkorDBProvider(GraphDataProvider):
         # merged children CHEVRON-LESS (no expand affordance, deeper levels
         # unreachable). Browse computes the count live; the batch hydration
         # every trace path uses must agree with it.
-        ctypes_for_count = [
-            _sanitize_label(t) for t in (self._get_containment_edge_types() or []) if t
-        ]
+        try:
+            _ct_for_count = self._get_containment_edge_types() or []
+        except Exception:
+            _ct_for_count = []
+        ctypes_for_count = [_sanitize_label(t) for t in _ct_for_count if t]
         ct_alt_count = "|".join(ctypes_for_count)
 
         async def _fetch(label: str, bucket: List[str]) -> list:
