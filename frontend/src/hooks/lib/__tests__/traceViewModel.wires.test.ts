@@ -6,10 +6,11 @@
  * columns — WHICH ONE gets drawn? Drawing both is the double-draw that made
  * the old overlay unreadable; drawing neither loses the lineage.
  *
- * The rule, on the CFO estate: closed partners read as the AUTHORED
- * container-grain rollups (INTERMEDIATE_T2 → cfo, weight 2), and opening
- * both sides refines that into the raw field wires while the rollup that
- * summarised them steps aside.
+ * RAW EVIDENCE WINS. On the CFO estate the wire lands on the chart the reader
+ * opened the dashboard to see, re-anchored up to whatever is closed on the
+ * other side, and refines as they open more. The authored rollups draw only
+ * where raw hops cannot speak: a pair with none under it at all, or one the
+ * ledger will not vouch for (then, as a residual, for the difference).
  */
 import { describe, it, expect } from 'vitest'
 import { buildTraceView } from '../traceViewModel'
@@ -67,10 +68,26 @@ const isAncestorOf = (model: LensWalkModel, ancestor: string, urn: string): bool
 }
 
 describe('buildTraceView — wires, grain rule', () => {
-  it('closed partners: rollup wires at card grain with weights; no raw leaks', () => {
+  it('closed partners: raw bundles re-anchored to the visible chart; authored rollups covered → dropped', () => {
     const v = view(['tableau', 'cfo'])
     const w = v.wires.map(desc).sort()
-    expect(w).toEqual(['INTERMEDIATE_T2>cfo:rollup:2', 'REPORTING>cfo:rollup:1'].sort())
+    // The reader opened the dashboard to see where the lineage lands, so it
+    // lands on `aov` — not on `cfo`, which they have already opened past.
+    // The rollups INTERMEDIATE_T2→cfo / REPORTING→cfo say the same flows one
+    // level coarser and are dropped rather than drawn beside them.
+    expect(w).toEqual(['INTERMEDIATE_T2>aov:raw:2', 'REPORTING>aov:raw:1'].sort())
+    // Re-anchored, so each line is a bundle rather than the hop itself.
+    for (const x of v.wires) expect(x.isBundled).toBe(true)
+  })
+
+  it('coarse-only estate: with no raw hops at all, the authored rollups ARE the lineage', () => {
+    // The coarse phase of a walk, or an estate whose lineage only ever
+    // materialises as :AGGREGATED. Nothing finer exists to draw, so the
+    // rollups draw — at their authored endpoints, with their own weights.
+    const e = cfoEstate()
+    const model: LensWalkModel = { ...e.model, lineageEdges: e.model.lineageEdges.filter(x => x.kind === 'rollup') }
+    const v = buildTraceView(inputs({ ...e, model }, ['tableau', 'cfo']))
+    expect(v.wires.map(desc)).toEqual(['INTERMEDIATE_T2>cfo:rollup:2', 'REPORTING>cfo:rollup:1'])
   })
 
   it('opening both sides refines to raw field wires and drops the rollup for that pair', () => {
@@ -78,8 +95,10 @@ describe('buildTraceView — wires, grain rule', () => {
     const kinds = new Set(v.wires.filter(x => x.source.startsWith('orders')).map(x => x.kind))
     expect(kinds).toEqual(new Set(['raw']))
     expect(v.wires.some(x => x.source === 'orders.channel' && x.target === 'aov.channel')).toBe(true)
-    // The still-closed REPORTING side keeps its container-grain statement.
-    expect(v.wires.map(desc)).toContain('REPORTING>cfo:rollup:1')
+    // The still-closed REPORTING side is re-anchored onto the container, and
+    // still raw: its hop into aov.avg is loaded, so its rollup is redundant.
+    expect(v.wires.map(desc)).toContain('REPORTING>aov.avg:raw:1')
+    expect(v.wires.every(x => x.kind === 'raw')).toBe(true)
   })
 
   it('partial pair: raw + residual W−R', () => {
@@ -87,50 +106,61 @@ describe('buildTraceView — wires, grain rule', () => {
     const v = buildTraceView({ ...inputs(e, HALF_OPEN), completePairs: new Set() })
     const res = v.wires.filter(x => x.kind === 'residual')
     expect(res.length).toBeGreaterThan(0)
-    // orders → aov is a weight-2 rollup and both its raw hops are drawn, but
-    // the ledger will not vouch for the pair being fully loaded — so the
-    // rollup stays on as a residual saying "there may be more". Its container
-    // pair says the same about ITS grain: a flow from another dataset in
-    // INTERMEDIATE_T2 into another chart on the dashboard is a thing only the
-    // coarse residual can be hiding.
-    expect(res.map(desc)).toEqual(['INTERMEDIATE_T2>cfo:residual:1', 'orders>aov:residual:1'])
+    // Every rollup pair holds raw hops (W flows, R of them in the model) and
+    // the ledger vouches for none of them, so each stays on as a residual
+    // saying what the raw wires cannot: "there may be more here". orders→aov
+    // is weight 2 over 2 loaded hops — the floor keeps it at 1 rather than
+    // claiming the pair is settled.
+    expect(res.map(desc)).toEqual([
+      'INTERMEDIATE_T2>cfo:residual:1', 'REPORTING>cfo:residual:1', 'orders>aov:residual:1',
+    ])
     for (const w of res) expect(w.complete).toBe(false)
-    // The raw wires are still there beside it, and the still-closed REPORTING
-    // side — nothing drilled under it — keeps a plain rollup rather than a
-    // residual.
+    // The raw wires are all still there beside them, none of them vouched for.
     expect(v.wires.filter(x => x.kind === 'raw').map(desc).sort())
-      .toEqual(['orders.channel>aov.channel:raw:1', 'orders.net>aov.avg:raw:1'])
-    expect(v.wires.filter(x => x.kind === 'rollup').map(desc)).toEqual(['REPORTING>cfo:rollup:1'])
+      .toEqual(['REPORTING>aov.avg:raw:1', 'orders.channel>aov.channel:raw:1', 'orders.net>aov.avg:raw:1'].sort())
+    for (const w of v.wires.filter(x => x.kind === 'raw')) expect(w.complete).toBe(false)
+  })
+
+  it('residual counts what the raw wires do NOT show: W − R', () => {
+    // Same estate, but the graph says orders → aov summarises FIVE flows
+    // while the model holds two of them. The residual is the other three.
+    const e = cfoEstate()
+    const model: LensWalkModel = {
+      ...e.model,
+      lineageEdges: e.model.lineageEdges.map(x =>
+        x.kind === 'rollup' && x.sourceUrn === 'orders' && x.targetUrn === 'aov' ? { ...x, weight: 5 } : x),
+    }
+    const v = buildTraceView({ ...inputs({ ...e, model }, HALF_OPEN), completePairs: new Set() })
+    expect(v.wires.filter(x => x.kind === 'residual').map(desc)).toContain('orders>aov:residual:3')
   })
 
   it('a complete pair drops the rollup instead of drawing a residual', () => {
     const v = view(HALF_OPEN)   // default completePairs = every pair complete
     expect(v.wires.some(x => x.kind === 'residual')).toBe(false)
     expect(v.wires.some(x => x.source === 'orders' && x.target === 'aov')).toBe(false)
+    for (const w of v.wires) expect(w.complete).toBe(true)
   })
 
   it('count parity: Σ raw wire counts == raw edges between visible-scoped endpoints', () => {
     const e = cfoEstate()
     const rawEdges = e.model.lineageEdges.filter(x => x.kind !== 'rollup')
 
-    // Fully drilled: every raw hop is its own wire, nothing bundled away,
-    // nothing counted twice.
-    const open = view(ALL_OPEN)
-    const openRaw = open.wires.filter(w => w.kind === 'raw')
-    expect(openRaw.reduce((n, w) => n + w.edgeCount, 0)).toBe(rawEdges.length)
-    expect(new Set(openRaw.map(w => pairKey(w.source, w.target))))
-      .toEqual(new Set(projectRaw(e.model, open.visible).keys()))
-    for (const w of openRaw) expect(w.isBundled).toBe(false)
-
-    // Half open: each raw wire still carries exactly the hops that project
-    // onto its pair — a wire never invents or loses a hop.
-    const half = view(HALF_OPEN)
-    const projected = projectRaw(e.model, half.visible)
-    for (const w of half.wires.filter(x => x.kind === 'raw')) {
-      expect(w.edgeCount).toBe(projected.get(pairKey(w.source, w.target)))
+    // However far the tree is open, every raw hop lands in exactly one wire:
+    // each wire carries the hops that project onto its pair, no hop is
+    // invented, none is dropped, none is counted twice.
+    for (const expansion of [['tableau', 'cfo'], HALF_OPEN, ALL_OPEN]) {
+      const v = view(expansion)
+      const raw = v.wires.filter(w => w.kind === 'raw')
+      const projected = projectRaw(e.model, v.visible)
+      expect(new Set(raw.map(w => pairKey(w.source, w.target)))).toEqual(new Set(projected.keys()))
+      for (const w of raw) expect(w.edgeCount).toBe(projected.get(pairKey(w.source, w.target)))
+      expect(raw.reduce((n, w) => n + w.edgeCount, 0)).toBe(rawEdges.length)
     }
-    expect(half.wires.filter(x => x.kind === 'raw').reduce((n, w) => n + w.edgeCount, 0))
-      .toBeLessThanOrEqual(rawEdges.length)
+
+    // Fully drilled, each wire IS its hop — nothing bundled.
+    for (const w of view(ALL_OPEN).wires) expect(w.isBundled).toBe(false)
+    // Closed, the same three hops arrive as two re-anchored bundles.
+    expect(view(['tableau', 'cfo']).wires.every(w => w.isBundled)).toBe(true)
   })
 
   it('no wire is ancestor↔descendant and every endpoint is a visible card', () => {

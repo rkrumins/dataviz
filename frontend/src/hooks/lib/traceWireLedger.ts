@@ -9,23 +9,30 @@
  * double-draw that made the old overlay unreadable. Draw neither and the
  * lineage is gone.
  *
- * So exactly one wins per pair, and WHICH one is decided by what the reader
- * has actually opened:
+ * RAW EVIDENCE ALWAYS WINS. The reader opened the dashboard precisely so the
+ * wire would land on the chart inside it; answering that with the coarser
+ * authored rollup — a line to the dashboard the reader has already opened
+ * past — is the wrong direction. The lineage is redrawn per expansion, so
+ * every raw hop the model holds is drawn between the nearest VISIBLE
+ * ancestor of each of its endpoints, at whatever grain the reader has earned.
  *
- *  • The reader has DRILLED to the raw hops (both endpoints of a hop are
- *    visible cards) ⇒ the raw wires are the finest truth on screen, and the
- *    rollup above them steps aside — unless the ledger will not vouch that
- *    every raw hop under that pair is loaded, in which case the rollup stays
- *    on as a RESIDUAL: "there are W flows here and you can see R of them".
- *  • The reader has NOT drilled ⇒ the authored rollup is the honest
- *    container-grain statement, and a raw hop re-anchored up onto the same
- *    two cards is that same statement made a second time, from a weaker
- *    source (it counts only the hops that happen to be loaded, while the
- *    rollup counts what the graph knows). The rollup wins; the re-anchored
- *    bundle is dropped.
- *  • No rollup at all ⇒ the projected bundle is all there is, and it draws.
- *    (This is the Lens's behaviour, kept: a collapsed estate without
- *    aggregation still shows its wires.)
+ * ROLLUPS EXIST TO COVER WHAT RAW EVIDENCE CANNOT SAY:
+ *
+ *  • The pair has NO raw hops under it at all — the coarse phase of a walk,
+ *    or an estate whose lineage is only ever materialised as :AGGREGATED.
+ *    The rollup is the only statement there is, so it draws.
+ *  • The pair has raw hops AND the ledger vouches that they are all loaded ⇒
+ *    the raw wires carry it; the rollup is the same flows counted a second
+ *    time, and is dropped.
+ *  • The pair has raw hops but the ledger will NOT vouch for them ⇒ one
+ *    RESIDUAL wire for the difference: "the graph counts W flows here and
+ *    you can see R of them".
+ *
+ * `rawCount` is a CONE count — raw hops between anything inside the source
+ * and anything inside the target — because that is exactly what a rollup
+ * between two containers is a statement about. It is visibility-independent
+ * on purpose: whether a rollup is redundant depends on what the MODEL holds,
+ * not on how far the reader happens to have opened the tree.
  *
  * Grain is decided HERE, from edge kinds and this ledger — never from
  * `card.depth` (which is lane-relative and says nothing about grain).
@@ -148,8 +155,29 @@ export function buildTraceWires(i: TraceWireInputs): TraceWire[] {
   const nested = (a: string, b: string): boolean =>
     a === b || ancestorsOrSelf(a).includes(b) || ancestorsOrSelf(b).includes(a)
 
+  const wires: TraceWire[] = []
+
+  // RAW: every hop the model holds, drawn between the nearest VISIBLE
+  // ancestor of each of its endpoints — the projection the Lens already
+  // ships, so a trace and a lens of the same model draw the same lines.
+  // Nothing suppresses these: they are the finest statement on screen.
+  const population = new Set(model.nodes.map(n => n.urn))
+  for (const bundle of projectLensEdges(sg, population, visible)) {
+    const { sourceUrn: source, targetUrn: target } = bundle
+    if (nested(source, target)) continue
+    wires.push({
+      id: `bundle:${pairKey(source, target)}:raw`,
+      source, target,
+      edgeCount: bundle.weight,
+      isBundled: !bundle.isLeafEdge,
+      kind: 'raw',
+      complete: ledger.state(source, target) === 'complete',
+    })
+  }
+
   // ROLLUPS are never re-anchored: a rollup is an authored statement about
-  // two specific nodes, so it draws where it was authored or not at all.
+  // two specific nodes, so it draws where it was authored or not at all —
+  // and only where the raw hops do not already say it.
   const rollups = new Map<string, { source: string; target: string; weight: number }>()
   for (const e of model.lineageEdges) {
     if (e.kind !== 'rollup') continue
@@ -163,63 +191,16 @@ export function buildTraceWires(i: TraceWireInputs): TraceWire[] {
     else rollups.set(key, { source: e.sourceUrn, target: e.targetUrn, weight: e.weight ?? 1 })
   }
 
-  // DRILLED hops: raw hops the reader can see BOTH ends of. These — and only
-  // these — are finer than a rollup, so only these retire one.
-  const drilledAt = new Map<string, number>()          // at their own pair
-  const drilledUnder = new Map<string, number>()       // inside a rollup's pair
-  for (const hop of sg.lineageEdges) {
-    if (!visible.has(hop.sourceUrn) || !visible.has(hop.targetUrn)) continue
-    const own = pairKey(hop.sourceUrn, hop.targetUrn)
-    drilledAt.set(own, (drilledAt.get(own) ?? 0) + 1)
-    if (rollups.size === 0) continue
-    for (const s of ancestorsOrSelf(hop.sourceUrn)) {
-      for (const t of ancestorsOrSelf(hop.targetUrn)) {
-        const key = pairKey(s, t)
-        if (rollups.has(key)) drilledUnder.set(key, (drilledUnder.get(key) ?? 0) + 1)
-      }
-    }
-  }
-
-  const wires: TraceWire[] = []
-  const drawnRollups = new Set<string>()
   for (const [key, { source, target, weight }] of rollups) {
-    const drilled = drilledUnder.get(key) ?? 0
-    if (drilled > 0 && ledger.state(source, target) === 'complete') continue   // the raw wires say it all
-    drawnRollups.add(key)
-    const kind = drilled > 0 ? 'residual' : 'rollup'
+    const raw = ledger.rawCount(source, target)
+    if (raw > 0 && ledger.state(source, target) === 'complete') continue   // the raw wires say it all
+    const kind = raw > 0 ? 'residual' : 'rollup'
     // A residual is what the raw wires do NOT show: the rollup's own count
-    // less the detail already loaded, and never nothing (a pair the ledger
+    // less the detail the model holds, and never nothing (a pair the ledger
     // will not vouch for always has something left to say).
-    const edgeCount = drilled > 0 ? Math.max(1, weight - ledger.rawCount(source, target)) : weight
+    const edgeCount = raw > 0 ? Math.max(1, weight - raw) : weight
     wires.push({ id: `bundle:${key}:${kind}`, source, target, edgeCount, isBundled: true, kind, complete: false })
   }
 
-  // RAW: each hop drawn between the nearest VISIBLE ancestor of each of its
-  // endpoints — the projection the Lens already ships, so a trace and a lens
-  // of the same model draw the same lines.
-  const population = new Set(model.nodes.map(n => n.urn))
-  for (const bundle of projectLensEdges(sg, population, visible)) {
-    const { sourceUrn: source, targetUrn: target } = bundle
-    if (nested(source, target)) continue
-    const key = pairKey(source, target)
-    // Re-anchored (nothing drilled at this pair) and a rollup already speaks
-    // for these two cards: same statement, and the rollup's count is the
-    // graph's rather than whatever happens to be loaded.
-    if ((drilledAt.get(key) ?? 0) === 0 && coveredBy(drawnRollups, ancestorsOrSelf(source), ancestorsOrSelf(target))) continue
-    wires.push({
-      id: `bundle:${key}:raw`,
-      source, target,
-      edgeCount: bundle.weight,
-      isBundled: !bundle.isLeafEdge,
-      kind: 'raw',
-      complete: ledger.state(source, target) === 'complete',
-    })
-  }
-
   return wires.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-}
-
-function coveredBy(drawnRollups: ReadonlySet<string>, sources: string[], targets: string[]): boolean {
-  for (const s of sources) for (const t of targets) if (drawnRollups.has(pairKey(s, t))) return true
-  return false
 }
