@@ -1012,7 +1012,7 @@ describe('what the lens says while it cannot answer', () => {
       truncationReason: 'node budget reached',
     })
     renderLens(['F'], doneWalk(model))
-    expect(screen.getByText(/stopped early \(node budget reached\)/)).toBeTruthy()
+    expect(screen.getByText(/Partial picture — 0 upstream · 0 downstream on the board/)).toBeTruthy()
   })
 })
 
