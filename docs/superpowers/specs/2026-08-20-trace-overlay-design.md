@@ -118,3 +118,96 @@ Scale-class changes are additionally certified live on `solidatus-test-large` (p
 3. Canvas trace-mode render swap + `traceExpansion` + exit.
 4. Cherry-pick the data layer from the backup branch; wire coarse-first + background fill + lazy drill.
 5. Live certification on the three estates; capsule narration.
+
+## 8. Scale & performance (millions of nodes/edges) — binding budgets
+
+Every number below was either measured this week on `solidatus-test-large`
+(1.23M nodes / 1.17M raw + 1.23M rollup edges) or is a budget the harness and
+the live probe must prove. "Complete" always means **complete at every grain
+you are looking at** — never "every leaf in RAM".
+
+### 8.1 The scale principle
+A trace on a million-node graph never loads the graph. It loads three things:
+1. the **coarse picture** — the flow at roots+1 from the materialised rollup
+   lane: small on ANY graph (measured: 443 nodes / 9,017 rollup edges /
+   423 containment, **296 ms warm, 1.85 s cold**);
+2. the **fine closure** — the focus's complete leaf-grain lineage, filled in
+   the background, hands-free, **bounded by a memory ceiling** (~25k nodes);
+3. **on-demand grain** — when you open a card whose finer grain is not in
+   the model (huge flows past the ceiling), ONE structural drill fetches
+   exactly that slice (measured: **254 ms**, 46 nodes / 434 edges / 44
+   containment for a root-pair).
+So completeness is guaranteed per visible grain, and the client's memory is
+proportional to what you have looked at, not to the graph.
+
+### 8.2 Server budgets (all index-anchored; a full scan is a bug)
+| Path | Mechanism | Budget |
+|---|---|---|
+| Coarse roots+1 | label-bucketed frontier hops, `gp IS NULL` depth≤1 filter, rollup lane | ≤ 2 s cold, ≤ 0.5 s warm |
+| Fine closure page | escalation pages 2k → 6k → 10k (`TRACE_MAX_NODES_HARD`), excludes keep known nodes off the wire | ≤ 2 s per page (measured 1.9 s @ 6k) |
+| Frontier tail | bulk drains, 200 seeds/request | ≤ 12 requests per 2,300 anchors (was 2,300) |
+| Containment | 400-pair chunks + chain synthesis on timeout | **never empty**; ≤ 2 s per chunk |
+| Drill on expand | structural `expandAggregated`, `nextLevel:null` | ≤ 300 ms |
+| `childCount` | live `count(child)` per batch, label-bucketed | included in the batch query; never the property |
+| Cache | redis 300 s + LKG keyed on the full request | repeat traces serve in ms |
+Hard rule: no per-anchor request storms; the capsule counts requests and the
+harness asserts the request count per journey.
+
+### 8.3 Client model & view-model budgets
+- **Model**: deduped maps keyed by urn (nodes, parent pointer, children list,
+  edges by endpoint). At the 25k ceiling ≈ 40–60 MB. Background merges are
+  **coalesced** (≤ 1 merge per 200 ms / per animation frame) so the board never
+  re-renders per response; view-model recompute runs in a chunked idle task
+  (no main-thread task > 50 ms during fill).
+- **TraceViewModel is incremental.** Expansion/collapse changes are local: only
+  the toggled subtree's visibility and only the wires touching it are
+  re-projected (edges indexed by endpoint; nearest-visible-ancestor memoised
+  per expansion version; bundles keyed `(srcVisible, dstVisible)`). Budget:
+  **≤ 16 ms** per expand/collapse on a 25k-node model. Unchanged lanes keep
+  their object identity (structural sharing) so `LayerColumn` memos hold.
+- **Direction/depth scoping** cuts both the VIEW and the FETCH: a depth-3
+  trace walks to depth 3, not 25.
+
+### 8.4 Rendering budgets
+- Cards: `LayerColumn`'s row virtualisation stays in force; a container's
+  rows window at 8 with "N more" (the Lens's `FRAME_WINDOW` idiom) — a
+  1,000-child table never mounts 1,000 rows.
+- Wires: projected onto visible cards and **bundled with counts**; the overlay
+  never draws more than the viewport's wires (viewport culling on both cards
+  and wires; hit-testing already degrades past `HIT_DENSITY_LIMIT`). Data is
+  never dropped to meet a draw budget — it is bundled.
+- Frame budget: expand/collapse paints within one frame after the ≤ 16 ms VM
+  step; the coarse picture paints ≤ 1 s after the click on the 1.23M graph.
+
+### 8.5 Expand / collapse / focus semantics at scale
+- **Expand**: if the model holds the finer grain → pure VM refinement, no
+  request; else ONE drill, the card shows a refining row, the capsule says
+  "refining"; wires re-project to the newly visible cards the moment the
+  slice lands. Recursive Node⊃Node⊃Node: unbounded depth via parent pointers;
+  chevrons from graph-counted `childCount` at every level.
+- **Collapse**: pure re-roll, no request, nothing removed from the model —
+  re-expand is instant. Collapsing the traced entity itself never removes it.
+- **Focus (re-anchor)**: a new session served from the per-focus walk cache;
+  trail/history unchanged. Switching direction presets flips the VIEW only.
+- **Exit**: drop the overlay; O(1).
+
+### 8.6 Harness & certification additions (perf is a test, not a hope)
+- Harness fixtures gain a **25k-node synthetic flow** (wide + deep, recursive
+  containment): assert VM cold ≤ 200 ms, expand/collapse ≤ 16 ms, zero
+  orphans, bundle counts equal the underlying edge counts (parity).
+- Request-count assertions per journey (coarse=1, escalations≤3, bulk≤12,
+  expand-in-model=0, expand-lazy=1).
+- Live certification script `backend/scripts/certify_trace.py` (kept in the
+  repo): coarse / fine / drill timings on `solidatus-test-large` and the
+  Roots⊃Node estate; run before any scale-class merge.
+- Long-task monitor in the harness during background fill (no task > 50 ms).
+
+### 8.7 Acceptance additions
+6. On `solidatus-test-large`: trace a layer → coarse picture ≤ 1 s; background
+   fill proceeds with the board fully interactive; expanding any container
+   refines its wires in ≤ 300 ms (lazy) or instantly (in-model); collapsing
+   re-rolls instantly; the capsule's request count stays ≤ 16 for the whole
+   session; memory stays under the ceiling with the capsule asking once past it.
+7. Wire parity with the Lens: for the same focus, the set of flows drawn (at
+   any grain) matches the Lens's walked flows — no lineage missing, none
+   invented.
