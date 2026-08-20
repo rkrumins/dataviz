@@ -9605,11 +9605,32 @@ class FalkorDBProvider(GraphDataProvider):
         # unlabeled IN-list form survives only for the unresolved-label
         # residue bucket (this build has no label-less URN index — the
         # unlabeled anchor is a full node scan).
+        #
+        # childCount is COMPUTED here when containment types are configured
+        # (2026-08-20): trace-shipped nodes used to rely on the denormalised
+        # `childCount` property alone, which import paths don't always stamp
+        # — a self-nesting Node⊃Node⊃Node estate then rendered its trace-
+        # merged children CHEVRON-LESS (no expand affordance, deeper levels
+        # unreachable). Browse computes the count live; the batch hydration
+        # every trace path uses must agree with it.
+        ctypes_for_count = [
+            _sanitize_label(t) for t in (self._get_containment_edge_types() or []) if t
+        ]
+        ct_alt_count = "|".join(ctypes_for_count)
+
         async def _fetch(label: str, bucket: List[str]) -> list:
             anchor = f"(n:{label})" if label else "(n)"
+            if ct_alt_count:
+                cy = (
+                    f"MATCH {anchor} WHERE n.urn IN $urns "
+                    f"OPTIONAL MATCH (n)-[:{ct_alt_count}]->(child) "
+                    "RETURN n, count(child) as childCount"
+                )
+            else:
+                cy = f"MATCH {anchor} WHERE n.urn IN $urns RETURN n"
             try:
                 res = await self._ro_query(
-                    f"MATCH {anchor} WHERE n.urn IN $urns RETURN n",
+                    cy,
                     params={"urns": bucket},
                     timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
                     op="nodes.batch",
@@ -9630,9 +9651,19 @@ class FalkorDBProvider(GraphDataProvider):
         out: List[GraphNode] = []
         for rows in rows_per_bucket:
             for row in rows:
-                node = self._extract_node_from_result(row)
-                if node:
-                    out.append(node)
+                child_count = None
+                if ct_alt_count and isinstance(row, (list, tuple)) and len(row) >= 2:
+                    node = self._extract_node_from_result([row[0]])
+                    child_count = row[1]
+                else:
+                    node = self._extract_node_from_result(row)
+                if not node:
+                    continue
+                if child_count is not None:
+                    node.child_count = int(child_count)
+                    if node.properties is not None:
+                        node.properties['childCount'] = int(child_count)
+                out.append(node)
         return out
 
     # Schema-level caches are persisted in Postgres by the stats service;
