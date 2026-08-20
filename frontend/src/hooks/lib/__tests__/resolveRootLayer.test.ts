@@ -35,7 +35,14 @@ describe('resolveRootLayer', () => {
     expect(resolveRootLayer({ ...base, unassignedFallbackLayerId: 'U' })).toBe('U')
   })
 
-  it('__UNASSIGNED__ sentinel resolves to undefined', () => {
-    expect(resolveRootLayer({ ...base, explicitAssignment: '__UNASSIGNED__' })).toBeUndefined()
+  it('explicit assignment wins over a rule match', () => {
+    expect(resolveRootLayer({ ...base, explicitAssignment: 'X', ruleAssignment: 'R' })).toBe('X')
+  })
+
+  it('__UNASSIGNED__ sentinel resolves to undefined, from whichever branch produced it', () => {
+    // Discriminating: if the explicit branch didn't win (or didn't normalize the
+    // sentinel), this would fall through the open chain to ruleAssignment 'R'.
+    expect(resolveRootLayer({ ...base, explicitAssignment: '__UNASSIGNED__', ruleAssignment: 'R' })).toBeUndefined()
+    expect(resolveRootLayer({ ...base, unassignedFallbackLayerId: '__UNASSIGNED__' })).toBeUndefined()
   })
 })
