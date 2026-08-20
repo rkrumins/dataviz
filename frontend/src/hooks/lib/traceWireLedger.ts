@@ -34,8 +34,20 @@
  * on purpose: whether a rollup is redundant depends on what the MODEL holds,
  * not on how far the reader happens to have opened the tree.
  *
+ * ROLLUPS ALSO REPEAT EACH OTHER. They are materialised per containment-level
+ * pair, so `orders → aov` and `INTERMEDIATE_T2 → cfo` are the same flows
+ * counted twice, one level apart. Only the FINEST visible grain per cone
+ * draws: a visible rollup is suppressed when another visible rollup sits
+ * inside it on both ends. The same suppression governs residuals, so a cone
+ * says "there may be more here" exactly once.
+ *
  * Grain is decided HERE, from edge kinds and this ledger — never from
  * `card.depth` (which is lane-relative and says nothing about grain).
+ *
+ * STAGE 2 CHECK: a residual's `max(1, W − R)` floor claims "1 more" even when
+ * the arithmetic says 0 — right for a pair the ledger will not vouch for, but
+ * unreachable in Stage 1 (the default ledger vouches for everything), so it
+ * wants confirming against real `completePairs`.
  */
 import { projectLensEdges, type LensSubgraph } from '@/components/canvas/context-view/lens/lens-subgraph'
 import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
@@ -150,10 +162,11 @@ export function buildTraceWires(i: TraceWireInputs): TraceWire[] {
     ancestorCache.set(urn, out)
     return out
   }
+  /** `inner` sits inside `outer`, or IS it. */
+  const within = (inner: string, outer: string): boolean => ancestorsOrSelf(inner).includes(outer)
   /** One contains the other: there is no line to draw between a card and its
    *  own container — it would leave a card and come straight back into it. */
-  const nested = (a: string, b: string): boolean =>
-    a === b || ancestorsOrSelf(a).includes(b) || ancestorsOrSelf(b).includes(a)
+  const nested = (a: string, b: string): boolean => a === b || within(a, b) || within(b, a)
 
   const wires: TraceWire[] = []
 
@@ -191,7 +204,15 @@ export function buildTraceWires(i: TraceWireInputs): TraceWire[] {
     else rollups.set(key, { source: e.sourceUrn, target: e.targetUrn, weight: e.weight ?? 1 })
   }
 
-  for (const [key, { source, target, weight }] of rollups) {
+  // FINEST GRAIN ONLY: a rollup with another visible rollup inside it on both
+  // ends is that inner one restated a level up — the same flows, counted
+  // twice. The inner pair is what the reader opened the tree to see.
+  const all = [...rollups.values()]
+  const finest = all.filter(a =>
+    !all.some(b => b !== a && within(b.source, a.source) && within(b.target, a.target)))
+
+  for (const { source, target, weight } of finest) {
+    const key = pairKey(source, target)
     const raw = ledger.rawCount(source, target)
     if (raw > 0 && ledger.state(source, target) === 'complete') continue   // the raw wires say it all
     const kind = raw > 0 ? 'residual' : 'rollup'

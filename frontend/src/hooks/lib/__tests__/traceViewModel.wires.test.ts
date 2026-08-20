@@ -57,6 +57,19 @@ const projectRaw = (model: LensWalkModel, visible: ReadonlySet<string>): Map<str
   return pairs
 }
 
+/** No summary wire restates another one level up: for any two rollup or
+ *  residual wires, neither sits inside the other on BOTH ends. */
+const expectNoNestedGrain = (model: LensWalkModel, wires: readonly TraceWire[]): void => {
+  const within = (inner: string, outer: string) => inner === outer || isAncestorOf(model, outer, inner)
+  const summaries = wires.filter(w => w.kind !== 'raw')
+  for (const a of summaries) {
+    for (const b of summaries) {
+      if (a === b) continue
+      expect(within(b.source, a.source) && within(b.target, a.target)).toBe(false)
+    }
+  }
+}
+
 const isAncestorOf = (model: LensWalkModel, ancestor: string, urn: string): boolean => {
   const parentOf = new Map(model.containmentEdges.map(c => [c.targetUrn, c.sourceUrn]))
   let cursor = parentOf.get(urn)
@@ -90,6 +103,22 @@ describe('buildTraceView — wires, grain rule', () => {
     expect(v.wires.map(desc)).toEqual(['INTERMEDIATE_T2>cfo:rollup:2', 'REPORTING>cfo:rollup:1'])
   })
 
+  it('rollups draw at the FINEST visible grain per cone, never twice a level apart', () => {
+    // Rollups are materialised per containment-level pair, so orders→aov and
+    // INTERMEDIATE_T2→cfo are the same flows one level apart. Open everything
+    // and the inner pair — the one the reader drilled for — is the only one
+    // that draws.
+    const e = cfoEstate()
+    const model: LensWalkModel = { ...e.model, lineageEdges: e.model.lineageEdges.filter(x => x.kind === 'rollup') }
+    const v = buildTraceView(inputs({ ...e, model }, ALL_OPEN))
+    expect(v.wires.map(desc)).toEqual(['orders>aov:rollup:2', 'rpt>aov:rollup:1'])
+    expectNoNestedGrain(model, v.wires)
+    // Closed, the same model draws the container pairs — grain follows what
+    // the reader has opened, not what the model happens to hold.
+    expect(buildTraceView(inputs({ ...e, model }, ['tableau', 'cfo'])).wires.map(desc))
+      .toEqual(['INTERMEDIATE_T2>cfo:rollup:2', 'REPORTING>cfo:rollup:1'])
+  })
+
   it('opening both sides refines to raw field wires and drops the rollup for that pair', () => {
     const v = view(HALF_OPEN)
     const kinds = new Set(v.wires.filter(x => x.source.startsWith('orders')).map(x => x.kind))
@@ -106,15 +135,15 @@ describe('buildTraceView — wires, grain rule', () => {
     const v = buildTraceView({ ...inputs(e, HALF_OPEN), completePairs: new Set() })
     const res = v.wires.filter(x => x.kind === 'residual')
     expect(res.length).toBeGreaterThan(0)
-    // Every rollup pair holds raw hops (W flows, R of them in the model) and
-    // the ledger vouches for none of them, so each stays on as a residual
-    // saying what the raw wires cannot: "there may be more here". orders→aov
-    // is weight 2 over 2 loaded hops — the floor keeps it at 1 rather than
-    // claiming the pair is settled.
-    expect(res.map(desc)).toEqual([
-      'INTERMEDIATE_T2>cfo:residual:1', 'REPORTING>cfo:residual:1', 'orders>aov:residual:1',
-    ])
+    // Each cone holds raw hops (W flows, R of them in the model) and the
+    // ledger vouches for none of them, so each says what the raw wires
+    // cannot: "there may be more here" — ONCE per cone. orders→aov is
+    // weight 2 over 2 loaded hops, and the floor keeps it at 1 rather than
+    // claiming the pair is settled; INTERMEDIATE_T2→cfo is that same cone one
+    // level up and does not repeat it.
+    expect(res.map(desc)).toEqual(['REPORTING>cfo:residual:1', 'orders>aov:residual:1'])
     for (const w of res) expect(w.complete).toBe(false)
+    expectNoNestedGrain(e.model, v.wires)
     // The raw wires are all still there beside them, none of them vouched for.
     expect(v.wires.filter(x => x.kind === 'raw').map(desc).sort())
       .toEqual(['REPORTING>aov.avg:raw:1', 'orders.channel>aov.channel:raw:1', 'orders.net>aov.avg:raw:1'].sort())
