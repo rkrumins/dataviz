@@ -32,6 +32,9 @@ import { resolveLayerAssignment, type GraphNode } from '@/providers/GraphDataPro
 import type { HierarchyNode } from '@/types/hierarchy'
 import type { ViewLayerConfig } from '@/types/schema'
 import { buildLayerRules, resolveRootLayer } from './resolveRootLayer'
+import { buildLedger, buildTraceWires, type TraceWire } from './traceWireLedger'
+
+export type { TraceWire } from './traceWireLedger'
 
 export interface TraceCard {
   id: string
@@ -78,6 +81,10 @@ export interface TraceViewInputs {
   /** ≥ 25 ⇒ unlimited. */
   depthUp: number
   depthDown: number
+  /** Pairs (`pairKey(src, dst)`) whose raw detail is fully loaded. Omitted =
+   *  all of them: Stage 1's standing assumption that the walk model IS the
+   *  fine closure. Anything less makes a pair's rollup stay on as a residual. */
+  completePairs?: ReadonlySet<string>
   /** The rest of the canvas's placement chain, so the overlay anchors a node
    *  exactly where the canvas behind it would. All optional: omit for a view
    *  that places purely by assignments and rules. */
@@ -95,6 +102,9 @@ export interface TraceViewInputs {
 export interface TraceView {
   lanes: TraceLane[]
   visible: Set<string>
+  /** The lineage lines between VISIBLE cards, each at the one grain the
+   *  reader's own expansion has earned (see traceWireLedger). */
+  wires: TraceWire[]
   /** How many CHAINS this view cannot place anywhere — keyed by the top of
    *  each unplaceable chain, so a warehouse whose six columns are all outside
    *  the view counts once. Computed before direction/depth scoping. */
@@ -354,7 +364,16 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
     if (role === 'down' || role === 'both') down += 1
   }
 
-  return { lanes, visible, outsideView: anchorlessChains.size, counts: { up, down } }
+  // WIRES last: they are drawn between the cards that survived scoping and
+  // are visible right now, so a hidden branch contributes none.
+  const wires = buildTraceWires({
+    sg,
+    model: i.model,
+    visible,
+    ledger: buildLedger(i.model, i.completePairs),
+  })
+
+  return { lanes, visible, wires, outsideView: anchorlessChains.size, counts: { up, down } }
 }
 
 /** The GRAPH's child count, at face value. `?? 0` and never `children.length`:
