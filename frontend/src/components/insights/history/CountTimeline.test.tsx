@@ -10,7 +10,7 @@ function point(over: Partial<HistoryPoint> & { at: string }): HistoryPoint {
         node_count: 0, edge_count: 0,
         entity_type_counts: {}, edge_type_counts: {},
         node_delta: null, edge_delta: null, node_min: null, node_max: null,
-        lane: 'probe', capture_reason: 'changed',
+        lane: 'probe', capture_reason: 'changed', significance: 'normal',
         ...over,
     }
 }
@@ -52,12 +52,12 @@ describe('CountTimeline', () => {
         ).toBeInTheDocument()
     })
 
-    it('marks a material drop and reports it to the caller', async () => {
+    it('marks a drop the server judged unusual and reports it to the caller', async () => {
         const dropped = [
             POINTS[0],
             point({
                 at: '2026-08-19T00:00:00Z', node_count: 5, node_delta: -95,
-                entity_type_counts: { Table: 5 },
+                entity_type_counts: { Table: 5 }, significance: 'severe',
             }),
             POINTS[2],
         ]
@@ -67,15 +67,36 @@ describe('CountTimeline', () => {
                 points={dropped} grain="day" mode="total" onDropSelect={onDropSelect}
             />,
         )
-        const marker = screen.getByRole('button', { name: /drop of −95/i })
+        const marker = screen.getByRole('button', { name: /severe drop of −95/i })
         await userEvent.click(marker)
         expect(onDropSelect).toHaveBeenCalledWith('2026-08-19T00:00:00Z')
     })
 
-    it('does not mark ordinary churn as a drop', () => {
+    it('marks an unusual RISE too — a runaway loader is also a failure', () => {
+        const spike = [
+            POINTS[0],
+            point({
+                at: '2026-08-19T00:00:00Z', node_count: 900_000,
+                node_delta: 899_900, significance: 'severe',
+            }),
+            POINTS[2],
+        ]
+        // A marker only claims to be a button when it is actionable — without
+        // a handler it is a mark, not a control.
+        render(
+            <CountTimeline
+                points={spike} grain="day" mode="total" onDropSelect={vi.fn()}
+            />,
+        )
+        expect(screen.getByRole('button', { name: /severe rise of/i })).toBeInTheDocument()
+    })
+
+    it('leaves movement the server called normal unmarked, however large', () => {
+        // A big number that is ordinary FOR THIS SOURCE. A fixed threshold
+        // would have marked it; the per-source baseline does not.
         const churn = [
             POINTS[0],
-            point({ at: '2026-08-19T00:00:00Z', node_count: 99, node_delta: -1 }),
+            point({ at: '2026-08-19T00:00:00Z', node_count: 5, node_delta: -95 }),
             POINTS[2],
         ]
         render(<CountTimeline points={churn} grain="day" mode="total" />)

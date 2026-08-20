@@ -20,7 +20,8 @@ import { createElement, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import {
-    AlertTriangle, ArrowLeft, BarChart3, GitCompare, History, Layers, Loader2, Spline,
+    AlertTriangle, ArrowLeft, BarChart3, Download, Filter, GitCompare, Globe,
+    History, Layers, Loader2, Spline,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -28,8 +29,8 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { useDataSourceProfile } from '@/hooks/useDataSourceProfile'
 import {
-    DEFAULT_HISTORY_WINDOW, resolveWindow, useCountHistory, useProviderHistory,
-    type HistoryWindowKey,
+    DEFAULT_HISTORY_WINDOW, resolveWindow, useCountHistory, useFleetHistory,
+    useProviderHistory, type HistoryWindowKey,
 } from '@/hooks/useCountHistory'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
 import { formatUtc } from '@/lib/timeAgo'
@@ -37,6 +38,8 @@ import { CountTimeline, TimelineLegend, type TimelineMode } from '@/components/i
 import { LabelLedger } from '@/components/insights/history/LabelLedger'
 import { ChangeLedger } from '@/components/insights/history/ChangeLedger'
 import { CoverageStrip } from '@/components/insights/history/CoverageStrip'
+import { HistoryExplainer } from '@/components/insights/history/HistoryExplainer'
+import { insightsHistoryService } from '@/services/insightsHistoryService'
 import { HistoryWindowSelector } from '@/components/insights/history/HistoryWindowSelector'
 import {
     axisLabel, compactNum, formatPct, seriesColor, signedNum,
@@ -44,7 +47,7 @@ import {
 import { DeltaChip } from '@/components/insights/history/DeltaChip'
 import type { HistorySummary, ProviderHistoryPayload } from '@/types/insights'
 
-type Scope = 'source' | 'provider'
+type Scope = 'source' | 'provider' | 'fleet'
 
 const MODES: Array<{ key: TimelineMode; label: string; icon: typeof BarChart3; hint: string }> = [
     { key: 'composition', label: 'Composition', icon: Layers, hint: 'Stacked by label — shows what appeared or vanished' },
@@ -59,9 +62,14 @@ export function DataSourceHistoryPage() {
 
     const windowKey = (params.get('window') as HistoryWindowKey) || DEFAULT_HISTORY_WINDOW
     const custom = { from: params.get('from') || undefined, to: params.get('to') || undefined }
-    const scope: Scope = params.get('scope') === 'provider' ? 'provider' : 'source'
+    const scopeParam = params.get('scope')
+    const scope: Scope =
+        scopeParam === 'provider' ? 'provider'
+        : scopeParam === 'fleet' ? 'fleet'
+        : 'source' 
     const mode = (params.get('mode') as TimelineMode) || 'composition'
     const [highlightAt, setHighlightAt] = useState<string | null>(null)
+    const [onlyNotable, setOnlyNotable] = useState(false)
 
     const range = useMemo(
         () => resolveWindow(windowKey, custom),
@@ -84,10 +92,15 @@ export function DataSourceHistoryPage() {
     const providerQuery = useProviderHistory(item?.providerId, range, {
         enabled: scope === 'provider' && Boolean(item?.providerId),
     })
+    const fleetQuery = useFleetHistory(range, { enabled: scope === 'fleet' })
 
     const payload = sourceQuery.data?.data
-    const providerPayload = providerQuery.data?.data
-    const isLoading = scope === 'source' ? sourceQuery.isLoading : providerQuery.isLoading
+    const rollupPayload =
+        scope === 'fleet' ? fleetQuery.data?.data : providerQuery.data?.data
+    const isLoading =
+        scope === 'source' ? sourceQuery.isLoading
+        : scope === 'fleet' ? fleetQuery.isLoading
+        : providerQuery.isLoading
 
     const setParam = (next: Record<string, string | undefined>) => {
         const merged = new URLSearchParams(params)
@@ -138,14 +151,38 @@ export function DataSourceHistoryPage() {
                         </div>
                     </div>
 
-                    <HistoryWindowSelector
-                        value={windowKey}
-                        custom={custom}
-                        retentionDays={summary?.retention_days ?? providerPayload?.retention_days}
-                        onChange={(next, nextCustom) => setParam({
-                            window: next, from: nextCustom.from, to: nextCustom.to,
-                        })}
-                    />
+                    <div className="flex items-center gap-2 flex-wrap">
+                        {scope === 'source' && payload && payload.points.length > 0 && (
+                            <a
+                                href={insightsHistoryService.exportUrl(historyScopeId, {
+                                    from: range.from, to: range.to,
+                                })}
+                                // Plain link, not a fetch: the browser owns the
+                                // filename and the save dialog, and the session
+                                // cookie rides along. Always the RAW series —
+                                // downsampling is a rendering concession and an
+                                // export is evidence.
+                                className={cn(
+                                    'inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border',
+                                    'border-glass-border bg-canvas-elevated text-sm font-semibold',
+                                    'text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5',
+                                    'transition-colors outline-none',
+                                    'focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                )}
+                                title="Download every observation in this window as CSV"
+                            >
+                                <Download className="w-4 h-4" /> Export
+                            </a>
+                        )}
+                        <HistoryWindowSelector
+                            value={windowKey}
+                            custom={custom}
+                            retentionDays={summary?.retention_days ?? rollupPayload?.retention_days}
+                            onChange={(next, nextCustom) => setParam({
+                                window: next, from: nextCustom.from, to: nextCustom.to,
+                            })}
+                        />
+                    </div>
                 </div>
 
                 {/* ── Scope switch ───────────────────────────────── */}
@@ -157,6 +194,10 @@ export function DataSourceHistoryPage() {
                     {([
                         { key: 'source' as Scope, label: 'This data source' },
                         { key: 'provider' as Scope, label: provider ? `All on ${provider.name}` : 'All on provider' },
+                        // The only altitude that can show a source falling off
+                        // the platform entirely — every narrower scope filters
+                        // by something a departed source no longer has.
+                        { key: 'fleet' as Scope, label: 'Whole platform' },
                     ]).map((option) => (
                         <button
                             key={option.key}
@@ -178,8 +219,8 @@ export function DataSourceHistoryPage() {
 
                 {isLoading ? (
                     <HistorySkeleton />
-                ) : scope === 'provider' ? (
-                    <ProviderScope payload={providerPayload} />
+                ) : scope !== 'source' ? (
+                    <RollupScope payload={rollupPayload} scope={scope} />
                 ) : !payload || payload.points.length === 0 ? (
                     <EmptyState
                         title="No history yet"
@@ -205,6 +246,11 @@ export function DataSourceHistoryPage() {
                             />
                             <DropTile summary={summary!} onSelect={setHighlightAt} />
                         </div>
+
+                        <HistoryExplainer
+                            className="mb-5"
+                            baseline={summary!.change_baseline}
+                        />
 
                         <CoverageStrip
                             className="mb-5"
@@ -286,13 +332,39 @@ export function DataSourceHistoryPage() {
                             </section>
 
                             <section className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
-                                <div className="px-5 pt-5 pb-1">
-                                    <h2 className="text-sm font-bold text-ink">Change ledger</h2>
-                                    <p className="text-xs text-ink-muted mt-0.5">
-                                        Only observations where something moved.
-                                    </p>
+                                <div className="px-5 pt-5 pb-1 flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                        <h2 className="text-sm font-bold text-ink">Change ledger</h2>
+                                        <p className="text-xs text-ink-muted mt-0.5">
+                                            Only observations where something moved.
+                                        </p>
+                                    </div>
+                                    {(summary!.notable_changes + summary!.severe_changes) > 0 && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setOnlyNotable((v) => !v)}
+                                            aria-pressed={onlyNotable}
+                                            className={cn(
+                                                'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg shrink-0',
+                                                'text-[11px] font-semibold transition-colors outline-none',
+                                                'focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                                onlyNotable
+                                                    ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                                                    : 'text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5',
+                                            )}
+                                            title="Only movements outside this source's own normal range"
+                                        >
+                                            <Filter className="w-3 h-3" />
+                                            Unusual only ({summary!.notable_changes + summary!.severe_changes})
+                                        </button>
+                                    )}
                                 </div>
-                                <ChangeLedger points={payload.points} highlightAt={highlightAt} />
+                                <ChangeLedger
+                                    points={payload.points}
+                                    events={payload.events}
+                                    highlightAt={highlightAt}
+                                    onlyNotable={onlyNotable}
+                                />
                             </section>
                         </div>
                     </>
@@ -392,14 +464,22 @@ function DropTile({ summary, onSelect }: {
     )
 }
 
-/** Provider rollup — the same chart shape, series-per-source instead of
- *  series-per-label. */
-function ProviderScope({ payload }: { payload?: ProviderHistoryPayload | null }) {
+/** The rollup altitudes — same chart shape, series-per-source (provider) or
+ *  series-per-provider (fleet) instead of series-per-label. One component for
+ *  both because the payload shape is identical and only the nouns differ;
+ *  two would drift. */
+function RollupScope({ payload, scope }: {
+    payload?: ProviderHistoryPayload | null
+    scope: 'provider' | 'fleet'
+}) {
+    const isFleet = scope === 'fleet'
     if (!payload || !payload.totals.length) {
         return (
             <EmptyState
-                title="No provider history yet"
-                message="Once any data source on this provider has been observed twice, its rollup appears here."
+                title={isFleet ? 'No platform history yet' : 'No provider history yet'}
+                message={isFleet
+                    ? 'Once any onboarded data source has been observed twice, the platform rollup appears here.'
+                    : 'Once any data source on this provider has been observed twice, its rollup appears here.'}
             />
         )
     }
@@ -411,9 +491,11 @@ function ProviderScope({ payload }: { payload?: ProviderHistoryPayload | null })
         <>
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
                 <KpiTile
-                    label="Entities across provider" value={last.node_count}
+                    label={isFleet ? 'Entities platform-wide' : 'Entities across provider'}
+                    value={last.node_count}
                     delta={last.node_count - first.node_count}
-                    tint="bg-indigo-500/10 text-indigo-500" icon={Layers}
+                    tint="bg-indigo-500/10 text-indigo-500"
+                    icon={isFleet ? Globe : Layers}
                 />
                 <KpiTile
                     label="Relationships" value={last.edge_count}
@@ -424,6 +506,7 @@ function ProviderScope({ payload }: { payload?: ProviderHistoryPayload | null })
                     label="Data sources" value={last.sources}
                     tint="bg-emerald-500/10 text-emerald-500" icon={BarChart3}
                 />
+
                 <KpiTile
                     label="Buckets" value={payload.totals.length}
                     tint="bg-cyan-500/10 text-cyan-500" icon={History}
@@ -431,17 +514,24 @@ function ProviderScope({ payload }: { payload?: ProviderHistoryPayload | null })
             </div>
 
             <section className="rounded-2xl border border-glass-border bg-canvas-elevated p-5 mb-5">
-                <h2 className="text-sm font-bold text-ink mb-1">Entities across every onboarded source</h2>
+                <h2 className="text-sm font-bold text-ink mb-1">
+                    {isFleet
+                        ? 'Entities across every provider'
+                        : 'Entities across every onboarded source'}
+                </h2>
                 <p className="text-xs text-ink-muted mb-4">
-                    Bucketed by {payload.grain}. A source not observed in a bucket carries its
-                    last known value forward — it did not drop to zero.
+                    Bucketed by {payload.grain}. A series not observed in a bucket carries its
+                    last known value forward — it did not drop to zero, and a stack implying
+                    it did would invent an outage.
                 </p>
                 <ProviderTotalsChart payload={payload} />
             </section>
 
             <section className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
                 <div className="px-5 pt-5 pb-3">
-                    <h2 className="text-sm font-bold text-ink">By data source</h2>
+                    <h2 className="text-sm font-bold text-ink">
+                        {isFleet ? 'By provider' : 'By data source'}
+                    </h2>
                 </div>
                 <div className="divide-y divide-glass-border">
                     {payload.sources.map((source, i) => {

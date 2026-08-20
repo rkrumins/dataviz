@@ -506,30 +506,80 @@ async def provider_data_source_ids(
     return list(rows)
 
 
-async def provider_snapshots(
+@dataclass(frozen=True)
+class RollupRow:
+    """One source's closing state in one bucket — the unit a rollup is built
+    from. Deliberately not an ORM row: the rollups need five fields and
+    carrying whole snapshots (JSON counts included) would be most of a
+    megabyte for a chart that plots two numbers."""
+    bucket: str
+    provider_id: Optional[str]
+    data_source_id: str
+    graph_name: Optional[str]
+    node_count: int
+    edge_count: int
+
+
+async def rollup_rows(
     session: AsyncSession,
-    provider_id: str,
     *,
     frm: str,
     to: str,
-    limit: int = 20000,
-) -> List[DataSourceCountSnapshotORM]:
-    """Every snapshot for a provider in the window, oldest first.
+    width: int,
+    provider_id: Optional[str] = None,
+) -> List[RollupRow]:
+    """Each source's LAST observation per bucket, bucketed in SQL.
 
-    The caller aligns these into a series per source; alignment is done in
-    Python because sources are observed at independent times and a SQL-side
-    join would have to invent a shared time axis anyway.
+    Bucketing here rather than in Python is a correctness requirement, not an
+    optimisation. Pulling raw rows and reducing them client-side needs a row
+    cap, and a fleet of a few hundred sources over 90 days exceeds any cap
+    worth setting — at which point the read silently returns a PREFIX of the
+    window and the chart shows a total that is simply wrong, with nothing to
+    say so. Reducing first makes the result size (buckets x sources), which is
+    bounded by the window rather than by how busy the fleet has been.
+
+    ``provider_id`` scopes it to one provider; omitted, it is the whole
+    platform. The window function is the same one ``latest_refresh_event_map``
+    already uses, so it is portable to the SQLite the tests run on.
     """
-    return list((await session.execute(
-        select(DataSourceCountSnapshotORM)
+    bucket = func.substr(DataSourceCountSnapshotORM.captured_at, 1, width).label("bucket")
+    ranked = (
+        select(
+            bucket,
+            DataSourceCountSnapshotORM.provider_id.label("provider_id"),
+            DataSourceCountSnapshotORM.data_source_id.label("data_source_id"),
+            DataSourceCountSnapshotORM.graph_name.label("graph_name"),
+            DataSourceCountSnapshotORM.node_count.label("node_count"),
+            DataSourceCountSnapshotORM.edge_count.label("edge_count"),
+            func.row_number().over(
+                partition_by=(bucket, DataSourceCountSnapshotORM.data_source_id),
+                order_by=DataSourceCountSnapshotORM.captured_at.desc(),
+            ).label("rn"),
+        )
         .where(
-            DataSourceCountSnapshotORM.provider_id == provider_id,
             DataSourceCountSnapshotORM.captured_at >= frm,
             DataSourceCountSnapshotORM.captured_at <= to,
         )
-        .order_by(DataSourceCountSnapshotORM.captured_at.asc())
-        .limit(limit)
-    )).scalars().all())
+    )
+    if provider_id is not None:
+        ranked = ranked.where(DataSourceCountSnapshotORM.provider_id == provider_id)
+
+    sub = ranked.subquery()
+    rows = (await session.execute(
+        select(
+            sub.c.bucket, sub.c.provider_id, sub.c.data_source_id,
+            sub.c.graph_name, sub.c.node_count, sub.c.edge_count,
+        )
+        .where(sub.c.rn == 1)
+        .order_by(sub.c.bucket.asc())
+    )).all()
+    return [
+        RollupRow(
+            bucket=r[0], provider_id=r[1], data_source_id=r[2],
+            graph_name=r[3], node_count=int(r[4] or 0), edge_count=int(r[5] or 0),
+        )
+        for r in rows
+    ]
 
 
 # ── purge ────────────────────────────────────────────────────────────
@@ -635,7 +685,8 @@ __all__: Sequence[str] = (
     "normalize_grain",
     "oldest_captured_at",
     "provider_data_source_ids",
-    "provider_snapshots",
+    "RollupRow",
+    "rollup_rows",
     "purge_by_age",
     "purge_over_cap",
     "purge_snapshots",

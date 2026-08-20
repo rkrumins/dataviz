@@ -9,6 +9,7 @@
 import type { LucideIcon } from 'lucide-react'
 import { Activity, Gauge, Layers, PencilLine, Radar } from 'lucide-react'
 
+import type { HistoryEvent } from '@/types/insights'
 import { toUtcDate } from '@/lib/timeAgo'
 
 /** Abbreviated count. Matches `DataSourceProfile.compactNum` so a number does
@@ -161,4 +162,62 @@ export const OTHER_COLOR = '#94a3b8' // slate-400 — reads as "not a series"
 
 export function seriesColor(index: number): string {
     return SERIES_COLORS[index % SERIES_COLORS.length]
+}
+
+
+/** How the platform names the thing that emitted a refresh event.
+ *
+ *  The wire values are terse and two of them look alike: `reconcile` is the
+ *  stale-marker reconciler, `reconcile-sweep` is the drift/overlay sweep. They
+ *  are different subsystems and a reader chasing a drop needs to know which
+ *  one acted, so they get different names here rather than both reading
+ *  "reconcile". */
+export const ORIGIN_LABEL: Record<string, string> = {
+    script: 'Load script',
+    connector: 'Connector',
+    api: 'API request',
+    drift: 'Drift signal',
+    reconcile: 'Stale-marker reconcile',
+    'reconcile-sweep': 'Reconciliation sweep',
+}
+
+export const OUTCOME_TONE: Record<string, string> = {
+    completed: 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/10',
+    accepted: 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/10',
+    noop: 'text-ink-muted bg-black/5 dark:bg-white/5',
+    deferred: 'text-amber-600 dark:text-amber-400 bg-amber-500/10',
+    conflict: 'text-amber-600 dark:text-amber-400 bg-amber-500/10',
+    error: 'text-red-600 dark:text-red-400 bg-red-500/10',
+    failed: 'text-red-600 dark:text-red-400 bg-red-500/10',
+}
+
+/**
+ * How far either side of an observation a platform event counts as "at the
+ * same moment", in milliseconds.
+ *
+ * Lives here rather than on the backend because the matching is per-entry and
+ * the UI already holds every event in the window — the API returns the window,
+ * this decides what is "near".
+ *
+ * Generous on purpose, and matching the backend's own window. An event is
+ * emitted when an operation is DECIDED and the snapshot written when the
+ * result is next observed; on the 900s poll lane those are minutes apart for
+ * the same cause, and a tight window would report "nothing was running" for a
+ * change our own sweep had just caused.
+ */
+export const EVENT_CORRELATION_WINDOW_MS = 15 * 60 * 1000
+
+/** Platform events close enough in time to this observation to be plausibly
+ *  related, newest first. */
+export function nearbyEvents(
+    events: HistoryEvent[], at: string,
+): HistoryEvent[] {
+    const anchor = toUtcDate(at)?.getTime()
+    if (anchor == null) return []
+    return events
+        .filter((event) => {
+            const ts = toUtcDate(event.ts)?.getTime()
+            return ts != null && Math.abs(ts - anchor) <= EVENT_CORRELATION_WINDOW_MS
+        })
+        .sort((a, b) => (b.ts > a.ts ? 1 : -1))
 }

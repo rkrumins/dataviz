@@ -822,6 +822,28 @@ _DEFAULT_HISTORY_WINDOW_DAYS = 30
 # hand-rolled SVG path starts costing layout time, not for payload size.
 _AUTO_RAW_POINT_BUDGET = 720
 
+# How far outside a source's own typical movement a change has to sit before
+# it is worth a reader's attention. Multiples of the median absolute delta,
+# which is the robust choice here: a mean would be dragged upward by the very
+# outlier we are trying to detect, and one 900k drop would then make every
+# subsequent 900k drop look ordinary.
+_NOTABLE_MULTIPLE = 3.0
+_SEVERE_MULTIPLE = 8.0
+
+# Floor under the baseline, in entities. Without it a source that sits
+# perfectly still has a baseline of 0, every multiple is 0, and the first time
+# it moves by one node the change is reported as severe.
+_SIGNIFICANCE_FLOOR = 25
+
+# Ceiling on correlated events returned with a window. A source under a
+# thrashing loader can emit a great many; the ledger only ever shows the few
+# nearest any one snapshot, so an unbounded read would be payload for nothing.
+_EVENT_LIMIT = 200
+
+# Ceiling on rows in a CSV export. High enough to cover the full retention of
+# a busy source, low enough that one request cannot pin a worker.
+_CSV_ROW_LIMIT = 50000
+
 
 class HistoryPoint(BaseModel):
     """One observation. ``node_min``/``node_max`` are the bucket extremes and
@@ -839,6 +861,30 @@ class HistoryPoint(BaseModel):
     node_max: Optional[int] = None
     lane: str
     capture_reason: str
+    #: normal | notable | severe — how far this movement sits outside what is
+    #: ordinary FOR THIS SOURCE. See ``_classify_significance``.
+    significance: str = "normal"
+
+
+class HistoryEvent(BaseModel):
+    """One `refresh_events` row inside the window.
+
+    The snapshot says what the numbers did; this says what the platform was
+    doing at that moment. Correlating them is how "an external process broke
+    something" stops being a guess.
+    """
+
+    id: str
+    ts: str
+    origin: str
+    actor: str
+    scope: str
+    outcome: str
+    gate: Optional[str] = None
+    reason: Optional[str] = None
+    detail: Optional[str] = None
+    job_id: Optional[str] = None
+    run_id: Optional[str] = None
 
 
 class LabelSeriesSummary(BaseModel):
@@ -881,6 +927,12 @@ class HistorySummary(BaseModel):
     labels_added: list
     labels_removed: list
     largest_drop: Optional[HistoryDrop] = None
+    #: The typical absolute movement for this source in this window — the
+    #: median of the non-zero |delta|s. Reported so the UI can say WHY a change
+    #: was called notable instead of asking the reader to trust a label.
+    change_baseline: int = 0
+    notable_changes: int = 0
+    severe_changes: int = 0
     # Oldest snapshot held for this source at ANY age. Without it a series
     # that simply started last Tuesday is indistinguishable from one that lost
     # everything before Tuesday.
@@ -896,6 +948,7 @@ class CountHistoryPayload(BaseModel):
     points: list
     labels: list
     edge_labels: list
+    events: list
     summary: HistorySummary
 
     class Config:
@@ -954,6 +1007,48 @@ def _auto_grain(frm: str, to: str) -> str:
     if hours <= 24 * 14:
         return "hour"
     return "day"
+
+
+def _change_baseline(rows: list) -> int:
+    """The median non-zero absolute node delta in the window.
+
+    "Is this drop big" has no answer in the absolute — 900 lost rows is
+    catastrophic for a source that never moves and a Tuesday for one that
+    rebuilds nightly. The baseline makes the question answerable per source,
+    from the data already in hand.
+
+    Zero deltas are excluded: heartbeat rows would otherwise drag the median to
+    0 on any source that is mostly idle, which is most of them.
+    """
+    magnitudes = sorted(
+        abs(r.node_delta) for r in rows
+        if r.node_delta is not None and r.node_delta != 0
+    )
+    if not magnitudes:
+        return _SIGNIFICANCE_FLOOR
+    middle = len(magnitudes) // 2
+    median = (
+        magnitudes[middle] if len(magnitudes) % 2
+        else (magnitudes[middle - 1] + magnitudes[middle]) // 2
+    )
+    return max(_SIGNIFICANCE_FLOOR, int(median))
+
+
+def _classify_significance(delta: Optional[int], baseline: int) -> str:
+    """normal | notable | severe, relative to this source's own baseline.
+
+    Deliberately symmetric: a graph that TRIPLED overnight is as much worth
+    looking at as one that lost two thirds, and an "only drops matter" rule
+    would miss a runaway loader duplicating every node.
+    """
+    if not delta:
+        return "normal"
+    magnitude = abs(delta)
+    if magnitude >= baseline * _SEVERE_MULTIPLE:
+        return "severe"
+    if magnitude >= baseline * _NOTABLE_MULTIPLE:
+        return "notable"
+    return "normal"
 
 
 def _pct_change(first: int, last: int) -> Optional[float]:
@@ -1143,6 +1238,18 @@ async def get_data_source_history(
     )
     width = 13 if resolved_grain == "hour" else 10
 
+    # The RAW rows, read once and reused for both the baseline and the drop.
+    # Both have to be derived from raw even when the view is downsampled: a
+    # bucket keeps one closing value, and the movement that matters is exactly
+    # what averaging away a bucket destroys.
+    raw_rows = (
+        rows if resolved_grain == "raw"
+        else await stats_history_repo.list_snapshots(
+            session, ds_id, frm=window_from, to=window_to, grain="raw",
+        )
+    )
+    baseline = _change_baseline(raw_rows)
+
     points = []
     for row in rows:
         bucket = (row.captured_at or "")[:width] if resolved_grain != "raw" else None
@@ -1159,6 +1266,7 @@ async def get_data_source_history(
             node_max=high,
             lane=row.lane or "poll",
             capture_reason=row.capture_reason or "changed",
+            significance=_classify_significance(row.node_delta, baseline),
         ).model_dump())
 
     labels = _label_summaries(points, "entity_type_counts")
@@ -1185,15 +1293,47 @@ async def get_data_source_history(
         ),
         labels_added=[l["label"] for l in labels if l["state"] == "new"],
         labels_removed=[l["label"] for l in labels if l["state"] == "gone"],
-        # Computed from the RAW rows, never the downsampled points: a drop is
-        # exactly the thing a downsample can average away, and the marker has
-        # to point at the moment it actually happened.
-        largest_drop=_largest_drop(await stats_history_repo.list_snapshots(
-            session, ds_id, frm=window_from, to=window_to, grain="raw",
-        )),
+        # From the RAW rows, never the downsampled points — see above.
+        largest_drop=_largest_drop(raw_rows),
+        change_baseline=baseline,
+        notable_changes=sum(
+            1 for r in raw_rows
+            if _classify_significance(r.node_delta, baseline) == "notable"
+        ),
+        severe_changes=sum(
+            1 for r in raw_rows
+            if _classify_significance(r.node_delta, baseline) == "severe"
+        ),
         coverage_from=await stats_history_repo.oldest_captured_at(session, ds_id),
         retention_days=policy.retention_days,
     )
+
+    # What the platform was doing during the window. Read separately and
+    # returned alongside rather than joined: refresh_events belongs to the
+    # aggregation domain, and the map says cross-domain references are by id.
+    # The UI aligns them onto the same axis as the snapshots.
+    from backend.app.db.repositories.refresh_events_repo import (
+        list_refresh_events_between,
+    )
+
+    events = [
+        HistoryEvent(
+            id=event.id,
+            ts=event.ts,
+            origin=event.origin,
+            actor=event.actor,
+            scope=event.scope,
+            outcome=event.outcome,
+            gate=event.gate,
+            reason=event.reason,
+            detail=event.detail,
+            job_id=event.job_id,
+            run_id=event.run_id,
+        ).model_dump()
+        for event in await list_refresh_events_between(
+            session, ds_id, frm=window_from, to=window_to, limit=_EVENT_LIMIT,
+        )
+    ]
 
     payload = CountHistoryPayload(
         data_source_id=ds_id,
@@ -1203,6 +1343,7 @@ async def get_data_source_history(
         points=points,
         labels=labels,
         edge_labels=edge_labels,
+        events=events,
         summary=summary,
     ).model_dump(by_alias=True)
 
@@ -1213,6 +1354,107 @@ async def get_data_source_history(
         updated_at=_parse_iso(points[-1]["at"]) if points else None,
         has_data=bool(points),
     )
+
+
+def _bucket_instant(bucket: str) -> str:
+    """Turn a bucket KEY into a real instant.
+
+    Buckets are ISO prefixes — ``2026-08-20`` for a day, ``2026-08-20T14`` for
+    an hour — and the hour form is not a parseable timestamp in Python or in
+    JavaScript. Emitting the key as-is left the rollup charts unable to label
+    their own axis. Padding it here means every ``at`` on the wire is an
+    instant, whatever produced it.
+    """
+    if len(bucket) == 13:
+        return f"{bucket}:00:00+00:00"
+    if len(bucket) == 10:
+        return f"{bucket}T00:00:00+00:00"
+    return bucket
+
+
+def _align_rollup(rows: list, *, group: str) -> tuple:
+    """Align independently-observed series onto shared buckets.
+
+    Sources are polled on their own clocks, so at any bucket only some of them
+    reported. Each series therefore CARRIES FORWARD its last known value into
+    buckets it was not observed in — a source that was not polled did not drop
+    to zero, and a stacked chart implying it did would invent an outage that
+    never happened.
+
+    ``group`` selects the altitude: ``source`` gives one series per data source
+    (the per-provider view), ``provider`` sums each provider's sources into one
+    series (the fleet view). The arithmetic is identical; only the key differs,
+    which is why this is one function and not two that drift apart.
+
+    Takes pre-bucketed :class:`RollupRow`s — the reduction happens in SQL, so
+    this never sees more rows than (buckets x sources).
+    """
+    grid: dict = {}
+    names: dict = {}
+    for row in rows:
+        bucket = row.bucket
+        if group == "provider":
+            key = row.provider_id or "unknown"
+            label = row.provider_id or "Unassigned"
+            # A provider's total is the sum of ITS sources, so the innermost
+            # value stays keyed by data source until the sum is taken.
+            slot = grid.setdefault(bucket, {}).setdefault(key, {})
+            slot[row.data_source_id] = (
+                int(row.node_count or 0), int(row.edge_count or 0),
+            )
+        else:
+            key = row.data_source_id
+            label = row.graph_name or row.data_source_id
+            grid.setdefault(bucket, {})[key] = (
+                int(row.node_count or 0), int(row.edge_count or 0),
+            )
+        names.setdefault(key, label)
+
+    def _totals_of(value) -> tuple:
+        if isinstance(value, dict):
+            return (
+                sum(v[0] for v in value.values()),
+                sum(v[1] for v in value.values()),
+            )
+        return value
+
+    buckets = sorted(grid)
+    carried: dict = {}
+    totals: list = []
+    per_key: dict = {k: [] for k in names}
+    for bucket in buckets:
+        for key, value in grid[bucket].items():
+            if group == "provider":
+                carried.setdefault(key, {}).update(value)
+            else:
+                carried[key] = value
+        resolved = {k: _totals_of(v) for k, v in carried.items()}
+        totals.append({
+            "at": _bucket_instant(bucket),
+            "node_count": sum(v[0] for v in resolved.values()),
+            "edge_count": sum(v[1] for v in resolved.values()),
+            "sources": (
+                sum(len(v) for v in carried.values()) if group == "provider"
+                else len(carried)
+            ),
+        })
+        for key in names:
+            nodes, edges = resolved.get(key, (0, 0))
+            per_key[key].append({
+                "at": _bucket_instant(bucket), "node_count": nodes,
+                "edge_count": edges,
+            })
+
+    series = [
+        ProviderSeriesEntry(
+            data_source_id=key, name=names[key], points=per_key[key],
+        ).model_dump()
+        for key in sorted(
+            names,
+            key=lambda k: -(per_key[k][-1]["node_count"] if per_key[k] else 0),
+        )
+    ]
+    return totals, series
 
 
 @router.get(
@@ -1252,49 +1494,13 @@ async def get_provider_history(
         resolved_grain = "hour"
     width = 13 if resolved_grain == "hour" else 10
 
-    rows = await stats_history_repo.provider_snapshots(
-        session, provider_id, frm=window_from, to=window_to,
+    rows = await stats_history_repo.rollup_rows(
+        session, frm=window_from, to=window_to, width=width,
+        provider_id=provider_id,
     )
 
-    # bucket -> ds_id -> (node_count, edge_count), last write per bucket wins.
-    grid: dict = {}
-    names: dict = {}
-    for row in rows:
-        bucket = (row.captured_at or "")[:width]
-        grid.setdefault(bucket, {})[row.data_source_id] = (
-            int(row.node_count or 0), int(row.edge_count or 0),
-        )
-        names.setdefault(
-            row.data_source_id, row.graph_name or row.data_source_id,
-        )
-
-    buckets = sorted(grid)
-    carried: dict = {}
-    totals = []
-    per_source: dict = {ds: [] for ds in names}
-    for bucket in buckets:
-        carried.update(grid[bucket])
-        node_total = sum(v[0] for v in carried.values())
-        edge_total = sum(v[1] for v in carried.values())
-        totals.append({
-            "at": bucket, "node_count": node_total, "edge_count": edge_total,
-            "sources": len(carried),
-        })
-        for ds_id in names:
-            nodes, edges = carried.get(ds_id, (0, 0))
-            per_source[ds_id].append({
-                "at": bucket, "node_count": nodes, "edge_count": edges,
-            })
-
+    totals, sources = _align_rollup(rows, group="source")
     policy = await stats_history_repo.resolve_history_policy(session)
-    sources = [
-        ProviderSeriesEntry(
-            data_source_id=ds_id, name=names[ds_id], points=per_source[ds_id],
-        ).model_dump()
-        for ds_id in sorted(
-            names, key=lambda d: -(per_source[d][-1]["node_count"] if per_source[d] else 0),
-        )
-    ]
 
     payload = ProviderHistoryPayload(
         provider_id=provider_id,
@@ -1310,6 +1516,153 @@ async def get_provider_history(
         payload,
         provider_id=provider_id,
         asset_name="",
-        updated_at=_parse_iso(rows[-1].captured_at) if rows else None,
+        updated_at=_parse_iso(totals[-1]["at"]) if totals else None,
         has_data=bool(totals),
+    )
+
+
+@router.get(
+    "/history/fleet",
+    summary="Historical entity counts across the whole platform",
+)
+async def get_fleet_history(
+    frm: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = Query(None),
+    grain: Optional[str] = Query(None, description="hour | day | auto"),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Total entities over time across every onboarded source, series per
+    provider.
+
+    The third altitude, above the per-source and per-provider views. It is the
+    one that answers "is the platform as a whole growing, and did anything fall
+    off it" — a question no per-source page can, because the interesting case
+    is a source that stopped reporting entirely.
+
+    Same carry-forward semantics as the provider rollup, for the same reason:
+    a provider not observed in a bucket did not drop to zero.
+    """
+    from backend.app.db.repositories import stats_history_repo
+
+    window_from, window_to = _history_window(frm, to)
+    resolved_grain = (
+        _auto_grain(window_from, window_to)
+        if grain in (None, "", "auto")
+        else stats_history_repo.normalize_grain(grain)
+    )
+    if resolved_grain == "raw":
+        resolved_grain = "hour"
+    width = 13 if resolved_grain == "hour" else 10
+
+    rows = await stats_history_repo.rollup_rows(
+        session, frm=window_from, to=window_to, width=width,
+    )
+    totals, providers = _align_rollup(rows, group="provider")
+
+    # Providers are keyed by id in the snapshot rows; resolve display names in
+    # one read rather than leaving the UI to render raw ids.
+    names: dict = {}
+    ids = [p["data_source_id"] for p in providers]
+    if ids:
+        rows_named = (await session.execute(
+            select(ProviderORM.id, ProviderORM.name).where(ProviderORM.id.in_(ids))
+        )).all()
+        names = {r[0]: r[1] for r in rows_named}
+    for entry in providers:
+        entry["name"] = names.get(entry["data_source_id"], entry["name"])
+
+    policy = await stats_history_repo.resolve_history_policy(session)
+    payload = ProviderHistoryPayload(
+        provider_id="fleet",
+        **{"from": window_from},
+        to=window_to,
+        grain=resolved_grain,
+        totals=totals,
+        sources=providers,
+        retention_days=policy.retention_days,
+    ).model_dump(by_alias=True)
+
+    return _history_envelope(
+        payload,
+        provider_id="fleet",
+        asset_name="",
+        updated_at=_parse_iso(totals[-1]["at"]) if totals else None,
+        has_data=bool(totals),
+    )
+
+
+@router.get(
+    "/data-sources/{ds_id}/history.csv",
+    summary="Export one data source's counts history as CSV",
+)
+async def export_data_source_history_csv(
+    ds_id: str = Path(..., description="Workspace data source or catalog id"),
+    frm: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = Query(None),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The raw series as CSV — always raw, never downsampled.
+
+    Downsampling is a rendering concession; an export is evidence. Someone
+    pulling this into a spreadsheet for an audit needs every observation that
+    was recorded, at the resolution it was recorded, not the bucket closings
+    that happened to fit a chart.
+
+    One column per label, unioned across the window, so a label that appeared
+    or disappeared still has a column and its zeroes are visible rather than
+    ragged. Streamed as a single string: the row cap keeps this bounded well
+    inside a response, and chunking would buy nothing at this size.
+    """
+    import csv
+    import io
+
+    from fastapi.responses import Response
+
+    from backend.app.db.repositories import stats_history_repo
+
+    ds_id = await _resolve_history_scope(session, ds_id)
+    window_from, window_to = _history_window(frm, to)
+    rows = await stats_history_repo.list_snapshots(
+        session, ds_id, frm=window_from, to=window_to,
+        grain="raw", limit=_CSV_ROW_LIMIT,
+    )
+
+    labels: list = sorted({
+        label
+        for row in rows
+        for label in stats_history_repo.loads_counts(row.entity_type_counts)
+    })
+    edge_labels: list = sorted({
+        label
+        for row in rows
+        for label in stats_history_repo.loads_counts(row.edge_type_counts)
+    })
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(
+        ["captured_at", "lane", "capture_reason", "node_count", "edge_count",
+         "node_delta", "edge_delta"]
+        + [f"node:{label}" for label in labels]
+        + [f"edge:{label}" for label in edge_labels]
+    )
+    for row in rows:
+        entities = stats_history_repo.loads_counts(row.entity_type_counts)
+        edges = stats_history_repo.loads_counts(row.edge_type_counts)
+        writer.writerow(
+            [
+                row.captured_at, row.lane, row.capture_reason,
+                row.node_count, row.edge_count,
+                "" if row.node_delta is None else row.node_delta,
+                "" if row.edge_delta is None else row.edge_delta,
+            ]
+            + [entities.get(label, 0) for label in labels]
+            + [edges.get(label, 0) for label in edge_labels]
+        )
+
+    filename = f"history-{ds_id}-{window_from[:10]}-to-{window_to[:10]}.csv"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

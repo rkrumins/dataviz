@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { compactNum, formatPct, laneMeta, signedNum } from './shared'
+import { compactNum, formatPct, laneMeta, nearbyEvents, signedNum } from './shared'
 
 describe('compactNum', () => {
     it('abbreviates at thousand and million boundaries', () => {
@@ -54,5 +54,51 @@ describe('laneMeta', () => {
 
     it('falls back rather than throwing on an unknown lane', () => {
         expect(laneMeta('nonsense').label).toBe('Write')
+    })
+})
+
+describe('nearbyEvents', () => {
+    const event = (id: string, ts: string) => ({
+        id, ts, origin: 'reconcile-sweep', actor: 'internal', scope: 'auto',
+        outcome: 'accepted', gate: 'changed', reason: null, detail: null,
+        job_id: null, run_id: null,
+    })
+
+    it('keeps activity close enough in time to be plausibly related', () => {
+        const near = nearbyEvents(
+            [event('a', '2026-08-18T12:05:00Z')], '2026-08-18T12:00:00Z',
+        )
+        expect(near.map((e) => e.id)).toEqual(['a'])
+    })
+
+    it('matches either side of the observation', () => {
+        // The event is emitted when an operation is DECIDED and the snapshot
+        // written when the result is next observed — the cause can precede or
+        // follow the point.
+        const near = nearbyEvents([
+            event('before', '2026-08-18T11:55:00Z'),
+            event('after', '2026-08-18T12:05:00Z'),
+        ], '2026-08-18T12:00:00Z')
+        expect(near).toHaveLength(2)
+    })
+
+    it('drops activity too far away to be related', () => {
+        const near = nearbyEvents(
+            [event('old', '2026-08-18T06:00:00Z')], '2026-08-18T12:00:00Z',
+        )
+        expect(near).toEqual([])
+    })
+
+    it('returns newest first', () => {
+        const near = nearbyEvents([
+            event('older', '2026-08-18T11:56:00Z'),
+            event('newer', '2026-08-18T12:04:00Z'),
+        ], '2026-08-18T12:00:00Z')
+        expect(near.map((e) => e.id)).toEqual(['newer', 'older'])
+    })
+
+    it('returns nothing for an unparseable anchor rather than throwing', () => {
+        expect(nearbyEvents([event('a', '2026-08-18T12:00:00Z')], 'nonsense'))
+            .toEqual([])
     })
 })

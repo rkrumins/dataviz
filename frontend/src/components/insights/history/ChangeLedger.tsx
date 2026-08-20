@@ -12,11 +12,16 @@
  * it, expandable to the full before → after breakdown.
  */
 import { useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, Minus, TrendingDown, TrendingUp } from 'lucide-react'
+import {
+    ChevronDown, ChevronRight, Minus, Radio, TrendingDown, TrendingUp,
+} from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-import type { HistoryPoint } from '@/types/insights'
-import { clockUtc, compactNum, dayLabel, laneMeta, signedNum } from './shared'
+import type { HistoryEvent, HistoryPoint } from '@/types/insights'
+import {
+    OUTCOME_TONE, ORIGIN_LABEL, clockUtc, compactNum, dayLabel, laneMeta,
+    nearbyEvents, signedNum,
+} from './shared'
 
 interface TypeDelta {
     added: Record<string, number>
@@ -59,11 +64,16 @@ function summarise(delta: TypeDelta): string {
     return parts.join(' · ') || 'Counts unchanged per label'
 }
 
-export function ChangeLedger({ points, highlightAt, className }: {
+export function ChangeLedger({ points, events = [], highlightAt, onlyNotable = false, className }: {
     points: HistoryPoint[]
+    /** Platform activity in the same window. Matched to each entry by time so
+     *  "what else was happening" is answerable without leaving the page. */
+    events?: HistoryEvent[]
     /** Timestamp to expand and scroll into view — set when a drop marker on
      *  the chart is activated. */
     highlightAt?: string | null
+    /** Show only movements outside this source's own normal range. */
+    onlyNotable?: boolean
     className?: string
 }) {
     const [expanded, setExpanded] = useState<string | null>(null)
@@ -75,6 +85,7 @@ export function ChangeLedger({ points, highlightAt, className }: {
         const kept: Array<{ point: HistoryPoint; prev?: HistoryPoint }> = []
         points.forEach((point, i) => {
             if (point.capture_reason === 'heartbeat') return
+            if (onlyNotable && point.significance === 'normal') return
             kept.push({ point, prev: points[i - 1] })
         })
         kept.reverse() // newest first
@@ -85,15 +96,21 @@ export function ChangeLedger({ points, highlightAt, className }: {
             previousDay = day
             return { ...entry, day, startsDay }
         })
-    }, [points])
+    }, [points, onlyNotable])
 
     if (!entries.length) {
         return (
             <div className={cn('px-4 py-8 text-center', className)}>
                 <Minus className="w-5 h-5 text-ink-muted mx-auto mb-2" />
-                <p className="text-sm font-semibold text-ink">Nothing changed in this window</p>
+                <p className="text-sm font-semibold text-ink">
+                    {onlyNotable
+                        ? 'Nothing unusual in this window'
+                        : 'Nothing changed in this window'}
+                </p>
                 <p className="text-xs text-ink-muted mt-1">
-                    Counts were observed and held steady. That is a finding, not a gap.
+                    {onlyNotable
+                        ? 'Every movement was within this source\u2019s normal range.'
+                        : 'Counts were observed and held steady. That is a finding, not a gap.'}
                 </p>
             </div>
         )
@@ -129,6 +146,7 @@ export function ChangeLedger({ points, highlightAt, className }: {
                         >
                             <span className={cn(
                                 'mt-0.5 w-7 h-7 rounded-lg flex items-center justify-center shrink-0',
+                                point.significance === 'severe' && 'ring-2 ring-red-500/40',
                                 point.capture_reason === 'first'
                                     ? 'text-ink-muted bg-black/5 dark:bg-white/5'
                                     : dropped
@@ -158,6 +176,19 @@ export function ChangeLedger({ points, highlightAt, className }: {
                                     {point.capture_reason === 'first' && (
                                         <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
                                             first snapshot
+                                        </span>
+                                    )}
+                                    {point.significance !== 'normal' && (
+                                        <span
+                                            className={cn(
+                                                'px-1.5 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide',
+                                                point.significance === 'severe'
+                                                    ? 'text-red-600 dark:text-red-400 bg-red-500/10'
+                                                    : 'text-amber-600 dark:text-amber-400 bg-amber-500/10',
+                                            )}
+                                            title="Measured against this source's own typical movement, not a fixed threshold"
+                                        >
+                                            {point.significance}
                                         </span>
                                     )}
                                 </span>
@@ -191,8 +222,9 @@ export function ChangeLedger({ points, highlightAt, className }: {
                         </button>
 
                         {isOpen && (
-                            <div className="px-4 pb-3 pl-14">
+                            <div className="px-4 pb-3 pl-14 space-y-2">
                                 <DeltaBreakdown delta={delta} />
+                                <CorrelatedEvents events={nearbyEvents(events, point.at)} />
                             </div>
                         )}
                     </div>
@@ -201,6 +233,58 @@ export function ChangeLedger({ points, highlightAt, className }: {
         </div>
     )
 }
+
+/**
+ * What else the platform was doing when the counts moved.
+ *
+ * This is the half that turns "something changed" into "something changed
+ * BECAUSE" — a reconcile sweep that decided to rebuild, an aggregation job, a
+ * script-driven refresh. Absence is informative too, and said out loud: if
+ * nothing of ours ran, whatever moved the graph came from outside the
+ * platform, which is exactly the case worth chasing.
+ */
+function CorrelatedEvents({ events }: { events: HistoryEvent[] }) {
+    if (!events.length) {
+        return (
+            <p className="text-[11px] text-ink-muted flex items-start gap-1.5">
+                <Radio className="w-3.5 h-3.5 mt-px shrink-0" />
+                <span>
+                    No platform activity recorded around this observation — whatever
+                    changed the graph came from outside{' '}
+                    {/* The distinction matters: our own rebuilds are accounted for,
+                        so an unaccounted change is an external writer. */}
+                    this platform.
+                </span>
+            </p>
+        )
+    }
+    return (
+        <div className="rounded-xl border border-glass-border bg-canvas-elevated divide-y divide-glass-border">
+            {events.map((event) => (
+                <div key={event.id} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
+                    <span className="text-[11px] text-ink-muted tabular-nums shrink-0 w-12">
+                        {clockUtc(event.ts)}
+                    </span>
+                    <span className="text-[11px] font-semibold text-ink truncate min-w-0 flex-1">
+                        {ORIGIN_LABEL[event.origin] ?? event.origin}
+                        {event.reason ? (
+                            <span className="font-normal text-ink-muted">
+                                {' '}· {event.reason.replace(/_/g, ' ')}
+                            </span>
+                        ) : null}
+                    </span>
+                    <span className={cn(
+                        'px-1.5 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide shrink-0',
+                        OUTCOME_TONE[event.outcome] ?? 'text-ink-muted bg-black/5 dark:bg-white/5',
+                    )}>
+                        {event.outcome}
+                    </span>
+                </div>
+            ))}
+        </div>
+    )
+}
+
 
 function DeltaBreakdown({ delta }: { delta: TypeDelta }) {
     const rows: Array<{ label: string; before: number; after: number; kind: string }> = [

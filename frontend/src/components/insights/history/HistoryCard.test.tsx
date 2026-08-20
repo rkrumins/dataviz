@@ -1,8 +1,13 @@
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const useCountHistory = vi.fn()
+const useAnyPermission = vi.fn()
+
+vi.mock('@/store/auth', () => ({
+    useAnyPermission: (perms: string[]) => useAnyPermission(perms),
+}))
 vi.mock('@/hooks/useCountHistory', async () => {
     const actual = await vi.importActual<typeof import('@/hooks/useCountHistory')>(
         '@/hooks/useCountHistory',
@@ -52,6 +57,29 @@ function renderCard(props: Partial<Parameters<typeof HistoryCard>[0]> = {}) {
 }
 
 describe('HistoryCard', () => {
+    beforeEach(() => {
+        useAnyPermission.mockReturnValue(true)
+    })
+
+    it('renders nothing for a viewer who cannot read history', () => {
+        // The API is system:admin. Showing an empty card that explains nothing
+        // is worse than showing no card, and firing the request would pop the
+        // global permission modal over a profile they may legitimately open.
+        useAnyPermission.mockReturnValue(false)
+        useCountHistory.mockReturnValue({ data: undefined, isLoading: false })
+        const { container } = renderCard()
+        expect(container).toBeEmptyDOMElement()
+    })
+
+    it('does not fetch history it is not allowed to read', () => {
+        useAnyPermission.mockReturnValue(false)
+        useCountHistory.mockReturnValue({ data: undefined, isLoading: false })
+        renderCard()
+        expect(useCountHistory).toHaveBeenCalledWith(
+            'ds-1', expect.anything(), expect.objectContaining({ enabled: false }),
+        )
+    })
+
     it('shows a loading state while the query is in flight', () => {
         useCountHistory.mockReturnValue({ data: undefined, isLoading: true })
         renderCard()

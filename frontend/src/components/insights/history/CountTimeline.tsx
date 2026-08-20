@@ -43,11 +43,6 @@ export type TimelineMode = 'composition' | 'total' | 'compare'
  *  their own borders. */
 const TOP_LABELS = 8
 
-/** A negative movement this large a share of the graph gets a marker. 2% is
- *  low enough to catch a single deleted label on a big graph and high enough
- *  that ordinary churn does not litter the axis. */
-const DROP_MARKER_FRACTION = 0.02
-
 const PAD = { top: 16, right: 12, bottom: 26, left: 48 }
 
 export interface CountTimelineProps {
@@ -180,10 +175,13 @@ export function CountTimeline({
           `L${bandLows.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).reverse().join('L')}Z`
         : null
 
-    const dropThreshold = Math.max(1, max * DROP_MARKER_FRACTION)
-    const drops = points
+    // Marked because the server judged the movement unusual FOR THIS SOURCE
+    // — the median absolute delta in the window, not a share of the axis. A
+    // fixed fraction marked every nightly rebuild on a churning source and
+    // nothing at all on a large one losing a small label.
+    const marked = points
         .map((p, i) => ({ point: p, index: i }))
-        .filter(({ point }) => (point.node_delta ?? 0) < -dropThreshold)
+        .filter(({ point }) => point.significance !== 'normal')
 
     const gridValues = [0, 0.25, 0.5, 0.75, 1].map((f) => max * f)
     const tickEvery = Math.max(1, Math.ceil(points.length / 6))
@@ -270,38 +268,50 @@ export function CountTimeline({
                     ) : null
                 ))}
 
-                {/* Drop markers. Buttons, not decoration — activating one
-                    reveals the matching entry in the change ledger. */}
-                {drops.map(({ point, index }) => (
-                    <g
-                        key={`${point.at}-drop`}
-                        role={onDropSelect ? 'button' : undefined}
-                        tabIndex={onDropSelect ? 0 : undefined}
-                        aria-label={
-                            `Drop of ${signedNum(point.node_delta)} at ${axisLabel(point.at, grain)}`
-                        }
-                        className={onDropSelect ? 'cursor-pointer' : undefined}
-                        onClick={() => onDropSelect?.(point.at)}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') onDropSelect?.(point.at)
-                        }}
-                    >
-                        <line
-                            x1={x(index)} x2={x(index)}
-                            y1={PAD.top} y2={PAD.top + innerH}
-                            className="stroke-red-500/35"
-                            strokeWidth="1"
-                            strokeDasharray="3 3"
-                        />
-                        <polygon
-                            points={`${x(index) - 5},${PAD.top - 9} ${x(index) + 5},${PAD.top - 9} ${x(index)},${PAD.top - 1}`}
-                            className="fill-red-500"
-                        />
-                        <title>
-                            {`${signedNum(point.node_delta)} at ${axisLabel(point.at, grain)}`}
-                        </title>
-                    </g>
-                ))}
+                {/* Markers. Buttons, not decoration — activating one reveals
+                    the matching entry in the change ledger. Red for a loss,
+                    amber for an unusual gain: a runaway loader duplicating
+                    every node is as much a failure as a deletion, and marking
+                    only drops would miss it entirely. */}
+                {marked.map(({ point, index }) => {
+                    const lost = (point.node_delta ?? 0) < 0
+                    const severe = point.significance === 'severe'
+                    return (
+                        <g
+                            key={`${point.at}-marker`}
+                            role={onDropSelect ? 'button' : undefined}
+                            tabIndex={onDropSelect ? 0 : undefined}
+                            aria-label={
+                                `${severe ? 'Severe' : 'Notable'} ` +
+                                `${lost ? 'drop' : 'rise'} of ${signedNum(point.node_delta)} ` +
+                                `at ${axisLabel(point.at, grain)}`
+                            }
+                            className={onDropSelect ? 'cursor-pointer' : undefined}
+                            onClick={() => onDropSelect?.(point.at)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') onDropSelect?.(point.at)
+                            }}
+                        >
+                            <line
+                                x1={x(index)} x2={x(index)}
+                                y1={PAD.top} y2={PAD.top + innerH}
+                                className={lost ? 'stroke-red-500/35' : 'stroke-amber-500/35'}
+                                strokeWidth="1"
+                                strokeDasharray="3 3"
+                            />
+                            <polygon
+                                points={`${x(index) - 5},${PAD.top - 9} ${x(index) + 5},${PAD.top - 9} ${x(index)},${PAD.top - 1}`}
+                                className={cn(
+                                    lost ? 'fill-red-500' : 'fill-amber-500',
+                                    !severe && 'opacity-60',
+                                )}
+                            />
+                            <title>
+                                {`${signedNum(point.node_delta)} at ${axisLabel(point.at, grain)} — ${point.significance}`}
+                            </title>
+                        </g>
+                    )
+                })}
 
                 {/* Crosshair */}
                 {hover != null && (

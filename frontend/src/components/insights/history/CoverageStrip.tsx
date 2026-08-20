@@ -7,10 +7,12 @@
  * looks exactly like a chart that lost twenty-seven days of data. Stating the
  * coverage up front removes the ambiguity before anyone raises an incident.
  */
-import { Clock, Database, History } from 'lucide-react'
+import { useState } from 'react'
+import { Clock, Database, History, Settings2 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { formatUtc, toUtcDate } from '@/lib/timeAgo'
+import { RetentionDialog } from './RetentionDialog'
 
 export function CoverageStrip({
     coverageFrom, requestedFrom, requestedTo, retentionDays, snapshots, changed, className,
@@ -23,6 +25,7 @@ export function CoverageStrip({
     changed: number
     className?: string
 }) {
+    const [editingRetention, setEditingRetention] = useState(false)
     const oldest = toUtcDate(coverageFrom)
     const requested = toUtcDate(requestedFrom)
     // Both ends of the WINDOW, never the wall clock. The statement is about
@@ -81,11 +84,29 @@ export function CoverageStrip({
                 {' '}with changes
             </span>
 
-            <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-secondary">
+            {/* The retention control lives on the number it governs. A reader
+                who has just been told the series only goes back 30 days is the
+                one person who wants to change that, and a settings page three
+                clicks away is where that intent goes to die. */}
+            <button
+                type="button"
+                onClick={() => setEditingRetention(true)}
+                className={cn(
+                    'inline-flex items-center gap-1.5 text-[11px] text-ink-secondary',
+                    'px-1.5 py-0.5 -mx-1.5 rounded-lg transition-colors outline-none',
+                    'hover:bg-black/5 dark:hover:bg-white/5',
+                    'focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                )}
+            >
                 <Clock className="w-3.5 h-3.5 text-ink-muted" />
                 Retention{' '}
                 <strong className="text-ink font-semibold tabular-nums">{retentionDays} days</strong>
-            </span>
+                <Settings2 className="w-3 h-3 text-ink-muted" />
+            </button>
+
+            {editingRetention && (
+                <RetentionDialog onClose={() => setEditingRetention(false)} />
+            )}
         </div>
     )
 }

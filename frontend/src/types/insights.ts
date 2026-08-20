@@ -98,6 +98,27 @@ export interface HistoryPoint {
     /** `heartbeat` rows are continuity, not events — the change ledger filters
      *  them out so a reader sees movement rather than ticks. */
     capture_reason: 'first' | 'changed' | 'heartbeat'
+    /** How far this movement sits outside what is ordinary FOR THIS SOURCE,
+     *  computed from the median absolute delta in the window. A fixed
+     *  threshold cannot tell a catastrophic drop apart from a nightly rebuild. */
+    significance: 'normal' | 'notable' | 'severe'
+}
+
+/** One `refresh_events` row inside the window — what the platform was doing
+ *  while the counts moved. Mirrors `HistoryEvent` in
+ *  `backend/app/api/v1/endpoints/insights.py`. */
+export interface HistoryEvent {
+    id: string
+    ts: string
+    origin: string
+    actor: string
+    scope: string
+    outcome: string
+    gate: string | null
+    reason: string | null
+    detail: string | null
+    job_id: string | null
+    run_id: string | null
 }
 
 export interface LabelSeriesSummary {
@@ -136,6 +157,11 @@ export interface HistorySummary {
     labels_added: string[]
     labels_removed: string[]
     largest_drop: HistoryDrop | null
+    /** The typical absolute movement for this source in this window. Reported
+     *  so the UI can say WHY something was called notable. */
+    change_baseline: number
+    notable_changes: number
+    severe_changes: number
     /** Oldest snapshot held at ANY age. Without it, a series that simply
      *  started last Tuesday reads identically to one that lost everything
      *  before Tuesday. */
@@ -151,6 +177,8 @@ export interface CountHistoryPayload {
     points: HistoryPoint[]
     labels: LabelSeriesSummary[]
     edge_labels: LabelSeriesSummary[]
+    /** Platform activity in the same window, for correlation. */
+    events: HistoryEvent[]
     summary: HistorySummary
 }
 

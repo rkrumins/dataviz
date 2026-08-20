@@ -26,6 +26,7 @@ import type {
 
 export const COUNT_HISTORY_QUERY_KEY_PREFIX = 'insights-history' as const
 export const PROVIDER_HISTORY_QUERY_KEY_PREFIX = 'insights-history-provider' as const
+export const FLEET_HISTORY_QUERY_KEY_PREFIX = 'insights-history-fleet' as const
 
 /** Named windows. `label` is what the segmented control shows; `days` drives
  *  the request. Kept here rather than in the component so the page, the card
@@ -92,6 +93,28 @@ export function useCountHistory(
         // Five minutes: the capture cadence floor is 60s and a changed
         // snapshot is not urgent to see. Refetch-on-focus covers "I came back
         // to this tab and want the current picture".
+        staleTime: 5 * 60 * 1000,
+        gcTime: 15 * 60 * 1000,
+        refetchOnWindowFocus: true,
+        retry: 1,
+        retryDelay: 800,
+    })
+}
+
+/** Platform-wide totals — the altitude above per-provider. It is the only
+ *  view that can show a source falling off the platform entirely, because
+ *  every narrower scope is filtered by something that source no longer has. */
+export function useFleetHistory(
+    range: { from: string; to: string },
+    { enabled = true, grain = 'auto' }: UseHistoryOptions = {},
+): UseQueryResult<Envelope<ProviderHistoryPayload>, Error> {
+    return useQuery<Envelope<ProviderHistoryPayload>, Error>({
+        queryKey: [FLEET_HISTORY_QUERY_KEY_PREFIX, range.from, range.to, grain],
+        queryFn: ({ signal }) =>
+            insightsHistoryService.getFleetHistory(
+                { from: range.from, to: range.to, grain }, signal,
+            ),
+        enabled,
         staleTime: 5 * 60 * 1000,
         gcTime: 15 * 60 * 1000,
         refetchOnWindowFocus: true,

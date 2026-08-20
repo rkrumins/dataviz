@@ -149,10 +149,28 @@ which the age cutoff alone cannot. Both defaults can be overridden live via
 `PUT /api/v1/admin/platform/history-retention` — `persisted ?? env`, so a no-op
 save round-trips the real default rather than pinning it.
 
+**What counts as a notable change** is decided per source, not by a fixed
+threshold. The window's median absolute delta is the baseline; a movement three
+times that is `notable`, eight times is `severe`. A fixed threshold cannot tell
+a catastrophic drop apart from a nightly rebuild, because the same number is
+both depending on whose graph it is. The classification is symmetric — a
+runaway loader tripling a graph is as much a failure as a deletion — and it is
+always computed from the RAW rows, since averaging a bucket is exactly what
+destroys the movement being looked for.
+
+**Correlation.** Each window also returns the `refresh_events` rows inside it,
+so the UI can answer "what else was running when this moved" — a reconcile
+sweep, an aggregation rebuild, a script-driven refresh. Two reads, never a
+JOIN: `refresh_events` is the aggregation domain's. Absence is informative and
+surfaced as such: if nothing of ours ran, whatever changed the graph came from
+outside the platform.
+
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/v1/admin/insights/data-sources/{id}/history` | Counts over time for one source, per label, with deltas. Accepts a catalog-item id too. |
-| GET | `/api/v1/admin/insights/providers/{id}/history` | The same series rolled up across a provider's onboarded sources. |
+| GET | `/api/v1/admin/insights/data-sources/{id}/history` | Counts over time for one source, per label, with deltas, significance and correlated activity. Accepts a catalog-item id too. |
+| GET | `/api/v1/admin/insights/data-sources/{id}/history.csv` | The same series as CSV — always raw, one column per label. |
+| GET | `/api/v1/admin/insights/providers/{id}/history` | Rolled up across a provider's onboarded sources. |
+| GET | `/api/v1/admin/insights/history/fleet` | Rolled up across the whole platform, one series per provider. |
 | GET/PUT | `/api/v1/admin/platform/history-retention` | Read / set the retention policy. |
 
 Both history reads take `from`, `to` and `grain` (`raw` \| `hour` \| `day` \|
@@ -232,8 +250,11 @@ job is `computing`. A stuck pipeline (Redis down) surfaces as a
 "background refresh paused" affordance when a read comes back `unavailable`.
 The counts history appears as a **Last 30 days** card in the data source
 profile and, behind it, a full history view at
-`/datasources/{catalogId}/history` — counts over time by label, a change
-ledger, and a per-provider rollup.
+`/datasources/{catalogId}/history` — counts over time by label, a change ledger
+with correlated platform activity, an unusual-only filter, a CSV export, and a
+scope switch between this source, its provider and the whole platform. The
+retention policy is edited in place from the coverage line that reports it,
+read-only for non-admins.
 Providers that fail repeatedly show as degraded via the rolling success window.
 
 ## Limitations

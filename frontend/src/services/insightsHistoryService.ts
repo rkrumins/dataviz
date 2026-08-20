@@ -52,7 +52,11 @@ export const insightsHistoryService = {
     ): Promise<Envelope<CountHistoryPayload>> {
         return authFetch<Envelope<CountHistoryPayload>>(
             `${BASE}/data-sources/${encodeURIComponent(dataSourceId)}/history${qs(query)}`,
-            { signal },
+            // silent403: history is admin-gated, but the card that reads it
+            // sits on a profile plenty of non-admins can open. A permission
+            // modal over a page they are entitled to see would be the app
+            // shouting about a section it should simply not have shown.
+            { signal, silent403: true },
         )
     },
 
@@ -63,8 +67,30 @@ export const insightsHistoryService = {
     ): Promise<Envelope<ProviderHistoryPayload>> {
         return authFetch<Envelope<ProviderHistoryPayload>>(
             `${BASE}/providers/${encodeURIComponent(providerId)}/history${qs(query)}`,
-            { signal },
+            { signal, silent403: true },
         )
+    },
+
+    /** Platform-wide totals, one series per provider. */
+    getFleetHistory(
+        query: HistoryQuery = {},
+        signal?: AbortSignal,
+    ): Promise<Envelope<ProviderHistoryPayload>> {
+        return authFetch<Envelope<ProviderHistoryPayload>>(
+            `${BASE}/history/fleet${qs(query)}`, { signal, silent403: true },
+        )
+    },
+
+    /** URL for the CSV export — always the RAW series, never downsampled.
+     *  Returned as a URL rather than fetched because the browser's own
+     *  download machinery handles the filename and the save dialog, and the
+     *  session cookie rides along. Grain is stripped: an export is evidence,
+     *  and evidence is not bucketed to fit a chart. */
+    exportUrl(dataSourceId: string, query: HistoryQuery = {}): string {
+        // Only the window travels; grain is deliberately dropped rather than
+        // forwarded.
+        const range: HistoryQuery = { from: query.from, to: query.to }
+        return `${BASE}/data-sources/${encodeURIComponent(dataSourceId)}/history.csv${qs(range)}`
     },
 
     getRetention(): Promise<HistoryRetentionPolicy> {
