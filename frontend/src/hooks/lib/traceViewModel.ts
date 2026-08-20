@@ -39,7 +39,9 @@ export interface TraceCard {
   depth: number
   /** Graph-counted children (`data.childCount`) — never `children.length`. */
   childCount: number
-  /** Participants inside this card's subtree (self excluded). */
+  /** Things INSIDE this card that carry lineage: participants in its subtree,
+   *  SELF EXCLUDED — a participant leaf reads 0. The same statement the Lens
+   *  makes, "N things inside X carry lineage here". */
   onLineage: number
   expanded: boolean
   /** Min lineage hop from the focus subtree (null = host only). */
