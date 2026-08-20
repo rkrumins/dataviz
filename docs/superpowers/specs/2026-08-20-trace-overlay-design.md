@@ -88,7 +88,7 @@ Determinism: same inputs → identical output (sorted by urn); idempotent across
 - Expand refines: wires touching the opened card re-project one grain finer; the parent-grain bundle disappears.
 - Collapse re-rolls: the exact inverse; nothing removed from any model.
 - Recursive Node⊃Node⊃Node: each level keeps its chevron; expansion to any depth; wires follow.
-- Direction toggles & depths scope the VIEW instantly, no refetch.
+- Direction toggles & depths scope the VIEW instantly, no refetch (see §9.1 for the single depth rule).
 - Never orphaned: every visible card has a visible parent or is the lane root the VIEW placed; no synthetic lane exists.
 
 ## 4. Harness first (R4) — `frontend/src/components/canvas/context-view/__tests__/traceCanvas.harness.test.tsx`
@@ -211,3 +211,89 @@ harness asserts the request count per journey.
 7. Wire parity with the Lens: for the same focus, the set of flows drawn (at
    any grain) matches the Lens's walked flows — no lineage missing, none
    invented.
+
+
+## 9. Integration contract (from the independent integration audit, 2026-08-20)
+
+The audit enumerated every existing trace integration; the rebuild must keep
+each one working. Evidence is in the audit report; the contract is below.
+
+### 9.1 ONE depth/direction rule
+- Wire max is 25 per direction (`TraceClosureRequest` `le=25`). The header
+  `TraceDepthControl` presets (25/50/100, max 100) and the dock sliders (max
+  50) are **capped at 25** for fetch; values above 25 are view-only and the
+  control says so ("25 = everything the source can walk").
+- **Fetch depth = monotone max requested in the session**; the model only
+  grows. **View depth/direction = scope, instant, no refetch.** Raising view
+  depth past the fetched depth triggers exactly one deeper fetch.
+- Dock direction arrows today zero the other side's depth and call `retrace`
+  → `continueWalk` (a budget grant per toggle — a storm vector). Under the
+  overlay: depth 0 means **hidden**, never a fetch parameter; `retrace` is a
+  **no-op for view-only changes**. The seam pin "depth-1 view is instant,
+  without a refetch" stays.
+- History entries gain `traceExpansion` (and focus) so back/forward/resume
+  restore the **exact picture**, not just the view scope.
+
+### 9.2 Dock adapter contract (`dockTrace`)
+- `setConfig` depth/direction → VM only. `lineageEdgeTypes` / hierarchy
+  `level` controls are **dead today in native mode**: either wire
+  `lineageEdgeTypes` into the walk request (a refetch) or hide both controls
+  in native mode — decision: **hide in v1, ticket the edge-type filter**.
+- Counts/statistics: define and label as **scoped** (after direction/depth)
+  — today they are model-wide while the view is scoped; the overview must
+  not disagree with the board.
+- Truncation notice + "Reduce depth & retrace": map to the ceiling state
+  ("asks once"); the action reduces VIEW depth and never calls
+  `continueWalk` below the ceiling. `TraceDockPerformance` is fed the
+  capsule's request count and timings instead of "unavailable".
+- Drilldown breadcrumb/tab: the lazy structural drill merges into the
+  **trace model**, never into the legacy `drilldowns` map (or the breadcrumb
+  returns). `beginTrace` side effects stay: flow master-switch on, drawer
+  closed once, drawer re-openable.
+- `TraceBottomDock` prop changes stay backward-compatible: `GraphCanvas` and
+  `HierarchyCanvas` still host the dock over the legacy `useUnifiedTrace`.
+- **ESC exits the trace.** Today `onExitTrace` is wired to the legacy
+  `exitTrace` (returns false when the legacy hook is idle) — already broken;
+  wire it to overlay exit and pin it.
+
+### 9.3 Rendering adapter contract
+- `FlatTreeItem` in trace mode uses `children.length` for its count/chevron
+  (`FlatTreeItem.tsx:169,195`): a CLOSED VM card with no materialised
+  children would render **no chevron and 0** — the R1 picture would silently
+  fail. The adapter supplies graph-counted `childCount` and an
+  "N on this lineage" count; the `isTracing ? children.length` branch goes.
+- `LayerColumn` suppresses "N more" in trace (`LayerColumn.tsx:437`) while
+  §8.4 requires row windowing: the overlay **re-enables windowing at 8** with
+  the window bound by the VM (not by store children).
+- Overlay wire shape: `source`/`target` are **node IDs** (via `urnToIdMap`),
+  bundles carry `edgeCount` + `isBundled` (the overlay's existing fields, not
+  `count`), and `coarse` renders with the existing dashed/animated language
+  (`stroke-dasharray` at `LineageFlowOverlay.tsx:1523`). `nativeTraceResult`
+  keeps ID-keyed `upstreamNodes`/`downstreamNodes` for cyan/amber/glow/dim.
+- Reveal-on-canvas, header search and focus auto-scroll write
+  `expandedNodes`/`loadChildren` today; in trace mode they **target
+  `traceExpansion` and VM cards** (`traceFocusId` for auto-scroll), or
+  "nothing happens" in trace.
+
+### 9.4 The "outside this view" count
+The existing chip is **per-selected-node and suppressed during trace** — it
+cannot serve R3. The VM exposes `outsideView` (chains with no placeable node)
+and the capsule/dock surface it; on a full-coverage view it must read 0 and a
+non-zero value is a defect to investigate, never hidden.
+
+### 9.5 Draft & versioned parity (acceptance)
+`draft_overlay_provider.trace_closure` lacks the `seed_cursor` kwarg the
+engine passes (TypeError on paging today); `versioned_branch_provider` has no
+`trace_closure` (501). Both get the same coarse/fine/seed-cursor/grain
+journeys as FalkorDB (the fixes exist on the backup branch — `41556de3`).
+
+### 9.6 Tests: rewrite vs keep
+- **Rewrite** (they pin the store-merge the overlay removes):
+  `useCanvasTraceWalk.test.ts`, `traceWalkMerge.test.ts`
+  (`computeTraceWalkDelta`, `traceExpansionUrns`), `canvasTraceWalkSeam`
+  cases 1–3 and 6. Their **journeys** port to the new harness: budget →
+  hands-free → exhausted; upstream-only hides hosts; depth-1 view instant;
+  exit restores.
+- **Keep**: `traceViewFilter.test.ts` (VM step 1 reuses it),
+  `traceHistoryStack.test.ts` (extended for `traceExpansion`),
+  `TraceHistoryPanel.test.tsx`, `traceMergeSpine.test.ts` (legacy hosts).
