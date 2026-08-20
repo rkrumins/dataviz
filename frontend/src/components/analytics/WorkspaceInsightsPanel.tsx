@@ -9,6 +9,7 @@ import { useEffect, useRef } from 'react'
 import { Activity, LayoutGrid, MousePointerClick, Users, X } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import type { AnalyticsRangeSelection } from '@/services/analyticsService'
 import { timeAgo } from '@/lib/timeAgo'
 import { exact, shortDate } from '@/lib/formatMetric'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -24,14 +25,14 @@ import { comparisonLabel, rangeLabel } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
 
 export function WorkspaceInsightsPanel({
-    workspaceId, days, onClose,
+    workspaceId, range, onClose,
 }: {
     workspaceId: string | null
-    days: number
+    range: AnalyticsRangeSelection
     onClose: () => void
 }) {
     const theme = useChartTheme()
-    const { data, isLoading, isFetching, error } = useWorkspaceAnalyticsDetail(workspaceId, days)
+    const { data, isLoading, isFetching, error } = useWorkspaceAnalyticsDetail(workspaceId, range)
     const closeRef = useRef<HTMLButtonElement>(null)
 
     useEffect(() => {
@@ -90,7 +91,7 @@ export function WorkspaceInsightsPanel({
                                 <KpiCard
                                     label="Views" value={data.totals.views.total} icon={LayoutGrid}
                                     changePct={data.totals.views.changePct}
-                                    comparisonLabel={comparisonLabel(days)}
+                                    comparisonLabel={comparisonLabel(range)}
                                     sub={`${exact(data.totals.views.current ?? 0)} new in range`}
                                     accent="indigo"
                                 />
@@ -98,14 +99,14 @@ export function WorkspaceInsightsPanel({
                                     label="View opens" value={data.totals.viewOpens.total}
                                     icon={MousePointerClick}
                                     changePct={data.totals.viewOpens.changePct}
-                                    comparisonLabel={comparisonLabel(days)}
+                                    comparisonLabel={comparisonLabel(range)}
                                     accent="cyan"
                                 />
                                 <KpiCard
                                     label="Active people" value={data.totals.activeUsers.current ?? 0}
                                     icon={Users}
                                     changePct={data.totals.activeUsers.changePct}
-                                    comparisonLabel={comparisonLabel(days)}
+                                    comparisonLabel={comparisonLabel(range)}
                                     sub={`${exact(data.totals.members.total)} members`}
                                     accent="emerald"
                                 />
@@ -113,14 +114,14 @@ export function WorkspaceInsightsPanel({
                                     label="Actions" value={data.totals.activity.current ?? 0}
                                     icon={Activity}
                                     changePct={data.totals.activity.changePct}
-                                    comparisonLabel={comparisonLabel(days)}
+                                    comparisonLabel={comparisonLabel(range)}
                                     accent="violet"
                                 />
                             </div>
 
                             <ChartFrame
                                 title="Activity over time"
-                                subtitle={`Actions and active people across ${rangeLabel(days).toLowerCase()}`}
+                                subtitle={`Actions and active people across ${rangeLabel(range).toLowerCase()}`}
                                 series={[
                                     { key: 'actions', label: 'Actions', color: theme.series[0], shape: 'line' },
                                     { key: 'people', label: 'Active people', color: theme.series[1], shape: 'line' },

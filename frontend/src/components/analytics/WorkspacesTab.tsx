@@ -12,6 +12,7 @@ import { useMemo, useState } from 'react'
 import { ArrowUpDown, MoonStar } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import type { AnalyticsRangeSelection } from '@/services/analyticsService'
 import { timeAgo } from '@/lib/timeAgo'
 import { compact, exact } from '@/lib/formatMetric'
 import type { WorkspaceAnalyticsRow } from '@/services/analyticsService'
@@ -34,10 +35,10 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean; hint?: string }[
 ]
 
 export function WorkspacesTab({
-    rows, days, isStale, onSelect, selectedId,
+    rows, range, isStale, onSelect, selectedId,
 }: {
     rows: WorkspaceAnalyticsRow[]
-    days: number
+    range: AnalyticsRangeSelection
     isStale: boolean
     onSelect: (workspaceId: string) => void
     selectedId: string | null
@@ -80,7 +81,7 @@ export function WorkspacesTab({
                     <span>
                         <strong className="font-semibold">{dormant}</strong>
                         {dormant === 1 ? ' workspace has' : ' workspaces have'} seen no
-                        activity in {rangeLabel(days).toLowerCase()}. Worth a look before
+                        activity in {rangeLabel(range).toLowerCase()}. Worth a look before
                         they quietly become abandoned.
                     </span>
                 </p>
@@ -89,7 +90,7 @@ export function WorkspacesTab({
             <div className="overflow-x-auto rounded-2xl border border-glass-border bg-canvas-elevated shadow-sm">
                 <table className="w-full text-xs">
                     <caption className="sr-only">
-                        Per-workspace analytics for {rangeLabel(days).toLowerCase()}
+                        Per-workspace analytics for {rangeLabel(range).toLowerCase()}
                     </caption>
                     <thead>
                         <tr className="border-b border-glass-border">

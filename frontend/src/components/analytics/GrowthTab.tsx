@@ -4,7 +4,9 @@
 import { CalendarClock, UserPlus, Users, Boxes } from 'lucide-react'
 
 import { exact, percent, shortDate } from '@/lib/formatMetric'
-import type { AnalyticsSummary } from '@/services/analyticsService'
+import type {
+    AnalyticsRangeSelection, AnalyticsSummary,
+} from '@/services/analyticsService'
 import { KpiCard } from './KpiCard'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
@@ -12,19 +14,19 @@ import { TimeSeriesChart } from './charts/TimeSeriesChart'
 import { BarSeriesChart } from './charts/BarSeriesChart'
 import { StackedShareBar, humanise } from './charts/StackedShareBar'
 import { HeatmapGrid } from './charts/HeatmapGrid'
-import { comparisonLabel, rangeLabel } from './RangePicker'
+import { comparisonLabel, rangeLabel, rangeSpanDays } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
 
 export function GrowthTab({
-    data, days, isStale,
+    data, range, isStale,
 }: {
     data: AnalyticsSummary
-    days: number
+    range: AnalyticsRangeSelection
     isStale: boolean
 }) {
     const theme = useChartTheme()
     const { totals, series, engagement, breakdowns } = data
-    const vs = comparisonLabel(days)
+    const vs = comparisonLabel(range)
     const growth = engagement.growthAccounting
 
     return (
@@ -62,7 +64,7 @@ export function GrowthTab({
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <ChartFrame
                     title="New accounts"
-                    subtitle={`Signups per period over ${rangeLabel(days).toLowerCase()}`}
+                    subtitle={`Signups per period over ${rangeLabel(range).toLowerCase()}`}
                     isStale={isStale}
                     isEmpty={series.signups.every((v) => v === 0)}
                     emptyLabel="No signups in this range."
@@ -74,7 +76,10 @@ export function GrowthTab({
                         />
                     }
                 >
-                    <BarSeriesChart buckets={series.buckets} values={series.signups} label="signups" />
+                    <BarSeriesChart
+                        buckets={series.buckets} values={series.signups}
+                        previous={series.previous.signups} label="signups"
+                    />
                 </ChartFrame>
 
                 <ChartFrame
@@ -157,7 +162,7 @@ export function GrowthTab({
                 isStale={isStale}
                 isEmpty={engagement.cohorts.length === 0}
                 emptyLabel={
-                    days < 28
+                    rangeSpanDays(range) < 28
                         ? 'Cohort retention needs a longer range — try 30 days or more.'
                         : 'No signups in this range to follow.'
                 }

@@ -13,6 +13,8 @@ import { useQuery } from '@tanstack/react-query'
 
 import {
     analyticsService,
+    rangeKey,
+    type AnalyticsRangeSelection,
     type AnalyticsSummary,
     type WorkspaceAnalyticsDetail,
     type WorkspaceAnalyticsRow,
@@ -21,10 +23,12 @@ import {
 /** Aggregates move slowly; a minute of staleness keeps range-flipping cheap. */
 const STALE_MS = 60_000
 
-export function useAnalyticsSummary(days: number) {
+export function useAnalyticsSummary(range: AnalyticsRangeSelection) {
     const query = useQuery({
-        queryKey: ['analytics', 'summary', days] as const,
-        queryFn: () => analyticsService.getSummary(days),
+        // Keyed by the RESOLVED range, not the object: a fresh `{days: 30}`
+        // each render would otherwise miss its own cache entry every time.
+        queryKey: ['analytics', 'summary', rangeKey(range)] as const,
+        queryFn: () => analyticsService.getSummary(range),
         staleTime: STALE_MS,
         placeholderData: (prev) => prev,
         retry: 1,
@@ -41,10 +45,10 @@ export function useAnalyticsSummary(days: number) {
 
 /** `enabled` is false on the tabs that don't show the table, so four of the
  *  five tabs cost one request rather than two. */
-export function useWorkspaceAnalytics(days: number, enabled = true) {
+export function useWorkspaceAnalytics(range: AnalyticsRangeSelection, enabled = true) {
     const query = useQuery({
-        queryKey: ['analytics', 'workspaces', days] as const,
-        queryFn: () => analyticsService.listWorkspaces(days),
+        queryKey: ['analytics', 'workspaces', rangeKey(range)] as const,
+        queryFn: () => analyticsService.listWorkspaces(range),
         enabled,
         staleTime: STALE_MS,
         placeholderData: (prev) => prev,
@@ -59,10 +63,12 @@ export function useWorkspaceAnalytics(days: number, enabled = true) {
     }
 }
 
-export function useWorkspaceAnalyticsDetail(workspaceId: string | null, days: number) {
+export function useWorkspaceAnalyticsDetail(
+    workspaceId: string | null, range: AnalyticsRangeSelection,
+) {
     const query = useQuery({
-        queryKey: ['analytics', 'workspace', workspaceId, days] as const,
-        queryFn: () => analyticsService.getWorkspace(workspaceId as string, days),
+        queryKey: ['analytics', 'workspace', workspaceId, rangeKey(range)] as const,
+        queryFn: () => analyticsService.getWorkspace(workspaceId as string, range),
         enabled: !!workspaceId,
         staleTime: STALE_MS,
         placeholderData: (prev) => prev,

@@ -13,6 +13,7 @@ import {
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { exportAndDownload, type ImportFormat } from '@/services/importExportApiService'
+import { recordEvent } from '@/services/telemetryService'
 
 export interface ExportDialogProps {
   wsId: string
@@ -48,6 +49,13 @@ export function ExportDialog({ wsId, graphId, viewId, branchId, onClose }: Expor
       await exportAndDownload(wsId, graphId, {
         format, viewId: scope === 'view' ? viewId : undefined,
         branchId: branchId && source === 'branch' ? branchId : undefined, props,
+      })
+      // Recorded on success only — a failed export is not adoption. Format and
+      // scope, never the property list: those are the user's column names.
+      recordEvent('graph.export', {
+        format,
+        scope: scope === 'view' ? 'view' : 'graph',
+        source: branchId && source === 'branch' ? 'branch' : 'published',
       })
       setPhase('done')
     } catch (e) {

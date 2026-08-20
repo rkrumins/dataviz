@@ -1,15 +1,19 @@
 /**
  * RangePicker — the one filter above everything it scopes.
  *
- * Presets as a segmented row, not a calendar: nobody wants to fight a date grid
- * for "last 30 days". These are the intervals people actually ask for, and they
- * scope EVERY chart, stat and table on the page, so the numbers always agree
- * with each other.
+ * Presets as a segmented row, because nobody wants to fight a date grid for
+ * "last 30 days", plus a custom range for the questions presets cannot ask:
+ * "how did March compare to April". They scope EVERY chart, stat and table on
+ * the page, so the numbers always agree with each other.
  *
  * Deliberately not per-chart. A chart that needs its own range is a different
  * dashboard.
  */
+import { useEffect, useRef, useState } from 'react'
+import { CalendarRange, Check, X } from 'lucide-react'
+
 import { cn } from '@/lib/utils'
+import type { AnalyticsRangeSelection } from '@/services/analyticsService'
 
 export const RANGE_PRESETS = [
     { days: 7, label: '7d', title: 'Last 7 days' },
@@ -22,23 +26,67 @@ export const RANGE_PRESETS = [
 
 export const DEFAULT_RANGE_DAYS = 30
 
-export function rangeLabel(days: number): string {
-    return RANGE_PRESETS.find((p) => p.days === days)?.title ?? `Last ${days} days`
+/** Matches the server's cap on a custom range. */
+export const MAX_RANGE_DAYS = 365
+
+export function todayIso(): string {
+    return new Date().toISOString().slice(0, 10)
 }
 
-/** "vs previous 30 days" — names what a delta is measured against. */
-export function comparisonLabel(days: number): string {
-    return `vs previous ${days} days`
+function daysBetween(from: string, to: string): number {
+    const ms = Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)
+    return Math.round(ms / 86_400_000) + 1
+}
+
+/** How many days the slice spans — for rules that need a length rather than a
+ *  name (e.g. "cohorts need at least four weeks"). */
+export function rangeSpanDays(range: AnalyticsRangeSelection): number {
+    return range.kind === 'custom' ? daysBetween(range.from, range.to) : range.days
+}
+
+/** Human name for the current slice — used in headings and delta captions. */
+export function rangeLabel(range: AnalyticsRangeSelection): string {
+    if (range.kind === 'custom') return `${range.from} → ${range.to}`
+    return RANGE_PRESETS.find((p) => p.days === range.days)?.title
+        ?? `Last ${range.days} days`
+}
+
+/** "vs previous 30 days" — names what a delta is measured against. A delta with
+ *  no stated baseline is a number people quietly invent a baseline for. */
+export function comparisonLabel(range: AnalyticsRangeSelection): string {
+    const span = range.kind === 'custom'
+        ? daysBetween(range.from, range.to)
+        : range.days
+    return `vs previous ${span} day${span === 1 ? '' : 's'}`
+}
+
+/** Why a custom range is refused, or `null` when it is fine. Mirrors the
+ *  server's rules so the user is told before the request goes out. */
+export function customRangeError(from: string, to: string): string | null {
+    if (!from || !to) return 'Pick both a start and an end date.'
+    if (Number.isNaN(Date.parse(from)) || Number.isNaN(Date.parse(to))) {
+        return 'Those dates could not be read.'
+    }
+    if (Date.parse(to) < Date.parse(from)) return 'The end date is before the start.'
+    if (daysBetween(from, to) > MAX_RANGE_DAYS) {
+        return `A range can span at most ${MAX_RANGE_DAYS} days.`
+    }
+    if (Date.parse(from) > Date.now()) return 'That range starts in the future.'
+    return null
 }
 
 export function RangePicker({
-    days, onChange, isFetching, className,
+    range, onChange, isFetching, className,
 }: {
-    days: number
-    onChange: (days: number) => void
+    range: AnalyticsRangeSelection
+    onChange: (next: AnalyticsRangeSelection) => void
     isFetching?: boolean
     className?: string
 }) {
+    const [open, setOpen] = useState(false)
+    const popoverRef = useRef<HTMLDivElement>(null)
+    const custom = range.kind === 'custom'
+
     return (
         <div className={cn('flex items-center gap-2', className)}>
             <div
@@ -47,12 +95,12 @@ export function RangePicker({
                 className="inline-flex items-center rounded-xl border border-glass-border bg-canvas-elevated p-1 shadow-sm"
             >
                 {RANGE_PRESETS.map((preset) => {
-                    const active = preset.days === days
+                    const active = !custom && preset.days === range.days
                     return (
                         <button
                             key={preset.days}
                             type="button"
-                            onClick={() => onChange(preset.days)}
+                            onClick={() => onChange({ kind: 'preset', days: preset.days })}
                             aria-pressed={active}
                             title={preset.title}
                             className={cn(
@@ -66,7 +114,43 @@ export function RangePicker({
                         </button>
                     )
                 })}
+
+                {/* Hairline before the custom range, so the presets read as one
+                    set and this reads as the escape hatch from it. */}
+                <span className="mx-1 h-5 w-px bg-glass-border" aria-hidden />
+
+                <div className="relative">
+                    <button
+                        type="button"
+                        onClick={() => setOpen((v) => !v)}
+                        aria-expanded={open}
+                        aria-haspopup="dialog"
+                        title="Custom date range"
+                        className={cn(
+                            'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                            custom
+                                ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-sm'
+                                : 'text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                        )}
+                    >
+                        <CalendarRange className="w-3.5 h-3.5" />
+                        {custom ? `${range.from} → ${range.to}` : 'Custom'}
+                    </button>
+
+                    {open && (
+                        <CustomRangePopover
+                            ref={popoverRef}
+                            initial={custom ? range : null}
+                            onClose={() => setOpen(false)}
+                            onApply={(from, to) => {
+                                onChange({ kind: 'custom', from, to })
+                                setOpen(false)
+                            }}
+                        />
+                    )}
+                </div>
             </div>
+
             {/* A refetch holds the previous render; this ring is the only cue
                 that anything is happening, so charts never flash a skeleton. */}
             {isFetching && (
@@ -76,6 +160,94 @@ export function RangePicker({
                     className="w-3.5 h-3.5 rounded-full border-2 border-indigo-500/60 border-t-transparent animate-spin"
                 />
             )}
+        </div>
+    )
+}
+
+function CustomRangePopover({
+    ref, initial, onApply, onClose,
+}: {
+    ref: React.RefObject<HTMLDivElement | null>
+    initial: { from: string; to: string } | null
+    onApply: (from: string, to: string) => void
+    onClose: () => void
+}) {
+    const today = todayIso()
+    const [from, setFrom] = useState(initial?.from ?? '')
+    const [to, setTo] = useState(initial?.to ?? today)
+    const error = from || to ? customRangeError(from, to) : null
+
+    // Escape closes, and a click anywhere outside does too — the same two exits
+    // every other popover in the app offers.
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+        const onDown = (e: MouseEvent) => {
+            if (ref.current && !ref.current.contains(e.target as Node)) onClose()
+        }
+        document.addEventListener('keydown', onKey)
+        document.addEventListener('mousedown', onDown)
+        return () => {
+            document.removeEventListener('keydown', onKey)
+            document.removeEventListener('mousedown', onDown)
+        }
+    }, [onClose, ref])
+
+    return (
+        <div
+            ref={ref}
+            role="dialog"
+            aria-label="Custom date range"
+            className="absolute right-0 top-full z-50 mt-2 w-[19rem] rounded-2xl border border-glass-border bg-canvas-elevated p-4 shadow-xl animate-in fade-in slide-in-from-top-1 duration-150"
+        >
+            <div className="flex items-center justify-between mb-3">
+                <h3 className="text-xs font-bold text-ink">Custom range</h3>
+                <button
+                    type="button" onClick={onClose} aria-label="Close"
+                    className="p-1 rounded-lg text-ink-muted hover:bg-black/5 dark:hover:bg-white/5"
+                >
+                    <X className="w-3.5 h-3.5" />
+                </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+                <label className="block">
+                    <span className="block text-[11px] font-medium text-ink-muted mb-1">From</span>
+                    <input
+                        type="date" value={from} max={to || today}
+                        onChange={(e) => setFrom(e.target.value)}
+                        className="w-full rounded-lg border border-glass-border bg-canvas px-2 py-1.5 text-xs text-ink outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                    />
+                </label>
+                <label className="block">
+                    <span className="block text-[11px] font-medium text-ink-muted mb-1">To</span>
+                    <input
+                        type="date" value={to} min={from || undefined} max={today}
+                        onChange={(e) => setTo(e.target.value)}
+                        className="w-full rounded-lg border border-glass-border bg-canvas px-2 py-1.5 text-xs text-ink outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                    />
+                </label>
+            </div>
+
+            {/* Both bounds are inclusive, and saying so beats making someone
+                run the experiment to find out. */}
+            <p className="mt-2 text-[11px] text-ink-muted">
+                Both dates included. Compared against the equal-length period before.
+            </p>
+
+            {error && (
+                <p role="alert" className="mt-2 text-[11px] font-medium text-rose-600 dark:text-rose-400">
+                    {error}
+                </p>
+            )}
+
+            <button
+                type="button"
+                disabled={!!error || !from || !to}
+                onClick={() => onApply(from, to)}
+                className="mt-3 w-full flex items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition-opacity disabled:opacity-40 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+            >
+                <Check className="w-3.5 h-3.5" /> Apply range
+            </button>
         </div>
     )
 }

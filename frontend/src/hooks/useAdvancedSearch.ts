@@ -49,6 +49,7 @@ import {
 } from '@/components/canvas/search/searchTemplates'
 import { stringifyPredicate } from '@/components/canvas/search/panel/predicateDsl'
 import { computeViewRootUrns } from '@/components/canvas/search/panel/useCanvasViewRoots'
+import { recordEvent } from '@/services/telemetryService'
 
 
 /**
@@ -488,9 +489,21 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
             // deterministic enough for the consumer's "did the query
             // change?" check; a real fingerprint can replace it if
             // ordering ever becomes an issue.
+            const matchUrns = collectMatchUrns(result)
+            // A search that finds nothing is its own event type, mirroring the
+            // `docs.search_miss` precedent: the zero-result queries are the
+            // interesting ones — they say what people expected the graph to
+            // contain and it didn't. The predicate is deliberately NOT sent;
+            // it can carry node names, and this store holds no PII beyond the
+            // actor id. The shape of the query is enough to spot a pattern.
+            recordEvent(matchUrns.length > 0 ? 'graph.search' : 'graph.search_miss', {
+                matches: matchUrns.length,
+                template: template.id,
+                elapsedMs: Math.round(performance.now() - startedAt),
+            })
             useSearchStore.getState().setResult({
                 viewId,
-                matchUrns: collectMatchUrns(result),
+                matchUrns,
                 ancestorPaths,
                 queryHash: JSON.stringify(query),
             })

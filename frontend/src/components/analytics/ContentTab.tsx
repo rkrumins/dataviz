@@ -4,7 +4,9 @@
 import { Eye, LayoutGrid, PenLine, Share2 } from 'lucide-react'
 
 import { exact, percent, shortDate } from '@/lib/formatMetric'
-import type { AnalyticsSummary } from '@/services/analyticsService'
+import type {
+    AnalyticsRangeSelection, AnalyticsSummary,
+} from '@/services/analyticsService'
 import { KpiCard } from './KpiCard'
 import { Leaderboard } from './Leaderboard'
 import { ChartFrame } from './charts/ChartFrame'
@@ -14,14 +16,14 @@ import { StackedShareBar, humanise } from './charts/StackedShareBar'
 import { comparisonLabel, rangeLabel } from './RangePicker'
 
 export function ContentTab({
-    data, days, isStale,
+    data, range, isStale,
 }: {
     data: AnalyticsSummary
-    days: number
+    range: AnalyticsRangeSelection
     isStale: boolean
 }) {
     const { totals, series, breakdowns, leaderboards } = data
-    const vs = comparisonLabel(days)
+    const vs = comparisonLabel(range)
 
     return (
         <div className="space-y-5">
@@ -72,7 +74,7 @@ export function ContentTab({
 
                 <ChartFrame
                     title="Top builders"
-                    subtitle={`Views created in ${rangeLabel(days).toLowerCase()}`}
+                    subtitle={`Views created in ${rangeLabel(range).toLowerCase()}`}
                     isStale={isStale}
                     isEmpty={leaderboards.topCreators.length === 0}
                     emptyLabel="Nobody created a view in this range."
@@ -106,6 +108,7 @@ export function ContentTab({
                 >
                     <BarSeriesChart
                         buckets={series.buckets} values={series.viewsCreated}
+                        previous={series.previous.viewsCreated}
                         label="views" slot={0}
                     />
                 </ChartFrame>

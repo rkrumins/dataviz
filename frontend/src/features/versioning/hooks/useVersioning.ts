@@ -9,6 +9,7 @@ import type { ResolutionMap, StageOp } from '@/services/versioningApiService'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
 import { findLivePrForBranch, isTerminalPr } from '../model/prStatus'
+import { recordEvent } from '@/services/telemetryService'
 
 export const VERSIONING_KEYS = {
   all: ['versioning'] as const,
@@ -505,6 +506,9 @@ export function usePublishBranch(wsId: string, graphId: string) {
     mutationFn: (v: { branchId: string; message: string; resolutions?: ResolutionMap }) =>
       api.publishBranch(wsId, graphId, v.branchId, { message: v.message, resolutions: v.resolutions }),
     onSuccess: () => {
+      // Version control is a headline feature with no usage signal until now:
+      // Analytics could see branches exist, never that anyone shipped one.
+      recordEvent('version.published')
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
       // Refresh ALL commit-log scopes by prefix — the new squash commit must show in History's
       // "This view" / "Whole graph" (viewCommits) and per-branch (commits) lists without a reload.

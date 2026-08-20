@@ -26,6 +26,19 @@ export interface Series {
     slot: number
     /** A single-series chart reads better with a wash under the line. */
     area?: boolean
+    /**
+     * The same measure over the previous period, aligned by bucket INDEX.
+     *
+     * Drawn as a recessive "ghost" behind the live line. The KPI delta already
+     * says a number moved; this says what SHAPE the move was — steady growth,
+     * a single spike, or a collapse late in the period all produce the same
+     * percentage and look completely different here.
+     *
+     * Deliberately the same hue as its series at low opacity, not a separate
+     * categorical colour: it is the same entity at a different time, and giving
+     * it its own slot would spend a palette colour saying "past".
+     */
+    previous?: number[]
 }
 
 interface Props {
@@ -35,6 +48,17 @@ interface Props {
     /** Label the last point of each series. Off past ~4 series, where end
      *  labels collide and detach from their lines. */
     labelEnds?: boolean
+    /** Draw the previous period behind each series that supplies one. */
+    showPrevious?: boolean
+    /**
+     * Dated events to mark on the timeline — a release, an announcement.
+     *
+     * A spike with no explanation is a mystery; a spike with "v2.1 shipped"
+     * beside it is a finding. Drawn as a recessive vertical rule so it reads as
+     * chrome, never as data: an annotation is context ABOUT the series, and
+     * giving it a mark's weight would put it in competition with the values.
+     */
+    annotations?: { bucket: string; title: string }[]
     className?: string
 }
 
@@ -44,7 +68,8 @@ const PAD = { top: 12, right: 16, bottom: 22, left: 44 }
 const LABEL_GUTTER = 52
 
 export function TimeSeriesChart({
-    buckets, series, height = 220, labelEnds = true, className,
+    buckets, series, height = 220, labelEnds = true, showPrevious = true,
+    annotations, className,
 }: Props) {
     const theme = useChartTheme()
     const gradientId = useId()
@@ -56,11 +81,27 @@ export function TimeSeriesChart({
     const plotW = Math.max(1, width - PAD.left - padRight)
     const plotH = height - PAD.top - PAD.bottom
 
+    // Memoised: a fresh array each render would re-run the scale computation
+    // below on every pointer move, since `ghosted` is one of its dependencies.
+    const ghosted = useMemo(
+        () => (showPrevious
+            ? series.filter((s) => s.previous?.length === buckets.length)
+            : []),
+        [showPrevious, series, buckets.length],
+    )
+
     const { max, ticks } = useMemo(() => {
-        const peak = Math.max(1, ...series.flatMap((s) => s.values))
+        // The ghost is inside the scale on purpose: leaving it out would let a
+        // previous period larger than this one run off the top of the plot,
+        // which reads as "we were doing fine" rather than "we shrank".
+        const peak = Math.max(
+            1,
+            ...series.flatMap((s) => s.values),
+            ...ghosted.flatMap((s) => s.previous ?? []),
+        )
         const t = niceTicks(peak)
         return { max: Math.max(peak, t[t.length - 1] ?? peak), ticks: t }
-    }, [series])
+    }, [series, ghosted])
 
     const stepX = buckets.length > 1 ? plotW / (buckets.length - 1) : 0
     const x = (i: number) => PAD.left + (buckets.length > 1 ? i * stepX : plotW / 2)
@@ -120,12 +161,53 @@ export function TimeSeriesChart({
                     ) : null
                 ))}
 
+                {/* Annotations sit under the crosshair and under every mark:
+                    they explain the data, they are not part of it. */}
+                {(annotations ?? []).map((a) => {
+                    const i = buckets.indexOf(a.bucket)
+                    if (i < 0) return null
+                    return (
+                        <g key={`${a.bucket}-${a.title}`}>
+                            <line
+                                x1={x(i)} y1={PAD.top} x2={x(i)} y2={PAD.top + plotH}
+                                stroke={theme.muted} strokeWidth={1}
+                            />
+                            {/* A small flag rather than inline text: the label
+                                would collide with the marks at this density. */}
+                            <circle
+                                cx={x(i)} cy={PAD.top} r={3}
+                                fill={theme.neutralMark}
+                                stroke={theme.surface} strokeWidth={MARK.surfaceGap}
+                            >
+                                <title>{a.title}</title>
+                            </circle>
+                        </g>
+                    )
+                })}
+
                 {active !== null && (
                     <line
                         x1={x(active)} y1={PAD.top} x2={x(active)} y2={PAD.top + plotH}
                         stroke={theme.muted} strokeWidth={1}
                     />
                 )}
+
+                {/* Ghosts first, so the live lines paint over them. Thinner
+                    and faded: a comparison should never out-shout the thing it
+                    is a comparison FOR. No end dot, no label — the reader is
+                    meant to see a shape, not read values off it. */}
+                {ghosted.map((s) => (
+                    <polyline
+                        key={`ghost-${s.key}`}
+                        points={(s.previous ?? []).map((v, i) => `${x(i)},${y(v)}`).join(' ')}
+                        fill="none"
+                        stroke={theme.series[s.slot % theme.series.length]}
+                        strokeWidth={1.5}
+                        strokeOpacity={0.28}
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
+                    />
+                ))}
 
                 {series.map((s) => {
                     const color = theme.series[s.slot % theme.series.length]
@@ -199,7 +281,12 @@ export function TimeSeriesChart({
                         onFocus={() => setHover(i)}
                         tabIndex={0}
                         role="button"
-                        aria-label={`${shortDate(b, true)}: ${series.map((s) => `${s.label} ${exact(s.values[i] ?? 0)}`).join(', ')}`}
+                        aria-label={`${shortDate(b, true)}: ${series.map((s) => {
+                            const now = `${s.label} ${exact(s.values[i] ?? 0)}`
+                            const was = showPrevious && s.previous?.length === buckets.length
+                                ? `, previously ${exact(s.previous[i] ?? 0)}` : ''
+                            return now + was
+                        }).join(', ')}`}
                         className="outline-none focus-visible:fill-black/[0.03] dark:focus-visible:fill-white/[0.04]"
                     />
                 ))}
@@ -212,6 +299,12 @@ export function TimeSeriesChart({
                         label: s.label,
                         value: s.values[active] ?? 0,
                         color: theme.series[s.slot % theme.series.length],
+                        // The ghost is drawn but never labelled on the plot, so
+                        // the tooltip is where its value becomes readable —
+                        // otherwise the comparison is a shape you cannot check.
+                        previous: showPrevious && s.previous?.length === buckets.length
+                            ? s.previous[active] ?? 0
+                            : undefined,
                     }))}
                     leftPct={((x(active) - PAD.left) / plotW) * 100}
                 />
@@ -227,7 +320,9 @@ function Tooltip({
     bucket, rows, leftPct,
 }: {
     bucket: string
-    rows: { label: string; value: number; color: string }[]
+    rows: {
+        label: string; value: number; color: string; previous?: number
+    }[]
     leftPct: number
 }) {
     const flip = leftPct > 60
@@ -250,8 +345,18 @@ function Tooltip({
                                   style={{ backgroundColor: r.color }} />
                             <span className="text-[11px] text-ink-secondary truncate">{r.label}</span>
                         </span>
-                        <span className="text-xs font-bold text-ink tabular-nums">
-                            {exact(r.value)}
+                        <span className="flex items-baseline gap-1.5 shrink-0">
+                            <span className="text-xs font-bold text-ink tabular-nums">
+                                {exact(r.value)}
+                            </span>
+                            {r.previous !== undefined && (
+                                <span
+                                    className="text-[10px] text-ink-muted tabular-nums"
+                                    title="Same point in the previous period"
+                                >
+                                    was {exact(r.previous)}
+                                </span>
+                            )}
                         </span>
                     </li>
                 ))}

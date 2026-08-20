@@ -60,6 +60,21 @@ export interface PlatformSeries {
     viewOpens: number[]
     activityEvents: number[]
     dataSourcesOnboarded: number[]
+    /**
+     * The same measures over the PREVIOUS period, aligned by bucket index
+     * (bucket 3 of last month under bucket 3 of this one) and padded to the
+     * current window's length.
+     *
+     * Drawn as a recessive ghost behind each live series. The KPI delta says a
+     * number moved; this says what shape the move was — steady growth, one
+     * spike, or a late collapse all produce the same percentage.
+     */
+    previous: {
+        signups: number[]
+        viewsCreated: number[]
+        viewOpens: number[]
+        activeUsers: number[]
+    }
 }
 
 export interface FunnelStageDto {
@@ -80,7 +95,11 @@ export interface Engagement {
     mau: number
     /** DAU ÷ MAU — habit, not traffic. `null` when there is no MAU. */
     stickiness: number | null
+    /** Share of the window's cohort that reached the VALUE moment — traced
+     *  lineage. Authoring a view is a later, heavier commitment and is scored
+     *  separately as `creationRate`. */
     activationRate: number | null
+    creationRate: number | null
     medianDaysToFirstView: number | null
     funnel: FunnelStageDto[]
     growthAccounting: {
@@ -141,6 +160,88 @@ export interface GraphScale {
     sourcesWithStats: number
 }
 
+/** One row of the feature-adoption matrix. */
+export interface AdoptionRow {
+    key: string
+    label: string
+    events: number
+    users: number
+    previousEvents: number
+    changePct: number | null
+    /** Share of ACTIVE users who touched this feature — not of all users. */
+    reach: number | null
+    /** When this feature's instrumentation first produced data. `null` means
+     *  never measured, which is different from "nobody used it". */
+    since: string | null
+}
+
+/**
+ * Did the product answer the question it was asked?
+ *
+ * A trace that returns no lineage and a search that finds no match are FAILED
+ * value moments — the user asked and got nothing back. Rates are `null` rather
+ * than `0` when there is no basis, because "no traces ran" is not "0% success".
+ */
+export interface ValueMoments {
+    traces: number
+    tracesEmpty: number
+    traceSuccessRate: number | null
+    tracedBy: number
+    searches: number
+    searchMisses: number
+    searchHitRate: number | null
+}
+
+export interface Reliability {
+    refreshes: number
+    failures: number
+    successRate: number | null
+    sourcesRefreshed: number
+    sourcesUntouched: number
+    byOutcome: ClassCount[]
+}
+
+export interface AccessFriction {
+    requests: number
+    pending: number
+    medianHoursToApprove: number | null
+    oldestPendingDays: number | null
+    invitesSent: number
+    invitesRedeemed: number
+    acceptanceRate: number | null
+}
+
+export interface SemanticAdoption {
+    sourcesWithOntology: number
+    sourcesTotal: number
+    coverage: number | null
+    sourcesDrifting: number
+}
+
+export interface PlatformHealth {
+    reliability: Reliability
+    access: AccessFriction
+    semanticLayer: SemanticAdoption
+}
+
+/** An announcement, anchored to a bucket on the shared x-axis. */
+export interface Annotation {
+    bucket: string
+    date: string
+    title: string
+    kind: string
+}
+
+/** One computed observation for the "What changed" strip. */
+export interface Insight {
+    key: string
+    tone: 'good' | 'watch' | 'bad' | 'neutral'
+    headline: string
+    detail: string
+    /** Which tab answers this in more depth, if any. */
+    tab: string | null
+}
+
 export interface AnalyticsSummary {
     windowDays: number
     generatedAt: string
@@ -152,10 +253,21 @@ export interface AnalyticsSummary {
     breakdowns: Breakdowns
     leaderboards: Leaderboards
     graph: GraphScale
+    adoption: AdoptionRow[]
+    valueMoments: ValueMoments
+    health: PlatformHealth
+    annotations: Annotation[]
+    /** Ranked, most significant first. Empty on a young install — the strip
+     *  says nothing rather than manufacturing observations. */
+    insights: Insight[]
     coverage: {
         /** When view-open tracking began. `null` means no opens recorded yet —
          *  the charts say so rather than implying nobody opened anything. */
         viewOpenTrackingSince: string | null
+        /** Per feature, because each signal starts the day its instrumentation
+         *  shipped. Lets the UI say "not measured yet" instead of plotting a
+         *  zero that reads as "unused". */
+        trackingSince: Record<string, string | null>
     }
 }
 
@@ -214,21 +326,55 @@ export interface WorkspaceAnalyticsDetail {
     graph: GraphScale
 }
 
+/**
+ * The slice every number is measured over. Two ways to say it, and the server
+ * resolves both to the same shape:
+ *
+ *   * `{ days }`        — a trailing window. What the presets send.
+ *   * `{ from, to }`    — explicit `YYYY-MM-DD` bounds, both inclusive.
+ *
+ * Modelled as a union rather than three optional fields so "a preset AND a
+ * custom range at once" cannot be expressed.
+ */
+export type AnalyticsRangeSelection =
+    | { kind: 'preset'; days: number }
+    | { kind: 'custom'; from: string; to: string }
+
+/** Query string for one selection. Shared by all three endpoints so they can
+ *  never disagree about which window they are showing. */
+export function rangeQuery(range: AnalyticsRangeSelection): string {
+    return range.kind === 'custom'
+        ? `from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`
+        : `days=${range.days}`
+}
+
+/** Stable cache-key fragment for a selection. */
+export function rangeKey(range: AnalyticsRangeSelection): string {
+    return range.kind === 'custom' ? `${range.from}..${range.to}` : `d${range.days}`
+}
+
 export const analyticsService = {
-    /** Platform-wide insights over the trailing `days` window. */
-    getSummary(days: number): Promise<AnalyticsSummary> {
-        return authFetch<AnalyticsSummary>(`${ANALYTICS_API}/summary?days=${days}`)
+    /** Platform-wide insights over one window. */
+    getSummary(range: AnalyticsRangeSelection): Promise<AnalyticsSummary> {
+        return authFetch<AnalyticsSummary>(
+            `${ANALYTICS_API}/summary?${rangeQuery(range)}`,
+        )
     },
 
     /** One aggregate row per live workspace. */
-    listWorkspaces(days: number): Promise<WorkspaceAnalyticsRow[]> {
-        return authFetch<WorkspaceAnalyticsRow[]>(`${ANALYTICS_API}/workspaces?days=${days}`)
+    listWorkspaces(range: AnalyticsRangeSelection): Promise<WorkspaceAnalyticsRow[]> {
+        return authFetch<WorkspaceAnalyticsRow[]>(
+            `${ANALYTICS_API}/workspaces?${rangeQuery(range)}`,
+        )
     },
 
     /** Full insights for a single workspace. */
-    getWorkspace(workspaceId: string, days: number): Promise<WorkspaceAnalyticsDetail> {
+    getWorkspace(
+        workspaceId: string, range: AnalyticsRangeSelection,
+    ): Promise<WorkspaceAnalyticsDetail> {
         return authFetch<WorkspaceAnalyticsDetail>(
-            `${ANALYTICS_API}/workspaces/${encodeURIComponent(workspaceId)}?days=${days}`,
+            `${ANALYTICS_API}/workspaces/${encodeURIComponent(workspaceId)}`
+            + `?${rangeQuery(range)}`,
         )
     },
 }

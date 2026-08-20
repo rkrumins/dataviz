@@ -43,13 +43,19 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
+    AccessRequestORM,
+    AnnouncementORM,
     CatalogItemORM,
     ContextModelORM,
     GroupMemberORM,
     GroupORM,
+    InviteORM,
+    InviteRedemptionORM,
     OntologyORM,
+    OntologySourceMappingORM,
     OutboxEventORM,
     ProductEventORM,
+    RefreshEventORM,
     RoleBindingORM,
     UserORM,
     ViewActivityLogORM,
@@ -67,12 +73,41 @@ logger = logging.getLogger(__name__)
 #: Event type appended by ``view_repo.record_view_visit`` on every view open.
 VIEW_OPENED = "view.opened"
 
+#: The product's own actions. These say someone got VALUE out of the platform,
+#: as distinct from the ``docs.``/``tour.`` events, which only say we managed to
+#: explain ourselves. Emitted by the frontend through
+#: ``services/telemetryService.ts`` and allow-listed in
+#: ``api/v1/endpoints/telemetry.py``.
+TRACE_RUN = "lineage.trace"
+TRACE_EMPTY = "lineage.trace_empty"
+SEARCH_RUN = "graph.search"
+SEARCH_MISS = "graph.search_miss"
+GRAPH_EXPORT = "graph.export"
+VERSION_PUBLISHED = "version.published"
+ONTOLOGY_PUBLISHED = "ontology.published"
+
+#: Feature → the event types that prove somebody used it. Tuple order is the
+#: display order of the adoption matrix, deliberately value-first: tracing
+#: lineage is what this platform is FOR, so it leads.
+FEATURE_EVENTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("lineage", "Lineage tracing", (TRACE_RUN, TRACE_EMPTY)),
+    ("search", "Graph search", (SEARCH_RUN, SEARCH_MISS)),
+    ("views", "Saved views", (VIEW_OPENED,)),
+    ("export", "Export", (GRAPH_EXPORT,)),
+    ("versioning", "Version control", (VERSION_PUBLISHED,)),
+    ("ontology", "Semantic layer", (ONTOLOGY_PUBLISHED,)),
+)
+
 #: Windows at or below this many days get one bucket per day; longer windows
 #: bucket by week, so a 365-day chart plots 53 marks instead of 365.
 _DAILY_BUCKET_MAX_DAYS = 31
 
 #: How many rows a leaderboard returns.
 TOP_N = 10
+
+#: Hard ceiling on a custom range, matching the ``days`` query cap. Without it
+#: an arbitrary 'from' turns the endpoint into an unbounded scan.
+_MAX_WINDOW_DAYS = 365
 
 #: Categorical breakdowns fold their tail into "Other" past this many classes —
 #: past ~7 classes adjacent colours stop being distinguishable.
@@ -119,13 +154,81 @@ class Window:
         return out
 
 
-def build_window(days: int, *, now: Optional[datetime] = None) -> Window:
-    now = now or datetime.now(timezone.utc)
-    start_dt = now - timedelta(days=days)
-    previous_dt = start_dt - timedelta(days=days)
+class InvalidWindow(ValueError):
+    """A caller-supplied date range that cannot be measured."""
 
-    first_day = start_dt.date()
-    last_day = now.date()
+
+def previous_window(w: Window) -> Window:
+    """The equal-length period immediately before ``w``.
+
+    Used to draw the previous period as a ghost line behind the current one:
+    the deltas in the KPI cards say a number moved, and this says what the shape
+    of the move was. Aligned by bucket INDEX rather than by date — bucket 3 of
+    last month against bucket 3 of this one — which is the only alignment that
+    makes two different date ranges comparable on one axis.
+    """
+    start_day = date.fromisoformat(w.previous_start[:10])
+    end_day = date.fromisoformat(w.start[:10]) - timedelta(days=1)
+    if end_day < start_day:
+        end_day = start_day
+    return build_window(start=start_day.isoformat(), end=end_day.isoformat())
+
+
+def build_window(
+    days: Optional[int] = None,
+    *,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Window:
+    """The slice every number is measured over.
+
+    Two ways to say it, and they produce the SAME shape so nothing downstream
+    has to care which was used:
+
+      * ``days`` — a trailing window ending now. What the presets send.
+      * ``start``/``end`` — explicit ``YYYY-MM-DD`` bounds, both inclusive.
+        What a custom range sends. The end date is inclusive because a person
+        picking "1–31 March" means all of the 31st, not midnight at its start.
+
+    The comparison window is always the equal-length period immediately before
+    ``start``, so a delta compares like with like in both modes.
+    """
+    now = now or datetime.now(timezone.utc)
+
+    if start is not None or end is not None:
+        if start is None or end is None:
+            raise InvalidWindow("A custom range needs both 'from' and 'to'.")
+        try:
+            first_day = date.fromisoformat(start)
+            last_day = date.fromisoformat(end)
+        except ValueError as exc:
+            raise InvalidWindow("Dates must be ISO 'YYYY-MM-DD'.") from exc
+        if last_day < first_day:
+            raise InvalidWindow("'from' must not be after 'to'.")
+        span = (last_day - first_day).days + 1
+        if span > _MAX_WINDOW_DAYS:
+            raise InvalidWindow(
+                f"A range may span at most {_MAX_WINDOW_DAYS} days.",
+            )
+        start_dt = datetime.combine(
+            first_day, datetime.min.time(), tzinfo=timezone.utc)
+        # Exclusive upper bound one day past the inclusive end date: every
+        # comparison downstream is `< end`, and the alternative (23:59:59.999)
+        # silently drops rows stamped in the final millisecond.
+        end_dt = datetime.combine(
+            last_day + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        days = span
+        previous_dt = start_dt - timedelta(days=span)
+    else:
+        if days is None:
+            raise InvalidWindow("Pass either 'days' or a 'from'/'to' pair.")
+        start_dt = now - timedelta(days=days)
+        end_dt = now
+        previous_dt = start_dt - timedelta(days=days)
+        first_day = start_dt.date()
+        last_day = now.date()
+
     all_days = [
         (first_day + timedelta(days=i)).isoformat()
         for i in range((last_day - first_day).days + 1)
@@ -149,7 +252,7 @@ def build_window(days: int, *, now: Optional[datetime] = None) -> Window:
     return Window(
         days=days,
         start=start_dt.isoformat(),
-        end=now.isoformat(),
+        end=end_dt.isoformat(),
         previous_start=previous_dt.isoformat(),
         granularity=granularity,
         buckets=buckets,
@@ -373,16 +476,22 @@ def _recent_days(count: int, *, now: datetime) -> list[str]:
 # ── Platform summary ────────────────────────────────────────────────
 
 async def platform_summary(
-    session: AsyncSession, *, days: int, now: Optional[datetime] = None,
+    session: AsyncSession, *, days: Optional[int] = None,
+    start: Optional[str] = None, end: Optional[str] = None,
+    now: Optional[datetime] = None,
 ) -> dict:
     """Everything the platform-wide Analytics dashboard renders, for one window."""
     now = now or datetime.now(timezone.utc)
-    w = build_window(days, now=now)
+    w = build_window(days, start=start, end=end, now=now)
 
     live_user = [UserORM.deleted_at.is_(None)]
     live_ws = [WorkspaceORM.deleted_at.is_(None)]
     live_view = [ViewORM.deleted_at.is_(None)]
     live_ds = [WorkspaceDataSourceORM.deleted_at.is_(None)]
+
+    # One rollup over ``product_events`` feeds the adoption matrix, the value
+    # moments, and the funnel's trace stage — three consumers, three queries.
+    adoption = await _load_adoption(session, w)
 
     # ── Totals and per-window counts ────────────────────────────────
     users_total = await _scalar(session, select(func.count()).select_from(UserORM).where(*live_user))
@@ -498,7 +607,7 @@ async def platform_summary(
 
     opens = await _fold_opens(session, since=w.start)
 
-    return {
+    doc = {
         "windowDays": days,
         "generatedAt": now.isoformat(),
         "range": {
@@ -535,18 +644,43 @@ async def platform_summary(
             "viewOpens": w.align(opens_by_day),
             "activityEvents": w.align(activity_by_day),
             "dataSourcesOnboarded": w.align(ds_by_day),
+            # The previous period's shape, aligned by bucket index, for the
+            # ghost line drawn behind each series.
+            "previous": await _ghost_series(
+                session, w, live_user=live_user, live_view=live_view),
         },
         "engagement": await _engagement(
             session, w, now=now, dau=dau, wau=wau, mau=mau,
             active_now=active_now, active_prev=active_prev,
+            tracers=adoption.users((TRACE_RUN,)),
         ),
         "breakdowns": await _breakdowns(session, w, opens=opens),
         "leaderboards": await _leaderboards(session, w, opens=opens),
         "graph": await _graph_scale(session),
+        "adoption": _adoption_matrix(adoption, active_users=len(active_now)),
+        "valueMoments": _value_moments(adoption),
+        "health": {
+            "reliability": await _reliability(session, w, sources=ds_total),
+            "access": await _access_friction(session, w, now=now),
+            "semanticLayer": await _semantic_adoption(session, sources=ds_total),
+        },
+        "annotations": await _annotations(session, w),
         "coverage": {
             "viewOpenTrackingSince": await _first_open_at(session),
+            # Per-feature, because each signal starts on the day its
+            # instrumentation shipped. A chart that plots zero for every date
+            # before that reads as "nobody used it" when the truth is "we
+            # weren't counting" — the UI needs to be able to tell them apart.
+            "trackingSince": {
+                key: adoption.since(types) for key, _label, types in FEATURE_EVENTS
+            },
         },
     }
+    # Interpretation runs LAST, over the finished document: the rules are a pure
+    # function of what the dashboard already says, so they can never disagree
+    # with the charts beneath them.
+    doc["insights"] = _narrative(doc, window_label=_window_label(w))
+    return doc
 
 
 async def _first_open_at(session: AsyncSession) -> Optional[str]:
@@ -562,10 +696,593 @@ async def _first_open_at(session: AsyncSession) -> Optional[str]:
     )).scalar()
 
 
+# ── Narrative insights ───────────────────────────────────────────────
+# A dashboard's failure mode is a wall of correct charts nobody reads. These
+# rules do the first pass of interpretation the reader would otherwise do by
+# eye: they state what moved, by how much, and whether it is good news.
+#
+# Every rule is a pure function of the finished summary document — no extra
+# queries — and every one is GUARDED: it stays silent unless it has enough data
+# to be worth saying. Silence is the correct output on a young install; a strip
+# that manufactures five observations from three users teaches people to ignore
+# it.
+
+#: Below this many percent, a change is noise dressed as news.
+_MATERIAL_CHANGE_PCT = 15.0
+
+#: A rule needs at least this many events before its rate means anything.
+_MIN_BASIS = 5
+
+#: How many insights the strip shows. More than this and it is a chart again.
+_MAX_INSIGHTS = 5
+
+
+def _insight(
+    key: str, tone: str, headline: str, detail: str, *, score: float,
+    tab: Optional[str] = None,
+) -> dict:
+    """``tone`` drives colour: good | watch | bad | neutral. ``score`` is only
+    used to rank; it never reaches the client."""
+    return {
+        "key": key, "tone": tone, "headline": headline,
+        "detail": detail, "tab": tab, "_score": score,
+    }
+
+
+def _pct(value: float) -> str:
+    return f"{abs(value):.0f}%"
+
+
+def _plural(n: int, one: str, many: Optional[str] = None) -> str:
+    return one if n == 1 else (many or f"{one}s")
+
+
+def _window_label(w: Window) -> str:
+    """How a sentence refers to this window: "in the last 30 days"."""
+    return f"in the last {w.days} {_plural(w.days, 'day')}"
+
+
+def _narrative(doc: dict, *, window_label: str) -> list[dict]:
+    """Rank what changed, most significant first."""
+    out: list[dict] = []
+    totals = doc["totals"]
+    engagement = doc["engagement"]
+    breakdowns = doc["breakdowns"]
+    health = doc["health"]
+    value = doc["valueMoments"]
+
+    def _swing(metric: dict, key: str, noun: str, tab: str) -> None:
+        change, current = metric.get("changePct"), metric.get("current") or 0
+        if change is None or current < _MIN_BASIS or abs(change) < _MATERIAL_CHANGE_PCT:
+            return
+        rising = change > 0
+        out.append(_insight(
+            key, "good" if rising else "watch",
+            f"{noun.capitalize()} {'up' if rising else 'down'} {_pct(change)}",
+            f"{current:,} {noun} {window_label}, against "
+            f"{metric.get('previous', 0):,} in the previous period.",
+            score=min(abs(change), 100), tab=tab,
+        ))
+
+    _swing(totals["users"], "signups", "new sign-ups", "growth")
+    _swing(totals["activeUsers"], "active", "active users", "engagement")
+    _swing(totals["views"], "views", "new views", "content")
+
+    # Where growth is actually coming from — a shift in mix is a strategy fact.
+    sources = breakdowns.get("usersBySignupSource") or []
+    source_total = sum(row["count"] for row in sources)
+    if source_total >= _MIN_BASIS and sources:
+        lead = max(sources, key=lambda r: r["count"])
+        share = lead["count"] / source_total
+        if share >= 0.5:
+            out.append(_insight(
+                "signup-mix", "neutral",
+                f"{_SOURCE_LABELS.get(lead['key'], lead['key'])} is "
+                f"{share:.0%} of new accounts",
+                f"{lead['count']:,} of {source_total:,} accounts created "
+                f"{window_label} came in this way.",
+                score=40 + share * 20, tab="growth",
+            ))
+
+    # Habit vs. visit. The single most diagnostic engagement number there is.
+    stickiness, mau = engagement.get("stickiness"), engagement.get("mau") or 0
+    if stickiness is not None and mau >= _MIN_BASIS:
+        if stickiness >= 0.2:
+            out.append(_insight(
+                "stickiness", "good", f"Stickiness at {stickiness:.0%}",
+                "Daily actives are a fifth of monthly actives — for most "
+                "people this is part of the working day, not an occasional "
+                "visit.", score=55, tab="engagement",
+            ))
+        elif stickiness < 0.1:
+            out.append(_insight(
+                "stickiness", "watch", f"Stickiness at {stickiness:.0%}",
+                "People come back, but not often. The platform is a "
+                "destination for occasional questions rather than a daily "
+                "habit.", score=65, tab="engagement",
+            ))
+
+    # The value moment. A trace that returns nothing is a question the product
+    # failed to answer, and it is invisible in every other number here.
+    traces = value.get("traces") or 0
+    rate = value.get("traceSuccessRate")
+    if traces >= _MIN_BASIS and rate is not None and rate < 0.7:
+        empty = value.get("tracesEmpty") or 0
+        out.append(_insight(
+            "trace-empty", "bad",
+            f"{1 - rate:.0%} of lineage traces come back empty",
+            f"{empty:,} of {traces:,} traces {window_label} found no lineage. "
+            "People are asking the core question and not getting an answer.",
+            score=90, tab="engagement",
+        ))
+
+    searches = value.get("searches") or 0
+    hit = value.get("searchHitRate")
+    if searches >= _MIN_BASIS and hit is not None and hit < 0.7:
+        out.append(_insight(
+            "search-miss", "watch",
+            f"{1 - hit:.0%} of graph searches return nothing",
+            f"{value.get('searchMisses', 0):,} of {searches:,} searches "
+            f"{window_label} found no match — either the graph is missing "
+            "what people expect, or search is not finding it.",
+            score=70, tab="engagement",
+        ))
+
+    # Where the funnel leaks. Reported as the single largest drop, because
+    # naming four mediocre stages is not an insight.
+    stages = engagement.get("funnel") or []
+    worst, worst_drop = None, 0.0
+    for prev_stage, stage in zip(stages, stages[1:]):
+        base = prev_stage.get("count") or 0
+        if base < _MIN_BASIS:
+            continue
+        drop = (base - (stage.get("count") or 0)) / base
+        if drop > worst_drop:
+            worst, worst_drop = (prev_stage, stage), drop
+    if worst and worst_drop >= 0.5:
+        before, after = worst
+        out.append(_insight(
+            "funnel-leak", "watch",
+            f"{worst_drop:.0%} drop between "
+            f"\u201c{before['stage']}\u201d and \u201c{after['stage']}\u201d",
+            f"Of {before['count']:,} who reached "
+            f"\u201c{before['stage'].lower()}\u201d, only {after['count']:,} "
+            "went on to the next step. This is the biggest leak in the funnel.",
+            score=75, tab="engagement",
+        ))
+
+    # Is the catalogue working, or is everything riding on a handful of views?
+    concentration = breakdowns.get("contentConcentration")
+    if concentration is not None and concentration >= 0.6 and (totals["viewOpens"].get("current") or 0) >= _MIN_BASIS:
+        out.append(_insight(
+            "concentration", "watch",
+            f"Top views take {concentration:.0%} of all opens",
+            "Attention is concentrated in a few views. The rest of the "
+            "catalogue is not being discovered.",
+            score=50, tab="content",
+        ))
+
+    # Data trust. Rising usage on stale data is the worst kind of good news.
+    reliability = health["reliability"]
+    success = reliability.get("successRate")
+    if success is not None and success < 0.95 and (reliability.get("refreshes") or 0) >= _MIN_BASIS:
+        out.append(_insight(
+            "refresh-failures", "bad",
+            f"{reliability['failures']:,} refresh "
+            f"{_plural(reliability['failures'], 'failure')} {window_label}",
+            f"Only {success:.0%} of refreshes succeeded. People are reading "
+            "lineage that may be out of date.",
+            score=85, tab="overview",
+        ))
+    untouched = reliability.get("sourcesUntouched") or 0
+    if untouched and (reliability.get("sourcesRefreshed") or 0) > 0:
+        out.append(_insight(
+            "stale-sources", "watch",
+            f"{untouched:,} data {_plural(untouched, 'source')} never refreshed "
+            f"{window_label}",
+            "No refresh activity at all in this period — staleness hides here.",
+            score=45, tab="overview",
+        ))
+
+    # Access friction — people who wanted in and are still waiting.
+    access = health["access"]
+    oldest = access.get("oldestPendingDays")
+    if access.get("pending") and oldest is not None and oldest >= 3:
+        out.append(_insight(
+            "access-backlog", "bad",
+            f"{access['pending']:,} access "
+            f"{_plural(access['pending'], 'request')} pending",
+            f"The oldest has been waiting {oldest:.0f} days. Every one is "
+            "someone who wanted to use the platform and cannot.",
+            score=80, tab="growth",
+        ))
+    acceptance = access.get("acceptanceRate")
+    if acceptance is not None and acceptance < 0.5 and (access.get("invitesSent") or 0) >= _MIN_BASIS:
+        out.append(_insight(
+            "invite-acceptance", "watch",
+            f"Only {acceptance:.0%} of invites were accepted",
+            f"{access['invitesSent']:,} sent, {access['invitesRedeemed']:,} "
+            "redeemed. Invitations are going out and not landing.",
+            score=60, tab="growth",
+        ))
+
+    # Adoption of the differentiator.
+    semantic = health["semanticLayer"]
+    coverage = semantic.get("coverage")
+    if coverage is not None and coverage < 0.5 and (semantic.get("sourcesTotal") or 0) >= 3:
+        out.append(_insight(
+            "semantic-coverage", "watch",
+            f"{coverage:.0%} of sources have a semantic layer",
+            f"{semantic['sourcesWithOntology']} of {semantic['sourcesTotal']} "
+            "sources have an ontology assigned — the rest show raw technical "
+            "metadata only.",
+            score=55, tab="content",
+        ))
+
+    # Churn signal, stated as people rather than a rate.
+    growth = engagement.get("growthAccounting") or {}
+    dormant, returning = growth.get("dormant") or 0, growth.get("returning") or 0
+    if dormant >= _MIN_BASIS and dormant > returning:
+        out.append(_insight(
+            "dormancy", "bad",
+            f"{dormant:,} active {_plural(dormant, 'user')} went quiet",
+            f"More people stopped using the platform this period ({dormant:,}) "
+            f"than kept using it ({returning:,}).",
+            score=88, tab="engagement",
+        ))
+
+    out.sort(key=lambda i: i["_score"], reverse=True)
+    for item in out:
+        item.pop("_score", None)
+    return out[:_MAX_INSIGHTS]
+
+
+#: Signup-source keys are database enums; these are what a human calls them.
+_SOURCE_LABELS = {
+    "local_signup": "Self sign-up",
+    "sso_jit": "SSO",
+    "invite": "Invitations",
+    "admin_created": "Admin-created",
+    "admin_linked": "Admin-linked",
+}
+
+
+async def _ghost_series(
+    session: AsyncSession, w: Window, *, live_user, live_view,
+) -> dict[str, list[int]]:
+    """The previous period's shape, aligned to the CURRENT window's bucket count.
+
+    The KPI deltas already say a number moved. This says how it moved — whether
+    growth is steady, front-loaded, or a single spike — which a percentage
+    cannot express and a reader would otherwise have to hold two screenshots
+    side by side to see.
+
+    Aligned by bucket INDEX, not by date: bucket 3 of last month sits under
+    bucket 3 of this one. Lists are padded or truncated to the current window's
+    length so a month boundary (28 vs 31 days) can never make the ghost run off
+    the end of the axis.
+    """
+    prev = previous_window(w)
+    width = len(w.buckets)
+
+    def _fit(values: list[int]) -> list[int]:
+        # Take the LAST `width` buckets: the ghost's right edge is the moment
+        # just before the current window opened, so that is the end to keep.
+        trimmed = values[-width:]
+        return [0] * (width - len(trimmed)) + trimmed
+
+    bounds = {"since": prev.start, "until": prev.end}
+    signups = await _count_by_day(
+        session, UserORM.created_at, **bounds, where=live_user)
+    views = await _count_by_day(
+        session, ViewORM.created_at, **bounds, where=live_view)
+    opens = await _count_by_day(
+        session, ProductEventORM.created_at, **bounds,
+        where=[ProductEventORM.event_type == VIEW_OPENED])
+
+    actors = await _actors_by_day(session, since=prev.start, until=prev.end)
+    per_bucket: dict[str, set[str]] = {b: set() for b in prev.buckets}
+    for day, people in actors.items():
+        bucket = prev.bucket_of(day)
+        if bucket is not None:
+            per_bucket[bucket].update(people)
+
+    return {
+        "signups": _fit(prev.align(signups)),
+        "viewsCreated": _fit(prev.align(views)),
+        "viewOpens": _fit(prev.align(opens)),
+        "activeUsers": _fit([len(per_bucket[b]) for b in prev.buckets]),
+    }
+
+
+# ── Platform health: what blocks growth but never shows on a signup chart ──
+# Three tables the dashboard used to ignore entirely. Each answers a question a
+# growth chart cannot: is the data trustworthy, can people get IN, and is the
+# thing that differentiates us actually switched on?
+
+
+async def _reliability(session: AsyncSession, w: Window, *, sources: int) -> dict:
+    """Refresh outcomes over the window — does the data people see hold up?
+
+    A lineage platform whose sources quietly stop refreshing still shows rising
+    view opens right up until someone notices the graph is a month stale. This
+    is the counter-signal.
+    """
+    rows = (await session.execute(
+        select(RefreshEventORM.outcome, func.count())
+        .where(RefreshEventORM.ts >= w.start, RefreshEventORM.ts < w.end)
+        .group_by(RefreshEventORM.outcome)
+    )).all()
+    by_outcome = {str(outcome or "unknown"): int(n) for outcome, n in rows}
+    total = sum(by_outcome.values())
+    failed = by_outcome.get("error", 0) + by_outcome.get("failed", 0)
+    refreshed = {
+        str(ds) for (ds,) in (await session.execute(
+            select(RefreshEventORM.data_source_id)
+            .where(RefreshEventORM.ts >= w.start, RefreshEventORM.ts < w.end)
+            .group_by(RefreshEventORM.data_source_id)
+        )).all() if ds
+    }
+    return {
+        "refreshes": total,
+        "failures": failed,
+        "successRate": round((total - failed) / total, 3) if total else None,
+        "sourcesRefreshed": len(refreshed),
+        # Live sources that saw no refresh at all in the window. Not "broken",
+        # but the population where staleness hides.
+        "sourcesUntouched": max(0, sources - len(refreshed)),
+        "byOutcome": _fold_tail(
+            sorted(by_outcome.items(), key=lambda kv: kv[1], reverse=True)),
+    }
+
+
+async def _access_friction(session: AsyncSession, w: Window, *, now: datetime) -> dict:
+    """How hard is it to get in, and how long do people wait?
+
+    Every row here is a person who wanted access and could not have it yet.
+    Slow approvals and unredeemed invites throttle growth upstream of anything
+    the activation funnel can see.
+    """
+    requests = (await session.execute(
+        select(AccessRequestORM.created_at, AccessRequestORM.resolved_at,
+               AccessRequestORM.status)
+        .where(AccessRequestORM.created_at >= w.start)
+    )).all()
+    waits: list[float] = []
+    for created, resolved, _status in requests:
+        if not resolved:
+            continue
+        started, finished = _parse(created), _parse(resolved)
+        if started and finished and finished >= started:
+            waits.append((finished - started).total_seconds() / 3600)
+
+    pending_rows = (await session.execute(
+        select(AccessRequestORM.created_at)
+        .where(AccessRequestORM.status == "pending")
+    )).all()
+    oldest_pending = None
+    for (created,) in pending_rows:
+        started = _parse(created)
+        if started:
+            age = (now - started).total_seconds() / 86400
+            oldest_pending = age if oldest_pending is None else max(oldest_pending, age)
+
+    invites_sent = await _scalar(session, select(func.count()).where(
+        InviteORM.created_at >= w.start, InviteORM.created_at < w.end))
+    invites_redeemed = await _scalar(session, select(func.count()).where(
+        InviteRedemptionORM.redeemed_at >= w.start,
+        InviteRedemptionORM.redeemed_at < w.end))
+
+    return {
+        "requests": len(requests),
+        "pending": len(pending_rows),
+        "medianHoursToApprove": round(_median(waits), 1) if waits else None,
+        "oldestPendingDays": round(oldest_pending, 1) if oldest_pending is not None else None,
+        "invitesSent": invites_sent,
+        "invitesRedeemed": invites_redeemed,
+        # Deliberately not clamped to the window on the numerator's side: an
+        # invite sent on day 1 and redeemed on day 3 is a success for this
+        # window, and comparing two window-bounded counts is the honest
+        # approximation available without joining the two tables.
+        "acceptanceRate": (
+            round(min(invites_redeemed / invites_sent, 1.0), 3) if invites_sent else None
+        ),
+    }
+
+
+async def _semantic_adoption(session: AsyncSession, *, sources: int) -> dict:
+    """Is the differentiator switched on?
+
+    Coverage is measured on ``workspace_data_sources.ontology_id`` — one table,
+    no join — rather than through ``ontology_source_mappings``, because the
+    question is "does this source have a semantic layer assigned", and that
+    column IS the assignment.
+    """
+    assigned = await _scalar(session, select(func.count()).where(
+        WorkspaceDataSourceORM.ontology_id.is_not(None),
+        WorkspaceDataSourceORM.deleted_at.is_(None),
+    ))
+    drifting = await _scalar(session, select(func.count()).select_from(
+        OntologySourceMappingORM).where(OntologySourceMappingORM.has_drift.is_(True)))
+    return {
+        "sourcesWithOntology": assigned,
+        "sourcesTotal": sources,
+        "coverage": round(assigned / sources, 3) if sources else None,
+        "sourcesDrifting": drifting,
+    }
+
+
+async def _annotations(session: AsyncSession, w: Window) -> list[dict]:
+    """Announcements inside the window, as timeline markers.
+
+    A spike with no explanation is a mystery; a spike with "v2.1 shipped"
+    beside it is a finding. Announcements are the only dated, human-authored
+    record of "something happened" the platform already keeps.
+    """
+    rows = (await session.execute(
+        select(AnnouncementORM.created_at, AnnouncementORM.title,
+               AnnouncementORM.banner_type)
+        .where(AnnouncementORM.created_at >= w.start,
+               AnnouncementORM.created_at < w.end)
+        .order_by(AnnouncementORM.created_at)
+    )).all()
+    out = []
+    for created, title, banner in rows:
+        day = str(created)[:10]
+        bucket = w.bucket_of(day)
+        if bucket is None:
+            continue
+        out.append({
+            "bucket": bucket, "date": day,
+            "title": str(title), "kind": str(banner or "info"),
+        })
+    return out
+
+
+def _parse(ts: Optional[str]) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _median(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+# ── Feature adoption & value moments ─────────────────────────────────
+# Everything below reads ONE table (``product_events``) three times and folds
+# every feature out of the result, rather than querying per feature. Six
+# features × window/previous/actors would have been eighteen round trips.
+
+
+@dataclass
+class _Adoption:
+    """Per-event-type rollup for one window, plus the previous window."""
+
+    counts: dict[str, int]
+    previous: dict[str, int]
+    actors: dict[str, set[str]]
+    first_seen: dict[str, str]
+
+    def total(self, types: Sequence[str]) -> int:
+        return sum(self.counts.get(t, 0) for t in types)
+
+    def prev_total(self, types: Sequence[str]) -> int:
+        return sum(self.previous.get(t, 0) for t in types)
+
+    def users(self, types: Sequence[str]) -> set[str]:
+        out: set[str] = set()
+        for t in types:
+            out |= self.actors.get(t, set())
+        return out
+
+    def since(self, types: Sequence[str]) -> Optional[str]:
+        stamps = [self.first_seen[t] for t in types if t in self.first_seen]
+        return min(stamps) if stamps else None
+
+
+async def _load_adoption(session: AsyncSession, w: Window) -> _Adoption:
+    async def _counts(since: str, until: Optional[str]) -> dict[str, int]:
+        bounds = [ProductEventORM.created_at >= since]
+        if until:
+            bounds.append(ProductEventORM.created_at < until)
+        rows = (await session.execute(
+            select(ProductEventORM.event_type, func.count())
+            .where(*bounds)
+            .group_by(ProductEventORM.event_type)
+        )).all()
+        return {str(t): int(n) for t, n in rows}
+
+    actor_rows = (await session.execute(
+        select(ProductEventORM.event_type, ProductEventORM.actor_id)
+        .where(
+            ProductEventORM.created_at >= w.start,
+            ProductEventORM.actor_id.is_not(None),
+        )
+        .group_by(ProductEventORM.event_type, ProductEventORM.actor_id)
+    )).all()
+    actors: dict[str, set[str]] = defaultdict(set)
+    for event_type, actor in actor_rows:
+        if event_type and actor:
+            actors[str(event_type)].add(str(actor))
+
+    first_rows = (await session.execute(
+        select(ProductEventORM.event_type, func.min(ProductEventORM.created_at))
+        .group_by(ProductEventORM.event_type)
+    )).all()
+
+    return _Adoption(
+        counts=await _counts(w.start, None),
+        previous=await _counts(w.previous_start, w.start),
+        actors=actors,
+        first_seen={str(t): str(ts) for t, ts in first_rows if t and ts},
+    )
+
+
+def _adoption_matrix(adoption: _Adoption, *, active_users: int) -> list[dict]:
+    """One row per feature: how much it was used, by how many, and the trend.
+
+    ``reach`` is the share of ACTIVE users who touched the feature, not of all
+    users — "12% of everyone who signed up in 2024" measures dormancy, not
+    adoption. A feature with no events yet reports ``since: null`` so the UI can
+    say "not measured yet" instead of implying nobody wants it.
+    """
+    rows = []
+    for key, label, types in FEATURE_EVENTS:
+        users = len(adoption.users(types))
+        events = adoption.total(types)
+        rows.append({
+            "key": key,
+            "label": label,
+            "events": events,
+            "users": users,
+            "previousEvents": adoption.prev_total(types),
+            "changePct": _delta(events, adoption.prev_total(types)),
+            "reach": round(users / active_users, 3) if active_users else None,
+            "since": adoption.since(types),
+        })
+    return rows
+
+
+def _value_moments(adoption: _Adoption) -> dict:
+    """Did the product answer the question it was asked?
+
+    A trace that returns no lineage and a search that returns no matches are
+    both *failed* value moments — the user asked and got nothing. Counting only
+    the successes would flatter the product; these two rates are the honest
+    version, and they are the reason the ``_empty``/``_miss`` variants are
+    separate event types rather than a payload flag.
+    """
+    traces_ok = adoption.counts.get(TRACE_RUN, 0)
+    traces_empty = adoption.counts.get(TRACE_EMPTY, 0)
+    traces = traces_ok + traces_empty
+    searches_ok = adoption.counts.get(SEARCH_RUN, 0)
+    searches_miss = adoption.counts.get(SEARCH_MISS, 0)
+    searches = searches_ok + searches_miss
+    return {
+        "traces": traces,
+        "tracesEmpty": traces_empty,
+        "traceSuccessRate": round(traces_ok / traces, 3) if traces else None,
+        "tracedBy": len(adoption.users((TRACE_RUN, TRACE_EMPTY))),
+        "searches": searches,
+        "searchMisses": searches_miss,
+        "searchHitRate": round(searches_ok / searches, 3) if searches else None,
+    }
+
+
 async def _engagement(
     session: AsyncSession, w: Window, *, now: datetime,
     dau: int, wau: int, mau: int,
     active_now: set[str], active_prev: set[str],
+    tracers: set[str],
 ) -> dict:
     """Habit, activation, and where the funnel leaks."""
     # Cohort = accounts created inside the window. An activation funnel over
@@ -591,6 +1308,7 @@ async def _engagement(
     }
     funnel_active = cohort & active_now
     funnel_opened = cohort & signed_in
+    funnel_traced = cohort & tracers
     funnel_created = cohort & creators
 
     def _stage(label: str, count: int) -> dict:
@@ -613,12 +1331,20 @@ async def _engagement(
         "mau": mau,
         # The one number that says whether this is a habit or a visit.
         "stickiness": round(dau / mau, 3) if mau else None,
-        "activationRate": round(len(funnel_created) / len(cohort), 3) if cohort else None,
+        # Activation is TRACING, not authoring. This platform exists to answer
+        # "where did this data come from"; the moment someone gets that answer
+        # is the moment it became useful to them. Creating a view is a later,
+        # heavier commitment and stays in the funnel as its own stage — but
+        # scoring activation on it counted investment rather than value, and
+        # undercounted every reader who got exactly what they came for.
+        "activationRate": round(len(funnel_traced) / len(cohort), 3) if cohort else None,
+        "creationRate": round(len(funnel_created) / len(cohort), 3) if cohort else None,
         "medianDaysToFirstView": await _median_time_to_value(session, w),
         "funnel": [
             _stage("Signed up", len(cohort)),
             _stage("Became active", len(funnel_active)),
             _stage("Opened a view", len(funnel_opened)),
+            _stage("Traced lineage", len(funnel_traced)),
             _stage("Created a view", len(funnel_created)),
         ],
         "growthAccounting": {
@@ -941,7 +1667,9 @@ async def _ds_ids_by_workspace(session: AsyncSession) -> dict[str, list[str]]:
 
 
 async def workspace_rows(
-    session: AsyncSession, *, days: int, now: Optional[datetime] = None,
+    session: AsyncSession, *, days: Optional[int] = None,
+    start: Optional[str] = None, end: Optional[str] = None,
+    now: Optional[datetime] = None,
 ) -> list[dict]:
     """One aggregate row per live workspace — the Workspaces tab's table.
 
@@ -950,7 +1678,7 @@ async def workspace_rows(
     table that fits on one screen.
     """
     now = now or datetime.now(timezone.utc)
-    w = build_window(days, now=now)
+    w = build_window(days, start=start, end=end, now=now)
 
     workspaces = (await session.execute(
         select(WorkspaceORM)
@@ -1075,12 +1803,14 @@ async def _actors_by_workspace(
 
 
 async def workspace_detail(
-    session: AsyncSession, workspace_id: str, *, days: int,
+    session: AsyncSession, workspace_id: str, *,
+    days: Optional[int] = None,
+    start: Optional[str] = None, end: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> Optional[dict]:
     """Full insights for one workspace. ``None`` when it doesn't exist."""
     now = now or datetime.now(timezone.utc)
-    w = build_window(days, now=now)
+    w = build_window(days, start=start, end=end, now=now)
 
     workspace = (await session.execute(
         select(WorkspaceORM).where(

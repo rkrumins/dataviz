@@ -19,6 +19,15 @@ interface Props {
     buckets: string[]
     values: number[]
     label: string
+    /**
+     * The same measure over the previous period, aligned by bucket index.
+     *
+     * Drawn as a thin tick across each column at the previous value — a
+     * reference marker, not a second bar. Two bars per band would double the
+     * ink and halve the width; a tick answers "up or down from last time?" at
+     * a glance and stays out of the way otherwise.
+     */
+    previous?: number[]
     /** Slot into the categorical palette. One series → one colour for every
      *  bar; darkening bars by value would double-encode height as hue. */
     slot?: number
@@ -29,7 +38,7 @@ interface Props {
 const PAD = { top: 12, right: 12, bottom: 22, left: 44 }
 
 export function BarSeriesChart({
-    buckets, values, label, slot = 0, height = 200, className,
+    buckets, values, label, previous, slot = 0, height = 200, className,
 }: Props) {
     const theme = useChartTheme()
     const [hover, setHover] = useState<number | null>(null)
@@ -39,11 +48,16 @@ export function BarSeriesChart({
     const plotH = height - PAD.top - PAD.bottom
     const color = theme.series[slot % theme.series.length]
 
+    // Only trust a comparison that lines up with this axis exactly.
+    const ghost = previous?.length === buckets.length ? previous : undefined
+
     const { max, ticks } = useMemo(() => {
-        const peak = Math.max(1, ...values)
+        // The ghost is inside the scale: a previous period taller than this one
+        // must not be clipped, or a decline would render as a flat ceiling.
+        const peak = Math.max(1, ...values, ...(ghost ?? []))
         const t = niceTicks(peak)
         return { max: Math.max(peak, t[t.length - 1] ?? peak), ticks: t }
-    }, [values])
+    }, [values, ghost])
 
     const band = buckets.length ? plotW / buckets.length : plotW
     const barW = Math.min(MARK.maxBarWidth, Math.max(2, band - MARK.surfaceGap * 2))
@@ -90,6 +104,20 @@ export function BarSeriesChart({
                                     className="transition-opacity duration-150"
                                 />
                             )}
+                            {/* Previous period: a hairline tick, slightly wider
+                                than the bar so it reads as a reference line
+                                rather than part of the column. */}
+                            {ghost !== undefined && (
+                                <line
+                                    x1={bx - 2} x2={bx + barW + 2}
+                                    y1={PAD.top + plotH * (1 - (ghost[i] ?? 0) / max)}
+                                    y2={PAD.top + plotH * (1 - (ghost[i] ?? 0) / max)}
+                                    stroke={color}
+                                    strokeOpacity={0.45}
+                                    strokeWidth={1.5}
+                                    strokeLinecap="round"
+                                />
+                            )}
                             {/* Hit area spans the whole band and the full plot
                                 height, so a 2px bar is still easy to reach. */}
                             <rect
@@ -98,7 +126,10 @@ export function BarSeriesChart({
                                 fill="transparent"
                                 tabIndex={0}
                                 role="button"
-                                aria-label={`${shortDate(b, true)}: ${exact(v)} ${label}`}
+                                aria-label={
+                                    `${shortDate(b, true)}: ${exact(v)} ${label}`
+                                    + (ghost ? `, previously ${exact(ghost[i] ?? 0)}` : '')
+                                }
                                 onMouseEnter={() => setHover(i)}
                                 onFocus={() => setHover(i)}
                                 className="outline-none focus-visible:fill-black/[0.03] dark:focus-visible:fill-white/[0.04]"

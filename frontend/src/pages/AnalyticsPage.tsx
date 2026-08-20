@@ -13,7 +13,8 @@
 import { useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
-    AlertCircle, BarChart3, Boxes, LayoutGrid, Sparkles, TrendingUp, Users,
+    AlertCircle, Activity, BarChart3, Boxes, LayoutGrid, Sparkles, TrendingUp,
+    Users,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -22,17 +23,20 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { formatUtc } from '@/lib/timeAgo'
 import { useAnalyticsSummary, useWorkspaceAnalytics } from '@/hooks/useAnalytics'
 import {
-    DEFAULT_RANGE_DAYS, RANGE_PRESETS, RangePicker,
+    DEFAULT_RANGE_DAYS, RANGE_PRESETS, RangePicker, customRangeError,
 } from '@/components/analytics/RangePicker'
+import type { AnalyticsRangeSelection } from '@/services/analyticsService'
 import { AnalyticsSkeleton } from '@/components/analytics/AnalyticsSkeleton'
 import { OverviewTab } from '@/components/analytics/OverviewTab'
 import { GrowthTab } from '@/components/analytics/GrowthTab'
 import { EngagementTab } from '@/components/analytics/EngagementTab'
 import { ContentTab } from '@/components/analytics/ContentTab'
 import { WorkspacesTab } from '@/components/analytics/WorkspacesTab'
+import { HealthTab } from '@/components/analytics/HealthTab'
 import { WorkspaceInsightsPanel } from '@/components/analytics/WorkspaceInsightsPanel'
 
-type AnalyticsTab = 'overview' | 'growth' | 'engagement' | 'content' | 'workspaces'
+type AnalyticsTab =
+    | 'overview' | 'growth' | 'engagement' | 'content' | 'health' | 'workspaces'
 
 interface TabDef {
     id: AnalyticsTab
@@ -46,6 +50,7 @@ const TABS: TabDef[] = [
     { id: 'growth', label: 'Growth', icon: TrendingUp, desc: 'Signups, sources, retention cohorts' },
     { id: 'engagement', label: 'Engagement', icon: Users, desc: 'Activity, stickiness, activation funnel' },
     { id: 'content', label: 'Content', icon: LayoutGrid, desc: 'Views, visibility and who builds them' },
+    { id: 'health', label: 'Health', icon: Activity, desc: 'Freshness, access friction, semantic coverage' },
     { id: 'workspaces', label: 'Workspaces', icon: Boxes, desc: 'Per-workspace insights and drill-down' },
 ]
 
@@ -59,8 +64,20 @@ export function AnalyticsPage() {
         ? (rawTab as AnalyticsTab)
         : 'overview'
 
+    // The whole slice lives in the URL: a preset in `range`, or explicit
+    // `from`/`to`. So "our activation rate for March" is a link you can paste
+    // into a message, not a thing you describe and hope the reader reproduces.
     const rawRange = Number(searchParams.get('range'))
-    const days = RANGE_PRESETS.some((p) => p.days === rawRange) ? rawRange : DEFAULT_RANGE_DAYS
+    const from = searchParams.get('from')
+    const to = searchParams.get('to')
+    const range: AnalyticsRangeSelection =
+        from && to && !customRangeError(from, to)
+            ? { kind: 'custom', from, to }
+            : {
+                kind: 'preset',
+                days: RANGE_PRESETS.some((p) => p.days === rawRange)
+                    ? rawRange : DEFAULT_RANGE_DAYS,
+            }
 
     const selectedWorkspace = searchParams.get('workspace')
 
@@ -73,10 +90,10 @@ export function AnalyticsPage() {
         setSearchParams(next, { replace: true })
     }
 
-    const summary = useAnalyticsSummary(days)
+    const summary = useAnalyticsSummary(range)
     // The workspace table is only fetched by the tab that shows it, so four of
     // the five tabs cost one request rather than two.
-    const workspaces = useWorkspaceAnalytics(days, activeTab === 'workspaces')
+    const workspaces = useWorkspaceAnalytics(range, activeTab === 'workspaces')
 
     const generatedAt = useMemo(
         () => (summary.data ? formatUtc(summary.data.generatedAt) : null),
@@ -104,6 +121,16 @@ export function AnalyticsPage() {
                                     How the platform is growing, and who is using it
                                     {generatedAt && ` · as of ${generatedAt}`}
                                 </p>
+                                {/* Two facts that apply to every chart below, so
+                                    they are stated once here rather than
+                                    repeated in six captions — or, worse, left
+                                    for the reader to infer. Days are bucketed
+                                    in UTC, which matters to anyone reading a
+                                    daily chart from another timezone. */}
+                                <p className="text-[11px] text-ink-muted/80">
+                                    Faded lines show the previous period · days
+                                    bucketed in UTC
+                                </p>
                             </div>
                         </div>
 
@@ -111,8 +138,12 @@ export function AnalyticsPage() {
                             chart, stat and table below re-renders against the
                             same slice, so the numbers always agree. */}
                         <RangePicker
-                            days={days}
-                            onChange={(next) => patchParams({ range: String(next) })}
+                            range={range}
+                            onChange={(next) => patchParams(
+                                next.kind === 'custom'
+                                    ? { from: next.from, to: next.to, range: null }
+                                    : { range: String(next.days), from: null, to: null },
+                            )}
                             isFetching={summary.isFetching || workspaces.isFetching}
                         />
                     </div>
@@ -163,16 +194,19 @@ export function AnalyticsPage() {
                         <AnalyticsSkeleton />
                     ) : activeTab === 'overview' ? (
                         <OverviewTab
-                            data={summary.data} days={days}
+                            data={summary.data} range={range}
                             isStale={summary.isFetching}
                             onWorkspaceClick={openWorkspace}
+                            onNavigateTab={(tab) => patchParams({ tab })}
                         />
                     ) : activeTab === 'growth' ? (
-                        <GrowthTab data={summary.data} days={days} isStale={summary.isFetching} />
+                        <GrowthTab data={summary.data} range={range} isStale={summary.isFetching} />
                     ) : activeTab === 'engagement' ? (
-                        <EngagementTab data={summary.data} days={days} isStale={summary.isFetching} />
+                        <EngagementTab data={summary.data} range={range} isStale={summary.isFetching} />
                     ) : activeTab === 'content' ? (
-                        <ContentTab data={summary.data} days={days} isStale={summary.isFetching} />
+                        <ContentTab data={summary.data} range={range} isStale={summary.isFetching} />
+                    ) : activeTab === 'health' ? (
+                        <HealthTab data={summary.data} range={range} isStale={summary.isFetching} />
                     ) : workspaces.error ? (
                         <ErrorPanel message={workspaces.error.message} />
                     ) : workspaces.isLoading || !workspaces.data ? (
@@ -180,7 +214,7 @@ export function AnalyticsPage() {
                     ) : (
                         <WorkspacesTab
                             rows={workspaces.data}
-                            days={days}
+                            range={range}
                             isStale={workspaces.isFetching}
                             selectedId={selectedWorkspace}
                             onSelect={(id) => patchParams({ workspace: id })}
@@ -191,7 +225,7 @@ export function AnalyticsPage() {
 
             <WorkspaceInsightsPanel
                 workspaceId={selectedWorkspace}
-                days={days}
+                range={range}
                 onClose={() => patchParams({ workspace: null })}
             />
         </div>

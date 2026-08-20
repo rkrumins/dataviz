@@ -1,10 +1,12 @@
 /**
  * EngagementTab — habit, activation, and what people actually do.
  */
-import { Activity, Flame, MousePointerClick, Repeat } from 'lucide-react'
+import { Activity, Flame, MousePointerClick, Repeat, Route, Search } from 'lucide-react'
 
 import { exact, percent, shortDate } from '@/lib/formatMetric'
-import type { AnalyticsSummary } from '@/services/analyticsService'
+import type {
+    AnalyticsRangeSelection, AnalyticsSummary,
+} from '@/services/analyticsService'
 import { KpiCard } from './KpiCard'
 import { Leaderboard } from './Leaderboard'
 import { ChartFrame } from './charts/ChartFrame'
@@ -17,14 +19,15 @@ import { comparisonLabel, rangeLabel } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
 
 export function EngagementTab({
-    data, days, isStale,
+    data, range, isStale,
 }: {
     data: AnalyticsSummary
-    days: number
+    range: AnalyticsRangeSelection
     isStale: boolean
 }) {
     const { totals, series, engagement, breakdowns, leaderboards, coverage } = data
-    const vs = comparisonLabel(days)
+    const value = data.valueMoments
+    const vs = comparisonLabel(range)
 
     return (
         <div className="space-y-5">
@@ -50,6 +53,75 @@ export function EngagementTab({
                     trend={series.activityEvents} trendTone="slate" accent="violet"
                 />
             </div>
+
+            {/* ── Did the product answer the question it was asked? ──────
+                A trace that returns no lineage is a FAILED value moment: the
+                user asked the platform's core question and got nothing back.
+                No other number here can see that — view opens, activity and
+                stickiness all count it as engagement. */}
+            <section
+                aria-labelledby="value-moments"
+                className="rounded-2xl border border-glass-border bg-canvas-elevated p-5 shadow-sm"
+            >
+                <div className="flex items-baseline justify-between gap-3 mb-1">
+                    <h2 id="value-moments" className="text-sm font-bold text-ink">
+                        Value moments
+                    </h2>
+                    <p className="text-[11px] text-ink-muted">
+                        Asking is engagement. Getting an answer is value.
+                    </p>
+                </div>
+                <p className="text-[11px] text-ink-muted mb-4">
+                    Tracing lineage is what this platform is for — these are the
+                    only numbers that say whether it worked.
+                </p>
+
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                    <KpiCard
+                        label="Traces run" value={value.traces} icon={Route}
+                        sub={value.tracedBy
+                            ? `by ${exact(value.tracedBy)} ${value.tracedBy === 1 ? 'person' : 'people'}`
+                            : 'Nobody has traced yet'}
+                        accent="indigo"
+                    />
+                    <KpiCard
+                        label="Traces that found lineage"
+                        value={value.traceSuccessRate == null
+                            ? '—' : percent(value.traceSuccessRate)}
+                        icon={Route}
+                        sub={value.tracesEmpty
+                            ? `${exact(value.tracesEmpty)} came back empty`
+                            : 'No empty traces'}
+                        accent={value.traceSuccessRate != null && value.traceSuccessRate < 0.7
+                            ? 'pink' : 'emerald'}
+                    />
+                    <KpiCard
+                        label="Graph searches" value={value.searches} icon={Search}
+                        sub={value.searchMisses
+                            ? `${exact(value.searchMisses)} found nothing`
+                            : 'Every search matched'}
+                        accent="cyan"
+                    />
+                    <KpiCard
+                        label="Searches that matched"
+                        value={value.searchHitRate == null
+                            ? '—' : percent(value.searchHitRate)}
+                        icon={Search}
+                        sub="Misses say what people expected to find"
+                        accent={value.searchHitRate != null && value.searchHitRate < 0.7
+                            ? 'amber' : 'emerald'}
+                    />
+                </div>
+
+                {/* A rate with no basis is not zero — say which it is. */}
+                {value.traces === 0 && value.searches === 0 && (
+                    <p className="mt-3 text-[11px] text-ink-muted">
+                        No traces or searches recorded in this range. These signals
+                        start accruing from the day instrumentation ships, so an
+                        older range shows none because none were counted.
+                    </p>
+                )}
+            </section>
 
             {/* Open tracking starts when the feature ships. Say so, rather than
                 letting a flat line read as "nobody opened anything". */}
@@ -86,13 +158,18 @@ export function EngagementTab({
                 >
                     <TimeSeriesChart
                         buckets={series.buckets}
-                        series={[{ key: 'active', label: 'Active users', values: series.activeUsers, slot: 0, area: true }]}
+                        series={[{
+                            key: 'active', label: 'Active users',
+                            values: series.activeUsers, slot: 0, area: true,
+                            previous: series.previous.activeUsers,
+                        }]}
+                        annotations={data.annotations}
                     />
                 </ChartFrame>
 
                 <ChartFrame
                     title="Activation funnel"
-                    subtitle={`Everyone who signed up in ${rangeLabel(days).toLowerCase()}`}
+                    subtitle={`Everyone who signed up in ${rangeLabel(range).toLowerCase()}`}
                     isStale={isStale}
                     isEmpty={(engagement.funnel[0]?.count ?? 0) === 0}
                     emptyLabel="Nobody signed up in this range."
@@ -159,7 +236,7 @@ export function EngagementTab({
 
                 <ChartFrame
                     title="Most active people"
-                    subtitle={`Ranked across ${rangeLabel(days).toLowerCase()}`}
+                    subtitle={`Ranked across ${rangeLabel(range).toLowerCase()}`}
                     isStale={isStale}
                     isEmpty={leaderboards.topUsers.length === 0}
                     emptyLabel="Nobody has been active in this range."

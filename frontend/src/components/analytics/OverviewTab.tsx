@@ -11,8 +11,12 @@ import {
 } from 'lucide-react'
 
 import { compact, exact, percent } from '@/lib/formatMetric'
-import type { AnalyticsSummary } from '@/services/analyticsService'
+import type {
+    AnalyticsRangeSelection, AnalyticsSummary,
+} from '@/services/analyticsService'
 import { HeroFigure, KpiCard } from './KpiCard'
+import { InsightStrip } from './InsightStrip'
+import { AdoptionMatrix } from './AdoptionMatrix'
 import { Leaderboard } from './Leaderboard'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
@@ -24,24 +28,37 @@ import { shortDate } from '@/lib/formatMetric'
 
 interface Props {
     data: AnalyticsSummary
-    days: number
+    range: AnalyticsRangeSelection
     isStale: boolean
     onWorkspaceClick: (workspaceId: string) => void
+    /** Jump to the tab that explains an insight in depth. */
+    onNavigateTab?: (tab: string) => void
 }
 
-export function OverviewTab({ data, days, isStale, onWorkspaceClick }: Props) {
+export function OverviewTab({
+    data, range, isStale, onWorkspaceClick, onNavigateTab,
+}: Props) {
     const theme = useChartTheme()
     const { totals, series, engagement, leaderboards, graph } = data
-    const vs = comparisonLabel(days)
+    const vs = comparisonLabel(range)
 
     return (
         <div className="space-y-5">
+            {/* What changed, in sentences, before any chart. A reader who only
+                has ten seconds should still leave with the finding. Renders
+                nothing at all when there is nothing worth saying. */}
+            <InsightStrip
+                insights={data.insights}
+                rangeLabel={rangeLabel(range)}
+                onNavigate={onNavigateTab}
+            />
+
             {/* Hero + headline stats. Exactly one hero figure per view; the
                 vanity totals sit beside it as ordinary tiles. */}
             <section className="rounded-2xl border border-glass-border bg-canvas-elevated p-6 shadow-sm">
                 <div className="flex flex-wrap items-end justify-between gap-6">
                     <HeroFigure
-                        label={`Active users · ${rangeLabel(days).toLowerCase()}`}
+                        label={`Active users · ${rangeLabel(range).toLowerCase()}`}
                         value={totals.activeUsers.current ?? 0}
                         changePct={totals.activeUsers.changePct}
                         comparisonLabel={vs}
@@ -93,7 +110,7 @@ export function OverviewTab({ data, days, isStale, onWorkspaceClick }: Props) {
                     they get two charts — never two y-axes on one plot. */}
                 <ChartFrame
                     title="User growth"
-                    subtitle={`Total accounts over ${rangeLabel(days).toLowerCase()}`}
+                    subtitle={`Total accounts over ${rangeLabel(range).toLowerCase()}`}
                     isStale={isStale}
                     isEmpty={series.cumulativeUsers.every((v) => v === 0)}
                     emptyLabel="No accounts yet."
@@ -111,6 +128,7 @@ export function OverviewTab({ data, days, isStale, onWorkspaceClick }: Props) {
                     <TimeSeriesChart
                         buckets={series.buckets}
                         series={[{ key: 'users', label: 'Total users', values: series.cumulativeUsers, slot: 0, area: true }]}
+                        annotations={data.annotations}
                     />
                 </ChartFrame>
 
@@ -138,17 +156,32 @@ export function OverviewTab({ data, days, isStale, onWorkspaceClick }: Props) {
                     <TimeSeriesChart
                         buckets={series.buckets}
                         series={[
-                            { key: 'active', label: 'Active users', values: series.activeUsers, slot: 0 },
-                            { key: 'opens', label: 'View opens', values: series.viewOpens, slot: 1 },
+                            {
+                                key: 'active', label: 'Active users',
+                                values: series.activeUsers, slot: 0,
+                                previous: series.previous.activeUsers,
+                            },
+                            {
+                                key: 'opens', label: 'View opens',
+                                values: series.viewOpens, slot: 1,
+                                previous: series.previous.viewOpens,
+                            },
                         ]}
                     />
                 </ChartFrame>
             </div>
 
+            {/* Which features anyone actually uses. Sits above the
+                leaderboards because "what gets used" outranks "who used it". */}
+            <AdoptionMatrix
+                rows={data.adoption}
+                subtitle={`Feature usage across ${rangeLabel(range).toLowerCase()}`}
+            />
+
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
                 <ChartFrame
                     title="Most active people"
-                    subtitle={`Ranked by everything they did in ${rangeLabel(days).toLowerCase()}`}
+                    subtitle={`Ranked by everything they did in ${rangeLabel(range).toLowerCase()}`}
                     isStale={isStale}
                     isEmpty={leaderboards.topUsers.length === 0}
                     emptyLabel="Nobody has been active in this range."
