@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest'
 import { buildTraceView, lanesToHierarchy } from '../traceViewModel'
 import { cfoEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
 import type { TraceViewInputs } from '../traceViewModel'
+import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
 
 const view = (expansion: string[], over: Partial<TraceViewInputs> = {}) => {
   const e = cfoEstate()
@@ -73,6 +74,101 @@ describe('buildTraceView — CFO estate', () => {
   })
 
   it('is deterministic', () => { expect(JSON.stringify(view(['tableau']).lanes.map(l => l.roots.map(r => r.id)))).toBe(JSON.stringify(view(['tableau']).lanes.map(l => l.roots.map(r => r.id)))) })
+
+  it('counts PARTNERS only — the focus side is never a partner', () => {
+    const v = view(['tableau', 'cfo'])
+    // The focus's whole containment subtree is the focus SIDE (hop 0 in both
+    // directions). It is what the user is looking at, never something the
+    // lineage led to, so it is never counted and never scoped away.
+    const report = v.lanes.find(l => l.layerId === 'report')!
+    for (const urn of ['cfo', 'aov', 'aov.channel', 'aov.avg']) expect(report.cards.get(urn)!.role).toBe('focus')
+    expect(report.cards.get('tableau')!.role).toBe('host')
+    // 7 upstream partners: the 2 containers, their 2 datasets, 3 columns.
+    expect(v.counts).toEqual({ up: 7, down: 0 })
+    // Turn upstream off and every partner leaves; the focus side stays.
+    const off = view(['tableau', 'cfo'], { showUpstream: false })
+    expect(off.counts).toEqual({ up: 0, down: 0 })
+    expect(off.visible.has('cfo')).toBe(true)
+  })
+
+  it('lanes follow the layer ORDER, not discovery order', () => {
+    expect(view(['tableau', 'cfo']).lanes.map(l => l.layerId)).toEqual(['warehouse', 'report'])
+    const flipped = cfoEstate().layers.map(l => ({ ...l, order: l.id === 'warehouse' ? 1 : 0 }))
+    expect(view(['tableau', 'cfo'], { layers: flipped }).lanes.map(l => l.layerId)).toEqual(['report', 'warehouse'])
+  })
+
+  it('unplaceable chains are COUNTED, never invented into a lane', () => {
+    // Drop the warehouse assignments: nothing on that side is placeable, and a
+    // curated view does not let a rule place `snowflake` either.
+    const v = view(['tableau', 'cfo'], { assignments: { tableau: { layerId: 'report' } } })
+    expect(v.lanes.map(l => l.layerId)).toEqual(['report'])
+    // 7 unplaced participants, but ONE anchorless chain — they all top out at
+    // the same unplaceable root (`snowflake`). Chains, not participants.
+    expect(v.outsideView).toBe(1)
+    expect(v.visible.has('INTERMEDIATE_T2')).toBe(false)
+  })
+})
+
+describe('lanesToHierarchy — the VISIBLE tree', () => {
+  it('a closed partner emits no children but keeps its chevron count', () => {
+    const lanes = lanesToHierarchy(view(['tableau', 'cfo']).lanes)
+    const warehouse = lanes.find(l => l.layerId === 'warehouse')!
+    const t2 = warehouse.nodes.find(n => n.id === 'INTERMEDIATE_T2')!
+    expect(t2.children).toEqual([])            // closed — the reader has not opened it
+    expect(t2.data.childCount).toBe(1)         // the chevron still knows there is one inside
+    expect(t2.data.onLineage).toBe(3)
+    expect(t2.data.traceRole).toBe('up')
+
+    // The focus chain IS open, so it nests the whole way down to the closed chart.
+    const report = lanes.find(l => l.layerId === 'report')!
+    const tableau = report.nodes[0]
+    expect(tableau.children.map(c => c.id)).toEqual(['cfo'])
+    expect(tableau.children[0].children.map(c => c.id)).toEqual(['aov'])
+    expect(tableau.children[0].children[0].children).toEqual([])   // aov closed
+    expect(tableau.children[0].children[0].data.childCount).toBe(2)
+  })
+})
+
+/** The CFO estate plus a SECOND upstream hop: SRC ⊃ src ⊃ src.f → orders.channel. */
+const node = (urn: string, type: string, childCount = 0): LensWalkNode => ({
+  id: urn, type: 'default', position: { x: 0, y: 0 },
+  data: { urn, label: urn, type, childCount }, urn, displayName: urn, entityType: type,
+}) as unknown as LensWalkNode
+
+const twoHopEstate = () => {
+  const e = cfoEstate()
+  const model: LensWalkModel = {
+    ...e.model,
+    nodes: [...e.model.nodes, node('SRC', 'container', 1), node('src', 'dataset', 1), node('src.f', 'schemaField')],
+    containmentEdges: [...e.model.containmentEdges,
+      { sourceUrn: 'SRC', targetUrn: 'src' }, { sourceUrn: 'src', targetUrn: 'src.f' }],
+    lineageEdges: [...e.model.lineageEdges,
+      { id: 'r:src.f>orders.channel', sourceUrn: 'src.f', targetUrn: 'orders.channel', edgeType: 'TRANSFORMS', kind: 'raw' as const, weight: null }],
+  }
+  return { ...e, model, assignments: { ...e.assignments, SRC: { layerId: 'warehouse' } } }
+}
+
+describe('buildTraceView — finite depth', () => {
+  const at = (depthUp: number) => {
+    const e = twoHopEstate()
+    return buildTraceView({
+      model: e.model, focusUrn: 'cfo', layers: e.layers, assignments: e.assignments, viewIsCurated: true,
+      traceExpansion: new Set(['tableau', 'cfo']), showUpstream: true, showDownstream: true, depthUp, depthDown: 25,
+    })
+  }
+  const warehouse = (depthUp: number) => at(depthUp).lanes.find(l => l.layerId === 'warehouse')!
+
+  it('depth 1 keeps the first hop and drops the second chain, hosts included', () => {
+    expect(warehouse(1).roots.map(r => r.id)).toEqual(['INTERMEDIATE_T2', 'REPORTING'])
+    expect(warehouse(1).cards.has('src.f')).toBe(false)   // hop 2, out of scope
+    expect(warehouse(1).cards.has('SRC')).toBe(false)     // its host goes with it
+  })
+
+  it('depth 2 admits the second chain at its own anchor', () => {
+    expect(warehouse(2).roots.map(r => r.id)).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'SRC'])
+    expect(warehouse(2).cards.get('src.f')!.hop).toBe(2)
+    expect(warehouse(2).cards.get('src.f')!.role).toBe('up')
+  })
 })
 
 describe('buildTraceView — Roots ⊃ Node ×10 (self-nesting, level-less)', () => {
