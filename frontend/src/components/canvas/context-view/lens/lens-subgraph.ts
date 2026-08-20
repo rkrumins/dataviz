@@ -42,6 +42,10 @@ export interface LensEdgeLike {
     sourceUrn: string
     targetUrn: string
     edgeType?: string
+    /** Grain of this edge: a raw hop, or a materialised rollup cell. */
+    kind?: 'raw' | 'rollup'
+    /** Rollup weight (flows summarised), null for raw or unknown. */
+    weight?: number | null
 }
 
 /** parent → child */

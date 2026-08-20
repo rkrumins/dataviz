@@ -121,7 +121,12 @@ export function toLensClosure(
     return {
         focusUrn,
         nodes: res.nodes.map(toLensWalkNode),
-        lineageEdges: res.edges,
+        lineageEdges: res.edges.map(e => {
+            const props = e.properties ?? {}
+            const isRollup = String(e.edgeType ?? '').toUpperCase() === 'AGGREGATED'
+            const w = props.weight ?? props.count
+            return { ...e, kind: isRollup ? 'rollup' as const : 'raw' as const, weight: typeof w === 'number' ? w : null }
+        }),
         containmentEdges: res.containmentEdges,
         upstreamUrns: new Set(res.upstreamUrns),
         downstreamUrns: new Set(res.downstreamUrns),

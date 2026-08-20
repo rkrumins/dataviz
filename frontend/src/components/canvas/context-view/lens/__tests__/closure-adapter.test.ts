@@ -158,6 +158,56 @@ describe('toLensClosure', () => {
     })
 })
 
+// ── toLensClosure — edge grain ───────────────────────────────────────────
+
+describe('toLensClosure — edge grain', () => {
+    const base = (over: Partial<TraceV2Result & LensClosureExtras> = {}): TraceV2Result & LensClosureExtras => ({
+        nodes: [], edges: [], containmentEdges: [],
+        upstreamUrns: new Set(), downstreamUrns: new Set(),
+        focus: { urn: 'F', level: 0, entityType: 'dataset' },
+        effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+        truncated: false, truncationReason: null,
+        frontierUp: [], frontierDown: [], seedTruncated: false,
+        ...over,
+    })
+
+    it('tags edges with grain: AGGREGATED → rollup with weight, others → raw', () => {
+        const m = toLensClosure(base({
+            edges: [
+                { id: 'r1', sourceUrn: 'a', targetUrn: 'b', edgeType: 'TRANSFORMS' },
+                { id: 'g1', sourceUrn: 'A', targetUrn: 'B', edgeType: 'AGGREGATED', properties: { weight: 7 } },
+            ] as never,
+        }), 'F')
+        expect(m.lineageEdges.find(e => e.id === 'r1')).toMatchObject({ kind: 'raw', weight: null })
+        expect(m.lineageEdges.find(e => e.id === 'g1')).toMatchObject({ kind: 'rollup', weight: 7 })
+    })
+})
+
+// ── mergeClosures — edge grain ───────────────────────────────────────────
+
+describe('mergeClosures — edge grain', () => {
+    const base = (over: Partial<TraceV2Result & LensClosureExtras> = {}): TraceV2Result & LensClosureExtras => ({
+        nodes: [], edges: [], containmentEdges: [],
+        upstreamUrns: new Set(), downstreamUrns: new Set(),
+        focus: { urn: 'F', level: 0, entityType: 'dataset' },
+        effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+        truncated: false, truncationReason: null,
+        frontierUp: [], frontierDown: [], seedTruncated: false,
+        ...over,
+    })
+
+    it('preserves kind/weight through a union, last write wins on a re-shipped edge', () => {
+        const m1 = toLensClosure(base({
+            edges: [{ id: 'g1', sourceUrn: 'A', targetUrn: 'B', edgeType: 'AGGREGATED', properties: { weight: 7 } }] as never,
+        }), 'F')
+        const m2 = mergeClosures(m1, base({
+            edges: [{ id: 'g1', sourceUrn: 'A', targetUrn: 'B', edgeType: 'AGGREGATED', properties: { weight: 12 } }] as never,
+        }), { rootUrn: 'F', direction: 'both' })
+
+        expect(m2.lineageEdges.find(e => e.id === 'g1')).toMatchObject({ kind: 'rollup', weight: 12 })
+    })
+})
+
 // ── mergeClosures — walk accumulation ───────────────────────────────────
 
 describe('mergeClosures — walk accumulation', () => {
