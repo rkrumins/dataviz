@@ -19,6 +19,7 @@ import {
 import type { HierarchyNode } from '@/types/hierarchy'
 import { compareOrderKeys } from '@/utils/orderKeys'
 import { useBranchCreatedDelta } from './useBranchCreatedDelta'
+import { resolveRootLayer } from './lib/resolveRootLayer'
 
 // ============================================
 // Types
@@ -290,11 +291,10 @@ export function useLayerAssignment({
       if (hasContainmentParent && inheritedLayerId) {
         myLayerId = inheritedLayerId
       } else {
-        // Root-level node priority chain.
-        //
-        // 1. instanceAssignments (live user drag in this session) — always
-        //    wins. The user just dropped this onto a layer; respect that
-        //    immediately regardless of view config or backend state.
+        // Root-level node priority chain — see resolveRootLayer for full
+        // semantics (instance drag → explicit → curated (stamped, only if
+        // branch-created) → open (backend → stamped → rule → inherited →
+        // showUnassigned fallback); '__UNASSIGNED__' sentinel → undefined).
         const instanceAssignment = instanceAssignments.get(nodeId)
         // Explicit, per-entity layer the app stamped on the node itself — on
         // create (creation layer) and on an explicit move (EntityDrawer "Layer"
@@ -308,43 +308,22 @@ export function useLayerAssignment({
         // reload). Validated so a stale layer id can't strand the node.
         const rawNodeLayer = nodeMap.get(nodeId)?.data?.layerAssignment as string | undefined
         const nodeLayerId = rawNodeLayer && validLayerIds.has(rawNodeLayer) ? rawNodeLayer : undefined
-        if (instanceAssignment) {
-          myLayerId = instanceAssignment.layerId
-        } else if (explicitAssignments.has(nodeId)) {
-          // 2a. Canonical per-node assignment (referenceLayout.assignments) — AUTHORITATIVE in BOTH
-          //     scopes. A user's explicit placement overrides type rules / backend even in an open
-          //     ('all') view, and is the closed-scope authority. This is what lets a canvas assign
-          //     render WITHOUT flipping the view's scope (scope is pinned per the persist path), and
-          //     it makes the canvas mirror the wizard's "if you didn't place it, it's not here" model.
-          myLayerId = explicitAssignments.get(nodeId)
-        } else if (viewIsCurated) {
-          // 2b. Curated (closed-scope): an unlisted root drops out, EXCEPT a branch-created node
-          //     placed by its own durable, view-valid `layerAssignment` (leak-safe delta exception —
-          //     only delta nodes qualify, so no arbitrary global-property node leaks in). We do NOT
-          //     otherwise consult the node's global `layerAssignment` in curated scope.
-          if (nodeLayerId) {
-            const nodeUrn = (nodeMap.get(nodeId)?.data?.urn as string | undefined) ?? nodeId
-            if (branchCreatedDelta.has(nodeUrn)) myLayerId = nodeLayerId
-          }
-        } else {
-          // 2c. Open-scope ('all'): fall back to backend → node property → rules → inheritance so
-          //     the user has data to start from (canonical assignments already handled above).
-          const backendAssignment = effectiveAssignments.get(nodeId)
-          if (backendAssignment?.layerId) {
-            myLayerId = backendAssignment.layerId
-          } else if (nodeLayerId) {
-            myLayerId = nodeLayerId
-          } else if (ruleAssignments.has(nodeId)) {
-            myLayerId = ruleAssignments.get(nodeId)
-          } else if (inheritedLayerId) {
-            myLayerId = inheritedLayerId
-          } else if (unassignedFallbackLayerId) {
-            myLayerId = unassignedFallbackLayerId
-          }
-        }
+        const nodeUrn = (nodeMap.get(nodeId)?.data?.urn as string | undefined) ?? nodeId
+        const backendAssignment = effectiveAssignments.get(nodeId)
+        myLayerId = resolveRootLayer({
+          nodeId,
+          nodeUrn,
+          nodeLayerProp: nodeLayerId,
+          instanceAssignment: instanceAssignment?.layerId,
+          explicitAssignment: explicitAssignments.get(nodeId),
+          viewIsCurated,
+          branchCreated: branchCreatedDelta.has(nodeUrn),
+          backendAssignment: backendAssignment?.layerId,
+          ruleAssignment: ruleAssignments.get(nodeId),
+          inheritedLayerId,
+          unassignedFallbackLayerId,
+        })
       }
-
-      if (myLayerId === '__UNASSIGNED__') myLayerId = undefined
 
       if (myLayerId) effectiveLayer.set(nodeId, myLayerId)
 
