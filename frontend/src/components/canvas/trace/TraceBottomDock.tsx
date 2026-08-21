@@ -30,6 +30,14 @@ export interface TraceBottomDockProps {
   onHistoryForward?: () => void
   canHistoryBack?: boolean
   canHistoryForward?: boolean
+  /** Driven by the NATIVE trace engine (the canvas overlay) rather than
+   *  `useUnifiedTrace`. The engine walks the whole flow once, so direction
+   *  and depth are VIEW scope on what it already holds — and the controls
+   *  that only ever parameterised the next request are withdrawn. */
+  nativeMode?: boolean
+  /** Chains the view cannot place anywhere (see `TraceView.outsideView`).
+   *  Surfaced in the Overview strip; hidden at 0. */
+  outsideView?: number
 }
 
 const COMPACT_HEIGHT = 64
@@ -77,6 +85,8 @@ export function TraceBottomDock({
   onHistoryForward,
   canHistoryBack = false,
   canHistoryForward = false,
+  nativeMode = false,
+  outsideView = 0,
 }: TraceBottomDockProps) {
   const [expandedHeight, setExpandedHeight] = useState(lastExpandedHeight)
   const [tab, setTab] = useState<TraceDockTab>('overview')
@@ -244,6 +254,7 @@ export function TraceBottomDock({
           onHistoryForward={onHistoryForward}
           canHistoryBack={canHistoryBack}
           canHistoryForward={canHistoryForward}
+          nativeMode={nativeMode}
         />
 
         {/* Drill-back breadcrumb — visible whenever one or more drills are
@@ -287,6 +298,7 @@ export function TraceBottomDock({
                     resolveEdgeColor={resolveEdgeColor}
                     onReduceDepth={handleReduceDepth}
                     onJumpToUrn={onJumpToUrn}
+                    outsideView={outsideView}
                   />
                 )}
                 {tab === 'drilldowns' && (
@@ -315,6 +327,7 @@ export function TraceBottomDock({
                     granularityOptions={granularityOptions}
                     availableEdgeTypes={availableEdgeTypes}
                     resolveEdgeColor={resolveEdgeColor}
+                    nativeMode={nativeMode}
                   />
                 )}
               </AnimatePresence>

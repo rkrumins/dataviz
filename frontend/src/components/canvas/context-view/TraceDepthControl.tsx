@@ -9,8 +9,18 @@
  * parent wires this to `trace.setConfig` + `retrace()` so the canvas
  * reflects the change without a manual re-trace.
  *
+ * ONE DEPTH RULE. The walk fetches 25 hops per direction — the wire cap
+ * (`TraceClosureRequest`, `FULL_WALK_INITIAL_DEPTH`) — and the closure engine
+ * then follows its frontiers to exhaustion, so 25 is not "the default", it is
+ * EVERY HOP THERE IS. Depth here is therefore a VIEW scope on a flow already
+ * in hand: it narrows what is drawn, instantly, and never refetches. The old
+ * 'Deep' (50) / 'Max' (100) presets promised a deeper fetch nothing has made
+ * since the native engine landed — they moved a number, the picture stayed
+ * put, and the reader was left to conclude their lineage ended there. The
+ * control is capped at the walked ceiling and says so.
+ *
  * Depth values: 0 disables the side (matches the dock direction-arrow
- * contract), 1..MAX_DEPTH is the literal hop count passed to /trace/v2.
+ * contract), 1..MAX_DEPTH narrows the drawn hops on that side.
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -18,6 +28,7 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { ArrowUp, ArrowDown, ChevronDown, Minus, Plus, Workflow } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
 
 export interface TraceDepthControlProps {
   upstreamDepth: number
@@ -26,7 +37,9 @@ export interface TraceDepthControlProps {
 }
 
 const POPOVER_WIDTH = 360
-const MAX_DEPTH = 100
+/** The walk's own ceiling — see the header. Nothing above it exists to show,
+ *  so it is read from the walk rather than restated here. */
+const MAX_DEPTH = FULL_WALK_INITIAL_DEPTH
 const MIN_DEPTH = 0
 
 interface DepthPreset {
@@ -36,9 +49,9 @@ interface DepthPreset {
 }
 
 const DEPTH_PRESETS: DepthPreset[] = [
-  { label: 'Default', upstream: 25, downstream: 25 },
-  { label: 'Deep', upstream: 50, downstream: 50 },
-  { label: 'Max', upstream: 100, downstream: 100 },
+  { label: 'Direct', upstream: 1, downstream: 1 },
+  { label: 'Nearby', upstream: 5, downstream: 5 },
+  { label: 'All hops', upstream: MAX_DEPTH, downstream: MAX_DEPTH },
 ]
 
 function clampDepth(v: number): number {
@@ -102,7 +115,7 @@ export function TraceDepthControl({
         onClick={() => setOpen(o => !o)}
         aria-haspopup="dialog"
         aria-expanded={open}
-        title={`Trace depth setting — ${upstreamDepth} upstream hops, ${downstreamDepth} downstream hops. Click to adjust.`}
+        title={`Trace depth — showing ${upstreamDepth} upstream and ${downstreamDepth} downstream hops of the ${MAX_DEPTH} this trace walked. Click to narrow the view.`}
         className={cn(
           'flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition-all duration-300',
           open
@@ -158,7 +171,7 @@ export function TraceDepthControl({
 
               <div className="px-3 pt-2.5 pb-2">
                 <p className="px-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
-                  Hop count per direction. Set a side to 0 to disable it; the dock arrows mirror this.
+                  {`How many hops per direction to DRAW. This trace already holds all ${MAX_DEPTH} walked hops, so narrowing applies instantly — no refetch. Set a side to 0 to hide it; the dock arrows mirror this.`}
                 </p>
 
                 <DepthRow

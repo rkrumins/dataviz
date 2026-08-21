@@ -11,6 +11,8 @@ export interface TraceDockOverviewProps {
   resolveEdgeColor: (edgeType: string) => string
   onReduceDepth: () => void
   onJumpToUrn: (urn: string) => void
+  /** Chains this view cannot place — see `TraceDockMetricStrip`. */
+  outsideView?: number
 }
 
 /**
@@ -26,6 +28,7 @@ export function TraceDockOverview({
   resolveEdgeColor,
   onReduceDepth,
   onJumpToUrn,
+  outsideView = 0,
 }: TraceDockOverviewProps) {
   return (
     <motion.div
@@ -52,6 +55,7 @@ export function TraceDockOverview({
         totalEdges={trace.statistics.totalEdges}
         upstreamCount={trace.upstreamCount}
         downstreamCount={trace.downstreamCount}
+        outsideView={outsideView}
         resolveEdgeColor={resolveEdgeColor}
       />
     </motion.div>

@@ -30,6 +30,9 @@ export interface TraceDockTitleBarProps {
   onHistoryForward?: () => void
   canHistoryBack?: boolean
   canHistoryForward?: boolean
+  /** Driven by the NATIVE trace engine: direction is a VIEW toggle on a flow
+   *  already walked to exhaustion, never a new request. */
+  nativeMode?: boolean
 }
 
 type Direction = 'up' | 'both' | 'down'
@@ -64,6 +67,7 @@ export function TraceDockTitleBar({
   onHistoryForward,
   canHistoryBack = false,
   canHistoryForward = false,
+  nativeMode = false,
 }: TraceDockTitleBarProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const recentTriggerRef = useRef<HTMLButtonElement>(null)
@@ -90,7 +94,19 @@ export function TraceDockTitleBar({
   // that side. We preserve the existing depth on kept sides and floor
   // at DEFAULT_TRACE_DEPTH when re-enabling a previously-disabled side,
   // so toggling 'up' → 'both' doesn't return only one downstream hop.
+  //
+  // NONE OF THAT ON THE NATIVE ENGINE. The flow is already walked, so the
+  // arrow is exactly what it looks like — a visibility toggle. Letting the
+  // depth encoding through would have an arrow that says nothing about depth
+  // silently rewrite the reader's view scope (to 0 on the hidden side, and
+  // back up to DEFAULT_TRACE_DEPTH on return), and the retrace would be a
+  // request for a flow the session already holds.
   const setDirection = (dir: Direction) => {
+    if (nativeMode) {
+      trace.setShowUpstream(dir !== 'down')
+      trace.setShowDownstream(dir !== 'up')
+      return
+    }
     const curUp = trace.config.upstreamDepth
     const curDown = trace.config.downstreamDepth
     if (dir === 'up') {

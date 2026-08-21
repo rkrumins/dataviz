@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { ArrowUp, ArrowDown, GitBranch, Network, Hash, Copy, Check } from 'lucide-react'
+import { ArrowUp, ArrowDown, GitBranch, Network, Hash, Copy, Check, EyeOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { TraceResult } from '@/hooks/useUnifiedTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -12,6 +12,11 @@ export interface TraceDockMetricStripProps {
   totalEdges: number
   upstreamCount: number
   downstreamCount: number
+  /** Chains this view cannot place ANYWHERE, counted once per chain. The
+   *  trace found them; the view has no lane for them, and inventing one is
+   *  what the overlay rebuild exists to stop. The number is the honest
+   *  answer to "why is this trace smaller than I expected". */
+  outsideView?: number
   resolveEdgeColor: (edgeType: string) => string
 }
 
@@ -29,6 +34,7 @@ export function TraceDockMetricStrip({
   totalEdges,
   upstreamCount,
   downstreamCount,
+  outsideView = 0,
   resolveEdgeColor,
 }: TraceDockMetricStripProps) {
   const [copied, setCopied] = useState(false)
@@ -110,6 +116,20 @@ export function TraceDockMetricStrip({
           accent="lineage"
         />
       </div>
+
+      {outsideView > 0 && (
+        <div
+          className={cn(
+            'flex items-center gap-2 px-3 h-8 rounded-lg self-start',
+            'bg-white/[0.06] border border-white/[0.15]',
+          )}
+        >
+          <EyeOff className="w-3.5 h-3.5 text-ink-muted shrink-0" strokeWidth={2.2} aria-hidden />
+          <span className="text-[11px] font-semibold text-ink tabular-nums">
+            {`${outsideView.toLocaleString()} ${outsideView === 1 ? 'source' : 'sources'} outside this view`}
+          </span>
+        </div>
+      )}
 
       {edgeTypeCounts.length > 0 && (
         <div className="flex items-center gap-3 flex-wrap pt-1">
