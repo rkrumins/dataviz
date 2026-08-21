@@ -1381,6 +1381,39 @@ class ContextEngine:
             edge_types = [t for t in declared_types if t]
         containment_types = list(resolved.containment_edge_types or [])
         max_nodes = min(req.max_nodes or ContextEngine.TRACE_MAX_NODES, ContextEngine.TRACE_MAX_NODES)
+
+        # THE LAZY PATH (2026-08-21 ruling: "no limits; lazy-loaded").
+        # `grain='coarse'` is the first paint and `drill=True` is one
+        # expansion; both are one hop at one grain and are answered by
+        # `trace_closure_lazy` — see its docstring for why the fine walk
+        # cannot be a first paint at scale. `max_nodes` is handed over as a
+        # PAGE SIZE there, never a budget: a full page ships a cursor.
+        #
+        # A provider without the lazy path (drafts, and any future provider)
+        # falls THROUGH to the fine walk rather than failing — a draft is
+        # small by nature, so the eager closure is the right answer there.
+        if req.drill or req.grain == "coarse":
+            lazy_fn = getattr(self.provider, "trace_closure_lazy", None)
+            if lazy_fn is not None:
+                async with self._trace_semaphore():
+                    return await lazy_fn(
+                        # A drill names its card in `seedUrns` (the shape the
+                        # walk contract already uses for "the card being
+                        # extended"); `urn` is the fallback and the coarse
+                        # path's only anchor.
+                        urn=(req.seed_urns[0] if req.seed_urns else req.urn),
+                        upstream_depth=req.upstream_depth if req.direction in ("upstream", "both") else 0,
+                        downstream_depth=req.downstream_depth if req.direction in ("downstream", "both") else 0,
+                        lineage_edge_types=edge_types,
+                        containment_edge_types=containment_types,
+                        aggregated_edge_type="AGGREGATED",
+                        drill=bool(req.drill),
+                        page_size=max_nodes,
+                        timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
+                        after_cursor=req.after_cursor,
+                        seed_cursor=req.seed_cursor,
+                    )
+
         fn = getattr(self.provider, "trace_closure", None)
         if fn is None:
             raise NotImplementedError("provider does not support trace_closure")

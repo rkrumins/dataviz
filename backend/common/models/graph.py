@@ -197,6 +197,28 @@ class TraceClosureRequest(BaseModel):
     # descendants (urn > cursor) and walks from those. Mutually exclusive
     # with afterCursor and seedUrns (endpoint-validated).
     seed_cursor: Optional[str] = Field(None, alias="seedCursor")
+    # LAZY TRACE (2026-08-21 ruling: "no limits; lazy-loaded"). Two fields,
+    # one engine path — see ``FalkorDBProvider.trace_closure_lazy``.
+    #
+    # ``grain='coarse'`` is the FIRST PAINT: the focus, its containment
+    # chain, the lineage-carrying children directly inside it, and every
+    # partner ONE hop away at the grain the lineage lane offers (the
+    # :AGGREGATED rollup endpoint where rollups exist, the raw hop
+    # endpoint where they do not) — each with its own ancestor chain, so
+    # the client can anchor it wherever the view places it. Omitted /
+    # ``'fine'`` = the raw leaf-grain closure walk, unchanged.
+    #
+    # ``drill=True`` is the SAME shape asked of a card the reader just
+    # opened: that card's lineage-carrying children and THEIR hop-1
+    # lineage, so the wires refine one grain. ``urn`` names the card.
+    #
+    # Neither path has a node cap: ``max_nodes`` is a PAGE SIZE there, a
+    # full page ships a cursor (``seedCursor`` for more children,
+    # ``frontierUp/Down[].nextCursor`` for more edges), and the driver
+    # follows cursors to exhaustion. The only ``truncationReason`` these
+    # paths can report is ``'timeout'``.
+    grain: Optional[Literal["coarse", "fine"]] = Field(None, alias="grain")
+    drill: bool = Field(False, alias="drill")
 
     class Config:
         populate_by_name = True

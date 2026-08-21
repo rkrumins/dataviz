@@ -164,6 +164,25 @@ _CURSOR_PREFIX = "k1:"
 # we don't know how much"), which is what an unprobed frontier honestly is.
 CLOSURE_FRONTIER_PROBE_CAP = int(os.getenv("CLOSURE_FRONTIER_PROBE_CAP", "1000"))
 
+# ── The lazy trace's page shape ──────────────────────────────────────────
+#
+# A hop that trips its own LIMIT cannot say WHICH anchor's rows it dropped,
+# so EVERY anchor in it becomes resumable. MEASURED on solidatus-test-large:
+# one drill of a layer whose 29 objects carry 6,557 rollup edges between them
+# tripped a flat limit and filed **476 cursors** — 476 follow-up requests to
+# finish one expansion, against a whole-journey budget of 16.
+#
+# So the page is shaped in three layers instead:
+#   * anchors are walked in small CHUNKS, so a trip costs at most one
+#     chunk's worth of per-anchor cursors rather than the whole page;
+#   * a chunk's LIMIT is generous per anchor (real estates measure ~226
+#     incident lane edges per object), so only a genuine mega-hub trips it;
+#   * the PAGE stops at a soft edge ceiling, and its resume is the keyset
+#     cursor over the anchors themselves — ONE cursor, exact, no storm.
+CLOSURE_LAZY_ANCHOR_CHUNK = int(os.getenv("CLOSURE_LAZY_ANCHOR_CHUNK", "25"))
+CLOSURE_LAZY_EDGES_PER_ANCHOR = int(os.getenv("CLOSURE_LAZY_EDGES_PER_ANCHOR", "500"))
+CLOSURE_LAZY_EDGE_CEILING = int(os.getenv("CLOSURE_LAZY_EDGE_CEILING", "8000"))
+
 
 class CursorMismatchError(ValueError):
     """A pagination cursor (or sort_direction) that cannot serve the request —
@@ -7787,6 +7806,507 @@ class FalkorDBProvider(GraphDataProvider):
             seedCursor=(f"s:{next_seed_after}" if next_seed_after else None),
         )
 
+    async def _lineage_children_page(
+        self,
+        parent_urn: str,
+        parent_label: str,
+        lane_types: List[str],
+        ctypes: List[str],
+        after_urn: Optional[str],
+        limit: int,
+        timeout_secs: float,
+    ) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+        """One keyset page of ``parent_urn``'s DIRECT containment children
+        that carry lineage — the only children a trace has any business
+        drawing.
+
+        Two shapes, in order, because they answer two different graphs:
+
+          1. the child carries a lineage edge ITSELF (raw or rollup). On an
+             estate with a materialised :AGGREGATED lane this is the whole
+             answer at every grain — a container with flow beneath it has a
+             rollup ON IT, which is exactly what the lane is for.
+          2. nothing did, so the child may still HOST the lineage further
+             down (a rollup-less estate: Roots ⊃ Node ⊃ … ⊃ Node with the
+             flow only at the leaves). Only then is the subtree probe worth
+             its cost, and it runs with its own timeout: failing it degrades
+             to "no contributing children", never to a failed trace.
+
+        Ordered by urn so the page is a true keyset — ``after_urn``
+        continues past the previous page's last child, SKIP-free.
+        Returns ``(pairs, next_after)``; ``next_after`` is set only when the
+        page came back FULL, which is the one thing that means "there are
+        more" (a short page is the end).
+        """
+        if not ctypes or limit <= 0:
+            return [], None
+
+        ct_alt = "|".join(_sanitize_label(t) for t in ctypes if t)
+        lane_alt = "|".join(_sanitize_label(t) for t in lane_types if t)
+        if not ct_alt or not lane_alt:
+            return [], None
+        sl = _sanitize_label(parent_label) if parent_label else ""
+        label_clause = f":{sl}" if sl else ""
+        after_clause = "AND c.urn > $after " if after_urn else ""
+        params: Dict[str, Any] = {"urn": parent_urn, "lim": limit}
+        if after_urn:
+            params["after"] = after_urn
+        per_query = max(0.6, min(2.0, timeout_secs))
+
+        rows: List[List[Any]] = []
+        try:
+            res = await self._ro_query(
+                f"MATCH (p{label_clause} {{urn: $urn}})-[:{ct_alt}]->(c) "
+                f"WHERE (c)-[:{lane_alt}]-() {after_clause}"
+                "RETURN c.urn AS urn, labels(c)[0] AS label ORDER BY urn LIMIT $lim",
+                params=params, timeout=per_query, op="trace.lazy_children",
+            )
+            rows = list(res.result_set or [])
+        except Exception as exc:
+            logger.warning("trace_closure_lazy: children page failed for %s: %s", parent_urn, exc)
+
+        if not rows:
+            hops = self._containment_hop_bound()
+            try:
+                res = await self._ro_query(
+                    f"MATCH (p{label_clause} {{urn: $urn}})-[:{ct_alt}]->(c)-[:{ct_alt}*1..{hops}]->(d) "
+                    f"WHERE (d)-[:{lane_alt}]-() {after_clause}"
+                    "RETURN DISTINCT c.urn AS urn, labels(c)[0] AS label ORDER BY urn LIMIT $lim",
+                    params=params, timeout=per_query, op="trace.lazy_children_deep",
+                )
+                rows = list(res.result_set or [])
+            except Exception as exc:
+                logger.warning(
+                    "trace_closure_lazy: deep children page failed for %s: %s", parent_urn, exc,
+                )
+                rows = []
+
+        pairs: List[Tuple[str, str]] = []
+        seen: Set[str] = set()
+        for row in rows:
+            u = row[0]
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            pairs.append((u, (row[1] if len(row) > 1 else None) or ""))
+        next_after = pairs[-1][0] if len(rows) >= limit and pairs else None
+        return pairs, next_after
+
+    async def trace_closure_lazy(
+        self,
+        urn: str,
+        upstream_depth: int,
+        downstream_depth: int,
+        lineage_edge_types: List[str],
+        containment_edge_types: List[str],
+        aggregated_edge_type: str,
+        drill: bool,
+        page_size: int,
+        timeout_ms: int,
+        after_cursor: Optional[str] = None,
+        seed_cursor: Optional[str] = None,
+    ) -> TraceClosureResult:
+        """THE LAZY TRACE — one grain, one hop, no caps (user ruling
+        2026-08-21: "no limits; lazy-loaded; fetch the upstream/downstream
+        entity and their containments; expand lazily or on the fly").
+
+        The fine closure walk fetches a focus's WHOLE leaf-grain lineage
+        before the first paint. Measured on the 2.08M-node estate that is
+        9.7 s and 2,004 participants for one attribute, and 5.9 s / 1,301
+        for one container — with a 1,152-entry frontier still unfollowed.
+        No amount of budget tuning fixes that: the closure of a real focus
+        is simply bigger than a first paint. So the trace stops asking for
+        it. It asks for what is on screen, and asks again when the reader
+        opens something.
+
+        ONE REQUEST SHAPE, TWO ANCHORS:
+
+        ``drill=False`` (grain ``'coarse'`` — the FIRST PAINT). ``urn`` is
+        the focus. Ships the focus, its containment chain, the
+        lineage-carrying children directly inside it (so the R1 picture —
+        the focus open over its own contents — needs no second request),
+        and every partner ONE lineage hop from the focus, each with its
+        own full ancestor chain. Partner GRAIN is whatever the lane
+        offers: where the :AGGREGATED rollup lane has an edge on the focus
+        the partner arrives at the rollup's grain WITH its weight; where it
+        does not, the raw hop's endpoint arrives at leaf grain. A container
+        focus with neither — the rollup-less pipeline estates — falls back
+        to seeding from its lineage-bearing descendants, i.e. a raw depth-1
+        closure around the focus subtree.
+
+        ``drill=True`` (the reader opened a card). ``urn`` is that card.
+        Same shape one containment step down: the card's lineage-carrying
+        children, and the hop-1 lineage of THOSE children, so every wire
+        into the card refines to the grain the reader just revealed. The
+        far endpoints ship with their ancestor chains too — a wire whose
+        other end the client cannot place is a wire it would have to drop
+        (and would then miscount as "outside this view").
+
+        NO CAPS ANYWHERE. ``page_size`` is a PAGE, not a budget:
+
+          * more children than a page  → ``seedCursor='s:<last-child-urn>'``
+            (keyset, SKIP-free — a deep page costs what the first one did);
+          * more edges on an anchor than a page → that anchor is filed in
+            ``frontierUp``/``frontierDown`` with ``nextCursor='e:0'``, the
+            same resumable-hub contract ``trace_closure`` ships, and the
+            driver pages it with ``afterCursor``.
+
+        The driver follows both to exhaustion, so a 4,000-partner container
+        is COMPLETE at its grain — just not in one response. The only
+        ``truncationReason`` reachable here is ``'timeout'``; ``max_nodes``
+        is not a concept on this path.
+
+        EVERY PARTNER IS A FRONTIER. This walk asked one hop and no more,
+        so what lies beyond a partner is genuinely unknown — each is filed
+        as a depth-boundary entry (no cursor: the resume is a re-root, not
+        a page) and the client reads its counts as floors ("1,203+"). No
+        degree probe: on a hop-1 walk "everything this node has is already
+        on screen" is a statement about the anchor's edges, never about the
+        partner's, so probing it could only produce a confident lie.
+        """
+        await self._ensure_connected()
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+
+        ltypes = [t.upper() for t in (lineage_edge_types or [])]
+        ctypes = [t.upper() for t in (containment_edge_types or [])]
+        ltypes = self._alias_rel_types(ltypes) if ltypes else ltypes
+        ctypes = self._alias_rel_types(ctypes) if ctypes else ctypes
+        agg = (aggregated_edge_type or "AGGREGATED").upper()
+        # ONE LANE, BOTH GRAINS. The engine strips :AGGREGATED out of the
+        # lineage types on purpose — walking rollups as if they were hops
+        # double-counts one flow once per grain above it. Here nothing is
+        # WALKED past hop 1, so the two grains cannot compound: the rollup
+        # is the coarse statement about the same hop, the client's grain
+        # rule (traceWireLedger) decides which one gets drawn, and asking
+        # for both in one query is what makes the partner arrive at the
+        # grain the view can actually place.
+        lane_types = [*ltypes] + ([agg] if agg not in ltypes else [])
+
+        want_up = int(upstream_depth) > 0
+        want_down = int(downstream_depth) > 0
+
+        try:
+            anchor_node = await self.get_node(urn)
+        except Exception:
+            anchor_node = None
+        anchor_label = str(anchor_node.entity_type) if anchor_node else ""
+
+        edges_by_id: Dict[str, GraphEdge] = {}
+        upstream_urns: Set[str] = set()
+        downstream_urns: Set[str] = set()
+        truncation_reason: Optional[str] = None
+        # Boundary bookkeeping, dict-as-ordered-set, exactly as in
+        # ``trace_closure``: ``cut_*`` = a page came back full and can be
+        # RESUMED, ``depth_*`` = unexplored beyond this walk's one hop.
+        cut_up: Dict[str, None] = {}
+        cut_down: Dict[str, None] = {}
+        depth_up: Dict[str, None] = {}
+        depth_down: Dict[str, None] = {}
+        paged_anchor: Optional[str] = None
+        paged_cursor: Optional[str] = None
+
+        def _record(rec: Dict[str, Any]) -> None:
+            eid = rec["edgeId"]
+            if eid in edges_by_id:
+                return
+            # A ROLLUP WITHOUT ITS WEIGHT IS A LINE WITH NO NUMBER ON IT.
+            # The client's grain rule reads `properties.weight` to decide
+            # what a coarse wire still has left to say against the raw
+            # detail beneath it; absent, every rollup would draw as "1".
+            weight = rec.get("weight")
+            edges_by_id[eid] = GraphEdge(
+                id=eid,
+                sourceUrn=rec["sourceUrn"],
+                targetUrn=rec["targetUrn"],
+                edgeType=rec["edgeType"],
+                properties=({"weight": int(weight)} if isinstance(weight, (int, float)) else {}),
+            )
+
+        # ---- the card's own contents ----------------------------------
+        # Skipped entirely on a cursor PAGE of one anchor's edges: that
+        # request is draining a hub the client already has open.
+        children: List[Tuple[str, str]] = []
+        next_child_after: Optional[str] = None
+        child_after = (
+            seed_cursor[2:]
+            if seed_cursor and seed_cursor.startswith("s:") and len(seed_cursor) > 2
+            else None
+        )
+        if after_cursor is None:
+            children, next_child_after = await self._lineage_children_page(
+                urn, anchor_label, lane_types, ctypes, child_after,
+                max(1, page_size), max(0.6, min(2.0, deadline - time.monotonic())),
+            )
+
+        # ---- who this walk asks about ---------------------------------
+        # Coarse asks about the FOCUS's own hops; a drill asks about the
+        # hops of the children it just revealed (the card's own hops are
+        # already on screen — they are why it was worth opening).
+        if after_cursor is not None:
+            lineage_anchors: List[Tuple[str, str]] = [(urn, anchor_label)]
+        elif drill:
+            lineage_anchors = list(children)
+        elif child_after is not None:
+            # A coarse CHILDREN page. The focus's hops came with page one;
+            # re-deriving them would re-ship a hub for nothing.
+            lineage_anchors = []
+        else:
+            lineage_anchors = [(urn, anchor_label)]
+
+        discovered: Set[str] = {urn} | {c for c, _ in children}
+
+        # ---- hop 1 ----------------------------------------------------
+        if lineage_anchors and lane_types:
+            anchor_labels = {u: lbl for u, lbl in lineage_anchors}
+            anchor_urns = [u for u, _ in lineage_anchors]
+            hop_timeout = max(0.6, min(1.5, (deadline - time.monotonic()) / 2))
+            if hop_timeout <= 0.6 and time.monotonic() >= deadline:
+                truncation_reason = "timeout"
+
+            if after_cursor is not None:
+                # ---- resumable hub page: one node, one direction ------
+                try:
+                    after_id = int(after_cursor[2:])
+                except (TypeError, ValueError):
+                    raise ValueError("invalid cursor")
+                rows, last_edge_id = await self._page_raw_lineage_single(
+                    urn, anchor_label, "incoming" if want_up else "outgoing",
+                    lane_types, after_id, max(1, page_size),
+                    max(0.0, deadline - time.monotonic()),
+                )
+                for rec in rows:
+                    _record(rec)
+                    other = rec.get("otherUrn")
+                    if not other or other == urn:
+                        continue
+                    discovered.add(other)
+                    (upstream_urns if want_up else downstream_urns).add(other)
+                    (depth_up if want_up else depth_down)[other] = None
+                if len(rows) >= max(1, page_size):
+                    paged_anchor = urn
+                    (cut_up if want_up else cut_down)[urn] = None
+                    if last_edge_id is not None:
+                        paged_cursor = f"e:{last_edge_id + 1}"
+            elif truncation_reason is None:
+                anchor_set = set(anchor_urns)
+                stopped_after: Optional[str] = None      # last anchor fully walked
+                for start in range(0, len(anchor_urns), CLOSURE_LAZY_ANCHOR_CHUNK):
+                    if len(edges_by_id) >= CLOSURE_LAZY_EDGE_CEILING:
+                        # The page is full. Its resume is the keyset cursor
+                        # over the ANCHORS — one cursor, exact, and the next
+                        # page starts strictly past the last one walked.
+                        break
+                    chunk = anchor_urns[start:start + CLOSURE_LAZY_ANCHOR_CHUNK]
+                    chunk_limit = len(chunk) * CLOSURE_LAZY_EDGES_PER_ANCHOR
+                    directions: List[str] = []
+                    coros = []
+                    if want_up:
+                        directions.append("up")
+                        coros.append(self._expand_raw_lineage_set(
+                            chunk, anchor_labels, "incoming", lane_types,
+                            chunk_limit, hop_timeout,
+                        ))
+                    if want_down:
+                        directions.append("down")
+                        coros.append(self._expand_raw_lineage_set(
+                            chunk, anchor_labels, "outgoing", lane_types,
+                            chunk_limit, hop_timeout,
+                        ))
+                    results = await asyncio.gather(*coros) if coros else []
+                    for direction, recs in zip(directions, results):
+                        if len(recs) >= chunk_limit:
+                            # A MEGA-HUB. This chunk's rows were cut and
+                            # nothing says which of its anchors lost them, so
+                            # all of them — at most one chunk's worth — are
+                            # offered as resumable ("e:0" pages one from the
+                            # start; the client's merge dedupes the overlap).
+                            # A cursor, never a truncation.
+                            cut = cut_up if direction == "up" else cut_down
+                            cut.update(dict.fromkeys(chunk))
+                        for rec in recs:
+                            _record(rec)
+                            other = rec.get("otherUrn")
+                            if not other or other in anchor_set:
+                                continue
+                            discovered.add(other)
+                            if direction == "up":
+                                upstream_urns.add(other)
+                                depth_up[other] = None
+                            else:
+                                downstream_urns.add(other)
+                                depth_down[other] = None
+                    stopped_after = chunk[-1]
+
+                # The card's contents are walked in urn order, so an
+                # unfinished page resumes exactly where it stopped. The
+                # anchors it never reached do NOT ship: a child shipped
+                # without its lineage is a row the reader would read as
+                # "nothing flows here".
+                if drill and stopped_after is not None and stopped_after != anchor_urns[-1]:
+                    walked = set(anchor_urns[:anchor_urns.index(stopped_after) + 1])
+                    discovered -= (anchor_set - walked)
+                    next_child_after = stopped_after
+
+        # ---- the rollup-less container focus ---------------------------
+        # A container that carries no lineage of its own and has no rollup
+        # standing in for it (the pipeline estates: Roots ⊃ Node, lineage
+        # only at the leaves). Its flow lives on its DESCENDANTS, so seed
+        # from those and take their hop — the raw depth-1 closure around
+        # the focus subtree. Only for a coarse first page: a drill already
+        # asks about children, and a cursor page is draining a known hub.
+        if (
+            not drill and after_cursor is None and child_after is None
+            and not edges_by_id and ctypes and ltypes
+            and truncation_reason is None
+        ):
+            seed, _seed_capped, _next = await self._collect_lineage_seed(
+                urn, anchor_label, ltypes, ctypes, max(1, page_size),
+                max(0.6, min(1.5, deadline - time.monotonic())),
+            )
+            seed = [(u, lbl) for u, lbl in seed if u != urn]
+            if seed:
+                seed_labels = {u: lbl for u, lbl in seed}
+                seed_urns_list = [u for u, _ in seed]
+                hop_timeout = max(0.6, min(1.5, (deadline - time.monotonic()) / 2))
+                hop_limit = max(1, len(seed_urns_list)) * CLOSURE_LAZY_EDGES_PER_ANCHOR
+                directions = []
+                coros = []
+                if want_up:
+                    directions.append("up")
+                    coros.append(self._expand_raw_lineage_set(
+                        seed_urns_list, seed_labels, "incoming", ltypes,
+                        hop_limit, hop_timeout,
+                    ))
+                if want_down:
+                    directions.append("down")
+                    coros.append(self._expand_raw_lineage_set(
+                        seed_urns_list, seed_labels, "outgoing", ltypes,
+                        hop_limit, hop_timeout,
+                    ))
+                results = await asyncio.gather(*coros) if coros else []
+                seed_set = set(seed_urns_list)
+                for direction, recs in zip(directions, results):
+                    if len(recs) >= hop_limit:
+                        cut = cut_up if direction == "up" else cut_down
+                        cut.update(dict.fromkeys(seed_urns_list))
+                    for rec in recs:
+                        _record(rec)
+                        other = rec.get("otherUrn")
+                        if not other or other in seed_set or other == urn:
+                            continue
+                        discovered.add(other)
+                        if direction == "up":
+                            upstream_urns.add(other)
+                            depth_up[other] = None
+                        else:
+                            downstream_urns.add(other)
+                            depth_down[other] = None
+                # A SEED THAT FOUND NOTHING IS NOT A RESULT. The seeds are a
+                # search for where the focus's flow actually lives, not a
+                # picture in their own right — shipping the ones with no hop
+                # in the asked direction would put a wall of bare leaves on
+                # a board whose answer is "nothing flows that way".
+                endpoints = {e.source_urn for e in edges_by_id.values()}
+                endpoints |= {e.target_urn for e in edges_by_id.values()}
+                discovered |= (seed_set & endpoints)
+
+        # ---- hydrate + place -------------------------------------------
+        nodes_by_urn: Dict[str, GraphNode] = {}
+        try:
+            hydrated = await self.get_nodes_batch(list(discovered))
+            nodes_by_urn = {n.urn: n for n in hydrated if n}
+        except Exception:
+            truncation_reason = truncation_reason or "nodes_failed"
+
+        # EVERY chain, ALWAYS. A partner the client cannot anchor is a
+        # partner it drops — and then counts as "outside this view", which
+        # is the one lie a lazy trace must not tell about its own results.
+        #
+        # THE CHAINS ARE THE ANSWER — the pair-fetch is not run here. The
+        # eager walk decorates each chain link with the graph's real edge id
+        # and type via `_fetch_containment_edges`; MEASURED on the 2.08M-node
+        # estate that decoration is `MATCH (s)-[:HAS]->(t) WHERE s.urn IN …
+        # AND t.urn IN …` — UNLABELED, so a full scan per 400-pair chunk:
+        # 9 chunks, 0.6–1.5 s each, **7.7 s of a 7.8 s drill**, against a
+        # 300 ms budget. Nothing in the trace overlay reads a containment
+        # edge's id or type (it nests by source/target and never writes the
+        # store), so the decoration buys nothing and costs the whole budget.
+        # The edges are marked `synthesized` exactly as the eager walk marks
+        # its own fallback ones, so a consumer that DID need a real edge can
+        # still tell.
+        containment_edges_list: List[GraphEdge] = []
+        if ctypes and nodes_by_urn:
+            try:
+                chains = await self._compute_and_store_ancestors_bulk(list(nodes_by_urn.keys()))
+                seen_anc: Set[str] = set()
+                ancestor_urns: List[str] = []
+                for chain in chains.values():
+                    for ancestor in chain or []:
+                        if ancestor and ancestor not in seen_anc:
+                            seen_anc.add(ancestor)
+                            ancestor_urns.append(ancestor)
+                new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+                if new_ancestors:
+                    for n in await self.get_nodes_batch(new_ancestors):
+                        if n:
+                            nodes_by_urn[n.urn] = n
+                held = set(nodes_by_urn.keys())
+                pairs: Set[Tuple[str, str]] = set()
+                for child_urn, chain in (chains or {}).items():
+                    prev = child_urn
+                    for ancestor in chain or []:
+                        if ancestor in held and prev in held:
+                            pairs.add((ancestor, prev))
+                        prev = ancestor
+                containment_edges_list = [
+                    GraphEdge(
+                        id=f"containment:{parent}>{child}",
+                        sourceUrn=parent, targetUrn=child,
+                        edgeType=ctypes[0],
+                        properties={"synthesized": True},
+                    )
+                    for parent, child in sorted(pairs)
+                ]
+            except Exception:
+                truncation_reason = truncation_reason or "ancestors_failed"
+
+        def _frontier(
+            candidates: Dict[str, None], cut: Dict[str, None],
+        ) -> List[TraceFrontierNode]:
+            out: List[TraceFrontierNode] = []
+            for u in dict.fromkeys([*cut, *candidates]):
+                if u == paged_anchor:
+                    out.append(TraceFrontierNode(urn=u, nextCursor=paged_cursor))
+                    continue
+                out.append(TraceFrontierNode(urn=u, nextCursor="e:0" if u in cut else None))
+            return out
+
+        return TraceClosureResult(
+            nodes=list(nodes_by_urn.values()),
+            edges=list(edges_by_id.values()),
+            containmentEdges=containment_edges_list,
+            upstreamUrns=upstream_urns,
+            downstreamUrns=downstream_urns,
+            focus=TraceFocus(
+                urn=urn,
+                level=0,
+                entityType=(anchor_label or "unknown"),
+            ),
+            effectiveLevel=0,
+            isInherited=False,
+            inheritedFromUrn=None,
+            truncated=(truncation_reason is not None),
+            truncationReason=truncation_reason,
+            frontierUp=_frontier(depth_up, cut_up),
+            frontierDown=_frontier(depth_down, cut_down),
+            # A FULL children page is not a truncation — it is a page with a
+            # cursor on it. `seedTruncated` stays the honest flag it always
+            # was ("there are more contents"), and the driver reads
+            # `seedCursor` and asks again.
+            seedTruncated=next_child_after is not None,
+            seedCursor=(f"s:{next_child_after}" if next_child_after else None),
+        )
+
     async def expand_aggregated(
         self,
         source_urn: str,
@@ -8507,6 +9027,12 @@ class FalkorDBProvider(GraphDataProvider):
                 + where_clause
                 + f"RETURN {source_var}.urn AS sourceUrn, {target_var}.urn AS targetUrn, "
                 "id(r) AS edgeId, type(r) AS edgeType, "
+                # The rollup lane's own count of the flows an :AGGREGATED
+                # edge summarises. NULL on a raw hop; every existing caller
+                # ignores it. The lazy trace is what draws with it — a
+                # rollup wire without its weight is a line with no number
+                # on it, which is the whole point of a coarse statement.
+                "r.weight AS weight, "
                 "o.urn AS otherUrn, labels(o)[0] AS otherLabel "
                 "LIMIT $limit"
             )
@@ -8542,8 +9068,9 @@ class FalkorDBProvider(GraphDataProvider):
                         "targetUrn": row[1],
                         "edgeId": eid,
                         "edgeType": str(row[3]) if row[3] else ltypes[0],
-                        "otherUrn": row[4],
-                        "otherLabel": row[5],
+                        "weight": row[4],
+                        "otherUrn": row[5],
+                        "otherLabel": row[6],
                     })
                     if len(out) >= limit:
                         return out
@@ -8805,7 +9332,8 @@ class FalkorDBProvider(GraphDataProvider):
             f"MATCH (f{label_clause} {{urn: $urn}}){arrow}(o) "
             "WHERE id(r) >= $after "
             f"RETURN id(r) AS edgeId, {source_expr} AS sourceUrn, {target_expr} AS targetUrn, "
-            "type(r) AS edgeType, o.urn AS otherUrn, labels(o)[0] AS otherLabel "
+            "type(r) AS edgeType, r.weight AS weight, "
+            "o.urn AS otherUrn, labels(o)[0] AS otherLabel "
             "ORDER BY id(r) "
             "LIMIT $limit"
         )
@@ -8838,8 +9366,9 @@ class FalkorDBProvider(GraphDataProvider):
                     "targetUrn": row[2],
                     "edgeId": str(raw_eid) if raw_eid is not None else f"raw-{row[1]}-{row[2]}",
                     "edgeType": str(row[3]) if row[3] else ltypes[0],
-                    "otherUrn": row[4],
-                    "otherLabel": row[5],
+                    "weight": row[4],
+                    "otherUrn": row[5],
+                    "otherLabel": row[6],
                 })
                 if eid_int is not None:
                     last_edge_id = eid_int

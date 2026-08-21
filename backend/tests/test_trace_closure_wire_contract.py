@@ -117,6 +117,10 @@ def test_trace_closure_request_alias_round_trip():
         "excludeUrns": ["x1"],
         "afterCursor": "e:123",
         "seedCursor": None,
+        # The lazy path's two fields ride the same round trip — they have
+        # no snake/camel split of their own, and this dump is exhaustive.
+        "grain": None,
+        "drill": False,
     }
     from_alias = TraceClosureRequest.model_validate(alias_payload)
 
@@ -131,6 +135,8 @@ def test_trace_closure_request_alias_round_trip():
         "exclude_urns": ["x1"],
         "after_cursor": "e:123",
         "seed_cursor": None,
+        "grain": None,
+        "drill": False,
     }
     from_snake = TraceClosureRequest.model_validate(snake_payload)
 
@@ -537,3 +543,159 @@ def test_a_source_with_any_real_type_still_filters_the_synthetic_one():
     eng = _engine_with_ontology(provider, _OntologyWithSyntheticTypes())
     _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate({"urn": "u1"})))
     assert "AGGREGATED" not in provider.calls[0]["lineage_edge_types"]
+
+
+# ── The LAZY path: grain / drill ────────────────────────────────────────
+#
+# The 2026-08-21 ruling ("no limits; lazy-loaded") gave the closure request
+# two more fields and the engine one more branch. `grain='coarse'` is the
+# first paint, `drill=True` is one expansion, and both are answered by the
+# provider's `trace_closure_lazy` — one hop, one grain, cursors instead of
+# caps. Everything below pins that seam: the fields themselves, which
+# provider method the engine reaches for, what it hands over, and — the one
+# that matters most — that a provider WITHOUT the lazy path still gets a
+# working (eager) trace rather than a 501.
+
+
+def test_grain_and_drill_default_to_the_eager_walk():
+    req = TraceClosureRequest(urn="u")
+    assert req.grain is None
+    assert req.drill is False
+
+
+def test_grain_accepts_only_coarse_and_fine():
+    for good in ("coarse", "fine"):
+        assert TraceClosureRequest.model_validate({"urn": "u", "grain": good}).grain == good
+    with pytest.raises(ValidationError):
+        TraceClosureRequest.model_validate({"urn": "u", "grain": "coarsest"})
+
+
+def test_grain_and_drill_travel_by_alias():
+    req = TraceClosureRequest.model_validate({"urn": "u", "grain": "coarse", "drill": True})
+    assert req.grain == "coarse" and req.drill is True
+    assert req.model_dump(by_alias=True)["grain"] == "coarse"
+    assert req.model_dump(by_alias=True)["drill"] is True
+
+
+class _CapturingLazyProvider(_CapturingClosureProvider):
+    """Both entry points, so a test can prove WHICH one the engine chose."""
+
+    def __init__(self):
+        super().__init__()
+        self.lazy_calls = []
+
+    async def trace_closure_lazy(self, **kwargs):
+        self.lazy_calls.append(kwargs)
+        return TraceClosureResult(
+            nodes=[], edges=[], containmentEdges=[],
+            upstreamUrns=set(), downstreamUrns=set(),
+            focus=TraceFocus(urn=kwargs["urn"], level=0, entityType="x"),
+            effectiveLevel=0, isInherited=False, inheritedFromUrn=None,
+            truncated=False, truncationReason=None,
+        )
+
+
+def test_coarse_grain_goes_to_the_lazy_path():
+    provider = _CapturingLazyProvider()
+    eng = _make_engine(provider)
+    _run(ContextEngine.trace_closure(
+        eng, TraceClosureRequest.model_validate({"urn": "u1", "grain": "coarse"}),
+    ))
+    assert len(provider.lazy_calls) == 1
+    assert provider.calls == [], "the eager walk must not also run"
+
+
+def test_drill_goes_to_the_lazy_path_at_any_grain():
+    provider = _CapturingLazyProvider()
+    eng = _make_engine(provider)
+    _run(ContextEngine.trace_closure(
+        eng, TraceClosureRequest.model_validate({"urn": "card", "drill": True}),
+    ))
+    assert len(provider.lazy_calls) == 1
+    assert provider.lazy_calls[0]["drill"] is True
+
+
+def test_a_drill_anchors_on_the_card_named_in_seed_urns():
+    """The walk contract already spells "the card being extended" as
+    `seedUrns`; a drill keeps that spelling, and `urn` is the fallback."""
+    provider = _CapturingLazyProvider()
+    eng = _make_engine(provider)
+    _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate(
+        {"urn": "focus", "drill": True, "seedUrns": ["the-card"]},
+    )))
+    assert provider.lazy_calls[0]["urn"] == "the-card"
+
+
+def test_the_eager_walk_is_untouched_by_default():
+    provider = _CapturingLazyProvider()
+    eng = _make_engine(provider)
+    _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate({"urn": "u1"})))
+    assert provider.lazy_calls == []
+    assert len(provider.calls) == 1
+
+
+def test_max_nodes_reaches_the_lazy_path_as_a_page_size():
+    """The one place `max_nodes` still means something on this path: how
+    big a PAGE is. It cannot truncate — a full page ships a cursor."""
+    provider = _CapturingLazyProvider()
+    eng = _make_engine(provider)
+    _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate(
+        {"urn": "u1", "grain": "coarse", "maxNodes": 250},
+    )))
+    call = provider.lazy_calls[0]
+    assert call["page_size"] == 250
+    assert "max_nodes" not in call
+
+
+def test_the_lazy_path_gets_the_rollup_lane_by_name():
+    """The engine strips :AGGREGATED out of the LINEAGE types (walking
+    rollups as hops double-counts). The lazy path needs them anyway — it is
+    what states a partner at a grain the view can place — so it is handed
+    over as its own argument, not smuggled into the lineage list."""
+    provider = _CapturingLazyProvider()
+    eng = _make_engine(provider)
+    _run(ContextEngine.trace_closure(
+        eng, TraceClosureRequest.model_validate({"urn": "u1", "grain": "coarse"}),
+    ))
+    call = provider.lazy_calls[0]
+    assert call["aggregated_edge_type"] == "AGGREGATED"
+    assert "AGGREGATED" not in call["lineage_edge_types"]
+
+
+def test_direction_zeroing_applies_to_the_lazy_path_too():
+    provider = _CapturingLazyProvider()
+    eng = _make_engine(provider)
+    _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate(
+        {"urn": "u1", "grain": "coarse", "direction": "upstream"},
+    )))
+    call = provider.lazy_calls[0]
+    assert call["upstream_depth"] == 1
+    assert call["downstream_depth"] == 0
+
+
+def test_cursors_are_forwarded_to_the_lazy_path_verbatim():
+    provider = _CapturingLazyProvider()
+    eng = _make_engine(provider)
+    _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate(
+        {"urn": "u1", "grain": "coarse", "direction": "upstream", "afterCursor": "e:7"},
+    )))
+    assert provider.lazy_calls[0]["after_cursor"] == "e:7"
+
+    provider2 = _CapturingLazyProvider()
+    _run(ContextEngine.trace_closure(_make_engine(provider2), TraceClosureRequest.model_validate(
+        {"urn": "u1", "grain": "coarse", "seedCursor": "s:child-9"},
+    )))
+    assert provider2.lazy_calls[0]["seed_cursor"] == "s:child-9"
+
+
+def test_a_provider_without_the_lazy_path_still_gets_a_trace():
+    """Drafts and the versioned overlay have no lazy walk. They are small
+    by nature, so a coarse request there falls THROUGH to the eager closure
+    rather than failing — the alternative is a 501 on a working graph."""
+    provider = _CapturingClosureProvider()          # no trace_closure_lazy
+    eng = _make_engine(provider)
+    result = _run(ContextEngine.trace_closure(
+        eng, TraceClosureRequest.model_validate({"urn": "u1", "grain": "coarse"}),
+    ))
+    assert isinstance(result, TraceClosureResult)
+    assert len(provider.calls) == 1
