@@ -3680,16 +3680,17 @@ export function ContextViewCanvas({
       ? { entries: initialLensShare.entries, cursor: initialLensShare.cursor }
       : EMPTY_LENS_HISTORY
   ))
-  // Trace = the Lens walked to the ends: every trace affordance opens
-  // the lens with the full walk ON; ordinary lens entries keep the
-  // classic one-hop ⊕ walk. The legacy /trace/v2 machinery below stays
-  // wired but is no longer reachable from this canvas's entry points.
-  const [lensFullWalk, setLensFullWalk] = useState(false)
+  // USER RULING (2026-08-21): the Lens opens with Walk = FULL FLOW by
+  // default — the whole lineage, walked to the ends — and the header
+  // switch drops it to the classic one-hop ⊕ walk on request. The legacy
+  // /trace/v2 machinery below stays wired but is no longer reachable from
+  // this canvas's entry points.
+  const [lensFullWalk, setLensFullWalk] = useState(true)
   const openLensAt = useCallback((nodeId: string, fullWalk: boolean) => {
     setLensFullWalk(fullWalk)
     setLensHistory({ entries: [nodeId], cursor: 0 })
   }, [])
-  const openLens = useCallback((nodeId: string) => openLensAt(nodeId, false), [openLensAt])
+  const openLens = useCallback((nodeId: string) => openLensAt(nodeId, true), [openLensAt])
   const lensRecenter = useCallback((nodeId: string) => setLensHistory(h => lensPush(h, nodeId)), [])
   const lensBack = useCallback(() => setLensHistory(lensBackward), [])
   const lensForward = useCallback(() => setLensHistory(lensForwardStep), [])
