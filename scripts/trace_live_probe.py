@@ -223,6 +223,9 @@ class Closure:
         self.seed_cursor: Optional[str] = None
         self.seed_truncated = False
         self._first = True
+        #: Walk mode: keep the frontier LIVE (merged per response) instead of
+        #: frozen at the first page.
+        self.live_frontier = False
 
     def merge(self, res: Dict[str, Any], secs: float) -> None:
         for n in res.get("nodes") or []:
@@ -236,6 +239,12 @@ class Closure:
         if res.get("truncationReason"):
             self.truncation_reasons.append(res["truncationReason"])
         self.frontier_entries_seen += len(res.get("frontierUp") or []) + len(res.get("frontierDown") or [])
+        if self.live_frontier:
+            # WALK MODE: the frontier is state, not a report — merged the way
+            # the client merges it, so following it terminates. The response is
+            # authoritative for the anchor it was asked about (its entry goes),
+            # and every entry it DOES carry is upserted.
+            self._merge_frontier(res)
         if self._first:
             self.frontier_up = res.get("frontierUp") or []
             self.frontier_down = res.get("frontierDown") or []
@@ -243,6 +252,25 @@ class Closure:
             self.seed_truncated = bool(res.get("seedTruncated"))
             self._first = False
         self.page_times.append(secs)
+
+    def _merge_frontier(self, res: Dict[str, Any]) -> None:
+        anchor = (res.get("focus") or {}).get("urn")
+        for attr, key in (("frontier_up", "frontierUp"), ("frontier_down", "frontierDown")):
+            by_urn = {e["urn"]: e for e in getattr(self, attr)}
+            by_urn.pop(anchor, None)
+            for e in res.get(key) or []:
+                by_urn[e["urn"]] = e
+            setattr(self, attr, list(by_urn.values()))
+
+    def drop_drained(self, urns: List[str], direction: str) -> None:
+        """A bulk drain answered for every seed it carried; the response can
+        only clear the one anchor it was nominally asked about."""
+        attr = "frontier_up" if direction == "upstream" else "frontier_down"
+        drop = set(urns)
+        setattr(self, attr, [
+            e for e in getattr(self, attr)
+            if e["urn"] not in drop or e.get("nextCursor")
+        ])
 
     def merge_all(self, other: "Closure") -> None:
         """Fold a whole sub-walk (one drill and its pages) into this one."""
@@ -415,6 +443,113 @@ def run_walk(api: Api, ws: str, ds: str, view: Optional[str], urn: str,
 # --------------------------------------------------------------------------- #
 # Verdict
 # --------------------------------------------------------------------------- #
+#: Seeds one bulk drain carries; the wire caps `seedUrns` at 500.
+BULK_SEEDS = 200
+
+
+def run_full_walk(api: Api, path: str, focus: str, acc: Closure,
+                  max_requests: int, concurrency: int = 4) -> Tuple[int, float]:
+    """The DRIVER's background walk, over HTTP: after the coarse paint, one
+    fine hop from the focus, then every frontier entry followed — paged where
+    it carries a cursor, re-rooted where it does not — until none remain.
+
+    Sequential here rather than 4-wide (the probe is a script, not the
+    driver); `concurrency` is reported so the wall time can be read as what
+    the browser would see. Returns (requests, seconds).
+    """
+    started = time.perf_counter()
+    requests = 0
+    fired: Dict[str, int] = {}
+    failed: set = set()
+    #: Boundaries finished with — the response that answered them was not
+    #: truncated. `excludeUrns` is capped at 2,000 by the wire, so past that
+    #: the server re-files nodes the client already holds; without this the
+    #: frontier grows faster than the walk drains it.
+    settled: set = set()
+
+    def known() -> List[str]:
+        return list(acc.nodes.keys())[:2000]
+
+    def fire(urns: List[str], direction: str, cursor: Optional[str]) -> None:
+        nonlocal requests
+        body: Dict[str, Any] = {
+            "urn": urns[0],
+            "direction": direction,
+            "upstreamDepth": 1 if direction == "upstream" else 0,
+            "downstreamDepth": 1 if direction == "downstream" else 0,
+        }
+        if cursor:
+            body["afterCursor"] = cursor
+        else:
+            # ONE request for the whole ring — the server walks a SET.
+            body["seedUrns"] = urns[:BULK_SEEDS]
+            body["excludeUrns"] = known()
+        try:
+            res, secs = api.post(path, json=body)
+        except Exception as exc:                       # noqa: BLE001 - operator-facing
+            for u in urns:
+                failed.add(f"{direction}:{u}")
+            print(f"  walk       op failed [{direction} x{len(urns)}]: {str(exc)[:70]}")
+            return
+        requests += 1
+        if os.getenv("PROBE_WALK_DEBUG") and requests <= 12:
+            print(f"    op[{requests}] seeds={len(urns)} cursor={cursor} -> "
+                  f"nodes={len(res.get('nodes') or [])} edges={len(res.get('edges') or [])} "
+                  f"fUp={len(res.get('frontierUp') or [])} fDn={len(res.get('frontierDown') or [])} "
+                  f"trunc={res.get('truncationReason')}")
+        acc.merge(res, secs)
+        if not res.get("truncated"):
+            for u in urns:
+                settled.add(f"{direction}:{u}")
+        if len(urns) > 1:
+            acc.drop_drained(urns, direction)
+
+    # The focus's own fine hop first — the coarse paint answered it at card
+    # grain, so the raw hops into its contents have not been asked for.
+    fire([focus], "upstream", None)
+    fire([focus], "downstream", None)
+
+    while requests < max_requests:
+        ops: List[Tuple[List[str], str, Optional[str]]] = []
+        cursor_ops: List[Tuple[List[str], str, Optional[str]]] = []
+        for key, direction in (("frontier_up", "upstream"), ("frontier_down", "downstream")):
+            bulk: List[str] = []
+            for entry in getattr(acc, key) or []:
+                urn, cursor = entry["urn"], entry.get("nextCursor")
+                op_key = f"{direction}:{urn}:{cursor or 'root'}"
+                if f"{direction}:{urn}" in failed or f"{direction}:{urn}" in settled:
+                    continue
+                if fired.get(op_key, -1) >= len(acc.nodes):
+                    continue
+                if cursor:
+                    fired[op_key] = len(acc.nodes)
+                    cursor_ops.append(([urn], direction, cursor))
+                elif len(bulk) < BULK_SEEDS:
+                    fired[op_key] = len(acc.nodes)
+                    bulk.append(urn)
+            if bulk:
+                ops.append((bulk, direction, None))
+        # Bulk drains first: a truncated hop files its whole ring as resumable,
+        # and letting those one-node cursor pages go first starves the drains
+        # that are actually covering the flow.
+        ops = (ops + cursor_ops)[:max(concurrency, len(ops))]
+        if not ops:
+            break
+        for urns, direction, cursor in ops:
+            fire(urns, direction, cursor)
+        if requests % 25 < concurrency:
+            print(f"  walk       {requests:>5} requests   {len(acc.nodes):>6} nodes   "
+                  f"{len(acc.edges):>6} edges   frontier {len(acc.frontier_up)}/{len(acc.frontier_down)}   "
+                  f"{(time.perf_counter() - started):.0f}s")
+
+    elapsed = time.perf_counter() - started
+    done = not (acc.frontier_up or acc.frontier_down)
+    print(f"  walk       {'EXHAUSTED' if done else 'BUDGET SPENT'} after {requests} requests, "
+          f"{elapsed:.1f}s — {len(acc.nodes)} nodes, {len(acc.edges)} edges, "
+          f"frontier {len(acc.frontier_up)}/{len(acc.frontier_down)} left")
+    return requests, elapsed
+
+
 def report(api: Api, acc: Closure, focus: str, ws: str, ds: str,
            view: Optional[str], container_types: List[str],
            verify_parents: int) -> None:
@@ -549,6 +684,9 @@ def main() -> None:
                     help="after the first paint, drill this card (repeatable, in order)")
     ap.add_argument("--journey", action="store_true",
                     help="coarse -> drill the biggest partner -> drill inside it, timed")
+    ap.add_argument("--walk", type=int, default=0, metavar="MAX_REQUESTS",
+                    help="after the coarse paint, run the driver's BACKGROUND walk to "
+                         "exhaustion (or this many requests) and report what it reached")
     args = ap.parse_args()
 
     email, password = _read_credentials(args.env_file)
@@ -575,7 +713,7 @@ def main() -> None:
     print()
 
     started = time.perf_counter()
-    if args.grain == "coarse" or args.drill or args.journey:
+    if args.grain == "coarse" or args.drill or args.journey or args.walk:
         path = f"/api/v1/{src['workspaceId']}/graph/trace/closure?dataSourceId={src['dataSourceId']}"
         if view:
             path += f"&viewId={view}"
@@ -583,6 +721,11 @@ def main() -> None:
             api, path, args.urn, args.max_nodes, args.pages, drill=False, label="coarse",
         )
         timings = [("coarse", coarse_ms * 1000, coarse_reqs)]
+
+        if args.walk:
+            acc.live_frontier = True
+            walk_reqs, walk_secs = run_full_walk(api, path, args.urn, acc, args.walk)
+            timings.append(("background walk to exhaustion", walk_secs * 1000, walk_reqs))
 
         cards = list(args.drill)
         if args.journey and not cards:

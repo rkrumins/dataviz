@@ -77,6 +77,16 @@ const MAX_PAGES_PER_OP = 200
  *  full walk uses the same width, which is part of why the two reach the
  *  same model. */
 const WALK_CONCURRENCY = 4
+/** Seeds ONE bulk drain may carry. The wire caps `seedUrns` at 500.
+ *
+ *  A frontier entry that ran out of DEPTH is re-rooted with `seedUrns`, and
+ *  the server walks a SET — so a hundred of them is one request, not a
+ *  hundred. MEASURED on the 2.08M-node estate before this: 577 requests and
+ *  15 s had reached 1,494 nodes with the frontier still GROWING (284 entries),
+ *  because each op brought back two or three nodes and filed them as two or
+ *  three more entries. One request per boundary is the request storm the
+ *  spec's budget exists to forbid. */
+const WALK_BULK_SEEDS = 200
 /** FAILSAFE, NOT A BUDGET. Every op either clears its frontier entry or
  *  advances its cursor, so a healthy walk terminates on its own; this exists
  *  only so a server bug cannot become an unbounded request loop, and it sits
@@ -129,9 +139,11 @@ const IDLE: DriverState = {
     inFlight: EMPTY_SET, drilled: EMPTY_SET, requests: 0, walkError: null,
 }
 
-/** One frontier op: page it when it carries a cursor, extend from it when it
- *  does not. Exactly the two shapes `useLensWalk`'s full walk fires. */
-interface WalkOp { urn: string; dir: 'up' | 'down'; cursor: string | null }
+/** One frontier op. A CURSOR op pages one anchor's adjacency onward; a BULK
+ *  op re-roots the walk on every depth-exhausted boundary it can carry at
+ *  once. `urns` is the whole seed set; `urn` is its first member, which is
+ *  what the request is nominally anchored on. */
+interface WalkOp { urn: string; urns: string[]; dir: 'up' | 'down'; cursor: string | null }
 
 /** URNs the client already holds. Budget steering for `excludeUrns`, never
  *  correctness — the merge dedupes regardless. Mirrors the Lens's own helper
@@ -150,10 +162,13 @@ function walkRequest(op: WalkOp, model: LensWalkModel): TraceClosureRequest {
         ? { urn: op.urn, direction: op.dir === 'up' ? 'upstream' : 'downstream', ...depth, afterCursor: op.cursor }
         : {
             urn: op.urn, direction: op.dir === 'up' ? 'upstream' : 'downstream', ...depth,
-            // A cursor-less entry ran out of DEPTH, not of graph: re-root the
-            // walk on it, seeded with the node itself — the server resolves
-            // that seed down to whatever grain carries lineage beneath it.
-            seedUrns: [op.urn],
+            // Cursor-less entries ran out of DEPTH, not of graph: re-root the
+            // walk on them, seeded with the nodes themselves — the server
+            // resolves each seed down to whatever grain carries lineage
+            // beneath it, and it walks the whole SET in one hop.
+            seedUrns: op.urns,
+            // Budget steering, not correctness — but it is also what stops the
+            // server naming rings the client has already drained.
             excludeUrns: knownUrns(model).slice(0, 2000),
         }
 }
@@ -169,22 +184,45 @@ function opKey(op: WalkOp): string {
 function collectWalkOps(
     model: LensWalkModel,
     failed: ReadonlySet<string>,
+    settled: ReadonlySet<string>,
     firedAt: ReadonlyMap<string, number>,
     limit: number,
 ): WalkOp[] {
     const ops: WalkOp[] = []
+    const cursors: WalkOp[] = []
     const take = (list: LensWalkModel['frontierUp'], dir: 'up' | 'down') => {
+        const bulk: string[] = []
         for (const fr of list) {
-            if (ops.length >= limit) return
-            const op: WalkOp = { urn: fr.urn, dir, cursor: fr.nextCursor }
-            if (failed.has(`${dir}:${fr.urn}`)) continue
-            if ((firedAt.get(opKey(op)) ?? -1) >= model.nodes.length) continue
-            ops.push(op)
+            if (failed.has(`${dir}:${fr.urn}`) || settled.has(`${dir}:${fr.urn}`)) continue
+            if (fr.nextCursor) {
+                // A half-read anchor is its own question: its cursor names
+                // where to resume, and no other node shares it. Held back —
+                // see below.
+                const op: WalkOp = { urn: fr.urn, urns: [fr.urn], dir, cursor: fr.nextCursor }
+                if ((firedAt.get(opKey(op)) ?? -1) >= model.nodes.length) continue
+                cursors.push(op)
+                continue
+            }
+            const key = `${dir}:${fr.urn}:root`
+            if ((firedAt.get(key) ?? -1) >= model.nodes.length) continue
+            if (bulk.length < WALK_BULK_SEEDS) bulk.push(fr.urn)
         }
+        // ONE request for the whole ring. The server walks a set, so asking it
+        // a hundred times about a hundred boundaries is a hundred round trips
+        // spent on one hop.
+        if (bulk.length > 0) ops.push({ urn: bulk[0], urns: bulk, dir, cursor: null })
     }
     take(model.frontierUp, 'up')
     take(model.frontierDown, 'down')
-    return ops
+
+    // BULK FIRST, CURSORS AFTER, and that ordering is the whole difference
+    // between a walk and a crawl. A hop that trips the server's node budget
+    // files its ENTIRE ring as resumable (the server cannot tell which anchor
+    // lost rows), so one truncated response can leave a thousand `e:0`
+    // cursors behind — each worth one node or two. Letting those go first
+    // starves the bulk drains that are actually covering the flow: MEASURED
+    // on the 2.08M-node estate, 24 requests bought 35 nodes that way.
+    return [...ops, ...cursors].slice(0, Math.max(limit, ops.length))
 }
 
 /** One hop, one grain, both directions — the shape every lazy request has. */
@@ -315,6 +353,18 @@ export function useTraceDriver(
     /** Frontier ops that FAILED. Never auto-retried — the walk stops honestly
      *  instead of looping on a broken hop; `retry()` clears them. */
     const failedOps = useRef<Set<string>>(new Set())
+    /** Boundaries this walk is FINISHED with: the response that answered them
+     *  was not truncated, so there is nothing left behind them and a later
+     *  response naming them again is telling us what we know.
+     *
+     *  This is what makes a big walk converge. `excludeUrns` is capped at
+     *  2,000 by the wire, so once the model is bigger than that the server
+     *  cannot know what the client holds and re-files nodes it has already
+     *  shipped. MEASURED on the 2.08M-node estate, a 709-child container:
+     *  without this the frontier GREW from 2,444 to 3,883 entries over 800
+     *  requests while the model crawled 1.5 nodes per request. With it the
+     *  same walk finishes. */
+    const settledOps = useRef<Set<string>>(new Set())
     /** Op key → how big the model was when it was last fired.
      *
      *  A frontier entry the walk has drained can be RE-REPORTED by a later
@@ -347,6 +397,7 @@ export function useTraceDriver(
         inFlightRef.current = new Set()
         failedOps.current = new Set()
         firedAt.current = new Map()
+        settledOps.current = new Set()
         requestsRef.current = 0
         return generation.current
     }, [])
@@ -441,6 +492,26 @@ export function useTraceDriver(
         }
     }, [provider, absorb])
 
+    /** Take the drained boundaries off the frontier. `mergeClosures` clears
+     *  the one anchor its ctx names; a BULK drain answered for all of its
+     *  seeds at once, and an entry left standing for a boundary already walked
+     *  is a request the loop would spend again every round. */
+    const dropDrained = useCallback((gen: number, urns: string[], dir: 'up' | 'down'): void => {
+        const model = modelRef.current
+        if (gen !== generation.current || !model) return
+        const drop = new Set(urns)
+        // A CURSORED entry survives: it says the anchor is half-read, which a
+        // re-rooting drain did not answer.
+        const keep = (f: { urn: string; nextCursor: string | null }) => !drop.has(f.urn) || !!f.nextCursor
+        const next: LensWalkModel = {
+            ...model,
+            frontierUp: dir === 'up' ? model.frontierUp.filter(keep) : model.frontierUp,
+            frontierDown: dir === 'down' ? model.frontierDown.filter(keep) : model.frontierDown,
+        }
+        modelRef.current = next
+        setState(prev => (prev.focusUrn === null ? prev : { ...prev, model: next }))
+    }, [])
+
     /**
      * THE BACKGROUND WALK — the whole lineage, hands-free.
      *
@@ -471,7 +542,7 @@ export function useTraceDriver(
         // them: on the CFO estate the three column-to-column flows that ARE
         // the lineage. This is also the Lens's very first request, which is
         // what makes the two engines converge rather than merely agree.
-        const seedOp: WalkOp = { urn: focus, dir: 'up', cursor: null }
+        const seedOp: WalkOp = { urn: focus, urns: [focus], dir: 'up', cursor: null }
         if (!firedAt.current.has(opKey(seedOp))) {
             firedAt.current.set(opKey(seedOp), modelRef.current?.nodes.length ?? 0)
             requestsRef.current += 1
@@ -505,19 +576,35 @@ export function useTraceDriver(
             if (!model) return
             if (requestsRef.current >= WALK_FAILSAFE_REQUESTS) return
             const ops = collectWalkOps(
-                model, failedOps.current, firedAt.current, WALK_CONCURRENCY,
+                model, failedOps.current, settledOps.current, firedAt.current, WALK_CONCURRENCY,
             )
             if (ops.length === 0) return
-            for (const op of ops) firedAt.current.set(opKey(op), model.nodes.length)
+            for (const op of ops) {
+                for (const u of op.urns) {
+                    firedAt.current.set(`${op.dir}:${u}:${op.cursor ?? 'root'}`, model.nodes.length)
+                }
+            }
 
             requestsRef.current += ops.length
             await Promise.all(ops.map(async op => {
                 try {
                     const res = await fetchClosure.call(provider, walkRequest(op, model), { signal })
-                    absorb(gen, res, { rootUrn: op.urn, direction: op.dir })
+                    if (!absorb(gen, res, { rootUrn: op.urn, direction: op.dir })) return
+                    // A response that was NOT cut short answered its seeds in
+                    // full: those boundaries are finished with, whatever a
+                    // later response says about them. A truncated one is left
+                    // to the progress rule, because it genuinely has more.
+                    if (!res.truncated) {
+                        for (const u of op.urns) settledOps.current.add(`${op.dir}:${u}`)
+                    }
+                    // `mergeClosures` clears the ONE anchor it was told about;
+                    // a bulk drain answered for all of its seeds, and an entry
+                    // left standing for a boundary already walked is a request
+                    // the loop would spend again on every round.
+                    if (op.urns.length > 1) dropDrained(gen, op.urns, op.dir)
                 } catch (err) {
                     if (gen !== generation.current) return
-                    failedOps.current.add(`${op.dir}:${op.urn}`)
+                    for (const u of op.urns) failedOps.current.add(`${op.dir}:${u}`)
                     setState(prev => (prev.focusUrn === null ? prev : {
                         ...prev,
                         walkError: err instanceof Error ? err.message : String(err),
@@ -525,7 +612,7 @@ export function useTraceDriver(
                 }
             }))
         }
-    }, [provider, absorb])
+    }, [provider, absorb, dropDrained])
 
     // ---- the session: coarse, then the walk behind it -------------------
     useEffect(() => {
