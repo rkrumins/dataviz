@@ -1171,3 +1171,94 @@ async def test_workspace_reporting_off_locks_rows_as_before(db_session):
     by_id = {r["workspaceId"]: r for r in rows}
     assert by_id["ws_quiet"]["redacted"] is True
     assert by_id["ws_quiet"]["views"] is None
+
+
+# ── The leak sweep ──────────────────────────────────────────────────
+#
+# Every other redaction test asserts on a FIELD, which only ever proves the
+# fields somebody remembered to check. This one serialises the whole document
+# and searches it for identifiers the viewer has no business receiving, so a
+# leak through a field nobody thought about still fails the build.
+#
+# It exists because of a real one: `createdBy` was added to the popular-views
+# rows so the redactor could honour a creator's own reach, and both branches
+# spread `**row`, so every redacted view shipped its author's user id to a
+# reader who could not see the view's name.
+
+async def test_a_redacted_document_contains_no_foreign_identifier(db_session):
+    await _seed(db_session)
+    db_session.add(ProductEventORM(
+        id="pev_probe", event_type="view.opened", actor_id="usr_old",
+        payload=json.dumps({"viewId": "view_c"}), created_at=_iso(1)))
+    await db_session.commit()
+
+    # usr_new2 is a member of nothing and sees the strictest level.
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW,
+        scope=_scope(privacy=PrivacyMode.STRICT, user_id="usr_new2"),
+    )
+    blob = json.dumps(doc)
+
+    forbidden = {
+        "usr_old": "another person's user id",
+        "usr_new1": "another person's user id",
+        "old@x.io": "another person's email",
+        "n1@x.io": "another person's email",
+        "Gamma": "the name of a view in a workspace they cannot open",
+        "Quiet": "the name of a workspace they are not in",
+    }
+    leaked = {k: why for k, why in forbidden.items() if k in blob}
+    assert not leaked, f"redacted document leaked: {leaked}"
+
+
+async def test_the_sweep_would_catch_a_leak(db_session):
+    """The guard above is only worth having if it can fail.
+
+    A privileged document contains exactly the identifiers the redacted one
+    must not, so running the same search over it proves the search works
+    rather than that the string happened to be absent.
+    """
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_PRIVILEGED)
+    blob = json.dumps(doc)
+    assert "usr_old" in blob and "old@x.io" in blob, (
+        "the sweep's search terms no longer appear even when unredacted, so "
+        "the sweep proves nothing — update the fixtures with it"
+    )
+
+
+async def test_the_http_response_is_clean_not_just_the_repo(
+    test_client, db_session, _flag_cache,
+):
+    """The repo's return value is not what reaches a browser.
+
+    Everything above tests the document `platform_summary` builds. This tests
+    the bytes the endpoint actually sends, which is the only surface an
+    attacker sees — and the only one a serialisation change could reopen.
+    """
+    await _seed(db_session)
+    _prime_flag(analyticsPublicEnabled=True, analyticsPrivacyMode="strict")
+
+    res = await _as(test_client, ())
+    assert res.status_code == 200
+    body = res.text
+
+    for secret, why in {
+        "usr_old": "another person's user id",
+        "old@x.io": "another person's email",
+        "Gamma": "a view in a workspace they cannot open",
+        "Quiet": "a workspace they are not in",
+        "createdBy": "an internal field that should never serialise",
+    }.items():
+        assert secret not in body, f"response leaked {why}: {secret!r}"
+
+
+async def test_workspace_rows_carry_no_hidden_fields(db_session):
+    """The table endpoint gets the same sweep as the summary."""
+    await _seed(db_session)
+    rows = await analytics_repo.workspace_rows(
+        db_session, days=7, now=NOW, scope=_scope(visible_workspaces=frozenset()))
+    blob = json.dumps(rows)
+    assert "Quiet" not in blob and "Live" not in blob
+    assert "usr_" not in blob, "a workspace row carried a user id"

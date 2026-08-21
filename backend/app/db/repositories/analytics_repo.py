@@ -753,12 +753,46 @@ def _redact_workspace_row(row: dict) -> dict:
     }
 
 
+#: Fields of an internal view row that may reach a non-privileged client.
+#: An ALLOW-list, not a deny-list, and that is the whole point: the previous
+#: version spread ``**row`` and shipped whatever the query happened to select,
+#: so adding ``createdBy`` for the creator-reach check silently published every
+#: redacted view's author. A field added to the query in future is withheld by
+#: default until somebody puts it here on purpose.
+_PUBLIC_VIEW_FIELDS = (
+    "viewId", "name", "workspaceId", "visibility", "viewType",
+    "opens", "uniqueViewers", "favourites",
+)
+
+
+#: Same discipline as ``_PUBLIC_VIEW_FIELDS``: name what may leave, so a column
+#: added to the ranking query later cannot ride out with it.
+_PUBLIC_WORKSPACE_ENTRY_FIELDS = ("workspaceId", "name", "activity", "opens")
+
+
+def _redact_workspace_entry(entry: dict, scope) -> dict:
+    """One row of the most-active-workspaces ranking."""
+    public = {k: entry.get(k) for k in _PUBLIC_WORKSPACE_ENTRY_FIELDS}
+    if scope.can_see(entry.get("workspaceId")):
+        return {**public, "canOpen": scope.can_open(entry.get("workspaceId"))}
+    # The counts stay: an anonymous ranking position names nothing, and
+    # dropping the row would make the leaderboard disagree with the totals.
+    return {**public, "name": REDACTED_WORKSPACE, "redacted": True, "canOpen": False}
+
+
 def _redact_view_row(row: dict, scope) -> dict:
     """A popular view. Its NAME leaks what a private workspace is working on —
     unless the reader could already open it, which is more often than the first
     version of this assumed. ``can_see_view`` mirrors
     ``view_access.can_read_view``: enterprise-published views are readable by
-    anyone, and a creator keeps reach to their own work."""
+    anyone, and a creator keeps reach to their own work.
+
+    ``createdBy`` is read here and never returned. It exists on the internal
+    row so the creator-reach rule can be applied; a user id is exactly the
+    "individual activity" the strict level withholds, so it must not survive
+    into the response even on a view the reader CAN see.
+    """
+    public = {k: row.get(k) for k in _PUBLIC_VIEW_FIELDS}
     if scope.can_see_view(
         workspace_id=row.get("workspaceId"),
         visibility=row.get("visibility"),
@@ -768,12 +802,12 @@ def _redact_view_row(row: dict, scope) -> dict:
         # enterprise-published view opens for anyone, a workspace-scoped one
         # only for a member.
         return {
-            **row,
+            **public,
             "canOpen": (row.get("visibility") == "enterprise")
             or scope.can_open(row.get("workspaceId")),
         }
     return {
-        **row,
+        **public,
         "name": REDACTED_VIEW,
         "redacted": True,
         # Counts stay: they are what makes it "popular", and they name nothing.
@@ -828,9 +862,7 @@ def redact_summary(doc: dict, scope) -> dict:
             _redact_view_row(v, scope) for v in boards.get("topViews", [])
         ],
         "topWorkspaces": [
-            {**w, "canOpen": scope.can_open(w.get("workspaceId"))}
-            if scope.can_see(w.get("workspaceId"))
-            else {**w, "name": REDACTED_WORKSPACE, "redacted": True, "canOpen": False}
+            _redact_workspace_entry(w, scope)
             for w in boards.get("topWorkspaces", [])
         ],
     }
