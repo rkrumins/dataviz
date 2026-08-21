@@ -1,5 +1,12 @@
 # Trace Overlay Rebuild — Stage 2 (Data Layer at Scale) Implementation Plan
 
+> **SUPERSEDED (2026-08-21).** Tasks 2–4 of this plan (hands-free walk, capsule, certification) were
+> replaced by the trace & lineage-focus uplift that shipped on `feature/trace-focus-resilience` the same
+> day, together with the server-side completeness contract this plan assumed but never had (degree-exact
+> prefix walk, honest cursors, no silent loss). Task 1 (containment always ships, graph-counted
+> `childCount`) stands. The record of what shipped, with the measured before/after, is
+> `docs/superpowers/plans/2026-08-21-trace-lens-uplift-certification.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the Stage 1 overlay complete at scale — every upstream and downstream hop loaded hands-free, containment always shipped, chevrons graph-counted — so a trace with 1,000+ participants on the 1.23M-node graph nests, expands and drills exactly like the CFO demo.
