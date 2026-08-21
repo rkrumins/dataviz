@@ -170,7 +170,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // inside this?", never `children.length` — the trace holds only the
   // children that carry lineage, so a table with 300 columns would offer a
   // chevron that opens onto one row, or none at all.
-  const hasChildren = isTracing ? childCount > 0 : (node.children.length > 0 || childCount > 0)
+  // In a trace the chevron means "there is lineage INSIDE": it opens only
+  // onto children that contribute (the view model's onLineage), so a card
+  // whose children carry no lineage offers no drill — the graph-wide
+  // childCount would promise rows the trace will never show.
+  const traceOnLineage = (node.data.onLineage as number) || 0
+  const hasChildren = isTracing ? traceOnLineage > 0 : (node.children.length > 0 || childCount > 0)
 
   // Advanced-search roll-up: number of matches sitting anywhere in this
   // node's subtree (N levels deep, deduped per hit). Drives the
@@ -198,7 +203,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // same statement the Lens makes and the honest invitation beside the
   // chevron: the graph-wide childCount would promise rows the trace hides,
   // and `children.length` is only whatever happens to be open.
-  const onLineageCount = (node.data.onLineage as number) || 0
+  const onLineageCount = traceOnLineage
   // TRACE TINT: a row the lineage actually runs through wears the lineage
   // accent — the same one click-highlight uses. HOSTS deliberately do not:
   // they are the containers the flow passes through, never things on it, and
