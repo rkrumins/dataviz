@@ -60,13 +60,18 @@ console.log('navigated', url.slice(0, 80) + '…')
 const samples = []
 let fullFlowClicked = false
 let fullFlowAt = 0, profiling = false, profileDone = false
-for (let i = 0; i < 420; i++) {
-  await sleep(1000)
+const SAMPLE_MS = Number(process.env.SAMPLE_MS ?? 1000)
+for (let i = 0; i < Math.round(420 * 1000 / SAMPLE_MS); i++) {
+  await sleep(SAMPLE_MS)
   for (const e of events.splice(0)) {
     if (e.method === 'Network.requestWillBeSent' && e.params.request.url.includes('/trace/closure')) {
       let body = {}
       try { body = JSON.parse(e.params.request.postData ?? '{}') } catch {}
-      requests.push({ t: Date.now() - t0, seedCursor: body.seedCursor ?? null, seeds: body.seedUrns?.length ?? 0, after: body.afterCursor ?? null, depth: [body.upstreamDepth, body.downstreamDepth], maxNodes: body.maxNodes ?? null })
+      requests.push({ id: e.params.requestId, t: Date.now() - t0, grain: body.grain ?? 'fine', seedCursor: body.seedCursor ?? null, seeds: body.seedUrns?.length ?? 0, after: body.afterCursor ?? null, depth: [body.upstreamDepth, body.downstreamDepth], maxNodes: body.maxNodes ?? null, done: null })
+    }
+    if (e.method === 'Network.loadingFinished') {
+      const r = requests.find(r => r.id === e.params.requestId)
+      if (r) r.done = Date.now() - t0
     }
     if (e.method === 'Runtime.consoleAPICalled' && e.params.type === 'error') console.log('CONSOLE ERROR:', JSON.stringify(e.params.args?.map(a => a.value ?? a.description)).slice(0, 300))
     if (e.method === 'Log.entryAdded' && e.params.entry.level === 'error') console.log('LOG ERROR:', e.params.entry.text.slice(0, 300))
@@ -120,11 +125,14 @@ for (let i = 0; i < 420; i++) {
   }
 }
 console.log('\n== requests:', requests.length)
-for (const r of requests.slice(0, 25)) console.log('  ', JSON.stringify(r))
+for (const r of requests.slice(0, 25)) console.log('  ', JSON.stringify({ ...r, id: undefined }))
 if (requests.length > 25) console.log('   …', requests.length - 25, 'more')
 console.log('\n== narration timeline (changes only):')
 let prev = null
 for (const s of samples) { const k = `${s.n}|${s.cards}|${s.strips.join(',')}|${s.chip}`; if (k !== prev) { console.log(`  t=${(s.t / 1000).toFixed(1)}s dom=${s.cards} scale=${Number.isFinite(s.scale) ? s.scale.toFixed(3) : "?"} grew=${s.grew} narration=${JSON.stringify(s.n)} chip=${JSON.stringify(s.chip)} strips=${JSON.stringify(s.strips)} mode=${s.oneHop}`); prev = k } }
+const firstReq = requests[0]?.t ?? null
+const firstCards = samples.find(s => s.cards > 0)
+console.log(`\n== first paint: first request at ${firstReq} ms, first cards in the DOM at ${firstCards?.t ?? '?'} ms (${firstCards && firstReq != null ? firstCards.t - firstReq : '?'} ms after the request, ${firstCards?.cards ?? 0} cards)`)
 const final = samples[samples.length - 1]
 console.log('\n== FINAL: cards in DOM =', final.cards, '| requests =', requests.length, '| strips =', JSON.stringify(final.strips), '| scale =', final.scale, '| grew pill =', final.grew, '| wall =', (final.t / 1000).toFixed(1), 's')
 // Fit the whole board and read the zoom + how many cards the DOM now holds.
