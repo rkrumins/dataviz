@@ -754,6 +754,14 @@ export interface UseUnifiedTraceResult {
     upstreamCount: number
     /** Downstream count */
     downstreamCount: number
+    /** The counts are FLOORS, not totals — read them as "N+".
+     *
+     *  The native trace fetches lazily: the coarse picture holds the focus's
+     *  hop-1 partners, and everything finer arrives when the reader opens a
+     *  card. So "1,203 upstream" is 1,203 SO FAR, and saying it flatly would
+     *  be the one number a reader cannot act on. True while any partner is
+     *  still an unexplored boundary; false once nothing is left unasked. */
+    countsAreFloors?: boolean
 
     /** Full trace statistics */
     statistics: TraceStatistics

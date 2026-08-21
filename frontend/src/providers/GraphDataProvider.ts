@@ -558,6 +558,18 @@ export interface TraceClosureRequest {
      *  the NEXT keyset page of the focus's lineage-bearing contents and
      *  walks from those. Mutually exclusive with afterCursor/seedUrns. */
     seedCursor?: string
+    /** THE LAZY PATH. `'coarse'` asks for the first paint — the focus, its
+     *  containment chain, the lineage-carrying children inside it, and
+     *  every partner ONE hop away at the grain the lineage lane offers
+     *  (rollup endpoints with their weight where rollups exist, raw hop
+     *  endpoints where they do not), each with its own ancestor chain.
+     *  Omitted/`'fine'` = the eager leaf-grain closure walk. */
+    grain?: 'coarse' | 'fine'
+    /** The reader opened `urn`: return ITS lineage-carrying children and
+     *  their hop-1 lineage, so the wires refine one grain. Neither this
+     *  nor `grain:'coarse'` has a node cap — `maxNodes` is a page size
+     *  there, and a full page ships a cursor. */
+    drill?: boolean
 }
 
 /** One frontier boundary node as the closure wire ships it — pre-normalization.
@@ -874,7 +886,12 @@ export interface GraphDataProvider {
      * not the table's. `edges` are the ONLY hops; `containmentEdges` are for
      * nesting and are never rendered as hops.
      */
-    traceClosure?(request: TraceClosureRequest): Promise<TraceV2Result & LensClosureExtras>
+    /** `opts.signal` aborts the request — the trace driver holds one
+     *  controller per session so leaving a trace stops its pages. */
+    traceClosure?(
+        request: TraceClosureRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<TraceV2Result & LensClosureExtras>
 
     /**
      * Drill into an AGGREGATED edge: return finer-level nodes + edges

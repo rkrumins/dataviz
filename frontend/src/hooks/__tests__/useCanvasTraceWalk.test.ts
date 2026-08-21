@@ -1,14 +1,18 @@
 /**
  * useCanvasTraceWalk — the native canvas trace session controller.
  *
- * Real `useCanvasStore`, real `useLensWalk` full-walk driver; only the
- * provider (the network) is stubbed. The contract this pins is a NEGATIVE
- * one and it is the whole point of the Stage 1 rebuild: start(urn) walks
- * the closure to the ends, every wave lands in the MODEL, and the canvas
- * store is never touched — not on start, not on a wave, not on exit. What
- * the reader sees is drawn from the model by the overlay
- * (`useTraceOverlay` / `buildTraceView`), so leaving a trace restores the
- * canvas for free.
+ * Real `useCanvasStore`, real `useTraceDriver`; only the provider (the
+ * network) is stubbed. The contract this pins is a NEGATIVE one and it is
+ * the whole point of the Stage 1 rebuild: start(urn) paints, every response
+ * lands in the MODEL, and the canvas store is never touched — not on start,
+ * not on a page, not on a drill, not on exit. What the reader sees is drawn
+ * from the model by the overlay (`useTraceOverlay` / `buildTraceView`), so
+ * leaving a trace restores the canvas for free.
+ *
+ * Since the 2026-08-21 ruling the walk is LAZY: one coarse hop, then one
+ * request per card the reader opens. So "a second wave" is a cursor page or
+ * a drill rather than a frontier op, and the budget the old driver pedalled
+ * against does not exist — both are pinned below.
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -103,10 +107,10 @@ describe('useCanvasTraceWalk', () => {
   })
 
   it('a second wave grows the model — still no store write', async () => {
-    // F's closure leaves a frontier on colA; the driver extends it and the
-    // second wave brings colB one hop further upstream.
+    // F's coarse page could not carry all of colA's edges, so it says so with
+    // a cursor; the driver pages it and the second wave brings colB.
     const { provider, traceClosure } = providerByUrn({
-      F: () => ({ ...estate(), frontierUp: [{ urn: 'colA', totalCount: 1, nextCursor: null }] }),
+      F: () => ({ ...estate(), frontierUp: [{ urn: 'colA', totalCount: 1, nextCursor: 'e:0' }] }),
       colA: () => closureResult({
         focus: f('colA'),
         nodes: [gn('colB')],
@@ -178,7 +182,11 @@ describe('useCanvasTraceWalk', () => {
     expect(result.current.fullWalkStatus).toBeNull()
   })
 
-  it('budget journey: cap → Keep walking → exhausted, the model complete and the store still empty of it', async () => {
+  // THE RULING, AS A TEST: "we cannot be applying limits for this". The old
+  // driver stopped at 1,000 nodes and asked the reader to press Keep walking;
+  // there is no budget to hit any more, so a 1,100-node page lands whole,
+  // `budgetHit` is permanently false, and `continueWalk` costs nothing.
+  it('no budget: a 1,100-node page lands whole and Keep walking is a no-op', async () => {
     const nodes: GraphNode[] = [gn('F', 'dataset')]
     const containment: Array<ReturnType<typeof holds>> = []
     for (let i = 0; i < 1100; i++) {
@@ -189,26 +197,66 @@ describe('useCanvasTraceWalk', () => {
       F: () => closureResult({
         focus: f('F'), nodes, containmentEdges: containment,
         upstreamUrns: new Set(nodes.map(n => n.urn)),
-        frontierUp: [{ urn: 'n0', totalCount: 1, nextCursor: null }],
-      }),
-      n0: () => closureResult({
-        focus: f('n0'), nodes: [gn('deeper')], edges: [hop('deeper', 'n0', 'e-deep')],
-        upstreamUrns: new Set(['deeper']),
       }),
     })
     const { writes, release } = watchStore()
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     act(() => result.current.start('F'))
 
-    await waitFor(() => expect(result.current.fullWalkStatus?.budgetHit).toBe(true))
+    await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
+    expect(result.current.walkEntry?.model.nodes.length).toBe(1101)
+    expect(result.current.fullWalkStatus?.budgetHit).toBe(false)
+    expect(result.current.fullWalkStatus?.stalled).toBe(false)
     expect(traceClosure).toHaveBeenCalledTimes(1)
 
     act(() => result.current.continueWalk())
-    await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
-    expect(modelNodeUrns(result.current.walkEntry?.model)).toContain('deeper')
+    expect(traceClosure).toHaveBeenCalledTimes(1)
 
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
     expect(writes.count).toBe(0)
     release()
+  })
+
+  it('opening a card drills it once — and the store still never moves', async () => {
+    const { provider, traceClosure } = providerByUrn({
+      F: estate,
+      T1: () => closureResult({
+        focus: f('T1'), nodes: [gn('colFiner')],
+        edges: [hop('colFiner', 'colA', 'e-fine')],
+        containmentEdges: [holds('T1', 'colFiner')],
+        upstreamUrns: new Set(['colFiner']),
+      }),
+    })
+    const { writes, release } = watchStore()
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+    act(() => result.current.start('F'))
+    await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
+
+    await act(async () => { result.current.drill('T1') })
+    await waitFor(() => expect(modelNodeUrns(result.current.walkEntry?.model)).toContain('colFiner'))
+    expect(traceClosure).toHaveBeenCalledTimes(2)
+
+    await act(async () => { result.current.drill('T1') })
+    expect(traceClosure).toHaveBeenCalledTimes(2)
+
+    expect(storeNodeIds()).toEqual(['F', 'PLAT'])
+    expect(writes.count).toBe(0)
+    release()
+  })
+
+  // Every partner arrives as an unexplored boundary, so the dock says "N+"
+  // until the reader has opened everything that is still asking.
+  it('counts read as floors while a boundary is still unexplored', async () => {
+    const { provider } = providerByUrn({
+      F: () => ({ ...estate(), frontierUp: [{ urn: 'colA', totalCount: 3, nextCursor: null }] }),
+    })
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+    act(() => result.current.start('F'))
+    await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
+
+    expect(result.current.countsAreFloors).toBe(true)
+
+    act(() => result.current.exit())
+    expect(result.current.countsAreFloors).toBe(false)
   })
 })

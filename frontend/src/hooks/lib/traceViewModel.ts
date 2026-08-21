@@ -51,6 +51,11 @@ export interface TraceCard {
    *  makes, "N things inside X carry lineage here". */
   onLineage: number
   expanded: boolean
+  /** This card's contents are being fetched right now (the reader opened it
+   *  and the drill has not landed). The row shows a spinner where its
+   *  chevron is, so an expand that costs a request still reads as an
+   *  expand. */
+  loading: boolean
   /** Min lineage hop from the focus subtree (null = host only). */
   hop: number | null
   /** `'focus'` is the focus SIDE — the focus and everything inside it, which
@@ -85,6 +90,9 @@ export interface TraceViewInputs {
    *  all of them: Stage 1's standing assumption that the walk model IS the
    *  fine closure. Anything less makes a pair's rollup stay on as a residual. */
   completePairs?: ReadonlySet<string>
+  /** Cards whose contents are in flight — a lazy engine fetches them when the
+   *  reader opens them, and the row says so. */
+  inFlight?: ReadonlySet<string>
   /** The rest of the canvas's placement chain, so the overlay anchors a node
    *  exactly where the canvas behind it would. All optional: omit for a view
    *  that places purely by assignments and rules. */
@@ -329,6 +337,7 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
         childCount: childCountOf(sg.nodes.get(urn)?.node),
         onLineage: inside,
         expanded: i.traceExpansion.has(urn),
+        loading: i.inFlight?.has(urn) ?? false,
         hop: hopOf(urn),
         role: roleBy.get(urn) ?? 'host',
         data: dataOf(urn),
@@ -417,6 +426,7 @@ export function lanesToHierarchy(lanes: TraceLane[]): Array<{ layerId: string; n
         onLineage: card.onLineage,
         traceRole: card.role,
         traceHop: card.hop,
+        traceLoading: card.loading,
       },
       children,
       ...(parentId === undefined ? {} : { parentId }),

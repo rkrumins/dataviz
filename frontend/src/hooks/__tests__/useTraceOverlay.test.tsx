@@ -61,7 +61,7 @@ const grownModel = (): LensWalkModel => {
 }
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(27))
+afterAll(() => expectTestsRan(33))
 
 describe('useTraceOverlay — the seed', () => {
   it('opens the focus chain and leaves the direct partners visible and CLOSED', () => {
@@ -459,5 +459,85 @@ describe('useTraceOverlay — restoreExpansion', () => {
 
     rerender(args())
     expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
+  })
+})
+
+// ── OPENING A CARD CAN COST A REQUEST ───────────────────────────────────
+//
+// Under the lazy engine the walk model holds only what has been asked for, so
+// `toggle` is no longer a pure re-projection: opening a card whose contents
+// are not loaded tells the driver to fetch them. What must NOT change is
+// everything around it — closing never fetches, the card opens immediately
+// (the rows arrive when the drill lands), and `toggle` keeps ONE identity so
+// the columns' memo still holds.
+
+describe('useTraceOverlay — the drill seam', () => {
+  it('opening a card asks the driver for its contents; closing it asks nothing', () => {
+    const drilled: string[] = []
+    const { result } = renderHook(() => useTraceOverlay(args({ onDrill: (u) => drilled.push(u) })))
+
+    act(() => result.current.toggle('INTERMEDIATE_T2'))
+    expect(drilled).toEqual(['INTERMEDIATE_T2'])
+    expect(result.current.traceExpansion.has('INTERMEDIATE_T2')).toBe(true)
+
+    act(() => result.current.toggle('INTERMEDIATE_T2'))
+    expect(drilled).toEqual(['INTERMEDIATE_T2'])          // closing is free
+    expect(result.current.traceExpansion.has('INTERMEDIATE_T2')).toBe(false)
+
+    // Re-opening asks again — and the DRIVER is what refuses a second fetch
+    // (it drills a card once, ever), so the overlay stays a dumb reporter of
+    // what the reader did.
+    act(() => result.current.toggle('INTERMEDIATE_T2'))
+    expect(drilled).toEqual(['INTERMEDIATE_T2', 'INTERMEDIATE_T2'])
+  })
+
+  it('the card opens NOW — the rows arrive when the drill lands', () => {
+    const { result } = renderHook(() => useTraceOverlay(args({ onDrill: () => {} })))
+    act(() => result.current.toggle('INTERMEDIATE_T2'))
+    // No wait, no pending state: the expansion is the reader's, not the
+    // network's.
+    expect(visibleIds(result.current.view)).toContain('orders')
+  })
+
+  it('a card whose drill is in flight says so, and the row shows it', () => {
+    const { result, rerender } = renderHook(
+      (a: UseTraceOverlayArgs) => useTraceOverlay(a),
+      { initialProps: args({ inFlight: new Set(['INTERMEDIATE_T2']) }) },
+    )
+    expect(cardOf(result.current.view, 'INTERMEDIATE_T2')?.loading).toBe(true)
+    expect(cardOf(result.current.view, 'REPORTING')?.loading).toBe(false)
+
+    rerender(args({ inFlight: new Set() }))
+    expect(cardOf(result.current.view, 'INTERMEDIATE_T2')?.loading).toBe(false)
+  })
+
+  it('toggle keeps ONE identity, so the columns` memo holds', () => {
+    const { result, rerender } = renderHook(
+      (a: UseTraceOverlayArgs) => useTraceOverlay(a),
+      { initialProps: args({ onDrill: () => {} }) },
+    )
+    const toggle = result.current.toggle
+    act(() => result.current.toggle('INTERMEDIATE_T2'))
+    rerender(args({ onDrill: () => {}, depthUp: 3 }))
+    expect(result.current.toggle).toBe(toggle)
+  })
+
+  it('an overlay with no driver still toggles — the seam is optional', () => {
+    const { result } = renderHook(() => useTraceOverlay(args()))
+    act(() => result.current.toggle('INTERMEDIATE_T2'))
+    expect(result.current.traceExpansion.has('INTERMEDIATE_T2')).toBe(true)
+  })
+
+  it('completePairs reaches the wire ledger: an unvouched pair keeps its rollup', () => {
+    // Stage 1's default (omitted) vouches for every raw-backed pair, so the
+    // container rollups are dropped as redundant. Hand the ledger an EMPTY
+    // set — a lazy model that has fetched nothing finer — and the coarse
+    // statements survive as residuals instead.
+    const vouched = renderHook(() => useTraceOverlay(args()))
+    const lazy = renderHook(() => useTraceOverlay(args({ completePairs: new Set<string>() })))
+
+    const kinds = (v: TraceView | null) => (v?.wires ?? []).map(w => w.kind).sort()
+    expect(kinds(vouched.result.current.view)).toEqual(['raw', 'raw'])
+    expect(kinds(lazy.result.current.view)).toContain('residual')
   })
 })

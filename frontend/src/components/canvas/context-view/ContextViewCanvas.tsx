@@ -1682,6 +1682,15 @@ export function ContextViewCanvas({
     depthUp: traceDepthUp,
     depthDown: traceDepthDown,
     placement: overlayPlacement,
+    // THE LAZY ENGINE'S THREE SEAMS. Opening a card may cost a request, so
+    // the overlay tells the driver which card the reader opened; the driver
+    // says which are still in flight (the row shows a spinner where its
+    // chevron is); and it says which pairs it has actually finished loading,
+    // because "the model IS the fine closure" — the ledger's Stage 1
+    // assumption — is exactly what a lazy engine stops guaranteeing.
+    onDrill: canvasTrace.drill,
+    inFlight: canvasTrace.inFlight,
+    completePairs: canvasTrace.completePairs,
   })
   // Read by the interaction callbacks (toggle, reveal, the write guards),
   // which must keep ONE identity — the overlay object is re-made every
@@ -1939,19 +1948,6 @@ export function ContextViewCanvas({
     }
   }, [overlay.active, traceModel, canvasTrace.tracedUrn, urnToIdMap])
 
-  const traceParticipants = useMemo(() => {
-    const upstream: Array<{ urn: string; label: string }> = []
-    const downstream: Array<{ urn: string; label: string }> = []
-    if (traceActive && traceModel) {
-      for (const n of traceModel.nodes) {
-        const entry = { urn: n.urn, label: n.displayName ?? n.urn }
-        if (traceModel.upstreamUrns.has(n.urn)) upstream.push(entry)
-        else if (traceModel.downstreamUrns.has(n.urn)) downstream.push(entry)
-      }
-    }
-    return { upstream, downstream }
-  }, [traceActive, traceModel])
-
   // The REAL TraceBottomDock, driven by the native walk: an adapter shaped
   // as UseUnifiedTraceResult. The dormant legacy hook supplies every field
   // the dock family may touch; the native walk overrides the live ones.
@@ -2008,8 +2004,13 @@ export function ContextViewCanvas({
       result,
       error: canvasTrace.walkEntry?.status === 'error' ? canvasTrace.walkEntry.error : null,
       isLoading: canvasTrace.walkEntry?.status === 'loading' || (canvasTrace.fullWalkStatus?.walking ?? false),
-      upstreamCount: traceParticipants.upstream.length,
-      downstreamCount: traceParticipants.downstream.length,
+      // SCOPED, AND HONEST ABOUT BEING A FLOOR. The counts are the VIEW's
+      // (after direction/depth), so the overview cannot disagree with the
+      // board — and a lazy trace has only counted what it has fetched, so
+      // while any partner is still an unexplored boundary they read "N+".
+      upstreamCount: overlay.view?.counts.up ?? 0,
+      downstreamCount: overlay.view?.counts.down ?? 0,
+      countsAreFloors: canvasTrace.countsAreFloors,
       showUpstream: traceShowUpstream,
       showDownstream: traceShowDownstream,
       setShowUpstream: (show) => { setTraceShowUpstream(show); recordTraceView({ showUpstream: show }) },
@@ -2044,8 +2045,8 @@ export function ContextViewCanvas({
         ...trace.statistics,
         totalNodes: traceModel.nodes.length,
         totalEdges: traceModel.lineageEdges.length,
-        upstreamCount: traceParticipants.upstream.length,
-        downstreamCount: traceParticipants.downstream.length,
+        upstreamCount: overlay.view?.counts.up ?? 0,
+        downstreamCount: overlay.view?.counts.down ?? 0,
       },
       // RETRACE IS NOT A VIEW ACTION. Direction and depth are scope on a flow
       // already in hand, so the "apply" the dock fires after one of them has
@@ -2054,13 +2055,15 @@ export function ContextViewCanvas({
       // retrace still MEANS is "this walk did not finish": re-kick a failed
       // initial fetch, or grant the budget / clear the failures for a walk
       // that stopped short of exhaustion.
+      // RETRACE IS THE ONE THING LEFT: re-kick a coarse fetch that failed.
+      // There is no budget to grant any more (the ruling removed the caps),
+      // so `continueWalk` is a no-op and more detail comes from opening a
+      // card, not from asking the walk to keep going.
       retrace: async () => {
-        if (canvasTrace.walkEntry?.status === 'error') { canvasTrace.retryWalk(); return }
-        const walk = canvasTrace.fullWalkStatus
-        if (walk?.budgetHit || walk?.stalled) canvasTrace.continueWalk()
+        if (canvasTrace.walkEntry?.status === 'error') canvasTrace.retryWalk()
       },
     }
-  }, [traceActive, traceModel, tracedNodeId, trace, canvasTrace, traceParticipants, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown, dockHistoryEntries, traceHistory, traceHistoryGo, recordTraceView])
+  }, [traceActive, traceModel, tracedNodeId, trace, canvasTrace, overlay.view, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown, dockHistoryEntries, traceHistory, traceHistoryGo, recordTraceView])
 
   // Auto-collapse the dock when trace exits so a stale open state doesn't
   // immediately reappear next time the user starts a trace.

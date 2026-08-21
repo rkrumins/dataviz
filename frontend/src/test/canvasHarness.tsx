@@ -214,9 +214,102 @@ function closureFor(estate: TraceEstate, focusUrn: string, stall?: boolean): Tra
     downstreamUrns: new Set(estate.model.downstreamUrns),
     effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
     truncated: false, truncationReason: null,
-    frontierUp: stall ? [{ urn: focusUrn, totalCount: null, nextCursor: null }] : [],
+    // A STALLED WALK. The first answer says one anchor is only half-read
+    // (`nextCursor`), and every request after it fails — so the driver's
+    // paging stops with a picture on screen and an error beside it, which is
+    // the only state where "retrace" has anything to do.
+    frontierUp: stall ? [{ urn: focusUrn, totalCount: null, nextCursor: 'e:0' }] : [],
     frontierDown: [], seedTruncated: false,
   } as unknown as TraceV2Result & LensClosureExtras
+}
+
+/**
+ * THE LAZY SERVER — the estate answered the way the real backend answers a
+ * `grain:'coarse'` / `drill:true` request, so the harness can drive the whole
+ * journey (first paint, then one card at a time) instead of being handed the
+ * finished picture.
+ *
+ * The rules it implements are the provider's, in miniature:
+ *   • a card's CONTRIBUTING children are the direct children that carry a
+ *     lineage edge, or host one further down;
+ *   • COARSE anchors on the focus: its contents, its own hop-1 lineage, the
+ *     partners that lineage reaches, and everybody's ancestor chain — and if
+ *     the focus carries none of its own (the rollup-less estates) it seeds
+ *     from the lineage-bearing descendants instead;
+ *   • DRILL anchors on the card the reader opened: its contents, and THEIR
+ *     hop-1 lineage, so the wires refine one grain;
+ *   • every partner comes back as a frontier boundary with no cursor — this
+ *     walk asked one hop, so what is past it is unknown and the counts read
+ *     as floors.
+ */
+function lazyServer(estate: TraceEstate) {
+  const nodes = wireNodes(estate)
+  const byUrn = new Map(nodes.map(n => [n.urn, n]))
+  const parent = new Map<string, string>()
+  const kids = new Map<string, string[]>()
+  for (const c of estate.model.containmentEdges) {
+    if (!parent.has(c.targetUrn)) parent.set(c.targetUrn, c.sourceUrn)
+    kids.set(c.sourceUrn, [...(kids.get(c.sourceUrn) ?? []), c.targetUrn])
+  }
+  const lineage = estate.model.lineageEdges
+  const touches = (urn: string) => lineage.some(e => e.sourceUrn === urn || e.targetUrn === urn)
+  const descendants = (urn: string): string[] => {
+    const out: string[] = []
+    const stack = [...(kids.get(urn) ?? [])]
+    while (stack.length > 0) {
+      const u = stack.pop()!
+      out.push(u)
+      stack.push(...(kids.get(u) ?? []))
+    }
+    return out
+  }
+  const contributing = (urn: string) =>
+    (kids.get(urn) ?? []).filter(c => touches(c) || descendants(c).some(touches))
+  const chainOf = (urn: string): string[] => {
+    const out: string[] = []
+    let cursor = parent.get(urn)
+    while (cursor && !out.includes(cursor)) { out.push(cursor); cursor = parent.get(cursor) }
+    return out
+  }
+
+  return (anchor: string, drill: boolean): TraceV2Result & LensClosureExtras => {
+    const children = contributing(anchor)
+    let anchors = drill ? children : [anchor]
+    let edges = lineage.filter(e => anchors.includes(e.sourceUrn) || anchors.includes(e.targetUrn))
+    if (!drill && edges.length === 0) {
+      anchors = descendants(anchor).filter(touches)
+      edges = lineage.filter(e => anchors.includes(e.sourceUrn) || anchors.includes(e.targetUrn))
+    }
+    const anchorSet = new Set(anchors)
+    const up = new Set<string>()
+    const down = new Set<string>()
+    for (const e of edges) {
+      if (anchorSet.has(e.targetUrn) && !anchorSet.has(e.sourceUrn)) up.add(e.sourceUrn)
+      if (anchorSet.has(e.sourceUrn) && !anchorSet.has(e.targetUrn)) down.add(e.targetUrn)
+    }
+    const ship = new Set<string>([anchor, ...children, ...anchors, ...up, ...down])
+    for (const u of [...ship]) for (const a of chainOf(u)) ship.add(a)
+
+    return {
+      focus: { urn: anchor, level: 0, entityType: '' },
+      nodes: [...ship].map(u => byUrn.get(u)).filter(Boolean),
+      edges: edges.map(e => ({
+        id: e.id ?? `${e.sourceUrn}>${e.targetUrn}`,
+        sourceUrn: e.sourceUrn, targetUrn: e.targetUrn, edgeType: e.edgeType,
+        properties: e.weight === null || e.weight === undefined ? {} : { weight: e.weight },
+      })),
+      containmentEdges: estate.model.containmentEdges.filter(
+        c => ship.has(c.sourceUrn) && ship.has(c.targetUrn),
+      ),
+      upstreamUrns: up,
+      downstreamUrns: down,
+      effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+      truncated: false, truncationReason: null,
+      frontierUp: [...up].map(urn => ({ urn, totalCount: null, nextCursor: null })),
+      frontierDown: [...down].map(urn => ({ urn, totalCount: null, nextCursor: null })),
+      seedTruncated: false, seedCursor: null,
+    } as unknown as TraceV2Result & LensClosureExtras
+  }
 }
 
 /** parent urn → child urns, from the estate's containment. */
@@ -240,8 +333,10 @@ function stubProvider(
   calls: { traceClosure: number },
   gate?: { promise: Promise<void> },
   stall?: boolean,
+  lazy?: boolean,
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
+  const answerLazily = lazyServer(estate)
   const nodes = wireNodes(estate)
   const byUrn = new Map(nodes.map(n => [n.urn, n]))
   const kids = childrenOf(estate)
@@ -257,9 +352,13 @@ function stubProvider(
   ]))
   return {
     scopeKey: 'harness',
-    traceClosure: async () => {
+    traceClosure: async (req: { urn: string; drill?: boolean }) => {
       calls.traceClosure += 1
       if (gate) await gate.promise
+      // The whole-estate answer is a legitimate coarse response for an estate
+      // one hop wide, and it is what the Stage 1 gates were written against.
+      // `lazy` swaps in the REAL contract so a test can drive the journey.
+      if (lazy) return answerLazily(req.urn, req.drill === true)
       // A STALLED WALK. The first answer reports a frontier, every frontier op
       // after it fails — which is exactly `fullWalkStatus.stalled`: candidates
       // remain, none is loading, and each one already carries its 'error'
@@ -374,7 +473,12 @@ function seedView(estate: TraceEstate): void {
 
 export async function renderCanvasWithTrace(
   estate: TraceEstate,
-  opts: { focus: string; deferTrace?: boolean; draft?: boolean; stallWalk?: boolean },
+  opts: {
+    focus: string; deferTrace?: boolean; draft?: boolean; stallWalk?: boolean
+    /** Answer closures the way the backend does — coarse first paint, one
+     *  drill per card opened — instead of handing over the whole estate. */
+    lazy?: boolean
+  },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
   releaseFetch?.()
@@ -436,7 +540,7 @@ export async function renderCanvasWithTrace(
   render(
     <QueryClientProvider client={queryClient}>
       <ProviderOverride value={{
-        provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk),
+        provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, opts.lazy),
         isLoading: false, error: null, scopeKind: 'ready',
         workspaceId: 'harness-ws', dataSourceId: null,
         providerReady: true, providerVersion: 1,

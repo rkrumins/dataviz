@@ -693,11 +693,15 @@ export class RemoteGraphProvider implements GraphDataProvider {
      * materialised leaf rollups. Same never-504 contract as /trace/v2 —
      * truncation surfaces as `truncated: true`, never an error.
      */
-    async traceClosure(request: TraceClosureRequest): Promise<TraceV2Result & LensClosureExtras> {
+    async traceClosure(
+        request: TraceClosureRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<TraceV2Result & LensClosureExtras> {
         const raw = await this.fetch<RawTraceClosureResult>('/trace/closure', {
             method: 'POST',
             body: JSON.stringify(request),
             timeoutMs: TIMEOUTS.TRACE_MS,
+            ...(opts?.signal ? { signal: opts.signal } : {}),
         })
         return {
             ...normalizeTraceV2(raw),

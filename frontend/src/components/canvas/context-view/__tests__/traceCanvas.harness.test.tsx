@@ -18,11 +18,11 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { act, fireEvent, screen } from '@testing-library/react'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
-import { cfoEstate } from '@/test/fixtures/traceEstates'
+import { cfoEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(17))
+afterAll(() => expectTestsRan(22))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -323,12 +323,12 @@ describe('the trace overlay on the real canvas', () => {
   }, 30000)
 
   // THE DANGEROUS CASE for "a view control never fetches": a walk that did
-  // NOT finish. `retrace` legitimately means `continueWalk` there, and
-  // `continueFullWalk` grants budget on every call and re-arms failed
-  // frontiers — so a depth slider still wired to "apply" would put a real
-  // request behind a scrub. Keep walking is the notice's job, not the
-  // slider's.
-  it('a depth scrub costs nothing even on a stalled walk', async () => {
+  // NOT finish. Here the first coarse answer reports a half-read anchor and
+  // the page behind it fails, so the session sits with a picture on screen
+  // and an error beside it — the one state where `retrace` still means
+  // something. A depth slider wired to "apply" would put a real request
+  // behind a scrub; it must not.
+  it('a depth scrub costs nothing even on a walk that did not finish', async () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', stallWalk: true })
     await h.startTrace('cfo')
     // The initial closure, plus the frontier op that failed: the walk is now
@@ -449,6 +449,112 @@ describe('the trace overlay on the real canvas', () => {
     await h.settle()
     expect(h.isTracing()).toBe(false)     // …and the next one leaves it
     expect(h.dockPresent()).toBe(false)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+})
+
+// ── THE LAZY ENGINE, END TO END ─────────────────────────────────────────
+//
+// The tests above hand the canvas an estate that arrived in one response —
+// which is what a coarse response IS for an estate one hop wide, and what the
+// Stage 1 gates were written against. These drive the REAL contract instead
+// (`lazy: true`): the server answers `grain:'coarse'` with the card-grain
+// picture and one drill per card the reader opens, and nothing else is ever
+// fetched. It is the claim of the whole rebuild, on the real canvas: the
+// first paint is small, opening a card costs exactly one request, and the
+// wires refine to the grain the reader has earned.
+describe('the lazy trace engine on the real canvas', () => {
+  it('R1 first paint: one request, the focus open over its contents, partners closed', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    await h.startTrace('cfo')
+
+    // The focus's chain and its own contents; the partners at the grain the
+    // rollup lane states them, CLOSED. Nothing inside them has been fetched
+    // — `orders` and `rpt` are not here, and neither are any columns.
+    expect(h.visibleCardIds().sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
+    expect(h.providerCalls()).toBe(1)
+    // The invitation is still there: the lineage runs THROUGH these cards, so
+    // the graph says there is something inside worth opening.
+    expect(h.chevron('INTERMEDIATE_T2')).toBe(true)
+    expect(h.chevron('REPORTING')).toBe(true)
+    // And the wires are the coarse statement — container to dashboard.
+    expect(h.wires().map(w => `${w.source}>${w.target}`).sort())
+      .toEqual(['INTERMEDIATE_T2>cfo', 'REPORTING>cfo'])
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('expanding a partner costs exactly ONE request, and the wires refine a grain', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    await h.startTrace('cfo')
+    const painted = h.providerCalls()
+
+    await h.toggle('INTERMEDIATE_T2')
+
+    expect(h.providerCalls()).toBe(painted + 1)
+    expect(h.visibleCardIds()).toContain('orders')
+    // The wire that ended at the dashboard now lands on the dataset, and the
+    // coarse statement it summarised is retired against it — one flow, one
+    // line, at the finest grain the reader has earned. REPORTING is still
+    // closed, so its own statement is untouched.
+    expect(h.wires().map(w => `${w.source}>${w.target}`).sort())
+      .toEqual(['REPORTING>cfo', 'orders>aov'])
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('collapse keeps what was fetched — re-opening costs nothing', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    await h.startTrace('cfo')
+    await h.toggle('INTERMEDIATE_T2')
+    const drilled = h.providerCalls()
+
+    await h.toggle('INTERMEDIATE_T2')
+    expect(h.visibleCardIds()).not.toContain('orders')
+    await h.toggle('INTERMEDIATE_T2')
+
+    expect(h.visibleCardIds()).toContain('orders')
+    expect(h.providerCalls()).toBe(drilled)     // a card is drilled once, ever
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('one drill per level, down to the raw hops', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    await h.startTrace('cfo')
+    expect(h.providerCalls()).toBe(1)
+
+    await h.toggle('INTERMEDIATE_T2')          // → orders
+    expect(h.providerCalls()).toBe(2)
+    await h.toggle('orders')                   // → its columns, and the RAW hops
+    expect(h.providerCalls()).toBe(3)
+
+    expect(h.visibleCardIds()).toContain('orders.channel')
+    // The finest grain on screen: the reader has earned the column-to-column
+    // hops, and the two coarser statements about the same flow are gone.
+    expect(h.wires().map(w => `${w.source}>${w.target}`).sort())
+      .toEqual(['REPORTING>cfo', 'orders.channel>aov', 'orders.net>aov'])
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('a partner`s chain arrives with the paint, so walking down it is free', async () => {
+    // Roots ⊃ a1 ⊃ … ⊃ a10, flow only at the bottom, no rollup lane: coarse
+    // falls back to a raw depth-1 closure around the focus subtree — and the
+    // partner it finds ships with its WHOLE ancestor chain, because a partner
+    // the client cannot place is a partner it drops. So every link in that
+    // chain is already in hand, and opening one costs nothing at all.
+    const h = await renderCanvasWithTrace(rootsNodeEstate(10), { focus: 'a9', lazy: true })
+    await h.startTrace('a9')
+    expect(h.providerCalls()).toBe(1)
+
+    await h.toggle('b1')
+    expect(h.visibleCardIds()).toContain('b2')
+    await h.toggle('b2')
+    expect(h.visibleCardIds()).toContain('b3')
+
+    expect(h.providerCalls()).toBe(1)
+    expect(h.storeWrites()).toBe(0)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 })

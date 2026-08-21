@@ -53,7 +53,7 @@
  * two would race, and the seed (running a frame later, when the model lands)
  * would win every time.
  */
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildTraceView, type TraceCard, type TraceView, type TraceViewInputs } from './lib/traceViewModel'
 import { buildLensSubgraph, focusAncestorChain } from '@/components/canvas/context-view/lens/lens-subgraph'
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
@@ -72,6 +72,18 @@ export interface UseTraceOverlayArgs {
   /** The rest of the canvas's placement chain, passed straight through so the
    *  overlay anchors a node exactly where the canvas behind it would. */
   placement?: TraceViewInputs['placement']
+  /** OPENING A CARD CAN COST A REQUEST NOW. Under the lazy engine the walk
+   *  model holds only what has been asked for, so `toggle` tells the driver
+   *  which card the reader opened and the driver fetches its contents. It is
+   *  idempotent — a card is drilled once, ever — so this fires on every open
+   *  and the driver decides. */
+  onDrill?: (urn: string) => void
+  /** Cards whose contents are in flight, straight through to the cards. */
+  inFlight?: ReadonlySet<string>
+  /** Pairs whose raw detail is fully loaded (the driver's ledger). Under a
+   *  lazy engine the model is NOT the fine closure, so the wire ledger needs
+   *  telling which pairs it may vouch for. */
+  completePairs?: ReadonlySet<string>
 }
 
 export interface TraceOverlay {
@@ -133,6 +145,8 @@ function viewInputs(a: UseTraceOverlayArgs, traceExpansion: ReadonlySet<string>)
     depthUp: a.depthUp,
     depthDown: a.depthDown,
     placement: a.placement,
+    completePairs: a.completePairs,
+    inFlight: a.inFlight,
   }
 }
 
@@ -197,6 +211,7 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   // object too, and depending on it would undo the whole point.
   const { model, focusUrn, layers, assignments, viewIsCurated } = a
   const { showUpstream, showDownstream, depthUp, depthDown } = a
+  const { onDrill, inFlight, completePairs } = a
   const { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns } = a.placement ?? {}
 
   // O(n) over the walk's nodes, but only when the model or the focus changes
@@ -249,18 +264,36 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
       ? buildTraceView({
         model, focusUrn, layers, assignments, viewIsCurated, traceExpansion,
         showUpstream, showDownstream, depthUp, depthDown,
+        completePairs, inFlight,
         placement: { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns },
       })
       : null
   ), [active, model, focusUrn, layers, assignments, viewIsCurated, traceExpansion,
-    showUpstream, showDownstream, depthUp, depthDown,
+    showUpstream, showDownstream, depthUp, depthDown, completePairs, inFlight,
     backendAssignments, unassignedFallbackLayerId, branchCreatedUrns])
 
-  const toggle = useCallback((id: string) => setSeed(prev => {
-    const next = new Set(prev.set)
-    if (!next.delete(id)) next.add(id)
-    return { ...prev, set: next }
-  }), [])
+  // A CARD THAT OPENS MAY HAVE TO BE FETCHED. `toggle` keeps ONE identity —
+  // the canvas hands it to every row, and re-minting it per expansion would
+  // bust `LayerColumn`'s memo — so what it needs to read (is this card open?
+  // where do I send a drill?) comes from refs synced after commit. A toggle
+  // only ever fires after commit, so they are current when it does.
+  const expansionRef = useRef(traceExpansion)
+  const drillRef = useRef(onDrill)
+  useEffect(() => { expansionRef.current = traceExpansion }, [traceExpansion])
+  useEffect(() => { drillRef.current = onDrill }, [onDrill])
+
+  const toggle = useCallback((id: string) => {
+    const opening = !expansionRef.current.has(id)
+    setSeed(prev => {
+      const next = new Set(prev.set)
+      if (!next.delete(id)) next.add(id)
+      return { ...prev, set: next }
+    })
+    // The card opens NOW and fills in when the drill lands — a spinner in
+    // place of the chevron says which. Closing never fetches, and neither
+    // does re-opening: the driver drills a card once, ever.
+    if (opening) drillRef.current?.(id)
+  }, [])
 
   const expandPath = useCallback((ids: readonly string[]) => setSeed(prev => ({
     ...prev,

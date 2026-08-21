@@ -170,12 +170,30 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // inside this?", never `children.length` — the trace holds only the
   // children that carry lineage, so a table with 300 columns would offer a
   // chevron that opens onto one row, or none at all.
-  // In a trace the chevron means "there is lineage INSIDE": it opens only
-  // onto children that contribute (the view model's onLineage), so a card
-  // whose children carry no lineage offers no drill — the graph-wide
-  // childCount would promise rows the trace will never show.
+  // In a trace the chevron means "there is lineage INSIDE" — it opens only
+  // onto children that contribute, never onto the graph-wide childCount,
+  // which would promise rows the trace will never show.
+  //
+  // WHO KNOWS THAT, THOUGH, DEPENDS ON WHAT HAS BEEN FETCHED. `onLineage`
+  // counts participants the model actually holds, and under the lazy engine
+  // a card nobody has opened holds NONE of its contents yet — so a strict
+  // `onLineage > 0` would take the chevron off every closed partner and
+  // leave the reader with nothing to open. A card the lineage runs THROUGH
+  // (any role but host) is different: its flow demonstrably passes through
+  // something inside it, so its graph child count is an honest invitation,
+  // and opening it is what goes and gets them. A HOST keeps the strict rule
+  // — it hosts, it is not on the flow, and it must not invite.
   const traceOnLineage = (node.data.onLineage as number) || 0
-  const hasChildren = isTracing ? traceOnLineage > 0 : (node.children.length > 0 || childCount > 0)
+  const traceRoleForChevron = node.data.traceRole as string | undefined
+  const hasChildren = isTracing
+    ? traceOnLineage > 0
+      || (!!traceRoleForChevron && traceRoleForChevron !== 'host' && childCount > 0)
+    : (node.children.length > 0 || childCount > 0)
+  // A TRACE EXPAND CAN COST A REQUEST. The lazy engine fetches a card's
+  // contents when the reader opens it, so the row wears the same spinner
+  // browse uses while its children are on the way — the card is already
+  // OPEN, and the rows drop in when the drill lands.
+  const rowLoading = isLoading || (isTracing && node.data.traceLoading === true)
 
   // Advanced-search roll-up: number of matches sitting anywhere in this
   // node's subtree (N levels deep, deduped per hit). Drives the
@@ -539,7 +557,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       >
         {hasChildren && (
           <AnimatePresence mode="wait">
-            {isLoading ? (
+            {rowLoading ? (
               <motion.div
                 key="spinner"
                 initial={{ opacity: 0, scale: 0.5 }}
