@@ -58,12 +58,27 @@ function toLensWalkNode(n: GraphNode): LensWalkNode {
     }
 }
 
-function toLensFrontierEntry(f: { urn: string; totalCount?: number | null; nextCursor?: string | null }): LensFrontierEntry {
+function toLensFrontierEntry(
+    f: { urn: string; totalCount?: number | null; nextCursor?: string | null; reason?: 'cut' | 'depth' | null },
+): LensFrontierEntry {
+    // An older server says nothing about WHY; a cursored entry can only be
+    // a paged hub (a cut), a bare one a depth boundary.
+    const kind: 'cut' | 'depth' = f.reason ?? (f.nextCursor ? 'cut' : 'depth')
     return {
         urn: f.urn,
         totalCount: f.totalCount ?? null,
         nextCursor: f.nextCursor ?? null,
+        kind,
     }
+}
+
+/** A model is PARTIAL while something the walk OWES is still out: a seed
+ *  cursor, or a frontier entry the budget cut (a hub's cursor included). A
+ *  depth boundary is not partiality — it is the next hop. Derived every
+ *  merge, never OR-accumulated, so a drained walk reads as complete. */
+function isOwed(seedCursor: string | null, up: ReadonlyArray<LensFrontierEntry>, down: ReadonlyArray<LensFrontierEntry>): boolean {
+    if (seedCursor !== null) return true
+    return [...up, ...down].some(f => f.kind === 'cut' || f.nextCursor !== null)
 }
 
 /** The accumulated walk state: the client-side union of every one-hop
@@ -118,6 +133,8 @@ export function toLensClosure(
     res: TraceV2Result & LensClosureExtras,
     focusUrn: string,
 ): LensWalkModel {
+    const up = res.frontierUp.map(toLensFrontierEntry)
+    const down = res.frontierDown.map(toLensFrontierEntry)
     return {
         focusUrn,
         nodes: res.nodes.map(toLensWalkNode),
@@ -130,13 +147,21 @@ export function toLensClosure(
         containmentEdges: res.containmentEdges,
         upstreamUrns: new Set(res.upstreamUrns),
         downstreamUrns: new Set(res.downstreamUrns),
-        frontierUp: res.frontierUp.map(toLensFrontierEntry),
-        frontierDown: res.frontierDown.map(toLensFrontierEntry),
-        truncated: res.truncated,
-        truncationReason: res.truncationReason ?? null,
-        seedTruncated: res.seedTruncated,
+        frontierUp: up,
+        frontierDown: down,
+        truncated: isOwed(res.seedCursor ?? null, up, down) || isFailure(res.truncationReason),
+        truncationReason: (isOwed(res.seedCursor ?? null, up, down) || isFailure(res.truncationReason))
+            ? (res.truncationReason ?? 'max_nodes')
+            : null,
+        seedTruncated: (res.seedCursor ?? null) !== null,
         seedCursor: res.seedCursor ?? null,
     }
+}
+
+/** A reason that names a FAILURE (not a budget cut) keeps the model partial
+ *  even when nothing is owed on the frontier — the page lost something. */
+function isFailure(reason: string | null | undefined): boolean {
+    return !!reason && reason !== 'max_nodes'
 }
 
 function edgeKey(e: LensEdgeLike): string {
@@ -161,10 +186,16 @@ function mergeFrontier(
     incoming: ReadonlyArray<LensFrontierEntry>,
     clearRoot: boolean,
     rootUrn: string,
+    clearRoots: ReadonlyArray<string> = [],
 ): LensFrontierEntry[] {
     const byUrn = new Map<string, LensFrontierEntry>()
     for (const f of existing) byUrn.set(f.urn, f)
     if (clearRoot) byUrn.delete(rootUrn)
+    // A BULK re-seed is authoritative for every anchor it named: the
+    // response re-reports the ones still open, so the rest are drained.
+    // Without this the union keeps stale entries and the driver re-chases
+    // them forever.
+    for (const u of clearRoots) byUrn.delete(u)
     for (const f of incoming) byUrn.set(f.urn, f)
     return [...byUrn.values()].sort((a, b) => a.urn.localeCompare(b.urn))
 }
@@ -180,7 +211,13 @@ function mergeFrontier(
 export function mergeClosures(
     model: LensWalkModel,
     response: TraceV2Result & LensClosureExtras,
-    ctx: { rootUrn: string; direction: 'up' | 'down' | 'both' },
+    ctx: {
+        rootUrn: string
+        direction: 'up' | 'down' | 'both'
+        /** Every anchor a bulk re-seed named: their frontier entries are
+         *  replaced by what the response re-reports (see `mergeFrontier`). */
+        clearFrontierRoots?: ReadonlyArray<string>
+    },
 ): LensWalkModel {
     const incoming = toLensClosure(response, model.focusUrn)
 
@@ -205,6 +242,19 @@ export function mergeClosures(
 
     const clearUp = ctx.direction === 'up' || ctx.direction === 'both'
     const clearDown = ctx.direction === 'down' || ctx.direction === 'both'
+    const clearRoots = ctx.clearFrontierRoots ?? []
+
+    const frontierUp = mergeFrontier(model.frontierUp, incoming.frontierUp, clearUp, ctx.rootUrn, clearUp ? clearRoots : [])
+    const frontierDown = mergeFrontier(model.frontierDown, incoming.frontierDown, clearDown, ctx.rootUrn, clearDown ? clearRoots : [])
+    // The focus-contents cursor belongs to FOCUS-anchored responses (the
+    // initial fetch and its seed-page continuations): those are
+    // authoritative — they advance it, and drain it to null when a page
+    // comes back uncapped. A card-anchored extend/page knows nothing about
+    // the focus's contents and must not touch it (its OWN seed cursor is
+    // followed by the driver, per op — see useLensWalk).
+    const seedCursor = ctx.rootUrn === model.focusUrn ? incoming.seedCursor : model.seedCursor
+    const owed = isOwed(seedCursor, frontierUp, frontierDown)
+    const failed = isFailure(incoming.truncationReason)
 
     return {
         focusUrn: model.focusUrn,
@@ -213,16 +263,11 @@ export function mergeClosures(
         containmentEdges: [...containmentByKey.values()],
         upstreamUrns,
         downstreamUrns,
-        frontierUp: mergeFrontier(model.frontierUp, incoming.frontierUp, clearUp, ctx.rootUrn),
-        frontierDown: mergeFrontier(model.frontierDown, incoming.frontierDown, clearDown, ctx.rootUrn),
-        truncated: model.truncated || incoming.truncated,
-        truncationReason: model.truncationReason ?? incoming.truncationReason,
-        seedTruncated: model.seedTruncated || incoming.seedTruncated,
-        // The focus-contents cursor belongs to FOCUS-anchored responses
-        // (the initial fetch and its seed-page continuations): those are
-        // authoritative — they advance it, and drain it to null when a
-        // page comes back uncapped. A card-anchored extend/page knows
-        // nothing about the focus's contents and must not touch it.
-        seedCursor: ctx.rootUrn === model.focusUrn ? incoming.seedCursor : model.seedCursor,
+        frontierUp,
+        frontierDown,
+        truncated: owed || failed,
+        truncationReason: failed ? incoming.truncationReason : (owed ? (incoming.truncationReason ?? model.truncationReason ?? 'max_nodes') : null),
+        seedTruncated: seedCursor !== null,
+        seedCursor,
     }
 }

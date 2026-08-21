@@ -146,15 +146,15 @@ describe('toLensClosure', () => {
             frontierUp: [{ urn: 'urn:li:table:t_raw' }],
         })
         const m = toLensClosure(synthetic, 'x')
-        expect(m.frontierUp).toEqual([{ urn: 'urn:li:table:t_raw', totalCount: null, nextCursor: null }])
+        expect(m.frontierUp).toEqual([{ urn: 'urn:li:table:t_raw', totalCount: null, nextCursor: null, kind: 'depth' }])
     })
 
     it("distinguishes depth-exhausted (cursor-less) from budget-cut ('e:0') frontier entries", () => {
         const m = toLensClosure(toResponse(fixture.initial), FOCUS_URN)
         // t_raw: depth ran out -> cursor-less.
-        expect(m.frontierUp).toEqual([{ urn: 'urn:li:table:t_raw', totalCount: 3, nextCursor: null }])
+        expect(m.frontierUp).toEqual([{ urn: 'urn:li:table:t_raw', totalCount: 3, nextCursor: null, kind: 'depth' }])
         // t_report: node-budget cut -> resumable from the start.
-        expect(m.frontierDown).toEqual([{ urn: 'urn:li:table:t_report', totalCount: 9, nextCursor: 'e:0' }])
+        expect(m.frontierDown).toEqual([{ urn: 'urn:li:table:t_report', totalCount: 9, nextCursor: 'e:0', kind: 'cut' }])
     })
 })
 
@@ -233,7 +233,7 @@ describe('mergeClosures — walk accumulation', () => {
             ['urn:li:table:t_src_a', 'urn:li:table:t_src_b'].sort(),
         )
         // frontierDown is untouched by an 'up' merge — t_report's cut entry survives.
-        expect(m2.frontierDown).toEqual([{ urn: 'urn:li:table:t_report', totalCount: 9, nextCursor: 'e:0' }])
+        expect(m2.frontierDown).toEqual([{ urn: 'urn:li:table:t_report', totalCount: 9, nextCursor: 'e:0', kind: 'cut' }])
 
         // The seam edge (t_src_a -> t_orders) is present in the union...
         const seam = m2.lineageEdges.find(e => e.id === 'e:7')
@@ -263,7 +263,7 @@ describe('mergeClosures — hub paging', () => {
 
         // 17 + 9 incoming - 4 re-shipped-overlap (t_report's own spine) = 22.
         expect(m3.nodes).toHaveLength(22)
-        expect(m3.frontierDown).toEqual([{ urn: 'urn:li:table:t_report', totalCount: 9, nextCursor: 'e:41' }])
+        expect(m3.frontierDown).toEqual([{ urn: 'urn:li:table:t_report', totalCount: 9, nextCursor: 'e:41', kind: 'cut' }])
 
         // A synthetic exhausted page: no entry for t_report at all.
         const exhausted = makeResponse({ focus: { urn: 'urn:li:table:t_report', level: 0, entityType: 'table' } })
@@ -378,5 +378,99 @@ describe('seedCursor — the focus-contents resume point', () => {
     let m = toLensClosure(base({ seedCursor: 's:w3' }), 'F')
     m = mergeClosures(m, base({ seedCursor: null }), { rootUrn: 'someCard', direction: 'up' })
     expect(m.seedCursor).toBe('s:w3')
+  })
+})
+
+// ── Degree-exact walk contract (2026-08-21) ──────────────────────────────
+
+describe('frontier entries carry their kind', () => {
+  const base = (over: Partial<TraceV2Result & LensClosureExtras> = {}): TraceV2Result & LensClosureExtras => ({
+    nodes: [], edges: [], containmentEdges: [],
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    focus: { urn: 'F', level: 0, entityType: 'dataset' },
+    effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+    truncated: false, truncationReason: null,
+    frontierUp: [], frontierDown: [], seedTruncated: false,
+    ...over,
+  })
+
+  it('reads the wire reason; a cursored entry without one is a cut, a bare one is depth', () => {
+    const m = toLensClosure(base({
+      frontierUp: [
+        { urn: 'cut1', totalCount: 3, nextCursor: null, reason: 'cut' },
+        { urn: 'dep1', totalCount: 3, nextCursor: null, reason: 'depth' },
+        { urn: 'hub', totalCount: 50, nextCursor: 'e:9' },          // old server: no reason
+        { urn: 'old', totalCount: 1, nextCursor: null },            // old server: no reason
+      ],
+    }), 'F')
+    expect(m.frontierUp.map(f => [f.urn, f.kind])).toEqual([
+      ['cut1', 'cut'], ['dep1', 'depth'], ['hub', 'cut'], ['old', 'depth'],
+    ])
+  })
+})
+
+describe('mergeClosures — bulk drains', () => {
+  const base = (over: Partial<TraceV2Result & LensClosureExtras> = {}): TraceV2Result & LensClosureExtras => ({
+    nodes: [], edges: [], containmentEdges: [],
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    focus: { urn: 'F', level: 0, entityType: 'dataset' },
+    effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+    truncated: false, truncationReason: null,
+    frontierUp: [], frontierDown: [], seedTruncated: false,
+    ...over,
+  })
+  const entry = (urn: string, reason: 'cut' | 'depth' = 'cut') => ({ urn, totalCount: 2, nextCursor: null, reason })
+
+  it('clearFrontierRoots drops every batched anchor before the union — a drained anchor disappears, a re-reported one survives', () => {
+    let m = toLensClosure(base({ frontierDown: [entry('a'), entry('b'), entry('c')] }), 'F')
+    // One request re-seeded a and b; the server says b still has more.
+    m = mergeClosures(m, base({ frontierDown: [entry('b')] }), {
+      rootUrn: 'a', direction: 'down', clearFrontierRoots: ['a', 'b'],
+    })
+    expect(m.frontierDown.map(f => f.urn)).toEqual(['b', 'c'])
+  })
+})
+
+describe('partiality is derived, never sticky', () => {
+  const base = (over: Partial<TraceV2Result & LensClosureExtras> = {}): TraceV2Result & LensClosureExtras => ({
+    nodes: [], edges: [], containmentEdges: [],
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    focus: { urn: 'F', level: 0, entityType: 'dataset' },
+    effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+    truncated: false, truncationReason: null,
+    frontierUp: [], frontierDown: [], seedTruncated: false,
+    ...over,
+  })
+
+  it('truncated is true while a seed cursor or a cut entry remains, and false once they drain', () => {
+    let m = toLensClosure(base({
+      truncated: true, truncationReason: 'max_nodes', seedTruncated: true, seedCursor: 's:x',
+      frontierDown: [{ urn: 'c', totalCount: 2, nextCursor: null, reason: 'cut' }],
+    }), 'F')
+    expect(m.truncated).toBe(true)
+
+    // The seed pages drain…
+    m = mergeClosures(m, base({ seedCursor: null }), { rootUrn: 'F', direction: 'both' })
+    expect(m.truncated).toBe(true)          // …but the cut entry is still owed
+    // …and the cut entry is re-seeded and comes back complete.
+    m = mergeClosures(m, base({}), { rootUrn: 'c', direction: 'down', clearFrontierRoots: ['c'] })
+    expect(m.truncated).toBe(false)
+    expect(m.truncationReason).toBeNull()
+    expect(m.seedTruncated).toBe(false)
+  })
+
+  it('a depth entry alone is not partiality — it is the next hop', () => {
+    const m = toLensClosure(base({
+      frontierUp: [{ urn: 'p', totalCount: 4, nextCursor: null, reason: 'depth' }],
+    }), 'F')
+    expect(m.truncated).toBe(false)
+  })
+
+  it('a failure reason on the latest page is kept while the page is partial', () => {
+    const m = toLensClosure(base({
+      truncated: true, truncationReason: 'timeout',
+      frontierDown: [{ urn: 'c', totalCount: 2, nextCursor: null, reason: 'cut' }],
+    }), 'F')
+    expect(m.truncationReason).toBe('timeout')
   })
 })

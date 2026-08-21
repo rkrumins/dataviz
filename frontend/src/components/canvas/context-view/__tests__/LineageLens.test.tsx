@@ -1004,15 +1004,19 @@ describe('what the lens says while it cannot answer', () => {
     expect(screen.queryByText(/No upstream sources in the data source/)).toBeNull()
   })
 
-  it('says when the data source stopped early, so the counts read as floors', () => {
+  it('a partial model on its own says nothing — what the server owes is drained hands-free', () => {
+    // Partiality is no longer a user problem. A model that still reads
+    // truncated while the walk is neither running nor failed has nothing
+    // to ask of the reader: no strip, no "Load everything", no "Keep walking".
     const model = walkModel('F', {
       nodes: [wnode('F'), wnode('u')],
       lineageEdges: [hop('u', 'F')],
       truncated: true,
-      truncationReason: 'node budget reached',
+      truncationReason: 'max_nodes',
     })
     renderLens(['F'], doneWalk(model))
-    expect(screen.getByText(/Partial picture — 0 upstream · 0 downstream on the board/)).toBeTruthy()
+    expect(screen.queryByText(/Partial picture/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /load everything|load more contents|keep walking/i })).toBeNull()
   })
 })
 

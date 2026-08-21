@@ -1997,9 +1997,16 @@ export function ContextViewCanvas({
       traceEdges: new Set(traceModel.lineageEdges.map(e => e.id ?? `${e.sourceUrn}>${e.targetUrn}`)),
       lineageResult: null,
       isInherited: false,
-      truncated: traceModel.truncated || (canvasTrace.fullWalkStatus?.budgetHit ?? false),
-      truncationReason: traceModel.truncationReason
-        ?? (canvasTrace.fullWalkStatus?.budgetHit ? 'max_nodes' : undefined),
+      // Partiality is DERIVED from the model (what is still owed), never a
+      // budget park — there is no budget. The dock's truncation notice
+      // therefore only speaks for a walk that genuinely lost something
+      // (a failed step) or is parked at the memory checkpoint.
+      truncated: traceModel.truncated
+        || canvasTrace.progress?.phase === 'checkpoint'
+        || canvasTrace.progress?.phase === 'error',
+      truncationReason: canvasTrace.progress?.phase === 'checkpoint'
+        ? 'checkpoint'
+        : (canvasTrace.progress?.phase === 'error' ? (canvasTrace.progress.error ?? 'timeout') : (traceModel.truncationReason ?? undefined)),
     }
     return {
       ...trace,
@@ -2007,7 +2014,8 @@ export function ContextViewCanvas({
       focusId: tracedNodeId,
       result,
       error: canvasTrace.walkEntry?.status === 'error' ? canvasTrace.walkEntry.error : null,
-      isLoading: canvasTrace.walkEntry?.status === 'loading' || (canvasTrace.fullWalkStatus?.walking ?? false),
+      isLoading: canvasTrace.walkEntry?.status === 'loading'
+        || canvasTrace.progress?.phase === 'seeding' || canvasTrace.progress?.phase === 'walking',
       upstreamCount: traceParticipants.upstream.length,
       downstreamCount: traceParticipants.downstream.length,
       showUpstream: traceShowUpstream,
@@ -2056,8 +2064,9 @@ export function ContextViewCanvas({
       // that stopped short of exhaustion.
       retrace: async () => {
         if (canvasTrace.walkEntry?.status === 'error') { canvasTrace.retryWalk(); return }
-        const walk = canvasTrace.fullWalkStatus
-        if (walk?.budgetHit || walk?.stalled) canvasTrace.continueWalk()
+        const phase = canvasTrace.progress?.phase
+        if (phase === 'checkpoint') canvasTrace.continuePastCheckpoint()
+        else if (phase === 'error') canvasTrace.retryWalk()
       },
     }
   }, [traceActive, traceModel, tracedNodeId, trace, canvasTrace, traceParticipants, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown, dockHistoryEntries, traceHistory, traceHistoryGo, recordTraceView])
@@ -4597,9 +4606,10 @@ export function ContextViewCanvas({
             void locateManyOnCanvas(ids)
           }}
           fullWalkEnabled={lensFullWalk}
-          fullWalkStatus={lensFocal ? lensWalk.fullWalkFor(lensFocal) : null}
+          walkProgress={lensFocal ? lensWalk.walkProgressFor(lensFocal) : null}
           onFullWalkToggle={setLensFullWalk}
-          onFullWalkContinue={() => { if (lensFocal) lensWalk.continueFullWalk(lensFocal) }}
+          onWalkContinue={() => { if (lensFocal) lensWalk.continuePastCheckpoint(lensFocal) }}
+          onWalkRetry={() => { if (lensFocal) lensWalk.retryWalk(lensFocal) }}
         />
 
         {/* Blank (hand-built) model guidance — the full-canvas hero on a truly

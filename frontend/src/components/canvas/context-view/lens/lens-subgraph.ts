@@ -62,6 +62,12 @@ export interface LensFrontierEntry {
     totalCount: number | null
     /** Paging cursor for the rest, or null when there is nothing further. */
     nextCursor: string | null
+    /** `cut`: the server's budget/deadline stopped before this anchor — the
+     *  walk is OWED here and the driver completes it hands-free in every
+     *  mode. `depth`: the requested depth ended here — the next hop, offered
+     *  as a pill and drained only by a full walk. The adapter always sets
+     *  it; a hand-built entry without one reads as `depth`. */
+    kind?: 'cut' | 'depth'
 }
 
 export interface LensSubgraphInput<N extends LensNodeLike = LensNodeLike> {

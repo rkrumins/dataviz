@@ -567,6 +567,12 @@ export interface TraceClosureFrontierNode {
     urn: URN
     totalCount?: number | null
     nextCursor?: string | null
+    /** WHY the node is on the frontier (additive, 2026-08-21): `cut` — the
+     *  node budget or the deadline stopped the walk before it (complete it
+     *  hands-free: re-root via `seedUrns`, or page a hub by `nextCursor`);
+     *  `depth` — the requested depth ended there (the next hop, a pill).
+     *  Absent on older servers. */
+    reason?: 'cut' | 'depth' | null
 }
 
 /** The three closure-only fields `TraceV2Result` doesn't carry — merged
@@ -874,7 +880,12 @@ export interface GraphDataProvider {
      * not the table's. `edges` are the ONLY hops; `containmentEdges` are for
      * nesting and are never rendered as hops.
      */
-    traceClosure?(request: TraceClosureRequest): Promise<TraceV2Result & LensClosureExtras>
+    traceClosure?(
+        request: TraceClosureRequest,
+        /** `signal` aborts the request (and the server's work on it) when the
+         *  lens closes or re-anchors mid-walk. */
+        opts?: { signal?: AbortSignal },
+    ): Promise<TraceV2Result & LensClosureExtras>
 
     /**
      * Drill into an AGGREGATED edge: return finer-level nodes + edges

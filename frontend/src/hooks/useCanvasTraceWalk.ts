@@ -24,7 +24,7 @@ import {
     useLensWalk,
     FULL_WALK_INITIAL_DEPTH,
     type WalkEntry,
-    type FullWalkStatus,
+    type WalkProgress,
 } from './useLensWalk'
 
 export interface CanvasTraceWalk {
@@ -36,10 +36,11 @@ export interface CanvasTraceWalk {
     exit: () => void
     /** Status/error/model for the trace bar and counts. */
     walkEntry: WalkEntry | null
-    fullWalkStatus: FullWalkStatus | null
-    /** Budget grant / stalled re-arm ("Keep walking"). */
-    continueWalk: () => void
-    /** Re-kick a failed INITIAL fetch. */
+    /** Where the hands-free walk stands (phase, counts, pending). */
+    progress: WalkProgress | null
+    /** Lift the one-time memory checkpoint (`progress.phase === 'checkpoint'`). */
+    continuePastCheckpoint: () => void
+    /** Give failed steps one more attempt, or re-kick a failed INITIAL fetch. */
     retryWalk: () => void
 }
 
@@ -48,7 +49,7 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
     const walk = useLensWalk(tracedUrn, provider, FULL_WALK_INITIAL_DEPTH, true)
 
     const walkEntry = tracedUrn ? walk.walkFor(tracedUrn) : null
-    const fullWalkStatus = tracedUrn ? walk.fullWalkFor(tracedUrn) : null
+    const progress = tracedUrn ? walk.walkProgressFor(tracedUrn) : null
 
     const exit = useCallback(() => setTracedUrn(null), [])
 
@@ -57,12 +58,14 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         setTracedUrn(urn)
     }, [])
 
-    const continueWalk = useCallback(() => {
-        if (tracedUrn) walk.continueFullWalk(tracedUrn)
+    const continuePastCheckpoint = useCallback(() => {
+        if (tracedUrn) walk.continuePastCheckpoint(tracedUrn)
     }, [walk, tracedUrn])
     const retryWalk = useCallback(() => {
-        if (tracedUrn) walk.retry(tracedUrn)
-    }, [walk, tracedUrn])
+        if (!tracedUrn) return
+        if (walkEntry?.status === 'error') walk.retry(tracedUrn)
+        else walk.retryWalk(tracedUrn)
+    }, [walk, tracedUrn, walkEntry?.status])
 
     return {
         isTracing: tracedUrn !== null,
@@ -70,8 +73,8 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         start,
         exit,
         walkEntry,
-        fullWalkStatus,
-        continueWalk,
+        progress,
+        continuePastCheckpoint,
         retryWalk,
     }
 }
