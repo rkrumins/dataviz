@@ -54,6 +54,7 @@ export function TraceDockOverview({
         totalNodes={trace.statistics.totalNodes}
         totalEdges={trace.statistics.totalEdges}
         upstreamCount={trace.upstreamCount}
+        countsAreFloors={trace.countsAreFloors === true}
         downstreamCount={trace.downstreamCount}
         outsideView={outsideView}
         resolveEdgeColor={resolveEdgeColor}

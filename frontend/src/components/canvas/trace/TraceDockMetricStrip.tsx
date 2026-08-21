@@ -12,6 +12,10 @@ export interface TraceDockMetricStripProps {
   totalEdges: number
   upstreamCount: number
   downstreamCount: number
+  /** The up/down counts are FLOORS (a lazy trace counts what it has), so
+   *  they read as "N+" — the overview must not claim a total the board
+   *  itself is still qualifying. */
+  countsAreFloors?: boolean
   /** Chains this view cannot place ANYWHERE, counted once per chain. The
    *  trace found them; the view has no lane for them, and inventing one is
    *  what the overlay rebuild exists to stop. The number is the honest
@@ -34,6 +38,7 @@ export function TraceDockMetricStrip({
   totalEdges,
   upstreamCount,
   downstreamCount,
+  countsAreFloors = false,
   outsideView = 0,
   resolveEdgeColor,
 }: TraceDockMetricStripProps) {
@@ -100,12 +105,14 @@ export function TraceDockMetricStrip({
         <HeroMetric
           label="Upstream"
           value={upstreamCount}
+          floor={countsAreFloors}
           icon={<ArrowUp className="w-4 h-4" strokeWidth={2.4} />}
           accent="blue"
         />
         <HeroMetric
           label="Downstream"
           value={downstreamCount}
+          floor={countsAreFloors}
           icon={<ArrowDown className="w-4 h-4" strokeWidth={2.4} />}
           accent="emerald"
         />
@@ -170,6 +177,8 @@ interface HeroMetricProps {
   value: number
   icon: React.ReactNode
   accent: 'lineage' | 'blue' | 'emerald'
+  /** The value is a floor, not a total — render it as "N+". */
+  floor?: boolean
 }
 
 const ACCENT = {
@@ -190,7 +199,7 @@ const ACCENT = {
   },
 } as const
 
-function HeroMetric({ label, value, icon, accent }: HeroMetricProps) {
+function HeroMetric({ label, value, icon, accent, floor = false }: HeroMetricProps) {
   const display = useCountUp(value)
   const palette = ACCENT[accent]
   return (
@@ -220,7 +229,7 @@ function HeroMetric({ label, value, icon, accent }: HeroMetricProps) {
 
       <div className="flex flex-col gap-0.5 min-w-0">
         <span className="text-2xl font-display font-bold tabular-nums leading-none tracking-tight text-ink">
-          {display.toLocaleString()}
+          {display.toLocaleString()}{floor ? '+' : ''}
         </span>
         <span className="text-[10px] uppercase tracking-[0.14em] font-bold text-ink-muted truncate">
           {label}

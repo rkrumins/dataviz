@@ -77,7 +77,13 @@ export function TraceDockTitleBar({
   const focusNode = trace.focusId ? displayMap.get(trace.focusId) : undefined
   const focusName = focusNode?.name ?? trace.focusId ?? 'Unknown'
   const focusType = focusNode?.typeId
-  const liveMsg = `Tracing ${focusName}${focusType ? `, ${focusType}` : ''}. ${trace.upstreamCount} upstream, ${trace.downstreamCount} downstream nodes.`
+  // A LAZY TRACE COUNTS WHAT IT HAS. Everything finer arrives when the
+  // reader opens a card, so while any partner is still unexplored these are
+  // floors and the pills say so: "1,203+".
+  const floors = trace.countsAreFloors === true
+  const atLeast = floors ? ' or more' : ''
+  const plus = floors ? '+' : ''
+  const liveMsg = `Tracing ${focusName}${focusType ? `, ${focusType}` : ''}. ${trace.upstreamCount}${atLeast} upstream, ${trace.downstreamCount}${atLeast} downstream nodes.`
 
   const upDisplay = useCountUp(trace.upstreamCount)
   const downDisplay = useCountUp(trace.downstreamCount)
@@ -219,20 +225,20 @@ export function TraceDockTitleBar({
             'inline-flex items-center gap-1.5 px-2.5 h-9 rounded-xl',
             'bg-white/[0.06] border border-blue-400/40',
           )}
-          aria-label={`${trace.upstreamCount} upstream nodes`}
+          aria-label={`${trace.upstreamCount}${atLeast} upstream nodes`}
         >
           <ArrowUp className="w-4 h-4 text-blue-600 dark:text-blue-400" strokeWidth={2.4} aria-hidden />
-          <span className="text-sm font-bold tabular-nums text-ink">{upDisplay.toLocaleString()}</span>
+          <span className="text-sm font-bold tabular-nums text-ink">{upDisplay.toLocaleString()}{plus}</span>
         </span>
         <span
           className={cn(
             'inline-flex items-center gap-1.5 px-2.5 h-9 rounded-xl',
             'bg-white/[0.06] border border-emerald-400/40',
           )}
-          aria-label={`${trace.downstreamCount} downstream nodes`}
+          aria-label={`${trace.downstreamCount}${atLeast} downstream nodes`}
         >
           <ArrowDown className="w-4 h-4 text-emerald-600 dark:text-emerald-400" strokeWidth={2.4} aria-hidden />
-          <span className="text-sm font-bold tabular-nums text-ink">{downDisplay.toLocaleString()}</span>
+          <span className="text-sm font-bold tabular-nums text-ink">{downDisplay.toLocaleString()}{plus}</span>
         </span>
       </div>
 
