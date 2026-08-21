@@ -104,6 +104,9 @@ export interface TraceOverlay {
 }
 
 const EMPTY_EXPANSION: ReadonlySet<string> = new Set<string>()
+/** Above this many lineage-bearing direct children, a traced container lands
+ *  closed rather than auto-opened (see seedExpansion). */
+export const FOCUS_AUTO_OPEN_MAX = 10
 
 interface SeedState {
   forFocus: string | null
@@ -151,14 +154,7 @@ function seedExpansion(a: UseTraceOverlayArgs): ReadonlySet<string> {
   })
   const seed = new Set<string>([...focusAncestorChain(sg), focusUrn])
 
-  const partners = new Set<string>()
-  for (const e of inputs.model.lineageEdges) {
-    if (e.sourceUrn === focusUrn) partners.add(e.targetUrn)
-    if (e.targetUrn === focusUrn) partners.add(e.sourceUrn)
-  }
-  if (partners.size === 0) return seed
-
-  // Where the VIEW anchors each partner is `buildTraceView`'s decision (the
+  // Where the VIEW anchors each card is `buildTraceView`'s decision (the
   // canvas's own placement chain), so ask it rather than re-deriving it here.
   // Lanes and cards are independent of expansion — only `expanded`/`visible`
   // read it — so a provisional build with nothing open answers exactly this.
@@ -166,6 +162,24 @@ function seedExpansion(a: UseTraceOverlayArgs): ReadonlySet<string> {
   for (const lane of buildTraceView(inputs).lanes) {
     for (const [urn, card] of lane.cards) cards.set(urn, card)
   }
+
+  // The focus itself opens only when what is inside it is small enough to
+  // read at a glance. A table or container traced with a hundred
+  // lineage-bearing children lands CLOSED — its pill says "N on this
+  // lineage", its wires roll up to it, and one click opens it — instead of
+  // a wall of rows. Decided BEFORE the partner walk: a table whose edges
+  // touch its columns has no direct partners of its own.
+  let focusKids = 0
+  for (const card of cards.values()) if (card.parentId === focusUrn) focusKids += 1
+  if (focusKids > FOCUS_AUTO_OPEN_MAX) seed.delete(focusUrn)
+
+  const partners = new Set<string>()
+  for (const e of inputs.model.lineageEdges) {
+    if (e.sourceUrn === focusUrn) partners.add(e.targetUrn)
+    if (e.targetUrn === focusUrn) partners.add(e.sourceUrn)
+  }
+  if (partners.size === 0) return seed
+
   for (const partner of partners) {
     let cursor = cards.get(partner)?.parentId ?? null
     while (cursor && !seed.has(cursor)) {

@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
-import { useTraceOverlay, type UseTraceOverlayArgs } from '../useTraceOverlay'
+import { useTraceOverlay, FOCUS_AUTO_OPEN_MAX, type UseTraceOverlayArgs } from '../useTraceOverlay'
 import type { TraceView } from '../lib/traceViewModel'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { emptyWalkModel, type LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
@@ -61,7 +61,7 @@ const grownModel = (): LensWalkModel => {
 }
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(25))
+afterAll(() => expectTestsRan(27))
 
 describe('useTraceOverlay — the seed', () => {
   it('opens the focus chain and leaves the direct partners visible and CLOSED', () => {
@@ -116,6 +116,53 @@ describe('useTraceOverlay — the seed', () => {
     const { result: noModel } = renderHook(() => useTraceOverlay(args({ model: null })))
     expect(noModel.current.active).toBe(false)
     expect(noModel.current.view).toBeNull()
+  })
+})
+
+/** A traced TABLE whose lineage lives on its columns: `orders` with N
+ *  lineage-bearing columns each feeding `aov.avg`. No edge touches the
+ *  table itself, so the seed's partner walk has nothing to add — what opens
+ *  is decided by the focus rule alone. */
+const wideTableModel = (columns: number): LensWalkModel => {
+  const base = estate.model
+  const template = base.nodes.find(n => n.urn === 'orders.net')!
+  const extraNodes = Array.from({ length: columns }, (_, i) => ({
+    ...template,
+    id: `orders.c${i}`, urn: `orders.c${i}`, displayName: `orders.c${i}`,
+    data: { urn: `orders.c${i}`, label: `orders.c${i}`, type: 'schemaField', childCount: 0 },
+  })) as typeof base.nodes
+  return {
+    ...base,
+    nodes: [...base.nodes, ...extraNodes],
+    containmentEdges: [...base.containmentEdges, ...extraNodes.map(n => ({ sourceUrn: 'orders', targetUrn: n.urn }))],
+    lineageEdges: [...base.lineageEdges, ...extraNodes.map(n => ({
+      id: `r:${n.urn}>aov.avg`, sourceUrn: n.urn, targetUrn: 'aov.avg', edgeType: 'TRANSFORMS', kind: 'raw' as const, weight: null,
+    }))],
+    upstreamUrns: new Set([...base.upstreamUrns, ...extraNodes.map(n => n.urn)]),
+  }
+}
+
+describe('useTraceOverlay — a wide focus lands closed', () => {
+  it(`opens the focus when it holds at most ${FOCUS_AUTO_OPEN_MAX} lineage-bearing children`, () => {
+    // orders already has 2 lineage-bearing columns; add enough to sit exactly on the cap.
+    const { result } = renderHook(() => useTraceOverlay(args({ model: wideTableModel(FOCUS_AUTO_OPEN_MAX - 2), focusUrn: 'orders' })))
+    const card = cardOf(result.current.view, 'orders')!
+    expect(card.expanded).toBe(true)
+    expect(result.current.view!.visible.has('orders.net')).toBe(true)
+  })
+
+  it('leaves a focus with more children than the cap CLOSED, counted, one click away', () => {
+    const { result } = renderHook(() => useTraceOverlay(args({ model: wideTableModel(FOCUS_AUTO_OPEN_MAX - 1), focusUrn: 'orders' })))
+    const card = cardOf(result.current.view, 'orders')!
+    expect(card.expanded).toBe(false)
+    expect(card.onLineage).toBe(FOCUS_AUTO_OPEN_MAX + 1)
+    expect(result.current.view!.visible.has('orders')).toBe(true)     // the focus itself is on screen
+    expect(result.current.view!.visible.has('orders.net')).toBe(false) // its columns are not
+    // The wire rolls up to the closed table at the visible grain.
+    // …and lands on the chart its columns feed (the authored rollup names the partner), not on the lane root.
+    expect(result.current.view!.wires.filter(w => w.source === 'orders').map(w => `${w.target}:${w.kind}:${w.edgeCount}`)).toEqual([`aov:raw:${FOCUS_AUTO_OPEN_MAX + 1}`])
+    act(() => result.current.toggle('orders'))
+    expect(result.current.view!.visible.has('orders.net')).toBe(true)
   })
 })
 

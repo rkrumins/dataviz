@@ -18,6 +18,7 @@ import { buildLedger, pairKey } from '../traceWireLedger'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
 import type { TraceViewInputs, TraceWire } from '../traceViewModel'
 import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
+import { buildLensSubgraph, projectLensEdges } from '@/components/canvas/context-view/lens/lens-subgraph'
 
 type Estate = ReturnType<typeof cfoEstate>
 
@@ -296,6 +297,39 @@ describe('inner-first accounting — the sibling a fine rollup says nothing abou
     // d1→X: R=1, nothing stated inside → max(1, 1−1) = 1. C→X: R=1 plus the
     // 1 just stated = 2 of its 3, so 1 remains.
     expect(v.wires.map(desc)).toEqual(['C>X:residual:1', 'd1>X:raw:1', 'd1>X:residual:1'])
+  })
+})
+
+describe('Lineage Lens parity — the trace draws the lineage the Lens would', () => {
+  /** What the Lens itself draws for this model at a given visible set: its
+   *  own subgraph over raw hops, its own projector. The canvas trace anchors
+   *  cards by the VIEW's layers rather than by system, but the wires it
+   *  draws for raw evidence must be the Lens's projection, line for line. */
+  const lensWires = (model: LensWalkModel, focusUrn: string, visible: ReadonlySet<string>): string[] => {
+    const sg = buildLensSubgraph({
+      focusUrn, nodes: model.nodes,
+      lineageEdges: model.lineageEdges.filter(e => e.kind !== 'rollup'),
+      containmentEdges: model.containmentEdges, frontierUp: [], frontierDown: [],
+    })
+    return projectLensEdges(sg, new Set(sg.nodes.keys()), visible)
+      .map(e => `${e.sourceUrn}>${e.targetUrn}:raw:${e.weight}`)
+      .sort()
+  }
+
+  for (const [name, expansion] of [['closed partners', ['tableau', 'cfo']], ['half open', HALF_OPEN], ['fully open', ALL_OPEN]] as const) {
+    it(`${name}: raw wires == the Lens projection at the same visible set`, () => {
+      const v = view([...expansion])
+      const ours = v.wires.filter(w => w.kind === 'raw').map(desc).sort()
+      expect(ours).toEqual(lensWires(cfoEstate().model, 'cfo', v.visible))
+    })
+  }
+
+  it('fully open: both are exactly the raw hops at leaf grain — every path, every column', () => {
+    const e = cfoEstate()
+    const v = view(ALL_OPEN)
+    const leafHops = e.model.lineageEdges.filter(x => x.kind !== 'rollup').map(x => `${x.sourceUrn}>${x.targetUrn}:raw:1`).sort()
+    expect(v.wires.map(desc).sort()).toEqual(leafHops)
+    expect(lensWires(e.model, 'cfo', v.visible)).toEqual(leafHops)
   })
 })
 
