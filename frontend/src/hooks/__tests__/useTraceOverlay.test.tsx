@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useTraceOverlay, FOCUS_AUTO_OPEN_MAX, type UseTraceOverlayArgs } from '../useTraceOverlay'
 import type { TraceView } from '../lib/traceViewModel'
-import { cfoEstate } from '@/test/fixtures/traceEstates'
+import { cfoEstate, fieldGrainEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
 import { emptyWalkModel, type LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import { countTest, expectTestsRan } from '@/test/canary'
 import type { ViewLayerConfig } from '@/types/schema'
@@ -61,7 +61,7 @@ const grownModel = (): LensWalkModel => {
 }
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(33))
+afterAll(() => expectTestsRan(36))
 
 describe('useTraceOverlay — the seed', () => {
   it('opens the focus chain and leaves the direct partners visible and CLOSED', () => {
@@ -539,5 +539,59 @@ describe('useTraceOverlay — the drill seam', () => {
     const kinds = (v: TraceView | null) => (v?.wires ?? []).map(w => w.kind).sort()
     expect(kinds(vouched.result.current.view)).toEqual(['raw', 'raw'])
     expect(kinds(lazy.result.current.view)).toContain('residual')
+  })
+})
+
+// ── PARTNERS AT THE LEVEL YOU TRACED ────────────────────────────────────
+//
+// Ruling 2026-08-21, from a screenshot: tracing a dataset landed with partner
+// datasets in the same layer FULLY EXPANDED, fields and all. The seed opened
+// the way to each partner, and when the flow is authored at field grain the
+// partners ARE fields — so their datasets opened to show them.
+//
+// The rule is type-agnostic on purpose (an ontology that nests the same type
+// twice has no level to appeal to): each partner is represented by its
+// ancestor at the FOCUS's own containment depth. Hosts above that card open;
+// the card itself stays CLOSED with its honest count.
+
+describe('useTraceOverlay — partner grain', () => {
+  it('a field-grain partner is represented by the dataset at the focus`s depth', () => {
+    const estate = fieldGrainEstate()
+    const { result } = renderHook(() => useTraceOverlay({
+      ...args(), model: estate.model, focusUrn: 'gl_postings',
+      layers: estate.layers, assignments: estate.assignments,
+    }))
+
+    // GOLD hosts the partner card, so GOLD opens…
+    expect(result.current.traceExpansion.has('GOLD')).toBe(true)
+    // …and `fact_revenue` — the partner AT THE FOCUS'S DEPTH — does not.
+    expect(result.current.traceExpansion.has('fact_revenue')).toBe(false)
+    expect(visibleIds(result.current.view)).toContain('fact_revenue')
+    // Which is the whole point: its fields stay inside it.
+    expect(visibleIds(result.current.view)).not.toContain('fact_revenue.amount')
+  })
+
+  it('leaves the CFO picture exactly as it was', () => {
+    // cfo is one deep; its partners' fields are three deep, so the card is
+    // INTERMEDIATE_T2 — which is what Stage 1 already landed on. The rule
+    // must not move a picture that was already right.
+    const { result } = renderHook(() => useTraceOverlay(args()))
+    expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
+    expect(visibleIds(result.current.view))
+      .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
+  })
+
+  it('a partner shallower than the focus stands for itself', () => {
+    // Roots ⊃ a1 … ⊃ a10, focus a9 (nine deep), partner b10 (ten). The card
+    // is b9 — one level up — and everything above it opens.
+    const estate = rootsNodeEstate(10)
+    const { result } = renderHook(() => useTraceOverlay({
+      ...args(), model: estate.model, focusUrn: 'a9',
+      layers: estate.layers, assignments: estate.assignments,
+    }))
+    expect(result.current.traceExpansion.has('b8')).toBe(true)
+    expect(result.current.traceExpansion.has('b9')).toBe(false)
+    expect(visibleIds(result.current.view)).toContain('b9')
+    expect(visibleIds(result.current.view)).not.toContain('b10')
   })
 })

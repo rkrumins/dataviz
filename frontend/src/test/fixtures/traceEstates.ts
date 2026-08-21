@@ -64,3 +64,49 @@ export function rootsNodeEstate(depth: 3 | 10) {
   const layers: ViewLayerConfig[] = [{ id: 'roots', name: 'Roots', order: 0, entityTypes: ['Roots'] }]
   return { model, layers, assignments: { ROOT: { layerId: 'roots' } } }
 }
+
+/**
+ * A DATASET focus whose flow is authored at FIELD grain — the shape that
+ * produced the user's screenshot on 2026-08-21: partner datasets in the same
+ * layer landing fully expanded beside a focus that is itself a dataset.
+ *
+ *   snowflake ⊃ INTERMEDIATE_T2 ⊃ gl_postings ⊃ {amount, cost_center}
+ *   snowflake ⊃ GOLD            ⊃ fact_revenue ⊃ {amount, cost_center}
+ *
+ * Focus is `gl_postings` (containment depth 2). The lineage runs field to
+ * field, so the raw partners are three deep — and the card that stands for
+ * them must be `fact_revenue`, at the focus's own depth, CLOSED.
+ */
+export function fieldGrainEstate() {
+  const nodes = [
+    wn('snowflake', 'dataPlatform', 2),
+    wn('INTERMEDIATE_T2', 'container', 1), wn('gl_postings', 'dataset', 2),
+    wn('gl_postings.amount', 'schemaField'), wn('gl_postings.cost_center', 'schemaField'),
+    wn('GOLD', 'container', 1), wn('fact_revenue', 'dataset', 2),
+    wn('fact_revenue.amount', 'schemaField'), wn('fact_revenue.cost_center', 'schemaField'),
+  ]
+  const containmentEdges = [
+    has('snowflake', 'INTERMEDIATE_T2'), has('INTERMEDIATE_T2', 'gl_postings'),
+    has('gl_postings', 'gl_postings.amount'), has('gl_postings', 'gl_postings.cost_center'),
+    has('snowflake', 'GOLD'), has('GOLD', 'fact_revenue'),
+    has('fact_revenue', 'fact_revenue.amount'), has('fact_revenue', 'fact_revenue.cost_center'),
+  ]
+  const lineageEdges = [
+    raw('gl_postings.amount', 'fact_revenue.amount'),
+    raw('gl_postings.cost_center', 'fact_revenue.cost_center'),
+  ]
+  const model: LensWalkModel = {
+    focusUrn: 'gl_postings', nodes, lineageEdges, containmentEdges,
+    upstreamUrns: new Set(),
+    downstreamUrns: new Set(['fact_revenue.amount', 'fact_revenue.cost_center']),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null,
+    seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'curated', name: 'Curated', order: 0, entityTypes: ['container'] },
+  ]
+  return {
+    model, layers,
+    assignments: { INTERMEDIATE_T2: { layerId: 'curated' }, GOLD: { layerId: 'curated' } },
+  }
+}

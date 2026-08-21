@@ -67,6 +67,10 @@ interface LayerColumnProps {
   traceNodes: Set<string>
   traceContextSet: Set<string>
   isTracing?: boolean
+  /** The trace SESSION is open — true from the click, before the overlay has
+   *  anything to draw. Browse affordances key on this rather than on
+   *  `isTracing`, so nothing browse-shaped survives into the walk window. */
+  traceSessionOpen?: boolean
   highlightedNodes?: Set<string>
   isHighlightActive?: boolean
   isHoverHighlight?: boolean
@@ -175,6 +179,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   traceNodes: _traceNodes,
   traceContextSet,
   isTracing = false,
+  traceSessionOpen = false,
   highlightedNodes,
   isHighlightActive = false,
   isHoverHighlight = false,
@@ -1491,7 +1496,15 @@ export const LayerColumn = React.memo(function LayerColumn({
               occlusion reads as an intentional fade — never as chrome
               covering a card. Click scrolls the column. ── */}
           <AnimatePresence>
-            {(overflowCounts.above > 0 || (periphery?.upEdges ?? 0) > 0) && (
+            {/* THE PERIPHERY SCRIMS ARE BROWSE FURNITURE. They count rows and
+                edges scrolled out of view — an honest affordance in browse,
+                and in a trace a "N more · N connections" pill in browse's own
+                rose that the reader reads as the trace hiding something from
+                them. The load-more ROW has always been gated (`hasMore`
+                above); these were not. Keyed on the SESSION, not on
+                `isTracing`, so they go at the click rather than a frame
+                later when the overlay first draws. */}
+            {!traceSessionOpen && (overflowCounts.above > 0 || (periphery?.upEdges ?? 0) > 0) && (
               <motion.div
                 key="periphery-top"
                 initial={{ opacity: 0 }}
@@ -1560,7 +1573,7 @@ export const LayerColumn = React.memo(function LayerColumn({
 
           {/* Bottom periphery scrim — mirror of the top. */}
           <AnimatePresence>
-            {(overflowCounts.below > 0 || (periphery?.downEdges ?? 0) > 0) && (
+            {!traceSessionOpen && (overflowCounts.below > 0 || (periphery?.downEdges ?? 0) > 0) && (
               <motion.div
                 key="periphery-bottom"
                 initial={{ opacity: 0 }}

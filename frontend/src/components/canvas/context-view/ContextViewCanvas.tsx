@@ -4774,6 +4774,7 @@ export function ContextViewCanvas({
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
                 isTracing={overlay.active}
+                traceSessionOpen={traceActive}
                 highlightedNodes={mergedHighlightNodes}
                 isHighlightActive={isHighlightActive}
                 isHoverHighlight={isHoverActive && !isClickHighlightActive}

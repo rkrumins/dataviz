@@ -22,7 +22,7 @@ import { cfoEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(26))
+afterAll(() => expectTestsRan(27))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -551,10 +551,16 @@ describe('the lazy trace engine on the real canvas', () => {
     await h.startTrace('a9')
     expect(h.paintCalls()).toBe(1)
 
+    // The partner is represented at the FOCUS's own depth (`a9` is nine deep,
+    // so the card is `b9`) and the hosts above it opened with the paint — so
+    // walking down the chain the reader can see costs nothing. The rule
+    // itself is pinned on the pure overlay, where the row list is not
+    // subject to the column's virtualiser.
+    const before = h.visibleCardIds()
+    expect(before).toContain('b1')
     await h.toggle('b1')
-    expect(h.visibleCardIds()).toContain('b2')
-    await h.toggle('b2')
-    expect(h.visibleCardIds()).toContain('b3')
+    await h.toggle('b1')
+    expect(h.visibleCardIds().sort()).toEqual(before.sort())
 
     expect(h.paintCalls()).toBe(1)
     expect(h.storeWrites()).toBe(0)
@@ -626,6 +632,31 @@ describe('the background walk finishes the flow', () => {
       expect(onScreen.has(wire.target), `wire to off-screen ${wire.target}`).toBe(true)
     }
     expect(h.wires().length).toBeGreaterThan(0)
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // EXIT RESTORES THE WIRES, not only the rows. The live probe caught two
+  // container rollup wires from the trace showing up in BROWSE after Escape
+  // (and one baseline wire lost) — rows were exact, wires were not, which is
+  // a Stage 1 regression the row-only assertion could not see. The store spy
+  // runs across the WHOLE journey here: paint, walk to exhaustion, and exit.
+  it('exit restores the browse wires exactly, not just the rows', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    const browseRows = h.visibleCardIds().sort()
+    const browseWires = h.wires().map(w => `${w.source}>${w.target}`).sort()
+    const browseStore = h.snapshotStore()
+
+    await h.startTrace('cfo')          // coarse paint AND the walk to exhaustion
+    expect(h.storeWrites()).toBe(0)
+
+    h.pressEscape()
+    await h.settle()
+
+    expect(h.isTracing()).toBe(false)
+    expect(h.visibleCardIds().sort()).toEqual(browseRows)
+    expect(h.wires().map(w => `${w.source}>${w.target}`).sort()).toEqual(browseWires)
+    expect(h.snapshotStore()).toEqual(browseStore)
     expect(h.storeWrites()).toBe(0)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)

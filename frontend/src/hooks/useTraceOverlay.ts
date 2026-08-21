@@ -190,14 +190,72 @@ function seedExpansion(a: UseTraceOverlayArgs): ReadonlySet<string> {
   for (const card of cards.values()) if (card.parentId === focusUrn) focusKids += 1
   if (focusKids > FOCUS_AUTO_OPEN_MAX) seed.delete(focusUrn)
 
+  // PARTNERS AT THE LEVEL YOU TRACED (ruling 2026-08-21). Lineage touches
+  // wherever it touches — a dataset focus whose flow is authored at FIELD
+  // grain has fields for partners, and opening the way to a field means
+  // opening its dataset, so the board landed with partner datasets fully
+  // expanded beside a focus that is itself a dataset. The reader asked to
+  // see this level; every other level is theirs to open.
+  //
+  // So each partner is represented by its ancestor at the FOCUS's own
+  // containment depth — type-agnostic, because an ontology that nests the
+  // same type twice has no level to appeal to. A partner shallower than the
+  // focus stands for itself. The hosts ABOVE that card open; the card itself
+  // stays CLOSED with its honest "N on this lineage" pill.
+  const parentOf = new Map<string, string>()
+  for (const c of inputs.model.containmentEdges) {
+    if (!parentOf.has(c.targetUrn)) parentOf.set(c.targetUrn, c.sourceUrn)
+  }
+  const depthOf = (urn: string): number => {
+    let depth = 0
+    let cursor = parentOf.get(urn)
+    const guard = new Set<string>([urn])
+    while (cursor && !guard.has(cursor)) {
+      guard.add(cursor)
+      depth += 1
+      cursor = parentOf.get(cursor)
+    }
+    return depth
+  }
+  const inFocusSubtree = (urn: string): boolean => {
+    let cursor: string | undefined = urn
+    const guard = new Set<string>()
+    while (cursor && !guard.has(cursor)) {
+      if (cursor === focusUrn) return true
+      guard.add(cursor)
+      cursor = parentOf.get(cursor)
+    }
+    return false
+  }
+  const focusDepth = depthOf(focusUrn)
+  /** `p`'s ancestor at the focus's depth — or `p` itself when it is already
+   *  at that depth or shallower. */
+  const partnerCard = (p: string): string => {
+    let cursor = p
+    let depth = depthOf(p)
+    const guard = new Set<string>()
+    while (depth > focusDepth && !guard.has(cursor)) {
+      guard.add(cursor)
+      const parent = parentOf.get(cursor)
+      if (!parent) break
+      cursor = parent
+      depth -= 1
+    }
+    return cursor
+  }
+
+  // An edge touching the focus SUBTREE, not only the focus node: the flow
+  // into a dashboard is authored against the charts inside it. Safe to widen
+  // now precisely because the depth rule bounds what opening it costs.
   const partners = new Set<string>()
   for (const e of inputs.model.lineageEdges) {
-    if (e.sourceUrn === focusUrn) partners.add(e.targetUrn)
-    if (e.targetUrn === focusUrn) partners.add(e.sourceUrn)
+    if (inFocusSubtree(e.sourceUrn)) partners.add(partnerCard(e.targetUrn))
+    if (inFocusSubtree(e.targetUrn)) partners.add(partnerCard(e.sourceUrn))
   }
   if (partners.size === 0) return seed
 
   for (const partner of partners) {
+    if (inFocusSubtree(partner)) continue        // the focus side is not a partner
     let cursor = cards.get(partner)?.parentId ?? null
     while (cursor && !seed.has(cursor)) {
       seed.add(cursor)
