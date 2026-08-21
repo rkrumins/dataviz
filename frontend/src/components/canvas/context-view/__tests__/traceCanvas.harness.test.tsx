@@ -29,23 +29,28 @@ describe('the trace overlay on the real canvas', () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
     await h.startTrace('cfo')
 
-    expect(h.visibleCardIds().sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
-    expect(h.chevron('INTERMEDIATE_T2')).toBe(true)
+    // D1 (2026-08-21): the dashboard's lineage lives on its chart's columns,
+    // whose partners are the two DATASETS — so the warehouse containers are
+    // hosts on the way to them (open) and the datasets are the partner
+    // cards, closed with their counts.
+    expect(h.visibleCardIds().sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'orders', 'rpt', 'tableau'])
+    expect(h.chevron('orders')).toBe(true)
     // Grain: with the dashboard open, the raw hops re-anchor to the CHART the
     // reader has earned — not to the dashboard they already opened past — and
-    // the authored container→dashboard rollups are covered by them, so they
-    // are dropped rather than drawn a level apart. See traceViewModel.wires.
-    expect(h.wires().map(w => `${w.source}>${w.target}`).sort()).toEqual(['INTERMEDIATE_T2>aov', 'REPORTING>aov'])
+    // to the closed DATASETS on the other end; the authored container rollups
+    // are covered by them, so they are dropped rather than drawn a level
+    // apart. See traceViewModel.wires.
+    expect(h.wires().map(w => `${w.source}>${w.target}`).sort()).toEqual(['orders>aov', 'rpt>aov'])
     // A trace keeps its wires bare — no count pills on the lines, ever.
     expect(document.querySelectorAll('[data-edge-badge]').length).toBe(0)
     // The cards carry the count instead, behind a dock setting that is ON by
     // default and can be switched off for a quieter board.
-    expect(h.countPill('INTERMEDIATE_T2')).toBe('3 on this lineage')
+    expect(h.countPill('orders')).toBe('2 on this lineage')
     await h.setLineageCounts(false)
-    expect(h.countPill('INTERMEDIATE_T2')).toBeNull()
-    expect(h.chevron('INTERMEDIATE_T2')).toBe(true)   // the invitation stays
+    expect(h.countPill('orders')).toBeNull()
+    expect(h.chevron('orders')).toBe(true)   // the invitation stays
     await h.setLineageCounts(true)
-    expect(h.countPill('INTERMEDIATE_T2')).toBe('3 on this lineage')
+    expect(h.countPill('orders')).toBe('2 on this lineage')
     expect(h.storeWrites()).toBe(0)
 
     const before = h.snapshotStore()
@@ -63,16 +68,16 @@ describe('the trace overlay on the real canvas', () => {
     const before = h.snapshotStore()
 
     const toggle = document
-      .querySelector<HTMLElement>('#layer-node-INTERMEDIATE_T2')
+      .querySelector<HTMLElement>('#layer-node-orders')
       ?.querySelector('button')
     expect(toggle).toBeTruthy()
     await act(async () => { fireEvent.click(toggle!) })
     await h.settle()
 
-    // `orders` and nothing under it: R1 opens the way to things, never the
-    // things themselves.
+    // `orders`'s two columns and nothing else: R1 opens the way to things,
+    // never the things themselves — the reader opened this one.
     expect(h.visibleCardIds().sort())
-      .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'orders', 'tableau'])
+      .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'orders', 'orders.channel', 'orders.net', 'rpt', 'tableau'])
     expect(h.storeWrites()).toBe(0)
     expect(h.snapshotStore()).toEqual(before)
     expect(h.consoleErrors()).toEqual([])
@@ -120,7 +125,7 @@ describe('the trace overlay on the real canvas', () => {
 
     await h.resolveTrace()
     expect(h.visibleCardIds().sort())
-      .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
+      .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'orders', 'rpt', 'tableau'])
     expect(h.storeWrites()).toBe(0)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
@@ -132,8 +137,9 @@ describe('the trace overlay on the real canvas', () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
     await h.startTrace('cfo')
 
-    // orders + its two columns sit inside INTERMEDIATE_T2 on this flow.
-    expect(h.countPill('INTERMEDIATE_T2')).toBe('3 on this lineage')
+    // orders's two columns sit on this flow; rpt's one.
+    expect(h.countPill('orders')).toBe('2 on this lineage')
+    expect(h.countPill('rpt')).toBe('1 on this lineage')
 
     const lineageHeaders = h.headerTitles().filter(t => t.endsWith('on this lineage')).sort()
     // Warehouse: INTERMEDIATE_T2(3)+itself, REPORTING(2)+itself = 7.
@@ -166,7 +172,7 @@ describe('the trace overlay on the real canvas', () => {
 
     await h.resolveTrace()
     expect(h.visibleCardIds().sort())
-      .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
+      .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'orders', 'rpt', 'tableau'])
     expect(h.storeWrites()).toBe(0)
 
     h.pressEscape()
@@ -301,9 +307,9 @@ describe('the trace overlay on the real canvas', () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
     await h.startTrace('cfo')
 
-    await h.toggle('INTERMEDIATE_T2')
+    await h.toggle('orders')
     const opened = h.visibleCardIds().sort()
-    expect(opened).toContain('orders')
+    expect(opened).toContain('orders.channel')
     await h.flushExpansionRecord()
 
     // A second trace, so there is somewhere to come back FROM.

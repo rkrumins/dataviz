@@ -64,3 +64,40 @@ export function rootsNodeEstate(depth: 3 | 10) {
   const layers: ViewLayerConfig[] = [{ id: 'roots', name: 'Roots', order: 0, entityTypes: ['Roots'] }]
   return { model, layers, assignments: { ROOT: { layerId: 'roots' } } }
 }
+
+/**
+ * The user's report #3 (2026-08-21), raw-only: a TABLE whose lineage lives
+ * on its columns, with no rollups at all (a manual model, or an estate
+ * whose aggregation worker has not run). No edge touches `orders` itself.
+ *
+ *   RAW ⊃ orders ⊃ {orders.id, orders.amt}      ← the focus
+ *   MART ⊃ sales ⊃ {sales.id, sales.amt}         ← downstream partner table
+ *   FIN ⊃ ledger ⊃ {ledger.amt}                   ← upstream partner table
+ *   ledger.amt → orders.amt;  orders.id → sales.id;  orders.amt → sales.amt
+ *
+ * Lane: one warehouse lane anchored at the three containers, so each partner
+ * table is a depth-1 child of a closed lane root — hidden unless the seed
+ * opens the root.
+ */
+export function tableEstate() {
+  const nodes = [
+    wn('RAW', 'container', 1), wn('orders', 'dataset', 2), wn('orders.id', 'schemaField'), wn('orders.amt', 'schemaField'),
+    wn('MART', 'container', 1), wn('sales', 'dataset', 2), wn('sales.id', 'schemaField'), wn('sales.amt', 'schemaField'),
+    wn('FIN', 'container', 1), wn('ledger', 'dataset', 1), wn('ledger.amt', 'schemaField'),
+  ]
+  const containmentEdges = [
+    has('RAW', 'orders'), has('orders', 'orders.id'), has('orders', 'orders.amt'),
+    has('MART', 'sales'), has('sales', 'sales.id'), has('sales', 'sales.amt'),
+    has('FIN', 'ledger'), has('ledger', 'ledger.amt'),
+  ]
+  const lineageEdges = [raw('ledger.amt', 'orders.amt'), raw('orders.id', 'sales.id'), raw('orders.amt', 'sales.amt')]
+  const model: LensWalkModel = {
+    focusUrn: 'orders', nodes, lineageEdges, containmentEdges,
+    upstreamUrns: new Set(['ledger.amt']), downstreamUrns: new Set(['sales.id', 'sales.amt']),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [{ id: 'warehouse', name: 'Warehouse', order: 0, entityTypes: ['container'] }]
+  const assignments = { RAW: { layerId: 'warehouse' }, MART: { layerId: 'warehouse' }, FIN: { layerId: 'warehouse' } }
+  return { model, layers, assignments }
+}
+

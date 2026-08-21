@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useTraceOverlay, FOCUS_AUTO_OPEN_MAX, type UseTraceOverlayArgs } from '../useTraceOverlay'
 import type { TraceView } from '../lib/traceViewModel'
-import { cfoEstate } from '@/test/fixtures/traceEstates'
+import { cfoEstate, rootsNodeEstate, tableEstate } from '@/test/fixtures/traceEstates'
 import { emptyWalkModel, type LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import { countTest, expectTestsRan } from '@/test/canary'
 import type { ViewLayerConfig } from '@/types/schema'
@@ -61,21 +61,27 @@ const grownModel = (): LensWalkModel => {
 }
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(27))
+afterAll(() => expectTestsRan(32))
 
 describe('useTraceOverlay — the seed', () => {
   it('opens the focus chain and leaves the direct partners visible and CLOSED', () => {
     const { result } = renderHook(() => useTraceOverlay(args()))
 
     expect(result.current.active).toBe(true)
-    // tableau ⊃ cfo ⊃ aov is open down to the focus's own contents; the two
-    // warehouse containers are lane roots, so they are already on screen.
-    expect(visibleIds(result.current.view)).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
-    expect(cardOf(result.current.view, 'INTERMEDIATE_T2')!.expanded).toBe(false)
-    expect(cardOf(result.current.view, 'REPORTING')!.expanded).toBe(false)
+    // tableau ⊃ cfo ⊃ aov is open down to the focus's own contents. The
+    // dashboard's lineage lives on its chart's columns, and THEIR partners
+    // are the two datasets — so the warehouse containers are hosts on the
+    // way to them (opened) and the datasets are the partner cards (closed).
+    // (2026-08-21, D1: partners are measured off the focus SIDE, the way
+    // the view model and the ledger measure them — not off edges that
+    // happen to touch the focus node itself, which a table never has.)
+    expect(visibleIds(result.current.view)).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'orders', 'rpt', 'tableau'])
+    expect(cardOf(result.current.view, 'INTERMEDIATE_T2')!.expanded).toBe(true)
+    expect(cardOf(result.current.view, 'REPORTING')!.expanded).toBe(true)
     // The partner's own contents stay shut — the chevron is the invitation.
-    expect(result.current.view!.visible.has('orders')).toBe(false)
-    expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
+    expect(cardOf(result.current.view, 'orders')!.expanded).toBe(false)
+    expect(result.current.view!.visible.has('orders.channel')).toBe(false)
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'cfo', 'tableau'])
   })
 
   it('opens the HOSTS above a partner when the view anchors the lane above it', () => {
@@ -85,10 +91,11 @@ describe('useTraceOverlay — the seed', () => {
     const withPlatform = { ...estate.assignments, snowflake: { layerId: 'warehouse' } }
     const { result } = renderHook(() => useTraceOverlay(args({ assignments: withPlatform })))
 
-    expect(visibleIds(result.current.view)).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'snowflake', 'tableau'])
+    expect(visibleIds(result.current.view)).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'orders', 'rpt', 'snowflake', 'tableau'])
     expect(cardOf(result.current.view, 'snowflake')!.expanded).toBe(true)     // a host, opened
-    expect(cardOf(result.current.view, 'INTERMEDIATE_T2')!.expanded).toBe(false)  // a partner, closed
-    expect(result.current.view!.visible.has('orders')).toBe(false)
+    expect(cardOf(result.current.view, 'INTERMEDIATE_T2')!.expanded).toBe(true)  // a host too — the dataset is the partner card
+    expect(cardOf(result.current.view, 'orders')!.expanded).toBe(false)          // the partner card, closed
+    expect(result.current.view!.visible.has('orders.channel')).toBe(false)
   })
 
   it('seeds the partner hosts of whatever the focus IS — refocusing re-seeds', () => {
@@ -105,6 +112,45 @@ describe('useTraceOverlay — the seed', () => {
     expect(result.current.view!.visible.has('orders')).toBe(true)
     expect(cardOf(result.current.view, 'orders')!.expanded).toBe(false)
     expect(result.current.view!.visible.has('orders.channel')).toBe(false)
+  })
+
+  /**
+   * The user's report #3 (2026-08-21): tracing a TABLE showed gaps that
+   * tracing one of its columns did not. A table carries no lineage of its
+   * own — its columns do — and the seed used to look only at edges that
+   * touched the focus node itself, so a table found no partners and every
+   * partner table stayed hidden behind its closed lane root.
+   */
+  it('a traced TABLE opens the way to the partner tables its columns reach — the tables stay closed', () => {
+    const t = tableEstate()
+    const { result } = renderHook(() => useTraceOverlay(args({ model: t.model, focusUrn: 'orders', layers: t.layers, assignments: t.assignments })))
+    expect(result.current.active).toBe(true)
+    expect([...result.current.traceExpansion].sort()).toEqual(['FIN', 'MART', 'RAW', 'orders'])
+    expect(visibleIds(result.current.view)).toEqual(['FIN', 'MART', 'RAW', 'ledger', 'orders', 'orders.amt', 'orders.id', 'sales'])
+    expect(cardOf(result.current.view, 'sales')!.expanded).toBe(false)
+    expect(cardOf(result.current.view, 'sales')!.onLineage).toBe(2)
+    expect(cardOf(result.current.view, 'ledger')!.expanded).toBe(false)
+    expect(cardOf(result.current.view, 'ledger')!.onLineage).toBe(1)
+  })
+
+  it('tracing the table and tracing one of its columns agree on the partner picture', () => {
+    const t = tableEstate()
+    const table = renderHook(() => useTraceOverlay(args({ model: t.model, focusUrn: 'orders', layers: t.layers, assignments: t.assignments })))
+    const column = renderHook(() => useTraceOverlay(args({ model: { ...t.model, focusUrn: 'orders.amt' }, focusUrn: 'orders.amt', layers: t.layers, assignments: t.assignments })))
+    const partners = (v: TraceView | null) => visibleIds(v).filter(id => ['sales', 'ledger'].includes(id))
+    expect(partners(column.result.current.view)).toEqual(['ledger', 'sales'])
+    expect(partners(table.result.current.view)).toEqual(partners(column.result.current.view))
+  })
+
+  it('ANY ontology: Roots ⊃ Node ⊃ Node ⊃ Node — the partner leaf’s parent is the card, the hosts above it open', () => {
+    const r = rootsNodeEstate(3)   // a1 ⊃ a2 ⊃ a3 → b3 ⊂ b2 ⊂ b1 ⊂ ROOT; focus a2
+    const { result } = renderHook(() => useTraceOverlay(args({ model: r.model, focusUrn: 'a2', layers: r.layers, assignments: r.assignments })))
+    expect(result.current.active).toBe(true)
+    // The focus chain (ROOT, a1, a2) plus the host above the partner card (b1). b2 is the card: closed.
+    expect([...result.current.traceExpansion].sort()).toEqual(['ROOT', 'a1', 'a2', 'b1'])
+    expect(result.current.view!.visible.has('b2')).toBe(true)
+    expect(cardOf(result.current.view, 'b2')!.expanded).toBe(false)
+    expect(result.current.view!.visible.has('b3')).toBe(false)
   })
 
   it('is inactive with no model or no focus', () => {
@@ -170,11 +216,13 @@ describe('useTraceOverlay — expansion', () => {
   it('toggle flips one card and the view follows', () => {
     const { result } = renderHook(() => useTraceOverlay(args()))
 
-    act(() => result.current.toggle('INTERMEDIATE_T2'))
-    expect(result.current.view!.visible.has('orders')).toBe(true)
-    expect(cardOf(result.current.view, 'INTERMEDIATE_T2')!.expanded).toBe(true)
-    expect(result.current.view!.visible.has('orders.channel')).toBe(false)   // one level, closed
+    act(() => result.current.toggle('orders'))
+    expect(result.current.view!.visible.has('orders.channel')).toBe(true)
+    expect(cardOf(result.current.view, 'orders')!.expanded).toBe(true)
 
+    act(() => result.current.toggle('orders'))
+    expect(result.current.view!.visible.has('orders.channel')).toBe(false)
+    // And a host the seed opened closes on a click, like any other card.
     act(() => result.current.toggle('INTERMEDIATE_T2'))
     expect(result.current.view!.visible.has('orders')).toBe(false)
   })
@@ -189,11 +237,11 @@ describe('useTraceOverlay — expansion', () => {
 
   it('keeps the reader’s expansion when unrelated args change', () => {
     const { result, rerender } = renderHook((a: UseTraceOverlayArgs) => useTraceOverlay(a), { initialProps: args() })
-    act(() => result.current.toggle('INTERMEDIATE_T2'))
+    act(() => result.current.toggle('orders'))
 
     rerender(args({ depthDown: 3, showDownstream: false }))
-    expect(result.current.traceExpansion.has('INTERMEDIATE_T2')).toBe(true)
-    expect(result.current.view!.visible.has('orders')).toBe(true)
+    expect(result.current.traceExpansion.has('orders')).toBe(true)
+    expect(result.current.view!.visible.has('orders.channel')).toBe(true)
   })
 
   it('exit clears the expansion', () => {
@@ -261,8 +309,8 @@ describe('useTraceOverlay — the seed waits for a model that holds the focus', 
     expect([...result.current.traceExpansion]).toEqual(['cfo'])
 
     rerender(args())
-    expect(visibleIds(result.current.view)).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
-    expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
+    expect(visibleIds(result.current.view)).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'orders', 'rpt', 'tableau'])
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'cfo', 'tableau'])
   })
 
   it('seeds ONCE: a later wave of the same walk leaves the reader’s expansion alone', () => {
@@ -271,18 +319,57 @@ describe('useTraceOverlay — the seed waits for a model that holds the focus', 
       { initialProps: args({ model: emptyWalkModel('cfo') }) },
     )
     rerender(args())
-    act(() => result.current.toggle('INTERMEDIATE_T2'))
-    expect(result.current.view!.visible.has('orders')).toBe(true)
+    act(() => result.current.toggle('rpt'))
+    expect(result.current.view!.visible.has('rpt.gross')).toBe(true)
 
     // The walk grows — same focus, bigger model. Nothing the reader opened
     // may close, and nothing they closed may re-open.
     rerender(args({ model: grownModel() }))
-    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'cfo', 'tableau'])
-    expect(result.current.view!.visible.has('orders')).toBe(true)
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'cfo', 'rpt', 'tableau'])
+    expect(result.current.view!.visible.has('rpt.gross')).toBe(true)
     // The wave DID land — the new node is a card, sitting closed inside the
     // dataset the reader has not opened.
     expect(cardOf(result.current.view, 'orders.extra')).toBeDefined()
     expect(result.current.view!.visible.has('orders.extra')).toBe(false)
+  })
+})
+
+describe('useTraceOverlay — the seed keeps up with the walk (D2, 2026-08-21)', () => {
+  // A full walk lands in waves. A partner table that arrives in the third
+  // wave is as much a partner as one that arrived in the first — its hosts
+  // open when it lands. What the reader CLOSED stays closed.
+  const firstWave = (): LensWalkModel => {
+    const t = tableEstate()
+    const keep = new Set(['RAW', 'orders', 'orders.id', 'orders.amt', 'FIN', 'ledger', 'ledger.amt'])
+    return {
+      ...t.model,
+      nodes: t.model.nodes.filter(n => keep.has(n.urn)),
+      containmentEdges: t.model.containmentEdges.filter(e => keep.has(e.sourceUrn) && keep.has(e.targetUrn)),
+      lineageEdges: t.model.lineageEdges.filter(e => keep.has(e.sourceUrn) && keep.has(e.targetUrn)),
+      downstreamUrns: new Set(),
+    }
+  }
+
+  it('a later wave that brings a new hop-1 partner opens the hosts above it', () => {
+    const t = tableEstate()
+    const base = { focusUrn: 'orders', layers: t.layers, assignments: t.assignments }
+    const { result, rerender } = renderHook((a: UseTraceOverlayArgs) => useTraceOverlay(a), { initialProps: args({ ...base, model: firstWave() }) })
+    expect([...result.current.traceExpansion].sort()).toEqual(['FIN', 'RAW', 'orders'])
+    rerender(args({ ...base, model: t.model }))
+    expect([...result.current.traceExpansion].sort()).toEqual(['FIN', 'MART', 'RAW', 'orders'])
+    expect(result.current.view!.visible.has('sales')).toBe(true)
+    expect(cardOf(result.current.view, 'sales')!.expanded).toBe(false)
+  })
+
+  it('never re-opens what the reader closed', () => {
+    const t = tableEstate()
+    const base = { focusUrn: 'orders', layers: t.layers, assignments: t.assignments }
+    const { result, rerender } = renderHook((a: UseTraceOverlayArgs) => useTraceOverlay(a), { initialProps: args({ ...base, model: firstWave() }) })
+    act(() => result.current.toggle('FIN'))      // the reader shuts the upstream container
+    act(() => result.current.toggle('orders'))   // and the focus itself
+    expect([...result.current.traceExpansion].sort()).toEqual(['RAW'])
+    rerender(args({ ...base, model: t.model }))
+    expect([...result.current.traceExpansion].sort()).toEqual(['MART', 'RAW'])
   })
 })
 
@@ -315,7 +402,7 @@ describe('useTraceOverlay — no blank canvas while the walk runs', () => {
     expect(result.current.active).toBe(true)
     expect(result.current.view).not.toBeNull()
     // The seed ran against the REAL model, not the empty one it latched on.
-    expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'cfo', 'tableau'])
   })
 
   it('no focus at all: inactive', () => {
@@ -383,7 +470,7 @@ describe('useTraceOverlay — identity', () => {
 describe('useTraceOverlay — restoreExpansion', () => {
   it('REPLACES the expansion on the focus already on screen — it is not additive', () => {
     const { result } = renderHook(() => useTraceOverlay(args()))
-    expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'cfo', 'tableau'])
 
     act(() => result.current.restoreExpansion('cfo', ['INTERMEDIATE_T2']))
     expect([...result.current.traceExpansion]).toEqual(['INTERMEDIATE_T2'])
@@ -419,7 +506,7 @@ describe('useTraceOverlay — restoreExpansion', () => {
       { initialProps: args() },
     )
     act(() => result.current.restoreExpansion('aov', ['INTERMEDIATE_T2']))
-    expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'cfo', 'tableau'])
 
     rerender(args({ focusUrn: 'aov' }))
     expect([...result.current.traceExpansion]).toEqual(['INTERMEDIATE_T2'])
@@ -458,6 +545,6 @@ describe('useTraceOverlay — restoreExpansion', () => {
     act(() => result.current.exit())
 
     rerender(args())
-    expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'cfo', 'tableau'])
   })
 })

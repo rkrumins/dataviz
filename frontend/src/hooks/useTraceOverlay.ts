@@ -19,13 +19,21 @@
  * never the things themselves — the chevron and its honest count are the
  * invitation.
  *
- * "One hop from the focus" is an edge that literally touches the focus, raw
- * or rollup. NOT "hop === 1" as the view model measures it: the view model
- * measures hops from the focus SIDE (the focus and everything inside it), so
- * on the CFO estate the columns feeding the chart read as hop 1 too — seeding
- * their hosts would open the containers AND the datasets inside them, which
- * is the "trace dumps the world on screen" failure this rebuild exists to
- * end.
+ * "One hop from the focus" is measured off the FOCUS SIDE — the focus and
+ * everything inside it — exactly as the view model and the wire ledger
+ * measure it: a partner is the far end of a hop with one end inside the
+ * focus side and the other outside. A table carries no lineage of its own,
+ * its columns do; measured off the focus node alone (as this used to be)
+ * a traced table found no partners at all and every partner table stayed
+ * hidden behind its closed lane root — the user's report: "tracing a table
+ * shows gaps that tracing one of its columns does not" (2026-08-21).
+ *
+ * What opens is the way TO the partner's CARD, never the card: a partner
+ * with contents is its own card; a partner leaf (a column) is stood for by
+ * its parent. The hosts between that card and its lane root open; the card
+ * lands closed with its honest count. That is why this does not "dump the
+ * world on screen": the columns feeding the CFO chart open the warehouse
+ * containers and leave the datasets shut.
  *
  * The seed is DERIVED STATE keyed by the focus: re-seeded during render when
  * `focusUrn` changes (React's "adjusting state on prop change"), never in an
@@ -41,10 +49,13 @@
  * hand on the first render and seeds perfectly.
  *
  * So the latch has TWO conditions — a new focus, or a first model that
- * actually contains the focus — and `seeded` records which happened. What it
- * deliberately does NOT key on is the model itself: a full walk arrives in
- * waves, and re-seeding on each one would wipe out everything the reader had
- * opened, over and over, while the walk finished.
+ * actually contains the focus — and `seeded` records which happened.
+ *
+ * AND IT KEEPS UP WITH THE WALK. A full walk arrives in waves, and a partner
+ * that lands in the third wave is as much a partner as one that landed in
+ * the first — so every later wave ADDS the hosts its new partners need.
+ * It only ever adds: nothing the reader opened closes, and nothing the
+ * reader CLOSED (recorded by `toggle`) re-opens, however many waves follow.
  *
  * AND ONE THING OUTRANKS THE SEED: a history restore. Pressing Back names a
  * focus AND the picture the reader left on it, at a moment when that focus's
@@ -114,6 +125,12 @@ interface SeedState {
   /** The seed came from a model that HELD the focus — so it is the real one
    *  and no later wave may replace it. False while the walk is still loading. */
   seeded: boolean
+  /** What the reader shut on this focus with `toggle` — no later wave
+   *  re-opens it. */
+  closed: ReadonlySet<string>
+  /** The picture a history restore put back, when one did: authoritative,
+   *  so whatever the seed would open that it leaves out counts as shut. */
+  restored: ReadonlySet<string> | null
   /** A history restore waiting for its focus's model. Consumed — once — by
    *  the same render-time branch that would otherwise seed. */
   pending: { forFocus: string; set: ReadonlySet<string> } | null
@@ -173,15 +190,32 @@ function seedExpansion(a: UseTraceOverlayArgs): ReadonlySet<string> {
   for (const card of cards.values()) if (card.parentId === focusUrn) focusKids += 1
   if (focusKids > FOCUS_AUTO_OPEN_MAX) seed.delete(focusUrn)
 
+  // The focus SIDE: the focus and everything inside it (see the header).
+  const focusSide = new Set<string>([focusUrn])
+  const stack = [...(sg.nodes.get(focusUrn)?.children ?? [])]
+  while (stack.length > 0) {
+    const urn = stack.pop()!
+    if (focusSide.has(urn)) continue
+    focusSide.add(urn)
+    for (const child of sg.nodes.get(urn)?.children ?? []) stack.push(child)
+  }
   const partners = new Set<string>()
   for (const e of inputs.model.lineageEdges) {
-    if (e.sourceUrn === focusUrn) partners.add(e.targetUrn)
-    if (e.targetUrn === focusUrn) partners.add(e.sourceUrn)
+    const sourceIn = focusSide.has(e.sourceUrn)
+    if (sourceIn === focusSide.has(e.targetUrn)) continue   // internal, or not ours
+    partners.add(sourceIn ? e.targetUrn : e.sourceUrn)
   }
   if (partners.size === 0) return seed
 
   for (const partner of partners) {
-    let cursor = cards.get(partner)?.parentId ?? null
+    const partnerCard = cards.get(partner)
+    if (!partnerCard) continue
+    // The card that stands for the partner: itself when it has contents,
+    // its parent when it is a leaf. The hosts ABOVE that card open.
+    const cardId = partnerCard.childCount > 0 || (sg.nodes.get(partner)?.children.length ?? 0) > 0
+      ? partner
+      : partnerCard.parentId
+    let cursor = cardId ? cards.get(cardId)?.parentId ?? null : null
     while (cursor && !seed.has(cursor)) {
       seed.add(cursor)
       cursor = cards.get(cursor)?.parentId ?? null
@@ -207,7 +241,7 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   )
 
   const [seed, setSeed] = useState<SeedState>(() => ({
-    forFocus: focusUrn, set: seedExpansion(a), seeded: focusInModel, pending: null,
+    forFocus: focusUrn, set: seedExpansion(a), seeded: focusInModel, closed: EMPTY_EXPANSION, restored: null, pending: null,
   }))
 
   // Re-seed DURING RENDER. Not an effect: an effect would paint one frame of
@@ -218,10 +252,12 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   // holds the focus: consuming it against the loading frame would spend it on
   // a render that draws nothing, and the real seed a frame later would then
   // wipe out the very picture the reader pressed Back for.
-  let traceExpansion = seed.set
+  let stored = seed.set
+  let restored = seed.restored
   if (seed.forFocus !== focusUrn || (!seed.seeded && focusInModel)) {
     const restore = seed.pending?.forFocus === focusUrn && focusInModel ? seed.pending : null
-    traceExpansion = restore ? restore.set : seedExpansion(a)
+    stored = restore ? restore.set : seedExpansion(a)
+    restored = restore ? restore.set : null
     // A pending restore belongs to the navigation that issued it. Landing on
     // a DIFFERENT focus means the reader abandoned that navigation, so it is
     // dropped rather than left armed to fire on some later, unrelated visit
@@ -230,11 +266,37 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
     const superseded = seed.forFocus !== focusUrn && seed.pending?.forFocus !== focusUrn
     setSeed({
       forFocus: focusUrn,
-      set: traceExpansion,
+      set: stored,
       seeded: focusInModel,
+      closed: EMPTY_EXPANSION,
+      restored,
       pending: restore || superseded ? null : seed.pending,
     })
   }
+
+  // KEEPING UP WITH THE WALK. What a wave adds is DERIVED, never stored: the
+  // hosts the current model's partners need, minus what the reader shut.
+  // Stored state would need a render-time write per wave, and a canvas that
+  // hands over a fresh model object per render would loop on it. Memoised
+  // on the model, so the O(model) seed runs once per wave.
+  const seedNow = useMemo(() => (
+    focusInModel
+      ? seedExpansion({ model, focusUrn, layers, assignments, viewIsCurated, showUpstream, showDownstream, depthUp, depthDown,
+        placement: { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns } })
+      : EMPTY_EXPANSION
+  ), [model, focusUrn, layers, assignments, viewIsCurated, showUpstream, showDownstream, depthUp, depthDown,
+    backendAssignments, unassignedFallbackLayerId, branchCreatedUrns, focusInModel])
+  const closed = seed.closed
+  const traceExpansion = useMemo(() => {
+    let next: Set<string> | null = null
+    for (const id of seedNow) {
+      // Shut by a click, or left out of the picture a restore put back.
+      if (stored.has(id) || closed.has(id) || (restored && !restored.has(id))) continue
+      next ??= new Set(stored)
+      next.add(id)
+    }
+    return next ?? stored
+  }, [seedNow, stored, closed, restored])
 
   // NO BLANK CANVAS. `model` is non-null from the first render of a walk —
   // the walk hook hands back a LOADING entry carrying an EMPTY one — so an
@@ -258,8 +320,10 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
 
   const toggle = useCallback((id: string) => setSeed(prev => {
     const next = new Set(prev.set)
-    if (!next.delete(id)) next.add(id)
-    return { ...prev, set: next }
+    const closed = new Set(prev.closed)
+    if (next.delete(id)) closed.add(id)
+    else { next.add(id); closed.delete(id) }
+    return { ...prev, set: next, closed }
   }), [])
 
   const expandPath = useCallback((ids: readonly string[]) => setSeed(prev => ({
@@ -272,14 +336,14 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   // already in" case, where no focus change would ever re-run the seed).
   const restoreExpansion = useCallback((forFocus: string, ids: readonly string[]) => setSeed(prev => (
     prev.forFocus === forFocus && prev.seeded
-      ? { ...prev, set: new Set(ids), pending: null }
+      ? { ...prev, set: new Set(ids), restored: new Set(ids), closed: EMPTY_EXPANSION, pending: null }
       : { ...prev, pending: { forFocus, set: new Set(ids) } }
   )), [])
 
   // Drops the expansion. The caller clears its own focus alongside — leaving
   // the focus in place re-seeds on the very next render, by design: exiting a
   // trace that is still focused somewhere is not a state the canvas has.
-  const exit = useCallback(() => setSeed({ forFocus: null, set: EMPTY_EXPANSION, seeded: false, pending: null }), [])
+  const exit = useCallback(() => setSeed({ forFocus: null, set: EMPTY_EXPANSION, seeded: false, closed: EMPTY_EXPANSION, restored: null, pending: null }), [])
 
   // Lanes are independent of each other, so the first one holding the card
   // is the only one that can hold its chain.
