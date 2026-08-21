@@ -64,7 +64,7 @@ import {
 } from '@/components/canvas/context-view/lens/closure-adapter'
 import { pairKey } from './lib/traceWireLedger'
 
-export type TracePhase = 'idle' | 'coarse' | 'walking' | 'ceiling' | 'complete' | 'error'
+export type TracePhase = 'idle' | 'coarse' | 'walking' | 'ceiling' | 'stalled' | 'complete' | 'error'
 export type TraceDriverStatus = 'loading' | 'done' | 'error'
 
 /** Failsafe against a server that hands back a cursor for ever. NOT a budget:
@@ -228,14 +228,30 @@ function collectWalkOps(
     const take = (list: LensWalkModel['frontierUp'], dir: 'up' | 'down') => {
         const bulk: string[] = []
         for (const fr of list) {
-            if (failed.has(`${dir}:${fr.urn}`) || settled.has(`${dir}:${fr.urn}`)) continue
+            if (failed.has(`${dir}:${fr.urn}`)) continue
+            // SETTLED IS PER QUESTION, NOT PER NODE. Paging a hub onward is a
+            // different question from re-rooting on it, and a FULL page is not
+            // a truncation — the server leaves `truncationReason` untouched on
+            // an `afterCursor` page — so a node-keyed settle marked a hub done
+            // after ONE page, abandoned the rest of its adjacency, and let the
+            // walk report `complete` with counts it presented as exact.
+            if (settled.has(`${dir}:${fr.urn}:${fr.nextCursor ?? 'root'}`)) continue
             if (fr.nextCursor) {
                 // A half-read anchor is its own question: its cursor names
                 // where to resume, and no other node shares it. Held back —
                 // see below.
-                const op: WalkOp = { urn: fr.urn, urns: [fr.urn], dir, cursor: fr.nextCursor }
-                if ((firedAt.get(opKey(op)) ?? -1) >= model.nodes.length) continue
-                cursors.push(op)
+                //
+                // NO PROGRESS RULE HERE. That rule exists to stop a re-rooting
+                // op looping when the model has stopped growing; a CURSOR
+                // always advances, so the next page is a different question
+                // whatever the model did. Applying it anyway stranded every
+                // cursor raised late in a walk — the model had stopped
+                // growing, so the pages that would have finished it were never
+                // asked, and the walk ended `stalled` a few hundred nodes
+                // short. Termination here comes from the cursor advancing and
+                // from `settledOps` retiring an anchor the moment the server
+                // stops offering one.
+                cursors.push({ urn: fr.urn, urns: [fr.urn], dir, cursor: fr.nextCursor })
                 continue
             }
             const key = `${dir}:${fr.urn}:root`
@@ -640,8 +656,23 @@ export function useTraceDriver(
                     // full: those boundaries are finished with, whatever a
                     // later response says about them. A truncated one is left
                     // to the progress rule, because it genuinely has more.
+                    // FINISHED MEANS THE SERVER OFFERED NO WAY ON. Not "the
+                    // response was not truncated" — a FULL page is not a
+                    // truncation, it is a page with a cursor on it, and
+                    // reading the two as the same thing abandoned every hub
+                    // after its first page (measured on the parity estate:
+                    // 565 of 585 nodes, reported as `complete`). An anchor is
+                    // settled only when this answer came back without a
+                    // cursor for it.
+                    const carriedOn = new Set<string>()
+                    for (const f of (op.dir === 'up' ? res.frontierUp : res.frontierDown) ?? []) {
+                        if (f.nextCursor) carriedOn.add(f.urn)
+                    }
                     if (!res.truncated) {
-                        for (const u of op.urns) settledOps.current.add(`${op.dir}:${u}`)
+                        for (const u of op.urns) {
+                            if (carriedOn.has(u)) continue
+                            settledOps.current.add(`${op.dir}:${u}:${op.cursor ?? 'root'}`)
+                        }
                     }
                     // `mergeClosures` clears the ONE anchor it was told about;
                     // a bulk drain answered for all of its seeds, and an entry
@@ -659,6 +690,24 @@ export function useTraceDriver(
             }))
         }
     }, [provider, absorb, dropDrained])
+
+    /**
+     * How the walk ENDED, in the reader's terms.
+     *
+     * `complete` is a strong claim — it turns the dock's counts from floors
+     * into totals — so it is made only when there is nothing left to ask: the
+     * model is under the ceiling, no hop failed, and no frontier entry still
+     * carries a cursor. Anything else is `stalled`: a real picture, still
+     * qualified, with `retry` as the way on.
+     */
+    const terminalPhase = useCallback((): TracePhase => {
+        const model = modelRef.current
+        if ((model?.nodes.length ?? 0) >= ceilingRef.current) return 'ceiling'
+        if (failedOps.current.size > 0) return 'stalled'
+        const cursored = [...(model?.frontierUp ?? []), ...(model?.frontierDown ?? [])]
+            .some(f => f.nextCursor)
+        return cursored ? 'stalled' : 'complete'
+    }, [])
 
     // ---- the session: coarse, then the walk behind it -------------------
     useEffect(() => {
@@ -717,14 +766,13 @@ export function useTraceDriver(
             // did. Only the first is "complete" — overwriting the ceiling here
             // would tell the reader the whole lineage is on screen when a
             // frontier is standing right behind it saying otherwise.
-            const full = (modelRef.current?.nodes.length ?? 0) >= ceilingRef.current
             setState(prev => (prev.focusUrn === focusUrn
-                ? { ...prev, phase: full ? 'ceiling' : 'complete', requests: requestsRef.current }
+                ? { ...prev, phase: terminalPhase(), requests: requestsRef.current }
                 : prev))
         })()
 
         return () => { controller.current?.abort() }
-    }, [focusUrn, provider, retryToken, newSession, runOp, runBackgroundWalk])
+    }, [focusUrn, provider, retryToken, newSession, runOp, runBackgroundWalk, terminalPhase])
 
     /**
      * WHAT IS INSIDE AN UPSTREAM CARD IS UPSTREAM.
@@ -849,11 +897,11 @@ export function useTraceDriver(
                     ...prev,
                     // Another pause is possible: a ceiling's worth may not be
                     // the end either.
-                    phase: (modelRef.current?.nodes.length ?? 0) >= ceilingRef.current ? 'ceiling' : 'complete',
+                    phase: terminalPhase(),
                     requests: requestsRef.current,
                 }))
         })()
-    }, [runBackgroundWalk])
+    }, [runBackgroundWalk, terminalPhase])
 
     const continueWalk = useCallback(() => {
         if (phaseRef.current !== 'ceiling') return
@@ -863,7 +911,10 @@ export function useTraceDriver(
     }, [resumeWalk])
 
     const retry = useCallback(() => {
-        if (modelRef.current && modelRef.current.nodes.length > 0 && failedOps.current.size > 0) {
+        const resumable = !!modelRef.current
+            && modelRef.current.nodes.length > 0
+            && (failedOps.current.size > 0 || phaseRef.current === 'stalled')
+        if (resumable) {
             const gen = generation.current
             failedOps.current = new Set()
             // The PROGRESS ledger goes with them: a retried op has to be
@@ -872,18 +923,14 @@ export function useTraceDriver(
             firedAt.current = new Map()
             setState(prev => (prev.focusUrn === null ? prev
                 : { ...prev, error: null, walkError: null, phase: 'walking' }))
-            const focus = sessionFocus.current
-            if (!focus) return
-            void (async () => {
-                await runBackgroundWalk(gen, focus)
-                if (gen !== generation.current) return
-                setState(prev => (prev.focusUrn === null
-                    ? prev : { ...prev, phase: 'complete', requests: requestsRef.current }))
-            })()
+            // Through `resumeWalk`, so a retry that fills the model lands on
+            // `ceiling` — and one that hits fresh failures lands on `stalled`
+            // — rather than claiming the flow is complete either way.
+            resumeWalk(gen)
             return
         }
         setRetryToken(t => t + 1)
-    }, [runBackgroundWalk])
+    }, [resumeWalk])
     const abort = useCallback(() => {
         newSession(null)
         setState(IDLE)
@@ -918,14 +965,18 @@ export function useTraceDriver(
                     : state.error ? 'error'
                         // A background hop failed and the walk has stopped:
                         // now it is the whole story, so now it is said.
-                        : state.phase === 'complete' && state.walkError ? 'error'
+                        // A walk that STOPPED — on broken hops or with
+                        // cursors it never drained — is now the whole story,
+                        // so now it is said.
+                        : (state.phase === 'complete' || state.phase === 'stalled') && state.walkError ? 'error'
                             : 'done'
 
     return {
         model: state.model,
         phase: state.phase,
         status,
-        error: state.error ?? (state.phase === 'complete' ? state.walkError : null),
+        error: state.error
+            ?? (state.phase === 'complete' || state.phase === 'stalled' ? state.walkError : null),
         inFlight: state.inFlight,
         drilled: state.drilled,
         completePairs,

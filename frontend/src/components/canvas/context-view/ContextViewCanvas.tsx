@@ -4261,7 +4261,12 @@ export function ContextViewCanvas({
         {traceActive && canvasTrace.phase !== 'idle' && (
           <TraceWalkIndicator
             key={canvasTrace.tracedUrn ?? ''}
-            phase={canvasTrace.phase}
+            // `stalled` — the walk stopped with hops it could not take, or
+            // cursors it never drained — narrates as the capsule's error
+            // beat: a real picture, still partial, with "Try again" as the
+            // way on. Mapped here rather than widening the capsule's own
+            // union, which Task 3 owns.
+            phase={canvasTrace.phase === 'stalled' ? 'error' : canvasTrace.phase}
             nodesHeld={canvasTrace.ceiling.nodesHeld}
             requests={canvasTrace.requests}
             upCount={overlay.view?.counts.up ?? 0}

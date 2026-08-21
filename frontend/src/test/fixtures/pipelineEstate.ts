@@ -113,9 +113,16 @@ interface ClosureRequestish {
     downstreamDepth?: number
     seedUrns?: string[]
     excludeUrns?: string[]
+    afterCursor?: string
     grain?: string
     drill?: boolean
 }
+
+/** Edges ONE anchor's adjacency page may carry. Small on purpose: every
+ *  attribute here has three out-edges, so every hop pages and the walk cannot
+ *  finish without following cursors — which is the whole point of having this
+ *  fixture at all. */
+const HUB_PAGE = 2
 
 /**
  * Answer one closure request over `g`.
@@ -160,7 +167,54 @@ export function fineWalkServer(g: PipelineGraph, page = 1000) {
         return out
     }
 
+    /** One anchor, one direction, one page — the `afterCursor` shape.
+     *
+     *  A FULL page is NOT a truncation: the real server leaves
+     *  `truncationReason` untouched here and says "there is more" with a
+     *  cursor instead. A client that reads a non-truncated response as "this
+     *  anchor is finished" abandons every hub after its first page, which is
+     *  exactly the defect this branch exists to catch. */
+    const hubPage = (urn: string, dir: 'up' | 'down', after: number): TraceV2Result & LensClosureExtras => {
+        const ids = (dir === 'up' ? (inTo.get(urn) ?? []) : (outOf.get(urn) ?? []))
+            .filter(id => id >= after)
+            .sort((a, b) => a - b)
+        const page = ids.slice(0, HUB_PAGE)
+        const others = page.map(id => (dir === 'up' ? g.flows[id][0] : g.flows[id][1]))
+        const ship = new Set<string>([urn, ...others])
+        for (const u of [...ship]) for (const a of chainOf(u)) ship.add(a)
+        const full = ids.length > HUB_PAGE
+        const boundary = [
+            ...(full ? [{ urn, totalCount: ids.length, nextCursor: `e:${page[page.length - 1] + 1}` }] : []),
+            ...others.map(o => ({ urn: o, totalCount: null, nextCursor: null })),
+        ]
+        return {
+            focus: { urn, level: 0, entityType: g.nodes.get(urn)?.entityType ?? '' },
+            nodes: [...ship].map(u => g.nodes.get(u)).filter(Boolean) as GraphNode[],
+            edges: page.map(id => ({
+                id: `e${id}`, sourceUrn: g.flows[id][0], targetUrn: g.flows[id][1],
+                edgeType: 'FLOWS', properties: {},
+            })),
+            containmentEdges: [...ship]
+                .filter(u => ship.has(g.parent.get(u) ?? ''))
+                .map(u => ({
+                    id: `c:${g.parent.get(u)}>${u}`,
+                    sourceUrn: g.parent.get(u)!, targetUrn: u, edgeType: 'HAS',
+                })),
+            upstreamUrns: dir === 'up' ? new Set(others) : new Set<string>(),
+            downstreamUrns: dir === 'down' ? new Set(others) : new Set<string>(),
+            effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+            truncated: false, truncationReason: null,
+            frontierUp: dir === 'up' ? boundary : [],
+            frontierDown: dir === 'down' ? boundary : [],
+            seedTruncated: false, seedCursor: null,
+        } as unknown as TraceV2Result & LensClosureExtras
+    }
+
     return (req: ClosureRequestish): TraceV2Result & LensClosureExtras => {
+        if (req.afterCursor) {
+            const after = Number.parseInt(req.afterCursor.slice(2), 10) || 0
+            return hubPage(req.urn, (req.upstreamDepth ?? 0) > 0 ? 'up' : 'down', after)
+        }
         const wantUp = (req.upstreamDepth ?? 1) > 0
         const wantDown = (req.downstreamDepth ?? 1) > 0
         const maxHops = Math.max(req.upstreamDepth ?? 0, req.downstreamDepth ?? 0)
@@ -184,6 +238,8 @@ export function fineWalkServer(g: PipelineGraph, page = 1000) {
         const down = new Set<string>()
         const frontierUp = new Set<string>()
         const frontierDown = new Set<string>()
+        const cursorUp = new Map<string, string>()
+        const cursorDown = new Map<string, string>()
 
         let ringUp = wantUp ? [...seeds] : []
         let ringDown = wantDown ? [...seeds] : []
@@ -199,7 +255,13 @@ export function fineWalkServer(g: PipelineGraph, page = 1000) {
             const step = (ring: string[], dir: 'up' | 'down'): string[] => {
                 const next: string[] = []
                 for (const f of ring) {
-                    const ids = dir === 'up' ? (inTo.get(f) ?? []) : (outOf.get(f) ?? [])
+                    const all = dir === 'up' ? (inTo.get(f) ?? []) : (outOf.get(f) ?? [])
+                    // ONE ANCHOR, ONE PAGE. What does not fit comes back as a
+                    // cursor on that anchor — not as a truncation.
+                    const ids = all.slice(0, HUB_PAGE)
+                    if (all.length > HUB_PAGE) {
+                        (dir === 'up' ? cursorUp : cursorDown).set(f, `e:${ids[ids.length - 1] + 1}`)
+                    }
                     for (const id of ids) {
                         const [s, t] = g.flows[id]
                         edges.set(id, g.flows[id])
@@ -251,8 +313,10 @@ export function fineWalkServer(g: PipelineGraph, page = 1000) {
             downstreamUrns: down,
             effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
             truncated: false, truncationReason: null,
-            frontierUp: [...frontierUp].map(urn => ({ urn, totalCount: null, nextCursor: null })),
-            frontierDown: [...frontierDown].map(urn => ({ urn, totalCount: null, nextCursor: null })),
+            frontierUp: [...new Set([...frontierUp, ...cursorUp.keys()])]
+                .map(urn => ({ urn, totalCount: null, nextCursor: cursorUp.get(urn) ?? null })),
+            frontierDown: [...new Set([...frontierDown, ...cursorDown.keys()])]
+                .map(urn => ({ urn, totalCount: null, nextCursor: cursorDown.get(urn) ?? null })),
             seedTruncated: false, seedCursor: null,
         } as unknown as TraceV2Result & LensClosureExtras
     }

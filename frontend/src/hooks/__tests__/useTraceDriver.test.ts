@@ -585,7 +585,10 @@ describe('useTraceDriver — the walk behind the paint', () => {
         })
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
 
-        await waitFor(() => expect(result.current.phase).toBe('complete'))
+        // STALLED, not complete: a hop failed, so the flow on screen is real
+        // but still partial — and saying `complete` would turn the dock's
+        // floors into totals it has not earned.
+        await waitFor(() => expect(result.current.phase).toBe('stalled'))
         expect(result.current.error).toBe('hop refused')
         expect(result.current.status).toBe('error')
         // The board it did reach is still there.

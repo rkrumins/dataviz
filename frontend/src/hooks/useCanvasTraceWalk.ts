@@ -104,12 +104,15 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
                 // expansion the reader asked for — all of it is "walking".
                 walking: phase === 'coarse' || phase === 'walking' || inFlight.size > 0,
                 exhausted: phase === 'complete' && inFlight.size === 0,
+                // A walk that stopped with hops it could not take, or cursors
+                // it never drained, is STALLED — a real picture, still
+                // partial, and `retryWalk` is the way on.
                 // THE ONE CEILING LEFT is a bound on what the browser HOLDS,
                 // not on what the trace may ask for — so "Keep walking" is
                 // once again a real move, and this is the state it belongs
                 // to. (F19: it exists only at the ceiling.)
                 budgetHit: phase === 'ceiling',
-                stalled: false,
+                stalled: phase === 'stalled',
             }
             : null
     ), [tracedUrn, phase, inFlight])
@@ -130,7 +133,7 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
     // partners and nothing else, and the background walk is still finding
     // more — so every count is a lower bound until the flow is exhausted, at
     // which point it is exact.
-    const countsAreFloors = phase === 'coarse' || phase === 'walking' || phase === 'ceiling' 
+    const countsAreFloors = phase !== 'idle' && phase !== 'complete' 
 
     const exit = useCallback(() => {
         setTracedUrn(null)
