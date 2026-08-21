@@ -22,7 +22,7 @@ import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(5))
+afterAll(() => expectTestsRan(6))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -130,6 +130,38 @@ describe('the trace overlay on the real canvas', () => {
     // Report: the four inside tableau — tableau itself is a HOST, so it is
     // not one of them.
     expect(lineageHeaders).toEqual(['4 on this lineage', '7 on this lineage'])
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // THE WALK WINDOW is the dangerous one: the reader is still looking at the
+  // browse canvas, so every browse affordance still looks live, and a write
+  // that lands here has nothing to undo it when the trace exits. The gates
+  // key on the SESSION, not on whether the overlay has anything to draw yet.
+  it('the canvas is already read-only while the walk runs', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', deferTrace: true })
+    // Open a child-search box while still in browse, so it is reachable
+    // during the walk — the trace cannot withdraw an affordance it has not
+    // rendered yet, which is exactly why the handler has to refuse too.
+    await h.openChildSearch('tableau')
+    const before = h.snapshotStore()
+
+    await h.startTrace('cfo')
+    expect(h.isTracing()).toBe(true)
+
+    // A browse chevron: a no-op, never a fall-through to the browse expand.
+    await h.toggle('INTERMEDIATE_T2')
+    // A submitted child search: refused.
+    expect(await h.typeChildSearch('orders')).toBe(true)
+    expect(h.storeWrites()).toBe(0)
+
+    await h.resolveTrace()
+    expect(h.visibleCardIds().sort())
+      .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
+    expect(h.storeWrites()).toBe(0)
+
+    h.pressEscape()
+    expect(h.isTracing()).toBe(false)
+    expect(h.snapshotStore()).toEqual(before)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 })

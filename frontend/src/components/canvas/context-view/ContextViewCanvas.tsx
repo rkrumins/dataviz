@@ -497,6 +497,26 @@ export function ContextViewCanvas({
   // expand, reveal, edit, reorder, connect — consults it: while a trace is
   // on, the canvas is a read-only projection of the walk model.
   const overlayRef = useRef<TraceOverlay | null>(null)
+  /** A trace SESSION is open — true from the instant Trace is pressed, which
+   *  is earlier than `overlay.active` (that waits for a model holding the
+   *  focus, so the canvas can keep showing browse while the walk runs). */
+  const traceSessionRef = useRef(false)
+
+  /**
+   * THE WRITE LOCK. A trace refuses canvas writes for its WHOLE life, not
+   * just while the overlay is drawing. The walk in between is precisely when
+   * a stray expand, reveal, search or edit would land in the store — the
+   * reader is still looking at browse, so the affordances still look live —
+   * and exiting the trace would then restore a canvas that never existed.
+   *
+   * Deliberately WIDER than `overlay.active`: that one answers "is a trace
+   * on screen right now" and drives RENDERING; this one answers "may the
+   * canvas be written" and drives every guard.
+   */
+  const traceWriteLocked = useCallback(
+    () => traceSessionRef.current || overlayRef.current?.active === true,
+    [],
+  )
 
   // Forward refs to values declared far below in render order: the hydration
   // cancellers (so `beginTrace` can drop in-flight child pages) and the live
@@ -1006,7 +1026,7 @@ export function ContextViewCanvas({
     // Drop-to-assign is a layout WRITE; a trace is read-only. (The columns
     // also render the overlay's lanes, so the drop target isn't the browse
     // tree the assignment would be recorded against.)
-    if (overlayRef.current?.active) return
+    if (traceWriteLocked()) return
     const before = currentLayout()
     // Live containment map (from useContainmentHierarchy, exposed via the forward-ref set during render).
     const parentMap = duplicateWiringRef.current?.parentMap ?? new Map<string, string>()
@@ -1066,7 +1086,7 @@ export function ContextViewCanvas({
         reapply: () => persistReferenceLayout(after),
       },
     )
-  }, [currentLayout, persistReferenceLayout])
+  }, [currentLayout, persistReferenceLayout, traceWriteLocked])
 
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
@@ -1147,14 +1167,14 @@ export function ContextViewCanvas({
     // The menu is an authoring surface (rename/duplicate/delete/reorder) and
     // its targets are resolved against the BROWSE tree, which is not what the
     // columns are showing. No menu while a trace is on.
-    if (overlayRef.current?.active) return
+    if (traceWriteLocked()) return
     const node = nodes.find(n => n.id === nodeId)
     interactions.openContextMenu(e, {
       type: 'node',
       id: nodeId,
       data: node?.data as Record<string, unknown> || {},
     })
-  }, [nodes, interactions])
+  }, [nodes, interactions, traceWriteLocked])
 
 
 
@@ -1190,7 +1210,7 @@ export function ContextViewCanvas({
   const handleDoubleClick = useCallback(async (nodeId: string, event?: React.MouseEvent) => {
     // A trace is a read-only projection: no inline edit, and no re-trace
     // gesture that would land mid-walk. ESC leaves first.
-    if (overlayRef.current?.active) return
+    if (traceWriteLocked()) return
 
     // UX-first: Double-click = inline edit (modern approach)
     // Use Shift+Double-click for trace (power user feature)
@@ -1221,7 +1241,7 @@ export function ContextViewCanvas({
 
     // TRACE: open the Lineage Lens on this node with the full walk on.
     toggleTraceRef.current(nodeId)
-  }, [nodes, interactions, canEditGraph])
+  }, [nodes, interactions, canEditGraph, traceWriteLocked])
 
 
   // Lineage flow toggle
@@ -1649,6 +1669,9 @@ export function ContextViewCanvas({
   useEffect(() => {
     overlayRef.current = overlay
     canvasTraceRef.current = canvasTrace
+    // Keeps the lock honest in both directions — notably it CLEARS on exit,
+    // and it re-arms for a trace started anywhere other than `beginTrace`.
+    traceSessionRef.current = canvasTrace.isTracing
   })
 
   // ── Trace history — browser-style back/forward over this user's traces
@@ -1682,11 +1705,22 @@ export function ContextViewCanvas({
   const beginTrace = useCallback((urn: string) => {
     setShowLineageFlow(true)
     useCanvasStore.getState().closeNodeDrawer()
+    // Lock writes NOW, not on the next commit: the reader can click a browse
+    // chevron between pressing Trace and the walk's first wave.
+    traceSessionRef.current = true
     // Drop every child page still in flight. It was requested for the browse
     // canvas, and letting it resolve mid-trace would addGraph into the store
     // behind the overlay — a write the trace cannot undo on exit.
     const hydration = childLoadRef.current
-    if (hydration) for (const id of hydration.loadingNodes) hydration.cancel(id)
+    if (hydration) {
+      for (const id of hydration.loadingNodes) {
+        hydration.cancel(id)
+        // `searchChildren` queues under its OWN keyspace while recording the
+        // BARE id in `loadingNodes`, so cancelling the id alone leaves an
+        // in-flight child search running straight into the trace.
+        hydration.cancel(`search:${id}`)
+      }
+    }
     canvasTrace.start(urn)
   }, [canvasTrace])
 
@@ -2232,7 +2266,7 @@ export function ContextViewCanvas({
   // current visual order. A cross-set drop is a safe no-op; the MIDDLE band
   // still reparents (nest into a node).
   const handleReorderNode = useCallback((draggedId: string, targetId: string, position: 'before' | 'after') => {
-    if (overlayRef.current?.active) return          // read-only while tracing
+    if (traceWriteLocked()) return                  // read-only while tracing
     if (draggedId === targetId) return
     const before = currentLayout()
     const ctx = siblingContext(targetId, reorderTreeRef.current)
@@ -2304,13 +2338,13 @@ export function ContextViewCanvas({
         reapply: () => persistReferenceLayout(after),
       },
     )
-  }, [currentLayout, persistReferenceLayout])
+  }, [currentLayout, persistReferenceLayout, traceWriteLocked])
 
   // Keyboard-and-mouse reorder nudge — the a11y sibling of the drag bands
   // (native HTML5 DnD is mouse-only). Resolves the node's sibling set (roots
   // OR children) and delegates to handleReorderNode. Stable identity.
   const nudgeReorder = useCallback((nodeId: string, dir: 'up' | 'down' | 'top' | 'bottom') => {
-    if (overlayRef.current?.active) return          // read-only while tracing
+    if (traceWriteLocked()) return                  // read-only while tracing
     const ctx = siblingContext(nodeId, reorderTreeRef.current)
     if (!ctx) return
     const { siblings } = ctx
@@ -2320,7 +2354,7 @@ export function ContextViewCanvas({
     else if (dir === 'down' && idx < siblings.length - 1) handleReorderNode(nodeId, siblings[idx + 1], 'after')
     else if (dir === 'top' && idx > 0) handleReorderNode(nodeId, siblings[0], 'before')
     else if (dir === 'bottom' && idx < siblings.length - 1) handleReorderNode(nodeId, siblings[siblings.length - 1], 'after')
-  }, [handleReorderNode])
+  }, [handleReorderNode, traceWriteLocked])
 
   // Context-menu "Move up / down / to top / to bottom" for any node of a draft
   // layer (roots and children alike — the nudge resolves the right sibling set
@@ -2396,17 +2430,17 @@ export function ContextViewCanvas({
   // children that carry lineage, so there is nothing more to fetch — and a
   // fetch would write the store the overlay deliberately leaves alone.
   const loadMoreChildren = useCallback(async (parentId: string) => {
-    if (overlayRef.current?.active) return
+    if (traceWriteLocked()) return
     await loadChildrenSorted(parentId)
-  }, [loadChildrenSorted])
+  }, [loadChildrenSorted, traceWriteLocked])
 
   // Same for another page of ROOTS — reachable from the status chip and from
   // scrolling a column to its end, neither of which means "grow the browse
   // canvas" while the columns are showing a trace.
   const loadMoreRootsGuarded = useCallback(() => {
-    if (overlayRef.current?.active) return
+    if (traceWriteLocked()) return
     void loadMoreRoots()
-  }, [loadMoreRoots])
+  }, [loadMoreRoots, traceWriteLocked])
 
   // Child search REPLACES a parent's loaded children in the store — it
   // `removeNodes`/`removeEdges` them and `addGraph`s the hits — and records
@@ -2414,9 +2448,9 @@ export function ContextViewCanvas({
   // never be exited back to the canvas the reader started from. The
   // magnifier is hidden while tracing (FlatTreeItem); this is the backstop.
   const searchChildrenGuarded = useCallback((parentId: string, query: string) => {
-    if (overlayRef.current?.active) return
+    if (traceWriteLocked()) return
     void searchChildren(parentId, query)
-  }, [searchChildren])
+  }, [searchChildren, traceWriteLocked])
 
   // Fill the forward refs declared at the top of the component. In an effect,
   // not during render: the callbacks that read them (beginTrace, the edge
@@ -2621,12 +2655,15 @@ export function ContextViewCanvas({
     focus: scrollHitIntoView,
   })
   const revealOnCanvas = useCallback(async (nodeId: string, revealOpts?: RevealOptions) => {
-    if (expandTraceChain(nodeId)) {
-      if (!revealOpts?.skipFocus) scrollHitIntoView(nodeId)
+    if (traceWriteLocked()) {
+      // Drawing: open the overlay's own chain. Still walking: there is
+      // nothing to reveal yet, and the browse reveal would lazy-LOAD the
+      // ancestors it is missing straight into the store.
+      if (expandTraceChain(nodeId) && !revealOpts?.skipFocus) scrollHitIntoView(nodeId)
       return
     }
     await revealAndFocus(nodeId, revealOpts)
-  }, [expandTraceChain, scrollHitIntoView, revealAndFocus])
+  }, [expandTraceChain, scrollHitIntoView, revealAndFocus, traceWriteLocked])
 
   // Multi-locate (T24 F5): reveal each target (expanding collapsed
   // ancestors), then walk each one through the SAME virtualizer-aware
@@ -2660,12 +2697,12 @@ export function ContextViewCanvas({
     scrollIntoView: scrollHitIntoView,
   })
   const revealSearchHit = useCallback(async (urn: string, ancestorPath: Parameters<typeof revealSearchHitBrowse>[1]) => {
-    if (expandTraceChain(urn)) {
-      scrollHitIntoView(urn)
+    if (traceWriteLocked()) {
+      if (expandTraceChain(urn)) scrollHitIntoView(urn)
       return
     }
     await revealSearchHitBrowse(urn, ancestorPath)
-  }, [expandTraceChain, scrollHitIntoView, revealSearchHitBrowse])
+  }, [expandTraceChain, scrollHitIntoView, revealSearchHitBrowse, traceWriteLocked])
 
   // "Frame matches" — scroll the horizontal canvas container so the first
   // match-bearing node is centered. This is a viewport-not-zoom action since
@@ -2995,6 +3032,10 @@ export function ContextViewCanvas({
       overlayRef.current.toggle(nodeId)
       return
     }
+    // Still walking: the columns are showing BROWSE and its chevrons look
+    // live, but expanding one would fetch children into the store with
+    // nothing to undo it when the trace exits. A no-op, never a fall-through.
+    if (traceWriteLocked()) return
 
     const node = displayMap.get(nodeId)
 
@@ -3204,7 +3245,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand])
+  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked])
 
 
 
@@ -3912,10 +3953,14 @@ export function ContextViewCanvas({
         onSearchResultClick={(node) => {
           selectNode(node.id)
           // Tracing: the overlay owns expansion (and the hit may be nested
-          // inside a closed card, so open the way to it too).
-          if (overlay.active) {
-            expandTraceChain(node.id)
-            overlay.expandPath([node.id])
+          // inside a closed card, so open the way to it too). Mid-walk there
+          // is no overlay yet and browse expansion is not restored on exit,
+          // so leave it alone.
+          if (traceWriteLocked()) {
+            if (overlay.active) {
+              expandTraceChain(node.id)
+              overlay.expandPath([node.id])
+            }
             return
           }
           setExpandedNodes((prev) => new Set([...prev, node.id]))

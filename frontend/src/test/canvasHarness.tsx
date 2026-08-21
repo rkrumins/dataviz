@@ -77,8 +77,10 @@ export interface TraceCanvasHarness {
   childSearchButton(id: string): boolean
   /** Click that magnifier, opening the column's inline search box. */
   openChildSearch(id: string): Promise<void>
-  /** Type into an open child-search box — the real keystroke path into the
-   *  canvas's `onSearchChildren`. Returns false if no box is open. */
+  /** Type a query into an open child-search box AND SUBMIT it — the real
+   *  keystroke path into the canvas's `onSearchChildren`. The box keeps its
+   *  own local value and only commits on Enter/blur, so a change event alone
+   *  reaches nothing. Returns false if no box is open. */
   typeChildSearch(query: string): Promise<boolean>
   /** Click a card's expand chevron. */
   toggle(id: string): Promise<void>
@@ -431,9 +433,17 @@ export async function renderCanvasWithTrace(
     async typeChildSearch(query: string) {
       // The column's own input, driven the way a reader drives it — no prop
       // capture, no mock: this is the exact path to `onSearchChildren`.
+      //
+      // ENTER IS LOAD-BEARING. SearchBoxItem holds the text in local state
+      // and only calls its `onChange` on Enter or blur, so a change event by
+      // itself commits nothing — a test that stops there passes whether the
+      // handler is gated or not.
       const input = document.querySelector<HTMLInputElement>('input[placeholder^="Search node"]')
       if (!input) return false
-      await act(async () => { fireEvent.change(input, { target: { value: query } }) })
+      await act(async () => {
+        fireEvent.change(input, { target: { value: query } })
+        fireEvent.keyDown(input, { key: 'Enter' })
+      })
       await settle()
       return true
     },

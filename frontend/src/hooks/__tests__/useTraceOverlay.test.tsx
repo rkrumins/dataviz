@@ -61,7 +61,7 @@ const grownModel = (): LensWalkModel => {
 }
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(17))
+afterAll(() => expectTestsRan(20))
 
 describe('useTraceOverlay — the seed', () => {
   it('opens the focus chain and leaves the direct partners visible and CLOSED', () => {
