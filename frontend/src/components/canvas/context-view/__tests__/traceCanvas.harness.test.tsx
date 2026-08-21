@@ -22,7 +22,7 @@ import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(17))
+afterAll(() => expectTestsRan(19))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -127,6 +127,48 @@ describe('the trace overlay on the real canvas', () => {
     expect(h.visibleCardIds().sort())
       .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'orders', 'rpt', 'tableau'])
     expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  /**
+   * THE CAPSULE (D4, 2026-08-21). The session opens on the click and the
+   * overlay only draws once the model holds the focus; between the two the
+   * board used to sit silent under trace chrome and read as broken. The
+   * capsule narrates from the first click, leaves by itself one beat after
+   * the flow completes, and Cancel mid-walk leaves the trace with the
+   * pre-trace store untouched.
+   */
+  it('the capsule narrates from the first click and leaves one beat after the flow completes', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', deferTrace: true })
+    const before = h.snapshotStore()
+    await h.startTrace('cfo')
+    const capsule = () => document.querySelector<HTMLElement>('[data-trace-phase]')
+    expect(capsule()?.dataset.tracePhase).toBe('loading')
+    expect(capsule()?.textContent).toMatch(/finding the focus/i)
+
+    await h.resolveTrace()
+    // The flow is small and lands complete in one response: one beat of
+    // "Complete", then gone — the dock owns the permanent numbers.
+    expect(capsule()?.dataset.tracePhase).toBe('done')
+    await act(async () => { await new Promise(r => setTimeout(r, 700)) })
+    expect(capsule()).toBeNull()
+    expect(h.isTracing()).toBe(true)
+    expect(h.storeWrites()).toBe(0)
+    expect(h.snapshotStore()).toEqual(before)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('Cancel on the capsule mid-walk leaves the trace, store untouched', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', deferTrace: true })
+    const before = h.snapshotStore()
+    await h.startTrace('cfo')
+    const cancel = [...document.querySelectorAll<HTMLButtonElement>('[data-trace-phase] button')].find(b => /cancel/i.test(b.textContent ?? ''))
+    expect(cancel).toBeTruthy()
+    await act(async () => { fireEvent.click(cancel!) })
+    await h.settle()
+    expect(h.isTracing()).toBe(false)
+    expect(document.querySelector('[data-trace-phase]')).toBeNull()
+    expect(h.snapshotStore()).toEqual(before)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 

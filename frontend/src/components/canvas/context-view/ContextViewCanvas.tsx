@@ -172,6 +172,7 @@ import { ExportDialog } from '@/features/import-export/ExportDialog'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
+import { TraceWalkIndicator } from './TraceWalkIndicator'
 
 // Re-export for backward compatibility
 export { defaultReferenceModelLayers } from './constants'
@@ -4250,6 +4251,31 @@ export function ContextViewCanvas({
               nativeMode={traceActive}
               outsideView={overlay.view?.outsideView ?? 0}
             />
+        )}
+
+        {/* THE CAPSULE — the board narrates while the trace computes (D4).
+            Visible from the FIRST click: the session opens instantly but the
+            overlay only draws once the model holds the focus, and the walk
+            then runs hands-free for as long as the flow is wide. Pointer
+            events only on its own buttons (the board underneath stays
+            interactive), and — like the dock — no AnimatePresence: it
+            unmounts with the trace. Keyed on the focus so a new trace
+            re-arms the finished beat. */}
+        {traceActive && canvasTrace.progress && (
+          <TraceWalkIndicator
+            key={tracedNodeId ?? ''}
+            phase={canvasTrace.progress.phase}
+            nodes={canvasTrace.progress.nodes}
+            flows={canvasTrace.progress.flows}
+            requests={canvasTrace.progress.requests}
+            pending={canvasTrace.progress.pending}
+            error={canvasTrace.progress.error}
+            upCount={overlay.view?.counts.up ?? 0}
+            downCount={overlay.view?.counts.down ?? 0}
+            onCancel={exitCanvasTrace}
+            onContinue={canvasTrace.continuePastCheckpoint}
+            onRetry={canvasTrace.retryWalk}
+          />
         )}
 
 
