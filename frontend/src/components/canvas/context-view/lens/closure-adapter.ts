@@ -95,6 +95,14 @@ export interface LensWalkModel {
     readonly containmentEdges: ReadonlyArray<LensContainmentEdgeLike>
     readonly upstreamUrns: ReadonlySet<string>
     readonly downstreamUrns: ReadonlySet<string>
+    /** The coarse page's partners — containers at whatever level the
+     *  rollup cells name (Part G). Kept apart from the raw-grain sets so
+     *  "N upstream" never counts a database beside the tables inside it;
+     *  read for the ≈ floors while the raw sets are still empty. Optional
+     *  (absent = none), so a fixture built before the coarse page needs
+     *  nothing added. */
+    readonly coarseUpstreamUrns?: ReadonlySet<string>
+    readonly coarseDownstreamUrns?: ReadonlySet<string>
     readonly frontierUp: ReadonlyArray<LensFrontierEntry>
     readonly frontierDown: ReadonlyArray<LensFrontierEntry>
     readonly truncated: boolean
@@ -116,6 +124,8 @@ export function emptyWalkModel(focusUrn: string): LensWalkModel {
         containmentEdges: [],
         upstreamUrns: new Set(),
         downstreamUrns: new Set(),
+        coarseUpstreamUrns: new Set(),
+        coarseDownstreamUrns: new Set(),
         frontierUp: [],
         frontierDown: [],
         truncated: false,
@@ -145,8 +155,12 @@ export function toLensClosure(
             return { ...e, kind: isRollup ? 'rollup' as const : 'raw' as const, weight: typeof w === 'number' ? w : null }
         }),
         containmentEdges: res.containmentEdges,
-        upstreamUrns: new Set(res.upstreamUrns),
-        downstreamUrns: new Set(res.downstreamUrns),
+        // A coarse page's partners are containers: they go to their own
+        // sets (see `LensWalkModel.coarseUpstreamUrns`).
+        upstreamUrns: new Set(res.grain === 'coarse' ? [] : res.upstreamUrns),
+        downstreamUrns: new Set(res.grain === 'coarse' ? [] : res.downstreamUrns),
+        coarseUpstreamUrns: new Set(res.grain === 'coarse' ? res.upstreamUrns : []),
+        coarseDownstreamUrns: new Set(res.grain === 'coarse' ? res.downstreamUrns : []),
         frontierUp: up,
         frontierDown: down,
         truncated: isOwed(res.seedCursor ?? null, up, down) || isFailure(res.truncationReason),
@@ -247,6 +261,8 @@ export function mergeClosures(
 
     const upstreamUrns = new Set([...model.upstreamUrns, ...incoming.upstreamUrns])
     const downstreamUrns = new Set([...model.downstreamUrns, ...incoming.downstreamUrns])
+    const coarseUpstreamUrns = new Set([...(model.coarseUpstreamUrns ?? []), ...(incoming.coarseUpstreamUrns ?? [])])
+    const coarseDownstreamUrns = new Set([...(model.coarseDownstreamUrns ?? []), ...(incoming.coarseDownstreamUrns ?? [])])
 
     const clearUp = authoritative && (ctx.direction === 'up' || ctx.direction === 'both')
     const clearDown = authoritative && (ctx.direction === 'down' || ctx.direction === 'both')
@@ -271,6 +287,8 @@ export function mergeClosures(
         containmentEdges: [...containmentByKey.values()],
         upstreamUrns,
         downstreamUrns,
+        coarseUpstreamUrns,
+        coarseDownstreamUrns,
         frontierUp,
         frontierDown,
         truncated: owed || failed,

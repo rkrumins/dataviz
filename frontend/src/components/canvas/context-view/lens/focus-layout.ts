@@ -37,6 +37,7 @@
 import type { LineageNode } from '@/store/canvas'
 import {
     boundaryFrontierFilter,
+    hopWeight,
     focusAncestorChain,
     projectLensEdges,
     visibleLensNodes,
@@ -1200,21 +1201,24 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // A hop crosses the boundary of exactly the ancestors-or-self of one
     // endpoint that are NOT ancestors-or-self of the other, so one pass over
     // the edges, walking two short chains each, counts every entity at once.
-    let crossIndex: Map<string, { in: number; out: number }> | null = null
-    const crossings = (): Map<string, { in: number; out: number }> => {
+    let crossIndex: Map<string, { in: number; out: number; approx: boolean }> | null = null
+    const crossings = (): Map<string, { in: number; out: number; approx: boolean }> => {
         if (crossIndex !== null) return crossIndex
         crossIndex = new Map()
-        const bump = (urn: string, key: 'in' | 'out') => {
+        const bump = (urn: string, key: 'in' | 'out', by: number, coarse: boolean) => {
             let c = crossIndex!.get(urn)
-            if (!c) { c = { in: 0, out: 0 }; crossIndex!.set(urn, c) }
-            c[key] += 1
+            if (!c) { c = { in: 0, out: 0, approx: false }; crossIndex!.set(urn, c) }
+            c[key] += by
+            c.approx = c.approx || coarse
         }
         for (const hop of sg.lineageEdges) {
             if (!population.has(hop.sourceUrn) || !population.has(hop.targetUrn)) continue
+            const by = hopWeight(hop)
+            const coarse = hop.kind === 'rollup'
             const a = new Set([...ancestorsOf(hop.sourceUrn), hop.sourceUrn])
             const b = new Set([...ancestorsOf(hop.targetUrn), hop.targetUrn])
-            for (const u of a) if (!b.has(u)) bump(u, 'out')     // leaves u's subtree
-            for (const u of b) if (!a.has(u)) bump(u, 'in')      // arrives into u's subtree
+            for (const u of a) if (!b.has(u)) bump(u, 'out', by, coarse)     // leaves u's subtree
+            for (const u of b) if (!a.has(u)) bump(u, 'in', by, coarse)      // arrives into u's subtree
         }
         return crossIndex
     }
@@ -1233,8 +1237,8 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      * both sides (its columns carry the lineage; the table itself has
      * none of its own).
      */
-    const NO_CROSSINGS = { in: 0, out: 0 } as const
-    const crossingOf = (urn: string): { in: number; out: number } =>
+    const NO_CROSSINGS = { in: 0, out: 0, approx: false } as const
+    const crossingOf = (urn: string): { in: number; out: number; approx: boolean } =>
         crossings().get(urn) ?? NO_CROSSINGS
 
     /** A card already on the board keeps the slot it was first drawn in;
@@ -1709,6 +1713,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             ancestry: ancestry.map(labelFor),
             ancestryIds: ancestry,
             count: Math.max(1, weightOf(urn)),
+            approx: crossingOf(urn).approx,
             // What this card is connected to: what is drawn, plus what
             // the data source says is still out there. The pill for that
             // side already IS the remainder (a reveal's own not-yet-shown
@@ -2092,7 +2097,8 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             existing.count += bundle.weight
             if (existing.edgeTypeNorm !== norm) existing.edgeTypeNorm = ''
             existing.cycleBack = existing.cycleBack || runsBackwards(bundle)
-            existing.grainCoarse = existing.grainCoarse || bundleCoarse
+            existing.grainCoarse = existing.grainCoarse || bundleCoarse || bundle.coarse
+            existing.approx = (existing.approx ?? false) || bundle.coarse
             continue
         }
         byPair.set(id, {
@@ -2111,7 +2117,8 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             cycleAnchor: false,
             labelVisible: false,
             labelT: 0.5,
-            grainCoarse: bundleCoarse,
+            grainCoarse: bundleCoarse || bundle.coarse,
+            approx: bundle.coarse,
             // Filled in just below, once every card's `frameId` is fixed.
             sameAncestorFrame: null,
             // Filled in by the in-frame routing pass below (the lane's own

@@ -39,8 +39,11 @@ import { useRelationshipTypes } from '@/store/schema'
 import { relationshipLabel } from '@/lib/relationshipLabel'
 import type { WalkEntry, LensWalkDir, WalkProgress } from '@/hooks/useLensWalk'
 import { emptyWalkModel, type LensWalkNode } from './lens/closure-adapter'
+import { accountedLineageEdges } from './lens/rollup-accounting'
+import { rollupResiduals } from '@/hooks/lib/traceWireLedger'
 import {
   boundaryFrontierFilter,
+  hopWeight,
   buildLensSubgraph,
   distinctSystemCount,
   rootUrnOf,
@@ -124,7 +127,7 @@ export function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>, anchorUrn: s
       const far = dir === 'in' ? hop.sourceUrn : hop.targetUrn
       if (!focusSide.has(near) || focusSide.has(far)) continue
       const entry = byUrn.get(far) ?? { weight: 0, types: new Set<string>() }
-      entry.weight += 1
+      entry.weight += hopWeight(hop)
       entry.types.add((hop.edgeType ?? '').toUpperCase())
       byUrn.set(far, entry)
     }
@@ -385,10 +388,22 @@ export function LineageLens({
 
   // ── The pipeline: model → subgraph → view state → layout ──────────
 
-  const sg = useMemo(
-    () => buildLensSubgraph(model ?? emptyWalkModel(nodeId ?? '')),
-    [model, nodeId],
-  )
+  // THE COARSE FIRST PAINT (Part G): when the model holds rollup cells the
+  // board is built from the ACCOUNTED edges — every raw hop, plus only the
+  // cells that still say something once the cells and raw hops inside them
+  // have spoken, each weighted by what it says. Once the walk is done every
+  // raw-backed cell is dropped: raw evidence wins. The direction flags take
+  // the coarse partners too, so a side reads as present from the first paint.
+  const walkDone = walkProgress?.phase === 'done' || walkProgress == null
+  const sg = useMemo(() => {
+    const base = model ?? emptyWalkModel(nodeId ?? '')
+    return buildLensSubgraph({
+      ...base,
+      lineageEdges: accountedLineageEdges(base, { vouchAll: walkDone }),
+      upstreamUrns: new Set([...base.upstreamUrns, ...(base.coarseUpstreamUrns ?? [])]),
+      downstreamUrns: new Set([...base.downstreamUrns, ...(base.coarseDownstreamUrns ?? [])]),
+    })
+  }, [model, nodeId, walkDone])
 
   // T26 R1 — what a fresh transition to THIS focal should show, per
   // `viewStateForTransition` (focus-layout.ts), the single owner of
@@ -1261,13 +1276,21 @@ export function LineageLens({
       const offers = boundaryFrontierFilter(sg, nodeId, dir)
       return (dir === 'in' ? model.frontierUp : model.frontierDown).some(f => offers(f.urn))
     }
+    // The coarse page's partners, counted at CARD grain: the endpoints the
+    // inner-first accounting left standing (a database whose cells are
+    // fully stated by its tables is not a partner beside them).
+    const residuals = (model.coarseUpstreamUrns?.size || model.coarseDownstreamUrns?.size) ? rollupResiduals(model) : null
+    const approxOn = (side: ReadonlySet<string> | undefined) =>
+      residuals ? [...(side ?? [])].filter(u => (residuals.get(u) ?? 0) > 0).length : 0
     return {
       up: model.upstreamUrns.size,
       down: model.downstreamUrns.size,
       moreUp: capped || more('in'),
       moreDown: capped || more('out'),
-      upSystems: distinctSystemCount(sg, model.upstreamUrns),
-      downSystems: distinctSystemCount(sg, model.downstreamUrns),
+      upSystems: distinctSystemCount(sg, model.upstreamUrns.size > 0 ? model.upstreamUrns : (model.coarseUpstreamUrns ?? model.upstreamUrns)),
+      downSystems: distinctSystemCount(sg, model.downstreamUrns.size > 0 ? model.downstreamUrns : (model.coarseDownstreamUrns ?? model.downstreamUrns)),
+      approxUp: approxOn(model.coarseUpstreamUrns),
+      approxDown: approxOn(model.coarseDownstreamUrns),
     }
   }, [model, nodeId, sg, walkStatus, capped])
 
@@ -2448,9 +2471,9 @@ function ReachLine({ reach, loading }: { reach: LensReach | null; loading: boole
           mid-word on each half at once on a narrow card (see the graph
           body's own `orientationHalf` note for the reported shape). */}
       <span className="truncate min-w-0 tabular-nums">
-        {orientationHalf('Fed by', 'source', 'upstream', reach.up, reach.moreUp, reach.upSystems, 'No upstream sources')}
+        {orientationHalf('Fed by', 'source', 'upstream', reach.up, reach.moreUp, reach.upSystems, 'No upstream sources', reach.approxUp ?? 0)}
         {' · '}
-        {orientationHalf('feeds', 'consumer', 'downstream', reach.down, reach.moreDown, reach.downSystems, 'feeds nothing downstream')}
+        {orientationHalf('feeds', 'consumer', 'downstream', reach.down, reach.moreDown, reach.downSystems, 'feeds nothing downstream', reach.approxDown ?? 0)}
       </span>
     </p>
   )

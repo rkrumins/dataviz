@@ -3719,3 +3719,72 @@ describe('fan-in bundles — a band over budget groups its cards under their par
     }
 })
 
+/**
+ * THE COARSE FIRST PAINT on the board (Part G, 2026-08-21). A rollup cell
+ * is a statement about W flows between two containers; on the board it
+ * weighs W — in the wire's count, in the partner card's count and in the
+ * neighbour records — and it draws as a COARSE wire (dashed, "≈"). The
+ * accounting that decides which cells survive runs before the layout
+ * (`accountedLineageEdges`); what reaches the layout is already what is
+ * worth drawing, so the layout only has to weigh it honestly.
+ */
+describe('a rollup cell on the board weighs what it says', () => {
+    const cellEstate = () => buildLensSubgraph<LensWalkNode>({
+        focusUrn: 'tbl',
+        nodes: [wnode('fdb', 'Node'), wnode('tbl', 'Node'), wnode('db', 'Node'), wnode('t1', 'Node'), wnode('t2', 'Node')].map(n => n),
+        lineageEdges: [
+            { id: 'agg:tbl>t1', sourceUrn: 'tbl', targetUrn: 't1', edgeType: 'AGGREGATED', kind: 'rollup', weight: 30 },
+            { id: 'agg:tbl>t2', sourceUrn: 'tbl', targetUrn: 't2', edgeType: 'AGGREGATED', kind: 'rollup', weight: 10 },
+        ],
+        containmentEdges: [{ sourceUrn: 'fdb', targetUrn: 'tbl' }, { sourceUrn: 'db', targetUrn: 't1' }, { sourceUrn: 'db', targetUrn: 't2' }],
+    })
+
+    it('the wire says ≈30, coarse; the partner card counts 30; the focal counts 40 out', () => {
+        const sg = cellEstate()
+        const g = layout(sg)
+        const t1 = cardFor(g, 't1')!
+        const wire = g.edges.find(e => e.target === t1.id)!
+        expect(wire.count).toBe(30)
+        expect(wire.grainCoarse).toBe(true)
+        expect(wire.approx).toBe(true)
+        expect(t1.count).toBe(30)
+        expect(t1.approx).toBe(true)
+        const focal = g.cards.find(c => c.kind === 'focal')!
+        expect(focal.flowsOut).toBe(40)
+        expect(sg.nodes.get('tbl')!.degreeDown).toBe(40)
+        expect(sg.nodes.get('t1')!.degreeUp).toBe(30)
+    })
+
+    it('the database whose cell the accounting dropped is the FRAME its tables sit in — never a partner card of its own', () => {
+        // `db` reaches the layout with no hop (its cell was fully stated by
+        // the cells inside it), so it is the container holding the hop
+        // carriers: drawn as the frame, its tables the rows, ≈ counts on them.
+        const g = layout(cellEstate())
+        const db = cardFor(g, 'db')!
+        expect(db.kind).toBe('frame')
+        expect(db.approx).toBe(true)
+        const rows = g.cards.filter(c => c.frameId === db.id).map(c => `${c.nodeId}:${c.count}:${c.approx}`).sort()
+        expect(rows).toEqual(['t1:30:true', 't2:10:true'])
+        // No wire lands on the database itself: the rows carry them.
+        expect(g.edges.some(e => e.target === db.id)).toBe(false)
+    })
+
+    it('a raw hop beside a cell is exact, never ≈', () => {
+        const sg = buildLensSubgraph<LensWalkNode>({
+            focusUrn: 'tbl',
+            nodes: [wnode('tbl', 'Node'), wnode('c0', 'Node'), wnode('t1', 'Node'), wnode('t1a', 'Node'), wnode('t2', 'Node')],
+            lineageEdges: [
+                { id: 'r1', sourceUrn: 'c0', targetUrn: 't1a', edgeType: 'FLOWS_TO', kind: 'raw', weight: null },
+                { id: 'agg:tbl>t2', sourceUrn: 'tbl', targetUrn: 't2', edgeType: 'AGGREGATED', kind: 'rollup', weight: 10 },
+            ],
+            containmentEdges: [{ sourceUrn: 'tbl', targetUrn: 'c0' }, { sourceUrn: 't1', targetUrn: 't1a' }],
+        })
+        const g = layout(sg)
+        const t1 = cardFor(g, 't1')!, t1a = cardFor(g, 't1a')!, t2 = cardFor(g, 't2')!
+        expect(t1.approx).toBe(false)
+        expect(t2.approx).toBe(true)
+        expect(g.edges.find(e => e.target === t1a.id)!.approx).toBe(false)   // the raw hop lands on the column row
+        expect(g.edges.find(e => e.target === t2.id)!.approx).toBe(true)
+    })
+})
+

@@ -48,6 +48,14 @@ export interface LensEdgeLike {
     weight?: number | null
 }
 
+/** What one edge WEIGHS on the board: a raw hop is one flow; a rollup cell
+ *  is the flows it summarises (Part G, 2026-08-21 — before the coarse
+ *  first paint a cell counted as one hop, so a partner "fed by 30 flows"
+ *  read as 1). Every count on the board — degrees, crossings, bundles,
+ *  neighbour records — goes through this. */
+export const hopWeight = (e: LensEdgeLike): number =>
+    e.kind === 'rollup' ? Math.max(1, e.weight ?? 1) : 1
+
 /** parent → child */
 export interface LensContainmentEdgeLike {
     sourceUrn: string
@@ -243,8 +251,8 @@ export function buildLensSubgraph<N extends LensNodeLike>(
     const degreeUpOf = new Map<string, number>()
     const degreeDownOf = new Map<string, number>()
     for (const e of lineageEdges) {
-        degreeDownOf.set(e.sourceUrn, (degreeDownOf.get(e.sourceUrn) ?? 0) + 1)
-        degreeUpOf.set(e.targetUrn, (degreeUpOf.get(e.targetUrn) ?? 0) + 1)
+        degreeDownOf.set(e.sourceUrn, (degreeDownOf.get(e.sourceUrn) ?? 0) + hopWeight(e))
+        degreeUpOf.set(e.targetUrn, (degreeUpOf.get(e.targetUrn) ?? 0) + hopWeight(e))
     }
 
     // Frontier stamping: keyed from the input lists. An entry for an urn
@@ -516,6 +524,9 @@ export interface ProjectedLensEdge {
     isLeafEdge: boolean
     /** The bundle's one shared edge type, or '' when it bundles more than one. */
     edgeTypeNorm: string
+    /** A rollup cell contributed: the weight is a summary, not a count of
+     *  hops the board holds — it draws coarse and reads "≈". */
+    coarse: boolean
 }
 
 /**
@@ -576,17 +587,20 @@ export function projectLensEdges<N extends LensNodeLike>(
         const hopType = hop.edgeType ?? ''
         const key = `${s} ${t}`
         const existing = bundles.get(key)
+        const coarse = hop.kind === 'rollup'
         if (existing) {
-            existing.weight += 1
+            existing.weight += hopWeight(hop)
             existing.isLeafEdge = false     // more than one hop ⇒ it's a bundle
+            existing.coarse = existing.coarse || coarse
             if (existing.edgeTypeNorm !== hopType) existing.edgeTypeNorm = ''
         } else {
             bundles.set(key, {
                 sourceUrn: s,
                 targetUrn: t,
-                weight: 1,
-                isLeafEdge: s === hop.sourceUrn && t === hop.targetUrn,
+                weight: hopWeight(hop),
+                isLeafEdge: !coarse && s === hop.sourceUrn && t === hop.targetUrn,
                 edgeTypeNorm: hopType,
+                coarse,
             })
         }
     }

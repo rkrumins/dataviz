@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { buildTraceView, lanesToHierarchy, lanesToRenderTrees } from '../traceViewModel'
-import { cfoEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
+import { cfoEstate, rootsNodeEstate, coarseCellsEstate } from '@/test/fixtures/traceEstates'
 import type { TraceViewInputs } from '../traceViewModel'
 import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
 
@@ -270,3 +270,38 @@ describe('lanesToRenderTrees — the canvas\'s render source', () => {
     expect(t2.data.traceRole).toBe('up')
   })
 })
+
+describe('buildTraceView — the coarse first paint (Part G)', () => {
+  const coarse = (expansion: string[]) => {
+    const e = coarseCellsEstate()
+    return buildTraceView({
+      model: e.model, focusUrn: 'orders', layers: e.layers, assignments: e.assignments, viewIsCurated: true,
+      traceExpansion: new Set(expansion), showUpstream: true, showDownstream: true, depthUp: 25, depthDown: 25,
+    })
+  }
+
+  it('a cell endpoint is a partner only while its residual is above zero — the database and department are hosts', () => {
+    const v = coarse(['dept', 'orders_db', 'ledger_db'])
+    const lane = v.lanes.find(l => l.layerId === 'warehouse')!
+    expect(lane.cards.get('journal')!.role).toBe('down')
+    expect(lane.cards.get('balances')!.role).toBe('down')
+    expect(lane.cards.get('ledger_db')!.role).toBe('host')
+    expect(lane.cards.get('dept')!.role).toBe('host')
+    expect(v.counts).toEqual({ up: 0, down: 2 })
+    // The tables hold no loaded rows yet, so "on this lineage" would read 0;
+    // the cell's weight is what they say instead, "≈", until the rows land.
+    expect(lane.cards.get('journal')!.approx).toBe(30)
+    expect(lane.cards.get('balances')!.approx).toBe(10)
+    expect(lane.cards.get('ledger_db')!.approx ?? 0).toBe(0)
+    type N = { id: string; data: Record<string, unknown>; children?: N[] }
+    const walk = (n: N): N[] => [n, ...(n.children ?? []).flatMap(walk)]
+    const journal = lanesToHierarchy(v.lanes).flatMap(l => (l.nodes as unknown as N[]).flatMap(walk)).find(n => n.id === 'journal')!
+    expect(journal.data.traceApprox).toBe(30)
+  })
+
+  it('the wires say what the cells say, inner-first: ≈30 and ≈10 to the tables, nothing to their hosts', () => {
+    const v = coarse(['dept', 'orders_db', 'ledger_db'])
+    expect(v.wires.map(w => `${w.source}>${w.target}:${w.kind}:${w.edgeCount}`).sort()).toEqual(['orders>balances:rollup:10', 'orders>journal:rollup:30'])
+  })
+})
+

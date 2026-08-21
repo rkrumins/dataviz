@@ -47,7 +47,14 @@ export const edgeLabelFor = (norm: string, info?: EdgeTypeInfoMap): string =>
  */
 export function orientationHalf(
   verb: string, noun: string, dirWord: string, count: number, floor: boolean, systems: number, zero: string,
+  /** Partners known only from the coarse page's cells (Part G) — read
+   *  as "≈N" while the raw sets are still empty, never as "nothing". */
+  approx = 0,
 ): string {
+  if (count === 0 && approx > 0) {
+    const sys = systems > 1 ? ` across ${systems} systems` : ''
+    return `${verb} ≈${approx.toLocaleString()} ${noun}${approx === 1 ? '' : 's'}${sys}`
+  }
   if (count === 0) {
     return floor ? `nothing loaded ${dirWord} yet — the data source may have more` : zero
   }
@@ -391,6 +398,11 @@ export interface LensReach {
    *  spread across a dozen platforms are a different picture entirely. */
   upSystems: number
   downSystems: number
+  /** Partner CARDS known only from the coarse page's cells (Part G) —
+   *  the endpoints whose residual is above zero — per side. Read as a
+   *  "≈N" floor while the raw-grain sets are still empty. */
+  approxUp?: number
+  approxDown?: number
 }
 
 export interface FocusCard {
@@ -420,6 +432,9 @@ export interface FocusCard {
   parentLabel: string | null
   /** Raw hops this card's subtree carries to the rest of the picture. */
   count: number
+  /** The count includes a rollup cell's summary (Part G): it reads "≈N"
+   *  until raw evidence replaces the cell. */
+  approx?: boolean
   /** WHAT THIS CARD IS CONNECTED TO, per side — the sentence a row
    *  states in words when you point at it ("17 flows · 12 in / 5 out").
    *
@@ -581,6 +596,9 @@ export interface FocusEdge {
   source: string
   target: string
   count: number
+  /** A rollup cell is in this bundle: the count is a summary ("≈N flows")
+   *  and the wire draws coarse (Part G). */
+  approx?: boolean
   edgeTypeNorm: string
   dimmed: boolean
   /** This hop runs BACKWARDS in the picture's own hop numbering, so it
