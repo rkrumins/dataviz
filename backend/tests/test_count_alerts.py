@@ -331,6 +331,7 @@ async def test_the_sweep_rings_only_after_the_alerts_are_committed(monkeypatch):
         async def __aenter__(self): return self
         async def __aexit__(self, *exc): return False
         async def commit(self): order.append("commit")
+        async def rollback(self): return None
 
     notice = count_alerts_repo.PendingNotice(
         data_source_id=DS_ID, workspace_id="ws_a1", catalog_item_id="cat_a1",
@@ -368,6 +369,7 @@ async def test_the_sweep_respects_its_cadence(monkeypatch):
         async def __aenter__(self): return self
         async def __aexit__(self, *exc): return False
         async def commit(self): return None
+        async def rollback(self): return None
 
     async def fake_policy(_s): return _policy()
     async def fake_sources(_s): calls.append(1); return []
@@ -392,6 +394,7 @@ async def test_the_sweep_does_nothing_when_alerting_is_off(monkeypatch):
         async def __aenter__(self): return self
         async def __aexit__(self, *exc): return False
         async def commit(self): return None
+        async def rollback(self): return None
 
     async def fake_policy(_s): return _policy(enabled=False)
     async def fake_sources(_s): scanned.append(1); return []
@@ -413,6 +416,7 @@ async def test_one_unreadable_source_does_not_cost_the_fleet_its_pass(monkeypatc
         async def __aenter__(self): return self
         async def __aexit__(self, *exc): return False
         async def commit(self): return None
+        async def rollback(self): return None
 
     seen: list[str] = []
 
@@ -444,6 +448,7 @@ async def test_a_failed_fan_out_leaves_the_alerts_readable(monkeypatch):
         async def __aenter__(self): return self
         async def __aexit__(self, *exc): return False
         async def commit(self): return None
+        async def rollback(self): return None
 
     notice = count_alerts_repo.PendingNotice(
         data_source_id=DS_ID, workspace_id=None, catalog_item_id=None,
@@ -497,3 +502,89 @@ async def test_the_scan_cap_is_announced_rather_than_silent(
 
     assert len(picked) == 2
     assert any("deferring the rest" in r.message for r in caplog.records)
+
+
+async def test_a_poisoned_transaction_is_rolled_back_before_continuing(monkeypatch):
+    """`continue` alone is not enough on Postgres: a failed statement poisons
+    the transaction until rollback, so every subsequent source would fail too
+    and the pass would lose everything it had found."""
+    from backend.insights_service import scheduler
+
+    events: list[str] = []
+
+    class _Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *exc): return False
+        async def commit(self): events.append("commit")
+        async def rollback(self): events.append("rollback")
+
+    notice = count_alerts_repo.PendingNotice(
+        data_source_id="ds_ok", workspace_id=None, catalog_item_id=None,
+        source_name="g", severity="severe", direction="drop", node_delta=-1,
+    )
+
+    async def fake_policy(_s): return _policy()
+    async def fake_sources(_s): return ["ds_broken", "ds_ok"]
+
+    async def fake_evaluate(_s, ds, _p):
+        events.append(f"judge:{ds}")
+        if ds == "ds_broken":
+            raise RuntimeError("constraint violation")
+        return notice
+
+    monkeypatch.setattr(scheduler, "get_jobs_session", lambda: _Session())
+    monkeypatch.setattr(count_alerts_repo, "resolve_alert_policy", fake_policy)
+    monkeypatch.setattr(count_alerts_repo, "sources_to_evaluate", fake_sources)
+    monkeypatch.setattr(count_alerts_repo, "evaluate_source", fake_evaluate)
+    monkeypatch.setattr(
+        "backend.app.db.repositories.notification_repo.notify_counts_anomaly",
+        lambda *_a, **_kw: None,
+    )
+    monkeypatch.setattr(scheduler, "_ALERT_INTERVAL_SECS", 0.0)
+    scheduler._alert_sweep_state["last_run_monotonic"] = 0.0
+
+    await scheduler._maybe_evaluate_count_alerts()
+    assert events[:4] == [
+        "judge:ds_broken", "rollback", "judge:ds_ok", "commit",
+    ]
+
+
+async def test_an_alert_is_committed_as_soon_as_it_lands(monkeypatch):
+    """Bounding what a later failure can cost to the source being judged,
+    rather than to the whole pass."""
+    from backend.insights_service import scheduler
+
+    events: list[str] = []
+
+    class _Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *exc): return False
+        async def commit(self): events.append("commit")
+        async def rollback(self): events.append("rollback")
+
+    notice = count_alerts_repo.PendingNotice(
+        data_source_id="ds_a", workspace_id=None, catalog_item_id=None,
+        source_name="g", severity="severe", direction="drop", node_delta=-1,
+    )
+
+    async def fake_policy(_s): return _policy()
+    async def fake_sources(_s): return ["ds_quiet", "ds_a"]
+    async def fake_evaluate(_s, ds, _p):
+        events.append(f"judge:{ds}")
+        return None if ds == "ds_quiet" else notice
+    async def fake_notify(_s, **_kw): events.append("notify"); return 1
+
+    monkeypatch.setattr(scheduler, "get_jobs_session", lambda: _Session())
+    monkeypatch.setattr(count_alerts_repo, "resolve_alert_policy", fake_policy)
+    monkeypatch.setattr(count_alerts_repo, "sources_to_evaluate", fake_sources)
+    monkeypatch.setattr(count_alerts_repo, "evaluate_source", fake_evaluate)
+    monkeypatch.setattr(
+        "backend.app.db.repositories.notification_repo.notify_counts_anomaly",
+        fake_notify,
+    )
+    monkeypatch.setattr(scheduler, "_ALERT_INTERVAL_SECS", 0.0)
+    scheduler._alert_sweep_state["last_run_monotonic"] = 0.0
+
+    await scheduler._maybe_evaluate_count_alerts()
+    # A quiet source costs no commit; the alert is durable before the bell.
+    assert events.index("commit") < events.index("notify")

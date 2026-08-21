@@ -806,16 +806,28 @@ async def _maybe_evaluate_count_alerts() -> None:
                 notice = await count_alerts_repo.evaluate_source(
                     session, ds_id, policy,
                 )
+                # Commit as soon as an alert lands, not once at the end. Most
+                # sources produce nothing, so this is rare — and it bounds what
+                # a later failure can cost to the source being judged, instead
+                # of the whole pass.
+                if notice is not None:
+                    await session.commit()
+                    notices.append(notice)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # One unreadable source must not cost the rest of the fleet
-                # its evaluation pass.
+                # One unreadable source must not cost the rest of the fleet its
+                # pass — but `continue` alone is not enough on Postgres, where
+                # a failed statement poisons the transaction until it is rolled
+                # back and every subsequent flush would fail too. Roll back,
+                # then carry on.
                 logger.warning("alert_sweep: %s could not be judged: %s", ds_id, exc)
+                try:
+                    await session.rollback()
+                except Exception:  # noqa: BLE001 - already in the failure path
+                    logger.warning("alert_sweep: rollback after %s failed", ds_id)
+                    break
                 continue
-            if notice is not None:
-                notices.append(notice)
-        await session.commit()
 
     if notices:
         from backend.app.db.repositories.notification_repo import (

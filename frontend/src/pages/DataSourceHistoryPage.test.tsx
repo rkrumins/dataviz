@@ -18,10 +18,14 @@ vi.mock('@/hooks/useCountHistory', async () => {
         useFleetHistory: (...a: unknown[]) => useFleetHistory(...a),
     }
 })
-// The retention dialog behind the coverage chip has its own QueryClient needs
-// and its own test; the page only has to render the chip.
-vi.mock('@/components/insights/history/RetentionDialog', () => ({
-    RetentionDialog: () => <div data-testid="retention-dialog" />,
+// Both of these fetch for themselves and have their own dedicated tests; the
+// page's job is only to mount them in the right place. Stubbing them keeps
+// this file about layout and URL state, and keeps a QueryClient out of it.
+vi.mock('@/components/insights/history/HistorySettingsDialog', () => ({
+    HistorySettingsDialog: () => <div data-testid="history-settings-dialog" />,
+}))
+vi.mock('@/components/insights/history/AlertBand', () => ({
+    AlertBand: () => <div data-testid="alert-band" />,
 }))
 vi.mock('@/hooks/useDataSourceProfile', () => ({
     useDataSourceProfile: () => ({
@@ -206,6 +210,16 @@ describe('DataSourceHistoryPage', () => {
         useFleetHistory.mockReturnValue({ data: undefined, isLoading: false })
         renderPage()
         expect(screen.queryByRole('link', { name: /export/i })).toBeNull()
+    })
+
+    it('mounts the alert band above the chart', () => {
+        // Someone arriving from a notification should find the incident
+        // already named, not have to locate it on a timeline.
+        useCountHistory.mockReturnValue({ data: SOURCE_PAYLOAD, isLoading: false })
+        useProviderHistory.mockReturnValue({ data: undefined, isLoading: false })
+        useFleetHistory.mockReturnValue({ data: undefined, isLoading: false })
+        renderPage()
+        expect(screen.getByTestId('alert-band')).toBeInTheDocument()
     })
 
     it('offers the guided explainer', () => {
