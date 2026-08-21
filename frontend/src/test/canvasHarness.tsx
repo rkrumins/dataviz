@@ -139,6 +139,11 @@ export interface TraceCanvasHarness {
   drawerEditTabs(): number
   /** The lineage lines on screen, as drawn. */
   wires(): Array<{ source: string; target: string }>
+  /** Browse's "N more" overflow affordances on screen — the load-more row and
+   *  the column periphery scrims alike. A trace must show none of them: they
+   *  are browse furniture, and in a trace they read as the trace hiding rows
+   *  from the reader. */
+  morePills(): string[]
   /** Writes to the canvas store's `nodes`/`edges` since the trace started. */
   storeWrites(): number
   snapshotStore(): { nodes: string[]; edges: string[] }
@@ -814,6 +819,9 @@ export async function renderCanvasWithTrace(
       await act(async () => { fireEvent.click(button) })
       await settle()
     },
+    morePills: () => [...document.querySelectorAll('button, div')]
+      .map(el => (el.textContent ?? '').trim())
+      .filter(text => /^\d[\d,]* more\b/.test(text)),
     providerCalls: () => providerCalls.traceClosure,
     paintCalls: () => providerCalls.paint,
     async setDirection(dir: 'up' | 'both' | 'down') {

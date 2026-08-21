@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useTraceOverlay, FOCUS_AUTO_OPEN_MAX, type UseTraceOverlayArgs } from '../useTraceOverlay'
 import type { TraceView } from '../lib/traceViewModel'
-import { cfoEstate, fieldGrainEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
+import { cfoEstate, deepChainEstate, fieldGrainEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
 import { emptyWalkModel, type LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import { countTest, expectTestsRan } from '@/test/canary'
 import type { ViewLayerConfig } from '@/types/schema'
@@ -61,7 +61,7 @@ const grownModel = (): LensWalkModel => {
 }
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(36))
+afterAll(() => expectTestsRan(39))
 
 describe('useTraceOverlay — the seed', () => {
   it('opens the focus chain and leaves the direct partners visible and CLOSED', () => {
@@ -593,5 +593,46 @@ describe('useTraceOverlay — partner grain', () => {
     expect(result.current.traceExpansion.has('b9')).toBe(false)
     expect(visibleIds(result.current.view)).toContain('b9')
     expect(visibleIds(result.current.view)).not.toContain('b10')
+  })
+})
+
+describe('useTraceOverlay — partner grain is about DEPTH, not type', () => {
+  const deep = deepChainEstate()
+  const atDepth = (focusUrn: string) => renderHook(() => useTraceOverlay({
+    ...args(), model: deep.model, focusUrn,
+    layers: deep.layers, assignments: deep.assignments,
+  }))
+
+  it('a focus four deep gets partner cards four deep, and nothing under them', () => {
+    // Domain > Application > Container > Container > Database > Table > Column,
+    // with the flow authored column to column. Tracing the second Container
+    // must not open the partner's Database, Table and Columns to reach it.
+    const { result } = atDepth('x4')
+    expect(visibleIds(result.current.view)).toContain('y4')
+    expect(result.current.traceExpansion.has('y4')).toBe(false)
+    for (const deeper of ['y5', 'y6']) {
+      expect(visibleIds(result.current.view)).not.toContain(deeper)
+    }
+    // The hosts above it DO open — that is how the card is reachable.
+    expect(result.current.traceExpansion.has('y3')).toBe(true)
+  })
+
+  it('a focus at COLUMN grain gets partner columns, with their tables as hosts', () => {
+    const { result } = atDepth('x6')
+    // The reader traced a column; the partner column is the card.
+    expect(visibleIds(result.current.view)).toContain('y6')
+    // And everything between it and the lane anchor is open, because that is
+    // what it takes to see a column.
+    for (const host of ['y0', 'y1', 'y2', 'y3', 'y4', 'y5']) {
+      expect(result.current.traceExpansion.has(host)).toBe(true)
+    }
+  })
+
+  it('the same estate traced deep does not open the OTHER side any deeper', () => {
+    const { result } = atDepth('x4')
+    // Symmetry check: the focus side opens to the focus (and its contents if
+    // few enough), the partner side stops at the partner card.
+    expect(result.current.traceExpansion.has('x3')).toBe(true)
+    expect(result.current.traceExpansion.has('y5')).toBe(false)
   })
 })

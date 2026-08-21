@@ -22,7 +22,7 @@ import { cfoEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(27))
+afterAll(() => expectTestsRan(28))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -658,6 +658,24 @@ describe('the background walk finishes the flow', () => {
     expect(h.wires().map(w => `${w.source}>${w.target}`).sort()).toEqual(browseWires)
     expect(h.snapshotStore()).toEqual(browseStore)
     expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // NO BROWSE FURNITURE IN A TRACE. The load-more row was always gated; the
+  // column periphery scrims ("N more · M connections", in browse's own rose)
+  // were not, so a trace showed the reader a pill that reads as the trace
+  // hiding rows from them. Gated on the SESSION, so they go at the click —
+  // asserted at the first paint, at landing, and once the walk is complete.
+  it('shows no browse "N more" pills at any point in a trace', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true, deferTrace: true })
+    await h.startTrace('cfo')
+    expect(h.morePills(), 'first paint').toEqual([])
+
+    await h.resolveTrace()
+    expect(h.morePills(), 'landing / complete').toEqual([])
+
+    h.pressEscape()
+    await h.settle()
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 

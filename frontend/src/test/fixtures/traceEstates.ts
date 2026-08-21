@@ -110,3 +110,40 @@ export function fieldGrainEstate() {
     assignments: { INTERMEDIATE_T2: { layerId: 'curated' }, GOLD: { layerId: 'curated' } },
   }
 }
+
+/**
+ * A DEEP, MIXED-TYPE chain — `Data Domain > Application > Container >
+ * Container > Database > Table > Column` — with the flow authored at COLUMN
+ * grain between two sibling chains.
+ *
+ * The partner-grain rule is type-agnostic on purpose: it reads containment
+ * DEPTH, never the ontology, because an ontology that repeats a type at two
+ * depths (Container inside Container, here) has no level to appeal to. This
+ * estate is what proves that — trace at depth 4 and the partner card is at
+ * depth 4; trace at column grain and the partner columns are the cards, with
+ * their tables and databases open as hosts.
+ */
+export function deepChainEstate() {
+  const types = ['domain', 'application', 'container', 'container', 'database', 'table', 'column']
+  const nodes: LensWalkNode[] = []
+  const containmentEdges: Array<{ sourceUrn: string; targetUrn: string }> = []
+  for (const side of ['x', 'y']) {
+    let parent: string | null = null
+    types.forEach((type, depth) => {
+      const urn = `${side}${depth}`
+      nodes.push(wn(urn, type, depth < types.length - 1 ? 1 : 0))
+      if (parent) containmentEdges.push(has(parent, urn))
+      parent = urn
+    })
+  }
+  const leaf = types.length - 1
+  const lineageEdges = [raw(`x${leaf}`, `y${leaf}`)]
+  const model: LensWalkModel = {
+    focusUrn: 'x4', nodes, lineageEdges, containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set([`y${leaf}`]),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null,
+    seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [{ id: 'all', name: 'All', order: 0, entityTypes: ['domain'] }]
+  return { model, layers, assignments: { x0: { layerId: 'all' }, y0: { layerId: 'all' } } }
+}
