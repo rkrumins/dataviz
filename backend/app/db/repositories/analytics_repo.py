@@ -859,6 +859,23 @@ def redact_workspace_detail(doc: dict, scope) -> dict:
     return doc
 
 
+def redact_workspace_rows(rows: list[dict], scope) -> list[dict]:
+    """Apply ``scope`` to the workspaces table.
+
+    A pure projection over finished rows, named rather than inlined because it
+    is what the endpoint applies to a cached document — the aggregation is the
+    same for everyone, only this last step differs per reader.
+    """
+    if scope is None or scope.privileged:
+        return rows
+    return [
+        {**r, "canOpen": scope.can_open(r["workspaceId"])}
+        if scope.can_see(r["workspaceId"])
+        else _redact_workspace_row(r)
+        for r in rows
+    ]
+
+
 def redact_summary(doc: dict, scope) -> dict:
     """Apply ``scope`` to a finished platform summary.
 
@@ -2031,14 +2048,7 @@ async def workspace_rows(
             # than being named: reporting on a workspace is not a door into it.
             "canOpen": True,
         })
-    if scope is not None and not scope.privileged:
-        rows = [
-            {**r, "canOpen": scope.can_open(r["workspaceId"])}
-            if scope.can_see(r["workspaceId"])
-            else _redact_workspace_row(r)
-            for r in rows
-        ]
-    return rows
+    return redact_workspace_rows(rows, scope)
 
 
 async def _member_counts(

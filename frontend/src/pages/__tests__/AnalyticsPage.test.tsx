@@ -559,7 +559,7 @@ describe('AnalyticsPage', () => {
         const zero = { total: 0, current: 0, previous: 0, changePct: null }
         vi.mocked(analyticsService.getSummary).mockResolvedValue({
             ...SUMMARY,
-            totals: { ...SUMMARY.totals, workspaces: zero, views: zero, dataSources: zero },
+            totals: { ...(SUMMARY.totals as Record<string, unknown>), workspaces: zero, views: zero, dataSources: zero },
         } as never)
         renderAt('/analytics')
 

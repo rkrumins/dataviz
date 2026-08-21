@@ -927,22 +927,22 @@ async def test_drilling_into_a_workspace_you_are_not_in_is_refused(db_session):
     assert mine is not None and mine["name"] == "Live"
 
 
-def test_cache_never_serves_one_audience_the_other_s_document():
-    """The leak this key exists to prevent: an admin warming the cache and
-    handing their unredacted document to the next non-privileged reader."""
+def test_the_cache_key_is_the_window_alone():
+    """One entry per window, shared by every reader.
+
+    Keyed per-reader, a few hundred concurrent users with a few hundred
+    distinct workspace sets meant a few hundred full recomputations per TTL.
+    What makes one entry safe is that the cached document is UNREDACTED and
+    nothing can leave the cache without a redactor — the guarantee that used to
+    live in the key now lives in `_serve`, and the two tests below hold it.
+    """
     from backend.app.api.v1.endpoints.analytics import _cache_key
 
-    args = {"days": 30}
-    admin = _cache_key("summary", _PRIVILEGED, args)
-    member = _cache_key("summary", _public("ws_a"), args)
-    other = _cache_key("summary", _public("ws_b"), args)
-    unknown = _cache_key("summary", _public("ws_a", known=False), args)
-
-    assert len({admin, member, other, unknown}) == 4, "audiences share a key"
-    # Identical access shares an entry — that is the point of caching at all.
-    assert member == _cache_key("summary", _public("ws_a"), args)
-    # And a different window is still a different document.
-    assert member != _cache_key("summary", _public("ws_a"), {"days": 7})
+    assert _cache_key("summary", {"days": 30}) == _cache_key("summary", {"days": 30})
+    # A different window is still a different document.
+    assert _cache_key("summary", {"days": 30}) != _cache_key("summary", {"days": 7})
+    # And two surfaces over the same window do not collide.
+    assert _cache_key("summary", {"days": 30}) != _cache_key("workspaces", {"days": 30})
 
 
 # ── The flag, at the endpoint ───────────────────────────────────────
@@ -974,6 +974,71 @@ async def _as(test_client, perms, url=SUMMARY):
         return await test_client.get(url)
     finally:
         app.dependency_overrides.pop(get_permission_claims, None)
+
+
+def _redacted(res) -> bool:
+    """Whether this response was filtered for its reader.
+
+    The notice is only attached by the redactors, so its presence IS the answer
+    — and unlike looking for an address in the body, it does not depend on the
+    seeded window overlapping the endpoint's real-clock default.
+    """
+    return bool((res.json().get("redaction") or {}).get("applied"))
+
+
+async def test_an_admin_warming_the_cache_does_not_unredact_the_next_reader(
+    test_client, db_session, _flag_cache,
+):
+    """The leak the per-reader key used to prevent, now held by `_serve`.
+
+    Both orders, because the failure is symmetric: a shared entry redacted in
+    place would serve the admin's document to the member on one ordering and
+    the member's to the admin on the other.
+    """
+    await _seed(db_session)
+    _prime_flag(analyticsPublicEnabled=True, analyticsPrivacyMode="strict")
+
+    admin_first = await _as(test_client, ("system:admin",))
+    member_after = await _as(test_client, ())
+    assert admin_first.status_code == 200 and member_after.status_code == 200
+    assert _redacted(admin_first) is False, "the admin's document was filtered"
+    assert _redacted(member_after) is True, "the member was served the admin's document"
+
+    analytics_cache.clear()
+    member_first = await _as(test_client, ())
+    admin_after = await _as(test_client, ("system:admin",))
+    assert _redacted(member_first) is True
+    assert _redacted(admin_after) is False, "the admin was served the member's redaction"
+
+
+async def test_readers_share_one_computation(test_client, db_session, _flag_cache, monkeypatch):
+    """The scale property, stated as a test.
+
+    Keyed per-reader, this cost one full aggregation per distinct workspace
+    set. Three readers with three different levels of access must now cost one
+    — and must still receive three correctly different documents.
+    """
+    await _seed(db_session)
+    _prime_flag(analyticsPublicEnabled=True, analyticsPrivacyMode="strict")
+
+    builds = 0
+    real = analytics_repo.platform_summary
+
+    async def counting(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(analytics_repo, "platform_summary", counting)
+
+    admin = await _as(test_client, ("system:admin",))
+    auditor = await _as(test_client, ("system:audit:read",))
+    member = await _as(test_client, ())
+
+    assert builds == 1, f"one window, one aggregation — ran {builds}"
+    assert admin.status_code == auditor.status_code == member.status_code == 200
+    assert _redacted(admin) is False and _redacted(auditor) is False
+    assert _redacted(member) is True
 
 
 async def test_flag_off_refuses_a_non_privileged_caller(test_client, db_session, _flag_cache):

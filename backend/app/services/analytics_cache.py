@@ -36,9 +36,13 @@ from backend.app.common.single_flight import SingleFlight
 
 logger = logging.getLogger(__name__)
 
-#: How long a computed document stays servable. Short enough that "as of" never
-#: reads as wrong, long enough to absorb tab-switching and a room full of
+#: How long a READ-THROUGH document stays servable. Short enough that "as of"
+#: never reads as wrong, long enough to absorb tab-switching and a room full of
 #: admins opening the same dashboard.
+#:
+#: Warmed documents are written with their own, much longer TTL — see
+#: ``analytics_warmer``. Under normal operation nothing expires and no reader
+#: ever pays for a build; this value governs the fallback path only.
 TTL_SECONDS = 60.0
 
 #: Redis key prefix. Versioned so a payload-shape change cannot serve a
@@ -74,19 +78,22 @@ async def _redis_get(key: str) -> Optional[Any]:
         return None
 
 
-async def _redis_set(key: str, value: Any) -> None:
+async def _redis_set(key: str, value: Any, ttl: float = TTL_SECONDS) -> bool:
+    """Write one entry. Returns whether it actually reached Redis."""
     global _redis_down_until
     if time.monotonic() < _redis_down_until:
-        return
+        return False
     try:
         from backend.app.services.aggregation.redis_client import get_redis
 
         await get_redis().set(
-            _PREFIX + key, json.dumps(value), ex=int(TTL_SECONDS),
+            _PREFIX + key, json.dumps(value), ex=int(ttl),
         )
+        return True
     except Exception as exc:  # noqa: BLE001 — same: never fail the request
         _redis_down_until = time.monotonic() + _REDIS_RETRY_AFTER
         logger.debug("Analytics cache write skipped: %s", exc)
+        return False
 
 
 def _memory_get(key: str) -> Optional[Any]:
@@ -134,6 +141,39 @@ async def cached(key: str, build: Callable[[], Awaitable[Any]]) -> Any:
         return value
 
     return await _flight.run(("analytics", key), _compute)
+
+
+def document_key(surface: str, args: dict[str, Any]) -> str:
+    """The cache key for one surface over one window.
+
+    Lives HERE rather than in the endpoint because two callers now build it —
+    the reader and the warmer — and a key they disagree about is a warmer that
+    silently warms nothing. Built from the resolved window arguments rather
+    than the query string, so ``?days=30`` and ``?days=30&from=`` land on the
+    same entry.
+
+    ``raw:`` names what the value is: an UNREDACTED document, shared by every
+    reader, filtered per-reader on the way out. Nothing may serve it directly.
+    """
+    window = (
+        f"d{args['days']}" if "days" in args
+        else f"{args.get('start')}:{args.get('end')}"
+    )
+    return f"raw:{surface}:{window}"
+
+
+async def put(key: str, value: Any, *, ttl: float) -> bool:
+    """Store a precomputed document. Returns whether Redis took it.
+
+    The warmer's write path. A long ``ttl`` is what makes reads never miss:
+    the entry outlives several refresh passes, so a warmer that stalls or a
+    scheduler that restarts degrades to slightly staler numbers rather than to
+    a stampede of readers all rebuilding at once.
+    """
+    if value is None:
+        return False
+    _memory[key] = (time.monotonic() + TTL_SECONDS, value)
+    return await _redis_set(key, value, ttl)
 
 
 def clear() -> None:

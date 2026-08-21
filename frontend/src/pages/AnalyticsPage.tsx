@@ -20,7 +20,7 @@ import {
 import { cn } from '@/lib/utils'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { formatUtc } from '@/lib/timeAgo'
+import { formatUtc, timeAgo } from '@/lib/timeAgo'
 import { useAnalyticsSummary, useWorkspaceAnalytics } from '@/hooks/useAnalytics'
 import {
     DEFAULT_RANGE_DAYS, RANGE_PRESETS, RangePicker, customRangeError,
@@ -97,8 +97,15 @@ export function AnalyticsPage() {
     // the five tabs cost one request rather than two.
     const workspaces = useWorkspaceAnalytics(range, activeTab === 'workspaces')
 
+    // Documents are precomputed on an interval and served from a shared cache,
+    // so what a reader sees is minutes old by design. A RELATIVE age states
+    // that at a glance — and if a warm pass ever stalls, "as of 40 min ago" is
+    // the first place anybody would notice. The exact instant stays available
+    // on hover for anyone reconciling against another system.
     const generatedAt = useMemo(
-        () => (summary.data ? formatUtc(summary.data.generatedAt) : null),
+        () => (summary.data
+            ? { relative: timeAgo(summary.data.generatedAt), exact: formatUtc(summary.data.generatedAt) }
+            : null),
         [summary.data],
     )
 
@@ -121,7 +128,9 @@ export function AnalyticsPage() {
                                 <h1 className="text-xl font-bold text-ink leading-tight">Analytics</h1>
                                 <p className="text-[11px] text-ink-muted">
                                     How the platform is growing, and who is using it
-                                    {generatedAt && ` · as of ${generatedAt}`}
+                                    {generatedAt && (
+                                        <> · as of <span title={generatedAt.exact}>{generatedAt.relative}</span></>
+                                    )}
                                 </p>
                                 {/* Two facts that apply to every chart below, so
                                     they are stated once here rather than
