@@ -2399,6 +2399,14 @@ export function ContextViewCanvas({
     await loadChildrenSorted(parentId)
   }, [loadChildrenSorted])
 
+  // Same for another page of ROOTS — reachable from the status chip and from
+  // scrolling a column to its end, neither of which means "grow the browse
+  // canvas" while the columns are showing a trace.
+  const loadMoreRootsGuarded = useCallback(() => {
+    if (overlayRef.current?.active) return
+    void loadMoreRoots()
+  }, [loadMoreRoots])
+
   // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
   // (Expanded nodes are excluded: their children are already visible and stand in
   // for them, so including both ends would double-count the same TRANSFORMS edges
@@ -2506,6 +2514,10 @@ export function ContextViewCanvas({
       const mode = sortOverrides.get(l.id) ?? l.nodeSortMode ?? viewDefaultSortMode
       dirByLayer.set(l.id, mode === 'alpha-desc' ? 'desc' : 'asc')
     })
+    // A trace never writes the canvas. Leave `prevLayerDirectionsRef` alone
+    // so the flip stays PENDING and is applied on the first browse render
+    // after exit (traceActive is in the dep list below).
+    if (traceActive) return
     const prev = prevLayerDirectionsRef.current
     prevLayerDirectionsRef.current = dirByLayer
     const flipped = new Set(
@@ -2536,7 +2548,7 @@ export function ContextViewCanvas({
     // refetches immediately under the new direction.
     for (const parentId of refetchParents) autoLoadedFirstPageRef.current.delete(parentId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sortedLayers, sortOverrides, viewDefaultSortMode])
+  }, [sortedLayers, sortOverrides, viewDefaultSortMode, traceActive])
 
   // Registry of per-column imperative geometry APIs, keyed by layer id.
   // Identity-stable Map (state initializer, never re-set) — columns
@@ -4180,7 +4192,7 @@ export function ContextViewCanvas({
         <CanvasStatusChips
           rootsLoaded={rootsLoaded}
           rootsHaveMore={rootsHaveMore}
-          onLoadMoreRoots={() => { void loadMoreRoots() }}
+          onLoadMoreRoots={loadMoreRootsGuarded}
           // During a trace the external-scope chip speaks browse-view
           // language that contradicts the trace picture (and its counts
           // live in the trace dock) — suppressed until exit.
@@ -4562,7 +4574,7 @@ export function ContextViewCanvas({
                 anchorProxies={anchorProxyGroups.get(layer.id)}
                 onProxyReveal={scrollHitIntoView}
                 onProxyMore={handleProxyMore}
-                onEndReached={rootsHaveMore ? () => { void loadMoreRoots() } : undefined}
+                onEndReached={rootsHaveMore ? loadMoreRootsGuarded : undefined}
                 onResizeLayer={isDraft ? resizeLayer : undefined}
               />
             ))}

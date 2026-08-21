@@ -10,17 +10,19 @@
  * earned — and writes NOTHING to the canvas store, so leaving it puts the
  * canvas back exactly as it was.
  *
- * EXPECTED RED until the canvas swap (Task 8). The canvas still merges the
- * walk into the store and renders it through the browse hierarchy; this file
- * is what says when that has stopped.
+ * GREEN since the canvas swap (Task 8): the canvas renders the overlay's
+ * lanes and wires, and every path that used to grow the store during a trace
+ * — the walk merge, expand-fetch, reveal, load-more — now yields to it. This
+ * file is what keeps it that way.
  */
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
+import { act, fireEvent } from '@testing-library/react'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(1))
+afterAll(() => expectTestsRan(2))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -40,5 +42,29 @@ describe('the trace overlay on the real canvas', () => {
     h.pressEscape()
     expect(h.isTracing()).toBe(false)
     expect(h.snapshotStore()).toEqual(before)
+  }, 30000)
+
+  // The landing frame proves the trace never merged. This proves the reader
+  // cannot MAKE it merge: opening a partner is a re-projection of the model
+  // the session already holds, so it costs one level of cards and no fetch.
+  it('expanding a closed partner reveals ONE level and still writes nothing', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    await h.startTrace('cfo')
+    const before = h.snapshotStore()
+
+    const toggle = document
+      .querySelector<HTMLElement>('#layer-node-INTERMEDIATE_T2')
+      ?.querySelector('button')
+    expect(toggle).toBeTruthy()
+    await act(async () => { fireEvent.click(toggle!) })
+    await h.settle()
+
+    // `orders` and nothing under it: R1 opens the way to things, never the
+    // things themselves.
+    expect(h.visibleCardIds().sort())
+      .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'orders', 'tableau'])
+    expect(h.storeWrites()).toBe(0)
+    expect(h.snapshotStore()).toEqual(before)
+    expect(h.consoleErrors()).toEqual([])
   }, 30000)
 })
