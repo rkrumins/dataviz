@@ -1,10 +1,15 @@
 /**
- * RetentionDialog — how much history is kept, and for how long.
+ * HistorySettingsDialog — how much history is kept, and what is worth
+ * interrupting someone about.
  *
  * Reached from the coverage strip's retention chip, which is where a reader
  * has just been told how far back the series goes. Putting the control at the
  * point the number is read, rather than in a settings page three clicks away,
  * is the difference between a knob someone finds and one they never do.
+ *
+ * Retention and alerting share one dialog because they are one decision in
+ * practice: how much evidence to keep, and how loudly to react to it. Splitting
+ * them across two surfaces would make the second one undiscoverable.
  *
  * Every field is `persisted ?? envDefault`: blank means "inherit", and the
  * placeholder shows what inheriting currently gets you. A no-op save
@@ -19,7 +24,9 @@ import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Clock, Database, Loader2, Save, X } from 'lucide-react'
+import {
+    AlertTriangle, BellRing, Clock, Database, Loader2, Save, X,
+} from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -27,9 +34,10 @@ import { useAnyPermission } from '@/store/auth'
 import {
     INHERIT_ENV_DEFAULT, insightsHistoryService,
 } from '@/services/insightsHistoryService'
-import type { HistoryRetentionPolicy } from '@/types/insights'
+import type { AlertPolicyUpdate, HistoryRetentionPolicy } from '@/types/insights'
 
 export const RETENTION_QUERY_KEY = 'insights-history-retention' as const
+export const ALERT_POLICY_QUERY_KEY = 'insights-alert-policy' as const
 
 interface FieldSpec {
     key: 'retentionDays' | 'maxRowsPerSource' | 'heartbeatSecs'
@@ -68,7 +76,7 @@ function toDraft(policy: HistoryRetentionPolicy): Draft {
     }
 }
 
-export function RetentionDialog({ onClose }: { onClose: () => void }) {
+export function HistorySettingsDialog({ onClose }: { onClose: () => void }) {
     const isAdmin = useAnyPermission(['system:admin'])
     const queryClient = useQueryClient()
     // `edits` holds ONLY what the user typed; the rendered draft is the
@@ -130,7 +138,7 @@ export function RetentionDialog({ onClose }: { onClose: () => void }) {
                 transition={{ duration: 0.12 }}
                 role="dialog"
                 aria-modal="true"
-                aria-label="History retention"
+                aria-label="History settings"
                 onClick={(e) => e.stopPropagation()}
                 className={cn(
                     'pointer-events-auto w-full max-w-lg rounded-2xl border border-glass-border',
@@ -143,11 +151,11 @@ export function RetentionDialog({ onClose }: { onClose: () => void }) {
                             <Clock className="w-4.5 h-4.5" />
                         </span>
                         <div className="min-w-0">
-                            <h2 className="text-sm font-bold text-ink">History retention</h2>
+                            <h2 className="text-sm font-bold text-ink">History settings</h2>
                             <p className="text-xs text-ink-muted mt-0.5">
                                 {isAdmin
-                                    ? 'What is kept, and for how long. Blank inherits the deployment default.'
-                                    : 'What is kept, and for how long. Changing this needs system admin.'}
+                                    ? 'What is kept, and what is worth interrupting someone about. Blank inherits the deployment default.'
+                                    : 'What is kept, and what is worth interrupting someone about. Changing this needs system admin.'}
                             </p>
                         </div>
                     </div>
@@ -231,6 +239,8 @@ export function RetentionDialog({ onClose }: { onClose: () => void }) {
                             })}
                         </div>
 
+                        <AlertPolicySection isAdmin={isAdmin} />
+
                         <div className="mx-5 mt-4 mb-4 px-3 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03]">
                             <p className="text-[11px] text-ink-secondary flex items-start gap-1.5">
                                 <Database className="w-3.5 h-3.5 text-ink-muted mt-px shrink-0" />
@@ -290,5 +300,121 @@ export function RetentionDialog({ onClose }: { onClose: () => void }) {
             </div>
         </>,
         document.body,
+    )
+}
+
+
+// ── Alert policy ────────────────────────────────────────────────────
+
+const SEVERITY_COPY: Record<string, { label: string; hint: string }> = {
+    severe: {
+        label: 'Only extreme movements',
+        hint: 'At least 8x this source\u2019s usual movement. The default: an alert that fires too eagerly gets muted, and a muted alert is worth less than none — people stop reading it but still believe something is watching.',
+    },
+    notable: {
+        label: 'Anything unusual',
+        hint: 'At least 3x the usual movement. Catches more, at the cost of more to read.',
+    },
+}
+
+/** Alerting: whether it runs, how loud, and how often it may repeat.
+ *
+ * Its own query and its own save, deliberately. Retention and alerting are one
+ * decision to a reader but two policies to the backend, and coupling the saves
+ * would mean a failure in one silently discarded the other.
+ */
+function AlertPolicySection({ isAdmin }: { isAdmin: boolean }) {
+    const queryClient = useQueryClient()
+    const { data: policy } = useQuery({
+        queryKey: [ALERT_POLICY_QUERY_KEY],
+        queryFn: () => insightsHistoryService.getAlertPolicy(),
+        staleTime: 60_000,
+    })
+
+    const save = useMutation({
+        mutationFn: (update: AlertPolicyUpdate) =>
+            insightsHistoryService.setAlertPolicy(update),
+        onSuccess: (next) => {
+            queryClient.setQueryData([ALERT_POLICY_QUERY_KEY], next)
+        },
+    })
+
+    if (!policy) return null
+    const enabled = policy.effectiveEnabled
+
+    return (
+        <div className="mx-5 mt-5 pt-4 border-t border-glass-border">
+            <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                    <p className="text-xs font-bold text-ink flex items-center gap-1.5">
+                        <BellRing className="w-3.5 h-3.5 text-ink-muted" />
+                        Alert on unusual movement
+                    </p>
+                    <p className="text-[11px] text-ink-muted mt-0.5">
+                        Rings the bell for data source managers and platform admins.
+                    </p>
+                </div>
+                <button
+                    type="button"
+                    role="switch"
+                    aria-checked={enabled}
+                    aria-label="Alert on unusual movement"
+                    disabled={!isAdmin || save.isPending}
+                    onClick={() => save.mutate({ enabled: !enabled })}
+                    className={cn(
+                        'relative w-10 h-6 rounded-full shrink-0 transition-colors outline-none',
+                        'focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                        'disabled:opacity-60 disabled:pointer-events-none',
+                        enabled ? 'bg-indigo-500' : 'bg-black/15 dark:bg-white/15',
+                    )}
+                >
+                    <span className={cn(
+                        'absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all',
+                        enabled ? 'left-5' : 'left-1',
+                    )} />
+                </button>
+            </div>
+
+            {enabled && (
+                <div className="mt-3 space-y-2">
+                    {(['severe', 'notable'] as const).map((level) => {
+                        const active = policy.effectiveMinSeverity === level
+                        return (
+                            <button
+                                key={level}
+                                type="button"
+                                disabled={!isAdmin || save.isPending}
+                                onClick={() => save.mutate({ minSeverity: level })}
+                                aria-pressed={active}
+                                className={cn(
+                                    'w-full text-left px-3 py-2 rounded-xl border transition-colors',
+                                    'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                    'disabled:opacity-60 disabled:pointer-events-none',
+                                    active
+                                        ? 'border-indigo-500/40 bg-indigo-500/[0.06]'
+                                        : 'border-glass-border hover:bg-black/5 dark:hover:bg-white/5',
+                                )}
+                            >
+                                <span className="text-xs font-semibold text-ink">
+                                    {SEVERITY_COPY[level].label}
+                                </span>
+                                <span className="block text-[11px] text-ink-muted mt-0.5">
+                                    {SEVERITY_COPY[level].hint}
+                                </span>
+                            </button>
+                        )
+                    })}
+
+                    <p className="text-[11px] text-ink-muted pt-1">
+                        At most one alert per source every{' '}
+                        <strong className="text-ink font-semibold tabular-nums">
+                            {Math.round(policy.effectiveCooldownSecs / 3600)}h
+                        </strong>
+                        . A graph thrashing under a broken loader moves unusually on
+                        every check; one alert per check would be a pager storm.
+                    </p>
+                </div>
+            )}
+        </div>
     )
 }

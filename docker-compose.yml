@@ -529,6 +529,14 @@ services:
       INSIGHTS_HISTORY_RETENTION_DAYS: "${INSIGHTS_HISTORY_RETENTION_DAYS:-90}"
       INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE: "${INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE:-5000}"
       INSIGHTS_HISTORY_PURGE_INTERVAL_SECS: "${INSIGHTS_HISTORY_PURGE_INTERVAL_SECS:-3600}"
+      # Counts anomaly alerting. Evaluated by a sweep in this service (not at
+      # capture time — "unusual" is a window property), delivered to the
+      # in-app bell, and recorded for the admin insights API. The severity
+      # floor defaults to severe: an alert that fires too eagerly gets muted.
+      INSIGHTS_ALERTS_ENABLED: "${INSIGHTS_ALERTS_ENABLED:-true}"
+      INSIGHTS_ALERT_MIN_SEVERITY: "${INSIGHTS_ALERT_MIN_SEVERITY:-severe}"
+      INSIGHTS_ALERT_COOLDOWN_SECS: "${INSIGHTS_ALERT_COOLDOWN_SECS:-21600}"
+      INSIGHTS_ALERT_INTERVAL_SECS: "${INSIGHTS_ALERT_INTERVAL_SECS:-900}"
 
       # Size-adaptive poll timeouts (owned by backend/app/config/resilience.py).
       STATS_POLL_TIMEOUT_SECS: "${STATS_POLL_TIMEOUT_SECS:-30}"

@@ -37,6 +37,7 @@ import { formatUtc } from '@/lib/timeAgo'
 import { CountTimeline, TimelineLegend, type TimelineMode } from '@/components/insights/history/CountTimeline'
 import { LabelLedger } from '@/components/insights/history/LabelLedger'
 import { ChangeLedger } from '@/components/insights/history/ChangeLedger'
+import { AlertBand } from '@/components/insights/history/AlertBand'
 import { CoverageStrip } from '@/components/insights/history/CoverageStrip'
 import { HistoryExplainer } from '@/components/insights/history/HistoryExplainer'
 import { insightsHistoryService } from '@/services/insightsHistoryService'
@@ -246,6 +247,15 @@ export function DataSourceHistoryPage() {
                             />
                             <DropTile summary={summary!} onSelect={setHighlightAt} />
                         </div>
+
+                        {/* Above the explainer and the chart: someone arriving
+                            from a notification should find the incident already
+                            named, not have to locate it on a timeline. */}
+                        <AlertBand
+                            className="mb-5"
+                            scopeId={historyScopeId}
+                            onSelect={setHighlightAt}
+                        />
 
                         <HistoryExplainer
                             className="mb-5"

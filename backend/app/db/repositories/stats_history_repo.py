@@ -177,6 +177,72 @@ async def resolve_history_policy(session: AsyncSession) -> HistoryPolicy:
     return policy
 
 
+# ── significance ─────────────────────────────────────────────────────
+#
+# Lives HERE, not in the API module, because two readers depend on it and
+# they must never disagree. The chart draws a marker where the history read
+# says a movement was unusual; the alert evaluator wakes someone up for the
+# same reason. Two copies of these thresholds would eventually differ, and
+# the failure mode is an alert about a change the chart draws as ordinary --
+# which destroys trust in both.
+
+# How far outside a source's own typical movement a change has to sit before
+# it is worth a reader's attention. Multiples of the median absolute delta,
+# which is the robust choice here: a mean would be dragged upward by the very
+# outlier we are trying to detect, and one 900k drop would then make every
+# subsequent 900k drop look ordinary.
+_NOTABLE_MULTIPLE = 3.0
+_SEVERE_MULTIPLE = 8.0
+
+# Floor under the baseline, in entities. Without it a source that sits
+# perfectly still has a baseline of 0, every multiple is 0, and the first time
+# it moves by one node the change is reported as severe.
+_SIGNIFICANCE_FLOOR = 25
+
+
+def change_baseline(rows: list) -> int:
+    """The median non-zero absolute node delta in the window.
+
+    "Is this drop big" has no answer in the absolute — 900 lost rows is
+    catastrophic for a source that never moves and a Tuesday for one that
+    rebuilds nightly. The baseline makes the question answerable per source,
+    from the data already in hand.
+
+    Zero deltas are excluded: heartbeat rows would otherwise drag the median to
+    0 on any source that is mostly idle, which is most of them.
+    """
+    magnitudes = sorted(
+        abs(r.node_delta) for r in rows
+        if r.node_delta is not None and r.node_delta != 0
+    )
+    if not magnitudes:
+        return _SIGNIFICANCE_FLOOR
+    middle = len(magnitudes) // 2
+    median = (
+        magnitudes[middle] if len(magnitudes) % 2
+        else (magnitudes[middle - 1] + magnitudes[middle]) // 2
+    )
+    return max(_SIGNIFICANCE_FLOOR, int(median))
+
+
+def classify_significance(delta: Optional[int], baseline: int) -> str:
+    """normal | notable | severe, relative to this source's own baseline.
+
+    Deliberately symmetric: a graph that TRIPLED overnight is as much worth
+    looking at as one that lost two thirds, and an "only drops matter" rule
+    would miss a runaway loader duplicating every node.
+    """
+    if not delta:
+        return "normal"
+    magnitude = abs(delta)
+    if magnitude >= baseline * _SEVERE_MULTIPLE:
+        return "severe"
+    if magnitude >= baseline * _NOTABLE_MULTIPLE:
+        return "notable"
+    return "normal"
+
+
+
 # ── capture ──────────────────────────────────────────────────────────
 
 
@@ -675,6 +741,8 @@ async def purge_snapshots(
 __all__: Sequence[str] = (
     "HistoryPolicy",
     "bucket_extremes",
+    "change_baseline",
+    "classify_significance",
     "diff_counts",
     "env_history_policy",
     "invalidate_history_policy_cache",

@@ -12,7 +12,7 @@ import { Clock, Database, History, Settings2 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { formatUtc, toUtcDate } from '@/lib/timeAgo'
-import { RetentionDialog } from './RetentionDialog'
+import { HistorySettingsDialog } from './HistorySettingsDialog'
 
 export function CoverageStrip({
     coverageFrom, requestedFrom, requestedTo, retentionDays, snapshots, changed, className,
@@ -105,7 +105,7 @@ export function CoverageStrip({
             </button>
 
             {editingRetention && (
-                <RetentionDialog onClose={() => setEditingRetention(false)} />
+                <HistorySettingsDialog onClose={() => setEditingRetention(false)} />
             )}
         </div>
     )

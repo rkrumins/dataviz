@@ -340,3 +340,64 @@ async def notify_reconcile_suspended(
         resource_id=data_source_id,
         dedupe_unread=True,
     )
+
+
+async def notify_counts_anomaly(
+    session: AsyncSession,
+    *,
+    workspace_id: Optional[str],
+    data_source_id: str,
+    catalog_item_id: Optional[str],
+    source_name: str,
+    severity: str,
+    direction: str,
+    node_delta: int,
+) -> int:
+    """Bell for a graph that moved far outside its own normal range.
+
+    Same audience and dedupe discipline as :func:`notify_reconcile_suspended`:
+    the workspace's data source managers plus globally bound platform admins,
+    unread-deduped per source so an incident that keeps moving rings once.
+
+    The copy leads with the number and the direction, because the first
+    question anyone asks is "how much, and which way" — and a title that only
+    says "anomaly detected" makes them open the page to find out.
+    """
+    managers = (
+        await users_who_can(
+            session,
+            workspace_id=workspace_id,
+            permission="workspace:datasource:manage",
+        )
+        if workspace_id else set()
+    )
+    admins = await users_with_global_permission(session, "system:admin")
+
+    magnitude = f"{abs(node_delta):,}"
+    verb = "lost" if direction == "drop" else "gained"
+    scale = "far outside" if severity == "severe" else "outside"
+    # The history view is routed by CATALOG id; the alert knows the data
+    # source. When the two cannot be connected — an unregistered graph, a
+    # catalog entry since removed — fall back to the freshness cockpit, which
+    # is keyed on the data source and is where the sibling ops alert points.
+    # A link that lands somewhere useful beats a precise one that 404s.
+    link = (
+        f"/datasources/{catalog_item_id}/history?ds={data_source_id}"
+        if catalog_item_id
+        else f"/ingestion?tab=freshness&fds={data_source_id}"
+    )
+    return await notify(
+        session,
+        user_ids=managers | admins,
+        kind="insights.counts_anomaly",
+        title=f"{source_name} {verb} {magnitude} entities",
+        body=(
+            f"That is {scale} this source's usual movement. "
+            "Open the history to see which labels moved and what else was "
+            "running at the time."
+        ),
+        link=link,
+        resource_type="data_source",
+        resource_id=data_source_id,
+        dedupe_unread=True,
+    )

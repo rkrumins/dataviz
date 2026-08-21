@@ -49,3 +49,7 @@ data:
   INSIGHTS_HISTORY_RETENTION_DAYS: {{ .Values.config.history.retentionDays | quote }}
   INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE: {{ .Values.config.history.maxRowsPerSource | quote }}
   INSIGHTS_HISTORY_PURGE_INTERVAL_SECS: {{ .Values.config.history.purgeIntervalSecs | quote }}
+  INSIGHTS_ALERTS_ENABLED: {{ .Values.config.history.alertsEnabled | quote }}
+  INSIGHTS_ALERT_MIN_SEVERITY: {{ .Values.config.history.alertMinSeverity | quote }}
+  INSIGHTS_ALERT_COOLDOWN_SECS: {{ .Values.config.history.alertCooldownSecs | quote }}
+  INSIGHTS_ALERT_INTERVAL_SECS: {{ .Values.config.history.alertIntervalSecs | quote }}

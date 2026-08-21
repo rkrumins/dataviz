@@ -70,6 +70,13 @@ config:
     retentionDays: "90"
     maxRowsPerSource: "5000"
     purgeIntervalSecs: "3600"
+    # Anomaly alerting. severe = >=8x the source's own usual movement;
+    # notable = >=3x. Defaults to severe because an alert that fires too
+    # eagerly gets muted, and a muted alert is worth less than none.
+    alertsEnabled: "true"
+    alertMinSeverity: "severe"
+    alertCooldownSecs: "21600"
+    alertIntervalSecs: "900"
 
 # ── Secrets ───────────────────────────────────────────────────────────
 # create=true renders a Secret from the values below. For production prefer

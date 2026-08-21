@@ -14,6 +14,9 @@
  */
 import { authFetch } from './apiClient'
 import type {
+    AlertPolicy,
+    AlertPolicyUpdate,
+    CountAlertsResponse,
     Envelope,
     CountHistoryPayload,
     HistoryRetentionPolicy,
@@ -91,6 +94,41 @@ export const insightsHistoryService = {
         // forwarded.
         const range: HistoryQuery = { from: query.from, to: query.to }
         return `${BASE}/data-sources/${encodeURIComponent(dataSourceId)}/history.csv${qs(range)}`
+    },
+
+    /** Recorded anomalies — fleet-wide, or scoped to one source. Accepts a
+     *  catalog id wherever a data source id is expected, like the history
+     *  reads do. */
+    listAlerts(
+        options: { dataSourceId?: string; openOnly?: boolean; limit?: number } = {},
+        signal?: AbortSignal,
+    ): Promise<CountAlertsResponse> {
+        const params = new URLSearchParams()
+        if (options.dataSourceId) params.set('dataSourceId', options.dataSourceId)
+        if (options.openOnly) params.set('openOnly', 'true')
+        if (options.limit) params.set('limit', String(options.limit))
+        const q = params.toString()
+        return authFetch<CountAlertsResponse>(
+            `${BASE}/alerts${q ? `?${q}` : ''}`, { signal, silent403: true },
+        )
+    },
+
+    acknowledgeAlert(alertId: string): Promise<unknown> {
+        return authFetch(
+            `${BASE}/alerts/${encodeURIComponent(alertId)}/acknowledge`,
+            { method: 'POST' },
+        )
+    },
+
+    getAlertPolicy(): Promise<AlertPolicy> {
+        return authFetch<AlertPolicy>(`${BASE}/alerts/policy`)
+    },
+
+    setAlertPolicy(update: AlertPolicyUpdate): Promise<AlertPolicy> {
+        return authFetch<AlertPolicy>(`${BASE}/alerts/policy`, {
+            method: 'PUT',
+            body: JSON.stringify(update),
+        })
     },
 
     getRetention(): Promise<HistoryRetentionPolicy> {

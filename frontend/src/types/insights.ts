@@ -228,3 +228,61 @@ export interface HistoryRetentionUpdate {
     maxRowsPerSource?: number
     heartbeatSecs?: number
 }
+
+
+/** One recorded counts anomaly. Mirrors `CountAlert` in
+ *  `backend/app/api/v1/endpoints/insights.py`. */
+export interface CountAlert {
+    id: string
+    data_source_id: string
+    catalog_item_id: string | null
+    workspace_id: string | null
+    provider_id: string | null
+    graph_name: string | null
+    /** When the movement happened — not when it was noticed. Evaluation runs
+     *  on a tick, so the two differ by up to one interval. */
+    observed_at: string
+    detected_at: string
+    severity: 'notable' | 'severe'
+    direction: 'drop' | 'rise'
+    node_delta: number
+    node_count: number
+    /** What it was judged against. "Unusual" without this is a claim; with
+     *  it, an argument. */
+    baseline: number
+    evidence: {
+        nodes?: {
+            added?: Record<string, number>
+            removed?: Record<string, number>
+            changed?: Record<string, [number, number]>
+        }
+    } | null
+    acknowledged_at: string | null
+    acknowledged_by: string | null
+}
+
+export interface CountAlertsResponse {
+    alerts: CountAlert[]
+    /** Unacknowledged across the whole fleet, not just this page. */
+    openCount: number
+}
+
+/** Mirrors `AlertPolicyResponse`. camelCase — a policy route, not an
+ *  insights envelope. */
+export interface AlertPolicy {
+    enabled: boolean | null
+    minSeverity: 'notable' | 'severe' | null
+    cooldownSecs: number | null
+    envEnabled: boolean
+    envMinSeverity: 'notable' | 'severe'
+    envCooldownSecs: number
+    effectiveEnabled: boolean
+    effectiveMinSeverity: 'notable' | 'severe'
+    effectiveCooldownSecs: number
+}
+
+export interface AlertPolicyUpdate {
+    enabled?: boolean
+    minSeverity?: 'notable' | 'severe'
+    cooldownSecs?: number
+}

@@ -42,12 +42,13 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel, Field
 
+from backend.app.auth.dependencies import requires
 from backend.app.config import resilience
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import (
@@ -822,19 +823,6 @@ _DEFAULT_HISTORY_WINDOW_DAYS = 30
 # hand-rolled SVG path starts costing layout time, not for payload size.
 _AUTO_RAW_POINT_BUDGET = 720
 
-# How far outside a source's own typical movement a change has to sit before
-# it is worth a reader's attention. Multiples of the median absolute delta,
-# which is the robust choice here: a mean would be dragged upward by the very
-# outlier we are trying to detect, and one 900k drop would then make every
-# subsequent 900k drop look ordinary.
-_NOTABLE_MULTIPLE = 3.0
-_SEVERE_MULTIPLE = 8.0
-
-# Floor under the baseline, in entities. Without it a source that sits
-# perfectly still has a baseline of 0, every multiple is 0, and the first time
-# it moves by one node the change is reported as severe.
-_SIGNIFICANCE_FLOOR = 25
-
 # Ceiling on correlated events returned with a window. A source under a
 # thrashing loader can emit a great many; the ledger only ever shows the few
 # nearest any one snapshot, so an unbounded read would be payload for nothing.
@@ -1007,48 +995,6 @@ def _auto_grain(frm: str, to: str) -> str:
     if hours <= 24 * 14:
         return "hour"
     return "day"
-
-
-def _change_baseline(rows: list) -> int:
-    """The median non-zero absolute node delta in the window.
-
-    "Is this drop big" has no answer in the absolute — 900 lost rows is
-    catastrophic for a source that never moves and a Tuesday for one that
-    rebuilds nightly. The baseline makes the question answerable per source,
-    from the data already in hand.
-
-    Zero deltas are excluded: heartbeat rows would otherwise drag the median to
-    0 on any source that is mostly idle, which is most of them.
-    """
-    magnitudes = sorted(
-        abs(r.node_delta) for r in rows
-        if r.node_delta is not None and r.node_delta != 0
-    )
-    if not magnitudes:
-        return _SIGNIFICANCE_FLOOR
-    middle = len(magnitudes) // 2
-    median = (
-        magnitudes[middle] if len(magnitudes) % 2
-        else (magnitudes[middle - 1] + magnitudes[middle]) // 2
-    )
-    return max(_SIGNIFICANCE_FLOOR, int(median))
-
-
-def _classify_significance(delta: Optional[int], baseline: int) -> str:
-    """normal | notable | severe, relative to this source's own baseline.
-
-    Deliberately symmetric: a graph that TRIPLED overnight is as much worth
-    looking at as one that lost two thirds, and an "only drops matter" rule
-    would miss a runaway loader duplicating every node.
-    """
-    if not delta:
-        return "normal"
-    magnitude = abs(delta)
-    if magnitude >= baseline * _SEVERE_MULTIPLE:
-        return "severe"
-    if magnitude >= baseline * _NOTABLE_MULTIPLE:
-        return "notable"
-    return "normal"
 
 
 def _pct_change(first: int, last: int) -> Optional[float]:
@@ -1248,7 +1194,7 @@ async def get_data_source_history(
             session, ds_id, frm=window_from, to=window_to, grain="raw",
         )
     )
-    baseline = _change_baseline(raw_rows)
+    baseline = stats_history_repo.change_baseline(raw_rows)
 
     points = []
     for row in rows:
@@ -1266,7 +1212,7 @@ async def get_data_source_history(
             node_max=high,
             lane=row.lane or "poll",
             capture_reason=row.capture_reason or "changed",
-            significance=_classify_significance(row.node_delta, baseline),
+            significance=stats_history_repo.classify_significance(row.node_delta, baseline),
         ).model_dump())
 
     labels = _label_summaries(points, "entity_type_counts")
@@ -1298,11 +1244,11 @@ async def get_data_source_history(
         change_baseline=baseline,
         notable_changes=sum(
             1 for r in raw_rows
-            if _classify_significance(r.node_delta, baseline) == "notable"
+            if stats_history_repo.classify_significance(r.node_delta, baseline) == "notable"
         ),
         severe_changes=sum(
             1 for r in raw_rows
-            if _classify_significance(r.node_delta, baseline) == "severe"
+            if stats_history_repo.classify_significance(r.node_delta, baseline) == "severe"
         ),
         coverage_from=await stats_history_repo.oldest_captured_at(session, ds_id),
         retention_days=policy.retention_days,
@@ -1666,3 +1612,218 @@ async def export_data_source_history_csv(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ── Counts anomaly alerts ───────────────────────────────────────────
+#
+# On this router, beside the history it is derived from, rather than on a
+# notifications surface of its own: an alert here is a READING of the counts
+# series, and the first thing anyone does with one is open that series. The
+# bell is the delivery channel; this is the record.
+
+class CountAlert(BaseModel):
+    """One recorded anomaly, with the evidence frozen at judgement time."""
+
+    id: str
+    data_source_id: str
+    catalog_item_id: Optional[str] = None
+    workspace_id: Optional[str] = None
+    provider_id: Optional[str] = None
+    graph_name: Optional[str] = None
+    #: When the movement happened — NOT when it was noticed. Evaluation runs
+    #: on a tick, so the two differ, and ordering by the wrong one tells a
+    #: confusing story.
+    observed_at: str
+    detected_at: str
+    severity: str
+    direction: str
+    node_delta: int
+    node_count: int
+    #: What it was judged against. "Unusual" without this is a claim; with it,
+    #: an argument.
+    baseline: int
+    evidence: Optional[dict] = None
+    acknowledged_at: Optional[str] = None
+    acknowledged_by: Optional[str] = None
+
+
+class CountAlertsResponse(BaseModel):
+    alerts: list
+    open_count: int = Field(0, alias="openCount")
+
+    class Config:
+        populate_by_name = True
+
+
+class AlertPolicyResponse(BaseModel):
+    enabled: Optional[bool] = None
+    min_severity: Optional[str] = Field(None, alias="minSeverity")
+    cooldown_secs: Optional[int] = Field(None, alias="cooldownSecs")
+    env_enabled: bool = Field(True, alias="envEnabled")
+    env_min_severity: str = Field("severe", alias="envMinSeverity")
+    env_cooldown_secs: int = Field(21600, alias="envCooldownSecs")
+    effective_enabled: bool = Field(True, alias="effectiveEnabled")
+    effective_min_severity: str = Field("severe", alias="effectiveMinSeverity")
+    effective_cooldown_secs: int = Field(21600, alias="effectiveCooldownSecs")
+
+    class Config:
+        populate_by_name = True
+
+
+class AlertPolicyRequest(BaseModel):
+    """Partial update. Absent leaves a field alone; ``-1`` on the numeric
+    field clears it back to the env default — same sentinel the retention
+    editor uses, because absent and null are indistinguishable over JSON."""
+
+    enabled: Optional[bool] = None
+    min_severity: Optional[str] = Field(None, alias="minSeverity")
+    cooldown_secs: Optional[int] = Field(None, alias="cooldownSecs", ge=-1)
+
+    class Config:
+        populate_by_name = True
+
+
+def _alert_model(row) -> dict:
+    evidence = None
+    if row.evidence:
+        try:
+            evidence = json.loads(row.evidence)
+        except (TypeError, ValueError):
+            evidence = None
+    return CountAlert(
+        id=row.id,
+        data_source_id=row.data_source_id,
+        catalog_item_id=row.catalog_item_id,
+        workspace_id=row.workspace_id,
+        provider_id=row.provider_id,
+        graph_name=row.graph_name,
+        observed_at=row.observed_at,
+        detected_at=row.detected_at,
+        severity=row.severity,
+        direction=row.direction,
+        node_delta=int(row.node_delta or 0),
+        node_count=int(row.node_count or 0),
+        baseline=int(row.baseline or 0),
+        evidence=evidence,
+        acknowledged_at=row.acknowledged_at,
+        acknowledged_by=row.acknowledged_by,
+    ).model_dump()
+
+
+@router.get(
+    "/alerts",
+    response_model=CountAlertsResponse,
+    summary="Recorded counts anomalies",
+)
+async def list_count_alerts(
+    ds_id: Optional[str] = Query(None, alias="dataSourceId"),
+    open_only: bool = Query(False, alias="openOnly"),
+    limit: int = Query(100, ge=1, le=500),
+    session: AsyncSession = Depends(get_db_session),
+) -> CountAlertsResponse:
+    """Newest first, fleet-wide or scoped to one source.
+
+    ``openCount`` counts UNACKNOWLEDGED alerts across the whole fleet, not
+    just the returned page — it drives a badge, and a badge that only counted
+    what happened to be on screen would under-report exactly when there is
+    most to report.
+    """
+    from backend.app.db.repositories import count_alerts_repo
+
+    resolved = await _resolve_history_scope(session, ds_id) if ds_id else None
+    rows = await count_alerts_repo.list_alerts(
+        session,
+        data_source_id=resolved,
+        unacknowledged_only=open_only,
+        limit=limit,
+    )
+    open_rows = await count_alerts_repo.list_alerts(
+        session, unacknowledged_only=True, limit=500,
+    )
+    return CountAlertsResponse(
+        alerts=[_alert_model(r) for r in rows],
+        openCount=len(open_rows),
+    )
+
+
+@router.post(
+    "/alerts/{alert_id}/acknowledge",
+    response_model=CountAlert,
+    summary="Acknowledge one counts anomaly",
+)
+async def acknowledge_count_alert(
+    alert_id: str = Path(...),
+    user=Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Idempotent, and the first acknowledgement wins — re-acknowledging must
+    not rewrite who actually looked at it."""
+    from backend.app.db.repositories import count_alerts_repo
+
+    row = await count_alerts_repo.acknowledge(
+        session, alert_id, actor_id=getattr(user, "id", None),
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id!r} not found")
+    await session.commit()
+    return _alert_model(row)
+
+
+@router.get(
+    "/alerts/policy",
+    response_model=AlertPolicyResponse,
+    summary="Read the counts-anomaly alert policy",
+)
+async def get_alert_policy(
+    session: AsyncSession = Depends(get_db_session),
+) -> AlertPolicyResponse:
+    from backend.app.db.repositories import count_alerts_repo
+
+    policy = await count_alerts_repo.resolve_alert_policy(session)
+    return AlertPolicyResponse(
+        enabled=policy.persisted_enabled,
+        minSeverity=policy.persisted_min_severity,
+        cooldownSecs=policy.persisted_cooldown_secs,
+        envEnabled=policy.env_enabled,
+        envMinSeverity=policy.env_min_severity,
+        envCooldownSecs=policy.env_cooldown_secs,
+        effectiveEnabled=policy.enabled,
+        effectiveMinSeverity=policy.min_severity,
+        effectiveCooldownSecs=policy.cooldown_secs,
+    )
+
+
+@router.put(
+    "/alerts/policy",
+    response_model=AlertPolicyResponse,
+    summary="Set the counts-anomaly alert policy",
+)
+async def put_alert_policy(
+    req: AlertPolicyRequest = Body(...),
+    session: AsyncSession = Depends(get_db_session),
+) -> AlertPolicyResponse:
+    from backend.app.db.models import PlatformSettingsORM
+    from backend.app.db.repositories import count_alerts_repo
+
+    if req.min_severity is not None and req.min_severity not in ("notable", "severe"):
+        raise HTTPException(
+            status_code=422,
+            detail="minSeverity must be 'notable' or 'severe'",
+        )
+
+    row = await session.get(PlatformSettingsORM, 1)
+    if row is None:
+        row = PlatformSettingsORM(id=1)
+        session.add(row)
+    if req.enabled is not None:
+        row.history_alerts_enabled = req.enabled
+    if req.min_severity is not None:
+        row.history_alert_min_severity = req.min_severity
+    if req.cooldown_secs is not None:
+        row.history_alert_cooldown_secs = (
+            None if req.cooldown_secs == -1 else req.cooldown_secs
+        )
+    row.updated_at = datetime.now(timezone.utc).isoformat()
+    await session.commit()
+
+    return await get_alert_policy(session)

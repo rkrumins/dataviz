@@ -181,6 +181,43 @@ carries its min and max, because a downsample that keeps only the closing value
 would hide a drop that happened and recovered inside the bucket, which is
 precisely the event this exists to surface.
 
+### Anomaly alerting
+
+The history knows what "unusual" means for each source — the same per-source
+baseline the chart draws markers from. Alerting is that reading, delivered.
+
+**It is a sweep, not a hook on the write.** Significance is a property of a
+WINDOW, so judging at capture time would put a range scan on the 60s probe path
+and would run inside the web tier as well; a request handler is no place to
+decide whether to wake someone up. Evaluation runs in the insights service on
+its own cadence, beside the retention purge, and reads what capture already
+wrote.
+
+**The verdict is frozen.** The baseline moves as the window moves, so an alert
+recomputed later against a different baseline could quietly downgrade itself and
+contradict the notification already sent. The classification, the baseline
+behind it and the per-label evidence are written once into
+`data_source_count_alerts` and never derived again — which also means an alert
+outlives the snapshot that produced it.
+
+**One alert per source per cooldown.** A graph thrashing under a broken loader
+moves unusually on every probe; alerting on each turns one incident into a pager
+storm and trains people to ignore it. The worst movement in the stretch wins,
+and only movements observed *since* the last reported one count as new.
+
+Delivery is the in-app bell — workspace data source managers plus globally bound
+`system:admin`, unread-deduped per source, exactly as
+`notify_reconcile_suspended` already does for the sibling ops alert. The bell is
+the channel; the table is the record. Retention never removes an
+**unacknowledged** alert by age: one nobody has looked at is the piece of this
+that must not disappear quietly.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/v1/admin/insights/alerts` | Recorded anomalies, fleet-wide or per source, with frozen evidence. |
+| POST | `/api/v1/admin/insights/alerts/{id}/acknowledge` | Mark one as seen. First acknowledgement wins. |
+| GET/PUT | `/api/v1/admin/insights/alerts/policy` | Read / set the switch, severity floor and cooldown. |
+
 ## Key endpoints
 
 The web tier exposes an admin surface under `/api/v1/admin/insights` (all routes
@@ -235,6 +272,10 @@ Scheduler / worker tunables (defaults in parentheses):
 | `INSIGHTS_HISTORY_RETENTION_DAYS` | `90` | Snapshot age cutoff (product floor is 30, with headroom). |
 | `INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE` | `5000` | Per-source snapshot cap, applied alongside the age cutoff. |
 | `INSIGHTS_HISTORY_PURGE_INTERVAL_SECS` | `3600` | Snapshot purge cadence. |
+| `INSIGHTS_ALERTS_ENABLED` | `true` | Master switch for anomaly evaluation. |
+| `INSIGHTS_ALERT_MIN_SEVERITY` | `severe` | Floor: `severe` (≥8× usual) or `notable` (≥3×). |
+| `INSIGHTS_ALERT_COOLDOWN_SECS` | `21600` | At most one alert per source per this interval. |
+| `INSIGHTS_ALERT_INTERVAL_SECS` | `900` | How often movements are judged. |
 
 Per-provider admission knobs (`bucket_capacity`, `refill_per_sec`) are stored in
 `provider_admission_config` and tuned live via the `PUT /admission/{provider_id}`
@@ -254,7 +295,10 @@ profile and, behind it, a full history view at
 with correlated platform activity, an unusual-only filter, a CSV export, and a
 scope switch between this source, its provider and the whole platform. The
 retention policy is edited in place from the coverage line that reports it,
-read-only for non-admins.
+read-only for non-admins — and the alert policy sits in the same dialog, because
+how much evidence to keep and how loudly to react to it are one decision in
+practice. Open anomalies appear as a band above the chart until someone
+acknowledges them.
 Providers that fail repeatedly show as degraded via the rolling success window.
 
 ## Limitations
@@ -274,6 +318,9 @@ Providers that fail repeatedly show as degraded via the rolling success window.
   — there is no backfill, because the observations simply were not recorded. The
   history API reports `coverage_from` so the UI can say so rather than letting a
   short series read as data loss.
+- Alerting latency is the evaluation cadence plus the capture cadence: a
+  movement is recorded when a lane next observes it, and judged when the sweep
+  next runs. It is a background signal, not a real-time one.
 - History resolution is bounded by the capture cadence: a change is recorded
   when a lane next observes it, which for a FalkorDB source is the 60s probe and
   for everything else the counts poll.

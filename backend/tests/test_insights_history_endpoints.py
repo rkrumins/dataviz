@@ -667,3 +667,143 @@ async def test_rollup_timestamps_are_parseable_instants(
         for source in result["data"]["sources"]:
             for point in source["points"]:
                 _dt.fromisoformat(point["at"])
+
+
+# ── alerts on the insights router ────────────────────────────────────
+
+async def _alert(session: AsyncSession, *, alert_id: str, ds_id: str = DS_ID,
+                 severity: str = "severe", acked: str | None = None,
+                 detected: str | None = None):
+    from backend.app.db.models import DataSourceCountAlertORM
+
+    at = detected or _iso(2)
+    session.add(DataSourceCountAlertORM(
+        id=alert_id, data_source_id=ds_id, detected_at=at, observed_at=at,
+        provider_id="prov_ep1", graph_name="ep-graph", catalog_item_id="cat_ep1",
+        severity=severity, direction="drop", node_delta=-900, node_count=100,
+        baseline=25, acknowledged_at=acked,
+        evidence=json.dumps({"nodes": {"removed": {"Column": 900}}}),
+    ))
+    await session.flush()
+
+
+async def test_alerts_list_newest_first_with_their_evidence(
+    db_session: AsyncSession,
+):
+    await _alert(db_session, alert_id="alr_old", detected=_iso(10))
+    await _alert(db_session, alert_id="alr_new", detected=_iso(1))
+
+    result = await insights.list_count_alerts(
+        ds_id=None, open_only=False, limit=100, session=db_session,
+    )
+    assert [a["id"] for a in result.alerts] == ["alr_new", "alr_old"]
+    assert result.alerts[0]["evidence"]["nodes"]["removed"] == {"Column": 900}
+    assert result.alerts[0]["baseline"] == 25
+
+
+async def test_the_open_count_spans_the_fleet_not_the_page(
+    db_session: AsyncSession,
+):
+    """It drives a badge. A badge that only counted what fits on screen would
+    under-report exactly when there is most to report."""
+    await _alert(db_session, alert_id="alr_1", ds_id="ds_a")
+    await _alert(db_session, alert_id="alr_2", ds_id="ds_b")
+    await _alert(db_session, alert_id="alr_3", ds_id="ds_c", acked=_iso(1))
+
+    scoped = await insights.list_count_alerts(
+        ds_id="ds_a", open_only=False, limit=100, session=db_session,
+    )
+    assert len(scoped.alerts) == 1
+    assert scoped.open_count == 2  # fleet-wide unacknowledged
+
+
+async def test_alerts_can_be_filtered_to_open_ones(db_session: AsyncSession):
+    await _alert(db_session, alert_id="alr_open")
+    await _alert(db_session, alert_id="alr_done", acked=_iso(1))
+
+    result = await insights.list_count_alerts(
+        ds_id=None, open_only=True, limit=100, session=db_session,
+    )
+    assert [a["id"] for a in result.alerts] == ["alr_open"]
+
+
+async def test_alerts_accept_a_catalog_id_like_the_history_does(
+    db_session: AsyncSession,
+):
+    db_session.add(ProviderORM(id="prov_ep1", name="P", provider_type="falkordb"))
+    db_session.add(CatalogItemORM(
+        id="cat_ep1", provider_id="prov_ep1", source_identifier="ep-graph", name="EP",
+    ))
+    await db_session.flush()
+    await _snap(db_session, at=_iso(2), entities={"Table": 10})
+    await _alert(db_session, alert_id="alr_1")
+
+    result = await insights.list_count_alerts(
+        ds_id="cat_ep1", open_only=False, limit=100, session=db_session,
+    )
+    assert [a["id"] for a in result.alerts] == ["alr_1"]
+
+
+async def test_acknowledging_stamps_the_actor(db_session: AsyncSession):
+    from types import SimpleNamespace
+
+    await _alert(db_session, alert_id="alr_1")
+    row = await insights.acknowledge_count_alert(
+        alert_id="alr_1", user=SimpleNamespace(id="u1"), session=db_session,
+    )
+    assert row["acknowledged_by"] == "u1"
+    assert row["acknowledged_at"] is not None
+
+
+async def test_acknowledging_a_missing_alert_is_a_404(db_session: AsyncSession):
+    from types import SimpleNamespace
+
+    import fastapi
+
+    with pytest.raises(fastapi.HTTPException) as exc:
+        await insights.acknowledge_count_alert(
+            alert_id="alr_nope", user=SimpleNamespace(id="u1"), session=db_session,
+        )
+    assert exc.value.status_code == 404
+
+
+async def test_the_alert_policy_round_trips(db_session: AsyncSession):
+    before = await insights.get_alert_policy(session=db_session)
+    assert before.enabled is None                       # nothing persisted
+    assert before.effective_enabled == before.env_enabled
+
+    after = await insights.put_alert_policy(
+        req=insights.AlertPolicyRequest(
+            enabled=False, minSeverity="notable", cooldownSecs=1800,
+        ),
+        session=db_session,
+    )
+    assert after.enabled is False
+    assert after.effective_min_severity == "notable"
+    assert after.effective_cooldown_secs == 1800
+
+
+async def test_the_policy_clears_a_cooldown_override_with_the_sentinel(
+    db_session: AsyncSession,
+):
+    await insights.put_alert_policy(
+        req=insights.AlertPolicyRequest(cooldownSecs=1800), session=db_session,
+    )
+    cleared = await insights.put_alert_policy(
+        req=insights.AlertPolicyRequest(cooldownSecs=-1), session=db_session,
+    )
+    assert cleared.cooldown_secs is None
+    assert cleared.effective_cooldown_secs == cleared.env_cooldown_secs
+
+
+async def test_an_unknown_severity_is_refused_rather_than_stored(
+    db_session: AsyncSession,
+):
+    import fastapi
+
+    with pytest.raises(fastapi.HTTPException) as exc:
+        await insights.put_alert_policy(
+            req=insights.AlertPolicyRequest(minSeverity="catastrophic"),
+            session=db_session,
+        )
+    assert exc.value.status_code == 422

@@ -380,6 +380,13 @@ async def run_trim_scheduler(shutdown: asyncio.Event) -> None:
         except Exception as exc:
             logger.error("history_purge failed: %s", exc, exc_info=True)
 
+        try:
+            await _maybe_evaluate_count_alerts()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("alert_sweep failed: %s", exc, exc_info=True)
+
     logger.info("Trim scheduler stopped")
 
 
@@ -732,3 +739,116 @@ async def run_discovery_scheduler(shutdown: asyncio.Event) -> None:
             continue
 
     logger.info("Discovery scheduler stopped")
+
+
+# ── counts-anomaly alerting ─────────────────────────────────────────
+
+# How often movements are judged. Its own knob, separate from the purge and
+# from the trim: how quickly you learn about an anomaly is a different
+# question from how long the evidence is kept.
+_ALERT_INTERVAL_SECS = float(resilience.INSIGHTS_ALERT_INTERVAL_SECS)
+
+_alert_sweep_state: dict = {
+    "last_run_monotonic": 0.0,
+    "last_run_at": None,
+    "last_scanned": 0,
+    "last_raised": 0,
+    "last_error": None,
+}
+
+
+def get_alert_sweep_status() -> dict:
+    """Last alert-sweep outcome, for the /health payload. An evaluator that
+    silently stopped running looks exactly like a quiet fleet, which is the
+    worst possible failure for an alerting system — so it reports itself."""
+    return {
+        "last_run_at": _alert_sweep_state["last_run_at"],
+        "last_scanned": _alert_sweep_state["last_scanned"],
+        "last_raised": _alert_sweep_state["last_raised"],
+        "last_error": _alert_sweep_state["last_error"],
+        "interval_secs": _ALERT_INTERVAL_SECS,
+    }
+
+
+async def _maybe_evaluate_count_alerts() -> None:
+    """Judge recent movements and raise at most one alert per source.
+
+    Notifications fire AFTER the commit that records the alerts, in their own
+    transaction — the discipline the reconcile sweep already documents: a
+    best-effort fan-out over another domain's tables must never be able to
+    roll back (or, on Postgres, poison) the findings it describes.
+
+    Never raises; the caller logs and the next tick retries. A pass that dies
+    halfway leaves the alerts it already committed and re-judges the rest,
+    which the per-source cooldown makes safe to repeat.
+    """
+    from backend.app.db.repositories import count_alerts_repo
+
+    now = time.monotonic()
+    last = _alert_sweep_state["last_run_monotonic"]
+    if last and (now - last) < _ALERT_INTERVAL_SECS:
+        return
+    _alert_sweep_state["last_run_monotonic"] = now
+
+    notices: list = []
+    scanned = 0
+    async with get_jobs_session() as session:
+        policy = await count_alerts_repo.resolve_alert_policy(session)
+        if not policy.enabled:
+            _alert_sweep_state["last_run_at"] = datetime.now(timezone.utc).isoformat()
+            _alert_sweep_state["last_scanned"] = 0
+            _alert_sweep_state["last_raised"] = 0
+            return
+
+        for ds_id in await count_alerts_repo.sources_to_evaluate(session):
+            scanned += 1
+            try:
+                notice = await count_alerts_repo.evaluate_source(
+                    session, ds_id, policy,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # One unreadable source must not cost the rest of the fleet
+                # its evaluation pass.
+                logger.warning("alert_sweep: %s could not be judged: %s", ds_id, exc)
+                continue
+            if notice is not None:
+                notices.append(notice)
+        await session.commit()
+
+    if notices:
+        from backend.app.db.repositories.notification_repo import (
+            notify_counts_anomaly,
+        )
+        try:
+            async with get_jobs_session() as session:
+                for notice in notices:
+                    await notify_counts_anomaly(
+                        session,
+                        workspace_id=notice.workspace_id,
+                        data_source_id=notice.data_source_id,
+                        catalog_item_id=notice.catalog_item_id,
+                        source_name=notice.source_name,
+                        severity=notice.severity,
+                        direction=notice.direction,
+                        node_delta=notice.node_delta,
+                    )
+                await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "alert_sweep: notification fan-out failed (%s) — the alerts "
+                "themselves are committed and readable", exc,
+            )
+
+    _alert_sweep_state["last_run_at"] = datetime.now(timezone.utc).isoformat()
+    _alert_sweep_state["last_scanned"] = scanned
+    _alert_sweep_state["last_raised"] = len(notices)
+    _alert_sweep_state["last_error"] = None
+    if notices:
+        logger.info(
+            "alert_sweep: %d source(s) scanned, %d alert(s) raised",
+            scanned, len(notices),
+        )

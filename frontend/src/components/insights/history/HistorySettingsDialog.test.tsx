@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const getRetention = vi.fn()
 const setRetention = vi.fn()
+const getAlertPolicy = vi.fn()
+const setAlertPolicy = vi.fn()
 const useAnyPermission = vi.fn()
 
 vi.mock('@/services/insightsHistoryService', async () => {
@@ -16,6 +18,8 @@ vi.mock('@/services/insightsHistoryService', async () => {
         insightsHistoryService: {
             getRetention: () => getRetention(),
             setRetention: (body: unknown) => setRetention(body),
+            getAlertPolicy: () => getAlertPolicy(),
+            setAlertPolicy: (body: unknown) => setAlertPolicy(body),
         },
     }
 })
@@ -23,7 +27,19 @@ vi.mock('@/store/auth', () => ({
     useAnyPermission: (perms: string[]) => useAnyPermission(perms),
 }))
 
-import { RetentionDialog } from './RetentionDialog'
+import { HistorySettingsDialog } from './HistorySettingsDialog'
+
+const ALERT_POLICY = {
+    enabled: null,
+    minSeverity: null,
+    cooldownSecs: null,
+    envEnabled: true,
+    envMinSeverity: 'severe' as const,
+    envCooldownSecs: 21600,
+    effectiveEnabled: true,
+    effectiveMinSeverity: 'severe' as const,
+    effectiveCooldownSecs: 21600,
+}
 
 const POLICY = {
     retentionDays: null,
@@ -44,17 +60,19 @@ function renderDialog(onClose = vi.fn()) {
         onClose,
         ...render(
             <QueryClientProvider client={qc}>
-                <RetentionDialog onClose={onClose} />
+                <HistorySettingsDialog onClose={onClose} />
             </QueryClientProvider>,
         ),
     }
 }
 
-describe('RetentionDialog', () => {
+describe('HistorySettingsDialog — retention', () => {
     beforeEach(() => {
         vi.clearAllMocks()
         getRetention.mockResolvedValue(POLICY)
         setRetention.mockResolvedValue(POLICY)
+        getAlertPolicy.mockResolvedValue(ALERT_POLICY)
+        setAlertPolicy.mockResolvedValue(ALERT_POLICY)
         useAnyPermission.mockReturnValue(true)
     })
 
@@ -135,7 +153,72 @@ describe('RetentionDialog', () => {
         expect(screen.queryByRole('button', { name: /^save$/i })).toBeNull()
         expect(screen.getByRole('spinbutton', { name: /keep history for/i })).toBeDisabled()
         // The explanation is the valuable half for everyone else.
-        expect(screen.getByText(/what is kept, and for how long/i)).toBeInTheDocument()
+        expect(screen.getByText(/what is kept, and what is worth interrupting/i))
+            .toBeInTheDocument()
         expect(screen.getByText(/needs system admin/i)).toBeInTheDocument()
+    })
+})
+
+
+describe('HistorySettingsDialog — alerting', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        getRetention.mockResolvedValue(POLICY)
+        setRetention.mockResolvedValue(POLICY)
+        getAlertPolicy.mockResolvedValue(ALERT_POLICY)
+        setAlertPolicy.mockResolvedValue(ALERT_POLICY)
+        useAnyPermission.mockReturnValue(true)
+    })
+
+    it('shows the severity choice and which one is in force', async () => {
+        renderDialog()
+        expect(await screen.findByText(/alert on unusual movement/i)).toBeInTheDocument()
+
+        const severe = screen.getByRole('button', { name: /only extreme movements/i })
+        expect(severe).toHaveAttribute('aria-pressed', 'true')
+        expect(screen.getByRole('button', { name: /anything unusual/i }))
+            .toHaveAttribute('aria-pressed', 'false')
+    })
+
+    it('states the cooldown in the terms the operator set it in', async () => {
+        renderDialog()
+        expect(await screen.findByText('6h')).toBeInTheDocument()
+        expect(screen.getByText(/pager storm/i)).toBeInTheDocument()
+    })
+
+    it('widens the floor on request', async () => {
+        renderDialog()
+        await screen.findByText(/alert on unusual movement/i)
+
+        await userEvent.click(screen.getByRole('button', { name: /anything unusual/i }))
+        await waitFor(() => expect(setAlertPolicy).toHaveBeenCalledWith({
+            minSeverity: 'notable',
+        }))
+    })
+
+    it('turns alerting off without touching retention', async () => {
+        renderDialog()
+        await screen.findByText(/alert on unusual movement/i)
+
+        await userEvent.click(screen.getByRole('switch', { name: /alert on unusual movement/i }))
+        await waitFor(() => expect(setAlertPolicy).toHaveBeenCalledWith({ enabled: false }))
+        // Coupling the two saves would let a failure in one silently discard
+        // the other.
+        expect(setRetention).not.toHaveBeenCalled()
+    })
+
+    it('hides the severity choice when alerting is off', async () => {
+        getAlertPolicy.mockResolvedValue({ ...ALERT_POLICY, effectiveEnabled: false })
+        renderDialog()
+        await screen.findByText(/alert on unusual movement/i)
+        expect(screen.queryByRole('button', { name: /only extreme movements/i })).toBeNull()
+    })
+
+    it('is read-only without system admin', async () => {
+        useAnyPermission.mockReturnValue(false)
+        renderDialog()
+        await screen.findByText(/alert on unusual movement/i)
+        expect(screen.getByRole('switch', { name: /alert on unusual movement/i }))
+            .toBeDisabled()
     })
 })

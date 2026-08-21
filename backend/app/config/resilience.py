@@ -305,6 +305,30 @@ INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE: int = int(os.getenv("INSIGHTS_HISTORY_MAX_
 # touching Redis housekeeping.
 INSIGHTS_HISTORY_PURGE_INTERVAL_SECS: int = int(os.getenv("INSIGHTS_HISTORY_PURGE_INTERVAL_SECS", "3600"))
 
+# ── Counts anomaly alerting ─────────────────────────────────────────
+# Turns the history from something you go and look at into something that
+# tells you. Evaluation is a sweep in the insights service, not a hook on the
+# write: significance is a property of a WINDOW (the source's own median
+# absolute movement), so judging at capture time would put a range scan on the
+# 60s probe path and would run inside the web tier as well.
+INSIGHTS_ALERTS_ENABLED: bool = os.getenv("INSIGHTS_ALERTS_ENABLED", "true").lower() == "true"
+
+# Severity floor: "severe" (>=8x the source's typical movement) alerts only on
+# the extreme tail; "notable" (>=3x) widens it. Defaults to severe because an
+# alerting default that is too eager gets muted, and a muted alert is worth
+# less than no alert — people stop reading it but still believe it is watching.
+INSIGHTS_ALERT_MIN_SEVERITY: str = os.getenv("INSIGHTS_ALERT_MIN_SEVERITY", "severe")
+
+# At most one alert per source per this interval. A graph thrashing under a
+# broken loader moves unusually on EVERY probe; one alert per probe turns a
+# single incident into a pager storm and trains people to ignore it.
+INSIGHTS_ALERT_COOLDOWN_SECS: int = int(os.getenv("INSIGHTS_ALERT_COOLDOWN_SECS", "21600"))
+
+# How often the evaluation sweep runs. Its own knob, like the purge cadence:
+# how quickly you learn about an anomaly is a different question from how long
+# the evidence is kept.
+INSIGHTS_ALERT_INTERVAL_SECS: int = int(os.getenv("INSIGHTS_ALERT_INTERVAL_SECS", "900"))
+
 # ── Discovery (pre-registration asset cache) ────────────────────────
 # Cadence for the background ``run_discovery_scheduler`` coroutine.
 # Each tick fans out enqueue calls for every active provider's

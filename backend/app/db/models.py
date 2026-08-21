@@ -224,6 +224,15 @@ class PlatformSettingsORM(Base):
     history_retention_days = Column(Integer, nullable=True)
     history_max_rows_per_source = Column(Integer, nullable=True)
     history_heartbeat_secs = Column(Integer, nullable=True)
+    # Counts-anomaly alerting. Same NULL-means-unset semantics again.
+    # ``history_alert_min_severity`` is the floor: 'severe' alerts only on the
+    # extreme tail, 'notable' widens it. Nullable Boolean rather than a
+    # non-null default because "the operator turned this off" and "nobody has
+    # ever touched it" are different states, and only the first should
+    # override the deployment default.
+    history_alerts_enabled = Column(Boolean, nullable=True)
+    history_alert_min_severity = Column(Text, nullable=True)
+    history_alert_cooldown_secs = Column(Integer, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 
@@ -1153,6 +1162,88 @@ class DataSourceCountSnapshotORM(Base):
         return (
             f"<DataSourceCountSnapshot ds_id={self.data_source_id!r} "
             f"at={self.captured_at!r} nodes={self.node_count}>"
+        )
+
+
+# ------------------------------------------------------------------ #
+# data_source_count_alerts (anomalies worth waking someone for)        #
+# ------------------------------------------------------------------ #
+
+class DataSourceCountAlertORM(Base):
+    """One recorded anomaly in a data source's counts.
+
+    The snapshot table records what happened; this records what was worth
+    telling someone about. They are separate tables because they answer
+    different questions and age differently: snapshots are a dense series
+    purged on a retention window, alerts are sparse, are acknowledged by a
+    person, and must survive long enough to still be there when someone
+    follows the notification days later.
+
+    **Not derived on read.** The classification depends on the baseline of the
+    window it was evaluated in, and that window moves. An alert recomputed
+    later against a different baseline could quietly downgrade itself to
+    "normal" — so the verdict and the evidence behind it are frozen here at
+    the moment they were reached.
+
+    No foreign key, for the same reason as the snapshots: an alert about a
+    source someone then deleted is precisely the alert worth keeping.
+    """
+
+    __tablename__ = "data_source_count_alerts"
+
+    id = Column(Text, primary_key=True, default=lambda: f"alr_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(Text, nullable=False)
+    #: The observation that tripped it. Logical reference — the snapshot may
+    #: be purged out from under a long-lived alert, which is survivable
+    #: because everything needed to explain the alert is frozen below.
+    snapshot_id = Column(Text, nullable=True)
+    detected_at = Column(Text, nullable=False, default=_now)
+    #: When the movement itself happened, which is NOT when it was detected:
+    #: evaluation runs on a tick, so the two differ by up to one interval and
+    #: a reader ordering by the wrong one gets a confusing story.
+    observed_at = Column(Text, nullable=False)
+
+    workspace_id = Column(Text, nullable=True)
+    provider_id = Column(Text, nullable=True)
+    graph_name = Column(Text, nullable=True)
+    #: Resolved once, at alert time, so the notification can deep-link into
+    #: the history view (which is routed by catalog id, not data source id).
+    #: NULL when the graph has no catalog entry, or lost it since.
+    catalog_item_id = Column(Text, nullable=True)
+
+    severity = Column(Text, nullable=False)   # notable | severe
+    direction = Column(Text, nullable=False)  # drop | rise
+    node_delta = Column(Integer, nullable=False, default=0)
+    node_count = Column(Integer, nullable=False, default=0)
+    #: The baseline it was judged against, frozen. Without it the UI can say
+    #: "unusual" but not "unusual COMPARED TO WHAT", which is the difference
+    #: between a claim and an argument.
+    baseline = Column(Integer, nullable=False, default=0)
+    #: JSON: the per-label movement behind it, so the alert explains itself
+    #: without a second read.
+    evidence = Column(Text, nullable=True)
+
+    acknowledged_at = Column(Text, nullable=True)
+    acknowledged_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_dsca_ds_detected", "data_source_id", "detected_at"),
+        # The fleet inbox: unacknowledged first, newest first. Partial indexes
+        # are not portable to the SQLite the tests use, so this is a plain
+        # composite the planner can still walk.
+        Index("ix_dsca_open", "acknowledged_at", "detected_at"),
+        CheckConstraint(
+            "severity IN ('notable', 'severe')", name="ck_dsca_severity",
+        ),
+        CheckConstraint(
+            "direction IN ('drop', 'rise')", name="ck_dsca_direction",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataSourceCountAlert ds_id={self.data_source_id!r} "
+            f"{self.severity}/{self.direction} delta={self.node_delta}>"
         )
 
 
