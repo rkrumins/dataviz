@@ -10,22 +10,32 @@
  * upstream/downstream entity and their containments. Can be expanded lazily
  * or do it on the fly."
  *
- * So this driver fetches what is on screen, and fetches again when the reader
- * opens something:
+ * AND THEN THE SECOND RULING (2026-08-21): "When I run the trace, ensure it
+ * covers the ENTIRE walk like Lens Full Flow. We must see the entire lineage.
+ * We must not apply any constraints." So laziness buys the FIRST PAINT, not
+ * the answer: the coarse picture lands instantly and the full fine walk then
+ * runs to exhaustion behind it.
  *
- *   idle ──start──▶ coarse ──▶ ready
+ *   idle ──start──▶ coarse ──▶ walking ──▶ complete
  *                     └─fail──▶ error ──retry──▶ coarse
  *
  *  • COARSE is one request (plus its cursor pages): the focus, its
  *    containment chain, the lineage-carrying children inside it, and every
  *    partner one hop away at the grain the lineage lane offers, each with its
- *    own ancestor chain. On the same 2.08M estate that is 25 ms warm.
- *  • DRILL is one request per card the reader opens, ever — `drilled` is the
- *    ledger of what has been asked for, and a card is never asked twice.
- *  • CURSORS ARE FOLLOWED, NOT SHOWN. A response that could not fit its page
- *    carries `seedCursor` (more contents) or a frontier `nextCursor` (more of
- *    one anchor's edges); the driver drains both. There is no budget, no
- *    "Keep walking", and no `max_nodes` — the only stop is exhaustion.
+ *    own ancestor chain. On the 2.08M estate that is 25 ms warm. The board is
+ *    readable here.
+ *  • WALKING is the same hands-free engine the Lens's Full Flow runs: every
+ *    frontier the server reports is followed — paged where it carries a
+ *    cursor, extended where it does not — until none remain. NO node budget,
+ *    no ceiling, no "Keep walking": the only stops are exhaustion, the reader
+ *    leaving, and a hop that failed.
+ *  • DRILL is one request for a card the reader opens, and it JUMPS THE
+ *    QUEUE — the background loop will not start a wave while one is in
+ *    flight, so an expansion never waits behind the walk. Once the walk has
+ *    completed, a card's contents are already in the model and opening it
+ *    costs nothing at all.
+ *  • CURSORS ARE FOLLOWED, NOT SHOWN, everywhere: `seedCursor` for more
+ *    contents, a frontier `nextCursor` for more of one anchor's edges.
  *
  * ONE MODEL. Every response merges into the same `LensWalkModel` through
  * `mergeClosures`, so the view model, the ledger and the wires all read one
@@ -54,7 +64,7 @@ import {
 } from '@/components/canvas/context-view/lens/closure-adapter'
 import { pairKey } from './lib/traceWireLedger'
 
-export type TracePhase = 'idle' | 'coarse' | 'ready' | 'error'
+export type TracePhase = 'idle' | 'coarse' | 'walking' | 'complete' | 'error'
 export type TraceDriverStatus = 'loading' | 'done' | 'error'
 
 /** Failsafe against a server that hands back a cursor for ever. NOT a budget:
@@ -62,6 +72,16 @@ export type TraceDriverStatus = 'loading' | 'done' | 'error'
  *  unreachable in a healthy system — it exists so a bug cannot become an
  *  infinite request loop. */
 const MAX_PAGES_PER_OP = 200
+
+/** Frontier ops the background walk holds in flight at once — the Lens's
+ *  full walk uses the same width, which is part of why the two reach the
+ *  same model. */
+const WALK_CONCURRENCY = 4
+/** FAILSAFE, NOT A BUDGET. Every op either clears its frontier entry or
+ *  advances its cursor, so a healthy walk terminates on its own; this exists
+ *  only so a server bug cannot become an unbounded request loop, and it sits
+ *  far past any real flow. */
+const WALK_FAILSAFE_REQUESTS = 100_000
 
 export interface TraceDriver {
     /** The accumulated picture. Non-null from the first render of a session
@@ -77,6 +97,8 @@ export interface TraceDriver {
     drilled: ReadonlySet<string>
     /** Pairs whose raw detail is fully loaded (see the file header). */
     completePairs: ReadonlySet<string>
+    /** Requests this session has issued, for the capsule's narration. */
+    requests: number
     /** Fetch one card's contents and their hop-1 lineage. Idempotent. */
     drill: (urn: string) => void
     /** Re-run the coarse fetch for the current focus. */
@@ -92,13 +114,77 @@ interface DriverState {
     error: string | null
     inFlight: ReadonlySet<string>
     drilled: ReadonlySet<string>
+    requests: number
+    /** A BACKGROUND hop failed. Kept apart from `error` — which is the
+     *  reader's own coarse fetch or their own expansion — because a hop the
+     *  walk could not take mid-flight must not headline over a board that is
+     *  still filling in. It surfaces when the walk stops. */
+    walkError: string | null
 }
 
 const EMPTY_SET: ReadonlySet<string> = new Set<string>()
 
 const IDLE: DriverState = {
     focusUrn: null, model: null, phase: 'idle', error: null,
-    inFlight: EMPTY_SET, drilled: EMPTY_SET,
+    inFlight: EMPTY_SET, drilled: EMPTY_SET, requests: 0, walkError: null,
+}
+
+/** One frontier op: page it when it carries a cursor, extend from it when it
+ *  does not. Exactly the two shapes `useLensWalk`'s full walk fires. */
+interface WalkOp { urn: string; dir: 'up' | 'down'; cursor: string | null }
+
+/** URNs the client already holds. Budget steering for `excludeUrns`, never
+ *  correctness — the merge dedupes regardless. Mirrors the Lens's own helper
+ *  so the two engines send the same requests. */
+function knownUrns(model: LensWalkModel): string[] {
+    return model.nodes.map(n => n.urn)
+}
+
+/** The fine-grain request behind one frontier op. NO `grain` — this is the
+ *  eager closure walk, the same one the Lens drives. */
+function walkRequest(op: WalkOp, model: LensWalkModel): TraceClosureRequest {
+    const depth = op.dir === 'up'
+        ? { upstreamDepth: 1, downstreamDepth: 0 }
+        : { upstreamDepth: 0, downstreamDepth: 1 }
+    return op.cursor !== null
+        ? { urn: op.urn, direction: op.dir === 'up' ? 'upstream' : 'downstream', ...depth, afterCursor: op.cursor }
+        : {
+            urn: op.urn, direction: op.dir === 'up' ? 'upstream' : 'downstream', ...depth,
+            // A cursor-less entry ran out of DEPTH, not of graph: re-root the
+            // walk on it, seeded with the node itself — the server resolves
+            // that seed down to whatever grain carries lineage beneath it.
+            seedUrns: [op.urn],
+            excludeUrns: knownUrns(model).slice(0, 2000),
+        }
+}
+
+/** Identity of one op. The cursor is part of it: paging an anchor onward is a
+ *  different question from paging it the first time. */
+function opKey(op: WalkOp): string {
+    return `${op.dir}:${op.urn}:${op.cursor ?? 'root'}`
+}
+
+/** The frontier entries worth firing at: never one that failed, and never one
+ *  that has already been asked against a model this size or bigger. */
+function collectWalkOps(
+    model: LensWalkModel,
+    failed: ReadonlySet<string>,
+    firedAt: ReadonlyMap<string, number>,
+    limit: number,
+): WalkOp[] {
+    const ops: WalkOp[] = []
+    const take = (list: LensWalkModel['frontierUp'], dir: 'up' | 'down') => {
+        for (const fr of list) {
+            if (ops.length >= limit) return
+            const op: WalkOp = { urn: fr.urn, dir, cursor: fr.nextCursor }
+            if (failed.has(`${dir}:${fr.urn}`)) continue
+            if ((firedAt.get(opKey(op)) ?? -1) >= model.nodes.length) continue
+            ops.push(op)
+        }
+    }
+    take(model.frontierUp, 'up')
+    take(model.frontierDown, 'down')
+    return ops
 }
 
 /** One hop, one grain, both directions — the shape every lazy request has. */
@@ -226,6 +312,26 @@ export function useTraceDriver(
     const drilledRef = useRef<Set<string>>(new Set())
     const inFlightRef = useRef<Set<string>>(new Set())
     const sessionFocus = useRef<string | null>(null)
+    /** Frontier ops that FAILED. Never auto-retried — the walk stops honestly
+     *  instead of looping on a broken hop; `retry()` clears them. */
+    const failedOps = useRef<Set<string>>(new Set())
+    /** Op key → how big the model was when it was last fired.
+     *
+     *  A frontier entry the walk has drained can be RE-REPORTED by a later
+     *  response about a different anchor: the server names the ring it
+     *  discovered and cannot know which of those the client already asked
+     *  about. Refusing to re-fire outright loses nodes — an op the server cut
+     *  short at its page boundary MUST be asked again, and its answer will
+     *  differ because `excludeUrns` has grown. So the rule is PROGRESS: an op
+     *  may be re-fired only if the model has grown since it last ran. That
+     *  terminates (the model grows finitely) and cannot starve.
+     *
+     *  Without any guard at all this loops: MEASURED at 100,000 requests for
+     *  302 nodes before the failsafe caught it. */
+    const firedAt = useRef<Map<string, number>>(new Map())
+    const requestsRef = useRef(0)
+    /** The phase, readable from callbacks that must not depend on state. */
+    const phaseRef = useRef<TracePhase>('idle')
     const [retryToken, setRetryToken] = useState(0)
 
     const newSession = useCallback((urn: string | null): number => {
@@ -239,6 +345,9 @@ export function useTraceDriver(
         // network for what is already in hand.
         drilledRef.current = new Set(urn ? [urn] : [])
         inFlightRef.current = new Set()
+        failedOps.current = new Set()
+        firedAt.current = new Map()
+        requestsRef.current = 0
         return generation.current
     }, [])
 
@@ -251,7 +360,9 @@ export function useTraceDriver(
         if (gen !== generation.current || !modelRef.current) return false
         const next = mergeClosures(modelRef.current, res, ctx)
         modelRef.current = next
-        setState(prev => (prev.focusUrn === null ? prev : { ...prev, model: next }))
+        setState(prev => (prev.focusUrn === null
+            ? prev
+            : { ...prev, model: next, requests: requestsRef.current }))
         return true
     }, [])
 
@@ -276,6 +387,7 @@ export function useTraceDriver(
 
         // THE FIRST RESPONSE IS THE OPERATION. If it fails there is nothing to
         // draw and the caller turns it into an error the reader can retry.
+        requestsRef.current += 1
         const first = await fetchClosure.call(provider, base, { signal })
         if (!absorb(gen, first, { rootUrn: anchorUrn, direction: 'both' })) return
         pages = 1
@@ -289,6 +401,7 @@ export function useTraceDriver(
             let res = first
             while (res.seedCursor && pages < MAX_PAGES_PER_OP) {
                 request = { ...base, seedCursor: res.seedCursor }
+                requestsRef.current += 1
                 res = await fetchClosure.call(provider, request, { signal })
                 if (!absorb(gen, res, { rootUrn: anchorUrn, direction: 'both' })) return
                 pages += 1
@@ -308,6 +421,7 @@ export function useTraceDriver(
                 ].find(f => f.nextCursor && !drained.has(`${f.dir}:${f.urn}:${f.nextCursor}`))
                 if (!next) return
                 drained.add(`${next.dir}:${next.urn}:${next.nextCursor}`)
+                requestsRef.current += 1
                 const paged = await fetchClosure.call(provider, lazyRequest(next.urn, {
                     direction: next.dir === 'up' ? 'upstream' : 'downstream',
                     downstreamDepth: next.dir === 'up' ? 0 : 1,
@@ -327,7 +441,93 @@ export function useTraceDriver(
         }
     }, [provider, absorb])
 
-    // ---- the coarse phase, one per (focus, provider, retry) -------------
+    /**
+     * THE BACKGROUND WALK — the whole lineage, hands-free.
+     *
+     * The same engine `useLensWalk`'s Full Flow runs, driven off the SAME
+     * model the coarse paint filled: every frontier entry the server reports
+     * is followed — paged where it carries a cursor, re-rooted where it does
+     * not — in waves of `WALK_CONCURRENCY`, until no candidate remains.
+     *
+     * NO BUDGET (user ruling): no node ceiling, no grants, no "Keep walking".
+     * It stops on exhaustion, on the reader leaving, or on a hop that failed —
+     * and a failed hop is remembered rather than retried, so the walk cannot
+     * loop on a broken step.
+     *
+     * DRILLS JUMP THE QUEUE. The loop will not open a new wave while the
+     * reader's own expansion is in flight, so an expand never queues behind
+     * the walk; it yields a macrotask and looks again.
+     */
+    const runBackgroundWalk = useCallback(async (gen: number, focus: string): Promise<void> => {
+        const fetchClosure = provider?.traceClosure
+        if (!fetchClosure || !provider) return
+        const signal = controller.current?.signal
+
+        // THE FOCUS'S OWN FINE HOP FIRST, and it is not optional. The coarse
+        // paint answered the focus at CARD grain — the rollup partners the
+        // view can place — and filed only those partners as boundaries. The
+        // raw hops into the focus's own contents were never asked for, so a
+        // walk that only followed the frontier would finish having never seen
+        // them: on the CFO estate the three column-to-column flows that ARE
+        // the lineage. This is also the Lens's very first request, which is
+        // what makes the two engines converge rather than merely agree.
+        const seedOp: WalkOp = { urn: focus, dir: 'up', cursor: null }
+        if (!firedAt.current.has(opKey(seedOp))) {
+            firedAt.current.set(opKey(seedOp), modelRef.current?.nodes.length ?? 0)
+            requestsRef.current += 1
+            try {
+                const res = await fetchClosure.call(provider, {
+                    urn: focus, direction: 'both', upstreamDepth: 1, downstreamDepth: 1,
+                    // Seeded with the focus itself, so the server resolves it
+                    // down to whatever carries lineage beneath it — the same
+                    // resolution a container focus gets on the eager path, and
+                    // the same shape every other op of this walk has.
+                    seedUrns: [focus],
+                }, { signal })
+                if (!absorb(gen, res, { rootUrn: focus, direction: 'both' })) return
+            } catch (err) {
+                if (gen !== generation.current) return
+                failedOps.current.add(`up:${focus}`)
+                setState(prev => (prev.focusUrn === null ? prev : {
+                    ...prev,
+                    walkError: err instanceof Error ? err.message : String(err),
+                }))
+            }
+        }
+
+        for (;;) {
+            if (gen !== generation.current) return
+            if (inFlightRef.current.size > 0) {
+                await new Promise(resolve => setTimeout(resolve, 0))
+                continue
+            }
+            const model = modelRef.current
+            if (!model) return
+            if (requestsRef.current >= WALK_FAILSAFE_REQUESTS) return
+            const ops = collectWalkOps(
+                model, failedOps.current, firedAt.current, WALK_CONCURRENCY,
+            )
+            if (ops.length === 0) return
+            for (const op of ops) firedAt.current.set(opKey(op), model.nodes.length)
+
+            requestsRef.current += ops.length
+            await Promise.all(ops.map(async op => {
+                try {
+                    const res = await fetchClosure.call(provider, walkRequest(op, model), { signal })
+                    absorb(gen, res, { rootUrn: op.urn, direction: op.dir })
+                } catch (err) {
+                    if (gen !== generation.current) return
+                    failedOps.current.add(`${op.dir}:${op.urn}`)
+                    setState(prev => (prev.focusUrn === null ? prev : {
+                        ...prev,
+                        walkError: err instanceof Error ? err.message : String(err),
+                    }))
+                }
+            }))
+        }
+    }, [provider, absorb])
+
+    // ---- the session: coarse, then the walk behind it -------------------
     useEffect(() => {
         if (!focusUrn || !provider?.traceClosure) {
             newSession(null)
@@ -342,23 +542,33 @@ export function useTraceDriver(
             error: null,
             inFlight: inFlightRef.current,
             drilled: drilledRef.current,
+            requests: 0,
+            walkError: null,
         })
 
         void (async () => {
             try {
                 await runOp(gen, focusUrn, lazyRequest(focusUrn, { grain: 'coarse' }))
-                if (gen !== generation.current) return
-                setState(prev => (prev.focusUrn === focusUrn ? { ...prev, phase: 'ready' } : prev))
             } catch (err) {
                 if (gen !== generation.current) return
                 setState(prev => (prev.focusUrn === focusUrn
                     ? { ...prev, phase: 'error', error: err instanceof Error ? err.message : String(err) }
                     : prev))
+                return
             }
+            if (gen !== generation.current) return
+            // The board is readable NOW; the rest of the flow arrives behind
+            // it. `walking` is what the dock's counts read as floors.
+            setState(prev => (prev.focusUrn === focusUrn
+                ? { ...prev, phase: 'walking', requests: requestsRef.current } : prev))
+            await runBackgroundWalk(gen, focusUrn)
+            if (gen !== generation.current) return
+            setState(prev => (prev.focusUrn === focusUrn
+                ? { ...prev, phase: 'complete', requests: requestsRef.current } : prev))
         })()
 
         return () => { controller.current?.abort() }
-    }, [focusUrn, provider, retryToken, newSession, runOp])
+    }, [focusUrn, provider, retryToken, newSession, runOp, runBackgroundWalk])
 
     /**
      * WHAT IS INSIDE AN UPSTREAM CARD IS UPSTREAM.
@@ -409,6 +619,15 @@ export function useTraceDriver(
     const drill = useCallback((urn: string) => {
         if (!urn || !provider?.traceClosure || !sessionFocus.current) return
         if (drilledRef.current.has(urn) || inFlightRef.current.has(urn)) return
+        // THE WALK GOT THERE FIRST. Once the background walk has run to
+        // exhaustion the model holds every lineage-carrying descendant it
+        // could reach, so opening a card is a re-projection and asking again
+        // could only be told what we know.
+        if (phaseRef.current === 'complete') {
+            drilledRef.current = new Set([...drilledRef.current, urn])
+            setState(prev => (prev.focusUrn === null ? prev : { ...prev, drilled: drilledRef.current }))
+            return
+        }
         // ALREADY IN HAND. A partner's whole ancestor CHAIN ships with the
         // paint that discovered it — it has to, or the client could not place
         // it — so opening a link in that chain reveals a card the model
@@ -460,31 +679,78 @@ export function useTraceDriver(
         })()
     }, [provider, runOp, inheritSide])
 
-    const retry = useCallback(() => setRetryToken(t => t + 1), [])
+    /** Re-kick what failed. A coarse fetch that never landed restarts the
+     *  session; a walk that stopped on broken hops clears them and resumes,
+     *  because throwing away a picture the reader is already reading to
+     *  re-fetch it from scratch is the opposite of what they asked for. */
+    const retry = useCallback(() => {
+        if (modelRef.current && modelRef.current.nodes.length > 0 && failedOps.current.size > 0) {
+            const gen = generation.current
+            failedOps.current = new Set()
+            // The PROGRESS ledger goes with them: a retried op has to be
+            // allowed to run again even though the model has not grown since
+            // it failed — which is precisely the state a failure leaves.
+            firedAt.current = new Map()
+            setState(prev => (prev.focusUrn === null ? prev
+                : { ...prev, error: null, walkError: null, phase: 'walking' }))
+            const focus = sessionFocus.current
+            if (!focus) return
+            void (async () => {
+                await runBackgroundWalk(gen, focus)
+                if (gen !== generation.current) return
+                setState(prev => (prev.focusUrn === null
+                    ? prev : { ...prev, phase: 'complete', requests: requestsRef.current }))
+            })()
+            return
+        }
+        setRetryToken(t => t + 1)
+    }, [runBackgroundWalk])
     const abort = useCallback(() => {
         newSession(null)
         setState(IDLE)
     }, [newSession])
 
-    const completePairs = useMemo(
-        () => computeCompletePairs(state.model, state.drilled),
-        [state.model, state.drilled],
-    )
+    // Synced after commit: `drill` keeps ONE identity, so it cannot read the
+    // phase out of state without being re-minted on every transition.
+    useEffect(() => { phaseRef.current = state.phase }, [state.phase])
 
+    // ONCE THE WALK IS COMPLETE, EVERY CONE IS SETTLED. The background walk
+    // reaches every lineage-carrying descendant of everything on the board, so
+    // there is nothing left for a rollup to be hiding — and a residual drawn
+    // over raw evidence that IS all here would be the coarse statement
+    // outliving its usefulness.
+    const completePairs = useMemo(() => computeCompletePairs(
+        state.model,
+        state.phase === 'complete' && state.model
+            ? new Set(state.model.nodes.map(n => n.urn))
+            : state.drilled,
+    ), [state.model, state.drilled, state.phase])
+
+    // The board is READABLE from the moment the coarse picture lands, so the
+    // background walk is not a loading state — `fullWalkStatus.walking` is
+    // what narrates it. An error only becomes the headline once nothing is
+    // left in flight to fix it.
     const status: TraceDriverStatus =
         state.phase === 'error' ? 'error'
-            : state.phase === 'coarse' || state.inFlight.size > 0 ? 'loading'
-                : state.error ? 'error'
-                    : 'done'
+            : state.phase === 'coarse' ? 'loading'
+                : state.inFlight.size > 0 ? 'loading'
+                    // The reader's OWN request failed — they clicked, so they
+                    // are told, whatever the walk behind it is doing.
+                    : state.error ? 'error'
+                        // A background hop failed and the walk has stopped:
+                        // now it is the whole story, so now it is said.
+                        : state.phase === 'complete' && state.walkError ? 'error'
+                            : 'done'
 
     return {
         model: state.model,
         phase: state.phase,
         status,
-        error: state.error,
+        error: state.error ?? (state.phase === 'complete' ? state.walkError : null),
         inFlight: state.inFlight,
         drilled: state.drilled,
         completePairs,
+        requests: state.requests,
         drill,
         retry,
         abort,

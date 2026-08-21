@@ -83,12 +83,36 @@ function drillResponse(): TraceV2Result & LensClosureExtras {
     } as Partial<TraceV2Result & LensClosureExtras>)
 }
 
+/** Is this the BACKGROUND WALK asking, rather than the coarse paint or a
+ *  drill? A walk op is a plain closure request re-rooted on a frontier entry
+ *  (`seedUrns`) or paging one (`afterCursor`) — never `grain:'coarse'`. */
+function isWalkOp(req: Record<string, unknown>): boolean {
+    return !req.grain && !req.drill && (!!req.seedUrns || !!req.afterCursor)
+}
+
+/** `impl` answers the coarse paint and any drill; the background walk gets
+ *  "nothing further" unless the test says otherwise, so a fixture cannot
+ *  accidentally hand the walk its own frontier back for ever. */
 function makeProvider(
     impl: (req: Record<string, unknown>) => TraceV2Result & LensClosureExtras | Promise<TraceV2Result & LensClosureExtras>,
+    walkImpl?: (req: Record<string, unknown>) => TraceV2Result & LensClosureExtras | Promise<TraceV2Result & LensClosureExtras>,
 ) {
-    const traceClosure = vi.fn(async (req: Record<string, unknown>) => impl(req))
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) => (
+        isWalkOp(req) ? (walkImpl ? walkImpl(req) : res({ focus: { urn: String(req.urn), level: 0, entityType: '' } })) : impl(req)
+    ))
     return { provider: { traceClosure } as unknown as GraphDataProvider, traceClosure }
 }
+
+/** Coarse paint + drill calls only — the background walk's own follow-ups are
+ *  counted separately, because their number is a property of the estate. */
+const paintCalls = (fn: { mock: { calls: unknown[][] } }): Record<string, unknown>[] =>
+    fn.mock.calls.map(c => c[0] as Record<string, unknown>).filter(r => !isWalkOp(r))
+
+/** A background walk that never comes back, so the session stays in
+ *  `walking` — which is where a DRILL still means something. (Once the walk
+ *  completes the model holds everything and opening a card is free, which is
+ *  its own test.) */
+const heldWalk = () => new Promise<TraceV2Result & LensClosureExtras>(() => {})
 
 // ── the first paint ─────────────────────────────────────────────────────
 
@@ -97,13 +121,12 @@ describe('useTraceDriver — the coarse first paint', () => {
         const { provider, traceClosure } = makeProvider(() => coarseResponse())
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
 
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
 
-        expect(traceClosure).toHaveBeenCalledTimes(1)
-        expect(traceClosure.mock.calls[0][0]).toEqual({
+        expect(paintCalls(traceClosure)).toEqual([{
             urn: FOCUS, direction: 'both', upstreamDepth: 1, downstreamDepth: 1,
             grain: 'coarse',
-        })
+        }])
         expect(result.current.status).toBe('done')
         expect(result.current.model?.nodes.map(n => n.urn).sort())
             .toEqual(['F', 'P', 'f1', 'proot', 'root'])
@@ -121,10 +144,10 @@ describe('useTraceDriver — the coarse first paint', () => {
     it('counts the focus as already drilled — its contents came with the paint', async () => {
         const { provider, traceClosure } = makeProvider(() => coarseResponse())
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
 
         act(() => result.current.drill(FOCUS))
-        expect(traceClosure).toHaveBeenCalledTimes(1)
+        expect(paintCalls(traceClosure)).toHaveLength(1)
     })
 
     it('idles with no focus, and asks nothing', () => {
@@ -148,11 +171,11 @@ describe('useTraceDriver — cursors are followed, never surfaced', () => {
             return res({ nodes: [gn(`c${i}`)], seedCursor: cursor } as Partial<TraceV2Result & LensClosureExtras>)
         })
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
 
-        expect(traceClosure).toHaveBeenCalledTimes(3)
-        expect(traceClosure.mock.calls[1][0]).toMatchObject({ seedCursor: 's:a' })
-        expect(traceClosure.mock.calls[2][0]).toMatchObject({ seedCursor: 's:b' })
+        expect(paintCalls(traceClosure)).toHaveLength(3)
+        expect(paintCalls(traceClosure)[1]).toMatchObject({ seedCursor: 's:a' })
+        expect(paintCalls(traceClosure)[2]).toMatchObject({ seedCursor: 's:b' })
     })
 
     it('pages one anchor`s edges through the frontier cursor, one direction at a time', async () => {
@@ -164,10 +187,10 @@ describe('useTraceDriver — cursors are followed, never surfaced', () => {
             } as Partial<TraceV2Result & LensClosureExtras>)
         })
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
 
-        expect(traceClosure).toHaveBeenCalledTimes(2)
-        expect(traceClosure.mock.calls[1][0]).toEqual({
+        expect(paintCalls(traceClosure)).toHaveLength(2)
+        expect(paintCalls(traceClosure)[1]).toEqual({
             urn: 'hub', direction: 'upstream', upstreamDepth: 1, downstreamDepth: 0,
             afterCursor: 'e:0', grain: 'coarse',
         })
@@ -179,10 +202,12 @@ describe('useTraceDriver — cursors are followed, never surfaced', () => {
     it('leaves a cursor-less boundary alone — that one resumes by re-rooting', async () => {
         const { provider, traceClosure } = makeProvider(() => coarseResponse())
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
 
-        expect(traceClosure).toHaveBeenCalledTimes(1)
-        expect(result.current.model?.frontierUp.map(f => f.urn)).toEqual(['P'])
+        expect(paintCalls(traceClosure)).toHaveLength(1)
+        // The BACKGROUND walk re-roots on it instead — that is its job — and
+        // the entry clears when it does.
+        expect(traceClosure.mock.calls.some(c => isWalkOp(c[0] as Record<string, unknown>))).toBe(true)
     })
 })
 
@@ -190,27 +215,30 @@ describe('useTraceDriver — cursors are followed, never surfaced', () => {
 
 describe('useTraceDriver — drill on expand', () => {
     it('fetches the card`s contents once, and never again', async () => {
-        const { provider, traceClosure } = makeProvider(req =>
-            req.drill ? drillResponse() : coarseResponse())
+        const { provider, traceClosure } = makeProvider(
+            req => (req.drill ? drillResponse() : coarseResponse()), heldWalk,
+        )
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('walking'))
 
         await act(async () => { result.current.drill('P') })
         await waitFor(() => expect(result.current.inFlight.size).toBe(0))
 
-        expect(traceClosure).toHaveBeenCalledTimes(2)
-        expect(traceClosure.mock.calls[1][0]).toEqual({
+        expect(paintCalls(traceClosure)).toHaveLength(2)
+        expect(paintCalls(traceClosure)[1]).toEqual({
             urn: 'P', direction: 'both', upstreamDepth: 1, downstreamDepth: 1, drill: true,
         })
 
         await act(async () => { result.current.drill('P') })
-        expect(traceClosure).toHaveBeenCalledTimes(2)
+        expect(paintCalls(traceClosure)).toHaveLength(2)
     })
 
     it('merges into the SAME model — the coarse picture is not replaced', async () => {
-        const { provider } = makeProvider(req => req.drill ? drillResponse() : coarseResponse())
+        const { provider } = makeProvider(
+            req => (req.drill ? drillResponse() : coarseResponse()), heldWalk,
+        )
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('walking'))
 
         await act(async () => { result.current.drill('P') })
         await waitFor(() => expect(result.current.inFlight.size).toBe(0))
@@ -230,9 +258,9 @@ describe('useTraceDriver — drill on expand', () => {
             return new Promise<TraceV2Result & LensClosureExtras>(resolve => {
                 release = () => resolve(drillResponse())
             })
-        })
+        }, heldWalk)
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('walking'))
 
         act(() => { result.current.drill('P') })
         await waitFor(() => expect([...result.current.inFlight]).toEqual(['P']))
@@ -248,9 +276,11 @@ describe('useTraceDriver — drill on expand', () => {
 
 describe('useTraceDriver — completePairs', () => {
     it('will not vouch for a pair whose partner has never been opened', async () => {
-        const { provider } = makeProvider(req => req.drill ? drillResponse() : coarseResponse())
+        const { provider } = makeProvider(
+            req => (req.drill ? drillResponse() : coarseResponse()), heldWalk,
+        )
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('walking'))
 
         // Nothing is complete yet — there is no raw evidence at all, and P is
         // a closed card that says it holds one thing nobody has asked for.
@@ -258,9 +288,11 @@ describe('useTraceDriver — completePairs', () => {
     })
 
     it('flips the pair once BOTH cones are leaf-or-drilled', async () => {
-        const { provider } = makeProvider(req => req.drill ? drillResponse() : coarseResponse())
+        const { provider } = makeProvider(
+            req => (req.drill ? drillResponse() : coarseResponse()), heldWalk,
+        )
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('walking'))
 
         await act(async () => { result.current.drill('P') })
         await waitFor(() => expect(result.current.inFlight.size).toBe(0))
@@ -323,19 +355,27 @@ describe('useTraceDriver — sessions', () => {
     it('aborts the previous session`s controller when the focus changes', async () => {
         const seen: Array<AbortSignal | undefined> = []
         const traceClosure = vi.fn(async (
-            _req: Record<string, unknown>, opts?: { signal?: AbortSignal },
-        ) => { seen.push(opts?.signal); return coarseResponse() })
+            req: Record<string, unknown>, opts?: { signal?: AbortSignal },
+        ) => {
+            // Only the COARSE paint's signal — the background walk's ops carry
+            // the same one, and counting them would confuse "session 1 was
+            // aborted" with "session 1 had more requests".
+            if (!isWalkOp(req)) seen.push(opts?.signal)
+            return isWalkOp(req)
+                ? res({ focus: { urn: String(req.urn), level: 0, entityType: '' } })
+                : coarseResponse()
+        })
         const provider = { traceClosure } as unknown as GraphDataProvider
 
         const { result, rerender } = renderHook(
             ({ urn }: { urn: string }) => useTraceDriver(urn, provider),
             { initialProps: { urn: FOCUS } },
         )
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
         const first = seen[0]
 
         rerender({ urn: 'OTHER' })
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
 
         expect(first?.aborted).toBe(true)
         expect(seen[1]?.aborted).toBe(false)
@@ -344,7 +384,7 @@ describe('useTraceDriver — sessions', () => {
     it('keeps the model`s identity across renders nothing happened in', async () => {
         const { provider } = makeProvider(() => coarseResponse())
         const { result, rerender } = renderHook(() => useTraceDriver(FOCUS, provider))
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
 
         const model = result.current.model
         rerender()
@@ -370,9 +410,9 @@ describe('useTraceDriver — failure and retry', () => {
 
         fail = false
         act(() => result.current.retry())
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
         expect(result.current.error).toBeNull()
-        expect(traceClosure).toHaveBeenCalledTimes(2)
+        expect(paintCalls(traceClosure)).toHaveLength(2)
     })
 
     it('a failed DRILL says so and leaves the card re-openable', async () => {
@@ -381,21 +421,217 @@ describe('useTraceDriver — failure and retry', () => {
             if (!req.drill) return coarseResponse()
             if (failDrill) throw new Error('drill refused')
             return drillResponse()
-        })
+        }, heldWalk)
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
-        await waitFor(() => expect(result.current.phase).toBe('ready'))
+        await waitFor(() => expect(result.current.phase).toBe('walking'))
 
         await act(async () => { result.current.drill('P') })
         await waitFor(() => expect(result.current.error).toBe('drill refused'))
         expect(result.current.status).toBe('error')
         // The coarse picture is still on screen — a failed expansion is not a
         // failed trace.
-        expect(result.current.phase).toBe('ready')
+        expect(result.current.phase).toBe('walking')
         expect(result.current.drilled.has('P')).toBe(false)
 
         failDrill = false
         await act(async () => { result.current.drill('P') })
-        await waitFor(() => expect(result.current.status).toBe('done'))
-        expect(traceClosure).toHaveBeenCalledTimes(3)
+        await waitFor(() => expect(result.current.drilled.has('P')).toBe(true))
+        expect(paintCalls(traceClosure)).toHaveLength(3)
+    })
+})
+
+/** A walk fixture with an END to it. A fake that invents a fresh node per
+ *  request describes an INFINITE graph, and an engine told to walk the entire
+ *  lineage will duly try to (measured: the vitest worker runs out of memory).
+ *  Real graphs are finite; so is this: P → q1 → q2 → q3, and nothing beyond. */
+function boundedChain(): (req: Record<string, unknown>) => TraceV2Result & LensClosureExtras {
+    const next: Record<string, string | null> = { P: 'q1', q1: 'q2', q2: 'q3', q3: null }
+    return (req) => {
+        const from = String(req.urn)
+        const child = next[from]
+        return child
+            ? res({
+                focus: { urn: from, level: 0, entityType: '' },
+                nodes: [gn(child)],
+                upstreamUrns: new Set([child]),
+                frontierUp: [{ urn: child, totalCount: null, nextCursor: null }],
+            } as Partial<TraceV2Result & LensClosureExtras>)
+            : res({ focus: { urn: from, level: 0, entityType: '' } })
+    }
+}
+
+// ── the background walk ─────────────────────────────────────────────────
+//
+// The second ruling: "ensure it covers the ENTIRE walk like Lens Full Flow.
+// We must see the entire lineage. We must not apply any constraints." So the
+// coarse paint buys the first frame and the walk behind it buys the answer.
+// (That the two engines END in the same place is `traceWalkParity.test.ts`;
+// these are the phase, priority and failure rules around it.)
+
+describe('useTraceDriver — the walk behind the paint', () => {
+    it('hands over coarse → walking → complete, and follows every boundary', async () => {
+        const seen: string[] = []
+        const { provider } = makeProvider(() => coarseResponse(), req => {
+            seen.push(String(req.urn))
+            return res({ focus: { urn: String(req.urn), level: 0, entityType: '' } })
+        })
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+
+        // `walking` is not asserted by waiting for it — on a fixture this
+        // small the walk is over within a tick, and a test that waits for a
+        // transient state is a test that flakes. The phases either side of it
+        // are what a reader can see, and the drill-priority test below holds
+        // the walk open to look at `walking` directly.
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
+        // THE FOCUS FIRST, then the boundary the paint left behind — both
+        // without anyone asking. The focus's own fine hop is not optional: the
+        // coarse paint answered it at CARD grain, so the raw hops into its own
+        // contents have not been asked for yet.
+        expect(seen).toEqual([FOCUS, 'P'])
+    })
+
+    it('re-roots on a cursor-less boundary and PAGES one that carries a cursor', async () => {
+        const asked: Record<string, unknown>[] = []
+        const { provider } = makeProvider(
+            () => res({
+                nodes: [gn(FOCUS), gn('plain'), gn('hub')],
+                upstreamUrns: new Set(['plain', 'hub']),
+                frontierUp: [
+                    { urn: 'plain', totalCount: null, nextCursor: null },
+                    { urn: 'hub', totalCount: null, nextCursor: 'e:9' },
+                ],
+            } as Partial<TraceV2Result & LensClosureExtras>),
+            req => { asked.push(req); return res({ focus: { urn: String(req.urn), level: 0, entityType: '' } }) },
+        )
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
+
+        const plain = asked.find(r => r.urn === 'plain')!
+        const hub = asked.find(r => r.urn === 'hub')!
+        // A boundary that ran out of DEPTH is re-rooted, seeded with itself so
+        // the server resolves it down to whatever carries lineage beneath it.
+        expect(plain).toMatchObject({ direction: 'upstream', upstreamDepth: 1, downstreamDepth: 0, seedUrns: ['plain'] })
+        expect(plain.afterCursor).toBeUndefined()
+        // One that was half-read is PAGED, verbatim.
+        expect(hub).toMatchObject({ afterCursor: 'e:9', direction: 'upstream' })
+        expect(hub.seedUrns).toBeUndefined()
+        // Neither carries a grain: this is the fine walk, not the paint.
+        expect(plain.grain).toBeUndefined()
+        expect(hub.grain).toBeUndefined()
+    })
+
+    it('a drill jumps the queue: the walk opens no wave while one is in flight', async () => {
+        let releaseDrill: (() => void) | null = null
+        const order: string[] = []
+        const { provider } = makeProvider(
+            req => {
+                if (!req.drill) return coarseResponse()
+                order.push('drill:start')
+                return new Promise<TraceV2Result & LensClosureExtras>(resolve => {
+                    releaseDrill = () => { order.push('drill:end'); resolve(drillResponse()) }
+                })
+            },
+            (() => {
+                const chain = boundedChain()
+                // Slow hops, so the walk is still going when the reader opens
+                // something — which is the only moment priority means anything.
+                return async (req: Record<string, unknown>) => {
+                    order.push(`walk:${String(req.urn)}`)
+                    return new Promise<TraceV2Result & LensClosureExtras>(resolve =>
+                        setTimeout(() => resolve(chain(req)), 30))
+                }
+            })(),
+        )
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+        await waitFor(() => expect(result.current.phase).toBe('walking'))
+
+        act(() => { result.current.drill('P') })
+        await waitFor(() => expect(result.current.inFlight.size).toBe(1))
+        const duringDrill = order.filter(o => o.startsWith('walk:')).length
+
+        await act(async () => { releaseDrill?.() })
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
+
+        // Nothing new was fired between the drill starting and finishing…
+        expect(order.filter(o => o.startsWith('walk:')).length).toBeGreaterThan(duringDrill)
+        // …and the walk carried on afterwards.
+        expect(order).toContain('drill:end')
+    })
+
+    it('once complete, opening a card costs nothing — the walk already went there', async () => {
+        const { provider, traceClosure } = makeProvider(req => req.drill ? drillResponse() : coarseResponse())
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
+        const settled = traceClosure.mock.calls.length
+
+        act(() => { result.current.drill('P') })
+        expect(traceClosure.mock.calls.length).toBe(settled)
+        // Marked as known, so the row's chevron can retract if there is in
+        // fact nothing on this lineage inside it.
+        expect(result.current.drilled.has('P')).toBe(true)
+    })
+
+    it('a failed hop stops the walk, and retry resumes it without repainting', async () => {
+        let fail = true
+        const { provider, traceClosure } = makeProvider(() => coarseResponse(), req => {
+            if (fail) throw new Error('hop refused')
+            return res({
+                focus: { urn: String(req.urn), level: 0, entityType: '' },
+                nodes: [gn('further')],
+            } as Partial<TraceV2Result & LensClosureExtras>)
+        })
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
+        expect(result.current.error).toBe('hop refused')
+        expect(result.current.status).toBe('error')
+        // The board it did reach is still there.
+        expect(result.current.model?.nodes.length).toBeGreaterThan(0)
+
+        fail = false
+        const painted = paintCalls(traceClosure).length
+        act(() => result.current.retry())
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
+
+        expect(result.current.error).toBeNull()
+        expect(result.current.model?.nodes.some(n => n.urn === 'further')).toBe(true)
+        // Retry re-armed the WALK. Re-painting would have thrown away a
+        // picture the reader is already reading.
+        expect(paintCalls(traceClosure)).toHaveLength(painted)
+    })
+
+    it('never re-fires an op that made no progress', async () => {
+        // A server that keeps naming a boundary it has already answered — the
+        // shape that looped 100,000 times before the progress rule.
+        const { provider, traceClosure } = makeProvider(() => coarseResponse(), req => res({
+            focus: { urn: String(req.urn), level: 0, entityType: '' },
+            frontierUp: [{ urn: 'P', totalCount: null, nextCursor: null }],
+        } as Partial<TraceV2Result & LensClosureExtras>))
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
+        expect(traceClosure.mock.calls.length).toBeLessThan(10)
+    })
+
+    it('leaving mid-walk stops it dead', async () => {
+        const chain = boundedChain()
+        const { provider, traceClosure } = makeProvider(
+            () => coarseResponse(),
+            // Slow enough that the reader can leave while a hop is in flight,
+            // which is the only moment this rule is about.
+            async req => new Promise<TraceV2Result & LensClosureExtras>(resolve =>
+                setTimeout(() => resolve(chain(req)), 40)),
+        )
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+        await waitFor(() => expect(result.current.phase).toBe('walking'))
+        await waitFor(() => expect(traceClosure.mock.calls.length).toBeGreaterThan(1))
+
+        act(() => result.current.abort())
+        const stopped = traceClosure.mock.calls.length
+        await new Promise(resolve => setTimeout(resolve, 200))
+
+        expect(result.current.phase).toBe('idle')
+        expect(result.current.model).toBeNull()
+        expect(traceClosure.mock.calls.length).toBe(stopped)
     })
 })

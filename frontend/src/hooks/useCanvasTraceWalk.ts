@@ -24,11 +24,12 @@
  *
  * THE `FullWalkStatus` SHAPE SURVIVES, because the dock and the capsule read
  * it — but two of its four fields are now permanently false. `budgetHit` is
- * the ceiling the ruling removed ("no limits"): there is no budget to grant,
- * so "Keep walking" has nothing to do and `continueWalk` is a no-op. And
- * `stalled` was "every frontier op failed"; a lazy session has no standing
- * frontier ops to fail. What remains is `walking` (the coarse fetch, or any
- * drill in flight) and `exhausted` (the coarse picture has landed).
+ * the ceiling the ruling removed ("we must not apply any constraints"): there
+ * is nothing to grant, so "Keep walking" has nothing to do and `continueWalk`
+ * is a no-op. `stalled` is false because a walk that stopped on broken hops
+ * reports an ERROR the dock's retrace re-arms, rather than a fourth state
+ * nobody acts on. What remains is `walking` (the coarse paint, the background
+ * walk, or an expansion in flight) and `exhausted` (the flow is complete).
  */
 import { useCallback, useMemo, useState } from 'react'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
@@ -62,13 +63,19 @@ export interface CanvasTraceWalk {
     /** The dock's up/down counts are FLOORS while anything is unfetched. */
     countsAreFloors: boolean
     phase: TracePhase
+    /** Cards whose contents are in the model — the chevron reads this to
+     *  tell "nothing inside" from "not asked yet". */
+    drilled: ReadonlySet<string>
+    /** Requests this session has issued, for the capsule's narration. */
+    requests: number
 }
 
 export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTraceWalk {
     const [tracedUrn, setTracedUrn] = useState<string | null>(null)
     const driver = useTraceDriver(tracedUrn, provider)
 
-    const { model, phase, status, error, inFlight, completePairs, drill, retry, abort } = driver
+    const { model, phase, status, error, inFlight, completePairs, drilled, requests } = driver
+    const { drill, retry, abort } = driver
 
     // The walk hook's contract: a session always has an entry, and its model
     // is non-null from the first render (empty until the coarse response
@@ -88,8 +95,10 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
     const fullWalkStatus = useMemo<FullWalkStatus | null>(() => (
         tracedUrn
             ? {
-                walking: phase === 'coarse' || inFlight.size > 0,
-                exhausted: phase === 'ready' && inFlight.size === 0,
+                // The coarse paint, the background walk behind it, and any
+                // expansion the reader asked for — all of it is "walking".
+                walking: phase === 'coarse' || phase === 'walking' || inFlight.size > 0,
+                exhausted: phase === 'complete' && inFlight.size === 0,
                 // See the file header: the ruling removed the budget, and a
                 // lazy session has no standing frontier ops to stall on.
                 budgetHit: false,
@@ -98,11 +107,22 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
             : null
     ), [tracedUrn, phase, inFlight])
 
-    // Every partner arrives as a frontier boundary — this walk asked ONE hop,
-    // so what lies past it is unknown — and drilling one clears its entry. So
-    // an empty frontier is exactly "nothing left unasked", and a non-empty one
-    // is exactly when the counts are floors.
-    const countsAreFloors = (model?.frontierUp.length ?? 0) + (model?.frontierDown.length ?? 0) > 0
+    // ONCE THE WALK IS COMPLETE, EVERYTHING IS KNOWN. The background walk
+    // reaches every lineage-carrying descendant of everything on the board,
+    // so at `complete` no card is merely "not asked yet" any more — which is
+    // what lets the chevron retract from a card the flow does not actually
+    // run through. Before that, only the cards actually fetched.
+    const drilledForCards = useMemo<ReadonlySet<string>>(() => (
+        phase === 'complete' && model
+            ? new Set(model.nodes.map(n => n.urn))
+            : drilled
+    ), [phase, model, drilled])
+
+    // FLOORS UNTIL THE WALK IS DONE. The coarse paint has counted its hop-1
+    // partners and nothing else, and the background walk is still finding
+    // more — so every count is a lower bound until the flow is exhausted, at
+    // which point it is exact.
+    const countsAreFloors = phase === 'coarse' || phase === 'walking' 
 
     const exit = useCallback(() => {
         setTracedUrn(null)
@@ -130,5 +150,7 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         completePairs,
         countsAreFloors,
         phase,
+        drilled: drilledForCards,
+        requests,
     }
 }

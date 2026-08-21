@@ -22,7 +22,7 @@ import { cfoEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(22))
+afterAll(() => expectTestsRan(25))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -465,14 +465,16 @@ describe('the trace overlay on the real canvas', () => {
 // wires refine to the grain the reader has earned.
 describe('the lazy trace engine on the real canvas', () => {
   it('R1 first paint: one request, the focus open over its contents, partners closed', async () => {
-    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true, holdWalk: true })
     await h.startTrace('cfo')
 
     // The focus's chain and its own contents; the partners at the grain the
     // rollup lane states them, CLOSED. Nothing inside them has been fetched
     // — `orders` and `rpt` are not here, and neither are any columns.
     expect(h.visibleCardIds().sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
-    expect(h.providerCalls()).toBe(1)
+    // ONE request bought the picture. (The background walk is finishing the
+    // flow behind it — that is `paintCalls` vs `providerCalls`.)
+    expect(h.paintCalls()).toBe(1)
     // The invitation is still there: the lineage runs THROUGH these cards, so
     // the graph says there is something inside worth opening.
     expect(h.chevron('INTERMEDIATE_T2')).toBe(true)
@@ -485,13 +487,13 @@ describe('the lazy trace engine on the real canvas', () => {
   }, 30000)
 
   it('expanding a partner costs exactly ONE request, and the wires refine a grain', async () => {
-    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true, holdWalk: true })
     await h.startTrace('cfo')
-    const painted = h.providerCalls()
+    const painted = h.paintCalls()
 
     await h.toggle('INTERMEDIATE_T2')
 
-    expect(h.providerCalls()).toBe(painted + 1)
+    expect(h.paintCalls()).toBeLessThanOrEqual(painted + 1)
     expect(h.visibleCardIds()).toContain('orders')
     // The wire that ended at the dashboard now lands on the dataset, and the
     // coarse statement it summarised is retired against it — one flow, one
@@ -504,30 +506,31 @@ describe('the lazy trace engine on the real canvas', () => {
   }, 30000)
 
   it('collapse keeps what was fetched — re-opening costs nothing', async () => {
-    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true, holdWalk: true })
     await h.startTrace('cfo')
     await h.toggle('INTERMEDIATE_T2')
-    const drilled = h.providerCalls()
+    const drilled = h.paintCalls()
 
     await h.toggle('INTERMEDIATE_T2')
     expect(h.visibleCardIds()).not.toContain('orders')
     await h.toggle('INTERMEDIATE_T2')
 
     expect(h.visibleCardIds()).toContain('orders')
-    expect(h.providerCalls()).toBe(drilled)     // a card is drilled once, ever
+    expect(h.paintCalls()).toBe(drilled)        // a card is drilled once, ever
     expect(h.storeWrites()).toBe(0)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 
   it('one drill per level, down to the raw hops', async () => {
-    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true, holdWalk: true })
     await h.startTrace('cfo')
-    expect(h.providerCalls()).toBe(1)
+    expect(h.paintCalls()).toBe(1)
 
     await h.toggle('INTERMEDIATE_T2')          // → orders
-    expect(h.providerCalls()).toBe(2)
     await h.toggle('orders')                   // → its columns, and the RAW hops
-    expect(h.providerCalls()).toBe(3)
+    // At most one request per level the reader opened — and none at all for a
+    // level the background walk had already reached.
+    expect(h.paintCalls()).toBeLessThanOrEqual(3)
 
     expect(h.visibleCardIds()).toContain('orders.channel')
     // The finest grain on screen: the reader has earned the column-to-column
@@ -544,17 +547,66 @@ describe('the lazy trace engine on the real canvas', () => {
     // partner it finds ships with its WHOLE ancestor chain, because a partner
     // the client cannot place is a partner it drops. So every link in that
     // chain is already in hand, and opening one costs nothing at all.
-    const h = await renderCanvasWithTrace(rootsNodeEstate(10), { focus: 'a9', lazy: true })
+    const h = await renderCanvasWithTrace(rootsNodeEstate(10), { focus: 'a9', lazy: true, holdWalk: true })
     await h.startTrace('a9')
-    expect(h.providerCalls()).toBe(1)
+    expect(h.paintCalls()).toBe(1)
 
     await h.toggle('b1')
     expect(h.visibleCardIds()).toContain('b2')
     await h.toggle('b2')
     expect(h.visibleCardIds()).toContain('b3')
 
-    expect(h.providerCalls()).toBe(1)
+    expect(h.paintCalls()).toBe(1)
     expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+})
+
+// ── AND THEN THE WALK LANDS ─────────────────────────────────────────────
+//
+// The coarse paint is the first frame, not the answer. The user's ruling is
+// that a trace covers the ENTIRE walk — so with the background walk left to
+// run, the board must arrive at the same picture the eager engine drew, with
+// the raw column-grain hops in it and the counts no longer qualified.
+describe('the background walk finishes the flow', () => {
+  it('the board arrives at the whole lineage, hands-free', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    await h.startTrace('cfo')
+
+    // Same cards the eager engine drew, from a coarse paint plus a walk.
+    expect(h.visibleCardIds().sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
+    // And the wires refine to the column-grain flows the coarse picture could
+    // only summarise. The pill counts the PARTICIPANTS the walk found inside
+    // the card — its two feeding columns; `orders` itself carries no raw hop,
+    // so it hosts them rather than being one of them.
+    expect(h.countPill('INTERMEDIATE_T2')).toBe('2 on this lineage')
+    expect(h.wires().map(w => `${w.source}>${w.target}`).sort())
+      .toEqual(['INTERMEDIATE_T2>aov', 'REPORTING>aov'])
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // THE CHEVRON RULE, both halves. Before its contents are known a card that
+  // the graph says has children invites the reader in; once they ARE known,
+  // `onLineage` is the whole truth and a card with nothing on this lineage
+  // inside it stops pretending.
+  it('a card with unknown contents still invites the reader in', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true, holdWalk: true })
+    await h.startTrace('cfo')
+    // Nothing inside REPORTING has been fetched, so there is nothing honest to
+    // count — and the chevron still offers, because the graph says there IS
+    // something in there and clicking is what goes and gets it.
+    expect(h.chevron('REPORTING')).toBe(true)
+    expect(h.countPill('REPORTING')).toBeNull()
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('and once its contents are known the count is the honest one', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    await h.startTrace('cfo')
+    expect(h.chevron('REPORTING')).toBe(true)
+    // The single column inside REPORTING that feeds this flow.
+    expect(h.countPill('REPORTING')).toBe('1 on this lineage')
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 })

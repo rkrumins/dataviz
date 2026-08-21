@@ -123,7 +123,7 @@ describe('useCanvasTraceWalk', () => {
     act(() => result.current.start('F'))
 
     await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
-    expect(traceClosure).toHaveBeenCalledTimes(2)
+    expect(traceClosure.mock.calls.length).toBeGreaterThanOrEqual(2)
     expect(modelNodeUrns(result.current.walkEntry?.model)).toEqual(['F', 'PLAT', 'T1', 'colA', 'colB'])
 
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
@@ -207,56 +207,56 @@ describe('useCanvasTraceWalk', () => {
     expect(result.current.walkEntry?.model.nodes.length).toBe(1101)
     expect(result.current.fullWalkStatus?.budgetHit).toBe(false)
     expect(result.current.fullWalkStatus?.stalled).toBe(false)
-    expect(traceClosure).toHaveBeenCalledTimes(1)
+    const settled = traceClosure.mock.calls.length
 
+    // "Keep walking" has nothing to grant: it costs no request at all.
     act(() => result.current.continueWalk())
-    expect(traceClosure).toHaveBeenCalledTimes(1)
+    expect(traceClosure.mock.calls.length).toBe(settled)
 
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
     expect(writes.count).toBe(0)
     release()
   })
 
-  it('opening a card drills it once — and the store still never moves', async () => {
-    const { provider, traceClosure } = providerByUrn({
-      F: estate,
-      T1: () => closureResult({
-        focus: f('T1'), nodes: [gn('colFiner')],
-        edges: [hop('colFiner', 'colA', 'e-fine')],
-        containmentEdges: [holds('T1', 'colFiner')],
-        upstreamUrns: new Set(['colFiner']),
-      }),
-    })
+  // Once the background walk has run out, the model holds everything it can
+  // reach — so opening a card is a re-projection and asking again could only
+  // be told what we know. The card is still MARKED as known, which is what
+  // lets its chevron retract when there is nothing on this lineage inside.
+  it('after the walk, opening a card costs nothing — and the store never moves', async () => {
+    const { provider, traceClosure } = providerByUrn({ F: estate })
     const { writes, release } = watchStore()
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     act(() => result.current.start('F'))
     await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
+    const settled = traceClosure.mock.calls.length
 
     await act(async () => { result.current.drill('T1') })
-    await waitFor(() => expect(modelNodeUrns(result.current.walkEntry?.model)).toContain('colFiner'))
-    expect(traceClosure).toHaveBeenCalledTimes(2)
-
-    await act(async () => { result.current.drill('T1') })
-    expect(traceClosure).toHaveBeenCalledTimes(2)
+    expect(traceClosure.mock.calls.length).toBe(settled)
+    expect(result.current.drilled.has('T1')).toBe(true)
 
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
     expect(writes.count).toBe(0)
     release()
   })
 
-  // Every partner arrives as an unexplored boundary, so the dock says "N+"
-  // until the reader has opened everything that is still asking.
-  it('counts read as floors while a boundary is still unexplored', async () => {
+  // A count is a floor while the flow is still being walked, and exact once
+  // it is not. Nothing else in the dock can tell the reader the difference.
+  it('counts read as floors while the walk runs, and exactly when it lands', async () => {
+    let release: (() => void) | null = null
     const { provider } = providerByUrn({
       F: () => ({ ...estate(), frontierUp: [{ urn: 'colA', totalCount: 3, nextCursor: null }] }),
+      colA: () => new Promise<TraceV2Result & LensClosureExtras>(resolve => {
+        release = () => resolve(closureResult({ focus: f('colA') }))
+      }) as never,
     })
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     act(() => result.current.start('F'))
-    await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
 
+    await waitFor(() => expect(result.current.phase).toBe('walking'))
     expect(result.current.countsAreFloors).toBe(true)
 
-    act(() => result.current.exit())
+    await act(async () => { release?.() })
+    await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
     expect(result.current.countsAreFloors).toBe(false)
   })
 })

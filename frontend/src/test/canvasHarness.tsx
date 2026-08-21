@@ -86,10 +86,13 @@ export interface TraceCanvasHarness {
   typeChildSearch(query: string): Promise<boolean>
   /** Click a card's expand chevron. */
   toggle(id: string): Promise<void>
-  /** How many closure fetches the provider has served. The number a
-   *  view-only control must never move: direction, view depth and expansion
-   *  are all re-projections of the walk the session already holds. */
+  /** How many closure fetches the provider has served, background walk
+   *  included. The number a view-only control must never move. */
   providerCalls(): number
+  /** How many of those the READER caused: the coarse first paint and one
+   *  drill per card opened. The background walk finishing the flow behind
+   *  them is not an expansion's cost. */
+  paintCalls(): number
   /** Click one of the dock's direction radios. */
   setDirection(dir: 'up' | 'both' | 'down'): Promise<void>
   /** Open the header's Depth chip and click a preset by label. */
@@ -252,7 +255,12 @@ function lazyServer(estate: TraceEstate) {
     kids.set(c.sourceUrn, [...(kids.get(c.sourceUrn) ?? []), c.targetUrn])
   }
   const lineage = estate.model.lineageEdges
+  // The FINE walk sees only real hops: the engine strips :AGGREGATED out of
+  // the lineage types, because walking a rollup counts one flow once per grain
+  // above it. The coarse paint is where rollups belong.
+  const raw = lineage.filter(e => e.kind !== 'rollup')
   const touches = (urn: string) => lineage.some(e => e.sourceUrn === urn || e.targetUrn === urn)
+  const touchesRaw = (urn: string) => raw.some(e => e.sourceUrn === urn || e.targetUrn === urn)
   const descendants = (urn: string): string[] => {
     const out: string[] = []
     const stack = [...(kids.get(urn) ?? [])]
@@ -272,7 +280,50 @@ function lazyServer(estate: TraceEstate) {
     return out
   }
 
-  return (anchor: string, drill: boolean): TraceV2Result & LensClosureExtras => {
+  /** The BACKGROUND WALK's op: one fine hop from a frontier entry, seeded with
+   *  the node itself so the server resolves it down to whatever carries
+   *  lineage beneath it. Excludes are PRE-VISITED — that is what stops the
+   *  walk being handed rings it has already drained. */
+  const fine = (
+    seedUrns: string[], dir: 'up' | 'down', exclude: string[],
+  ): TraceV2Result & LensClosureExtras => {
+    const seeds = new Set<string>()
+    for (const u of seedUrns) {
+      if (touchesRaw(u)) seeds.add(u)
+      for (const d of descendants(u)) if (touchesRaw(d)) seeds.add(d)
+    }
+    const visited = new Set<string>([...seeds, ...exclude])
+    const found = new Set<string>()
+    const edges = raw.filter(e => (dir === 'up' ? seeds.has(e.targetUrn) : seeds.has(e.sourceUrn)))
+    for (const e of edges) {
+      const other = dir === 'up' ? e.sourceUrn : e.targetUrn
+      if (!visited.has(other)) { visited.add(other); found.add(other) }
+    }
+    const ship = new Set<string>([...seeds, ...found])
+    for (const u of [...ship]) for (const a of chainOf(u)) ship.add(a)
+    const entries = [...found].map(urn => ({ urn, totalCount: null, nextCursor: null }))
+    return {
+      focus: { urn: seedUrns[0] ?? '', level: 0, entityType: '' },
+      nodes: [...ship].map(u => byUrn.get(u)).filter(Boolean),
+      edges: edges.map(e => ({
+        id: e.id ?? `${e.sourceUrn}>${e.targetUrn}`,
+        sourceUrn: e.sourceUrn, targetUrn: e.targetUrn, edgeType: e.edgeType,
+        properties: e.weight === null || e.weight === undefined ? {} : { weight: e.weight },
+      })),
+      containmentEdges: estate.model.containmentEdges.filter(
+        c => ship.has(c.sourceUrn) && ship.has(c.targetUrn),
+      ),
+      upstreamUrns: dir === 'up' ? found : new Set<string>(),
+      downstreamUrns: dir === 'down' ? found : new Set<string>(),
+      effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+      truncated: false, truncationReason: null,
+      frontierUp: dir === 'up' ? entries : [],
+      frontierDown: dir === 'down' ? entries : [],
+      seedTruncated: false, seedCursor: null,
+    } as unknown as TraceV2Result & LensClosureExtras
+  }
+
+  const answer = (anchor: string, drill: boolean): TraceV2Result & LensClosureExtras => {
     const children = contributing(anchor)
     let anchors = drill ? children : [anchor]
     let edges = lineage.filter(e => anchors.includes(e.sourceUrn) || anchors.includes(e.targetUrn))
@@ -310,6 +361,16 @@ function lazyServer(estate: TraceEstate) {
       seedTruncated: false, seedCursor: null,
     } as unknown as TraceV2Result & LensClosureExtras
   }
+
+  return { answer, fine }
+}
+
+/** A request from the BACKGROUND WALK rather than from the reader: a plain
+ *  fine closure re-rooted on a frontier entry, never `grain:'coarse'`. */
+function isWalkOp(req: {
+  grain?: string; drill?: boolean; seedUrns?: string[]; afterCursor?: string
+}): boolean {
+  return !req.grain && !req.drill && (!!req.seedUrns?.length || !!req.afterCursor)
 }
 
 /** parent urn → child urns, from the estate's containment. */
@@ -330,13 +391,14 @@ function childrenOf(estate: TraceEstate): Map<string, string[]> {
 function stubProvider(
   estate: TraceEstate,
   focusUrn: string,
-  calls: { traceClosure: number },
+  calls: { traceClosure: number; paint: number },
   gate?: { promise: Promise<void> },
   stall?: boolean,
   lazy?: boolean,
+  holdWalk?: boolean,
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
-  const answerLazily = lazyServer(estate)
+  const lazily = lazyServer(estate)
   const nodes = wireNodes(estate)
   const byUrn = new Map(nodes.map(n => [n.urn, n]))
   const kids = childrenOf(estate)
@@ -352,13 +414,31 @@ function stubProvider(
   ]))
   return {
     scopeKey: 'harness',
-    traceClosure: async (req: { urn: string; drill?: boolean }) => {
+    traceClosure: async (req: {
+      urn: string; drill?: boolean; grain?: string
+      seedUrns?: string[]; excludeUrns?: string[]; afterCursor?: string
+      upstreamDepth?: number
+    }) => {
       calls.traceClosure += 1
+      // PAINT vs WALK. What the reader's own actions cost is the paint: the
+      // coarse first picture and one drill per card opened. The background
+      // walk's own ops are the engine finishing the flow behind them, and
+      // counting those against an expansion would make every assertion about
+      // "one request" a statement about the estate instead.
+      if (!isWalkOp(req)) calls.paint += 1
+      // THE COARSE PAINT, HELD IN VIEW. The background walk finishes the flow
+      // within a tick on an estate this size, so a test that wants to look at
+      // the FIRST picture has to stop the walk landing on top of it.
+      if (holdWalk && isWalkOp(req)) await new Promise(() => {})
       if (gate) await gate.promise
       // The whole-estate answer is a legitimate coarse response for an estate
       // one hop wide, and it is what the Stage 1 gates were written against.
       // `lazy` swaps in the REAL contract so a test can drive the journey.
-      if (lazy) return answerLazily(req.urn, req.drill === true)
+      if (lazy) {
+        return isWalkOp(req)
+          ? lazily.fine(req.seedUrns ?? [req.urn], (req.upstreamDepth ?? 0) > 0 ? 'up' : 'down', req.excludeUrns ?? [])
+          : lazily.answer(req.urn, req.drill === true)
+      }
       // A STALLED WALK. The first answer reports a frontier, every frontier op
       // after it fails — which is exactly `fullWalkStatus.stalled`: candidates
       // remain, none is loading, and each one already carries its 'error'
@@ -478,6 +558,9 @@ export async function renderCanvasWithTrace(
     /** Answer closures the way the backend does — coarse first paint, one
      *  drill per card opened — instead of handing over the whole estate. */
     lazy?: boolean
+    /** Hold the BACKGROUND walk, so the board stays on the coarse paint and a
+     *  test can look at the first picture rather than the finished one. */
+    holdWalk?: boolean
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -535,12 +618,12 @@ export async function renderCanvasWithTrace(
     ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
     : undefined
 
-  const providerCalls = { traceClosure: 0 }
+  const providerCalls = { traceClosure: 0, paint: 0 }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={queryClient}>
       <ProviderOverride value={{
-        provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, opts.lazy),
+        provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, opts.lazy, opts.holdWalk),
         isLoading: false, error: null, scopeKind: 'ready',
         workspaceId: 'harness-ws', dataSourceId: null,
         providerReady: true, providerVersion: 1,
@@ -732,6 +815,7 @@ export async function renderCanvasWithTrace(
       await settle()
     },
     providerCalls: () => providerCalls.traceClosure,
+    paintCalls: () => providerCalls.paint,
     async setDirection(dir: 'up' | 'both' | 'down') {
       const name = dir === 'both' ? /both directions/i : dir === 'up' ? /upstream only/i : /downstream only/i
       await act(async () => { fireEvent.click(screen.getByRole('radio', { name })) })
