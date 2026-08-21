@@ -157,6 +157,26 @@ design, and that remains true. `trigger()` applies the stored global tuning
 defaults, so an auto-queued job inherits the configuration that clears a
 1M-node / 2M-edge graph with no extra plumbing.
 
+### What an auto-queued rebuild actually runs with
+
+Both dispatch paths send only an idempotency key, so every knob resolves
+server-side — job tuning (none here) → stored global `tuning_json` → env → code
+default. Two of those defaults are worth naming, because a reconcile-queued job
+is the one nobody is watching:
+
+* **Rollup storage** ships as **full detail**: every ancestor combination is
+  pre-created, so a rebuild the sweep queues can never leave the canvas thin at
+  some granularity. Above the write budget it fails terminally instead of
+  degrading, and because a forced cube skips the up-front estimate it fails
+  part-way through — see
+  [Materialization modes](/docs/aggregation-pipeline). Operators move the fleet
+  to `auto` from the Automation modal (③ Act → Advanced); the breaker still
+  catches a source that keeps failing.
+* **The stall window** is the worker default, `AGGREGATION_STALL_TIMEOUT_SECS`,
+  now 3h — matching what every UI trigger path sends explicitly. It used to be
+  15 minutes, and because only the machine paths leave `timeout_secs` NULL, the
+  sweep's rebuilds were the only ones being killed for going quiet.
+
 ## Versioned (platform-mastered) sources
 
 A graph mastered inside the platform inverts everything above. Postgres
@@ -238,6 +258,16 @@ cadence — the same store, the same 30-second cache, the same dialog.
 | — | `STATS_PROBE_TIMEOUT_SECS` (stats-service lane) | `20` |
 | — | `STATS_PROBE_DEDUP_TTL_SECS` (enqueue claim) | `90` |
 | — | `AGGREGATION_PROBE_SCAN_CAP` (code constant, not env) | `1000` due rows per tick |
+
+Rollup storage is the exception to "global policy lives in `cadence_json`": it
+is a pipeline knob, not a cadence, so it lives in the same row's `tuning_json`
+beside the workspace Defaults dialog's caps and floors. The Automation modal
+writes only its own key and the server MERGES `tuning_json`, so the two editors
+cannot erase each other — the same guarantee `cadence_json` already had.
+
+| Field | Env fallback | Default |
+|---|---|---|
+| `tuning.materializeFinePairs` | `AGGREGATION_MATERIALIZE_FINE_PAIRS` | `true` (full detail) |
 
 Per-source overrides are columns on `aggregation.data_source_state`:
 `reconcile_enabled` (the per-source feature flag — it cannot live in
@@ -389,7 +419,7 @@ would break the signposting.
 |---|---|---|---|
 | ① **Detect** | Watches each source for data changed by systems outside this app. Reads stored counts, never the data itself. | O(1) counter reads — see [The probe](#the-probe) | `probeEnabled`, `probeIntervalSecs` |
 | ② **Check** | Decides whether the rolled-up lineage still matches the data. | Pure database work; never touches the graph | `reconcileEnabled`, `reconcileCheckIntervalSecs`, `reconcileShrinkTolerancePct`, `reconcileDetectors` |
-| ③ **Act** | Rebuilds the rolled-up lineage when it no longer matches. | Minutes of graph work — capped on purpose | `reconcileMaxActionsPerRun`, `rebuildMinIntervalSecs`, `pausedUntil` |
+| ③ **Act** | Rebuilds the rolled-up lineage when it no longer matches. | Minutes of graph work — capped on purpose | `reconcileMaxActionsPerRun`, `rebuildMinIntervalSecs`, `pausedUntil`, `materializeFinePairs` |
 
 The detectors belong to **Check**, not Act: they decide what counts as a
 finding, which is Check's job, while the cap decides how many rebuilds follow,
@@ -481,6 +511,14 @@ seven states.
   does it; while the finding persists, checks re-confirm the suspension).
 - **Turning a detector off** stops rebuilds for it. The problem is still
   detected and still shown.
+- **A source that fails every rebuild on `MaterializationBudgetExceeded`** is
+  the forced-cube default meeting a graph too big for the write budget. It is
+  deterministic, so the job is not retried and the breaker suspends the source
+  after three passes. Either raise `maxMaterializedEdges` (~0.5KB of FalkorDB
+  RAM per edge, sized against ONE shard) or move the fleet's Rollup storage to
+  Auto in the Automation modal, which degrades to the depth-diagonal instead of
+  failing. Note the failed job leaves a partial cube behind — the next
+  successful rebuild reconciles it.
 
 ## Verifying it end to end
 

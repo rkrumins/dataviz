@@ -204,16 +204,31 @@ def _materialize_fine_pairs_mode() -> str:
     """FULL-CUBE materialization mode: EVERY ancestor-pair combination
     (leaf→table, table→table, column→domain, …) physically stored.
 
-    ``auto`` (default): the pipeline ESTIMATES the cube volume up front
-    (one counting pass over the raw edges using the ancestor walks it
-    already performs) and materializes the full cube whenever the
-    estimate fits ``AGGREGATION_MAX_MATERIALIZED_EDGES`` — the canvas
-    then answers at EVERY granularity from storage alone. Above budget
-    it falls back to the structural depth-diagonal + on-demand reads
-    (the scale mode; the cube scales as edges × depth² and OOM'd real
-    instances: 1.17M edges → 5.6M pairs). ``true``/``false`` force a
-    mode (a forced cube over budget fails terminally, loudly)."""
-    raw = os.getenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "auto").strip().lower()
+    ``true`` (default): always store the full cube, so the canvas answers
+    at EVERY granularity from storage alone and no drill can come back
+    thin — including on self-nesting types, where boundary mode's
+    on-demand reader still reasons in ontology type levels and can return
+    incomplete mixed-granularity answers.
+
+    ``auto``: ESTIMATE the cube volume up front (one counting pass over
+    the raw edges using the ancestor walks the run already performs) and
+    store the full cube only while the estimate fits
+    ``AGGREGATION_MAX_CUBE_EDGES``. Above the ceiling it falls back to
+    the structural depth-diagonal + on-demand reads (the scale mode; the
+    cube scales as edges × depth² and OOM'd real instances: 1.17M edges
+    → 5.6M pairs). ``false`` forces the diagonal.
+
+    THE COST OF THE DEFAULT, stated plainly: a FORCED cube skips the
+    estimate entirely (see ``_decide_materialization_mode``), so a graph
+    whose cube exceeds ``AGGREGATION_MAX_MATERIALIZED_EDGES`` is not
+    refused up front — it fails terminally mid-apply, leaving a partial
+    cube over the previous generation's cells because the reconcile
+    delete pass never runs. ``auto`` can never pick a cube that exceeds
+    the budget and is the mode that degrades instead of failing. Operators
+    move a fleet back to it from Ingestion → Freshness → Automation
+    (③ Act → Advanced) without a redeploy, or by setting this env var.
+    """
+    raw = os.getenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true").strip().lower()
     if raw in ("1", "true", "yes", "on"):
         return "true"
     if raw in ("0", "false", "no", "off"):

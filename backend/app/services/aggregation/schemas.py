@@ -4,7 +4,7 @@ Pydantic request/response schemas for the aggregation API.
 These live inside the aggregation package so the package is self-contained.
 The thin FastAPI adapter (app/api/v1/endpoints/aggregation.py) imports from here.
 """
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -135,13 +135,17 @@ class AggregationTuning(BaseModel):
         None, alias="materializeLeafPairs",
         description="Also materialize leaf-to-leaf mirror pairs (legacy behavior).",
     )
-    materialize_fine_pairs: Optional[bool] = Field(
+    materialize_fine_pairs: Optional[Union[Literal["auto"], bool]] = Field(
         None, alias="materializeFinePairs",
-        description="Legacy full-cube mode: materialize every ancestor-pair "
-                    "combination, including leaf-involving and mixed-level "
-                    "pairs (scales with raw-edge count; can exceed FalkorDB "
-                    "memory). Default false: only the same-level diagonal is "
-                    "stored; the rest is served on demand.",
+        description="Rollup storage. ``true`` (the shipped default) pre-creates "
+                    "every ancestor-pair combination, including leaf-involving "
+                    "and mixed-level pairs, so every canvas granularity answers "
+                    "from storage; a cube over ``maxMaterializedEdges`` fails the "
+                    "job terminally. ``\"auto\"`` stores the full cube only while "
+                    "the estimate fits the cube ceiling and falls back to the "
+                    "depth-diagonal above it, serving the rest on demand. "
+                    "``false`` forces the diagonal. Absent inherits the stored "
+                    "global default, then the env default.",
     )
     max_materialized_edges: Optional[int] = Field(
         None, alias="maxMaterializedEdges", ge=10_000, le=50_000_000,
@@ -903,6 +907,13 @@ class AggregationSettingsResponse(BaseModel):
     )
     env_probe_interval_secs: Optional[int] = Field(
         None, alias="envProbeIntervalSecs",
+    )
+    # The tri-state the pipeline resolves when nothing overrides it, reported
+    # as the string ``_materialize_fine_pairs_mode`` returns rather than a
+    # bool — "auto" is a third state, not a missing one, and the editors seed
+    # from ``persisted ?? envDefault``.
+    env_materialize_fine_pairs: Optional[Literal["auto", "true", "false"]] = Field(
+        None, alias="envMaterializeFinePairs",
     )
     updated_at: Optional[str] = Field(None, alias="updatedAt")
     updated_by: Optional[str] = Field(None, alias="updatedBy")
