@@ -133,6 +133,11 @@ const EMPTY_DRILLDOWNS: Map<string, TraceV2Result> = new Map()
 /** The native trace draws through the overlay, never through the browse
  *  hierarchy filter — so the filter is fed nothing and stays pass-through. */
 const EMPTY_TRACE_NODES: ReadonlySet<string> = new Set<string>()
+/** Trailing edge for recording the reader's expansion into the history
+ *  entry. One reveal opens a whole chain and one drill peels a level per
+ *  click; without this each of those rewrites the entry (and its
+ *  localStorage line) several times over for a single gesture. */
+const TRACE_EXPANSION_RECORD_MS = 250
 import { useLensChildren } from '@/hooks/useLensChildren'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
@@ -1680,9 +1685,20 @@ export function ContextViewCanvas({
   // ever fire after commit, and a render-time ref write blocks the compiler
   // from preserving the surrounding memoization.
   const canvasTraceRef = useRef(canvasTrace)
+  // The live trace VIEW, for the debounced history writer: a timer closure
+  // captured when the reader opened a card would otherwise record whatever
+  // was true 250 ms ago.
+  const traceViewParamsRef = useRef({
+    showUpstream: traceShowUpstream, showDownstream: traceShowDownstream,
+    depthUp: traceDepthUp, depthDown: traceDepthDown,
+  })
   useEffect(() => {
     overlayRef.current = overlay
     canvasTraceRef.current = canvasTrace
+    traceViewParamsRef.current = {
+      showUpstream: traceShowUpstream, showDownstream: traceShowDownstream,
+      depthUp: traceDepthUp, depthDown: traceDepthDown,
+    }
     // Keeps the lock honest in both directions — notably it CLEARS on exit,
     // and it re-arms for a trace started anywhere other than `beginTrace`.
     traceSessionRef.current = canvasTrace.isTracing
@@ -1712,6 +1728,16 @@ export function ContextViewCanvas({
       localStorage.setItem(traceHistoryKeyRef.current, serializeTraceHistory(traceHistory))
     } catch { /* storage full/blocked — history stays in-memory */ }
   }, [traceHistory])
+  // The pending expansion record (see `recordTraceExpansionSoon` below).
+  // Declared up here because every path that CHANGES THE FOCAL has to cancel
+  // it first: a flush scheduled by the trace being left would otherwise land
+  // on the entry being opened.
+  const expansionRecordRef = useRef<{ timer: ReturnType<typeof setTimeout>; forFocus: string } | null>(null)
+  const cancelExpansionRecord = useCallback(() => {
+    if (expansionRecordRef.current) clearTimeout(expansionRecordRef.current.timer)
+    expansionRecordRef.current = null
+  }, [])
+
   // Low-level entry shared by fresh traces and history restores. A trace
   // with the flow overlay off is a contradiction — tracing IS asking to
   // see the flow — and entering one collapses the sticky drawer once, so
@@ -1762,19 +1788,30 @@ export function ContextViewCanvas({
     setTraceShowDownstream(view.showDownstream)
     setTraceDepthUp(view.depthUp)
     setTraceDepthDown(view.depthDown)
+    cancelExpansionRecord()
     setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeId, view, timestamp: Date.now() }))
     beginTrace(urn)
-  }, [displayMap, beginTrace])
+  }, [displayMap, beginTrace, cancelExpansionRecord])
 
   // History restore: the entry's own view params, no push (back/forward
   // move the cursor, they never rewrite the trail).
   const restoreTraceEntry = useCallback((entry: TraceHistoryEntryRecord) => {
+    // A toggle from the trace being LEFT must not land on the entry being
+    // restored — the flush is 250 ms behind the click that scheduled it.
+    cancelExpansionRecord()
     setTraceShowUpstream(entry.view.showUpstream)
     setTraceShowDownstream(entry.view.showDownstream)
-    setTraceDepthUp(entry.view.depthUp)
-    setTraceDepthDown(entry.view.depthDown)
+    // ONE DEPTH RULE, even for history written under the old 100-hop control.
+    setTraceDepthUp(Math.min(entry.view.depthUp, FULL_WALK_INITIAL_DEPTH))
+    setTraceDepthDown(Math.min(entry.view.depthDown, FULL_WALK_INITIAL_DEPTH))
+    // THE PICTURE, not just the focus. Empty means "as the trace opened", so
+    // the overlay's own seed is the right answer and restoring nothing is how
+    // it gets to run — see traceHistoryStack's note on the empty expansion.
+    if (entry.view.traceExpansion.length > 0) {
+      overlayRef.current?.restoreExpansion(entry.urn, entry.view.traceExpansion)
+    }
     beginTrace(entry.urn)
-  }, [beginTrace])
+  }, [beginTrace, cancelExpansionRecord])
   const traceHistoryGo = useCallback((next: TraceHistoryStack) => {
     if (next === traceHistory) return
     setTraceHistory(next)
@@ -1787,22 +1824,46 @@ export function ContextViewCanvas({
   // Every view-param change while tracing is recorded on the CURRENT
   // history entry, so back/forward restore the trace as it was left.
   // Called from the setters' own event paths (never an effect).
+  // Reads the live view off refs rather than deps, which is what lets it be
+  // called from a TIMER (the expansion recorder below) and keeps it out of
+  // the dock adapter's dependency list.
   const recordTraceView = useCallback((partial: Partial<{ showUpstream: boolean; showDownstream: boolean; depthUp: number; depthDown: number }>) => {
+    const live = traceViewParamsRef.current
     setTraceHistory(h => {
       const cur = currentTraceEntry(h)
-      if (!cur || cur.urn !== canvasTrace.tracedUrn) return h
+      if (!cur || cur.urn !== canvasTraceRef.current.tracedUrn) return h
       return updateCurrentTraceView(h, {
-        showUpstream: partial.showUpstream ?? traceShowUpstream,
-        showDownstream: partial.showDownstream ?? traceShowDownstream,
-        depthUp: partial.depthUp ?? traceDepthUp,
-        depthDown: partial.depthDown ?? traceDepthDown,
+        showUpstream: partial.showUpstream ?? live.showUpstream,
+        showDownstream: partial.showDownstream ?? live.showDownstream,
+        depthUp: partial.depthUp ?? live.depthUp,
+        depthDown: partial.depthDown ?? live.depthDown,
         // The picture, always — `updateCurrentTraceView` REPLACES the view,
         // so omitting it would erase the reader's expansion every time they
         // touched a direction arrow.
         traceExpansion: [...(overlayRef.current?.traceExpansion ?? [])],
       })
     })
-  }, [canvasTrace.tracedUrn, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])
+  }, [])
+
+  // WHAT THE READER HAS OPEN, on a trailing edge. The timer reads the
+  // expansion at FIRE time, so it records where the reader ended up rather
+  // than every level they passed through on the way.
+  const recordTraceExpansionSoon = useCallback(() => {
+    const forFocus = canvasTraceRef.current.tracedUrn
+    if (!forFocus) return
+    cancelExpansionRecord()
+    expansionRecordRef.current = {
+      forFocus,
+      timer: setTimeout(() => {
+        expansionRecordRef.current = null
+        // Back pressed between the toggle and the flush: the picture on
+        // screen now belongs to the entry the reader moved TO, and writing
+        // it here would overwrite the one they just came back to.
+        if (canvasTraceRef.current.tracedUrn === forFocus) recordTraceView({})
+      }, TRACE_EXPANSION_RECORD_MS),
+    }
+  }, [cancelExpansionRecord, recordTraceView])
+  useEffect(() => cancelExpansionRecord, [cancelExpansionRecord])
   // Stable identity (refs, not deps) so the ESC listener below attaches
   // once per trace rather than once per render.
   const exitCanvasTrace = useCallback(() => {
@@ -1929,15 +1990,23 @@ export function ContextViewCanvas({
       showDownstream: traceShowDownstream,
       setShowUpstream: (show) => { setTraceShowUpstream(show); recordTraceView({ showUpstream: show }) },
       setShowDownstream: (show) => { setTraceShowDownstream(show); recordTraceView({ showDownstream: show }) },
-      // Depth is a VIEW limit on the walked flow — setConfig applies it
-      // instantly, and the retrace the dock fires afterwards is a no-op
-      // continue (nothing to refetch).
+      // Depth is a VIEW limit on the walked flow: it re-projects instantly,
+      // it is clamped to the walk's own ceiling (one depth rule), and it
+      // NEVER reaches the legacy hook — `trace.setConfig` would queue a
+      // refetch of a flow this session already holds in full. Every other
+      // field on TraceConfig parameterises that same request, which is why
+      // the dock withdraws those controls in `nativeMode`; a stray one must
+      // die here rather than quietly become a network call.
       config: { ...trace.config, upstreamDepth: traceDepthUp, downstreamDepth: traceDepthDown },
       setConfig: (cfg) => {
-        if (cfg.upstreamDepth !== undefined) setTraceDepthUp(cfg.upstreamDepth)
-        if (cfg.downstreamDepth !== undefined) setTraceDepthDown(cfg.downstreamDepth)
-        recordTraceView({ depthUp: cfg.upstreamDepth, depthDown: cfg.downstreamDepth })
-        trace.setConfig(cfg)
+        const depthUp = cfg.upstreamDepth === undefined
+          ? undefined : Math.min(cfg.upstreamDepth, FULL_WALK_INITIAL_DEPTH)
+        const depthDown = cfg.downstreamDepth === undefined
+          ? undefined : Math.min(cfg.downstreamDepth, FULL_WALK_INITIAL_DEPTH)
+        if (depthUp === undefined && depthDown === undefined) return
+        if (depthUp !== undefined) setTraceDepthUp(depthUp)
+        if (depthDown !== undefined) setTraceDepthDown(depthDown)
+        recordTraceView({ depthUp, depthDown })
       },
       // History — the dock's Recent popover + back/forward, fed from the
       // per-view stack (newest first for the list).
@@ -1954,7 +2023,18 @@ export function ContextViewCanvas({
         upstreamCount: traceParticipants.upstream.length,
         downstreamCount: traceParticipants.downstream.length,
       },
-      retrace: async () => { canvasTrace.continueWalk() },
+      // RETRACE IS NOT A VIEW ACTION. Direction and depth are scope on a flow
+      // already in hand, so the "apply" the dock fires after one of them has
+      // nothing to do and must stay a no-op — re-walking on every arrow is
+      // exactly the refetch storm the native engine exists to end. What
+      // retrace still MEANS is "this walk did not finish": re-kick a failed
+      // initial fetch, or grant the budget / clear the failures for a walk
+      // that stopped short of exhaustion.
+      retrace: async () => {
+        if (canvasTrace.walkEntry?.status === 'error') { canvasTrace.retryWalk(); return }
+        const walk = canvasTrace.fullWalkStatus
+        if (walk?.budgetHit || walk?.stalled) canvasTrace.continueWalk()
+      },
     }
   }, [traceActive, traceModel, tracedNodeId, trace, canvasTrace, traceParticipants, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown, dockHistoryEntries, traceHistory, traceHistoryGo, recordTraceView])
 
@@ -2667,8 +2747,9 @@ export function ContextViewCanvas({
     if (!o?.active) return false
     const chain = o.revealPath(nodeId)
     if (chain.length > 0) o.expandPath(chain)
+    recordTraceExpansionSoon()
     return true
-  }, [])
+  }, [recordTraceExpansionSoon])
 
   // Reveal-and-focus: clicking a neighbor in the drawer's Lineage section
   // expands collapsed ancestors (lazy-loading from the backend if needed),
@@ -3064,6 +3145,7 @@ export function ContextViewCanvas({
     // no store write, and nothing to undo when the trace ends.
     if (overlayRef.current?.active) {
       overlayRef.current.toggle(nodeId)
+      recordTraceExpansionSoon()
       return
     }
     // Still walking: the columns are showing BROWSE and its chevrons look
@@ -3279,7 +3361,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked])
+  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon])
 
 
 
@@ -4104,6 +4186,8 @@ export function ContextViewCanvas({
               onHistoryForward={traceForward}
               canHistoryBack={traceHistory.cursor > 0}
               canHistoryForward={traceHistory.cursor < traceHistory.entries.length - 1}
+              nativeMode={traceActive}
+              outsideView={overlay.view?.outsideView ?? 0}
             />
           )}
         </AnimatePresence>

@@ -16,13 +16,13 @@
  * file is what keeps it that way.
  */
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
-import { act, fireEvent } from '@testing-library/react'
+import { act, fireEvent, screen } from '@testing-library/react'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(7))
+afterAll(() => expectTestsRan(11))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -202,6 +202,113 @@ describe('the trace overlay on the real canvas', () => {
     h.pressEscape()
     expect(h.isTracing()).toBe(false)
     expect(h.snapshotStore()).toEqual(before)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // ── THE DOCK CONTRACT (Task 9) ────────────────────────────────────────
+  //
+  // The engine changed under the dock: one walk to exhaustion, and every
+  // question after it answered from the model in hand. These four are what
+  // stops the dock from quietly re-asking the network for what it has.
+
+  // Direction and depth are SCOPE, not a request. Twenty of them in a row
+  // must not cost a single fetch — and must still change the picture, or
+  // "no fetch" would be trivially satisfied by a control that does nothing.
+  it('twenty direction/depth changes: not one refetch, and the picture keeps up', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    await h.startTrace('cfo')
+    const walked = h.providerCalls()
+    expect(walked).toBeGreaterThan(0)
+    const both = h.visibleCardIds().sort()
+
+    for (let i = 0; i < 5; i++) {
+      await h.setDirection('up')
+      await h.setDirection('both')
+      await h.setDirection('down')
+      await h.setDirection('both')
+    }
+    expect(h.providerCalls()).toBe(walked)
+    expect(h.visibleCardIds().sort()).toEqual(both)
+
+    // …and it is genuinely answering: on this estate the dashboard's partners
+    // are all UPSTREAM, so hiding that side leaves the focus chain alone on
+    // screen — and coming back restores them.
+    await h.setDirection('down')
+    const downOnly = h.visibleCardIds().sort()
+    expect(downOnly).not.toEqual(both)
+    expect(downOnly).not.toContain('INTERMEDIATE_T2')
+    await h.setDirection('both')
+    expect(h.visibleCardIds().sort()).toEqual(both)
+    expect(h.providerCalls()).toBe(walked)
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // ONE DEPTH RULE. The walk fetched 25 hops and followed its frontiers to
+  // exhaustion, so there is nothing above 25 to offer and nothing a depth
+  // change could go and get.
+  it('the depth control offers nothing above the walked ceiling, and costs no fetch', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    await h.startTrace('cfo')
+    const walked = h.providerCalls()
+
+    const depthChip = () => screen.getByRole('button', { name: /^depth/i }).textContent ?? ''
+
+    await h.depthPreset(/direct/i)
+    // Nothing on offer promises a hop the walk did not fetch.
+    expect(h.depthPresetValues().length).toBeGreaterThan(0)
+    expect(h.depthPresetValues().every(pair => pair.split('/').every(v => Number(v) <= 25))).toBe(true)
+    // The change is live — and cost nothing. (This estate is one hop deep, so
+    // depth 1 and depth 25 draw the same cards; what is under test here is
+    // that the control moves the VIEW and never the network.)
+    expect(depthChip()).toMatch(/1.*1/)
+    expect(h.providerCalls()).toBe(walked)
+
+    await h.depthPreset(/all hops/i)
+    expect(depthChip()).toMatch(/25.*25/)
+    expect(h.providerCalls()).toBe(walked)
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // A control that cannot do anything is withdrawn, not left on screen for
+  // the reader to trust.
+  it('the Settings tab drops the edge-type filter and the hierarchy level', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    await h.startTrace('cfo')
+    await h.openDockSettings()
+
+    expect(screen.getByText(/upstream depth/i)).toBeInTheDocument()
+    expect(screen.queryByText(/hierarchy level/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/edge types/i)).not.toBeInTheDocument()
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // HISTORY RESTORES THE PICTURE, not just the focus. Back used to re-open
+  // the trace and let the seed decide what was open, which returns the
+  // reader to a trace they never left.
+  it('back and forward restore the exact picture, expansion and all', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    await h.startTrace('cfo')
+
+    await h.toggle('INTERMEDIATE_T2')
+    const opened = h.visibleCardIds().sort()
+    expect(opened).toContain('orders')
+    await h.flushExpansionRecord()
+
+    // A second trace, so there is somewhere to come back FROM.
+    h.pressEscape()
+    await h.settle()
+    await h.startTrace('REPORTING')
+    const second = h.visibleCardIds().sort()
+    expect(second).not.toEqual(opened)
+
+    await h.historyBack()
+    expect(h.visibleCardIds().sort()).toEqual(opened)
+
+    await h.historyForward()
+    expect(h.visibleCardIds().sort()).toEqual(second)
+    expect(h.storeWrites()).toBe(0)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 })

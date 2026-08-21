@@ -86,6 +86,24 @@ export interface TraceCanvasHarness {
   typeChildSearch(query: string): Promise<boolean>
   /** Click a card's expand chevron. */
   toggle(id: string): Promise<void>
+  /** How many closure fetches the provider has served. The number a
+   *  view-only control must never move: direction, view depth and expansion
+   *  are all re-projections of the walk the session already holds. */
+  providerCalls(): number
+  /** Click one of the dock's direction radios. */
+  setDirection(dir: 'up' | 'both' | 'down'): Promise<void>
+  /** Open the header's Depth chip and click a preset by label. */
+  depthPreset(label: string | RegExp): Promise<void>
+  /** The depth presets the control offers, as `${up}/${down}` pairs. */
+  depthPresetValues(): string[]
+  /** Click the dock's ←/→ trace-history arrows. */
+  historyBack(): Promise<void>
+  historyForward(): Promise<void>
+  /** Expand the dock and open its Settings tab. */
+  openDockSettings(): Promise<void>
+  /** Wait past the expansion recorder's 250 ms trailing edge, so the current
+   *  picture has actually reached the history entry. */
+  flushExpansionRecord(): Promise<void>
   /** Press a bare key on the document — the canvas's global shortcuts. */
   pressKey(key: string): Promise<void>
   /** Click a card row (what the armed connect flow resolves as its target). */
@@ -195,6 +213,7 @@ function childrenOf(estate: TraceEstate): Map<string, string[]> {
 function stubProvider(
   estate: TraceEstate,
   focusUrn: string,
+  calls: { traceClosure: number },
   gate?: { promise: Promise<void> },
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn)
@@ -214,6 +233,7 @@ function stubProvider(
   return {
     scopeKey: 'harness',
     traceClosure: async () => {
+      calls.traceClosure += 1
       if (gate) await gate.promise
       return closure
     },
@@ -355,11 +375,12 @@ export async function renderCanvasWithTrace(
     ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
     : undefined
 
+  const providerCalls = { traceClosure: 0 }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={queryClient}>
       <ProviderOverride value={{
-        provider: stubProvider(estate, opts.focus, gate),
+        provider: stubProvider(estate, opts.focus, providerCalls, gate),
         isLoading: false, error: null, scopeKind: 'ready',
         workspaceId: 'harness-ws', dataSourceId: null,
         providerReady: true, providerVersion: 1,
@@ -368,6 +389,14 @@ export async function renderCanvasWithTrace(
       </ProviderOverride>
     </QueryClientProvider>,
   )
+
+  // REAL TIME, for the surfaces that animate. `settle` drains microtasks and
+  // frames but barely advances the clock, so anything gated on a duration —
+  // an AnimatePresence exit before the next tab mounts, the canvas's 250 ms
+  // expansion recorder — has not happened yet when it returns.
+  const wait = async (ms: number): Promise<void> => {
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, ms)) })
+  }
 
   // Macrotasks AND animation frames. The flow overlay redraws its edges on a
   // rAF (`scheduleUpdate`), so a settle that only drains timers reads the DOM
@@ -508,6 +537,62 @@ export async function renderCanvasWithTrace(
       const button = row?.querySelector('button')
       if (!button) throw new Error(`no toggle on ${id}`)
       await act(async () => { fireEvent.click(button) })
+      await settle()
+    },
+    providerCalls: () => providerCalls.traceClosure,
+    async setDirection(dir: 'up' | 'both' | 'down') {
+      const name = dir === 'both' ? /both directions/i : dir === 'up' ? /upstream only/i : /downstream only/i
+      await act(async () => { fireEvent.click(screen.getByRole('radio', { name })) })
+      await settle()
+    },
+    async depthPreset(label: string | RegExp) {
+      // The chip is in the canvas HEADER, not the dock; its popover portals
+      // to document.body, so both queries go through `screen`. The chip is a
+      // TOGGLE — clicking it again would close the popover it just opened.
+      const chip = screen.getByRole('button', { name: /^depth/i })
+      if (chip.getAttribute('aria-expanded') !== 'true') {
+        await act(async () => { fireEvent.click(chip) })
+        await settle()
+      }
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: label })) })
+      await settle()
+    },
+    depthPresetValues: () => {
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Trace depth settings"]')
+      return [...(dialog?.querySelectorAll<HTMLElement>('button') ?? [])]
+        .map(b => b.textContent?.match(/\d+\/\d+/)?.[0] ?? '')
+        .filter(Boolean)
+    },
+    async historyBack() {
+      const button = document.querySelector<HTMLButtonElement>('[aria-label="Previous trace"]')
+      if (!button) throw new Error('the dock is not offering a Previous trace control')
+      await act(async () => { fireEvent.click(button) })
+      await settle()
+    },
+    async historyForward() {
+      const button = document.querySelector<HTMLButtonElement>('[aria-label="Next trace"]')
+      if (!button) throw new Error('the dock is not offering a Next trace control')
+      await act(async () => { fireEvent.click(button) })
+      await settle()
+    },
+    async openDockSettings() {
+      const expand = document.querySelector<HTMLButtonElement>('[aria-controls="trace-bottom-dock-body"]')
+      if (!expand) throw new Error('the dock is not on screen')
+      if (expand.getAttribute('aria-expanded') !== 'true') {
+        await act(async () => { fireEvent.click(expand) })
+        await wait(300)
+        await settle()
+      }
+      await act(async () => { fireEvent.click(screen.getByRole('tab', { name: /settings/i })) })
+      // The tab bodies cross-fade with `mode="wait"`: the outgoing panel's
+      // 180 ms exit has to finish before the incoming one mounts at all.
+      await wait(400)
+      await settle()
+    },
+    async flushExpansionRecord() {
+      // Real time, not a fake timer: the canvas schedules the record with a
+      // plain setTimeout and the rest of the harness runs on real timers.
+      await wait(400)
       await settle()
     },
     wires: () => [...document.querySelectorAll<SVGGElement>('g[data-edge-id]')].map(g => ({
