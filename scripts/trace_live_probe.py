@@ -244,9 +244,21 @@ class Closure:
             self._first = False
         self.page_times.append(secs)
 
+    def merge_all(self, other: "Closure") -> None:
+        """Fold a whole sub-walk (one drill and its pages) into this one."""
+        self.nodes.update(other.nodes)
+        self.edges.update(other.edges)
+        self.containment.update(other.containment)
+        self.upstream |= other.upstream
+        self.downstream |= other.downstream
+        self.truncation_reasons += other.truncation_reasons
+        self.page_times += other.page_times
+        self.frontier_entries_seen += other.frontier_entries_seen
+
 
 def closure_body(urn: str, depth: int, direction: str,
-                 max_nodes: Optional[int]) -> Dict[str, Any]:
+                 max_nodes: Optional[int], grain: Optional[str] = None,
+                 drill: bool = False) -> Dict[str, Any]:
     body: Dict[str, Any] = {
         "urn": urn,
         "direction": direction,
@@ -255,7 +267,89 @@ def closure_body(urn: str, depth: int, direction: str,
     }
     if max_nodes:
         body["maxNodes"] = max_nodes
+    if grain:
+        body["grain"] = grain
+    if drill:
+        # The lazy drill anchors on the card the reader opened; the walk
+        # contract already spells that `seedUrns`.
+        body["drill"] = True
+        body["seedUrns"] = [urn]
     return body
+
+
+def run_lazy(api: Api, path: str, urn: str, max_nodes: Optional[int],
+             pages: int, drill: bool, label: str) -> Tuple[Closure, float, int]:
+    """One LAZY request (coarse first paint, or one drill) followed to
+    exhaustion: `seedCursor` pages more of the card's contents, a frontier
+    `nextCursor` pages more of an anchor's edges. Neither is a truncation —
+    this loop is what "no caps" actually costs in requests.
+
+    Returns (accumulated closure, FIRST-page seconds, request count).
+    """
+    acc = Closure()
+    body = closure_body(urn, 1, "both", max_nodes,
+                        grain=None if drill else "coarse", drill=drill)
+    res, first_secs = api.post(path, json=body)
+    acc.merge(res, first_secs)
+    requests = 1
+    print(f"  {label:<10} page 1  ({first_secs * 1000:8.0f} ms)  "
+          f"nodes={len(res.get('nodes') or []):>6} "
+          f"edges={len(res.get('edges') or []):>6} "
+          f"containment={len(res.get('containmentEdges') or []):>6} "
+          f"frontier={len(res.get('frontierUp') or [])}/{len(res.get('frontierDown') or [])} "
+          f"seedCursor={'yes' if res.get('seedCursor') else 'no'} "
+          f"truncation={res.get('truncationReason')}")
+
+    pending: List[Dict[str, Any]] = []
+
+    def enqueue(res_obj: Dict[str, Any]) -> None:
+        if res_obj.get("seedCursor"):
+            b = closure_body(urn, 1, "both", max_nodes,
+                             grain=None if drill else "coarse", drill=drill)
+            b["seedCursor"] = res_obj["seedCursor"]
+            pending.append({"body": b, "what": "contents", "carries_seed": True})
+        for key, direction in (("frontierUp", "upstream"), ("frontierDown", "downstream")):
+            for entry in res_obj.get(key) or []:
+                cursor = entry.get("nextCursor")
+                if not cursor:
+                    continue
+                pending.append({
+                    "what": f"edges {direction} {entry['urn'][-24:]}",
+                    "carries_seed": False,
+                    "body": {
+                        "urn": entry["urn"],
+                        "direction": direction,
+                        "upstreamDepth": 1 if direction == "upstream" else 0,
+                        "downstreamDepth": 1 if direction == "downstream" else 0,
+                        "afterCursor": cursor,
+                        "grain": "coarse",
+                        **({"maxNodes": max_nodes} if max_nodes else {}),
+                    },
+                })
+
+    enqueue(res)
+    seen: set = set()
+    while pending and requests < pages:
+        job = pending.pop(0)
+        key = json.dumps(job["body"], sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        page_res, secs = api.post(path, json=job["body"])
+        requests += 1
+        acc.merge(page_res, secs)
+        enqueue(page_res)
+        print(f"  {label:<10} page {requests:<2} ({secs * 1000:8.0f} ms)  "
+              f"+nodes={len(page_res.get('nodes') or []):>5} "
+              f"+edges={len(page_res.get('edges') or []):>5} "
+              f"+containment={len(page_res.get('containmentEdges') or []):>5} "
+              f"[{job['what']}]")
+
+    if pending:
+        print(f"  {label:<10} ... {len(pending)} page(s) left unfollowed (--pages {pages})")
+    else:
+        print(f"  {label:<10} EXHAUSTED after {requests} request(s)")
+    return acc, first_secs, requests
 
 
 def run_walk(api: Api, ws: str, ds: str, view: Optional[str], urn: str,
@@ -449,6 +543,12 @@ def main() -> None:
                     help="comma-separated entity types to summarise as containers")
     ap.add_argument("--verify-parents", type=int, default=0,
                     help="ask the graph whether N uncovered participants really are top-level")
+    ap.add_argument("--grain", choices=("coarse", "fine"), default=None,
+                    help="'coarse' probes the LAZY first paint instead of the eager walk")
+    ap.add_argument("--drill", action="append", default=[],
+                    help="after the first paint, drill this card (repeatable, in order)")
+    ap.add_argument("--journey", action="store_true",
+                    help="coarse -> drill the biggest partner -> drill inside it, timed")
     args = ap.parse_args()
 
     email, password = _read_credentials(args.env_file)
@@ -475,8 +575,51 @@ def main() -> None:
     print()
 
     started = time.perf_counter()
-    acc = run_walk(api, src["workspaceId"], src["dataSourceId"], view,
-                   args.urn, args.depth, args.max_nodes, args.pages)
+    if args.grain == "coarse" or args.drill or args.journey:
+        path = f"/api/v1/{src['workspaceId']}/graph/trace/closure?dataSourceId={src['dataSourceId']}"
+        if view:
+            path += f"&viewId={view}"
+        acc, coarse_ms, coarse_reqs = run_lazy(
+            api, path, args.urn, args.max_nodes, args.pages, drill=False, label="coarse",
+        )
+        timings = [("coarse", coarse_ms * 1000, coarse_reqs)]
+
+        cards = list(args.drill)
+        if args.journey and not cards:
+            # The biggest partner first (most children = most to reveal),
+            # then the biggest thing INSIDE it — the journey a reader takes.
+            def _kids(u):
+                return acc.nodes.get(u, {}).get("childCount") or 0
+            partners = sorted((acc.upstream | acc.downstream), key=_kids, reverse=True)
+            cards = partners[:1]
+
+        drilled: List[str] = []
+        while cards:
+            card = cards.pop(0)
+            sub, ms, reqs = run_lazy(
+                api, path, card, args.max_nodes, args.pages, drill=True,
+                label=f"drill{len(drilled) + 1}",
+            )
+            acc.merge_all(sub)
+            drilled.append(card)
+            timings.append((f"drill {card[-28:]}", ms * 1000, reqs))
+            if args.journey and len(drilled) < 3:
+                inside = sorted(
+                    (u for u, e in sub.containment.items()
+                     if e["sourceUrn"] == card for u in [e["targetUrn"]]),
+                    key=lambda u: sub.nodes.get(u, {}).get("childCount") or 0, reverse=True,
+                )
+                inside = [u for u in inside if u not in drilled]
+                if inside:
+                    cards.append(inside[0])
+
+        print()
+        for name, ms, reqs in timings:
+            print(f"  {name:<40} {ms:8.0f} ms   {reqs} request(s)")
+        print()
+    else:
+        acc = run_walk(api, src["workspaceId"], src["dataSourceId"], view,
+                       args.urn, args.depth, args.max_nodes, args.pages)
     container_types = [t.strip().lower() for t in args.container_types.split(",") if t.strip()]
     report(api, acc, args.urn, src["workspaceId"], src["dataSourceId"], view,
            container_types, args.verify_parents)
