@@ -221,3 +221,46 @@ export function nearbyEvents(
         })
         .sort((a, b) => (b.ts > a.ts ? 1 : -1))
 }
+
+
+/** The alert severities, in the order a reader should care about them.
+ *
+ *  `critical` is not a louder `severe` — it is a different measurement.
+ *  notable/severe are relative to a source's own churn (3x and 8x its median
+ *  movement); critical is proportional to the GRAPH (>=90% of it gone), which
+ *  is what catches a wipe on a source whose routine churn is large enough to
+ *  hide one.
+ */
+export const SEVERITY_META: Record<string, {
+    label: string
+    chip: string
+    surface: string
+    rank: number
+    blurb: string
+}> = {
+    critical: {
+        label: 'Critical',
+        rank: 3,
+        chip: 'bg-red-600 text-white',
+        surface: 'border-red-600/40 bg-red-600/[0.07]',
+        blurb: 'Almost the whole graph is gone',
+    },
+    severe: {
+        label: 'Severe',
+        rank: 2,
+        chip: 'bg-red-500/15 text-red-600 dark:text-red-400',
+        surface: 'border-red-500/25 bg-red-500/[0.04]',
+        blurb: 'Far outside this source\u2019s usual movement',
+    },
+    notable: {
+        label: 'Notable',
+        rank: 1,
+        chip: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
+        surface: 'border-amber-500/25 bg-amber-500/[0.04]',
+        blurb: 'Outside this source\u2019s usual movement',
+    },
+}
+
+export function severityMeta(severity: string) {
+    return SEVERITY_META[severity] ?? SEVERITY_META.notable
+}

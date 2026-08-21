@@ -145,6 +145,33 @@ describe('AlertBand', () => {
         expect(screen.getByText('notable')).toBeInTheDocument()
     })
 
+    it('names which source under which provider is affected', async () => {
+        // On a deployment running several providers this is the difference
+        // between an alert you can act on and one you have to go and identify.
+        listAlerts.mockResolvedValue({
+            alerts: [alert({
+                provider_name: 'Falkor Prod',
+                data_source_label: 'Orders',
+                graph_name: 'orders_graph',
+            })],
+            openCount: 1,
+        })
+        renderBand()
+        expect(await screen.findByText('Falkor Prod')).toBeInTheDocument()
+        expect(screen.getByText('Orders')).toBeInTheDocument()
+        expect(screen.getByText(/graph orders_graph/)).toBeInTheDocument()
+    })
+
+    it('marks a near-total loss as critical, not merely severe', async () => {
+        listAlerts.mockResolvedValue({
+            alerts: [alert({ severity: 'critical', node_delta: -4_000_000, node_count: 12 })],
+            openCount: 1,
+        })
+        renderBand()
+        expect(await screen.findByText('critical')).toBeInTheDocument()
+        expect(screen.getByTitle(/almost the whole graph is gone/i)).toBeInTheDocument()
+    })
+
     it('pluralises the heading', async () => {
         listAlerts.mockResolvedValue({
             alerts: [alert(), alert({ id: 'alr_2' })], openCount: 2,

@@ -27,6 +27,11 @@ vi.mock('@/components/insights/history/HistorySettingsDialog', () => ({
 vi.mock('@/components/insights/history/AlertBand', () => ({
     AlertBand: () => <div data-testid="alert-band" />,
 }))
+vi.mock('@/components/insights/history/AlertInbox', () => ({
+    AlertInbox: ({ providerId }: { providerId?: string }) => (
+        <div data-testid="alert-inbox" data-provider={providerId ?? 'fleet'} />
+    ),
+}))
 vi.mock('@/hooks/useDataSourceProfile', () => ({
     useDataSourceProfile: () => ({
         item: { id: 'cat-1', providerId: 'p-1', name: 'Orders Graph' },
@@ -300,6 +305,34 @@ describe('DataSourceHistoryPage', () => {
         expect(screen.getByText('Entities platform-wide')).toBeInTheDocument()
         expect(screen.getByText('By provider')).toBeInTheDocument()
         expect(screen.getByText('Falkor Prod')).toBeInTheDocument()
+    })
+
+    it('scopes the alert inbox to the provider at the provider altitude', async () => {
+        useCountHistory.mockReturnValue({ data: SOURCE_PAYLOAD, isLoading: false })
+        useProviderHistory.mockReturnValue({
+            data: { data: { provider_id: 'p-1', from: '', to: '', grain: 'day',
+                totals: [{ at: '2026-08-20', node_count: 1, edge_count: 1, sources: 1 }],
+                sources: [], retention_days: 90 }, meta: {} },
+            isLoading: false,
+        })
+        useFleetHistory.mockReturnValue({ data: undefined, isLoading: false })
+        renderPage('?scope=provider')
+
+        expect(screen.getByTestId('alert-inbox')).toHaveAttribute('data-provider', 'p-1')
+    })
+
+    it('widens the alert inbox to the whole fleet at the platform altitude', () => {
+        useCountHistory.mockReturnValue({ data: SOURCE_PAYLOAD, isLoading: false })
+        useProviderHistory.mockReturnValue({ data: undefined, isLoading: false })
+        useFleetHistory.mockReturnValue({
+            data: { data: { provider_id: 'fleet', from: '', to: '', grain: 'day',
+                totals: [{ at: '2026-08-20', node_count: 1, edge_count: 1, sources: 1 }],
+                sources: [], retention_days: 90 }, meta: {} },
+            isLoading: false,
+        })
+        renderPage('?scope=fleet')
+
+        expect(screen.getByTestId('alert-inbox')).toHaveAttribute('data-provider', 'fleet')
     })
 
     it('reads the chart mode from the URL', () => {

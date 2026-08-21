@@ -348,10 +348,12 @@ async def notify_counts_anomaly(
     workspace_id: Optional[str],
     data_source_id: str,
     catalog_item_id: Optional[str],
+    provider_name: Optional[str],
     source_name: str,
     severity: str,
     direction: str,
     node_delta: int,
+    node_count: int = 0,
 ) -> int:
     """Bell for a graph that moved far outside its own normal range.
 
@@ -375,7 +377,12 @@ async def notify_counts_anomaly(
 
     magnitude = f"{abs(node_delta):,}"
     verb = "lost" if direction == "drop" else "gained"
-    scale = "far outside" if severity == "severe" else "outside"
+    # Critical is not a bigger version of severe — it means the graph is
+    # nearly gone — so it gets its own sentence rather than a stronger adverb.
+    scale = {
+        "critical": None,
+        "severe": "far outside",
+    }.get(severity, "outside")
     # The history view is routed by CATALOG id; the alert knows the data
     # source. When the two cannot be connected — an unregistered graph, a
     # catalog entry since removed — fall back to the freshness cockpit, which
@@ -390,10 +397,21 @@ async def notify_counts_anomaly(
         session,
         user_ids=managers | admins,
         kind="insights.counts_anomaly",
-        title=f"{source_name} {verb} {magnitude} entities",
+        # The provider is in the TITLE, not the body. An operator running
+        # several providers reads the bell as a list, and "Orders lost 4.2M"
+        # does not say which deployment to go and look at.
+        title=(
+            f"{source_name} {verb} {magnitude} entities"
+            + (f" on {provider_name}" if provider_name else "")
+        ),
         body=(
-            f"That is {scale} this source's usual movement. "
-            "Open the history to see which labels moved and what else was "
+            (
+                f"Almost nothing is left — {node_count:,} entities remain. "
+                "Check the source system before anything reloads over it."
+                if scale is None else
+                f"That is {scale} this source's usual movement."
+            )
+            + " Open the history to see which labels moved and what else was "
             "running at the time."
         ),
         link=link,

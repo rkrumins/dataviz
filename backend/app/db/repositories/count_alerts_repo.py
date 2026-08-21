@@ -44,7 +44,7 @@ from . import stats_history_repo
 
 logger = logging.getLogger(__name__)
 
-_SEVERITY_RANK = {"normal": 0, "notable": 1, "severe": 2}
+_SEVERITY_RANK = {"normal": 0, "notable": 1, "severe": 2, "critical": 3}
 
 #: Floors on the operator overrides, mirroring the retention policy's. A
 #: cooldown of 0 would turn one incident into an alert per probe.
@@ -123,31 +123,75 @@ async def resolve_alert_policy(session: AsyncSession) -> AlertPolicy:
     )
 
 
-async def _catalog_item_for(
-    session: AsyncSession, provider_id: Optional[str], graph_name: Optional[str],
-) -> Optional[str]:
-    """The catalog entry for a physical graph, if it has one.
+@dataclass(frozen=True)
+class AlertIdentity:
+    """Who this alert is ABOUT, in names a person recognises.
 
-    Resolved once here rather than at notification time so the bell can
-    deep-link into the history view, which is routed by catalog id. A
-    by-id read across the domain boundary, never a JOIN — and one query per
-    ALERT, which is a rare event, not per snapshot.
+    Frozen onto the alert rather than resolved on read: an operator opening a
+    week-old alert needs to know which source under which provider was hit,
+    and by then the provider may have been renamed and the source relabelled
+    or deleted. Ids alone send the reader hunting through a catalog to find
+    out what the alert was even about.
     """
-    if not provider_id or not graph_name:
-        return None
-    from ..models import CatalogItemORM
+    catalog_item_id: Optional[str] = None
+    provider_name: Optional[str] = None
+    data_source_label: Optional[str] = None
+
+
+async def _identity_for(
+    session: AsyncSession,
+    *,
+    data_source_id: str,
+    provider_id: Optional[str],
+    graph_name: Optional[str],
+) -> AlertIdentity:
+    """Resolve the names and the deep-link target for one alert.
+
+    Three small by-id reads across domain boundaries — never a JOIN, per the
+    ownership map — and they run once per ALERT, which is a rare event, not
+    once per snapshot. Every lookup degrades to ``None`` independently: a
+    missing provider row must not cost the alert its source label, and neither
+    must cost the alert itself.
+    """
+    from ..models import CatalogItemORM, ProviderORM, WorkspaceDataSourceORM
+
+    catalog_item_id = provider_name = data_source_label = None
+
+    if provider_id and graph_name:
+        try:
+            catalog_item_id = (await session.execute(
+                select(CatalogItemORM.id).where(
+                    CatalogItemORM.provider_id == provider_id,
+                    CatalogItemORM.source_identifier == graph_name,
+                ).limit(1)
+            )).scalar_one_or_none()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("alert identity: catalog lookup failed for %s/%s: %s",
+                           provider_id, graph_name, exc)
+
+    if provider_id:
+        try:
+            provider_name = (await session.execute(
+                select(ProviderORM.name).where(ProviderORM.id == provider_id)
+            )).scalar_one_or_none()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("alert identity: provider lookup failed for %s: %s",
+                           provider_id, exc)
 
     try:
-        return (await session.execute(
-            select(CatalogItemORM.id).where(
-                CatalogItemORM.provider_id == provider_id,
-                CatalogItemORM.source_identifier == graph_name,
-            ).limit(1)
+        data_source_label = (await session.execute(
+            select(WorkspaceDataSourceORM.label)
+            .where(WorkspaceDataSourceORM.id == data_source_id)
         )).scalar_one_or_none()
     except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("catalog lookup failed for %s/%s: %s",
-                       provider_id, graph_name, exc)
-        return None
+        logger.warning("alert identity: source lookup failed for %s: %s",
+                       data_source_id, exc)
+
+    return AlertIdentity(
+        catalog_item_id=catalog_item_id,
+        provider_name=provider_name,
+        data_source_label=data_source_label,
+    )
 
 
 @dataclass(frozen=True)
@@ -159,13 +203,23 @@ class PendingNotice:
     data_source_id: str
     workspace_id: Optional[str]
     catalog_item_id: Optional[str]
+    provider_name: Optional[str]
     source_name: str
     severity: str
     direction: str
     node_delta: int
+    node_count: int
 
 
 def _meets(severity: str, floor: str) -> bool:
+    """Does this movement clear the configured floor?
+
+    ``critical`` clears any floor. It means the graph is nearly gone, and
+    there is no operator setting for which that is not worth knowing — a floor
+    is a noise control, and a wipe is not noise.
+    """
+    if severity == "critical":
+        return True
     return _SEVERITY_RANK.get(severity, 0) >= _SEVERITY_RANK.get(floor, 1)
 
 
@@ -229,10 +283,20 @@ async def evaluate_source(
     worst = None
     worst_severity = "normal"
     for row in rows:
-        severity = stats_history_repo.classify_significance(row.node_delta, baseline)
+        severity = stats_history_repo.classify_significance(
+            row.node_delta, baseline,
+            before=int(row.node_count or 0) - int(row.node_delta or 0),
+        )
         if not _meets(severity, policy.min_severity):
             continue
-        if worst is None or abs(row.node_delta or 0) > abs(worst.node_delta or 0):
+        # Rank first, magnitude second. A wipe on a small graph outranks a
+        # merely-severe swing on a huge one, and ordering by magnitude alone
+        # would report the second and bury the first.
+        if worst is None or (
+            _SEVERITY_RANK[severity], abs(row.node_delta or 0)
+        ) > (
+            _SEVERITY_RANK[worst_severity], abs(worst.node_delta or 0)
+        ):
             worst, worst_severity = row, severity
     if worst is None:
         return None
@@ -250,8 +314,11 @@ async def evaluate_source(
         return None
 
     delta = int(worst.node_delta or 0)
-    catalog_item_id = await _catalog_item_for(
-        session, worst.provider_id, worst.graph_name,
+    identity = await _identity_for(
+        session,
+        data_source_id=ds_id,
+        provider_id=worst.provider_id,
+        graph_name=worst.graph_name,
     )
     session.add(DataSourceCountAlertORM(
         id=f"alr_{uuid.uuid4().hex[:12]}",
@@ -262,7 +329,9 @@ async def evaluate_source(
         workspace_id=worst.workspace_id,
         provider_id=worst.provider_id,
         graph_name=worst.graph_name,
-        catalog_item_id=catalog_item_id,
+        catalog_item_id=identity.catalog_item_id,
+        provider_name=identity.provider_name,
+        data_source_label=identity.data_source_label,
         severity=worst_severity,
         direction="drop" if delta < 0 else "rise",
         node_delta=delta,
@@ -274,11 +343,16 @@ async def evaluate_source(
     return PendingNotice(
         data_source_id=ds_id,
         workspace_id=worst.workspace_id,
-        catalog_item_id=catalog_item_id,
-        source_name=worst.graph_name or ds_id,
+        catalog_item_id=identity.catalog_item_id,
+        provider_name=identity.provider_name,
+        # The source's own label when it has one, falling back to the physical
+        # graph name and then to the id — always something a person can match
+        # against what they see in the product.
+        source_name=identity.data_source_label or worst.graph_name or ds_id,
         severity=worst_severity,
         direction="drop" if delta < 0 else "rise",
         node_delta=delta,
+        node_count=int(worst.node_count or 0),
     )
 
 
@@ -388,6 +462,7 @@ async def purge_alerts(
 
 __all__: Sequence[str] = (
     "AlertPolicy",
+    "AlertIdentity",
     "PendingNotice",
     "acknowledge",
     "env_alert_policy",

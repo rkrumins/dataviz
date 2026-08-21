@@ -1210,8 +1210,14 @@ class DataSourceCountAlertORM(Base):
     #: the history view (which is routed by catalog id, not data source id).
     #: NULL when the graph has no catalog entry, or lost it since.
     catalog_item_id = Column(Text, nullable=True)
+    #: Human names, frozen alongside the ids for the same reason everything
+    #: else here is frozen: an alert has to still say WHICH source under WHICH
+    #: provider was affected after the provider is renamed, the source is
+    #: relabelled, or either is deleted. An id alone sends the reader hunting.
+    provider_name = Column(Text, nullable=True)
+    data_source_label = Column(Text, nullable=True)
 
-    severity = Column(Text, nullable=False)   # notable | severe
+    severity = Column(Text, nullable=False)   # notable | severe | critical
     direction = Column(Text, nullable=False)  # drop | rise
     node_delta = Column(Integer, nullable=False, default=0)
     node_count = Column(Integer, nullable=False, default=0)
@@ -1233,7 +1239,8 @@ class DataSourceCountAlertORM(Base):
         # composite the planner can still walk.
         Index("ix_dsca_open", "acknowledged_at", "detected_at"),
         CheckConstraint(
-            "severity IN ('notable', 'severe')", name="ck_dsca_severity",
+            "severity IN ('notable', 'severe', 'critical')",
+            name="ck_dsca_severity",
         ),
         CheckConstraint(
             "direction IN ('drop', 'rise')", name="ck_dsca_direction",

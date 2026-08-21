@@ -38,6 +38,7 @@ import { CountTimeline, TimelineLegend, type TimelineMode } from '@/components/i
 import { LabelLedger } from '@/components/insights/history/LabelLedger'
 import { ChangeLedger } from '@/components/insights/history/ChangeLedger'
 import { AlertBand } from '@/components/insights/history/AlertBand'
+import { AlertInbox } from '@/components/insights/history/AlertInbox'
 import { CoverageStrip } from '@/components/insights/history/CoverageStrip'
 import { HistoryExplainer } from '@/components/insights/history/HistoryExplainer'
 import { insightsHistoryService } from '@/services/insightsHistoryService'
@@ -221,7 +222,16 @@ export function DataSourceHistoryPage() {
                 {isLoading ? (
                     <HistorySkeleton />
                 ) : scope !== 'source' ? (
-                    <RollupScope payload={rollupPayload} scope={scope} />
+                    <>
+                        {/* At these altitudes the question is which SOURCE
+                            under which PROVIDER is broken — the rollup chart
+                            shows the shape, this names the culprits. */}
+                        <AlertInbox
+                            className="mb-5"
+                            providerId={scope === 'provider' ? item?.providerId : undefined}
+                        />
+                        <RollupScope payload={rollupPayload} scope={scope} />
+                    </>
                 ) : !payload || payload.points.length === 0 ? (
                     <EmptyState
                         title="No history yet"

@@ -200,6 +200,25 @@ behind it and the per-label evidence are written once into
 `data_source_count_alerts` and never derived again — which also means an alert
 outlives the snapshot that produced it.
 
+**Four severities, and the top one is measured differently.** `notable` (≥3×)
+and `severe` (≥8×) are relative to the source's own median movement — the right
+lens for "is this unusual". `critical` is proportional to the **graph**: a drop
+taking ≥90% of it. That distinction is the point, not a refinement. A source
+with large routine churn can lose *everything* without the loss reaching 8× its
+own median, so the tier that should shout loudest would otherwise stay silent on
+the worst failure. `critical` also clears any configured severity floor: a floor
+is a noise control, and a wipe is not noise. It is asymmetric — only losses
+qualify — because a graph doubling is dramatic but recoverable, where one that is
+nearly gone may have nothing left to recover from.
+
+**Every alert names what it was about.** `provider_name`, `data_source_label`,
+`graph_name` and `catalog_item_id` are resolved once and frozen onto the alert
+beside the ids. An operator opening a week-old alert has to know which source
+under which provider was hit, and by then the provider may have been renamed and
+the source relabelled or deleted — ids alone send them hunting. Each lookup
+degrades independently, so a missing provider row costs the alert its provider
+name and nothing else.
+
 **One alert per source per cooldown.** A graph thrashing under a broken loader
 moves unusually on every probe; alerting on each turns one incident into a pager
 storm and trains people to ignore it. The worst movement in the stretch wins,
@@ -273,7 +292,7 @@ Scheduler / worker tunables (defaults in parentheses):
 | `INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE` | `5000` | Per-source snapshot cap, applied alongside the age cutoff. |
 | `INSIGHTS_HISTORY_PURGE_INTERVAL_SECS` | `3600` | Snapshot purge cadence. |
 | `INSIGHTS_ALERTS_ENABLED` | `true` | Master switch for anomaly evaluation. |
-| `INSIGHTS_ALERT_MIN_SEVERITY` | `severe` | Floor: `severe` (≥8× usual) or `notable` (≥3×). |
+| `INSIGHTS_ALERT_MIN_SEVERITY` | `severe` | Floor: `severe` (≥8× usual) or `notable` (≥3×). `critical` ignores it. |
 | `INSIGHTS_ALERT_COOLDOWN_SECS` | `21600` | At most one alert per source per this interval. |
 | `INSIGHTS_ALERT_INTERVAL_SECS` | `900` | How often movements are judged. |
 
@@ -298,7 +317,11 @@ retention policy is edited in place from the coverage line that reports it,
 read-only for non-admins — and the alert policy sits in the same dialog, because
 how much evidence to keep and how loudly to react to it are one decision in
 practice. Open anomalies appear as a band above the chart until someone
-acknowledges them.
+acknowledges them, naming the provider and source they belong to; at the
+provider and platform scopes they are grouped into an inbox by provider, because
+several affected sources under one provider is a provider problem — a rotated
+cluster, a broken loader, an expired credential — and a flat severity-ordered
+list scatters that signal instead of leading with it.
 Providers that fail repeatedly show as degraded via the rolling success window.
 
 ## Limitations

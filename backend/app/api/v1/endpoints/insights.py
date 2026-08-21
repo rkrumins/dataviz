@@ -997,6 +997,19 @@ def _auto_grain(frm: str, to: str) -> str:
     return "day"
 
 
+def _significance_of(row, baseline: int) -> str:
+    """Classify one raw snapshot, supplying the pre-movement count so the
+    proportional ``critical`` test can run."""
+    # Imported here, not at module scope, like every other repository
+    # reference in this module.
+    from backend.app.db.repositories import stats_history_repo
+
+    return stats_history_repo.classify_significance(
+        row.node_delta, baseline,
+        before=int(row.node_count or 0) - int(row.node_delta or 0),
+    )
+
+
 def _pct_change(first: int, last: int) -> Optional[float]:
     """None rather than a fake number when the baseline is zero — a graph that
     grew from 0 to 40,000 did not grow by a percentage."""
@@ -1212,7 +1225,12 @@ async def get_data_source_history(
             node_max=high,
             lane=row.lane or "poll",
             capture_reason=row.capture_reason or "changed",
-            significance=stats_history_repo.classify_significance(row.node_delta, baseline),
+            significance=stats_history_repo.classify_significance(
+                row.node_delta, baseline,
+                # The count BEFORE the movement, which is what the
+                # proportional critical test measures against.
+                before=int(row.node_count or 0) - int(row.node_delta or 0),
+            ),
         ).model_dump())
 
     labels = _label_summaries(points, "entity_type_counts")
@@ -1243,12 +1261,14 @@ async def get_data_source_history(
         largest_drop=_largest_drop(raw_rows),
         change_baseline=baseline,
         notable_changes=sum(
-            1 for r in raw_rows
-            if stats_history_repo.classify_significance(r.node_delta, baseline) == "notable"
+            1 for r in raw_rows if _significance_of(r, baseline) == "notable"
         ),
         severe_changes=sum(
             1 for r in raw_rows
-            if stats_history_repo.classify_significance(r.node_delta, baseline) == "severe"
+            # Critical counts as severe here: the summary tile asks "how much
+            # needs attention", and splitting the worst tier out of that total
+            # would under-report it.
+            if _significance_of(r, baseline) in ("severe", "critical")
         ),
         coverage_from=await stats_history_repo.oldest_captured_at(session, ds_id),
         retention_days=policy.retention_days,
@@ -1629,7 +1649,9 @@ class CountAlert(BaseModel):
     catalog_item_id: Optional[str] = None
     workspace_id: Optional[str] = None
     provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
     graph_name: Optional[str] = None
+    data_source_label: Optional[str] = None
     #: When the movement happened — NOT when it was noticed. Evaluation runs
     #: on a tick, so the two differ, and ordering by the wrong one tells a
     #: confusing story.
@@ -1696,7 +1718,9 @@ def _alert_model(row) -> dict:
         catalog_item_id=row.catalog_item_id,
         workspace_id=row.workspace_id,
         provider_id=row.provider_id,
+        provider_name=row.provider_name,
         graph_name=row.graph_name,
+        data_source_label=row.data_source_label,
         observed_at=row.observed_at,
         detected_at=row.detected_at,
         severity=row.severity,

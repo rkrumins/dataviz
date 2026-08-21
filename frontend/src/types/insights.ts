@@ -238,12 +238,17 @@ export interface CountAlert {
     catalog_item_id: string | null
     workspace_id: string | null
     provider_id: string | null
+    /** Names frozen at alert time. An operator opening a week-old alert needs
+     *  to know which source under which provider was hit, by which point the
+     *  provider may have been renamed and the source relabelled or deleted. */
+    provider_name: string | null
     graph_name: string | null
+    data_source_label: string | null
     /** When the movement happened — not when it was noticed. Evaluation runs
      *  on a tick, so the two differ by up to one interval. */
     observed_at: string
     detected_at: string
-    severity: 'notable' | 'severe'
+    severity: 'notable' | 'severe' | 'critical'
     direction: 'drop' | 'rise'
     node_delta: number
     node_count: number

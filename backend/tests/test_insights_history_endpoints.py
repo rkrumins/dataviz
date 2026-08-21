@@ -392,6 +392,23 @@ async def test_significance_is_relative_to_the_source_s_own_baseline(
 async def test_a_movement_far_outside_the_baseline_is_severe(
     db_session: AsyncSession,
 ):
+    # A tenth of the graph, on a source that normally moves by ten. Far
+    # outside its own range, and deliberately NOT proportionally catastrophic
+    # — that is the next test.
+    for hours in range(20, 10, -1):
+        await _snap(db_session, at=_iso(hours), entities={"Table": 10_000}, delta=10)
+    await _snap(db_session, at=_iso(2), entities={"Table": 9_000}, delta=-1_000)
+
+    result = await insights.get_data_source_history(
+        ds_id=DS_ID, grain="raw", session=db_session,
+    )
+    assert result["data"]["points"][-1]["significance"] == "severe"
+    assert result["data"]["summary"]["severe_changes"] == 1
+
+
+async def test_a_near_total_loss_is_critical(db_session: AsyncSession):
+    """Measured against the GRAPH, not against the source's churn — a wipe is
+    not a statistical outlier, it is an outage."""
     for hours in range(20, 10, -1):
         await _snap(db_session, at=_iso(hours), entities={"Table": 10_000}, delta=10)
     await _snap(db_session, at=_iso(2), entities={"Table": 100}, delta=-9_900)
@@ -399,8 +416,39 @@ async def test_a_movement_far_outside_the_baseline_is_severe(
     result = await insights.get_data_source_history(
         ds_id=DS_ID, grain="raw", session=db_session,
     )
-    assert result["data"]["points"][-1]["significance"] == "severe"
+    assert result["data"]["points"][-1]["significance"] == "critical"
+    # Critical counts into the severe tally on purpose: the tile asks "how
+    # much needs attention", and splitting the worst tier out under-reports it.
     assert result["data"]["summary"]["severe_changes"] == 1
+
+
+async def test_a_big_rise_is_never_critical(db_session: AsyncSession):
+    """The proportional tier is asymmetric. A graph doubling is dramatic and
+    recoverable; one that is nearly gone may have nothing left to recover
+    from."""
+    for hours in range(20, 10, -1):
+        await _snap(db_session, at=_iso(hours), entities={"Table": 10_000}, delta=10)
+    await _snap(db_session, at=_iso(2), entities={"Table": 500_000}, delta=490_000)
+
+    result = await insights.get_data_source_history(
+        ds_id=DS_ID, grain="raw", session=db_session,
+    )
+    assert result["data"]["points"][-1]["significance"] == "severe"
+
+
+async def test_a_tiny_graph_losing_almost_everything_is_not_critical(
+    db_session: AsyncSession,
+):
+    """Below the floor the proportion carries no signal — an 11-node fixture
+    losing 10 of them is 91% and not an incident."""
+    for hours in range(20, 10, -1):
+        await _snap(db_session, at=_iso(hours), entities={"Table": 11}, delta=1)
+    await _snap(db_session, at=_iso(2), entities={"Table": 1}, delta=-10)
+
+    result = await insights.get_data_source_history(
+        ds_id=DS_ID, grain="raw", session=db_session,
+    )
+    assert result["data"]["points"][-1]["significance"] == "normal"
 
 
 async def test_significance_is_symmetric(db_session: AsyncSession):

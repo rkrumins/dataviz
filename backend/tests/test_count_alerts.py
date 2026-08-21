@@ -75,7 +75,9 @@ async def _alerts(session: AsyncSession) -> list:
 # ── detection ────────────────────────────────────────────────────────
 
 async def test_a_severe_drop_raises_an_alert(db_session: AsyncSession):
-    await _steady_then(db_session, -9_900, 100)
+    """Far outside the source's own churn, but the graph survives — 1,000 of
+    10,000 is 10%, nowhere near the proportional critical threshold."""
+    await _steady_then(db_session, -1_000, 9_000)
 
     notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
     assert notice is not None
@@ -84,7 +86,7 @@ async def test_a_severe_drop_raises_an_alert(db_session: AsyncSession):
 
     rows = await _alerts(db_session)
     assert len(rows) == 1
-    assert rows[0].node_delta == -9_900
+    assert rows[0].node_delta == -1_000
     assert rows[0].severity == "severe"
 
 
@@ -335,8 +337,8 @@ async def test_the_sweep_rings_only_after_the_alerts_are_committed(monkeypatch):
 
     notice = count_alerts_repo.PendingNotice(
         data_source_id=DS_ID, workspace_id="ws_a1", catalog_item_id="cat_a1",
-        source_name="alert-graph", severity="severe", direction="drop",
-        node_delta=-9_900,
+        provider_name="Falkor Prod", source_name="alert-graph",
+        severity="severe", direction="drop", node_delta=-9_900, node_count=100,
     )
 
     async def fake_policy(_s): return _policy()
@@ -452,7 +454,8 @@ async def test_a_failed_fan_out_leaves_the_alerts_readable(monkeypatch):
 
     notice = count_alerts_repo.PendingNotice(
         data_source_id=DS_ID, workspace_id=None, catalog_item_id=None,
-        source_name="g", severity="severe", direction="drop", node_delta=-1,
+        provider_name=None, source_name="g", severity="severe",
+        direction="drop", node_delta=-1, node_count=0,
     )
 
     async def fake_policy(_s): return _policy()
@@ -520,7 +523,8 @@ async def test_a_poisoned_transaction_is_rolled_back_before_continuing(monkeypat
 
     notice = count_alerts_repo.PendingNotice(
         data_source_id="ds_ok", workspace_id=None, catalog_item_id=None,
-        source_name="g", severity="severe", direction="drop", node_delta=-1,
+        provider_name=None, source_name="g", severity="severe",
+        direction="drop", node_delta=-1, node_count=0,
     )
 
     async def fake_policy(_s): return _policy()
@@ -564,7 +568,8 @@ async def test_an_alert_is_committed_as_soon_as_it_lands(monkeypatch):
 
     notice = count_alerts_repo.PendingNotice(
         data_source_id="ds_a", workspace_id=None, catalog_item_id=None,
-        source_name="g", severity="severe", direction="drop", node_delta=-1,
+        provider_name=None, source_name="g", severity="severe",
+        direction="drop", node_delta=-1, node_count=0,
     )
 
     async def fake_policy(_s): return _policy()
@@ -588,3 +593,236 @@ async def test_an_alert_is_committed_as_soon_as_it_lands(monkeypatch):
     await scheduler._maybe_evaluate_count_alerts()
     # A quiet source costs no commit; the alert is durable before the bell.
     assert events.index("commit") < events.index("notify")
+
+
+# ── critical: measured against the graph, not against its churn ──────
+
+async def test_a_near_total_loss_is_critical(db_session: AsyncSession):
+    await _steady_then(db_session, -9_900, 100)
+
+    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    assert notice.severity == "critical"
+    assert (await _alerts(db_session))[0].severity == "critical"
+
+
+async def test_critical_fires_even_when_the_multiple_would_not(
+    db_session: AsyncSession,
+):
+    """THE reason this tier exists. A source with huge routine churn can lose
+    everything without the loss reaching 8x its own median movement — the tier
+    that should shout loudest would otherwise stay silent on the worst
+    failure."""
+    # Routine movement of 5,000 on a 10,000-node graph.
+    for hours in range(20, 10, -1):
+        await _snap(db_session, at=_iso(hours), nodes=10_000, delta=5_000)
+    # Then the graph is emptied. 10,000 is only 2x the 5,000 baseline — not
+    # even "notable" by the multiples — but it is 100% of the graph.
+    await _snap(db_session, at=_iso(2), nodes=0, delta=-10_000)
+
+    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    assert notice is not None
+    assert notice.severity == "critical"
+
+
+async def test_critical_clears_any_configured_floor(db_session: AsyncSession):
+    """A floor is a noise control; a wipe is not noise."""
+    await _steady_then(db_session, -9_900, 100)
+
+    notice = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(min_severity="severe"),
+    )
+    assert notice.severity == "critical"
+
+
+async def test_a_doubling_is_never_critical(db_session: AsyncSession):
+    """Asymmetric on purpose: a graph doubling is dramatic but recoverable,
+    where one that is nearly gone may have nothing left to recover from."""
+    await _steady_then(db_session, 30_000, 40_000)
+
+    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    assert notice.severity == "severe"
+    assert notice.direction == "rise"
+
+
+async def test_a_tiny_graph_emptying_is_not_called_critical(
+    db_session: AsyncSession,
+):
+    """Below the floor the proportion carries no signal — a 12-node fixture
+    losing 11 is 92% and not an incident."""
+    for hours in range(20, 10, -1):
+        await _snap(db_session, at=_iso(hours), nodes=12, delta=1)
+    await _snap(db_session, at=_iso(2), nodes=1, delta=-11)
+
+    notice = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(min_severity="notable"),
+    )
+    assert notice is None or notice.severity != "critical"
+
+
+async def test_critical_outranks_a_larger_severe_movement(
+    db_session: AsyncSession,
+):
+    """Rank first, magnitude second. Ordering by magnitude alone would report
+    a big swing on a healthy graph and bury the wipe."""
+    for hours in range(20, 10, -1):
+        await _snap(db_session, at=_iso(hours), nodes=1_000_000, delta=100)
+    # A huge but survivable swing...
+    await _snap(db_session, at=_iso(6), nodes=800_000, delta=-200_000)
+    # ...then the graph is wiped. Smaller in absolute terms, worse in every
+    # way that matters.
+    await _snap(db_session, at=_iso(5), nodes=100, delta=-799_900)
+
+    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    assert notice.severity == "critical"
+    assert notice.node_delta == -799_900
+
+
+# ── frozen identity ──────────────────────────────────────────────────
+
+async def test_the_alert_freezes_the_provider_and_source_names(
+    db_session: AsyncSession,
+):
+    """An operator opening a week-old alert needs to know which source under
+    which provider was hit — by then the provider may have been renamed and
+    the source relabelled or deleted."""
+    from backend.app.db.models import WorkspaceORM, WorkspaceDataSourceORM
+
+    db_session.add(ProviderORM(id="prov_a1", name="Falkor Prod",
+                               provider_type="falkordb"))
+    db_session.add(WorkspaceORM(id="ws_a1", name="Analytics"))
+    await db_session.flush()
+    db_session.add(WorkspaceDataSourceORM(
+        id=DS_ID, workspace_id="ws_a1", provider_id="prov_a1",
+        graph_name="alert-graph", label="Orders",
+    ))
+    db_session.add(CatalogItemORM(
+        id="cat_a1", provider_id="prov_a1",
+        source_identifier="alert-graph", name="Orders",
+    ))
+    await db_session.flush()
+    await _steady_then(db_session, -9_900, 100)
+
+    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    row = (await _alerts(db_session))[0]
+
+    assert row.provider_name == "Falkor Prod"
+    assert row.data_source_label == "Orders"
+    assert row.graph_name == "alert-graph"
+    assert row.catalog_item_id == "cat_a1"
+    # The notice prefers the source's own label over the physical graph name.
+    assert notice.provider_name == "Falkor Prod"
+    assert notice.source_name == "Orders"
+
+
+async def test_a_renamed_provider_does_not_rewrite_an_existing_alert(
+    db_session: AsyncSession,
+):
+    from backend.app.db.models import ProviderORM as _P
+
+    db_session.add(_P(id="prov_a1", name="Falkor Prod", provider_type="falkordb"))
+    await db_session.flush()
+    await _steady_then(db_session, -9_900, 100)
+    await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+
+    provider = await db_session.get(_P, "prov_a1")
+    provider.name = "Falkor Prod (decommissioned)"
+    await db_session.flush()
+
+    assert (await _alerts(db_session))[0].provider_name == "Falkor Prod"
+
+
+async def test_a_missing_provider_row_does_not_cost_the_alert_its_label(
+    db_session: AsyncSession,
+):
+    """Each lookup degrades independently — one missing row must not take the
+    others down with it, nor the alert itself."""
+    from backend.app.db.models import WorkspaceORM, WorkspaceDataSourceORM
+
+    db_session.add(WorkspaceORM(id="ws_a1", name="Analytics"))
+    await db_session.flush()
+    db_session.add(WorkspaceDataSourceORM(
+        id=DS_ID, workspace_id="ws_a1", provider_id="prov_gone",
+        graph_name="alert-graph", label="Orders",
+    ))
+    await db_session.flush()
+    await _steady_then(db_session, -9_900, 100)
+
+    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    assert notice is not None
+    row = (await _alerts(db_session))[0]
+    assert row.provider_name is None
+    assert row.data_source_label == "Orders"
+
+
+# --------------------------------------------------------------------------
+# What the bell actually says
+# --------------------------------------------------------------------------
+# The sweep tests above monkeypatch ``notify_counts_anomaly`` wholesale, so
+# nothing exercises the copy itself. It is the only part of this feature an
+# operator reads before deciding whether to get out of bed, and `critical`
+# takes a different branch than the other tiers — so it is worth asserting.
+
+
+async def _captured_notice(monkeypatch, **kwargs) -> dict:
+    """Call the real ``notify_counts_anomaly`` and return the ``notify`` kwargs
+    it would have written, with the audience lookups stubbed out."""
+    from backend.app.db.repositories import notification_repo
+
+    captured: dict = {}
+
+    async def fake_notify(_session, **kw):
+        captured.update(kw)
+        return len(kw.get("user_ids") or ())
+
+    async def fake_managers(_s, **_kw): return {"usr_1"}
+    async def fake_admins(_s, _perm): return set()
+
+    monkeypatch.setattr(notification_repo, "notify", fake_notify)
+    monkeypatch.setattr(notification_repo, "users_who_can", fake_managers)
+    monkeypatch.setattr(
+        notification_repo, "users_with_global_permission", fake_admins,
+    )
+    await notification_repo.notify_counts_anomaly(None, **kwargs)
+    return captured
+
+
+async def test_the_bell_names_the_provider_in_its_title(monkeypatch):
+    """An operator running several providers reads the bell as a list.
+    "Orders lost 4,200" does not say which deployment to go and look at."""
+    captured = await _captured_notice(
+        monkeypatch,
+        workspace_id="ws_a1", data_source_id=DS_ID, catalog_item_id="cat_a1",
+        provider_name="Falkor Prod", source_name="Orders",
+        severity="severe", direction="drop", node_delta=-4_200, node_count=800,
+    )
+    assert captured["title"] == "Orders lost 4,200 entities on Falkor Prod"
+    assert "far outside" in captured["body"]
+    assert captured["link"] == f"/datasources/cat_a1/history?ds={DS_ID}"
+
+
+async def test_a_critical_bell_says_what_is_left(monkeypatch):
+    """Not a stronger adverb — a different sentence. "Far outside its usual
+    movement" is a wild understatement for a graph that is gone, and it buries
+    the one number that decides what to do next: how much is left."""
+    captured = await _captured_notice(
+        monkeypatch,
+        workspace_id="ws_a1", data_source_id=DS_ID, catalog_item_id="cat_a1",
+        provider_name="Falkor Prod", source_name="Orders",
+        severity="critical", direction="drop",
+        node_delta=-4_000_000, node_count=1_200,
+    )
+    assert "Almost nothing is left" in captured["body"]
+    assert "1,200 entities remain" in captured["body"]
+    assert "usual movement" not in captured["body"]
+
+
+async def test_the_title_survives_a_provider_it_cannot_name(monkeypatch):
+    captured = await _captured_notice(
+        monkeypatch,
+        workspace_id=None, data_source_id=DS_ID, catalog_item_id=None,
+        provider_name=None, source_name="alert-graph",
+        severity="notable", direction="rise", node_delta=900, node_count=9_900,
+    )
+    assert captured["title"] == "alert-graph gained 900 entities"
+    # No catalog entry: the bell still lands somewhere useful.
+    assert captured["link"] == f"/ingestion?tab=freshness&fds={DS_ID}"

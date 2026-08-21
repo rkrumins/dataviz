@@ -841,10 +841,12 @@ async def _maybe_evaluate_count_alerts() -> None:
                         workspace_id=notice.workspace_id,
                         data_source_id=notice.data_source_id,
                         catalog_item_id=notice.catalog_item_id,
+                        provider_name=notice.provider_name,
                         source_name=notice.source_name,
                         severity=notice.severity,
                         direction=notice.direction,
                         node_delta=notice.node_delta,
+                        node_count=notice.node_count,
                     )
                 await session.commit()
         except asyncio.CancelledError:

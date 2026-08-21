@@ -194,6 +194,29 @@ async def resolve_history_policy(session: AsyncSession) -> HistoryPolicy:
 _NOTABLE_MULTIPLE = 3.0
 _SEVERE_MULTIPLE = 8.0
 
+# ``critical`` is measured against the GRAPH, not against its churn, and that
+# is the whole reason it exists as a separate tier. The multiples above answer
+# "is this unusual for this source" — the right question almost always, and the
+# wrong one for a wipe:
+#
+#   * A source with large routine churn can lose EVERYTHING without the loss
+#     reaching 8x its own median movement. The tier that should shout loudest
+#     would stay silent precisely on the worst failure.
+#   * A graph going from four million entities to zero is not a statistical
+#     outlier. It is an outage, a dropped database, or a loader that truncated
+#     instead of upserting, and no amount of context makes it ordinary.
+#
+# So: a drop that removes this fraction of the graph is critical regardless of
+# what the source's usual movement looks like. 0.9 rather than 1.0 because a
+# loader that leaves a handful of rows behind has still destroyed the graph.
+_CRITICAL_LOSS_FRACTION = 0.9
+
+# Below this many entities the fraction is meaningless — a 12-node fixture
+# graph losing 11 nodes is 92% and not an incident. Real graphs are orders of
+# magnitude larger; this only excludes the ones where the proportion cannot
+# carry any signal.
+_CRITICAL_MIN_BEFORE = 1000
+
 # Floor under the baseline, in entities. Without it a source that sits
 # perfectly still has a baseline of 0, every multiple is 0, and the first time
 # it moves by one node the change is reported as severe.
@@ -225,16 +248,35 @@ def change_baseline(rows: list) -> int:
     return max(_SIGNIFICANCE_FLOOR, int(median))
 
 
-def classify_significance(delta: Optional[int], baseline: int) -> str:
-    """normal | notable | severe, relative to this source's own baseline.
+def classify_significance(
+    delta: Optional[int], baseline: int, *, before: Optional[int] = None,
+) -> str:
+    """normal | notable | severe | critical.
 
-    Deliberately symmetric: a graph that TRIPLED overnight is as much worth
+    The first three are relative to this source's OWN baseline, and
+    deliberately symmetric: a graph that tripled overnight is as much worth
     looking at as one that lost two thirds, and an "only drops matter" rule
     would miss a runaway loader duplicating every node.
+
+    ``critical`` is the exception, and it is asymmetric on purpose. It is
+    measured against the size of the graph rather than against its churn, and
+    only for losses — a graph doubling is dramatic but recoverable, whereas one
+    that is nearly gone may have nothing left to recover from. ``before`` is
+    the count prior to the movement; without it the proportional test is
+    skipped and the multiples decide alone.
     """
     if not delta:
         return "normal"
     magnitude = abs(delta)
+
+    if (
+        delta < 0
+        and before is not None
+        and before >= _CRITICAL_MIN_BEFORE
+        and magnitude >= before * _CRITICAL_LOSS_FRACTION
+    ):
+        return "critical"
+
     if magnitude >= baseline * _SEVERE_MULTIPLE:
         return "severe"
     if magnitude >= baseline * _NOTABLE_MULTIPLE:

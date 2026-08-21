@@ -16,14 +16,16 @@
  * check against the chart directly below it.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Check, Loader2, TrendingDown, TrendingUp } from 'lucide-react'
+import {
+    AlertTriangle, Check, Loader2, ServerCog, TrendingDown, TrendingUp,
+} from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { formatUtc, timeAgo } from '@/lib/timeAgo'
 import { useAnyPermission } from '@/store/auth'
 import { insightsHistoryService } from '@/services/insightsHistoryService'
 import type { CountAlert } from '@/types/insights'
-import { compactNum, signedNum } from './shared'
+import { compactNum, severityMeta, signedNum } from './shared'
 
 export const ALERTS_QUERY_KEY = 'insights-history-alerts' as const
 
@@ -79,16 +81,28 @@ export function AlertBand({ scopeId, onSelect, className }: {
     const alerts = data?.alerts ?? []
     if (!canRead || alerts.length === 0) return null
 
+    // The band takes the tone of the WORST thing in it. A critical alert
+    // sitting under a band styled for a notable one is a design that buries
+    // its own headline.
+    const worst = alerts.reduce(
+        (acc, a) => (severityMeta(a.severity).rank > severityMeta(acc).rank
+            ? a.severity : acc),
+        'notable',
+    )
+    const tone = severityMeta(worst)
+
     return (
         <section
             aria-label="Open anomalies"
             className={cn(
-                'rounded-2xl border border-red-500/25 bg-red-500/[0.04] overflow-hidden',
-                className,
+                'rounded-2xl border overflow-hidden', tone.surface, className,
             )}
         >
             <div className="flex items-center gap-2 px-4 pt-3.5 pb-2">
-                <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+                <AlertTriangle className={cn(
+                    'w-4 h-4 shrink-0',
+                    worst === 'critical' ? 'text-red-600' : 'text-red-500',
+                )} />
                 <h2 className="text-sm font-bold text-ink">
                     {alerts.length === 1
                         ? 'One movement needs a look'
@@ -121,14 +135,49 @@ export function AlertBand({ scopeId, onSelect, className }: {
                                     <span className="font-semibold text-ink-muted">
                                         {' '}· now {compactNum(alert.node_count)}
                                     </span>
-                                    <span className={cn(
-                                        'ml-2 px-1.5 py-0.5 rounded-md align-middle',
-                                        'text-[10px] font-bold uppercase tracking-wide',
-                                        alert.severity === 'severe'
-                                            ? 'bg-red-500/15 text-red-600 dark:text-red-400'
-                                            : 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
-                                    )}>
+                                    <span
+                                        className={cn(
+                                            'ml-2 px-1.5 py-0.5 rounded-md align-middle',
+                                            'text-[10px] font-bold uppercase tracking-wide',
+                                            severityMeta(alert.severity).chip,
+                                        )}
+                                        title={severityMeta(alert.severity).blurb}
+                                    >
                                         {alert.severity}
+                                    </span>
+                                </p>
+
+                                {/* WHICH source, under WHICH provider. On a
+                                    deployment running several providers this is
+                                    the difference between an alert you can act
+                                    on and one you have to go and identify. */}
+                                <p className="text-[11px] text-ink-secondary mt-0.5 flex items-center gap-1 min-w-0">
+                                    <ServerCog className="w-3 h-3 text-ink-muted shrink-0" />
+                                    <span className="truncate">
+                                        {alert.provider_name && (
+                                            <>
+                                                <strong className="text-ink font-semibold">
+                                                    {alert.provider_name}
+                                                </strong>
+                                                <span className="text-ink-muted"> / </span>
+                                            </>
+                                        )}
+                                        <strong className="text-ink font-semibold">
+                                            {alert.data_source_label
+                                                || alert.graph_name
+                                                || alert.data_source_id}
+                                        </strong>
+                                        {/* The physical graph too when it differs
+                                            from the label — one names what the
+                                            product calls it, the other what to
+                                            look for on the server. */}
+                                        {alert.graph_name
+                                            && alert.data_source_label
+                                            && alert.graph_name !== alert.data_source_label && (
+                                            <span className="text-ink-muted">
+                                                {' '}· graph {alert.graph_name}
+                                            </span>
+                                        )}
                                     </span>
                                 </p>
 
