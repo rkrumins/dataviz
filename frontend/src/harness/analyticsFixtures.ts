@@ -130,7 +130,7 @@ export const PRIVILEGED: AnalyticsSummary = {
             { key: 'visibility_changed', count: 141 }, { key: 'deleted', count: 74 },
         ],
         collaborationRate: 0.672,
-        contentConcentration: 0.64,
+        contentConcentration: 0.64, viewsNotOpened: 590, viewsNotOpenedShare: 0.643,
     },
     leaderboards: {
         topUsers: [
@@ -301,7 +301,7 @@ export const FIRST_RUN: AnalyticsSummary = {
     breakdowns: {
         usersByStatus: [], usersBySignupSource: [], viewsByVisibility: [],
         viewsByType: [], activityByAction: [],
-        collaborationRate: null, contentConcentration: null,
+        collaborationRate: null, contentConcentration: null, viewsNotOpened: 0, viewsNotOpenedShare: null,
     },
     leaderboards: { topUsers: [], topViews: [], topWorkspaces: [], topCreators: [] },
     graph: { nodes: 0, edges: 0, entityTypes: 0, sourcesWithStats: 0 },

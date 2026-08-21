@@ -118,6 +118,13 @@ export const METRICS: Record<string, MetricDefinition> = {
         why: 'Attention. Read it against active users: many opens from few people is a small group leaning on the platform heavily.',
         caveat: 'Recorded from the day open-tracking shipped; earlier ranges show none because none were counted.',
     },
+    notOpened: {
+        title: 'Not opened',
+        what: 'Views that exist and that nobody opened at all in the selected period.',
+        how: 'Live views, minus the ones with at least one recorded open inside the range. A view opened the day before the range started counts here.',
+        why: 'The other half of Top-10 share. Concentration says attention is narrow; this says how much of the catalogue is getting none of it — which is either content nobody can find, or content nobody wanted. Both are worth knowing before anyone builds more.',
+        caveat: 'Counts opens recorded since open-tracking shipped, so a range reaching further back overstates this.',
+    },
     concentration: {
         title: 'Top-10 share',
         what: 'The share of all view opens going to the ten most-opened views.',

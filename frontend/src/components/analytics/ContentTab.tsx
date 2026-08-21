@@ -1,9 +1,9 @@
 /**
  * ContentTab — the views themselves: what exists, what gets read, who builds it.
  */
-import { Eye, LayoutGrid, PenLine, Share2 } from 'lucide-react'
+import { Eye, EyeOff, LayoutGrid, PenLine, Share2 } from 'lucide-react'
 
-import { exact, percent, shortDate } from '@/lib/formatMetric'
+import { compact, exact, percent, shortDate } from '@/lib/formatMetric'
 import type {
     AnalyticsRangeSelection, AnalyticsSummary,
 } from '@/services/analyticsService'
@@ -32,7 +32,7 @@ export function ContentTab({
 
     return (
         <div className="space-y-5">
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
                 <KpiCard
                     label="Views" metric="views" value={totals.views.total} icon={LayoutGrid}
                     changePct={totals.views.changePct} comparisonLabel={vs}
@@ -49,6 +49,20 @@ export function ContentTab({
                     sub="of opens going to ten views"
                     higherIsBetter={false}
                     accent="amber"
+                />
+                {/* Sits beside Top-10 share on purpose: they are two halves of
+                    the same question, and the concentration figure alone reads
+                    as good news ("people know what they want") until you see
+                    how much of the catalogue is getting nothing. */}
+                <KpiCard
+                    label="Not opened" metric="notOpened"
+                    value={breakdowns.viewsNotOpenedShare == null
+                        ? compact(breakdowns.viewsNotOpened)
+                        : percent(breakdowns.viewsNotOpenedShare)}
+                    icon={EyeOff}
+                    sub={`${exact(breakdowns.viewsNotOpened)} of ${exact(totals.views.total)} views, in ${rangePhrase(range)}`}
+                    higherIsBetter={false}
+                    accent={(breakdowns.viewsNotOpenedShare ?? 0) > 0.5 ? 'amber' : 'cyan'}
                 />
                 <KpiCard
                     label="Semantic layers" metric="semanticLayers" value={totals.ontologies.total} icon={PenLine}

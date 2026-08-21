@@ -124,6 +124,11 @@ export interface Breakdowns {
     activityByAction: ClassCount[]
     collaborationRate: number | null
     contentConcentration: number | null
+    /** Live views with no opens in the window, and what share of the
+     *  catalogue that is. The other half of concentration: knowing the top ten
+     *  take most of the attention says nothing about how much is getting none. */
+    viewsNotOpened: number
+    viewsNotOpenedShare: number | null
 }
 
 export interface TopUser {

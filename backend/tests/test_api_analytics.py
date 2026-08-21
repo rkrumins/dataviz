@@ -1397,6 +1397,42 @@ async def test_an_unattributable_open_still_counts_but_ranks_nothing(db_session)
         len(before["leaderboards"]["topViews"])
 
 
+async def test_the_catalogue_s_dark_matter_is_counted(db_session):
+    """How much of the catalogue nobody reached.
+
+    "The top ten views take most of the opens" reads as good news — people know
+    what they want — right up until you see how much is getting nothing. The
+    count is by subtraction, so it must survive a view being soft-deleted (it
+    leaves the catalogue) and an open landing outside the window (it stops
+    counting).
+    """
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(db_session, days=7, now=NOW)
+    b = doc["breakdowns"]
+
+    live = doc["totals"]["views"]["total"]
+    opened = {v["viewId"] for v in doc["leaderboards"]["topViews"]}
+    assert b["viewsNotOpened"] == live - len(opened), (
+        "not-opened must be the catalogue minus what was actually opened"
+    )
+    assert b["viewsNotOpenedShare"] == round(b["viewsNotOpened"] / live, 3)
+
+
+async def test_an_open_outside_the_window_does_not_count_as_reached(db_session):
+    await _seed(db_session)
+    # `view_old` has no opens at all inside 7 days; give it one long past.
+    db_session.add(ProductEventORM(
+        id="pev_stale", event_type="view.opened", actor_id="usr_old",
+        subject_id="view_old", payload=json.dumps({"viewId": "view_old"}),
+        created_at=_iso(200)))
+    await db_session.commit()
+
+    doc = await analytics_repo.platform_summary(db_session, days=7, now=NOW)
+    opened = {v["viewId"] for v in doc["leaderboards"]["topViews"]}
+    assert "view_old" not in opened
+    assert doc["breakdowns"]["viewsNotOpened"] >= 1
+
+
 async def test_the_drill_in_obeys_the_privacy_level(db_session):
     """The per-workspace page is a document like any other.
 

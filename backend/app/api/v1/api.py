@@ -24,6 +24,7 @@ from .endpoints import (
     branding,
     telemetry,
     analytics,
+    content_insights,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -104,6 +105,13 @@ api_router.include_router(
 # Gated inside the module on system:audit:read OR system:org-admin.
 api_router.include_router(
     analytics.router, prefix="/admin/analytics", tags=["admin:analytics"],
+)
+
+# Usage figures ON the content, for whoever can already see it. Deliberately
+# NOT under /admin and not analytics-gated: it returns counts and dates with no
+# identities, scoped by the same read rule the catalogue lists with.
+api_router.include_router(
+    content_insights.router, prefix="/insights", tags=["insights"],
 )
 
 # ── RBAC Phase 2 admin surface ───────────────────────────────────────

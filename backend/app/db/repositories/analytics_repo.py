@@ -461,6 +461,105 @@ async def _fold_opens(
                      viewers_by_view=viewers, total=total)
 
 
+# ── Per-entity usage ────────────────────────────────────────────────
+
+#: Ceiling on one batch. A gallery page is a few dozen cards; anything much
+#: larger is a caller using this as an export, which is what the dashboard's
+#: own endpoints are for.
+MAX_USAGE_IDS = 100
+
+
+async def view_usage(
+    session: AsyncSession,
+    view_ids: Sequence[str],
+    *,
+    days: int = 30,
+    now: Optional[datetime] = None,
+    readable=None,
+) -> dict[str, dict]:
+    """Opens, distinct viewers and a daily trend, per view.
+
+    THE POINT. Analytics could only ever answer "is anyone using this?" for
+    someone who navigated to the dashboard — and the people who would act on
+    the answer are the person who built the view and the team that owns it,
+    who never go there. This is the same question asked from the content
+    itself.
+
+    TWO QUERIES, WHATEVER THE BATCH. One filters the requested ids down to what
+    this reader may actually see; one groups the event log over the survivors.
+    A per-card fetch would be two per card, which is the difference between a
+    gallery that loads and one that hammers the database once per tile.
+
+    NO IDENTITIES, EVER. Counts and dates only — no actor ids, no names, not
+    even a "most frequent viewer". That is what makes this safe to answer for
+    any reader who can open the view, without the dashboard's privacy modes:
+    there is nothing here to redact. Anything that would name a person belongs
+    on the Analytics section, behind its gate.
+    """
+    ids = [v for v in dict.fromkeys(view_ids) if v][:MAX_USAGE_IDS]
+    if not ids:
+        return {}
+    now = now or datetime.now(timezone.utc)
+    w = build_window(days, now=now)
+
+    # 1. What may this reader see? `readable` is the caller's SQL rendering of
+    #    the view read rule — the same predicate the catalogue lists with, so
+    #    usage can never disagree with visibility.
+    allowed_stmt = select(ViewORM.id).where(
+        ViewORM.id.in_(ids), ViewORM.deleted_at.is_(None),
+    )
+    if readable is not None:
+        allowed_stmt = allowed_stmt.where(readable)
+    allowed = [row[0] for row in (await session.execute(allowed_stmt)).all()]
+    if not allowed:
+        return {}
+
+    where = [
+        ProductEventORM.event_type == VIEW_OPENED,
+        ProductEventORM.subject_id.in_(allowed),
+        ProductEventORM.created_at >= w.start,
+        ProductEventORM.created_at < w.end,
+    ]
+
+    # 2. Totals per view. `COUNT(DISTINCT actor)` cannot be summed back up from
+    #    per-day rows, which is why the trend below is its own pass rather than
+    #    something folded out of one.
+    totals = (await session.execute(
+        select(
+            ProductEventORM.subject_id,
+            func.count().label("opens"),
+            func.count(func.distinct(ProductEventORM.actor_id)).label("viewers"),
+            func.max(ProductEventORM.created_at).label("last_opened"),
+        ).where(*where).group_by(ProductEventORM.subject_id)
+    )).all()
+
+    day = func.substr(ProductEventORM.created_at, 1, 10)
+    per_day = (await session.execute(
+        select(ProductEventORM.subject_id, day, func.count())
+        .where(*where).group_by(ProductEventORM.subject_id, day)
+    )).all()
+    series: dict[str, dict[str, int]] = defaultdict(dict)
+    for view_id, bucket, count in per_day:
+        series[view_id][bucket] = count
+
+    out: dict[str, dict] = {}
+    for view_id in allowed:
+        row = next((r for r in totals if r[0] == view_id), None)
+        out[view_id] = {
+            "viewId": view_id,
+            "opens": row[1] if row else 0,
+            "uniqueViewers": row[2] if row else 0,
+            "lastOpenedAt": row[3] if row else None,
+            # Folded onto the window's own buckets by the same helper every
+            # chart uses, so a long window buckets by week here exactly as it
+            # does on the dashboard — and every view in a batch shares one
+            # x-axis, which is what makes a row of sparklines comparable.
+            "trend": w.align(series.get(view_id, {})),
+            "windowDays": days,
+        }
+    return out
+
+
 # ── Activity actors ─────────────────────────────────────────────────
 
 async def _actors_by_day(
@@ -1236,6 +1335,25 @@ def _narrative(doc: dict, *, window_label: str) -> list[dict]:
             score=55, tab="content",
         ))
 
+    # The catalogue's dark matter. Deliberately ranked BELOW the empty-trace
+    # and access-backlog signals: neglected content is a slow problem, and a
+    # strip that leads with it would bury the things failing right now.
+    not_opened = breakdowns.get("viewsNotOpened") or 0
+    not_opened_share = breakdowns.get("viewsNotOpenedShare")
+    if (
+        not_opened_share is not None
+        and not_opened_share >= 0.5
+        and (totals["views"].get("total") or 0) >= _MIN_BASIS
+    ):
+        out.append(_insight(
+            "views-not-opened", "watch",
+            f"{not_opened_share:.0%} of views were not opened {window_label}",
+            f"{not_opened:,} of {totals['views']['total']:,} views got no traffic "
+            f"{window_label}. Either people cannot find them or they are not "
+            "worth finding — and building more will not fix either one.",
+            score=62, tab="content",
+        ))
+
     # Churn signal, stated as people rather than a rate.
     growth = engagement.get("growthAccounting") or {}
     dormant, returning = growth.get("dormant") or 0, growth.get("returning") or 0
@@ -1792,6 +1910,24 @@ async def _breakdowns(session: AsyncSession, w: Window, *, opens: _OpenFold) -> 
 
     top_opens = sum(n for _, n in opens.by_view.most_common(TOP_N))
 
+    # ── The catalogue's dark matter ──────────────────────────────────
+    # "The top ten views take 64% of opens" says attention is concentrated. It
+    # does not say how much of the catalogue is getting NONE — and that is the
+    # actionable half: content nobody reaches is either undiscoverable or
+    # unwanted, and both are worth knowing before anyone builds more of it.
+    #
+    # Counted by subtraction rather than by listing what was missed. Asking
+    # "which views were not opened" means either a NOT IN over every opened id
+    # or a scan of the whole catalogue; counting the opened ones that are still
+    # live is a chunked COUNT over at most a few thousand ids, and the
+    # difference is the same number.
+    opened_live = 0
+    opened_ids = [v for v in opens.by_view if v]
+    for i in range(0, len(opened_ids), _IN_CHUNK):
+        opened_live += await _scalar(session, select(func.count()).where(
+            ViewORM.id.in_(opened_ids[i:i + _IN_CHUNK]), *live_view))
+    not_opened = max(0, total_views - opened_live)
+
     return {
         "usersByStatus": _fold_tail(await _count_group(session, UserORM.status, where=live_user)),
         "usersBySignupSource": _fold_tail(
@@ -1806,6 +1942,12 @@ async def _breakdowns(session: AsyncSession, w: Window, *, opens: _OpenFold) -> 
         "collaborationRate": round(shared / total_views, 3) if total_views else None,
         # Is the catalogue being used, or are a handful of views carrying it?
         "contentConcentration": round(top_opens / opens.total, 3) if opens.total else None,
+        # How much of it nobody reached at all. A count and a share, not a
+        # list: a reader does not want five arbitrary neglected views, they
+        # want to know the size of the problem — and an author learns about
+        # their OWN view from the badge on the view itself.
+        "viewsNotOpened": not_opened,
+        "viewsNotOpenedShare": round(not_opened / total_views, 3) if total_views else None,
     }
 
 
