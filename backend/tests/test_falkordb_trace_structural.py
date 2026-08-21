@@ -17,7 +17,7 @@ type-level pair filter.
 """
 import asyncio
 
-from backend.app.models.graph import GraphNode
+from backend.app.models.graph import GraphEdge, GraphNode
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 
 
@@ -1412,3 +1412,84 @@ def test_trace_closure_short_budget_drops_the_counts_not_the_frontier():
 
     assert [(f.urn, f.total_count) for f in result.frontier_up] == [("c0", None)]
     assert [(f.urn, f.total_count) for f in result.frontier_down] == [("c2", None)]
+
+
+# ---------------------------------------------------------------------------
+# Containment ALWAYS ships. The step used to short-circuit into
+# `truncationReason='ancestors_failed'` whenever less than 2s of the request
+# deadline was left — a BUDGET verdict dressed up as a provider failure. At
+# scale the walk ALWAYS spends that budget, so the closure shipped its
+# participants PARENTLESS and the canvas nested nothing and drew no chevrons.
+# ---------------------------------------------------------------------------
+
+
+def _with_real_containment(p, chains):
+    """Give a hydrating provider honest chains + the edges they imply."""
+
+    async def _chains(urns):
+        return {u: list(chains.get(u, [])) for u in urns}
+
+    async def _containment(urns, ctypes, chains=None):
+        held = set(urns)
+        return [
+            GraphEdge(
+                id=f"c:{parent}>{child}", sourceUrn=parent,
+                targetUrn=child, edgeType=ctypes[0],
+            )
+            for child, chain in (chains or {}).items()
+            for parent in chain
+            if parent in held and child in held
+        ]
+
+    p._compute_and_store_ancestors_bulk = _chains
+    p._fetch_containment_edges = _containment
+    return p
+
+
+def test_trace_closure_ships_containment_even_with_the_deadline_spent():
+    """timeout_ms=1: by the time the walk reaches the containment step the
+    deadline is long gone — the exact condition the old guard bailed on. The
+    chain must still ship, and a spent budget must not be reported as a
+    provider failure."""
+    fake = _TraceFake()
+    fake.contain("r_a", "l_a")
+    fake.lineage = [("l_a", "l_b", "FLOWS")]
+    p = _with_real_containment(
+        _make_provider(fake, hydrate=True), {"l_a": ["r_a"]},
+    )
+
+    result = _run(p.trace_closure(
+        "l_a", upstream_depth=25, downstream_depth=25,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=1000, timeout_ms=1,
+    ))
+
+    assert result.truncation_reason != "ancestors_failed"
+    assert {(e.source_urn, e.target_urn) for e in result.containment_edges} == {
+        ("r_a", "l_a"),
+    }
+    # The ancestor is SHIPPED too — an edge to a node the client never
+    # receives nests nothing.
+    assert "r_a" in {n.urn for n in result.nodes}
+
+
+def test_trace_closure_reports_ancestors_failed_only_on_a_real_failure():
+    """The reason keeps meaning what it says: the provider actually failed."""
+    fake = _TraceFake()
+    fake.contain("r_a", "l_a")
+    fake.lineage = [("l_a", "l_b", "FLOWS")]
+    p = _make_provider(fake, hydrate=True)
+
+    async def _boom(urns):
+        raise RuntimeError("ancestor store down")
+
+    p._compute_and_store_ancestors_bulk = _boom
+
+    result = _run(p.trace_closure(
+        "l_a", upstream_depth=25, downstream_depth=25,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=1000, timeout_ms=5000,
+    ))
+
+    assert result.truncation_reason == "ancestors_failed"
+    assert result.containment_edges == []
