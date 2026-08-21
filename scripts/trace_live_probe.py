@@ -141,6 +141,10 @@ def cmd_drain(args: argparse.Namespace) -> None:
         res, ms, nbytes, cache = closure(api, args.ws, args.ds, body)
         pages += 1; slowest = max(slowest, ms)
         print(f"[drain page {pages}] {summarise(res, ms, nbytes, cache)}")
+        if args.dump:
+            os.makedirs(args.dump, exist_ok=True)
+            with open(os.path.join(args.dump, f"page_{pages:02d}.json"), "w") as fh:
+                json.dump(res, fh)
         for n in res.get("nodes") or []:
             known.add(n["urn"])
         for e in res.get("edges") or []:
@@ -179,6 +183,7 @@ def main() -> None:
     sub.choices["drain"].add_argument("--max-pages", type=int, default=200)
     sub.choices["drain"].add_argument("--graph", default="")
     sub.choices["drain"].add_argument("--falkordb", default="localhost:6379")
+    sub.choices["drain"].add_argument("--dump", default="", help="directory to save each page's JSON into")
     args = ap.parse_args()
     args.fn(args)
 

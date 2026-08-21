@@ -633,7 +633,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // pinned entity reaches the board through its own container exactly
     // the way any other admission does, and becomes a full citizen of
     // everything downstream (weight, rank, wires, Reach).
-    for (const urn of view.pinned) admit(urn)
+    const pinnedRoots = new Set<string>()
+    for (const urn of view.pinned) {
+        if (!model.has(urn)) continue
+        admit(urn)
+        pinnedRoots.add(rootOf(urn))
+    }
 
     // ── the column a card sits in: its signed hop distance ───────────
 
@@ -722,6 +727,20 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const isLeafHopCarrier = (urn: string): boolean =>
         carriesHop.has(urn) && (nodeOf(urn)?.children.length ?? 0) === 0
 
+    const holdsCache = new Map<string, boolean>()
+    /** Does anything in this entity's population subtree carry a hop? The
+     *  containers above that grain are chrome the answer sits under. */
+    const holdsHopCarrier = (urn: string): boolean => {
+        const hit = holdsCache.get(urn)
+        if (hit !== undefined) return hit
+        let out = false
+        for (const inside of subtreeOf(urn)) {
+            if (inside !== urn && population.has(inside) && carriesHop.has(inside)) { out = true; break }
+        }
+        holdsCache.set(urn, out)
+        return out
+    }
+
     /** Levels the layout opens by itself, and — of those — the ones it
      *  opens WITHOUT drawing, because they are chrome the answer sits
      *  under. Separate sets: a container holding rows is opened AND
@@ -749,19 +768,30 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // counted, searchable and paged in place — and draw it. Never
         // above the focus, where nothing is drawn at all (R1).
         if (!above && kids.some(isLeafHopCarrier)) { spine.add(urn); return }
-        // Otherwise chrome, and seen through: a level above the focus, or
-        // a PASS-THROUGH the data source has not itself named as a
-        // lineage end. Sticky, because the population only grows: a level
-        // once drawn through stays drawn through for this view state, or
-        // the arrival of a second child would turn it into a card and
-        // swallow the one already on the board.
-        if (above || view.walkedThrough.has(urn) || (kids.length === 1 && !carriesHop.has(urn))) {
+        // Otherwise chrome, and seen through: a level above the focus, a
+        // PASS-THROUGH the data source has not itself named as a lineage
+        // end, or — R1, partners at THEIR OWN grain — any container whose
+        // hop-carrying grain lies deeper (a layer holding forty partner
+        // tables is breadcrumb chrome; the tables are the cards). Sticky,
+        // because the population only grows: a level once drawn through
+        // stays drawn through for this view state, or the arrival of a
+        // second child would turn it into a card and swallow the one
+        // already on the board.
+        const holding = kids.filter(holdsHopCarrier)
+        if (above || view.walkedThrough.has(urn) || (kids.length === 1 && !carriesHop.has(urn))
+            || (!carriesHop.has(urn) && holding.length > 0)) {
             spine.add(urn)
             walkedThrough.add(urn)
-            for (const kid of kids) openThrough(kid)
+            for (const kid of (holding.length > 0 ? holding : kids)) openThrough(kid)
         }
     }
     for (const group of admittedGroups) openThrough(group.root)
+    // A PIN OPENS THE WAY TO ITS ENTITY exactly as a reveal does. Pinned
+    // entities used to be admitted to the population and then left inside
+    // CLOSED roots: the spine walk ran only for reveal-admitted groups, so
+    // a one-hop walk of 20,212 nodes drew 13 cards (live, 2026-08-21 —
+    // every partner layer a closed root with its tables hidden inside).
+    for (const root of pinnedRoots) openThrough(root)
     // The focus's own contents deliberately do NOT join the walk. FOCUS
     // +1 (2026-08-19, re-refined the same day): the focus's frame shows
     // its direct children as CLOSED rows with honest counts, and that is
