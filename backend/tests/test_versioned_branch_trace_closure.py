@@ -13,7 +13,7 @@ and containment ancestor chains ship so the canvas can nest participants.
 """
 import asyncio
 
-from app.providers.versioned_branch_provider import VersionedBranchProvider
+from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
 
 
 def _run(coro):

@@ -7660,34 +7660,42 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception:
             truncation_reason = truncation_reason or "nodes_failed"
 
+        # CONTAINMENT ALWAYS SHIPS (2026-08-21): this step used to short-
+        # circuit into `ancestors_failed` whenever the walk had spent the
+        # request deadline down to its last 2s — a BUDGET verdict dressed up
+        # as a provider failure. At scale the walk ALWAYS spends that budget,
+        # so the closure shipped its participants with containmentEdges=[]:
+        # the canvas received thousands of rootless entities, nested nothing
+        # and drew no chevrons. The step now always runs — the pair-fetch is
+        # chunked with its own per-chunk timeout and synthesizes edges from
+        # the ancestor chains when a chunk fails, so the chain is never
+        # silently empty. `ancestors_failed` now means what it says: the
+        # provider actually failed.
         containment_edges_list: List[GraphEdge] = []
         if ctypes and nodes_by_urn:
-            if (deadline - time.monotonic()) < 2.0:
-                truncation_reason = truncation_reason or "ancestors_failed"
-            else:
-                try:
-                    chains = await self._compute_and_store_ancestors_bulk(
-                        list(nodes_by_urn.keys()),
+            try:
+                chains = await self._compute_and_store_ancestors_bulk(
+                    list(nodes_by_urn.keys()),
+                )
+                seen_anc: Set[str] = set()
+                ancestor_urns: List[str] = []
+                for chain in chains.values():
+                    for ancestor in chain or []:
+                        if ancestor and ancestor not in seen_anc:
+                            seen_anc.add(ancestor)
+                            ancestor_urns.append(ancestor)
+                new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+                if new_ancestors:
+                    ancestor_nodes = await self.get_nodes_batch(new_ancestors)
+                    for n in ancestor_nodes:
+                        if n:
+                            nodes_by_urn[n.urn] = n
+                if len(nodes_by_urn) > 1:
+                    containment_edges_list = await self._fetch_containment_edges(
+                        list(nodes_by_urn.keys()), ctypes, chains=chains,
                     )
-                    seen_anc: Set[str] = set()
-                    ancestor_urns: List[str] = []
-                    for chain in chains.values():
-                        for ancestor in chain or []:
-                            if ancestor and ancestor not in seen_anc:
-                                seen_anc.add(ancestor)
-                                ancestor_urns.append(ancestor)
-                    new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
-                    if new_ancestors:
-                        ancestor_nodes = await self.get_nodes_batch(new_ancestors)
-                        for n in ancestor_nodes:
-                            if n:
-                                nodes_by_urn[n.urn] = n
-                    if len(nodes_by_urn) > 1:
-                        containment_edges_list = await self._fetch_containment_edges(
-                            list(nodes_by_urn.keys()), ctypes, chains=chains,
-                        )
-                except Exception:
-                    truncation_reason = truncation_reason or "ancestors_failed"
+            except Exception:
+                truncation_reason = truncation_reason or "ancestors_failed"
 
         # The seed cap, folded in at the end: the walk ran on what it had, and
         # the response still says out loud that it is partial.
