@@ -461,6 +461,9 @@ export function LineageLens({
   const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
   const condenseSteps = usePreferencesStore((s) => s.lensCondenseSteps)
   const setCondenseSteps = usePreferencesStore((s) => s.setLensCondenseSteps)
+  // Part H — how much of the picture is FOLDED: the reader's own grain.
+  const density = usePreferencesStore((s) => s.lensDensity)
+  const setDensity = usePreferencesStore((s) => s.setLensDensity)
   const lensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
 
@@ -544,7 +547,8 @@ export function LineageLens({
     childrenAllStatus,
     walkStatus,
     directionFilter,
-  }), [sg, layoutView, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter])
+    density,
+  }), [sg, layoutView, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter, density])
 
   // T23 R2 — pass-through condensation, a pure re-projection over the
   // built layout (never touches population/grain/rank). OFF unless the
@@ -1586,6 +1590,51 @@ export function LineageLens({
                       className={cn(
                         'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                         condenseSteps === on
+                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                          : 'text-ink-muted hover:text-ink',
+                      )}
+                    >
+                      <Icon className="w-3 h-3" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Density (Part H, 2026-08-21) — how much of the picture is
+                  FOLDED. A band of 200 partner tables drawn one card each
+                  is a wall; folded under the 18 databases they sit in it
+                  reads. "Overview" lands those hosts as closed cards with
+                  counts (start at the high level), "Grouped" — the
+                  default — as frames showing their strongest rows, "Every
+                  card" draws it all. A PREFERENCE: it follows the reader
+                  from lens to lens. Nothing is hidden at any rung — the
+                  numbers agree across all three; only the grain folds. */}
+              {lensViewMode === 'graph' && (
+                <div
+                  role="group"
+                  aria-label="How much of the picture to fold"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
+                    Density
+                  </span>
+                  {([
+                    { value: 'overview', Icon: LucideIcons.Layers, label: 'Overview',
+                      title: 'Start at the high level — a wide band shows the containers its cards sit in, closed, with counts' },
+                    { value: 'grouped', Icon: LucideIcons.Group, label: 'Grouped',
+                      title: 'A wide band folds its cards into the containers they sit in, each showing its strongest rows first' },
+                    { value: 'all', Icon: LucideIcons.LayoutGrid, label: 'Every card',
+                      title: 'Draw every card on its own, however many there are' },
+                  ] as const).map(({ value, Icon, label, title }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setDensity(value)}
+                      title={title}
+                      aria-pressed={density === value}
+                      className={cn(
+                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                        density === value
                           ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
                           : 'text-ink-muted hover:text-ink',
                       )}

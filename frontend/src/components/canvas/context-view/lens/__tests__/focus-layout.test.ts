@@ -27,6 +27,7 @@ import {
 } from '../focus-layout'
 import {
     FOCAL_H, FRAME_WINDOW, LABEL_MIN_RUN, frameWindow, labelFitsRun,
+    BAND_BUDGET, BUNDLE_WINDOW,
     type FocusCard, type FocusEdge,
 } from '../focus-cards'
 
@@ -3421,3 +3422,300 @@ describe('deep focus subtree — FOCUS +1 (2026-08-19, re-refined: children are 
         ).toBe(true)
     })
 })
+
+/**
+ * FAN-IN BUNDLES (Part H, 2026-08-21).
+ *
+ * The user's case: 100+ inputs and 100+ outputs — 200+ partner tables drawn
+ * as separate cards, "so tiny when opened" — that share 18 databases. The
+ * board should show 18 database frames with the tables as their rows. A
+ * per-container threshold would MISS this (≈11 tables per database), so
+ * the decision is a BAND-level one ("this band is overwhelming") and the
+ * remedy is "group the cards under their parents". Nothing in the rule may
+ * name a type, label or level: it reads parent pointers and the hop-
+ * carrying grain only — so every pin below runs over three hierarchies,
+ * all on ONE entity type, and the rule cannot know which it is on.
+ */
+describe('fan-in bundles — a band over budget groups its cards under their parents', () => {
+    const HIERARCHIES: Array<{ name: string; levels: string[] }> = [
+        { name: 'Domain → Department → Database → Table → Column', levels: ['Domain', 'Department', 'Database', 'Table', 'Column'] },
+        { name: 'Root → Node → Node → Node', levels: ['Root', 'Node', 'Node', 'Node'] },
+        { name: 'Data Domain → App → Container → Container → Table → SchemaField', levels: ['Data Domain', 'App', 'Container', 'Container', 'Table', 'SchemaField'] },
+    ]
+
+    /**
+     * ANY chain of container levels: the last level is the leaf (column),
+     * the one above it the card (table), the one above that the group
+     * (database), everything above is chrome. One entity type — `Node` —
+     * for every level, `HAS` containment, raw hops from the focus's leaves
+     * into the partners' leaves. Card c of group g carries `(c % 3) + 1`
+     * hops so ranking is observable.
+     */
+    function hierarchyEstate(levels: string[], opts: {
+        groups: number
+        cardsPer: number
+        leavesPer?: number
+        /** Groups FEEDING the focus as well (cards on the other side). */
+        upstreamGroups?: number
+        /** Partner cards with NO container at all. */
+        looseCards?: number
+        /** A card sitting directly under the group's PARENT (ragged). */
+        raggedCard?: boolean
+    }): LensSubgraph<LensWalkNode> {
+        const leavesPer = opts.leavesPer ?? 2
+        const depth = levels.length
+        const nodes: LensWalkNode[] = []
+        const contains: Array<[string, string]> = []
+        const hops: Array<[string, string]> = []
+        const add = (urn: string) => nodes.push(wnode(urn, 'Node', urn))
+        // The focus's own chain down to its leaves: f0 ⊃ f1 ⊃ … ⊃ focus ⊃ focus.leaf_i
+        const chain = (prefix: string): string[] => {
+            const out: string[] = []
+            for (let d = 0; d < depth - 2; d++) {
+                const urn = `${prefix}${d}`
+                add(urn)
+                if (d > 0) contains.push([out[d - 1]!, urn])
+                out.push(urn)
+            }
+            return out
+        }
+        const focusChain = chain('f')
+        const focus = 'focus'
+        add(focus); contains.push([focusChain[focusChain.length - 1]!, focus])
+        const focusLeaves = Array.from({ length: 3 }, (_, i) => `focus.leaf_${i}`)
+        for (const leaf of focusLeaves) { add(leaf); contains.push([focus, leaf]) }
+        // Partner chain: p0 ⊃ p1 ⊃ … ⊃ (group level is p_{depth-3}) — groups hang off the level above the group level
+        const partnerChain = chain('p')
+        // Groups are the deepest chrome level: with levels [L0..Lk] the group level is
+        // L(k-2) — the chain's last entry — and `groups` siblings are created beside it.
+        const groupHost = partnerChain.length >= 2 ? partnerChain[partnerChain.length - 2]! : null
+        const groupTemplate = partnerChain[partnerChain.length - 1]!   // one group already exists in the chain: reuse as group 0
+        const groupUrns: string[] = [groupTemplate]
+        for (let g = 1; g < opts.groups + (opts.upstreamGroups ?? 0); g++) {
+            const urn = `p${depth - 3}_g${g}`
+            add(urn)
+            if (groupHost) contains.push([groupHost, urn])
+            groupUrns.push(urn)
+        }
+        let hopIndex = 0
+        groupUrns.forEach((group, g) => {
+            const upstream = g >= opts.groups
+            for (let c = 0; c < opts.cardsPer; c++) {
+                const card = `${group}.t${c}`
+                add(card); contains.push([group, card])
+                for (let l = 0; l < leavesPer; l++) { add(`${card}.l${l}`); contains.push([card, `${card}.l${l}`]) }
+                const weight = (c % 3) + 1
+                for (let w = 0; w < weight; w++) {
+                    const fl = focusLeaves[(hopIndex++) % focusLeaves.length]!
+                    if (upstream) hops.push([`${card}.l0`, fl])
+                    else hops.push([fl, `${card}.l${w % leavesPer}`])
+                }
+            }
+        })
+        for (let i = 0; i < (opts.looseCards ?? 0); i++) {
+            const urn = `loose_${i}`
+            add(urn)
+            hops.push([focusLeaves[0]!, urn])
+        }
+        if (opts.raggedCard && groupHost) {
+            const card = `${groupHost}.ragged`
+            add(card); contains.push([groupHost, card])
+            add(`${card}.l0`); contains.push([card, `${card}.l0`])
+            hops.push([focusLeaves[1]!, `${card}.l0`])
+        }
+        return subgraph({ focus, nodes, hops, contains })
+    }
+
+    const topLevel = (g: { cards: FocusCard[] }) => g.cards.filter(c => !c.frameId && c.kind !== 'divider')
+    const rowsOf = (g: { cards: FocusCard[] }, frameUrn: string) => {
+        const frame = cardFor(g, frameUrn)
+        return frame ? g.cards.filter(c => c.frameId === frame.id) : []
+    }
+    const groupUrnsOf = (sg: LensSubgraph<LensWalkNode>) =>
+        [...sg.nodes.keys()].filter(u => /^p\d+(_g\d+)?$/.test(u) && (sg.nodes.get(u)?.children.length ?? 0) > 0
+            && [...sg.nodes.get(u)!.children].some(c => /\.t\d+$/.test(c)))
+
+    for (const { name, levels } of HIERARCHIES) {
+        describe(name, () => {
+            it("the user's case: 18 groups × 11 cards → 18 frames, every card a row, the strongest rows first", () => {
+                const sg = hierarchyEstate(levels, { groups: 18, cardsPer: 11 })
+                const g = layout(sg, initialLensViewState(sg), { density: 'grouped' })
+                const groups = groupUrnsOf(sg)
+                expect(groups).toHaveLength(18)
+                for (const group of groups) {
+                    const frame = cardFor(g, group)!
+                    expect(frame, group).toBeDefined()
+                    expect(frame.kind).toBe('frame')
+                    expect(g.bundled.has(group)).toBe(true)
+                    // Rows: every card of the group, the window BUNDLE_WINDOW wide, "N more" behind it.
+                    expect(frame.frameRows).toHaveLength(11)
+                    expect(frame.frameWindowSize).toBe(BUNDLE_WINDOW)
+                    const rows = rowsOf(g, group)
+                    expect(rows).toHaveLength(BUNDLE_WINDOW)
+                    const weights = rows.map(r => r.count)
+                    expect([...weights].sort((a, b) => b - a)).toEqual(weights)     // strongest first
+                    expect(weights[0]).toBe(3)
+                }
+                // No table is a loose card; the focus and its frame are the only other top-level things.
+                expect(topLevel(g).filter(c => /\.t\d+$/.test(c.nodeId ?? '')).length).toBe(0)
+                expect(topLevel(g).length).toBe(18 + 1)
+            })
+
+            it('the budget is exact: BAND_BUDGET cards stay cards, one more bundles', () => {
+                const under = hierarchyEstate(levels, { groups: 1, cardsPer: BAND_BUDGET })
+                const gUnder = layout(under, initialLensViewState(under), { density: 'grouped' })
+                expect(gUnder.bundled.size).toBe(0)
+                expect(topLevel(gUnder).filter(c => /\.t\d+$/.test(c.nodeId ?? '')).length).toBe(BAND_BUDGET)
+                const over = hierarchyEstate(levels, { groups: 1, cardsPer: BAND_BUDGET + 1 })
+                const gOver = layout(over, initialLensViewState(over), { density: 'grouped' })
+                expect(gOver.bundled.size).toBe(1)
+                expect(topLevel(gOver).filter(c => /\.t\d+$/.test(c.nodeId ?? '')).length).toBe(0)
+            })
+
+            it('a card with no container stays a card beside the bundles', () => {
+                const sg = hierarchyEstate(levels, { groups: 1, cardsPer: 40, looseCards: 2 })
+                const g = layout(sg, initialLensViewState(sg), { density: 'grouped' })
+                expect(g.bundled.size).toBe(1)
+                expect(cardFor(g, 'loose_0')?.frameId ?? null).toBeNull()
+                expect(cardFor(g, 'loose_1')?.frameId ?? null).toBeNull()
+                expect(rowsOf(g, groupUrnsOf(sg)[0]!).length).toBe(BUNDLE_WINDOW)
+            })
+
+            it('groups ONE level: the level above the bundles stays chrome', () => {
+                const sg = hierarchyEstate(levels, { groups: 18, cardsPer: 11 })
+                const g = layout(sg, initialLensViewState(sg), { density: 'grouped' })
+                const host = [...sg.nodes.values()].find(n => n.children.some(c => groupUrnsOf(sg).includes(c)))
+                if (host) {
+                    expect(cardFor(g, host.urn)).toBeUndefined()
+                    expect(g.walkedThrough.has(host.urn)).toBe(true)
+                }
+            })
+
+            it("density 'all' draws every card and bundles nothing", () => {
+                const sg = hierarchyEstate(levels, { groups: 18, cardsPer: 11 })
+                const g = layout(sg, initialLensViewState(sg), { density: 'all' })
+                expect(g.bundled.size).toBe(0)
+                expect(topLevel(g).filter(c => /\.t\d+$/.test(c.nodeId ?? '')).length).toBe(198)
+            })
+
+            it('a wave that takes the band past the budget folds the loose cards into their frames', () => {
+                const small = hierarchyEstate(levels, { groups: 1, cardsPer: 5 })
+                const g1 = layout(small, initialLensViewState(small), { density: 'grouped' })
+                expect(g1.bundled.size).toBe(0)
+                // The same view, fed back the way the lens feeds it, over the grown model.
+                const grown = hierarchyEstate(levels, { groups: 1, cardsPer: 20 })
+                const view = { ...initialLensViewState(grown), walkedThrough: g1.walkedThrough }
+                const g2 = layout(grown, view, { density: 'grouped' })
+                expect(g2.bundled.size).toBe(1)
+                expect(g2.walkedThrough.has(groupUrnsOf(grown)[0]!)).toBe(false)   // no longer chrome
+            })
+
+            it('hops land on visible rows; what is scrolled past rolls up to the frame with its count', () => {
+                const sg = hierarchyEstate(levels, { groups: 1, cardsPer: 20 })
+                const g = layout(sg, initialLensViewState(sg), { density: 'grouped' })
+                const group = groupUrnsOf(sg)[0]!
+                const frame = cardFor(g, group)!
+                const rows = rowsOf(g, group)
+                const rowIds = new Set(rows.map(r => r.id))
+                const intoRows = g.edges.filter(e => rowIds.has(e.target))
+                // Every visible row is wired (one wire per focus row × table row pair).
+                expect(new Set(intoRows.map(e => e.target)).size).toBe(rows.length)
+                const intoFrame = g.edges.filter(e => e.target === frame.id)
+                const total = g.edges.reduce((n, e) => n + e.count, 0)
+                // Every hop is drawn exactly once: on its row, or rolled up onto the frame.
+                expect(total).toBe(sg.lineageEdges.length)
+                expect(intoFrame.reduce((n, e) => n + e.count, 0)).toBe(total - intoRows.reduce((n, e) => n + e.count, 0))
+                expect(g.hopsAtCoarserGrain).toBe(0)
+            })
+
+            it("the focus's own contents never bundle — R1, focus +1 is unchanged", () => {
+                const sg = hierarchyEstate(levels, { groups: 18, cardsPer: 11 })
+                const g = layout(sg, initialLensViewState(sg), { density: 'grouped' })
+                const focal = g.cards.find(c => c.kind === 'focal')!
+                expect(focal.frameRows.map(r => r.urn).sort()).toEqual(['focus.leaf_0', 'focus.leaf_1', 'focus.leaf_2'].sort())
+                expect(g.bundled.has('focus')).toBe(false)
+                for (const a of ['f0', 'f1', 'f2', 'f3']) expect(g.bundled.has(a)).toBe(false)
+            })
+
+            it('a bundled row keeps its own ⊕ when the server owes it more', () => {
+                const sg = hierarchyEstate(levels, { groups: 1, cardsPer: 20 })
+                // A row the window actually shows (the strongest first).
+                const first = rowsOf(layout(sg, initialLensViewState(sg), { density: 'grouped' }), groupUrnsOf(sg)[0]!)[0]!.nodeId!
+                const withFrontier = buildLensSubgraph<LensWalkNode>({
+                    focusUrn: sg.focusUrn,
+                    nodes: [...sg.nodes.values()].map(n => n.node),
+                    lineageEdges: sg.lineageEdges,
+                    containmentEdges: [...sg.nodes.values()].flatMap(n => n.parent ? [{ sourceUrn: n.parent, targetUrn: n.urn }] : []),
+                    frontierDown: [{ urn: first, totalCount: 9, nextCursor: null, kind: 'depth' }],
+                })
+                const g = layout(withFrontier, initialLensViewState(withFrontier), { density: 'grouped' })
+                const row = cardFor(g, first)!
+                expect(row.frameId).not.toBeNull()
+                expect(row.pillDown).not.toBeNull()
+            })
+
+            it('a group with cards on BOTH sides is one frame, on the heavier side', () => {
+                const sg = hierarchyEstate(levels, { groups: 1, cardsPer: 20, upstreamGroups: 1 })
+                // Make ONE group carry both: move the upstream group's cards under the downstream group.
+                const [down, up] = groupUrnsOf(sg)
+                const merged = buildLensSubgraph<LensWalkNode>({
+                    focusUrn: sg.focusUrn,
+                    nodes: [...sg.nodes.values()].filter(n => n.urn !== up).map(n => n.node),
+                    lineageEdges: sg.lineageEdges,
+                    containmentEdges: [...sg.nodes.values()].flatMap(n => {
+                        if (!n.parent || n.urn === up) return []
+                        return [{ sourceUrn: n.parent === up ? down! : n.parent, targetUrn: n.urn }]
+                    }),
+                })
+                const g = layout(merged, initialLensViewState(merged), { density: 'grouped' })
+                expect(g.bundled.has(down!)).toBe(true)
+                const frame = cardFor(g, down!)!
+                expect(frame.band).toBeGreaterThan(0)              // the heavier side: 20 downstream vs 20 upstream — downstream wins the tie
+                expect(frame.frameRows.length).toBe(40)
+                expect(topLevel(g).filter(c => /\.t\d+$/.test(c.nodeId ?? '')).length).toBe(0)
+            })
+
+            it('a ragged card (its parent holds chrome too) stays a card; its siblings bundle', () => {
+                const sg = hierarchyEstate(levels, { groups: 1, cardsPer: 20, raggedCard: true })
+                const g = layout(sg, initialLensViewState(sg), { density: 'grouped' })
+                const ragged = [...sg.nodes.keys()].find(u => u.endsWith('.ragged'))
+                if (!ragged) return   // a 3-level chain has no level above the group to hang it from
+                expect(g.bundled.size).toBe(1)
+                expect(cardFor(g, ragged)?.frameId ?? null).toBeNull()
+            })
+
+            it("density 'overview' lands the hosts as closed cards with counts; one open is one click", () => {
+                const sg = hierarchyEstate(levels, { groups: 18, cardsPer: 11 })
+                const g = layout(sg, initialLensViewState(sg), { density: 'overview' })
+                const groups = groupUrnsOf(sg)
+                expect(g.bundled.size).toBe(18)
+                for (const group of groups) {
+                    const card = cardFor(g, group)!
+                    expect(card.kind).toBe('entity')
+                    expect(card.childrenOpen).toBe(false)
+                    expect(card.canOpenChildren).toBe(true)
+                    expect(rowsOf(g, group)).toHaveLength(0)
+                    expect(card.count).toBeGreaterThan(0)
+                }
+                expect(topLevel(g).filter(c => /\.t\d+$/.test(c.nodeId ?? '')).length).toBe(0)
+                const opened = { ...initialLensViewState(sg), expandedContainment: new Set([groups[0]!]) }
+                const g2 = layout(sg, opened, { density: 'overview' })
+                expect(cardFor(g2, groups[0]!)!.kind).toBe('frame')
+                expect(rowsOf(g2, groups[0]!).length).toBe(BUNDLE_WINDOW)
+            })
+
+            it('the grain folds, the numbers do not: counts and wires agree across densities', () => {
+                const sg = hierarchyEstate(levels, { groups: 18, cardsPer: 11 })
+                const totals = (['all', 'grouped', 'overview'] as const).map(density => {
+                    const g = layout(sg, initialLensViewState(sg), { density })
+                    return { density, wires: g.edges.reduce((n, e) => n + e.count, 0), coarser: g.hopsAtCoarserGrain }
+                })
+                for (const t of totals) {
+                    expect(t.wires, t.density).toBe(sg.lineageEdges.length)
+                    expect(t.coarser, t.density).toBe(0)
+                }
+            })
+        })
+    }
+})
+

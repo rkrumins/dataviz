@@ -69,6 +69,9 @@ import {
     nameLinesFor,
     FRAME_WINDOW,
     FRAME_WINDOW_ALL,
+    BAND_BUDGET,
+    BUNDLE_WINDOW,
+    type LensDensity,
     NO_FRAME_ROWS,
     UNRESOLVED_TYPE,
     type FocusCard,
@@ -209,6 +212,10 @@ export interface FocusLayoutInput {
      *  pill remainder stays true when the user toggles back. Defaults to
      *  'both' (nothing suppressed). */
     directionFilter?: LensDirectionFilter
+    /** How much of the picture is folded (Part H) — the reader's
+     *  preference. Defaults to 'all' (nothing folded) so a caller that
+     *  has not asked for a grain gets the whole picture. */
+    density?: LensDensity
 }
 
 /** Every focal-transition kind the lens recognizes (T26 R1). All five
@@ -420,6 +427,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         sg, view, query, hiddenTypes, extendStatus,
         childrenAll, childrenAllStatus, walkStatus,
         directionFilter = 'both',
+        density = 'all',
     } = input
     const model = sg.nodes
 
@@ -820,6 +828,71 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // a one-hop walk of 20,212 nodes drew 13 cards (live, 2026-08-21 —
     // every partner layer a closed root with its tables hidden inside).
     for (const root of pinnedRoots) openThrough(root)
+
+    // ── 2b. FAN-IN BUNDLES (Part H, 2026-08-21) ───────────────────────
+    //
+    // Reported: 100+ inputs and 100+ outputs — 200+ partner tables drawn
+    // as separate cards, "so tiny when opened" — that share 18 databases.
+    // The walk above sees every container through to the grain that
+    // carries the hops, which is right for three tables and a wall for
+    // two hundred. A per-container limit would miss the report (eleven
+    // tables per database, every one under any sensible cap): the
+    // judgement is the BAND's — "this column is overwhelming" — and the
+    // remedy is "fold the cards into the containers they sit in". The
+    // rule reads parent pointers and the hop grain only; it names no
+    // type, label or level, so it holds for Domain ⊃ Department ⊃
+    // Database ⊃ Table ⊃ Column, Root ⊃ Node ⊃ Node ⊃ Node, or whatever
+    // the ontology says.
+    //
+    //  • A unit is what the walk would present as a top-level card: a
+    //    population child of a walked-through level that is not itself
+    //    walked through, or a root that is not chrome. Every unit counts
+    //    toward its band's total, wherever it sits.
+    //  • A host qualifies to fold when every population child of it is a
+    //    unit — a level that also holds chrome is not the grain to fold
+    //    at (a ragged table beside a walked-through database stays a
+    //    card) — and never above the focus (R1: nothing is drawn there).
+    //  • It folds when the band it would sit in (its own signed hop, the
+    //    same rule that places every card) is over BAND_BUDGET: it stops
+    //    being chrome and becomes a drawn frame; its units become its
+    //    rows, CLOSED, one level per click — unless the reader already
+    //    opened one. One level only: the frame's own parent stays chrome,
+    //    because a frame of frames puts the answer two clicks away.
+    //  • Overview lands the host CLOSED too: the database as a card with
+    //    its count, the tables one click away.
+    //  • It runs AFTER the sticky walk-through and overrides it in the
+    //    grow direction only: a database seen through at five tables
+    //    folds when a later wave takes the band past the budget. The
+    //    board only ever gets calmer as the walk grows, never noisier.
+    const bundled = new Set<string>()
+    if (density !== 'all') {
+        const unitsByHost = new Map<string, string[]>()
+        const bandCount = new Map<number, number>()
+        const countUnit = (unit: string) => {
+            const band = signedHop(unit)
+            bandCount.set(band, (bandCount.get(band) ?? 0) + 1)
+        }
+        for (const host of walkedThrough) {
+            const units = childrenInPopulation(host)
+                .filter(k => !walkedThrough.has(k) && !focusAncestors.has(k) && k !== sg.focusUrn)
+            for (const unit of units) countUnit(unit)
+            if (!focusAncestors.has(host) && host !== sg.focusUrn) unitsByHost.set(host, units)
+        }
+        for (const urn of population) {
+            if ((nodeOf(urn)?.parent ?? null) !== null) continue
+            if (walkedThrough.has(urn) || focusAncestors.has(urn) || urn === sg.focusUrn) continue
+            countUnit(urn)
+        }
+        for (const [host, units] of unitsByHost) {
+            if (units.length === 0) continue
+            if (childrenInPopulation(host).some(k => walkedThrough.has(k))) continue
+            if ((bandCount.get(signedHop(host)) ?? 0) <= BAND_BUDGET) continue
+            bundled.add(host)
+            walkedThrough.delete(host)
+            for (const unit of units) spine.delete(unit)
+            if (density === 'overview') spine.delete(host)
+        }
+    }
     // The focus's own contents deliberately do NOT join the walk. FOCUS
     // +1 (2026-08-19, re-refined the same day): the focus's frame shows
     // its direct children as CLOSED rows with honest counts, and that is
@@ -1587,7 +1660,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const { pillUp, pillDown, deadEnd } = focusContents.has(urn)
             ? { pillUp: null, pillDown: null, deadEnd: false }
             : walkStateOf(urn, isFrame, band)
-        const windowSize = showAll ? FRAME_WINDOW_ALL : FRAME_WINDOW
+        const windowSize = showAll ? FRAME_WINDOW_ALL : bundled.has(urn) ? BUNDLE_WINDOW : FRAME_WINDOW
         // The scroll window can never travel past what has loaded: a
         // restored share link, or a roster that shrank under a new
         // search, must land on rows rather than on empty space.
@@ -2357,7 +2430,10 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // builds of the same view state did. The consumer folds it back
         // in (see `LensViewState.walkedThrough`) so a level once seen
         // through stays seen through while the walk grows.
-        walkedThrough: new Set([...view.walkedThrough, ...walkedThrough]),
+        // …except what a bundle folded: a host that stopped being chrome
+        // is no longer fed back as chrome.
+        walkedThrough: new Set([...view.walkedThrough, ...walkedThrough].filter(u => !bundled.has(u))),
+        bundled,
         drawnRank,
         bandTotals,
     }

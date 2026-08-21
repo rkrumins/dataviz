@@ -66,6 +66,23 @@ export const ANCESTRY_CAP = 6
  *  fixed window is what keeps a 500-column table the same size as a
  *  5-column one; what MOVES it is a scroll rather than a page click. */
 export const FRAME_WINDOW = 8
+/**
+ * FAN-IN BUNDLES (Part H, 2026-08-21). How many top-level cards a hop band
+ * may show before it is overwhelming: past this, the cards fold into frames
+ * under their own parents (a database holding its tables as rows). A
+ * layout constant about what a reader can scan — never ontology: the rule
+ * that uses it reads parent pointers only.
+ */
+export const BAND_BUDGET = 12
+/** Rows a bundle shows at once — the strongest first, "N more" behind.
+ *  Narrower than a frame the reader opened on purpose (`FRAME_WINDOW`):
+ *  eighteen bundles of five read; eighteen of eight are a wall again. */
+export const BUNDLE_WINDOW = 5
+/** How much of the picture is folded — the reader's preference (see
+ *  `usePreferencesStore.lensDensity`): 'overview' lands bundle hosts as
+ *  CLOSED cards with counts, 'grouped' as open frames showing their
+ *  strongest rows, 'all' draws every card and folds nothing. */
+export type LensDensity = 'overview' | 'grouped' | 'all'
 /** Same, but in "everything inside" mode — rows are shorter there, so a
  *  couple more fit in the same height. */
 export const FRAME_WINDOW_ALL = 10
@@ -674,6 +691,9 @@ export interface FocusGraph {
    *  `LensViewState.walkedThrough`; see the note there for why the grain
    *  has to be sticky. */
   walkedThrough: ReadonlySet<string>
+  /** The containers this build folded a band's cards into (Part H):
+   *  their rows are the cards the band would otherwise have shown. */
+  bundled: ReadonlySet<string>
   /** Where every entity drawn so far SITS, by first-draw order. The
    *  consumer folds it back into `LensViewState.drawnRank`; a card on the
    *  board never moves because the walk grew under it. */

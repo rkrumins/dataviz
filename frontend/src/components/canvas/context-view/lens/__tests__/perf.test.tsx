@@ -525,6 +525,18 @@ describe('P0 — perf harness (Task 20)', () => {
       const best = Math.min(...samples)
       console.log(`[wide-table] nodes=${nodes.length} cards=${warm.cards.length} edges=${warm.edges.length} best=${best.toFixed(0)}ms samples=${samples.map(x => x.toFixed(0)).join(',')}`)
       expect(best).toBeLessThan(REGRESSION_CEILING_MS)
+
+      // GROUPED (Part H): the 500 tables sit in three layers, so the band
+      // folds them into three frames — the board is a handful of top-level
+      // items instead of five hundred, in no more time.
+      const grouped = buildFocusLayout({ ...input, density: 'grouped' })
+      const topLevel = grouped.cards.filter(c => !c.frameId && c.kind !== 'divider')
+      expect(grouped.bundled.size).toBe(3)
+      expect(topLevel.length).toBeLessThanOrEqual(6)
+      expect(grouped.edges.reduce((n, e) => n + e.count, 0)).toBe(warm.edges.reduce((n, e) => n + e.count, 0))
+      const t0 = performance.now()
+      buildFocusLayout({ ...input, density: 'grouped' })
+      expect(performance.now() - t0).toBeLessThan(REGRESSION_CEILING_MS)
     }, 120_000)
   })
 
