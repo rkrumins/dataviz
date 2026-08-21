@@ -406,6 +406,7 @@ class DraftOverlayProvider:
         lineage_edge_types: List[str], containment_edge_types: List[str],
         max_nodes: int, timeout_ms: int, seed_urns: Optional[List[str]] = None,
         exclude_urns: Optional[List[str]] = None, after_cursor: Optional[str] = None,
+        seed_cursor: Optional[str] = None,
     ) -> TraceClosureResult:
         # Overlay lineage deltas can make frontier totalCount advisory-stale —
         # acceptable (it is a cue, not a ledger).
@@ -424,7 +425,7 @@ class DraftOverlayProvider:
         base = await fn(
             urn, upstream_depth, downstream_depth, lineage_edge_types, containment_edge_types,
             max_nodes, timeout_ms, seed_urns=seed_urns, exclude_urns=exclude_urns,
-            after_cursor=after_cursor)
+            after_cursor=after_cursor, seed_cursor=seed_cursor)
         return await self._overlay_trace(base)
 
     async def _overlay_trace(self, base: _TraceT) -> _TraceT:

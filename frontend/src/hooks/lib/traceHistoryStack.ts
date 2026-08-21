@@ -5,7 +5,14 @@
  * The Lens's lensHistory semantics (entries + cursor; push truncates the
  * forward side; back/forward/jump never drop entries), over RICH entries:
  * each records the focal AND the view it was traced with (direction
- * toggles + hop depths), so "back" restores the trace AS IT WAS VIEWED.
+ * toggles, hop depths, and WHICH CARDS WERE OPEN), so "back" restores the
+ * trace AS IT WAS VIEWED — the same picture, not just the same focus.
+ *
+ * An EMPTY `traceExpansion` means "as the trace opened" — the overlay's own
+ * seed — never "everything closed". One consequence worth knowing: stepping
+ * forward to an "as it opened" entry for the focal ALREADY on screen restores
+ * nothing, so the reader keeps the picture they are looking at rather than
+ * watching it re-seed under them.
  *
  * One deliberate rule: pushing the CURRENT focal again never adds an
  * entry — it updates the current entry's view params in place. A Root
@@ -21,6 +28,12 @@ export interface TraceViewParams {
     showDownstream: boolean
     depthUp: number
     depthDown: number
+    /** WHICH CARDS WERE OPEN — sorted and deduped, so two identical
+     *  pictures serialize identically. EMPTY means "as the trace opened":
+     *  a restore then lets the overlay's own seed decide, which is right
+     *  for a trace the reader never expanded (and is the only sane reading
+     *  of history written before this field existed). */
+    traceExpansion: string[]
 }
 
 export interface TraceHistoryEntryRecord {
@@ -45,6 +58,17 @@ export const TRACE_HISTORY_CAP = 50
 
 const STORAGE_VERSION = 1
 
+/** The reader's open cards as a stable value. Sorted + deduped so the same
+ *  picture always compares and serializes the same. */
+export function normalizeTraceExpansion(ids: readonly string[] | undefined): string[] {
+    return ids && ids.length > 0 ? [...new Set(ids)].sort() : []
+}
+
+/** Every write goes through here, so no caller has to remember the rule. */
+function normalizeView(view: TraceViewParams): TraceViewParams {
+    return { ...view, traceExpansion: normalizeTraceExpansion(view.traceExpansion) }
+}
+
 export function emptyTraceHistory(): TraceHistoryStack {
     return { entries: [], cursor: -1 }
 }
@@ -59,10 +83,10 @@ export function pushTraceFocal(h: TraceHistoryStack, entry: TraceHistoryEntryRec
     const current = currentTraceEntry(h)
     if (current && current.urn === entry.urn) {
         const entries = [...h.entries]
-        entries[h.cursor] = { ...current, view: entry.view, timestamp: entry.timestamp }
+        entries[h.cursor] = { ...current, view: normalizeView(entry.view), timestamp: entry.timestamp }
         return { entries, cursor: h.cursor }
     }
-    const entries = [...h.entries.slice(0, h.cursor + 1), entry]
+    const entries = [...h.entries.slice(0, h.cursor + 1), { ...entry, view: normalizeView(entry.view) }]
     return { entries, cursor: entries.length - 1 }
 }
 
@@ -71,7 +95,7 @@ export function updateCurrentTraceView(h: TraceHistoryStack, view: TraceViewPara
     const current = currentTraceEntry(h)
     if (!current) return h
     const entries = [...h.entries]
-    entries[h.cursor] = { ...current, view }
+    entries[h.cursor] = { ...current, view: normalizeView(view) }
     return { entries, cursor: h.cursor }
 }
 
@@ -110,6 +134,11 @@ function isValidEntry(e: unknown): e is TraceHistoryEntryRecord {
         && typeof v.showDownstream === 'boolean'
         && typeof v.depthUp === 'number'
         && typeof v.depthDown === 'number'
+        // Absent is fine — entries written before the expansion picture
+        // existed. A WRONG shape is not: half-loading it would restore a
+        // picture nobody left.
+        && (v.traceExpansion === undefined
+            || (Array.isArray(v.traceExpansion) && v.traceExpansion.every(id => typeof id === 'string')))
 }
 
 /** Hydrate from storage. Junk, version drift, or malformed shapes start
@@ -119,8 +148,12 @@ export function hydrateTraceHistory(raw: string | null): TraceHistoryStack {
     try {
         const parsed = JSON.parse(raw) as { v?: number; entries?: unknown; cursor?: unknown }
         if (parsed.v !== STORAGE_VERSION || !Array.isArray(parsed.entries)) return emptyTraceHistory()
-        const entries = parsed.entries.filter(isValidEntry)
-        if (entries.length !== parsed.entries.length) return emptyTraceHistory()
+        const valid = parsed.entries.filter(isValidEntry)
+        if (valid.length !== parsed.entries.length) return emptyTraceHistory()
+        const entries = valid.map(e => ({
+            ...e,
+            view: { ...e.view, traceExpansion: normalizeTraceExpansion(e.view.traceExpansion) },
+        }))
         const cursor = typeof parsed.cursor === 'number' ? parsed.cursor : -1
         if (entries.length === 0) return emptyTraceHistory()
         return { entries, cursor: Math.max(0, Math.min(cursor, entries.length - 1)) }

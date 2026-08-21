@@ -129,6 +129,13 @@ interface PreferencesState {
    */
   showFlowRibbons: boolean
   toggleFlowRibbons: () => void
+  /**
+   * "N on this lineage" pills on the cards of a trace — how much of what is
+   * inside a closed card the lineage runs through. On by default; lives
+   * under the trace dock's Settings for readers who want a quieter board.
+   */
+  showLineageCounts: boolean
+  toggleLineageCounts: () => void
 
 
   // User avatar
@@ -302,6 +309,9 @@ export const usePreferencesStore = create<PreferencesState>()(
       showFlowRibbons: true,
       toggleFlowRibbons: () =>
         set((state) => ({ showFlowRibbons: !state.showFlowRibbons })),
+      showLineageCounts: true,
+      toggleLineageCounts: () =>
+        set((state) => ({ showLineageCounts: !state.showLineageCounts })),
 
       // User avatar
       avatarId: null,

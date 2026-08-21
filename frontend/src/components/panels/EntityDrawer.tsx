@@ -67,6 +67,11 @@ import { MOTION } from '@/lib/motion'
 // ============================================
 
 interface EntityDrawerProps {
+  /** Writes are refused by the surface that owns this drawer — currently a
+   *  canvas trace, which is read-only for its whole life. Hides the Edit tab
+   *  and takes away the property editor's edit rights, so the drawer cannot
+   *  offer what the canvas would reject. */
+  writesLocked?: boolean
   /** Open the Lineage Lens (ego-graph overlay) on this node. */
   onFocusConnections?: (nodeId: string) => void
   /** Callback when trace upstream is triggered */
@@ -94,6 +99,7 @@ type ViewMode = 'view' | 'edit' | 'json'
 // ============================================
 
 export function EntityDrawer({
+  writesLocked = false,
   onFocusConnections,
   onTraceUp,
   onTraceDown,
@@ -617,7 +623,7 @@ export function EntityDrawer({
               icon={LucideIcons.Eye}
               label="View"
             />
-            {!isGhost && versioningEnabled && editModeEnabled && (
+            {!isGhost && versioningEnabled && editModeEnabled && !writesLocked && (
               <ModeTab
                 active={viewMode === 'edit'}
                 onClick={() => setViewMode('edit')}
@@ -704,7 +710,7 @@ export function EntityDrawer({
               rawJson={rawJson}
               jsonError={jsonError}
               onChange={handleRawJsonChange}
-              canEdit={!isGhost && versioningEnabled && editModeEnabled}
+              canEdit={!isGhost && versioningEnabled && editModeEnabled && !writesLocked}
             />
           )}
         </div>

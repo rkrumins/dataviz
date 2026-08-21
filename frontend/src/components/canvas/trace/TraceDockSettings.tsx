@@ -10,6 +10,9 @@ export interface TraceDockSettingsProps {
   granularityOptions: GranularityOption[]
   availableEdgeTypes: string[]
   resolveEdgeColor: (edgeType: string) => string
+  /** See `TraceDockControls` — withdraws the controls the native engine
+   *  cannot honour. */
+  nativeMode?: boolean
 }
 
 /**
@@ -22,6 +25,7 @@ export function TraceDockSettings({
   granularityOptions,
   availableEdgeTypes,
   resolveEdgeColor,
+  nativeMode = false,
 }: TraceDockSettingsProps) {
   return (
     <motion.div
@@ -44,6 +48,7 @@ export function TraceDockSettings({
             resolveEdgeColor={resolveEdgeColor}
             onChangeConfig={trace.setConfig}
             onApply={() => { trace.retrace() }}
+            nativeMode={nativeMode}
           />
         </Section>
 

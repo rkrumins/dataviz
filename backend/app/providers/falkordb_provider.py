@@ -703,7 +703,13 @@ def _node_from_props(
             properties=user_props,
             tags=json.loads(props["tags"]) if isinstance(props.get("tags"), str) else (props.get("tags") or []),
             layerAssignment=props.get("layerAssignment"),
-            childCount=props.get("childCount"),
+            # DETERMINISTIC childCount (2026-08-20 ruling): the stored
+            # property is an ingest-time snapshot that drifts as the graph
+            # changes — it is NEVER a truth source. childCount is set ONLY
+            # by the read paths that count real containment edges live
+            # (get_nodes, get_nodes_batch, get_node, children fetches);
+            # a path that cannot compute reports unknown, not stale.
+            childCount=None,
             sourceSystem=props.get("sourceSystem"),
             lastSyncedAt=props.get("lastSyncedAt"),
         )
@@ -2909,25 +2915,49 @@ class FalkorDBProvider(GraphDataProvider):
     async def get_node(self, urn: str) -> Optional[GraphNode]:
         await self._ensure_connected()
 
+        # DETERMINISTIC childCount: counted live from real containment
+        # edges when types are configured — never the stored property.
+        try:
+            _ct_types = self._get_containment_edge_types() or []
+        except Exception:
+            # Unconfigured provider (probes, pre-ontology warmup): degrade
+            # to the bare form — childCount reports unknown, never stale.
+            _ct_types = []
+        ct = "|".join(_sanitize_label(t) for t in _ct_types if t)
+        count_clause = (
+            f" OPTIONAL MATCH (n)-[:{ct}]->(child) RETURN n, count(child) as childCount"
+            if ct else " RETURN n"
+        )
+
+        def _from_row(row) -> Optional[GraphNode]:
+            if ct and isinstance(row, (list, tuple)) and len(row) >= 2:
+                node = self._extract_node_from_result([row[0]])
+                if node is not None:
+                    node.child_count = int(row[1])
+                    if node.properties is not None:
+                        node.properties['childCount'] = int(row[1])
+                return node
+            return self._extract_node_from_result(row)
+
         # Try label-aware lookup first (index-assisted, 10-50x faster)
         label = await self._get_cached_label(urn)
         if label:
             result = await self._ro_query(
-                f"MATCH (n:{_sanitize_label(label)} {{urn: $urn}}) RETURN n",
+                f"MATCH (n:{_sanitize_label(label)} {{urn: $urn}}){count_clause}",
                 params={"urn": urn},
                 op="nodes.get",
             )
             if result.result_set and len(result.result_set) > 0:
-                return self._extract_node_from_result(result.result_set[0])
+                return _from_row(result.result_set[0])
 
         # Fallback: label-less scan (still works, just slower)
         result = await self._ro_query(
-            "MATCH (n) WHERE n.urn = $urn RETURN n",
+            f"MATCH (n) WHERE n.urn = $urn{count_clause}",
             params={"urn": urn},
             op="nodes.get_unlabeled",
         )
         if result.result_set and len(result.result_set) > 0:
-            node = self._extract_node_from_result(result.result_set[0])
+            node = _from_row(result.result_set[0])
             # Backfill the cache for next time
             if node:
                 await self._cache_urn_label(urn, str(node.entity_type))
@@ -7630,34 +7660,42 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception:
             truncation_reason = truncation_reason or "nodes_failed"
 
+        # CONTAINMENT ALWAYS SHIPS (2026-08-21): this step used to short-
+        # circuit into `ancestors_failed` whenever the walk had spent the
+        # request deadline down to its last 2s — a BUDGET verdict dressed up
+        # as a provider failure. At scale the walk ALWAYS spends that budget,
+        # so the closure shipped its participants with containmentEdges=[]:
+        # the canvas received thousands of rootless entities, nested nothing
+        # and drew no chevrons. The step now always runs — the pair-fetch is
+        # chunked with its own per-chunk timeout and synthesizes edges from
+        # the ancestor chains when a chunk fails, so the chain is never
+        # silently empty. `ancestors_failed` now means what it says: the
+        # provider actually failed.
         containment_edges_list: List[GraphEdge] = []
         if ctypes and nodes_by_urn:
-            if (deadline - time.monotonic()) < 2.0:
-                truncation_reason = truncation_reason or "ancestors_failed"
-            else:
-                try:
-                    chains = await self._compute_and_store_ancestors_bulk(
-                        list(nodes_by_urn.keys()),
+            try:
+                chains = await self._compute_and_store_ancestors_bulk(
+                    list(nodes_by_urn.keys()),
+                )
+                seen_anc: Set[str] = set()
+                ancestor_urns: List[str] = []
+                for chain in chains.values():
+                    for ancestor in chain or []:
+                        if ancestor and ancestor not in seen_anc:
+                            seen_anc.add(ancestor)
+                            ancestor_urns.append(ancestor)
+                new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+                if new_ancestors:
+                    ancestor_nodes = await self.get_nodes_batch(new_ancestors)
+                    for n in ancestor_nodes:
+                        if n:
+                            nodes_by_urn[n.urn] = n
+                if len(nodes_by_urn) > 1:
+                    containment_edges_list = await self._fetch_containment_edges(
+                        list(nodes_by_urn.keys()), ctypes, chains=chains,
                     )
-                    seen_anc: Set[str] = set()
-                    ancestor_urns: List[str] = []
-                    for chain in chains.values():
-                        for ancestor in chain or []:
-                            if ancestor and ancestor not in seen_anc:
-                                seen_anc.add(ancestor)
-                                ancestor_urns.append(ancestor)
-                    new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
-                    if new_ancestors:
-                        ancestor_nodes = await self.get_nodes_batch(new_ancestors)
-                        for n in ancestor_nodes:
-                            if n:
-                                nodes_by_urn[n.urn] = n
-                    if len(nodes_by_urn) > 1:
-                        containment_edges_list = await self._fetch_containment_edges(
-                            list(nodes_by_urn.keys()), ctypes, chains=chains,
-                        )
-                except Exception:
-                    truncation_reason = truncation_reason or "ancestors_failed"
+            except Exception:
+                truncation_reason = truncation_reason or "ancestors_failed"
 
         # The seed cap, folded in at the end: the walk ran on what it had, and
         # the response still says out loud that it is partial.
@@ -9298,27 +9336,59 @@ class FalkorDBProvider(GraphDataProvider):
         # scan/seek for the whole batch. The pair-bounded branch
         # post-filters Cartesian results down to the requested pairs.
         if pairs:
-            s_urns = sorted({s for s, _ in pairs})
-            t_urns = sorted({t for _, t in pairs})
-            allowed_pairs: Set[Tuple[str, str]] = set(pairs)
-            cypher = (
-                f"MATCH (s)-[r:{rel_alt}]->(t) "
-                "WHERE s.urn IN $sUrns AND t.urn IN $tUrns "
-                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
-                "type(r) AS edgeType, id(r) AS edgeId"
-            )
-            try:
-                result = await self._ro_query(
-                    cypher,
-                    params={"sUrns": s_urns, "tUrns": t_urns},
-                    timeout=2.0,
+            # CHUNKED + NEVER-EMPTY (2026-08-20): one set×set query over a
+            # full-walk's ~2,000 pairs on a 1.2M-node graph blew the 2s
+            # timeout and the exception path silently returned [] — the
+            # trace shipped participants WITHOUT the containment that
+            # placement/nesting need ("completely disjointed" on the big
+            # estates, while the Lens's small per-click pair sets fit the
+            # budget). Pairs now resolve in bounded chunks, and any chunk
+            # that still fails SYNTHESIZES its edges straight from the
+            # ancestor chains — the chains are the truth; the query only
+            # decorates real ids/types onto them.
+            all_pairs = sorted(pairs)
+            out: List[GraphEdge] = []
+            CHUNK_PAIRS = 400
+            for i in range(0, len(all_pairs), CHUNK_PAIRS):
+                chunk = all_pairs[i:i + CHUNK_PAIRS]
+                chunk_set: Set[Tuple[str, str]] = set(chunk)
+                s_urns = sorted({s for s, _ in chunk})
+                t_urns = sorted({t for _, t in chunk})
+                cypher = (
+                    f"MATCH (s)-[r:{rel_alt}]->(t) "
+                    "WHERE s.urn IN $sUrns AND t.urn IN $tUrns "
+                    "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                    "type(r) AS edgeType, id(r) AS edgeId"
                 )
-            except Exception as exc:
-                logger.warning(
-                    "trace_at_level: containment edge pair-fetch failed "
-                    "(%d pairs): %s", len(pairs), exc,
-                )
-                return []
+                resolved: Set[Tuple[str, str]] = set()
+                try:
+                    result = await self._ro_query(
+                        cypher,
+                        params={"sUrns": s_urns, "tUrns": t_urns},
+                        timeout=2.0,
+                    )
+                    for row in (result.result_set or []):
+                        if (row[0], row[1]) not in chunk_set:
+                            continue
+                        resolved.add((row[0], row[1]))
+                        out.append(GraphEdge(
+                            id=str(row[3]), sourceUrn=row[0], targetUrn=row[1],
+                            edgeType=str(row[2]), properties={},
+                        ))
+                except Exception as exc:
+                    logger.warning(
+                        "trace: containment pair-fetch chunk failed "
+                        "(%d pairs) — synthesizing from chains: %s",
+                        len(chunk), exc,
+                    )
+                for (s, t) in chunk:
+                    if (s, t) in resolved:
+                        continue
+                    out.append(GraphEdge(
+                        id=f"containment:{s}>{t}", sourceUrn=s, targetUrn=t,
+                        edgeType=ctypes[0], properties={},
+                    ))
+            return out
         else:
             allowed_pairs = None  # type: ignore[assignment]  # no post-filter
             # Cold-cache fallback. Still rel-typed (avoids the OR-on-type
@@ -9380,11 +9450,34 @@ class FalkorDBProvider(GraphDataProvider):
         # unlabeled IN-list form survives only for the unresolved-label
         # residue bucket (this build has no label-less URN index — the
         # unlabeled anchor is a full node scan).
+        #
+        # childCount is COMPUTED here when containment types are configured
+        # (2026-08-20): trace-shipped nodes used to rely on the denormalised
+        # `childCount` property alone, which import paths don't always stamp
+        # — a self-nesting Node⊃Node⊃Node estate then rendered its trace-
+        # merged children CHEVRON-LESS (no expand affordance, deeper levels
+        # unreachable). Browse computes the count live; the batch hydration
+        # every trace path uses must agree with it.
+        try:
+            _ct_for_count = self._get_containment_edge_types() or []
+        except Exception:
+            _ct_for_count = []
+        ctypes_for_count = [_sanitize_label(t) for t in _ct_for_count if t]
+        ct_alt_count = "|".join(ctypes_for_count)
+
         async def _fetch(label: str, bucket: List[str]) -> list:
             anchor = f"(n:{label})" if label else "(n)"
+            if ct_alt_count:
+                cy = (
+                    f"MATCH {anchor} WHERE n.urn IN $urns "
+                    f"OPTIONAL MATCH (n)-[:{ct_alt_count}]->(child) "
+                    "RETURN n, count(child) as childCount"
+                )
+            else:
+                cy = f"MATCH {anchor} WHERE n.urn IN $urns RETURN n"
             try:
                 res = await self._ro_query(
-                    f"MATCH {anchor} WHERE n.urn IN $urns RETURN n",
+                    cy,
                     params={"urns": bucket},
                     timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
                     op="nodes.batch",
@@ -9405,9 +9498,19 @@ class FalkorDBProvider(GraphDataProvider):
         out: List[GraphNode] = []
         for rows in rows_per_bucket:
             for row in rows:
-                node = self._extract_node_from_result(row)
-                if node:
-                    out.append(node)
+                child_count = None
+                if ct_alt_count and isinstance(row, (list, tuple)) and len(row) >= 2:
+                    node = self._extract_node_from_result([row[0]])
+                    child_count = row[1]
+                else:
+                    node = self._extract_node_from_result(row)
+                if not node:
+                    continue
+                if child_count is not None:
+                    node.child_count = int(child_count)
+                    if node.properties is not None:
+                        node.properties['childCount'] = int(child_count)
+                out.append(node)
         return out
 
     # Schema-level caches are persisted in Postgres by the stats service;

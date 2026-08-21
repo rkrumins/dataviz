@@ -605,7 +605,7 @@ def test_collect_lineage_seed_takes_every_lineage_bearing_participant():
     fake.lineage = [("leaf_a", "leaf_b", "FLOWS"), ("dom", "elsewhere", "FLOWS")]
     p = _make_provider(fake)
 
-    seed, capped = _run(p._collect_lineage_seed(
+    seed, capped, _after = _run(p._collect_lineage_seed(
         "dom", "Domain", ["FLOWS"], ["HAS"], cap=10, timeout_secs=2.0,
     ))
     urns = {u for u, _ in seed}
@@ -626,12 +626,12 @@ def test_collect_lineage_seed_seed_capped_reflects_limit_hit():
     ]
     p = _make_provider(fake)
 
-    _, capped_small = _run(p._collect_lineage_seed(
+    _, capped_small, _a1 = _run(p._collect_lineage_seed(
         "dom", "Domain", ["FLOWS"], ["HAS"], cap=10, timeout_secs=2.0,
     ))
     assert capped_small is False
 
-    _, capped_hit = _run(p._collect_lineage_seed(
+    _, capped_hit, _a2 = _run(p._collect_lineage_seed(
         "dom", "Domain", ["FLOWS"], ["HAS"], cap=3, timeout_secs=2.0,
     ))
     assert capped_hit is True
