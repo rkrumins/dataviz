@@ -76,12 +76,14 @@ describe('LineageLens — full walk surface', () => {
     expect(screen.getByText(/full flow drawn/i)).toBeInTheDocument()
   })
 
-  it('offers to keep walking when the budget was hit, wired to the continuation', () => {
+  // The budget is gone (ruling 2026-08-21), and so is the strip that asked
+  // the reader to top it up. `budgetHit` is retired and always false; even
+  // handed one, the lens must not offer a ceiling that does not exist.
+  it('never offers to keep walking — there is no budget to grant', () => {
     const onFullWalkContinue = vi.fn()
     renderLens({ fullWalkEnabled: true, fullWalkStatus: status({ budgetHit: true }), onFullWalkContinue })
-    expect(screen.getByText(/the flow continues past 2 nodes/i)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /keep walking/i }))
-    expect(onFullWalkContinue).toHaveBeenCalledTimes(1)
+    expect(screen.queryByText(/the flow continues past/i)).toBeNull()
+    expect(screen.queryByRole('button', { name: /keep walking/i })).toBeNull()
   })
 
   it('says the walk stalled when steps failed, and "Try again" re-arms them', () => {

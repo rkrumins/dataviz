@@ -13,7 +13,6 @@ import { describe, expect, it, vi, beforeAll } from 'vitest'
 import {
   useLensWalk,
   FULL_WALK_INITIAL_DEPTH,
-  FULL_WALK_NODE_BUDGET,
   FULL_WALK_CONCURRENCY,
 } from '../useLensWalk'
 import type { GraphDataProvider, TraceV2Result, LensClosureExtras, GraphNode } from '@/providers/GraphDataProvider'
@@ -486,19 +485,23 @@ describe('useLensWalk — full walk', () => {
     expect(result.current.fullWalkFor('a')).toBeNull()
   })
 
-  it('stops at the node budget with frontiers remaining, and "continue" resumes', async () => {
-    const many = Array.from({ length: FULL_WALK_NODE_BUDGET }, (_, i) => gn(`n${i}`))
+  // THE RULING, AS A TEST (2026-08-21): "we must see the entire lineage; we
+  // must not apply any constraints." The walk used to stop at 1,000 nodes and
+  // ask the reader to press "Keep walking". A thousand-node first response no
+  // longer stops anything — the frontier behind it is followed hands-free and
+  // the walk simply finishes, with `budgetHit` false throughout.
+  it('no node budget: a thousand-node response keeps walking to exhaustion', async () => {
+    const many = Array.from({ length: 1000 }, (_, i) => gn(`n${i}`))
     const { provider, traceClosure } = providerByUrn({
       a: () => closureResult({ focus: f('a'), nodes: many, frontierUp: [frontier('n0')] }),
       n0: () => closureResult({ focus: f('n0'), nodes: [gn('deeper')] }),
     })
     const { result } = renderHook(() => useLensWalk('a', provider, 1, true))
-    await waitFor(() => expect(result.current.fullWalkFor('a')?.budgetHit).toBe(true))
-    expect(traceClosure).toHaveBeenCalledTimes(1)
 
-    act(() => result.current.continueFullWalk('a'))
     await waitFor(() => expect(result.current.fullWalkFor('a')?.exhausted).toBe(true))
+    expect(result.current.fullWalkFor('a')?.budgetHit).toBe(false)
     expect(result.current.walkFor('a')!.model.nodes.some(n => n.urn === 'deeper')).toBe(true)
+    expect(traceClosure).toHaveBeenCalledTimes(2)
   })
 
   it('never auto-retries a failed frontier op: reports stalled, and "continue" gives it another attempt', async () => {

@@ -11,9 +11,12 @@
  * visited this lens session is cached (keyed by provider scope + focal),
  * so stepping back to a focal already walked is instant.
  *
- * Full walk (trace mode): with `fullWalk` on, the hook drives those same
- * ops itself — deep initial fetch, then every frontier followed to
- * exhaustion under a node budget — see the driver effect below.
+ * Full walk: with `fullWalk` on, the hook drives those same ops itself —
+ * deep initial fetch, then every frontier followed to exhaustion. There is
+ * no node budget and no ceiling (user ruling 2026-08-21: "we must see the
+ * entire lineage; we must not apply any constraints"), so the walk stops
+ * only when every frontier has drained, when the lens closes, or when a hop
+ * fails — see the driver effect below.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GraphDataProvider, TraceClosureRequest } from '@/providers/GraphDataProvider'
@@ -30,15 +33,15 @@ export type LensWalkDir = 'up' | 'down'
 /** Full-walk (trace) initial fetch depth — the closure contract's max, so
  *  the first response already carries as much of the flow as one call can. */
 export const FULL_WALK_INITIAL_DEPTH = 25
-/** Full-walk safety budget: the driver stops once the model holds this many
- *  nodes (times the grants "Keep walking" has added). */
-export const FULL_WALK_NODE_BUDGET = 1000
 /** Frontier ops the driver holds in flight at once. */
 export const FULL_WALK_CONCURRENCY = 4
-/** Failsafe per budget grant against a frontier that never drains (each op
- *  either clears its entry or advances its cursor, so this should be
- *  unreachable — it exists so a server bug cannot become a request loop). */
-const FULL_WALK_REQUEST_CAP = 300
+/** FAILSAFE, NOT A BUDGET (user ruling 2026-08-21: "we must see the entire
+ *  lineage; we must not apply any constraints"). Every op either clears its
+ *  frontier entry or advances its cursor, so a healthy walk terminates on its
+ *  own; this exists only so a server bug cannot become an unbounded request
+ *  loop, and it is set far past any real flow. Hitting it is a STALL, never a
+ *  budget — there is nothing to grant. */
+const FULL_WALK_FAILSAFE_REQUESTS = 100_000
 
 /** Where the full walk stands for one focal. At most one of
  *  exhausted/budgetHit/stalled is true; all false only while walking. */
@@ -47,8 +50,10 @@ export interface FullWalkStatus {
     walking: boolean
     /** Every frontier drained — the whole flow is in the model. */
     exhausted: boolean
-    /** Frontiers remain but the node budget (or request cap) is spent;
-     *  `continueFullWalk` grants another round. */
+    /** RETIRED — always false. The walk had a node budget and asked the
+     *  reader to press "Keep walking" at the ceiling; the ruling removed
+     *  both, so there is nothing to grant and nothing to hit. Kept on the
+     *  shape because the dock and the capsule read it. */
     budgetHit: boolean
     /** Frontiers remain but every candidate op has failed;
      *  `continueFullWalk` clears the failures for another attempt. */
@@ -352,8 +357,9 @@ export function useLensWalk(
         const entry = state.get(cacheKey)
         if (entry?.status !== 'done') return
         const meta = fullWalkMeta.get(cacheKey) ?? { grants: 1, requests: 0 }
-        if (entry.model.nodes.length >= FULL_WALK_NODE_BUDGET * meta.grants) return
-        if (meta.requests >= FULL_WALK_REQUEST_CAP * meta.grants) return
+        // NO NODE BUDGET. The walk runs to exhaustion; the only stops are the
+        // reader leaving, a hop that failed, and the failsafe below.
+        if (meta.requests >= FULL_WALK_FAILSAFE_REQUESTS) return
         let slots = FULL_WALK_CONCURRENCY
         for (const v of entry.extendStatus.values()) if (v === 'loading') slots--
         if (slots <= 0) return
@@ -407,9 +413,11 @@ export function useLensWalk(
         const frontierCount = entry.model.frontierUp.length + entry.model.frontierDown.length
             + (entry.model.seedCursor ? 1 : 0)
         if (frontierCount === 0) return { walking: anyLoading, exhausted: !anyLoading, budgetHit: false, stalled: false }
-        const overBudget = entry.model.nodes.length >= FULL_WALK_NODE_BUDGET * meta.grants
-            || meta.requests >= FULL_WALK_REQUEST_CAP * meta.grants
-        if (overBudget) return { walking: anyLoading, exhausted: false, budgetHit: !anyLoading, stalled: false }
+        if (meta.requests >= FULL_WALK_FAILSAFE_REQUESTS) {
+            // The failsafe tripped: frontiers remain but the walk is not
+            // making sane progress. That is a stall, not a spent budget.
+            return { walking: anyLoading, exhausted: false, budgetHit: false, stalled: !anyLoading }
+        }
         const hasCandidate =
             entry.model.frontierUp.some(fr => !entry.extendStatus.has(`up:${fr.urn}`))
             || entry.model.frontierDown.some(fr => !entry.extendStatus.has(`down:${fr.urn}`))
@@ -418,14 +426,12 @@ export function useLensWalk(
         return { walking: false, exhausted: false, budgetHit: false, stalled: true }
     }, [fullWalk, provider, state, fullWalkMeta])
 
+    /** Give failed frontier ops one more attempt. It used to ALSO grant
+     *  another budget round; there is no budget any more, so this is a retry
+     *  and nothing else — the strip that calls it belongs to errors, not to a
+     *  ceiling. */
     const continueFullWalk = useCallback((urn: string) => {
         const cacheKey = cacheKeyFor(provider, urn)
-        setFullWalkMeta(prev => {
-            const meta = prev.get(cacheKey) ?? { grants: 1, requests: 0 }
-            const next = new Map(prev)
-            next.set(cacheKey, { grants: meta.grants + 1, requests: meta.requests })
-            return next
-        })
         // Failed frontier ops get one more attempt: clearing the 'error'
         // markers makes them candidates for the driver again.
         setState(prev => {

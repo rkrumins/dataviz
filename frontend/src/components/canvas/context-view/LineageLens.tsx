@@ -1915,23 +1915,12 @@ export function LineageLens({
               </span>
             </div>
           )}
-          {/* Full walk stopped short of the ends — say WHY and offer the
-              way onward, same narration contract as the strips above. */}
-          {fullWalkStatus?.budgetHit && (
-            <div className="flex items-center gap-2 px-4 py-1.5 border-b border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
-              <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
-              <span>{`The flow continues past ${model?.nodes.length ?? 0} nodes — the walk paused at its safety budget.`}</span>
-              {onFullWalkContinue && (
-                <button
-                  type="button"
-                  onClick={onFullWalkContinue}
-                  className="ml-auto flex-shrink-0 font-semibold hover:underline"
-                >
-                  Keep walking
-                </button>
-              )}
-            </div>
-          )}
+          {/* The BUDGET strip is gone with the budget (ruling 2026-08-21:
+              "we must see the entire lineage; we must not apply any
+              constraints"). `budgetHit` is retired and always false, so the
+              only reason the walk stops short is now a hop that FAILED —
+              which the strip below already narrates, and "Try again" is the
+              only onward move there is. */}
           {fullWalkStatus?.stalled && (
             <div className="flex items-center gap-2 px-4 py-1.5 border-b border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
               <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
