@@ -168,7 +168,9 @@ describe('useTraceDriver — cursors are followed, never surfaced', () => {
         let i = 0
         const { provider, traceClosure } = makeProvider(() => {
             const cursor = pages[Math.min(i++, pages.length - 1)]
-            return res({ nodes: [gn(`c${i}`)], seedCursor: cursor } as Partial<TraceV2Result & LensClosureExtras>)
+            // The focus always ships: a coarse response without it cannot be
+            // drawn, and the driver says so rather than sitting in browse.
+            return res({ nodes: [gn(FOCUS), gn(`c${i}`)], seedCursor: cursor } as Partial<TraceV2Result & LensClosureExtras>)
         })
         const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
         await waitFor(() => expect(result.current.phase).toBe('complete'))
@@ -180,9 +182,9 @@ describe('useTraceDriver — cursors are followed, never surfaced', () => {
 
     it('pages one anchor`s edges through the frontier cursor, one direction at a time', async () => {
         const { provider, traceClosure } = makeProvider((req) => {
-            if (req.afterCursor) return res({ nodes: [gn('hub')] })
+            if (req.afterCursor) return res({ nodes: [gn(FOCUS), gn('hub')] })
             return res({
-                nodes: [gn('hub')],
+                nodes: [gn(FOCUS), gn('hub')],
                 frontierUp: [{ urn: 'hub', totalCount: null, nextCursor: 'e:0' }],
             } as Partial<TraceV2Result & LensClosureExtras>)
         })
@@ -361,9 +363,10 @@ describe('useTraceDriver — sessions', () => {
             // the same one, and counting them would confuse "session 1 was
             // aborted" with "session 1 had more requests".
             if (!isWalkOp(req)) seen.push(opts?.signal)
-            return isWalkOp(req)
-                ? res({ focus: { urn: String(req.urn), level: 0, entityType: '' } })
-                : coarseResponse()
+            if (isWalkOp(req)) return res({ focus: { urn: String(req.urn), level: 0, entityType: '' } })
+            // Each session's own focus ships, whichever one is being traced.
+            const anchored = coarseResponse()
+            return { ...anchored, nodes: [...anchored.nodes, gn(String(req.urn))] }
         })
         const provider = { traceClosure } as unknown as GraphDataProvider
 
@@ -685,5 +688,31 @@ describe('useTraceDriver — no request excludes its own seeds', () => {
         const drain = asked.find(r => (r.seedUrns as string[] | undefined)?.includes('P'))!
         expect(drain.excludeUrns as string[]).toContain(FOCUS)
         expect(drain.excludeUrns as string[]).not.toContain('P')
+    })
+})
+
+// ── a picture that cannot be drawn is a failure ─────────────────────────
+
+describe('useTraceDriver — a coarse response without the focus', () => {
+    it('is an error, not a silent browse canvas', async () => {
+        // Nothing throws: a 200 that simply does not contain the focus. The
+        // overlay only goes live once the model holds it, so left unsaid this
+        // leaves the reader looking at the browse picture under trace chrome
+        // and wondering why nothing happened.
+        const { provider } = makeProvider(() => res({
+            nodes: [gn('somebody-else')],
+        } as Partial<TraceV2Result & LensClosureExtras>))
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+
+        await waitFor(() => expect(result.current.phase).toBe('error'))
+        expect(result.current.status).toBe('error')
+        expect(result.current.error).toMatch(/anchored on/i)
+    })
+
+    it('and a response that DOES hold the focus walks on as normal', async () => {
+        const { provider } = makeProvider(() => coarseResponse())
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
+        expect(result.current.error).toBeNull()
     })
 })

@@ -659,6 +659,23 @@ export function useTraceDriver(
                 return
             }
             if (gen !== generation.current) return
+            // A COARSE RESPONSE THAT CANNOT BE DRAWN IS A FAILURE, even though
+            // nothing threw. The overlay only goes live once the model holds
+            // the focus (see `useTraceOverlay`'s "no blank canvas" rule), so a
+            // 200 that comes back without it leaves the canvas sitting in the
+            // browse picture under trace chrome — the exact silent state the
+            // reader reported as "the trace did nothing". Said out loud
+            // instead, so the dock can show it and `retry` means something.
+            if (!modelRef.current?.nodes.some(n => n.urn === focusUrn)) {
+                setState(prev => (prev.focusUrn === focusUrn
+                    ? {
+                        ...prev,
+                        phase: 'error',
+                        error: 'The trace came back without the entity it was anchored on.',
+                    }
+                    : prev))
+                return
+            }
             // The board is readable NOW; the rest of the flow arrives behind
             // it. `walking` is what the dock's counts read as floors.
             setState(prev => (prev.focusUrn === focusUrn
