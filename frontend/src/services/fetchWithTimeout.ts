@@ -678,9 +678,21 @@ async function runOnce(
 ): Promise<Response> {
   const controller = new AbortController()
   if (fetchInit.signal) {
-    fetchInit.signal.addEventListener('abort', () =>
-      controller.abort((fetchInit.signal as AbortSignal).reason),
-    )
+    // ALREADY ABORTED COUNTS. Subscribing alone misses a signal that aborted
+    // between the caller building the request and this line — an `abort()` in
+    // the same tick as the call, which is exactly the shape of "the reader
+    // pressed Escape while a wave was being issued". The listener never
+    // fires, nothing cancels the fetch, and the request hangs until its
+    // timeout with a caller that stopped waiting long ago.
+    if (fetchInit.signal.aborted) {
+      controller.abort(fetchInit.signal.reason)
+    } else {
+      fetchInit.signal.addEventListener(
+        'abort',
+        () => controller.abort((fetchInit.signal as AbortSignal).reason),
+        { once: true },
+      )
+    }
   }
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -717,7 +729,16 @@ export async function fetchWithTimeout(
   try {
     res = await runOnce(input, fetchInit, method, timeoutMs)
   } catch (err) {
+    // A CALLER'S ABORT IS NOT A TIMEOUT, and must not be dressed up as one.
+    // `runOnce` chains the caller's signal into its own controller, so both
+    // arrive here as the same `AbortError` — and calling both a timeout tells
+    // every layer above that the BACKEND failed. `RemoteGraphProvider` reads
+    // the resulting TypeError as a circuit-breaker failure, so a reader who
+    // pressed Escape on a trace with four pages in flight tripped the trace
+    // breaker (threshold 3) and the NEXT trace opened with "Provider
+    // unavailable (circuit open)" against a perfectly healthy server.
     if (err instanceof DOMException && err.name === 'AbortError') {
+      if (fetchInit.signal?.aborted) throw err
       throw new TypeError(
         `Request timed out after ${Math.round(timeoutMs / 1000)}s ` +
         '(client-side limit — backend may be slow or unavailable)',

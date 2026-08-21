@@ -240,6 +240,19 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
         const promise = this._doFetch<T>(url, fetchOptions, method, cacheKey, timeoutMs)
         this._inflight.set(cacheKey, promise)
+        // AN ABORTED FLIGHT MUST NOT BE HANDED TO THE NEXT CALLER. The entry
+        // is cleared in `_doFetch`'s `finally`, but that runs when the promise
+        // SETTLES — so a re-trace of the same focus in the same tick as the
+        // exit that cancelled it gets the dying promise back and fails before
+        // it starts. Dropping it on the abort itself closes that window.
+        const signal = (fetchOptions as RequestInit).signal
+        if (signal) {
+            signal.addEventListener(
+                'abort',
+                () => { if (this._inflight.get(cacheKey) === promise) this._inflight.delete(cacheKey) },
+                { once: true },
+            )
+        }
         return promise
     }
 
@@ -326,7 +339,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
             circuitBreaker.recordSuccess()
             return data
         } catch (err) {
-            if (err instanceof TypeError) {
+            // A request the CALLER cancelled says nothing about the provider.
+            // Counting it opens the breaker on a healthy backend — exit a
+            // trace with pages in flight and the next one cannot start.
+            const cancelled = (fetchOptions as RequestInit).signal?.aborted === true
+                || (err instanceof DOMException && err.name === 'AbortError')
+            if (err instanceof TypeError && !cancelled) {
                 circuitBreaker.recordFailure()
                 if (err.message.includes('timed out')) {
                     throw new Error(`Request timed out: ${method} ${url}`)
