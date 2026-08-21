@@ -114,14 +114,35 @@ def cypher_truth(graph: str, falkordb: str, urn: str):
     return edges, lt, ct
 
 
+def coarse_truth(graph: str, falkordb: str, urn: str):
+    """Every `:AGGREGATED` cell incident to the focus, straight from the graph."""
+    from falkordb import FalkorDB
+
+    host, _, port = falkordb.partition(":")
+    gr = FalkorDB(host=host, port=int(port or 6379)).select_graph(graph)
+    row = gr.ro_query(
+        "MATCH (f {urn:$u})-[r:AGGREGATED]-(p) RETURN count(r), sum(coalesce(r.weight, 0))",
+        {"u": urn}, timeout=60000,
+    ).result_set[0]
+    return int(row[0]), int(row[1] or 0)
+
+
 def cmd_page(args: argparse.Namespace) -> None:
     api = Api(); api.login()
     body = {"urn": args.urn, "direction": args.direction, "upstreamDepth": args.depth, "downstreamDepth": args.depth}
     if args.max_nodes:
         body["maxNodes"] = args.max_nodes
+    if args.grain:
+        body["grain"] = args.grain
     for i in range(args.repeat):
         res, ms, nbytes, cache = closure(api, args.ws, args.ds, body)
-        print(f"[page {i + 1}] {summarise(res, ms, nbytes, cache)}")
+        print(f"[page {i + 1}] {summarise(res, ms, nbytes, cache)} grain={res.get('grain')}")
+    if args.grain == "coarse" and args.graph:
+        cells = [e for e in res.get("edges") or [] if str(e.get("edgeType", "")).upper() == "AGGREGATED"]
+        total_w = sum((e.get("properties") or {}).get("weight") or 0 for e in cells)
+        n_truth, w_truth = coarse_truth(args.graph, args.falkordb, args.urn)
+        print(f"== coarse: {len(cells)} cells shipped (Σweight {total_w}); graph holds {n_truth} incident cells (Σweight {w_truth})")
+        print("== VERDICT:", "COMPLETE" if (len(cells) == n_truth and total_w == w_truth) else "INCOMPLETE")
 
 
 def cmd_drain(args: argparse.Namespace) -> None:
@@ -134,6 +155,8 @@ def cmd_drain(args: argparse.Namespace) -> None:
         body = {"urn": args.urn, "direction": args.direction, "upstreamDepth": args.depth, "downstreamDepth": args.depth}
         if args.max_nodes:
             body["maxNodes"] = args.max_nodes
+        if args.grain:
+            body["grain"] = args.grain
         if cursor:
             body["seedCursor"] = cursor
             if known:
@@ -178,8 +201,11 @@ def main() -> None:
         sp.add_argument("--depth", type=int, default=1)
         sp.add_argument("--direction", default="both")
         sp.add_argument("--max-nodes", type=int, default=0)
+        sp.add_argument("--grain", default="", help="'coarse' asks for the rollup cells incident to the focus (Part G)")
         sp.set_defaults(fn=fn)
     sub.choices["page"].add_argument("--repeat", type=int, default=1)
+    sub.choices["page"].add_argument("--graph", default="")
+    sub.choices["page"].add_argument("--falkordb", default="localhost:6379")
     sub.choices["drain"].add_argument("--max-pages", type=int, default=200)
     sub.choices["drain"].add_argument("--graph", default="")
     sub.choices["drain"].add_argument("--falkordb", default="localhost:6379")

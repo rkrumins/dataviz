@@ -17,7 +17,7 @@ type-level pair filter.
 """
 import asyncio
 
-from backend.app.models.graph import GraphNode
+from backend.app.models.graph import GraphEdge, GraphNode
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 
 
@@ -55,6 +55,8 @@ class _TraceFake:
         self.fail_expand_labels = set()
         self.fail_seed = False
         self.fail_walk_degrees = False
+        #   fail_coarse — the coarse (rollup-cell) read raises.
+        self.fail_coarse = False
 
     def contain(self, parent, child):
         self.children.setdefault(parent, []).append(child)
@@ -115,6 +117,20 @@ class _TraceFake:
 
     async def ro_query(self, cypher, params=None, timeout=None, **kwargs):
         params = params or {}
+        if "AS partner" in cypher and "[r:" in cypher:
+            # trace_closure_coarse — every rollup cell INCIDENT to the focus,
+            # one direction per query, heaviest first, capped.
+            if self.fail_coarse:
+                raise RuntimeError("coarse read timed out")
+            incoming = "<-[r" in cypher
+            rows = []
+            for (src, tgt), e in self.agg.items():
+                near, far = (tgt, src) if incoming else (src, tgt)
+                if near != params["urn"]:
+                    continue
+                rows.append([far, _label(far), e["weight"], e["sd"], e["td"], None, e["types"]])
+            rows.sort(key=lambda r: (-r[2], r[0]))
+            return _Result(rows[:params["cap"]])
         if "RETURN 'd' AS side" in cypher and "RETURN 'p' AS side" in cypher:
             # The ASYMMETRIC collectors: one side steps, the partner
             # contributes itself and its whole subtree.
@@ -1486,3 +1502,150 @@ def test_trace_closure_short_budget_drops_the_counts_not_the_frontier():
 
     assert [(f.urn, f.total_count) for f in result.frontier_up] == [("c0", None)]
     assert [(f.urn, f.total_count) for f in result.frontier_down] == [("c2", None)]
+
+
+# ── trace_closure_coarse — the rollup cells incident to the focus ────────────
+#
+# The coarse first paint (Part G, 2026-08-21): every `:AGGREGATED` cell
+# touching the focus, both directions, one shot — partner containers and
+# how many flows, in milliseconds, so the board has a picture before the
+# raw pages land. No depth filter and no label assumption: which endpoints
+# are cards is the client's inner-first accounting (`rollupResiduals`).
+# Honesty is the fine walk's: failures are flagged, never an empty 200.
+
+
+def _coarse_fake():
+    """focus `obj_f` with cells to partner containers at two levels —
+    `obj_p` (a table) and `grp_g` inside it, plus `lay_l` above — and one
+    incoming cell from `obj_u`. Weights as the worker would stamp them:
+    the outer cell carries the inner cell's flows plus its own."""
+    fake = _TraceFake()
+    fake.aggregated("obj_f", "grp_g", 30, 2, 3)
+    fake.aggregated("obj_f", "obj_p", 100, 2, 2)
+    fake.aggregated("obj_f", "lay_l", 100, 2, 1)
+    fake.aggregated("obj_u", "obj_f", 7, 2, 2)
+    return fake
+
+
+def _coarse_provider(fake):
+    p = _make_provider(fake)
+
+    async def _focus(urn):
+        return GraphNode(urn=urn, entityType=_label(urn), displayName=urn)
+
+    p.get_node = _focus
+    return p
+
+
+def test_coarse_ships_every_incident_cell_both_directions_with_its_weight():
+    fake = _coarse_fake()
+    p = _coarse_provider(fake)
+
+    r = _run(p.trace_closure_coarse(
+        "obj_f", direction="both", aggregated_edge_type="AGGREGATED",
+        containment_edge_types=["HAS"], max_cells=2000, timeout_ms=5000,
+    ))
+
+    by_pair = {(e.source_urn, e.target_urn): e for e in r.edges}
+    assert set(by_pair) == {("obj_f", "grp_g"), ("obj_f", "obj_p"), ("obj_f", "lay_l"), ("obj_u", "obj_f")}
+    assert all(e.edge_type == "AGGREGATED" for e in r.edges)
+    assert by_pair[("obj_f", "obj_p")].properties["weight"] == 100
+    assert by_pair[("obj_f", "grp_g")].properties["sourceDepth"] == 2
+    assert by_pair[("obj_f", "grp_g")].properties["targetDepth"] == 3
+    assert r.downstream_urns == {"grp_g", "obj_p", "lay_l"}
+    assert r.upstream_urns == {"obj_u"}
+    # Every endpoint ships as a node; the focus itself is one of them.
+    assert {n.urn for n in r.nodes} >= {"obj_f", "grp_g", "obj_p", "lay_l", "obj_u"}
+    # One shot: nothing to resume, nothing owed.
+    assert r.frontier_up == [] and r.frontier_down == []
+    assert r.seed_cursor is None and r.seed_truncated is False
+    assert r.truncated is False and r.truncation_reason is None
+
+
+def test_coarse_direction_upstream_ships_only_incoming_cells():
+    p = _coarse_provider(_coarse_fake())
+    r = _run(p.trace_closure_coarse(
+        "obj_f", direction="upstream", aggregated_edge_type="AGGREGATED",
+        containment_edge_types=["HAS"], max_cells=2000, timeout_ms=5000,
+    ))
+    assert [(e.source_urn, e.target_urn) for e in r.edges] == [("obj_u", "obj_f")]
+    assert r.downstream_urns == set()
+
+
+def test_coarse_cap_keeps_the_heaviest_and_says_max_nodes():
+    p = _coarse_provider(_coarse_fake())
+    r = _run(p.trace_closure_coarse(
+        "obj_f", direction="downstream", aggregated_edge_type="AGGREGATED",
+        containment_edge_types=["HAS"], max_cells=2, timeout_ms=5000,
+    ))
+    weights = sorted((e.properties["weight"] for e in r.edges), reverse=True)
+    assert weights == [100, 100]          # the two heaviest; the 30 is cut
+    assert r.truncated is True and r.truncation_reason == "max_nodes"
+
+
+def test_coarse_failed_read_is_flagged_timeout_never_an_empty_page():
+    fake = _coarse_fake()
+    fake.fail_coarse = True
+    p = _coarse_provider(fake)
+    r = _run(p.trace_closure_coarse(
+        "obj_f", direction="both", aggregated_edge_type="AGGREGATED",
+        containment_edge_types=["HAS"], max_cells=2000, timeout_ms=5000,
+    ))
+    assert r.edges == []
+    assert r.truncated is True and r.truncation_reason == "timeout"
+
+
+def test_coarse_partner_that_fails_to_hydrate_drops_its_cell_and_says_nodes_failed():
+    fake = _coarse_fake()
+    p = _coarse_provider(fake)
+
+    async def _hydrate_all_but_one(urns):
+        return [GraphNode(urn=u, entityType=_label(u), displayName=u) for u in urns if u != "lay_l"]
+
+    p.get_nodes_batch = _hydrate_all_but_one
+    r = _run(p.trace_closure_coarse(
+        "obj_f", direction="both", aggregated_edge_type="AGGREGATED",
+        containment_edge_types=["HAS"], max_cells=2000, timeout_ms=5000,
+    ))
+    assert ("obj_f", "lay_l") not in {(e.source_urn, e.target_urn) for e in r.edges}
+    assert "lay_l" not in {n.urn for n in r.nodes}
+    assert r.truncation_reason == "nodes_failed"
+
+
+def test_coarse_ships_the_ancestor_chain_and_containment_of_every_partner():
+    """The TraceResult invariant: every containment ancestor of a shipped
+    node ships too, with the edges — the boards nest on them."""
+    fake = _coarse_fake()
+    p = _coarse_provider(fake)
+
+    async def _chains(urns):
+        return {"grp_g": ["lay_l", "obj_p"], "obj_p": ["lay_l"], "obj_f": ["lay_f"], "obj_u": ["lay_l"]}
+
+    async def _containment(urns, ctypes, chains=None, labels=None):
+        out = []
+        for child, chain in (chains or {}).items():
+            parent = chain[-1] if chain else None
+            if parent:
+                out.append(GraphEdge(id=f"c:{parent}>{child}", sourceUrn=parent, targetUrn=child, edgeType=ctypes[0]))
+        return out
+
+    p._compute_and_store_ancestors_bulk = _chains
+    p._fetch_containment_edges = _containment
+    r = _run(p.trace_closure_coarse(
+        "obj_f", direction="both", aggregated_edge_type="AGGREGATED",
+        containment_edge_types=["HAS"], max_cells=2000, timeout_ms=5000,
+    ))
+    assert "lay_f" in {n.urn for n in r.nodes}
+    pairs = {(e.source_urn, e.target_urn) for e in r.containment_edges}
+    assert ("obj_p", "grp_g") in pairs and ("lay_f", "obj_f") in pairs
+
+
+def test_coarse_on_a_focus_with_no_cells_is_an_honest_empty_page():
+    p = _coarse_provider(_TraceFake())
+    r = _run(p.trace_closure_coarse(
+        "obj_lonely", direction="both", aggregated_edge_type="AGGREGATED",
+        containment_edge_types=["HAS"], max_cells=2000, timeout_ms=5000,
+    ))
+    assert r.edges == [] and r.truncated is False
+    assert [n.urn for n in r.nodes] == ["obj_lonely"]
+
