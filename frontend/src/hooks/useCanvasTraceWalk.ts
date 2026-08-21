@@ -18,7 +18,7 @@
  * lands wherever the graph says instead of where THE VIEW places it. The
  * store now holds browse, and only browse.
  */
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useState } from 'react'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import {
     useLensWalk,
@@ -26,9 +26,6 @@ import {
     type WalkEntry,
     type FullWalkStatus,
 } from './useLensWalk'
-import { traceExpansionUrns } from './lib/traceWalkMerge'
-
-const EMPTY_URNS: ReadonlySet<string> = new Set()
 
 export interface CanvasTraceWalk {
     isTracing: boolean
@@ -44,10 +41,6 @@ export interface CanvasTraceWalk {
     continueWalk: () => void
     /** Re-kick a failed INITIAL fetch. */
     retryWalk: () => void
-    /** Model urns ∪ upstream ∪ downstream — the trace filter's feed. */
-    traceNodeUrns: ReadonlySet<string>
-    /** Containment ancestors of every participant — what to expand. */
-    expansionUrns: ReadonlySet<string>
 }
 
 export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTraceWalk {
@@ -56,7 +49,6 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
 
     const walkEntry = tracedUrn ? walk.walkFor(tracedUrn) : null
     const fullWalkStatus = tracedUrn ? walk.fullWalkFor(tracedUrn) : null
-    const model = walkEntry?.model ?? null
 
     const exit = useCallback(() => setTracedUrn(null), [])
 
@@ -72,20 +64,6 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         if (tracedUrn) walk.retry(tracedUrn)
     }, [walk, tracedUrn])
 
-    const traceNodeUrns = useMemo<ReadonlySet<string>>(() => {
-        if (!model) return EMPTY_URNS
-        const out = new Set<string>()
-        for (const n of model.nodes) out.add(n.urn)
-        for (const u of model.upstreamUrns) out.add(u)
-        for (const u of model.downstreamUrns) out.add(u)
-        return out
-    }, [model])
-
-    const expansionUrns = useMemo<ReadonlySet<string>>(
-        () => (model && tracedUrn ? traceExpansionUrns(model, tracedUrn) : EMPTY_URNS),
-        [model, tracedUrn],
-    )
-
     return {
         isTracing: tracedUrn !== null,
         tracedUrn,
@@ -95,7 +73,5 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         fullWalkStatus,
         continueWalk,
         retryWalk,
-        traceNodeUrns,
-        expansionUrns,
     }
 }

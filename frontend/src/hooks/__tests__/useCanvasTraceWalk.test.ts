@@ -133,12 +133,12 @@ describe('useCanvasTraceWalk', () => {
     const { writes, release } = watchStore()
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     act(() => result.current.start('F'))
-    await waitFor(() => expect(result.current.traceNodeUrns.has('colA')).toBe(true))
+    await waitFor(() => expect(modelNodeUrns(result.current.walkEntry?.model)).toContain('colA'))
 
     act(() => result.current.exit())
     expect(result.current.isTracing).toBe(false)
     expect(result.current.tracedUrn).toBeNull()
-    expect(result.current.traceNodeUrns.size).toBe(0)
+    expect(result.current.walkEntry).toBeNull()
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
     expect(storeEdgeIds()).toEqual([])
     expect(writes.count).toBe(0)
@@ -158,27 +158,24 @@ describe('useCanvasTraceWalk', () => {
     const { writes, release } = watchStore()
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     act(() => result.current.start('F'))
-    await waitFor(() => expect(result.current.traceNodeUrns.has('colA')).toBe(true))
+    await waitFor(() => expect(modelNodeUrns(result.current.walkEntry?.model)).toContain('colA'))
 
     act(() => result.current.start('G'))
-    await waitFor(() => expect(result.current.traceNodeUrns.has('colG')).toBe(true))
+    await waitFor(() => expect(modelNodeUrns(result.current.walkEntry?.model)).toContain('colG'))
     expect(result.current.tracedUrn).toBe('G')
     // F's flow is gone from the session — nothing of it lingers anywhere.
-    expect(result.current.traceNodeUrns.has('colA')).toBe(false)
+    expect(modelNodeUrns(result.current.walkEntry?.model)).not.toContain('colA')
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
     expect(writes.count).toBe(0)
     release()
   })
 
-  it('traceNodeUrns and expansionUrns derive from the model', async () => {
+  it('idle before a focus is set: no walk entry, no status', () => {
     const { provider } = providerByUrn({ F: estate })
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
-    expect(result.current.traceNodeUrns.size).toBe(0)
-
-    act(() => result.current.start('F'))
-    await waitFor(() => expect(result.current.traceNodeUrns.has('colA')).toBe(true))
-    expect(result.current.traceNodeUrns.has('F')).toBe(true)
-    expect([...result.current.expansionUrns].sort()).toEqual(['PLAT', 'T1'])
+    expect(result.current.isTracing).toBe(false)
+    expect(result.current.walkEntry).toBeNull()
+    expect(result.current.fullWalkStatus).toBeNull()
   })
 
   it('budget journey: cap → Keep walking → exhausted, the model complete and the store still empty of it', async () => {
@@ -208,7 +205,7 @@ describe('useCanvasTraceWalk', () => {
 
     act(() => result.current.continueWalk())
     await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
-    expect(result.current.traceNodeUrns.has('deeper')).toBe(true)
+    expect(modelNodeUrns(result.current.walkEntry?.model)).toContain('deeper')
 
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
     expect(writes.count).toBe(0)
