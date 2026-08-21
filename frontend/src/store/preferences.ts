@@ -130,13 +130,12 @@ interface PreferencesState {
   showFlowRibbons: boolean
   toggleFlowRibbons: () => void
   /**
-   * Count pills on TRACE wires — the number of underlying hops a drawn
-   * line stands for, shown only where it is more than one. Off by default:
-   * the cards already carry "N on this lineage"; the pills are for readers
-   * who want the per-wire split. Lives under the trace dock's Settings.
+   * "N on this lineage" pills on the cards of a trace — how much of what is
+   * inside a closed card the lineage runs through. On by default; lives
+   * under the trace dock's Settings for readers who want a quieter board.
    */
-  showWireCounts: boolean
-  toggleWireCounts: () => void
+  showLineageCounts: boolean
+  toggleLineageCounts: () => void
 
 
   // User avatar
@@ -310,9 +309,9 @@ export const usePreferencesStore = create<PreferencesState>()(
       showFlowRibbons: true,
       toggleFlowRibbons: () =>
         set((state) => ({ showFlowRibbons: !state.showFlowRibbons })),
-      showWireCounts: false,
-      toggleWireCounts: () =>
-        set((state) => ({ showWireCounts: !state.showWireCounts })),
+      showLineageCounts: true,
+      toggleLineageCounts: () =>
+        set((state) => ({ showLineageCounts: !state.showLineageCounts })),
 
       // User avatar
       avatarId: null,

@@ -36,16 +36,16 @@ describe('the trace overlay on the real canvas', () => {
     // the authored container→dashboard rollups are covered by them, so they
     // are dropped rather than drawn a level apart. See traceViewModel.wires.
     expect(h.wires().map(w => `${w.source}>${w.target}`).sort()).toEqual(['INTERMEDIATE_T2>aov', 'REPORTING>aov'])
-    // Count pills are a trace-settings opt-in (the cards already say "N on
-    // this lineage"): none by default; switched on, only where a line stands
-    // for MORE than one hop — the T2 bundle earns its "2", REPORTING's single
-    // hop, drawn re-anchored at the chart, is still one flow and stays bare.
-    const badges = () => [...document.querySelectorAll('[data-edge-badge]')].map(g => g.getAttribute('data-edge-badge'))
-    expect(badges()).toEqual([])
-    await h.setWireCounts(true)
-    expect(badges()).toEqual(['2'])
-    await h.setWireCounts(false)
-    expect(badges()).toEqual([])
+    // A trace keeps its wires bare — no count pills on the lines, ever.
+    expect(document.querySelectorAll('[data-edge-badge]').length).toBe(0)
+    // The cards carry the count instead, behind a dock setting that is ON by
+    // default and can be switched off for a quieter board.
+    expect(h.countPill('INTERMEDIATE_T2')).toBe('3 on this lineage')
+    await h.setLineageCounts(false)
+    expect(h.countPill('INTERMEDIATE_T2')).toBeNull()
+    expect(h.chevron('INTERMEDIATE_T2')).toBe(true)   // the invitation stays
+    await h.setLineageCounts(true)
+    expect(h.countPill('INTERMEDIATE_T2')).toBe('3 on this lineage')
     expect(h.storeWrites()).toBe(0)
 
     const before = h.snapshotStore()

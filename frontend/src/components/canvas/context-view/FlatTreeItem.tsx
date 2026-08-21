@@ -205,8 +205,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // tinting them would make a lane of chrome look like the answer.
   const traceRole = node.data.traceRole as string | undefined
   const isOnLineage = isTracing && !!traceRole && traceRole !== 'host'
+  // The trace pill is a dock setting (on by default) for readers who want a
+  // quieter board; the browse "+N" is not a setting.
+  const showLineageCounts = usePreferencesStore(s => s.showLineageCounts) ?? true
   const descendantCount = hasChildren && !isExpanded
-    ? (isTracing ? onLineageCount : (childCount || node.children.length))
+    ? (isTracing ? (showLineageCounts ? onLineageCount : 0) : (childCount || node.children.length))
     : 0
 
   // Density-aware sizing — driven by usePreferencesStore.canvasDensity. The

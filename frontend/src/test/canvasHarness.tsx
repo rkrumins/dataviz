@@ -141,8 +141,8 @@ export interface TraceCanvasHarness {
   snapshotStore(): { nodes: string[]; edges: string[] }
   pressEscape(): void
   isTracing(): boolean
-  /** Flip the trace dock's "Counts on wires" preference and let the overlay repaint. */
-  setWireCounts(on: boolean): Promise<void>
+  /** Flip the trace dock's "Lineage counts on cards" preference and let the rows repaint. */
+  setLineageCounts(on: boolean): Promise<void>
   /** Let every pending promise and effect settle. */
   settle(): Promise<void>
   /** Everything the canvas logged as an error. Checked automatically at the
@@ -714,8 +714,8 @@ export async function renderCanvasWithTrace(
     pressEscape: () => {
       act(() => { fireEvent.keyDown(document, { key: 'Escape' }) })
     },
-    setWireCounts: async (on: boolean) => {
-      act(() => { usePreferencesStore.setState({ showWireCounts: on }) })
+    setLineageCounts: async (on: boolean) => {
+      act(() => { usePreferencesStore.setState({ showLineageCounts: on }) })
       await settle()
     },
   }

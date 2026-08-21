@@ -55,7 +55,7 @@ export function TraceDockSettings({
 
         {nativeMode && (
           <Section icon={<Eye className="w-3.5 h-3.5" strokeWidth={2.2} />} label="Display">
-            <WireCountsToggle />
+            <LineageCountsToggle />
           </Section>
         )}
 
@@ -97,18 +97,18 @@ function Section({
   )
 }
 
-/** Count pills on the trace's wires — how many hops a line stands for,
- *  shown only where it is more than one. Off by default; the cards already
- *  say "N on this lineage". Persisted with the other canvas preferences. */
-function WireCountsToggle() {
-  const show = usePreferencesStore((s) => s.showWireCounts) ?? false
-  const toggle = usePreferencesStore((s) => s.toggleWireCounts)
+/** "N on this lineage" pills on the trace's cards — how much of what is
+ *  inside a closed card the lineage runs through. On by default; persisted
+ *  with the other canvas preferences. */
+function LineageCountsToggle() {
+  const show = usePreferencesStore((s) => s.showLineageCounts) ?? true
+  const toggle = usePreferencesStore((s) => s.toggleLineageCounts)
   return (
     <button
       type="button"
       role="switch"
       aria-checked={show}
-      aria-label="Counts on wires"
+      aria-label="Lineage counts on cards"
       onClick={toggle}
       className={cn(
         'w-full flex items-center gap-3 px-2.5 py-2 rounded-lg border text-left transition-colors',
@@ -138,10 +138,10 @@ function WireCountsToggle() {
           )}
         >
           <Hash className="w-3.5 h-3.5" strokeWidth={2.2} />
-          <span>Counts on wires</span>
+          <span>Lineage counts on cards</span>
         </div>
         <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
-          Number each wire with how many flows it bundles, where that is more than one
+          Show “N on this lineage” beside each closed card
         </div>
       </div>
     </button>

@@ -209,7 +209,7 @@ describe('TraceDockMetricStrip — sources outside this view', () => {
   })
 })
 
-// ── Settings tab: "Counts on wires" lives here, native mode only ─────────────
+// ── Settings tab: "Lineage counts on cards" lives here, native mode only ─────
 
 function renderSettings(nativeMode: boolean) {
   const trace = {
@@ -229,20 +229,20 @@ function renderSettings(nativeMode: boolean) {
   )
 }
 
-describe('TraceDockSettings — counts on wires', () => {
-  it('offers the switch in native mode, off by default, and flips the persisted preference', () => {
-    usePreferencesStore.setState({ showWireCounts: false })
+describe('TraceDockSettings — lineage counts on cards', () => {
+  it('offers the switch in native mode, ON by default, and flips the persisted preference', () => {
+    usePreferencesStore.setState({ showLineageCounts: true })
     renderSettings(true)
-    const sw = screen.getByRole('switch', { name: 'Counts on wires' })
-    expect(sw.getAttribute('aria-checked')).toBe('false')
+    const sw = screen.getByRole('switch', { name: 'Lineage counts on cards' })
+    expect(sw.getAttribute('aria-checked')).toBe('true')
     fireEvent.click(sw)
-    expect(usePreferencesStore.getState().showWireCounts).toBe(true)
-    expect(screen.getByRole('switch', { name: 'Counts on wires' }).getAttribute('aria-checked')).toBe('true')
-    usePreferencesStore.setState({ showWireCounts: false })
+    expect(usePreferencesStore.getState().showLineageCounts).toBe(false)
+    expect(screen.getByRole('switch', { name: 'Lineage counts on cards' }).getAttribute('aria-checked')).toBe('false')
+    usePreferencesStore.setState({ showLineageCounts: true })
   })
 
-  it('is absent in legacy mode — it describes the overlay the native trace draws', () => {
+  it('is absent in legacy mode — it describes the cards the native trace draws', () => {
     renderSettings(false)
-    expect(screen.queryByRole('switch', { name: 'Counts on wires' })).toBeNull()
+    expect(screen.queryByRole('switch', { name: 'Lineage counts on cards' })).toBeNull()
   })
 })
