@@ -46,6 +46,8 @@ import { toCanvasNode } from '@/lib/canvasNodeMapper'
 import { useCanvasStore, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
+import { useBranchStore } from '@/store/branchStore'
+import { useFeaturesStore } from '@/store/features'
 import type { GraphDataProvider, GraphNode, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { ViewLayerConfig } from '@/types/schema'
@@ -84,6 +86,15 @@ export interface TraceCanvasHarness {
   typeChildSearch(query: string): Promise<boolean>
   /** Click a card's expand chevron. */
   toggle(id: string): Promise<void>
+  /** Press a bare key on the document — the canvas's global shortcuts. */
+  pressKey(key: string): Promise<void>
+  /** Click a card row (what the armed connect flow resolves as its target). */
+  clickCard(id: string): Promise<void>
+  /** Is the edge-type picker on screen? (It only appears once a connection
+   *  has resolved a source AND a target — i.e. the staging flow is live.) */
+  connectPickerOpen(): boolean
+  /** Is the row's drag-to-connect handle rendered? */
+  connectHandle(id: string): boolean
   /** The lineage lines on screen, as drawn. */
   wires(): Array<{ source: string; target: string }>
   /** Writes to the canvas store's `nodes`/`edges` since the trace started. */
@@ -122,6 +133,9 @@ function installJsdomLayout(): void {
     Object.defineProperty(HTMLElement.prototype, '__harnessMetrics', { value: true })
     Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, get: () => 900 })
     Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, get: () => 420 })
+    // jsdom has no scrolling; the reveal/pulse paths call these.
+    Element.prototype.scrollTo = function () {}
+    Element.prototype.scrollIntoView = function () {}
     Element.prototype.getBoundingClientRect = function (): DOMRect {
       return { x: 0, y: 0, top: 0, left: 0, right: 420, bottom: 40, width: 420, height: 40, toJSON: () => ({}) } as DOMRect
     }
@@ -278,7 +292,7 @@ function seedView(estate: TraceEstate): void {
       containmentEdgeTypes: ['CONTAINS'], lineageEdgeTypes: ['TRANSFORMS', 'AGGREGATED'],
       rootEntityTypes: [], defaultViewId: 'harness-view',
       views: [{
-        id: 'harness-view', name: 'Harness View',
+        id: 'harness-view', name: 'Harness View', workspaceId: 'harness-ws',
         content: {
           visibleEntityTypes: [], visibleRelationshipTypes: [],
           defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope: 'curated',
@@ -295,12 +309,26 @@ function seedView(estate: TraceEstate): void {
 
 export async function renderCanvasWithTrace(
   estate: TraceEstate,
-  opts: { focus: string; deferTrace?: boolean },
+  opts: { focus: string; deferTrace?: boolean; draft?: boolean },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
   releaseFetch?.()
   releaseFetch = stubFetch(estate)
   usePreferencesStore.setState({ canvasDensity: 'spacious' } as never)
+  // AUTHORING MUST BE LIVE for a test of the trace's write gates to mean
+  // anything: with no draft open (or edit mode off) every connect/edit path
+  // is already inert, and the test would pass against a canvas with no gates
+  // at all. `isDraft` needs the branch store scoped to this exact
+  // (workspace, dataSource, view); `canEditGraph` needs the admin flag too.
+  useBranchStore.setState({
+    workspaceId: opts.draft ? 'harness-ws' : null,
+    dataSourceId: null,
+    viewId: opts.draft ? 'harness-view' : null,
+    currentBranchId: opts.draft ? 'harness-branch' : null,
+  } as never)
+  useFeaturesStore.setState({
+    values: { ...useFeaturesStore.getState().values, editModeEnabled: !!opts.draft },
+  } as never)
   seedBrowse(estate)
   seedView(estate)
 
@@ -446,6 +474,34 @@ export async function renderCanvasWithTrace(
       })
       await settle()
       return true
+    },
+    async pressKey(key: string) {
+      await act(async () => { fireEvent.keyDown(document, { key }) })
+      await settle()
+    },
+    async clickCard(id: string) {
+      const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)
+      if (!row) throw new Error(`no card ${id}`)
+      // The armed connect flow resolves its target by HIT-TESTING the click
+      // point (`document.elementFromPoint` → nearest `layer-node-*`), and
+      // jsdom has no hit-testing at all — it answers null, so the flow would
+      // silently never resolve and a test asserting "no picker" would pass
+      // against a canvas with no gates whatsoever. Point the hit test at the
+      // row being clicked, for exactly this click.
+      const realFromPoint = document.elementFromPoint
+      document.elementFromPoint = (() => row) as typeof document.elementFromPoint
+      try {
+        await act(async () => { fireEvent.click(row) })
+        await settle()
+      } finally {
+        document.elementFromPoint = realFromPoint
+      }
+    },
+    connectPickerOpen: () =>
+      [...document.querySelectorAll('h3')].some(h => h.textContent?.trim() === 'Connect'),
+    connectHandle: (id: string) => {
+      const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)
+      return !!row?.querySelector('[aria-label="Drag to connect"]')
     },
     async toggle(id: string) {
       const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)

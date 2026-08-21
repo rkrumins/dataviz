@@ -471,8 +471,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         </div>
       )}
 
-      {/* Edge authoring: hover-reveal handle on the card's right edge. */}
-      {onBeginConnect && (
+      {/* Edge authoring: hover-reveal handle on the card's right edge. Never
+          while tracing — dragging one stages a create_edge, and the canvas is
+          read-only for the whole trace. The canvas withholds the prop too;
+          this keeps the row honest on its own. */}
+      {onBeginConnect && !isTracing && (
         <NodeConnectionHandle
           visible={isHovered}
           onBeginConnect={(start) => onBeginConnect(node.id, start)}

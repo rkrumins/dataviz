@@ -517,6 +517,10 @@ export function ContextViewCanvas({
     () => traceSessionRef.current || overlayRef.current?.active === true,
     [],
   )
+  /** Same predicate, reachable from the handlers wired ABOVE it (the keyboard
+   *  config among them). Set once and never reassigned — `traceWriteLocked`
+   *  has empty deps, so it is stable for the component's life. */
+  const traceWriteLockedRef = useRef(traceWriteLocked)
 
   // Forward refs to values declared far below in render order: the hydration
   // cancellers (so `beginTrace` can drop in-flight child pages) and the live
@@ -585,6 +589,10 @@ export function ContextViewCanvas({
       // Draft-gated on the SCOPED isDraft: on Published (or a draft open on a different data
       // source) the connect shortcut is inert — managers enter edit via the header's Edit button.
       if (!isDraft) return
+      // …and trace-gated, because arming leads to the picker, which stages a
+      // create_edge straight into the canvas store. The 'C' key reaches this
+      // with no affordance to withdraw, so the refusal has to live here.
+      if (traceWriteLockedRef.current()) return
       edgeConnectRef.current?.armConnect(nodeId)
     },
     layers: layers,
@@ -1621,6 +1629,12 @@ export function ContextViewCanvas({
   // the canvas store, so leaving a trace restores the canvas for free.
   const canvasTrace = useCanvasTraceWalk(provider)
   const traceActive = canvasTrace.isTracing
+  // RENDER-TIME twin of `traceWriteLocked()`, which reads refs and so must not
+  // be called during render. `overlay.active` implies `traceActive`, so the
+  // session flag alone is the whole window — including the walk, when the
+  // columns still show browse and every authoring affordance on them still
+  // looks (and, ungated, still is) live.
+  const canvasWritable = canEditGraph && !traceActive
   const traceModel = canvasTrace.walkEntry?.model ?? null
   // Direction visibility — the dock's upstream/downstream toggles. Reset
   // on every trace start so a new trace always opens with the whole flow.
@@ -2451,6 +2465,15 @@ export function ContextViewCanvas({
     if (traceWriteLocked()) return
     void searchChildren(parentId, query)
   }, [searchChildren, traceWriteLocked])
+
+  // Arming a connection is the first step of staging an edge: the next click
+  // resolves a target, the picker opens, and confirming writes a create_edge
+  // into the store. One choke point for both entry points (the 'C' key and
+  // the drawer's "Link to…"), so neither can start the flow while locked.
+  const armConnectGuarded = useCallback((nodeId: string) => {
+    if (traceWriteLocked()) return
+    edgeConnectRef.current?.armConnect(nodeId)
+  }, [traceWriteLocked])
 
   // Fill the forward refs declared at the top of the component. In an effect,
   // not during render: the callbacks that read them (beginTrace, the edge
@@ -4586,10 +4609,10 @@ export function ContextViewCanvas({
                 onDoubleClick={handleDoubleClick}
                 // Create affordances render only in draft (edit) mode —
                 // Published shows zero mutation entry points for anyone.
-                onAddChild={canEditGraph && !overlay.active ? handleAddChildEntity : undefined}
+                onAddChild={canvasWritable ? handleAddChildEntity : undefined}
                 onAddToLayer={canEditGraph ? openBuilderForLayer : undefined}
                 onBuildToLayer={canEditGraph ? openBuildForLayer : undefined}
-                onBeginConnect={canEditGraph && !overlay.active ? edgeConnect.beginDrag : undefined}
+                onBeginConnect={canvasWritable ? edgeConnect.beginDrag : undefined}
                 onLayerContextMenu={handleLayerContextMenuOpen}
                 traceFocusId={traceActive && canvasTrace.tracedUrn
                   ? (urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
@@ -4758,12 +4781,12 @@ export function ContextViewCanvas({
         position={interactions.state.contextMenu.position}
         target={interactions.state.contextMenu.target}
         onClose={interactions.closeContextMenu}
-        onEditNode={canEditGraph && !overlay.active ? interactions.editNode : undefined}
-        onDuplicateNode={canEditGraph && !overlay.active ? interactions.duplicateNode : undefined}
-        onDeleteNode={canEditGraph && !overlay.active ? interactions.deleteNode : undefined}
-        onCreateChild={canEditGraph && !overlay.active ? interactions.createChild : undefined}
-        onConnect={canEditGraph && !overlay.active ? (id) => edgeConnect.armConnect(id) : undefined}
-        onLinkNode={canEditGraph && !overlay.active ? (id) => {
+        onEditNode={canvasWritable ? interactions.editNode : undefined}
+        onDuplicateNode={canvasWritable ? interactions.duplicateNode : undefined}
+        onDeleteNode={canvasWritable ? interactions.deleteNode : undefined}
+        onCreateChild={canvasWritable ? interactions.createChild : undefined}
+        onConnect={canvasWritable ? (id) => armConnectGuarded(id) : undefined}
+        onLinkNode={canvasWritable ? (id) => {
           const node = nodes.find(n => n.id === id || (n.data?.urn as string) === id)
           useCreateLinkStore.getState().open({
             sourceUrn: (node?.data?.urn as string) || id,

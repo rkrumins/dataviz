@@ -22,7 +22,7 @@ import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(6))
+afterAll(() => expectTestsRan(7))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -157,6 +157,46 @@ describe('the trace overlay on the real canvas', () => {
     await h.resolveTrace()
     expect(h.visibleCardIds().sort())
       .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
+    expect(h.storeWrites()).toBe(0)
+
+    h.pressEscape()
+    expect(h.isTracing()).toBe(false)
+    expect(h.snapshotStore()).toEqual(before)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // EDGE STAGING is the write with the longest fuse: arming a connection does
+  // nothing observable, the next click resolves a target, and only then does
+  // confirming stage a create_edge. The 'C' key reaches it with no affordance
+  // to withdraw, so the refusal has to sit on the arm itself.
+  //
+  // This test only means something on a canvas where the flow WORKS, so the
+  // harness opens a draft with edit mode on and the first leg proves it: in
+  // browse the handle is there and the whole C → click → picker flow runs.
+  it('edge staging refuses for the whole trace window — handle and C shortcut', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', draft: true, deferTrace: true })
+
+    // Control: authoring is genuinely live here.
+    expect(h.connectHandle('tableau')).toBe(true)
+    const before = h.snapshotStore()
+
+    await h.startTrace('cfo')
+
+    // ── the walk window: columns still show browse, affordances must not ──
+    expect(h.connectHandle('tableau')).toBe(false)
+    await h.clickCard('tableau')
+    await h.pressKey('c')
+    await h.clickCard('INTERMEDIATE_T2')
+    expect(h.connectPickerOpen()).toBe(false)
+    expect(h.storeWrites()).toBe(0)
+
+    // ── and once the trace is actually drawing ──
+    await h.resolveTrace()
+    expect(h.connectHandle('tableau')).toBe(false)
+    await h.clickCard('tableau')
+    await h.pressKey('c')
+    await h.clickCard('INTERMEDIATE_T2')
+    expect(h.connectPickerOpen()).toBe(false)
     expect(h.storeWrites()).toBe(0)
 
     h.pressEscape()
