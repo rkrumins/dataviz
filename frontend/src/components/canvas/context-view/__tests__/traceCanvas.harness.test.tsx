@@ -29,7 +29,11 @@ describe('the trace overlay on the real canvas', () => {
 
     expect(h.visibleCardIds().sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
     expect(h.chevron('INTERMEDIATE_T2')).toBe(true)
-    expect(h.wires().map(w => `${w.source}>${w.target}`).sort()).toEqual(['INTERMEDIATE_T2>cfo', 'REPORTING>cfo'])
+    // Grain: with the dashboard open, the raw hops re-anchor to the CHART the
+    // reader has earned — not to the dashboard they already opened past — and
+    // the authored container→dashboard rollups are covered by them, so they
+    // are dropped rather than drawn a level apart. See traceViewModel.wires.
+    expect(h.wires().map(w => `${w.source}>${w.target}`).sort()).toEqual(['INTERMEDIATE_T2>aov', 'REPORTING>aov'])
     expect(h.storeWrites()).toBe(0)
 
     const before = h.snapshotStore()

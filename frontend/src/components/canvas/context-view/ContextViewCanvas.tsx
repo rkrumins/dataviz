@@ -46,7 +46,7 @@ import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
-import { useRevealNode } from '@/hooks/useRevealNode'
+import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
@@ -108,7 +108,9 @@ import {
 import { decodeLensShare } from './lens/shareCodec'
 import { useLensWalk } from '@/hooks/useLensWalk'
 import { useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
-import { computeTraceVisibleUrns } from '@/hooks/lib/traceViewFilter'
+import { useTraceOverlay, type TraceOverlay } from '@/hooks/useTraceOverlay'
+import { lanesToHierarchy } from '@/hooks/lib/traceViewModel'
+import { useBranchCreatedDelta } from '@/hooks/useBranchCreatedDelta'
 import {
   emptyTraceHistory,
   pushTraceFocal,
@@ -128,6 +130,9 @@ import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
  *  model is complete at leaf grain. One shared empty map keeps the trace
  *  filter's memo quiet. */
 const EMPTY_DRILLDOWNS: Map<string, TraceV2Result> = new Map()
+/** The native trace draws through the overlay, never through the browse
+ *  hierarchy filter — so the filter is fed nothing and stays pass-through. */
+const EMPTY_TRACE_NODES: ReadonlySet<string> = new Set<string>()
 import { useLensChildren } from '@/hooks/useLensChildren'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
@@ -486,6 +491,12 @@ export function ContextViewCanvas({
   // Forward ref so the keyboard 'C' handler (wired into useCanvasInteractions
   // before useEdgeConnect exists) can arm connect-mode on the selected node.
   const edgeConnectRef = useRef<{ armConnect: (id: string) => void } | null>(null)
+
+  // Forward ref to the TRACE OVERLAY (declared far below, after the layer
+  // assignment it reads). Every interaction that would write the canvas —
+  // expand, reveal, edit, reorder, connect — consults it: while a trace is
+  // on, the canvas is a read-only projection of the walk model.
+  const overlayRef = useRef<TraceOverlay | null>(null)
 
   // Forward-ref for the duplicate-subtree layer wiring. onNodeCopied /
   // onNodeDuplicated fire from useDuplicateSubtree / useCanvasInteractions,
@@ -986,6 +997,10 @@ export function ContextViewCanvas({
   const assignmentWarningTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleAssignToLayer = useCallback((entityId: string, layerId: string) => {
+    // Drop-to-assign is a layout WRITE; a trace is read-only. (The columns
+    // also render the overlay's lanes, so the drop target isn't the browse
+    // tree the assignment would be recorded against.)
+    if (overlayRef.current?.active) return
     const before = currentLayout()
     // Live containment map (from useContainmentHierarchy, exposed via the forward-ref set during render).
     const parentMap = duplicateWiringRef.current?.parentMap ?? new Map<string, string>()
@@ -1163,6 +1178,10 @@ export function ContextViewCanvas({
 
   // Double-click handler: inline edit (default) or trace (shift+double-click)
   const handleDoubleClick = useCallback(async (nodeId: string, event?: React.MouseEvent) => {
+    // A trace is a read-only projection: no inline edit, and no re-trace
+    // gesture that would land mid-walk. ESC leaves first.
+    if (overlayRef.current?.active) return
+
     // UX-first: Double-click = inline edit (modern approach)
     // Use Shift+Double-click for trace (power user feature)
     //
@@ -1568,7 +1587,8 @@ export function ContextViewCanvas({
   // ── NATIVE canvas trace — Trace = the canvas shows the whole flow ──
   // upfront (Lens = interactive investigation; the two coexist). Every
   // trace affordance starts this session; the walk engine fetches to the
-  // ends and useCanvasTraceWalk delta-merges each wave into the store.
+  // ends and the OVERLAY (below) draws the result. Nothing is merged into
+  // the canvas store, so leaving a trace restores the canvas for free.
   const canvasTrace = useCanvasTraceWalk(provider)
   const traceActive = canvasTrace.isTracing
   const traceModel = canvasTrace.walkEntry?.model ?? null
@@ -1580,6 +1600,46 @@ export function ContextViewCanvas({
   // walk's own fetch depth means unlimited). Reset on trace start.
   const [traceDepthUp, setTraceDepthUp] = useState(FULL_WALK_INITIAL_DEPTH)
   const [traceDepthDown, setTraceDepthDown] = useState(FULL_WALK_INITIAL_DEPTH)
+
+  // THE TRACE OVERLAY. Everything a trace draws — lanes, cards, counts,
+  // wires — is a pure function of (walk model, this view's placement,
+  // the reader's own expansion). The placement chain is the SAME one
+  // useLayerAssignment resolves the browse canvas with, so an overlay card
+  // anchors exactly where the canvas behind it would place the same node.
+  const branchCreatedUrns = useBranchCreatedDelta()
+  const viewIsCurated = activeEntityScope === 'curated'
+  const overlayPlacement = useMemo(() => ({
+    backendAssignments: new Map(
+      [...effectiveAssignments].map(([nodeId, a]) => [nodeId, a.layerId] as const),
+    ),
+    unassignedFallbackLayerId: viewIsCurated
+      ? undefined
+      : sortedLayers.find(l => l.showUnassigned === true)?.id,
+    branchCreatedUrns,
+  }), [effectiveAssignments, viewIsCurated, sortedLayers, branchCreatedUrns])
+  const overlay = useTraceOverlay({
+    model: traceModel,
+    focusUrn: canvasTrace.tracedUrn,
+    layers: sortedLayers,
+    assignments: activeReferenceLayout.assignments,
+    viewIsCurated,
+    showUpstream: traceShowUpstream,
+    showDownstream: traceShowDownstream,
+    depthUp: traceDepthUp,
+    depthDown: traceDepthDown,
+    placement: overlayPlacement,
+  })
+  // Read by the interaction callbacks (toggle, reveal, the write guards),
+  // which must keep ONE identity — the overlay object is re-made every
+  // render, so depending on it would re-mint them and bust LayerColumn's
+  // memo. Assigned in an effect, not during render: those callbacks only
+  // ever fire after commit, and a render-time ref write blocks the compiler
+  // from preserving the surrounding memoization.
+  const canvasTraceRef = useRef(canvasTrace)
+  useEffect(() => {
+    overlayRef.current = overlay
+    canvasTraceRef.current = canvasTrace
+  })
 
   // ── Trace history — browser-style back/forward over this user's traces
   // in THIS view, persisted to localStorage (per user, per view; capped).
@@ -1669,10 +1729,13 @@ export function ContextViewCanvas({
       })
     })
   }, [canvasTrace.tracedUrn, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])
+  // Stable identity (refs, not deps) so the ESC listener below attaches
+  // once per trace rather than once per render.
   const exitCanvasTrace = useCallback(() => {
-    canvasTrace.exit()
+    overlayRef.current?.exit()
+    canvasTraceRef.current.exit()
     resetAllCircuitBreakers()
-  }, [canvasTrace])
+  }, [])
   // Forward-declared refs, for hooks that fire earlier in render order.
   // Assigned in an effect (not render) — the interaction callbacks that
   // read them only fire after commit, and a render-time ref write blocks
@@ -1681,39 +1744,38 @@ export function ContextViewCanvas({
     startTraceRef.current = startCanvasTrace
     toggleTraceRef.current = startCanvasTrace
   }, [startCanvasTrace])
-  // The dock's direction toggles and the hop-depth limits narrow WHAT
-  // RENDERS, never what was walked — the full flow stays in memory, so
-  // "2 up / 3 down" answers instantly with no refetch. Hiding a
-  // direction hides its whole branch, containers included; the focus
-  // and its own subtree always stay (computeTraceVisibleUrns).
-  const traceVisibleUrns = useMemo<ReadonlySet<string>>(() => {
-    if (!traceActive || !traceModel || !canvasTrace.tracedUrn) return canvasTrace.traceNodeUrns
-    // Always computed (no unlimited shortcut): the result is also the
-    // spine-aware set the expansion filter intersects against — a raw
-    // traceNodeUrns lacks ancestors that were never model nodes.
-    return computeTraceVisibleUrns({
-      model: traceModel,
-      focusUrn: canvasTrace.tracedUrn,
-      showUpstream: traceShowUpstream,
-      showDownstream: traceShowDownstream,
-      upstreamDepth: traceDepthUp >= FULL_WALK_INITIAL_DEPTH ? Infinity : traceDepthUp,
-      downstreamDepth: traceDepthDown >= FULL_WALK_INITIAL_DEPTH ? Infinity : traceDepthDown,
-    })
-  }, [traceActive, traceModel, canvasTrace.tracedUrn, canvasTrace.traceNodeUrns, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])
-
-  // Everything on the flow expands upfront — derived, never written, so
-  // exiting trace restores the user's own expansion for free. Filtered
-  // to the VISIBLE set: expanding the host of a hidden branch is what
-  // used to let the legacy filter's pass-through fallback resurrect the
-  // pruned nodes.
-  const expandedForRender = useMemo(() => {
-    if (!traceActive || canvasTrace.expansionUrns.size === 0) return expandedNodes
-    const out = new Set(expandedNodes)
-    for (const u of canvasTrace.expansionUrns) {
-      if (traceVisibleUrns.has(u)) out.add(u)
+  // What the canvas renders while a trace is on: the overlay's lanes, as
+  // the HierarchyNode trees LayerColumn already knows how to draw. The
+  // lanes hold ONLY the visible tree (a closed card emits no children), so
+  // this is the whole picture — no filtering step downstream.
+  //
+  // Direction toggles and hop-depth limits narrow WHAT RENDERS, never what
+  // was walked: they are inputs to the view model, so "2 up / 3 down"
+  // answers instantly with no refetch.
+  const traceRender = useMemo(() => {
+    if (!overlay.active || !overlay.view) return null
+    const byLayer = new Map<string, HierarchyNode[]>()
+    const flat: HierarchyNode[] = []
+    const map = new Map<string, HierarchyNode>()
+    const walk = (n: HierarchyNode) => {
+      flat.push(n)
+      map.set(n.id, n)
+      for (const child of n.children) walk(child)
     }
-    return out
-  }, [traceActive, expandedNodes, canvasTrace.expansionUrns, traceVisibleUrns])
+    for (const lane of lanesToHierarchy(overlay.view.lanes)) {
+      byLayer.set(lane.layerId, lane.nodes)
+      for (const root of lane.nodes) walk(root)
+    }
+    // Layers with no lane keep their column and render empty — the canvas
+    // must not re-flow underneath the reader when a trace lands.
+    return { byLayer, flat, map }
+  }, [overlay.active, overlay.view])
+
+  // Expansion in trace mode is the OVERLAY's, never the canvas's — which
+  // is why exiting restores the reader's own browse expansion for free.
+  const expandedForRender = traceRender
+    ? (overlay.traceExpansion as Set<string>)
+    : expandedNodes
 
   // The flow-direction picture for LineageFlowOverlay — the SAME styling
   // contract the legacy trace drove (cyan upstream, amber downstream,
@@ -1782,7 +1844,9 @@ export function ContextViewCanvas({
     if (!traceActive || !traceModel || !tracedNodeId) return trace
     const result: TraceResult = {
       focusId: tracedNodeId,
-      traceNodes: new Set(canvasTrace.traceNodeUrns),
+      // What the WALK brought back — the dock's truncation notice asks
+      // "how big is this trace", not "how much is on screen".
+      traceNodes: new Set(traceModel.nodes.map(n => n.urn)),
       upstreamNodes: new Set(traceModel.upstreamUrns),
       downstreamNodes: new Set(traceModel.downstreamUrns),
       traceEdges: new Set(traceModel.lineageEdges.map(e => e.id ?? `${e.sourceUrn}>${e.targetUrn}`)),
@@ -1839,12 +1903,17 @@ export function ContextViewCanvas({
   useEffect(() => {
     if (!traceActive && dockExpanded) setDockExpanded(false)
   }, [traceActive, dockExpanded])
-  // Cmd/Ctrl+I toggles the dock's expanded state while a trace is active.
+  // Trace-mode keys: ESC leaves the trace, Cmd/Ctrl+I toggles the dock.
   useEffect(() => {
     if (!traceActive) return
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        exitCanvasTrace()
+        return
+      }
       const isMod = e.metaKey || e.ctrlKey
       if (!isMod || e.shiftKey) return
       if (e.key.toLowerCase() === 'i') {
@@ -1854,32 +1923,29 @@ export function ContextViewCanvas({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [traceActive])
+  }, [traceActive, exitCanvasTrace])
 
-  // Trace filter — when a trace is active, hides everything outside the trace
-  // context (traced URNs + drilldown URNs + their containment ancestors).
-  // When trace is off, returns the inputs unchanged with no allocation.
-  // Used by LayerColumn / edge projection so expansion reveals only traced
-  // descendants, recursively to any depth.
+  // Trace filter — retained for the LEGACY (useUnifiedTrace) drilldown
+  // path only. The native trace no longer filters the browse hierarchy: the
+  // overlay's lanes ARE the picture, already scoped, so `isTracing: false`
+  // keeps this a pass-through and `contextSet` stays empty.
   const {
-    filteredByLayer, filteredFlat, filteredMap, contextSet: traceContextSet,
+    contextSet: traceContextSet,
   } = useTraceFilteredHierarchy({
     nodesByLayer, displayFlat, displayMap,
-    isTracing: traceActive,
-    traceNodes: traceVisibleUrns,
-    // The closure walk model is already complete at leaf grain — there
-    // are no per-edge drilldowns in the native trace.
+    isTracing: false,
+    traceNodes: EMPTY_TRACE_NODES,
     drilldowns: EMPTY_DRILLDOWNS,
     parentMap,
     childMap,
-    expandedNodes: expandedForRender,
+    expandedNodes,
   })
 
-  // The hook returns the inputs unchanged when !isTracing, so these
-  // assignments are effectively a no-op outside trace mode.
-  const renderByLayer = traceActive ? filteredByLayer : nodesByLayer
-  const renderFlat = traceActive ? filteredFlat : displayFlat
-  const renderMap = traceActive ? filteredMap : displayMap
+  // TRACE MODE swaps the whole render source for the overlay's lanes;
+  // browse renders exactly as before.
+  const renderByLayer = traceRender?.byLayer ?? nodesByLayer
+  const renderFlat = traceRender?.flat ?? displayFlat
+  const renderMap = traceRender?.map ?? displayMap
 
 
   // Suppress parent AGGREGATED edges whose drill currently has at least one
@@ -2165,6 +2231,7 @@ export function ContextViewCanvas({
   // current visual order. A cross-set drop is a safe no-op; the MIDDLE band
   // still reparents (nest into a node).
   const handleReorderNode = useCallback((draggedId: string, targetId: string, position: 'before' | 'after') => {
+    if (overlayRef.current?.active) return          // read-only while tracing
     if (draggedId === targetId) return
     const before = currentLayout()
     const ctx = siblingContext(targetId, reorderTreeRef.current)
@@ -2242,6 +2309,7 @@ export function ContextViewCanvas({
   // (native HTML5 DnD is mouse-only). Resolves the node's sibling set (roots
   // OR children) and delegates to handleReorderNode. Stable identity.
   const nudgeReorder = useCallback((nodeId: string, dir: 'up' | 'down' | 'top' | 'bottom') => {
+    if (overlayRef.current?.active) return          // read-only while tracing
     const ctx = siblingContext(nodeId, reorderTreeRef.current)
     if (!ctx) return
     const { siblings } = ctx
@@ -2322,6 +2390,14 @@ export function ContextViewCanvas({
     (parentId: string) => loadChildren(parentId, { sortDirection: layerSortDirectionFor(parentId) }),
     [loadChildren, layerSortDirectionFor],
   )
+
+  // "Load N more" from a column. In trace mode the walk model IS the set of
+  // children that carry lineage, so there is nothing more to fetch — and a
+  // fetch would write the store the overlay deliberately leaves alone.
+  const loadMoreChildren = useCallback(async (parentId: string) => {
+    if (overlayRef.current?.active) return
+    await loadChildrenSorted(parentId)
+  }, [loadChildrenSorted])
 
   // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
   // (Expanded nodes are excluded: their children are already visible and stand in
@@ -2480,11 +2556,34 @@ export function ContextViewCanvas({
     setRevealTarget({ id: nodeId, pulse: revealPulseRef.current })
   }, [])
 
+  // F9 — REVEAL WHILE TRACING opens the OVERLAY's chain. The browse reveal
+  // below walks `parentMap` and lazy-LOADS whichever ancestors the store is
+  // missing; both are canvas writes a trace must not make. The overlay
+  // already holds every card the trace can show, so the chain is a lookup
+  // and opening it is a re-projection. Returns true when it handled the
+  // reveal — including for a urn the trace does not hold at all, which is
+  // "not on this lineage", not an invitation to go fetch it.
+  const expandTraceChain = useCallback((nodeId: string): boolean => {
+    const active = overlayRef.current
+    if (!active?.active) return false
+    const chain: string[] = []
+    for (const lane of active.view?.lanes ?? []) {
+      if (!lane.cards.has(nodeId)) continue
+      let cursor = lane.cards.get(nodeId)?.parentId ?? null
+      while (cursor) {
+        chain.push(cursor)
+        cursor = lane.cards.get(cursor)?.parentId ?? null
+      }
+      break
+    }
+    if (chain.length > 0) active.expandPath(chain)
+    return true
+  }, [])
+
   // Reveal-and-focus: clicking a neighbor in the drawer's Lineage section
   // expands collapsed ancestors (lazy-loading from the backend if needed),
-  // then scrolls the now-visible target into view. Works during trace mode
-  // because visibility here is governed by parentMap + expandedNodes, not
-  // by trace state directly. See [useRevealNode](../../../hooks/useRevealNode.ts).
+  // then scrolls the now-visible target into view.
+  // See [useRevealNode](../../../hooks/useRevealNode.ts).
   //
   // T24 F5 — `focus` used to scrollIntoView a plain
   // `document.getElementById` lookup, which returns null for any row the
@@ -2499,6 +2598,13 @@ export function ContextViewCanvas({
     provider,
     focus: scrollHitIntoView,
   })
+  const revealOnCanvas = useCallback(async (nodeId: string, revealOpts?: RevealOptions) => {
+    if (expandTraceChain(nodeId)) {
+      if (!revealOpts?.skipFocus) scrollHitIntoView(nodeId)
+      return
+    }
+    await revealAndFocus(nodeId, revealOpts)
+  }, [expandTraceChain, scrollHitIntoView, revealAndFocus])
 
   // Multi-locate (T24 F5): reveal each target (expanding collapsed
   // ancestors), then walk each one through the SAME virtualizer-aware
@@ -2511,7 +2617,7 @@ export function ContextViewCanvas({
   // are hooks rather than inline closures here: this component has no
   // test harness of its own to reach the logic through.
   const locateManyOnCanvas = useLocateManyOnCanvas({
-    revealAndFocus,
+    revealAndFocus: revealOnCanvas,
     scrollHitIntoView,
     getElementById: (id) => document.getElementById(`layer-node-${id}`),
     getScrollContainer: () => horizontalScrollRef.current,
@@ -2525,12 +2631,19 @@ export function ContextViewCanvas({
   // (W3). Uses `useRevealSearchHit` (renamed from the original Advanced
   // Search `useRevealNode` during the resilience-hardening integration to
   // coexist with the entity-drawer reveal hook above).
-  const revealSearchHit = useRevealSearchHit({
+  const revealSearchHitBrowse = useRevealSearchHit({
     setExpandedNodes,
     loadChildren: loadChildrenSorted,
     provider,
     scrollIntoView: scrollHitIntoView,
   })
+  const revealSearchHit = useCallback(async (urn: string, ancestorPath: Parameters<typeof revealSearchHitBrowse>[1]) => {
+    if (expandTraceChain(urn)) {
+      scrollHitIntoView(urn)
+      return
+    }
+    await revealSearchHitBrowse(urn, ancestorPath)
+  }, [expandTraceChain, scrollHitIntoView, revealSearchHitBrowse])
 
   // "Frame matches" — scroll the horizontal canvas container so the first
   // match-bearing node is centered. This is a viewport-not-zoom action since
@@ -2853,6 +2966,14 @@ export function ContextViewCanvas({
   }, [trace, nodes, edges, entityTypeLevels, mergeDrilldownIntoCanvas])
 
   const toggleNode = useCallback(async (nodeId: string) => {
+    // TRACE MODE: expansion belongs to the overlay. Opening a card is a
+    // re-projection of the walk model the session already holds — no fetch,
+    // no store write, and nothing to undo when the trace ends.
+    if (overlayRef.current?.active) {
+      overlayRef.current.toggle(nodeId)
+      return
+    }
+
     const node = displayMap.get(nodeId)
 
     if (node?.isLogical) {
@@ -3097,27 +3218,17 @@ export function ContextViewCanvas({
   // resolution because the walk respects `expandedNodes`.
   const browseBundleEnabled = !traceActive
 
-  // Edge projection: lineageEdges, visibleLineageEdges
-  // Pass the trace-filtered views so projected edges only reference visible
-  // nodes; outside trace mode these are pass-through to the originals.
-  const { visibleLineageEdges, unresolvedEdgeCount } = useEdgeProjection({
+  // Edge projection — BROWSE only. In trace mode the overlay's own wire
+  // ledger has already decided the grain (see traceWireLedger), so the
+  // projection would be re-deciding it from a store that holds none of the
+  // trace's lineage anyway.
+  const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount } = useEdgeProjection({
     edges, aggregatedEdges, nodesByLayer: renderByLayer, expandedNodes,
     displayFlat: renderFlat, displayMap: renderMap, urnToIdMap,
     showLineageFlow, isTracing: traceActive,
     traceContextSet, isContainmentEdge,
     hoveredNodeId,
     suppressedAggEdgeKeys,
-    // Trace-mode edge bundling: roll every leaf endpoint up to the focus's
-    // hierarchy level so per-pair grouping collapses thousands of
-    // column-to-column edges into a handful of container-to-container
-    // bundles. parentMap is the canvas containment hierarchy; entityTypeLevels
-    // is the ontology level map; result.effectiveLevel is what the trace
-    // actually ran at.
-    traceBundleParentMap: parentMap,
-    entityTypeLevels,
-    // The closure walk is level-free; expanded parents already render
-    // leaf edges and collapsed parents bundle by containment.
-    traceFocusLevel: undefined,
     // Browse-mode bundling: kicks in only outside trace mode and only when
     // edge density would otherwise overload the canvas. Walks endpoints up
     // the containment chain in passes; collapses parent-pairs whose fan-in
@@ -3127,6 +3238,21 @@ export function ContextViewCanvas({
     browseBundleFanInThreshold: lineageBundleFanIn,
     nodeLayerIndexMap,
   })
+
+  // THE TRACE'S OWN WIRES: one line per flow, at the one grain the reader's
+  // expansion has earned. Endpoints are card ids (a Context View node id IS
+  // its urn), which is what LineageFlowOverlay anchors on.
+  const visibleLineageEdges = useMemo(() => {
+    if (!overlay.active || !overlay.view) return browseVisibleLineageEdges
+    return overlay.view.wires.map(w => ({
+      id: w.id,
+      source: w.source,
+      target: w.target,
+      edgeCount: w.edgeCount,
+      isBundled: w.isBundled,
+      kind: w.kind,
+    }))
+  }, [overlay.active, overlay.view, browseVisibleLineageEdges])
 
   // Publish the projected lineage edge set to the canvas store so panels
   // outside the canvas (EntityDrawer's Lineage section) can mirror exactly
@@ -3751,6 +3877,13 @@ export function ContextViewCanvas({
         searchResults={searchResults}
         onSearchResultClick={(node) => {
           selectNode(node.id)
+          // Tracing: the overlay owns expansion (and the hit may be nested
+          // inside a closed card, so open the way to it too).
+          if (overlay.active) {
+            expandTraceChain(node.id)
+            overlay.expandPath([node.id])
+            return
+          }
           setExpandedNodes((prev) => new Set([...prev, node.id]))
         }}
         showLineageFlow={showLineageFlow}
@@ -4195,7 +4328,7 @@ export function ContextViewCanvas({
             void locateManyOnCanvas(ids)
           }}
           onClose={lensClose}
-          onRevealOnCanvas={revealAndFocus}
+          onRevealOnCanvas={revealOnCanvas}
           onOpenDetails={openNodeDrawer}
           onLocateAll={(ids) => {
             // "Reveal all on canvas" IS a frame action — land the user in
@@ -4377,7 +4510,7 @@ export function ContextViewCanvas({
                 onAddChild={canEditGraph ? handleAddChildEntity : undefined}
                 onAddToLayer={canEditGraph ? openBuilderForLayer : undefined}
                 onBuildToLayer={canEditGraph ? openBuildForLayer : undefined}
-                onBeginConnect={canEditGraph ? edgeConnect.beginDrag : undefined}
+                onBeginConnect={canEditGraph && !overlay.active ? edgeConnect.beginDrag : undefined}
                 onLayerContextMenu={handleLayerContextMenuOpen}
                 traceFocusId={traceActive && canvasTrace.tracedUrn
                   ? (urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
@@ -4389,7 +4522,7 @@ export function ContextViewCanvas({
                 isHighlightActive={isHighlightActive}
                 isHoverHighlight={isHoverActive && !isClickHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
-                onLoadMore={loadChildrenSorted}
+                onLoadMore={loadMoreChildren}
                 onSearchChildren={searchChildren}
                 isLoadingChildren={isLoadingChildren}
                 loadingNodes={loadingNodes}
@@ -4502,7 +4635,7 @@ export function ContextViewCanvas({
             onTraceUp={(nodeId) => startCanvasTrace(nodeId, 'up')}
             onTraceDown={(nodeId) => startCanvasTrace(nodeId, 'down')}
             onFullTrace={(nodeId) => startCanvasTrace(nodeId, 'both')}
-            onFocusNode={revealAndFocus}
+            onFocusNode={revealOnCanvas}
             onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
           />
         )}
@@ -4550,7 +4683,7 @@ export function ContextViewCanvas({
         onDuplicateNode={canEditGraph ? interactions.duplicateNode : undefined}
         onDeleteNode={canEditGraph ? interactions.deleteNode : undefined}
         onCreateChild={canEditGraph ? interactions.createChild : undefined}
-        onConnect={canEditGraph ? (id) => edgeConnect.armConnect(id) : undefined}
+        onConnect={canEditGraph && !overlay.active ? (id) => edgeConnect.armConnect(id) : undefined}
         onLinkNode={canEditGraph ? (id) => {
           const node = nodes.find(n => n.id === id || (n.data?.urn as string) === id)
           useCreateLinkStore.getState().open({
