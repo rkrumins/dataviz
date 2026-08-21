@@ -9,6 +9,7 @@ import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useHoveredNodeId } from '@/hooks/useHighlightState'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
+import { usePreferencesStore } from '@/store/preferences'
 
 // Global visibility tracker — which layer-node-* elements are currently in the viewport
 const globalVisibleNodes = new Set<string>()
@@ -85,6 +86,7 @@ export function LineageFlowOverlay({
    *  actually changes (the compute pass runs per frame). */
   onAnchorProxies?: (groups: Map<string, AnchorProxyGroup>, focusId: string | null) => void,
 }) {
+  const showWireCounts = usePreferencesStore((st) => st.showWireCounts) ?? false
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
   // Overflow indicators — badges at top/bottom of column gutters for off-screen connections
@@ -1616,10 +1618,12 @@ export function LineageFlowOverlay({
                 />
               )}
 
-              {/* Bundle count — minimal pill. Only when the line stands for
-                  MORE than one hop: a re-anchored single hop is still one
-                  flow, and a "1" on every such line reads as noise. */}
-              {isBundled && !isGhost && edge.edgeCount > 1 && (
+              {/* Bundle count — minimal pill. In a trace it sits behind the
+                  dock's "Counts on wires" setting (off by default: the cards
+                  already carry "N on this lineage"). Only when the line
+                  stands for MORE than one hop: a re-anchored single hop is
+                  still one flow, and a "1" on every such line reads as noise. */}
+              {(!isTracing || showWireCounts) && isBundled && !isGhost && edge.edgeCount > 1 && (
                 <g data-edge-badge={edge.edgeCount} transform={`translate(${(sx + tx) / 2}, ${(sy + ty) / 2})`}>
                   <rect x="-8" y="-6" width="16" height="12" rx="6" fill="currentColor" opacity="0.08" />
                   <text x="0" y="3" fill="currentColor" fontSize="8px" fontWeight="500" textAnchor="middle" opacity="0.6">

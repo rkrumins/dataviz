@@ -21,6 +21,8 @@ import { render, screen, fireEvent, within } from '@testing-library/react'
 import { TraceDockControls } from '../TraceDockControls'
 import { TraceDockTitleBar } from '../TraceDockTitleBar'
 import { TraceDockMetricStrip } from '../TraceDockMetricStrip'
+import { TraceDockSettings } from '../TraceDockSettings'
+import { usePreferencesStore } from '@/store/preferences'
 import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
 import type { TraceConfig, UseUnifiedTraceResult } from '@/hooks/useUnifiedTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -204,5 +206,43 @@ describe('TraceDockMetricStrip — sources outside this view', () => {
   it('reads as one source in the singular', () => {
     const { container } = strip(1)
     expect(within(container).getByText(/1 source outside this view/i)).toBeInTheDocument()
+  })
+})
+
+// ── Settings tab: "Counts on wires" lives here, native mode only ─────────────
+
+function renderSettings(nativeMode: boolean) {
+  const trace = {
+    config: config(),
+    setConfig: vi.fn(),
+    retrace: vi.fn(async () => {}),
+    result: null,
+  } as unknown as UseUnifiedTraceResult
+  render(
+    <TraceDockSettings
+      trace={trace}
+      granularityOptions={[{ id: 'dataset', name: 'Dataset', level: 2 }]}
+      availableEdgeTypes={['TRANSFORMS']}
+      resolveEdgeColor={() => '#fff'}
+      nativeMode={nativeMode}
+    />,
+  )
+}
+
+describe('TraceDockSettings — counts on wires', () => {
+  it('offers the switch in native mode, off by default, and flips the persisted preference', () => {
+    usePreferencesStore.setState({ showWireCounts: false })
+    renderSettings(true)
+    const sw = screen.getByRole('switch', { name: 'Counts on wires' })
+    expect(sw.getAttribute('aria-checked')).toBe('false')
+    fireEvent.click(sw)
+    expect(usePreferencesStore.getState().showWireCounts).toBe(true)
+    expect(screen.getByRole('switch', { name: 'Counts on wires' }).getAttribute('aria-checked')).toBe('true')
+    usePreferencesStore.setState({ showWireCounts: false })
+  })
+
+  it('is absent in legacy mode — it describes the overlay the native trace draws', () => {
+    renderSettings(false)
+    expect(screen.queryByRole('switch', { name: 'Counts on wires' })).toBeNull()
   })
 })

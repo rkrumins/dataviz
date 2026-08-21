@@ -36,10 +36,16 @@ describe('the trace overlay on the real canvas', () => {
     // the authored container→dashboard rollups are covered by them, so they
     // are dropped rather than drawn a level apart. See traceViewModel.wires.
     expect(h.wires().map(w => `${w.source}>${w.target}`).sort()).toEqual(['INTERMEDIATE_T2>aov', 'REPORTING>aov'])
-    // Count pills only where a line stands for MORE than one hop: the T2
-    // bundle carries 2 flows and earns its "2"; REPORTING's single hop, drawn
-    // re-anchored at the chart, is still one flow and carries no digit.
-    expect([...document.querySelectorAll('[data-edge-badge]')].map(g => g.getAttribute('data-edge-badge'))).toEqual(['2'])
+    // Count pills are a trace-settings opt-in (the cards already say "N on
+    // this lineage"): none by default; switched on, only where a line stands
+    // for MORE than one hop — the T2 bundle earns its "2", REPORTING's single
+    // hop, drawn re-anchored at the chart, is still one flow and stays bare.
+    const badges = () => [...document.querySelectorAll('[data-edge-badge]')].map(g => g.getAttribute('data-edge-badge'))
+    expect(badges()).toEqual([])
+    await h.setWireCounts(true)
+    expect(badges()).toEqual(['2'])
+    await h.setWireCounts(false)
+    expect(badges()).toEqual([])
     expect(h.storeWrites()).toBe(0)
 
     const before = h.snapshotStore()
