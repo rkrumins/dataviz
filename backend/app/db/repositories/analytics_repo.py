@@ -817,6 +817,48 @@ def _redact_view_row(row: dict, scope) -> dict:
     }
 
 
+#: A contributor row, minus the address. Same allow-list discipline as the
+#: view rows: name what may leave.
+_PUBLIC_CONTRIBUTOR_FIELDS = ("userId", "name", "events")
+
+
+def redact_workspace_detail(doc: dict, scope) -> dict:
+    """Apply ``scope`` to one workspace's drill-in.
+
+    This existed as an unredacted hole for one commit, and the shape of the
+    mistake is worth naming: the drill-in was treated as an ACCESS decision
+    ("may you open this page?") and therefore not as a DOCUMENT ("what may it
+    contain?"). Passing the first check told us nothing about the second, and
+    the page shipped a roster of contributors with their email addresses to
+    anyone the first check let through.
+
+    Contributors are gated on ``can_open`` rather than ``can_see``: an
+    operator opening workspace REPORTING wanted figures on a dashboard, not a
+    staff list for a team the reader has no part in. Reporting is not a roster.
+    """
+    if scope is None or scope.privileged:
+        return doc
+
+    doc = dict(doc)
+    member = scope.can_open(doc.get("workspaceId"))
+    show_people = scope.shows_people and member
+
+    contributors = doc.get("topContributors") or []
+    doc["topContributors"] = [
+        {k: c.get(k) for k in _PUBLIC_CONTRIBUTOR_FIELDS}
+        for c in contributors
+        # Their own row survives at every level — it is their data.
+        if show_people or scope.is_self(c.get("userId"))
+    ]
+    doc["topViews"] = [_redact_view_row(v, scope) for v in doc.get("topViews", [])]
+    doc["redaction"] = {
+        "applied": True,
+        "showsPeople": show_people,
+        "member": member,
+    }
+    return doc
+
+
 def redact_summary(doc: dict, scope) -> dict:
     """Apply ``scope`` to a finished platform summary.
 
@@ -2062,7 +2104,12 @@ async def workspace_detail(
     now: Optional[datetime] = None,
     scope: Optional["ViewerScope"] = None,
 ) -> Optional[dict]:
-    """Full insights for one workspace. ``None`` when it doesn't exist."""
+    """Full insights for one workspace. ``None`` when it doesn't exist.
+
+    The document is built in full and then filtered through
+    :func:`redact_workspace_detail`, so this function has exactly one exit and
+    a future field cannot bypass the scope by being added below.
+    """
     now = now or datetime.now(timezone.utc)
     w = build_window(days, start=start, end=end, now=now)
 
@@ -2165,7 +2212,7 @@ async def workspace_detail(
     )).all()))
     names = await resolve_user_ids(session, {a for a, _ in contributors.most_common(TOP_N)})
 
-    return {
+    detail = {
         "workspaceId": workspace.id,
         "name": workspace.name,
         "description": workspace.description,
@@ -2239,3 +2286,5 @@ async def workspace_detail(
             "sourcesWithStats": len(stats),
         },
     }
+    # One exit, through the redactor. See the note on the function.
+    return redact_workspace_detail(detail, scope)

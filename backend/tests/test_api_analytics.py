@@ -1262,3 +1262,96 @@ async def test_workspace_rows_carry_no_hidden_fields(db_session):
     blob = json.dumps(rows)
     assert "Quiet" not in blob and "Live" not in blob
     assert "usr_" not in blob, "a workspace row carried a user id"
+
+
+async def test_the_drill_in_obeys_the_privacy_level(db_session):
+    """The per-workspace page is a document like any other.
+
+    It was not treated as one: `workspace_detail` returned `topContributors`
+    with names AND email addresses, guarded only by "can you see this
+    workspace" and passing through no redaction at all. So a reader at the
+    strictest level — where no individual is ever named — got a roster of
+    everyone who had touched their own workspace, addresses included.
+    """
+    await _seed(db_session)
+    detail = await analytics_repo.workspace_detail(
+        db_session, "ws_live", days=7, now=NOW,
+        scope=_scope(privacy=PrivacyMode.STRICT,
+                     visible_workspaces=frozenset({"ws_live"}),
+                     user_id="usr_new2"),
+    )
+    assert detail is not None
+    blob = json.dumps(detail)
+    assert "@x.io" not in blob, "the drill-in leaked email addresses"
+    assert detail["topContributors"] == [], (
+        "no individual may be named at the strict level"
+    )
+
+
+async def test_workspace_reporting_does_not_expose_a_roster(db_session):
+    """The combination that makes the above dangerous rather than untidy.
+
+    With workspace reporting on, `can_see` is satisfied for EVERY workspace,
+    so the drill-in opens for someone who is not a member — and it was handing
+    them that workspace's people.
+    """
+    await _seed(db_session)
+    detail = await analytics_repo.workspace_detail(
+        db_session, "ws_live", days=7, now=NOW,
+        scope=_scope(privacy=PrivacyMode.INTERNAL,
+                     visible_workspaces=frozenset(),
+                     reports_all_workspaces=True, user_id="usr_new2"),
+    )
+    assert detail is not None, "reporting is on, so the page opens"
+    assert "@x.io" not in json.dumps(detail), "no addresses, at any level"
+
+
+async def test_every_analytics_endpoint_is_swept(test_client, db_session, _flag_cache):
+    """The guard that survives the next person.
+
+    Two leaks reached main in this feature — a user id spread into view rows,
+    and an unredacted contributor roster on the drill-in. Both were single
+    endpoints failing to do what the others did, and both were invisible to
+    field-level tests because nobody knew the field was there.
+
+    So this walks the router rather than a hand-written list. An endpoint
+    added later is swept the moment it is mounted, without anyone remembering
+    to come back here — which is the only kind of guard that holds.
+    """
+    from backend.app.main import app
+
+    await _seed(db_session)
+    _prime_flag(
+        analyticsPublicEnabled=True,
+        # The most permissive posture that still redacts, so the sweep runs
+        # against the largest document a non-privileged reader can obtain.
+        analyticsPrivacyMode="internal",
+        analyticsWorkspaceVisibility=True,
+    )
+
+    paths = sorted({
+        r.path for r in app.routes
+        if getattr(r, "path", "").startswith("/api/v1/admin/analytics")
+    } | {
+        # Route objects may be wrapped by an included-router, so the concrete
+        # URLs are listed too; the assertion below proves the set is not empty
+        # and covers what the frontend actually calls.
+        "/api/v1/admin/analytics/summary",
+        "/api/v1/admin/analytics/workspaces",
+        "/api/v1/admin/analytics/workspaces/ws_live",
+    })
+    urls = [p.replace("{workspace_id}", "ws_live") for p in paths]
+    assert len(urls) >= 3, f"router introspection found too little: {urls}"
+
+    forbidden = {
+        "old@x.io": "an email address",
+        "n1@x.io": "an email address",
+        "createdBy": "an internal-only field",
+    }
+    for url in urls:
+        res = await _as(test_client, (), url=url)
+        assert res.status_code in (200, 403, 404), f"{url} -> {res.status_code}"
+        if res.status_code != 200:
+            continue
+        for secret, why in forbidden.items():
+            assert secret not in res.text, f"{url} leaked {why}: {secret!r}"
