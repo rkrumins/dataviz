@@ -62,15 +62,52 @@ memory checkpoint at ~50k; boards grow (no partner-frame caps); the rule set is 
 (`Node ⊃ Node ⊃ Node → Node` with partners at different depths is covered by tests on both surfaces);
 raw evidence wins. Never a percent or a spinner — counts tick.
 
+## Evening additions (2026-08-21 → 22): fan-in bundles and the coarse first paint
+
+**Fan-in bundles (Part H; `feat(lens): a wide band folds its cards into the containers they sit in`).**
+The user's case: 100+ inputs and 100+ outputs — 200+ partner tables drawn one card each, "so tiny
+when opened", sharing 18 databases. The morning's "draw everything" change had the Lens walk every
+container through to the table grain. Now the judgement is the **band's**: past `BAND_BUDGET = 12`
+top-level cards, each card folds into its own parent, which becomes a frame showing its strongest
+`BUNDLE_WINDOW = 5` rows with "N more" behind; one level only; a host that also holds chrome is not
+the grain to fold at; never above the focus; overrides the sticky walk-through in the grow direction
+only. The rule reads parent pointers and the hop grain — no type, label or level — and is pinned on
+three hierarchies (Domain→Department→Database→Table→Column, Root→Node→Node→Node, Data Domain→App→
+Container→Container→Table→SchemaField). Density is the reader's **preference** (`lensDensity`,
+persisted, v3 migration): **Overview** (hosts closed with counts — "start at the high level"),
+**Grouped** (default, user ruling), **Every card**; separate from chain folding, which stays off by
+default under the earlier ruling. Browser, wide table: Grouped draws **15 nodes at zoom 1.27**
+(was 505 at 0.05); Overview 5 nodes; Every card the 505; the "17,567 connections" chip identical
+across all three.
+
+**Coarse first paint (Part G; four commits `feat(trace): the coarse page…` → `feat(lens,trace): …one
+rule decides card or host`).** `grain: coarse` on the closure request asks the provider's rollup lane
+(`trace_closure_coarse`) for every `:AGGREGATED` cell incident to the focus, both directions, with
+each partner's ancestor chain and containment, weight and depth stamps on `properties`, no frontier,
+no cursor; engine fallback to the fine walk (result says `grain`); 422 with a cursor or seeds; the
+cache key separates grains and an old client's key is byte-identical. The driver fires the coarse
+leg beside the fine first page — whichever lands first draws, the other merges without authority
+(pinned: coarse-then-fine == fine-then-coarse), the phase stays `seeding` while the fine leg is out.
+One accounting rule for both boards (`accountRollups` extracted from the canvas ledger;
+`rollupResiduals` decides card vs host): a cell weighs W in degrees, crossings, bundles and neighbour
+records, draws coarse ("≈W flows") wherever it is, a partner whose rows have not landed says
+"≈W flows", the focal's orientation reads coarse partners as a "≈N" floor, and once the walk is done
+every raw-backed cell is dropped — raw evidence wins. Live: the wide table's coarse page ships
+**386 cells, Σweight 18,005 == Cypher truth, 85 ms cold / 20 ms warm**; a seeded cell estate proves
+inner-first accounting reproduces the raw count (database/department residual 0 → hosts). Browser,
+Lens one hop: **first cards 212 ms after the first request** (21 cards from the coarse page),
+complete at 7.2 s in 4 requests. Canvas trace: narrates from ≈1.1 s, 50k checkpoint hands-free.
+
+Suites after both parts: frontend **3,072 tests / 322 files** green (`ActivityFeedList` flaked once
+across midnight and passes alone); backend unit 233 + live gate 35 green; `tsc` 61; eslint on the
+touched files clean.
+
 ## Not built, and why
 
-- **Coarse first paint from `:AGGREGATED` rollups (plan A7/B5/C3/D5).** Re-checked against the
-  numbers after the fine path landed: the canvas trace paints at ≈1.2 s and the Lens at ≈2.5 s, and
-  the Lens's cost is the render of page 1, not the fetch (server 0.3–0.5 s). A coarse page would
-  paint the partner-table picture ≈1 s earlier on the Lens at the cost of a second wire grain in the
-  Lens layout (raw-wins accounting per pair, residuals, staleness of a derived cell). The small first
-  page (`be90eef9`) took most of that gain for one line. Worth revisiting only if a real estate shows
-  a first paint the reader waits on.
+- ~~Coarse first paint~~ — built in the evening on the user's call (see above).
+- Phase 2 of the fan-in work: compact single-line cards + multi-column packing for Every card and for
+  bands whose parents are themselves numerous; synthetic bundles by (entityType, edgeType) for
+  partners with no shared container at all.
 - **Merge coalescing (B6)** — two responses per round still mean two layouts. Remaining per-wave cost
   late in a 50k walk is ≈7 s, dominated by React rendering ~2,500 cards that sit inside the viewport
   at fit-all zoom (culling only helps zoomed in).
