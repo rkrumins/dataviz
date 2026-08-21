@@ -17,6 +17,11 @@
  * `&theme=dark` renders the dark palette — the chart colours are resolved in
  * JavaScript from the preferences store, so a dark screenshot is the only way
  * to check the validated dark steps actually land.
+ *
+ * `&perms=admin` seeds `system:admin` into the auth store. Only the first-run
+ * panel reads it, and it reads it to decide which next steps this reader can
+ * actually take — with no claims at all, the shot shows the one step everybody
+ * gets and the permission-gated half goes unchecked.
  */
 import { StrictMode, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -24,6 +29,7 @@ import { MemoryRouter } from 'react-router-dom'
 
 import '../styles/globals.css'
 import { usePreferencesStore } from '../store/preferences'
+import { useAuthStore } from '../store/auth'
 import { ANALYTICS_FIXTURES, type AnalyticsFixtureName } from './analyticsFixtures'
 import { OverviewTab } from '../components/analytics/OverviewTab'
 import { GrowthTab } from '../components/analytics/GrowthTab'
@@ -38,6 +44,7 @@ const params = new URLSearchParams(window.location.search)
 const fixtureName = (params.get('fixture') ?? 'privileged') as AnalyticsFixtureName
 const tab = params.get('tab') ?? 'overview'
 const dark = params.get('theme') === 'dark'
+const asAdmin = params.get('perms') === 'admin'
 
 const RANGE: AnalyticsRangeSelection = { kind: 'preset', days: 14 }
 
@@ -53,6 +60,21 @@ function Harness() {
             getComputedStyle(document.documentElement)
                 .getPropertyValue('--nx-bg-canvas').trim() || '#fff'
     }, [setTheme])
+
+    // Set once, outside render, so the permission-gated links have claims to
+    // read before the first paint.
+    useEffect(() => {
+        useAuthStore.setState({
+            status: 'authenticated',
+            isAuthenticated: true,
+            permissionsStatus: 'ready',
+            permissions: {
+                sid: 'harness',
+                global: asAdmin ? ['system:admin'] : [],
+                ws: {},
+            },
+        } as never)
+    }, [])
 
     const { summary, rows } = ANALYTICS_FIXTURES[fixtureName]
     const common = { data: summary, range: RANGE, isStale: false }

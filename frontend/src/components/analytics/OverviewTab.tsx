@@ -16,6 +16,7 @@ import type {
 } from '@/services/analyticsService'
 import { HeroFigure, KpiCard } from './KpiCard'
 import { InsightStrip } from './InsightStrip'
+import { FirstRun, isFirstRun } from './FirstRun'
 import { WithheldPanel } from './Redacted'
 import { ViewLink, WorkspaceLink } from './EntityLink'
 import { AdoptionMatrix } from './AdoptionMatrix'
@@ -58,6 +59,12 @@ export function OverviewTab({
                 rangeLabel={rangeLabel(range)}
                 onNavigate={onNavigateTab}
             />
+
+            {/* A brand-new deployment gets an explanation and the two or three
+                actions that fill this page, rather than six panels each saying
+                "no activity in this range". The charts below stay: they show
+                the shape the page will take. */}
+            {isFirstRun(data) && <FirstRun />}
 
             {/* Hero + headline stats. Exactly one hero figure per view; the
                 vanity totals sit beside it as ordinary tiles. */}

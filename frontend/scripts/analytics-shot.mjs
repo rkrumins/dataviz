@@ -28,7 +28,10 @@ const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
   'strict:workspaces',  // locked rows with request-access
   'internal:overview',  // colleagues named again at the internal default
   'reported:workspaces',// named but not openable — reporting is not a door
-  'firstRun:overview',  // a brand-new tenant: zeros that must not read as dead
+  // A brand-new tenant: zeros that must not read as dead. Shot as an admin,
+  // because the first-run panel offers the steps THIS reader can take and with
+  // no claims the permission-gated half never renders.
+  'firstRun:overview:admin',
   'privileged:overview:dark',
   'strict:overview:dark',
 ]
@@ -81,8 +84,12 @@ const ready = new Promise((resolve, reject) => {
 try {
   await ready
   for (const shot of SHOTS) {
-    const [fixture, tab, theme] = shot.split(':')
-    const query = `fixture=${fixture}&tab=${tab}${theme === 'dark' ? '&theme=dark' : ''}`
+    // `fixture:tab[:dark|:admin]` — the third segment picks the palette or the
+    // permission claims, whichever the posture needs.
+    const [fixture, tab, mode] = shot.split(':')
+    const query = `fixture=${fixture}&tab=${tab}`
+      + (mode === 'dark' ? '&theme=dark' : '')
+      + (mode === 'admin' ? '&perms=admin' : '')
     const out = join(OUT, `analytics-${shot.replace(/:/g, '-')}.png`)
     await run(chromium, [
       '--headless', '--no-sandbox', '--disable-gpu', '--hide-scrollbars',

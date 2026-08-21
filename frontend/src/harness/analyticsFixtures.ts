@@ -279,7 +279,7 @@ export const FIRST_RUN: AnalyticsSummary = {
     ) as unknown as AnalyticsSummary['totals'],
     series: {
         ...PRIVILEGED.series,
-        signups: BUCKETS.map(() => 0), cumulativeUsers: BUCKETS.map(() => 1),
+        signups: BUCKETS.map(() => 0), cumulativeUsers: BUCKETS.map(() => 0),
         activeUsers: BUCKETS.map(() => 0), signIns: BUCKETS.map(() => 0),
         viewsCreated: BUCKETS.map(() => 0), cumulativeViews: BUCKETS.map(() => 0),
         workspacesCreated: BUCKETS.map(() => 0), cumulativeWorkspaces: BUCKETS.map(() => 0),

@@ -81,7 +81,10 @@ export function KpiCard({
                         <Icon className="w-4 h-4" />
                     </span>
                 )}
-                {trend && trend.length >= 3 && (
+                {/* An all-zero trend drawn as a line is a flat rule with an
+                    end dot, which reads as "steady at some level" rather than
+                    as "nothing happened". Omitted instead. */}
+                {trend && trend.length >= 3 && trend.some((v) => v !== 0) && (
                     <Sparkline
                         points={trend}
                         tone={trendTone}

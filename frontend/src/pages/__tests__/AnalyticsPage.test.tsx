@@ -552,6 +552,31 @@ describe('AnalyticsPage', () => {
         expect(screen.queryByText(/contributors are hidden/i)).toBeNull()
     })
 
+    it('guides a brand-new deployment instead of showing six empty charts', async () => {
+        // Zeros everywhere is a real state, and six panels each saying "no
+        // activity in this range" reads as a broken dashboard rather than as an
+        // empty one.
+        const zero = { total: 0, current: 0, previous: 0, changePct: null }
+        vi.mocked(analyticsService.getSummary).mockResolvedValue({
+            ...SUMMARY,
+            totals: { ...SUMMARY.totals, workspaces: zero, views: zero, dataSources: zero },
+        } as never)
+        renderAt('/analytics')
+
+        expect(await screen.findByText(/nothing to measure yet/i)).toBeInTheDocument()
+        // Everyone gets the step they can take; the admin-only ones stay hidden
+        // for a reader holding no claims.
+        expect(screen.getByRole('link', { name: /create a workspace/i })).toBeInTheDocument()
+        expect(screen.queryByRole('link', { name: /invite your team/i })).toBeNull()
+    })
+
+    it('does not call a live platform a first run', async () => {
+        vi.mocked(analyticsService.getSummary).mockResolvedValue(SUMMARY as never)
+        renderAt('/analytics')
+        await screen.findByText(/accounts in total/i)
+        expect(screen.queryByText(/nothing to measure yet/i)).toBeNull()
+    })
+
     it('surfaces a load failure instead of rendering empty charts', async () => {
         vi.mocked(analyticsService.getSummary).mockRejectedValue(new Error('Session expired'))
         renderAt('/analytics')
