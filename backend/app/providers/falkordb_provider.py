@@ -183,6 +183,19 @@ CLOSURE_LAZY_ANCHOR_CHUNK = int(os.getenv("CLOSURE_LAZY_ANCHOR_CHUNK", "25"))
 CLOSURE_LAZY_EDGES_PER_ANCHOR = int(os.getenv("CLOSURE_LAZY_EDGES_PER_ANCHOR", "500"))
 CLOSURE_LAZY_EDGE_CEILING = int(os.getenv("CLOSURE_LAZY_EDGE_CEILING", "8000"))
 
+#: What the lazy path may spend DECORATING containment with real edge ids and
+#: types (see `_hydrate_and_nest`). Under the cap the pair-fetch synthesizes
+#: from the ancestor chains instead — the chains are the truth, so this costs
+#: fidelity, never coverage.
+#:
+#: MEASURED on the 2.08M-node estate, one drill of a 751-child container
+#: shipping 3,424 containment pairs: 689 ms with the decoration skipped,
+#: 1,563 ms with it. (It was 7,764 ms before the pair query was taught to seek
+#: an index — that fix bought 9×, and this cap buys the rest.) Nothing in the
+#: trace overlay reads a containment edge's id or type, and this path answers
+#: a click, so the decoration must not outbid the page.
+CLOSURE_LAZY_CONTAINMENT_BUDGET_S = float(os.getenv("CLOSURE_LAZY_CONTAINMENT_BUDGET_S", "2.0"))
+
 
 class CursorMismatchError(ValueError):
     """A pagination cursor (or sort_direction) that cannot serve the request —
@@ -7250,6 +7263,118 @@ class FalkorDBProvider(GraphDataProvider):
             object.__setattr__(result, "_fallback_level", fallback_level)
         return result
 
+    async def _hydrate_and_nest(
+        self,
+        urns: Set[str],
+        ctypes: List[str],
+        deadline: float,
+        reason: Optional[str],
+        containment_budget_s: Optional[float] = None,
+    ) -> Tuple[Dict[str, GraphNode], List[GraphEdge], Optional[str]]:
+        """Hydrate a walk's participants and ship the containment that nests
+        them — the step BOTH closure paths share, so both inherit F18.
+
+        Split out of ``trace_closure`` so the lazy coarse/drill walk cannot
+        drift from it: the detailed hydration that distinguishes
+        ``nodes_failed`` from ``nodes_partial``, the chains under their own
+        floor-budgeted ``wait_for``, and the pair-fetch that synthesizes from
+        those chains for anything it could not afford to ask about.
+
+        ``containment_budget_s`` caps what the pair-fetch may spend on
+        QUERIES; the default is the caller's whole residual deadline. The
+        chains are the truth and the query only decorates real ids and types
+        onto them, so a smaller budget costs fidelity, never coverage.
+
+        Returns ``(nodes_by_urn, containment_edges, reason)``.
+        """
+        nodes_by_urn: Dict[str, GraphNode] = {}
+        containment_edges_list: List[GraphEdge] = []
+        buckets_failed = 0
+        try:
+            hydrated, buckets_failed = await self._get_nodes_batch_detailed(
+                list(urns),
+            )
+            nodes_by_urn = {n.urn: n for n in hydrated if n}
+        except Exception:
+            reason = reason or "nodes_failed"
+        if urns and not nodes_by_urn:
+            # Nothing hydrated at all. Either every bucket failed or the walk's
+            # urns have vanished from the graph; either way the response is not
+            # the whole truth and must not claim to be.
+            reason = reason or "nodes_failed"
+        elif buckets_failed:
+            # Some participants are missing and we KNOW why. Distinct from
+            # `nodes_failed` so a client can say "partial" rather than "failed".
+            reason = reason or "nodes_partial"
+
+        # CONTAINMENT ALWAYS SHIPS (2026-08-21): this step used to short-
+        # circuit into `ancestors_failed` whenever the walk had spent the
+        # request deadline down to its last 2s — a BUDGET verdict dressed up
+        # as a provider failure. At scale the walk ALWAYS spends that budget,
+        # so the closure shipped its participants with containmentEdges=[]:
+        # the canvas received thousands of rootless entities, nested nothing
+        # and drew no chevrons. The step now always runs — the pair-fetch is
+        # chunked with its own per-chunk timeout and synthesizes edges from
+        # the ancestor chains when a chunk fails, so the chain is never
+        # silently empty. `ancestors_failed` now means what it says: the
+        # provider actually failed.
+        if ctypes and nodes_by_urn:
+            # The step is BUDGETED, not gated: whatever is left of the request
+            # deadline bounds how long it may spend on queries, and the
+            # pair-fetch synthesizes from the chains for anything it could not
+            # afford to ask about. A spent budget therefore costs edge ids and
+            # types, never the chain itself.
+            #: Floor under the chains' own budget. Synthesis can replace a
+            #: failed QUERY but not a missing CHAIN — with no chains there is
+            #: nothing to synthesize from and containment ships empty, which
+            #: is the precise bug this whole step exists to prevent. The
+            #: cached path is a Redis pipeline read (sub-millisecond on a warm
+            #: namespace), so a small floor buys the common case without
+            #: reopening an unbounded tail.
+            ANCESTORS_MIN_BUDGET_S = 1.0
+            residual = max(0.0, deadline - time.monotonic())
+            try:
+                chains = await asyncio.wait_for(
+                    self._compute_and_store_ancestors_bulk(
+                        list(nodes_by_urn.keys()),
+                    ),
+                    timeout=max(residual, ANCESTORS_MIN_BUDGET_S),
+                )
+                seen_anc: Set[str] = set()
+                ancestor_urns: List[str] = []
+                for chain in chains.values():
+                    for ancestor in chain or []:
+                        if ancestor and ancestor not in seen_anc:
+                            seen_anc.add(ancestor)
+                            ancestor_urns.append(ancestor)
+                new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+                if new_ancestors:
+                    ancestor_nodes = await asyncio.wait_for(
+                        self.get_nodes_batch(new_ancestors),
+                        timeout=max(
+                            deadline - time.monotonic(), ANCESTORS_MIN_BUDGET_S,
+                        ),
+                    )
+                    for n in ancestor_nodes:
+                        if n:
+                            nodes_by_urn[n.urn] = n
+                if len(nodes_by_urn) > 1:
+                    containment_edges_list = await self._fetch_containment_edges(
+                        list(nodes_by_urn.keys()), ctypes, chains=chains,
+                        budget_secs=(
+                            max(0.0, deadline - time.monotonic())
+                            if containment_budget_s is None
+                            else min(containment_budget_s, max(0.0, deadline - time.monotonic()))
+                        ),
+                    )
+            except Exception:
+                # A timeout on the chains IS a real failure of this step — we
+                # have no chains, so there is nothing to synthesize from. Said
+                # out loud, unlike the old budget guard which reported the same
+                # word for a walk that had simply been busy.
+                reason = reason or "ancestors_failed"
+        return nodes_by_urn, containment_edges_list, reason
+
     async def trace_closure(
         self,
         urn: str,
@@ -7697,88 +7822,9 @@ class FalkorDBProvider(GraphDataProvider):
         # was skipped by its own `and nodes_by_urn` guard, and the response
         # shipped containmentEdges=[] with truncationReason NULL — a silent []
         # by a second route, after we had just closed the first one.
-        nodes_by_urn: Dict[str, GraphNode] = {}
-        buckets_failed = 0
-        try:
-            hydrated, buckets_failed = await self._get_nodes_batch_detailed(
-                list(discovered),
-            )
-            nodes_by_urn = {n.urn: n for n in hydrated if n}
-        except Exception:
-            truncation_reason = truncation_reason or "nodes_failed"
-        if discovered and not nodes_by_urn:
-            # Nothing hydrated at all. Either every bucket failed or the walk's
-            # urns have vanished from the graph; either way the response is not
-            # the whole truth and must not claim to be.
-            truncation_reason = truncation_reason or "nodes_failed"
-        elif buckets_failed:
-            # Some participants are missing and we KNOW why. Distinct from
-            # `nodes_failed` so a client can say "partial" rather than "failed".
-            truncation_reason = truncation_reason or "nodes_partial"
-
-        # CONTAINMENT ALWAYS SHIPS (2026-08-21): this step used to short-
-        # circuit into `ancestors_failed` whenever the walk had spent the
-        # request deadline down to its last 2s — a BUDGET verdict dressed up
-        # as a provider failure. At scale the walk ALWAYS spends that budget,
-        # so the closure shipped its participants with containmentEdges=[]:
-        # the canvas received thousands of rootless entities, nested nothing
-        # and drew no chevrons. The step now always runs — the pair-fetch is
-        # chunked with its own per-chunk timeout and synthesizes edges from
-        # the ancestor chains when a chunk fails, so the chain is never
-        # silently empty. `ancestors_failed` now means what it says: the
-        # provider actually failed.
-        containment_edges_list: List[GraphEdge] = []
-        if ctypes and nodes_by_urn:
-            # The step is BUDGETED, not gated: whatever is left of the request
-            # deadline bounds how long it may spend on queries, and the
-            # pair-fetch synthesizes from the chains for anything it could not
-            # afford to ask about. A spent budget therefore costs edge ids and
-            # types, never the chain itself.
-            #: Floor under the chains' own budget. Synthesis can replace a
-            #: failed QUERY but not a missing CHAIN — with no chains there is
-            #: nothing to synthesize from and containment ships empty, which
-            #: is the precise bug this whole step exists to prevent. The
-            #: cached path is a Redis pipeline read (sub-millisecond on a warm
-            #: namespace), so a small floor buys the common case without
-            #: reopening an unbounded tail.
-            ANCESTORS_MIN_BUDGET_S = 1.0
-            residual = max(0.0, deadline - time.monotonic())
-            try:
-                chains = await asyncio.wait_for(
-                    self._compute_and_store_ancestors_bulk(
-                        list(nodes_by_urn.keys()),
-                    ),
-                    timeout=max(residual, ANCESTORS_MIN_BUDGET_S),
-                )
-                seen_anc: Set[str] = set()
-                ancestor_urns: List[str] = []
-                for chain in chains.values():
-                    for ancestor in chain or []:
-                        if ancestor and ancestor not in seen_anc:
-                            seen_anc.add(ancestor)
-                            ancestor_urns.append(ancestor)
-                new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
-                if new_ancestors:
-                    ancestor_nodes = await asyncio.wait_for(
-                        self.get_nodes_batch(new_ancestors),
-                        timeout=max(
-                            deadline - time.monotonic(), ANCESTORS_MIN_BUDGET_S,
-                        ),
-                    )
-                    for n in ancestor_nodes:
-                        if n:
-                            nodes_by_urn[n.urn] = n
-                if len(nodes_by_urn) > 1:
-                    containment_edges_list = await self._fetch_containment_edges(
-                        list(nodes_by_urn.keys()), ctypes, chains=chains,
-                        budget_secs=max(0.0, deadline - time.monotonic()),
-                    )
-            except Exception:
-                # A timeout on the chains IS a real failure of this step — we
-                # have no chains, so there is nothing to synthesize from. Said
-                # out loud, unlike the old budget guard which reported the same
-                # word for a walk that had simply been busy.
-                truncation_reason = truncation_reason or "ancestors_failed"
+        nodes_by_urn, containment_edges_list, truncation_reason = await self._hydrate_and_nest(
+            discovered, ctypes, deadline, truncation_reason,
+        )
 
         # The seed cap, folded in at the end: the walk ran on what it had, and
         # the response still says out loud that it is partial.
@@ -8211,64 +8257,25 @@ class FalkorDBProvider(GraphDataProvider):
                 discovered |= (seed_set & endpoints)
 
         # ---- hydrate + place -------------------------------------------
-        nodes_by_urn: Dict[str, GraphNode] = {}
-        try:
-            hydrated = await self.get_nodes_batch(list(discovered))
-            nodes_by_urn = {n.urn: n for n in hydrated if n}
-        except Exception:
-            truncation_reason = truncation_reason or "nodes_failed"
-
-        # EVERY chain, ALWAYS. A partner the client cannot anchor is a
-        # partner it drops — and then counts as "outside this view", which
-        # is the one lie a lazy trace must not tell about its own results.
+        # THE SAME STEP THE EAGER WALK USES, so this path cannot drift from
+        # F18: detailed hydration (nodes_failed vs nodes_partial), the chains
+        # under their own floor-budgeted wait_for, and the pair-fetch that
+        # synthesizes from those chains for anything it could not afford.
         #
-        # THE CHAINS ARE THE ANSWER — the pair-fetch is not run here. The
-        # eager walk decorates each chain link with the graph's real edge id
-        # and type via `_fetch_containment_edges`; MEASURED on the 2.08M-node
-        # estate that decoration is `MATCH (s)-[:HAS]->(t) WHERE s.urn IN …
-        # AND t.urn IN …` — UNLABELED, so a full scan per 400-pair chunk:
-        # 9 chunks, 0.6–1.5 s each, **7.7 s of a 7.8 s drill**, against a
-        # 300 ms budget. Nothing in the trace overlay reads a containment
-        # edge's id or type (it nests by source/target and never writes the
-        # store), so the decoration buys nothing and costs the whole budget.
-        # The edges are marked `synthesized` exactly as the eager walk marks
-        # its own fallback ones, so a consumer that DID need a real edge can
-        # still tell.
-        containment_edges_list: List[GraphEdge] = []
-        if ctypes and nodes_by_urn:
-            try:
-                chains = await self._compute_and_store_ancestors_bulk(list(nodes_by_urn.keys()))
-                seen_anc: Set[str] = set()
-                ancestor_urns: List[str] = []
-                for chain in chains.values():
-                    for ancestor in chain or []:
-                        if ancestor and ancestor not in seen_anc:
-                            seen_anc.add(ancestor)
-                            ancestor_urns.append(ancestor)
-                new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
-                if new_ancestors:
-                    for n in await self.get_nodes_batch(new_ancestors):
-                        if n:
-                            nodes_by_urn[n.urn] = n
-                held = set(nodes_by_urn.keys())
-                pairs: Set[Tuple[str, str]] = set()
-                for child_urn, chain in (chains or {}).items():
-                    prev = child_urn
-                    for ancestor in chain or []:
-                        if ancestor in held and prev in held:
-                            pairs.add((ancestor, prev))
-                        prev = ancestor
-                containment_edges_list = [
-                    GraphEdge(
-                        id=f"containment:{parent}>{child}",
-                        sourceUrn=parent, targetUrn=child,
-                        edgeType=ctypes[0],
-                        properties={"synthesized": True},
-                    )
-                    for parent, child in sorted(pairs)
-                ]
-            except Exception:
-                truncation_reason = truncation_reason or "ancestors_failed"
+        # BUDGETED FOR AN INTERACTIVE PAGE. The pair-fetch decorates each
+        # chain link with the graph's real edge id and type through an
+        # unlabeled `s.urn IN … AND t.urn IN …` — a full scan per 400-pair
+        # chunk, MEASURED at 7,764 ms of a 7,764 ms drill on the 2.08M-node
+        # estate. This path answers a click and is budgeted at ~300 ms;
+        # nothing in the trace overlay reads a containment edge's id or type
+        # (it nests by source/target and never writes the store), so the
+        # decoration must never outbid the page. Under the cap the pair-fetch
+        # synthesizes instead — the chains ARE the truth, so a small budget
+        # costs fidelity, never coverage, and the edges say `synthesized`.
+        nodes_by_urn, containment_edges_list, truncation_reason = await self._hydrate_and_nest(
+            discovered, ctypes, deadline, truncation_reason,
+            containment_budget_s=CLOSURE_LAZY_CONTAINMENT_BUDGET_S,
+        )
 
         def _frontier(
             candidates: Dict[str, None], cut: Dict[str, None],

@@ -198,6 +198,12 @@ def _make_provider(fake):
         return [GraphNode(urn=u, entityType=fake.labels.get(u, ""), displayName=u)
                 for u in urns]
 
+    async def _batch_detailed(urns):
+        # The seam the closure paths hydrate through: (nodes, buckets_failed).
+        # Both walks use it, which is how they share `nodes_failed` /
+        # `nodes_partial` rather than each inventing a verdict.
+        return await _batch(urns), 0
+
     async def _chains(urns):
         out = {}
         for u in urns:
@@ -211,6 +217,7 @@ def _make_provider(fake):
     p._ensure_connected = _noop
     p.get_node = _get_node
     p.get_nodes_batch = _batch
+    p._get_nodes_batch_detailed = _batch_detailed
     p._compute_and_store_ancestors_bulk = _chains
     return p
 
