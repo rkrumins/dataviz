@@ -23,7 +23,6 @@ import { LineageLens, type LensWalkSeed } from '../LineageLens'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
 import { decodeLensShare } from '../lens/shareCodec'
-import { FRAME_CONTENT_W } from '../lens/focus-cards'
 import type { WalkEntry } from '@/hooks/useLensWalk'
 import {
   toLensClosure,
@@ -596,8 +595,11 @@ const pillCatalogue = () => {
 }
 
 
-/** Fourteen upstream groups against a REVEAL_PAGE of twelve, so the
- *  focus's own ⊕ has a remainder to offer from data already in hand. */
+/** Fourteen upstream groups — more than the layout's REVEAL_PAGE of
+ *  twelve. Everything the walk FETCHED is drawn (user ruling, 2026-08-21:
+ *  "I expect to see all the immediate incoming and outgoing edges, not
+ *  click Load more"), so there is nothing left to reveal from data in
+ *  hand. */
 const crowdedFanIn = () => {
   const nodes = [wnode('F', 'dataset', 'dim_customer')]
   const lineageEdges = []
@@ -613,13 +615,11 @@ describe('the ⊕ tells the truth about what it costs', () => {
   beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
 
-  it('a reveal is instant: more cards, no request', () => {
+  it('one hop draws every partner it fetched: fourteen sources, fourteen cards, no reveal pill, no request', () => {
     const { api } = renderLens(['F'], doneWalk(crowdedFanIn()))
-    // Twelve of fourteen fit on the first page.
-    expect(onBoard('source_12')).toBe(false)
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only · 2 data flows recorded/))
-    expect(onBoard('source_12')).toBe(true)
-    expect(onBoard('source_13')).toBe(true)
+    for (let i = 0; i < 14; i++) expect(onBoard(`source_${String(i).padStart(2, '0')}`)).toBe(true)
+    // Nothing in hand is held back, so the focus offers no "reveal".
+    expect(screen.queryByTitle(/Shows the next hop upstream of dim_customer/)).toBeNull()
     expect(api.extend).not.toHaveBeenCalled()
     expect(api.page).not.toHaveBeenCalled()
   })
@@ -772,14 +772,6 @@ describe('the ⊕ tells the truth about what it costs', () => {
     expect(extend.textContent).not.toMatch(/\d/)
 
     cleanup()
-    // A reveal: fourteen sources, twelve drawn, two waiting — and those
-    // two carry one connection each. The FACE shows the card count (2,
-    // a visible arrival); the hover states the same two as flows.
-    renderLens(['F'], doneWalk(crowdedFanIn()))
-    const reveal = screen.getByTitle(/Shows the next hop upstream of dim_customer only · 2 data flows recorded/)
-    expect(reveal.textContent).toContain('2')
-
-    cleanup()
     renderLens(['F'], doneWalk(pillCatalogue()))
     expect(screen.getByTitle(/Loads the next hop upstream of partially_loaded only · 96 data flows recorded/)).toBeTruthy()
   })
@@ -871,54 +863,18 @@ describe('F1 — the follow pill never blocks the row it sits on', () => {
     return walkModel('F', { nodes, lineageEdges, upstreamUrns: new Set(nodes.slice(1).map(n => n.urn)) })
   }
 
-  it('a reveal pill with a 4-digit count stays inside PILL_ZONE at rest, degrading honestly', () => {
+  it('nothing in hand is ever held behind a reveal pill — not even 1,200 sources', () => {
+    // The counted-rest pill ("1.2K", max-w-[36px]) was the face of a
+    // REVEAL: groups already fetched but not yet drawn. Everything fetched
+    // is drawn now (user ruling, 2026-08-21), so the reveal kind has no
+    // subject: every source is on the board and the focus offers only
+    // what is NOT in hand. The F1 hover-resize CSS stays in the pill for
+    // the day a counted face returns.
     renderLens(['F'], doneWalk(massiveFanIn()))
-    const pill = screen.getByTitle(/Shows the next hop upstream of dim_customer/)
-    expect(pill.className).toMatch(/max-w-\[36px\]/)
-    // Ellipsis-clipped digits would silently claim a SMALLER, WRONG
-    // count ("1,2…" reads as a different number); compact notation
-    // ("1.2K") stays honest while fitting the capped rest width. The
-    // exact count is still what the hover title states in full.
-    expect(pill.textContent).toContain('1.2K')
-  })
-  // A HOVER THAT MOVES THE CONTROL OUT FROM UNDER THE POINTER FLICKERS
-  // FOREVER. Reported live: "it non stop keeps flicking until mouse is
-  // on the right location as if there is a deadzone". The expansion
-  // pins the pill's REST edge and grows the far edge outward — but the
-  // pinned value assumed the icon-only rest width, while a pill showing
-  // a count rests up to 36px wide. The strip between the two was inside
-  // the rest box and outside the expanded one: enter, expand away,
-  // leave, shrink back under the pointer, enter again.
-  //
-  // The invariant, asserted on the CSS the pill actually carries: the
-  // expanded box's pinned edge is at least the rest box's own outer
-  // edge, so the expanded box always CONTAINS the box the pointer
-  // entered.
-  it('a counted pill expands outward from its OWN rest edge, never from a narrower one', () => {
-    // A pill INSIDE a frame (only those expand outward) that shows a
-    // COUNT at rest (only those rest wider than the icon).
-    renderLens(['F'], doneWalk(walkModel('F', {
-      nodes: [
-        wnode('F', 'dataset', 'stg_orders'),
-        wnode('T', 'dataset', 'raw_orders', { childCount: 1 }),
-        wnode('c1', 'schemaField', 'order_id'),
-        ...Array.from({ length: 40 }, (_, i) => wnode(`s${i}`, 'dataset', `source_${i}`)),
-      ],
-      containmentEdges: [holds('T', 'c1')],
-      lineageEdges: [hop('c1', 'F'), ...Array.from({ length: 40 }, (_, i) => hop(`s${i}`, 'c1'))],
-      upstreamUrns: new Set(['c1', ...Array.from({ length: 40 }, (_, i) => `s${i}`)]),
-    })))
-    const pill = screen.getByTitle(/upstream of order_id/)
-    expect(pill.className).toMatch(/max-w-\[36px\]/)   // it really is a counted rest state
-    const outer = pill.style.getPropertyValue('--pill-outer')
-    expect(outer).not.toBe('')
-    // `--pill-outer` is `cardWidth - restEdge`, so a SMALLER value means
-    // a pinned edge further from the row's left edge. The counted pill's
-    // rest box can reach 40px (left-1 + max-w-[36px]); the pin must be
-    // at least that far out or the strip between them is a dead zone.
-    const cardW = FRAME_CONTENT_W
-    expect(cardW - Number.parseFloat(outer)).toBeGreaterThanOrEqual(40)
-  })
+    expect(screen.queryByTitle(/Shows the next hop upstream of dim_customer/)).toBeNull()
+    expect(onBoard('source_0')).toBe(true)
+    expect(onBoard('source_1199')).toBe(true)
+  }, 30_000)   // 1,200 cards through jsdom: slow under a parallel run, not a failure
 
 })
 
@@ -2564,10 +2520,12 @@ describe('browsing what is inside — the peek and the keyboard', () => {
       lineageEdges,
       upstreamUrns: new Set(['c1', ...Array.from({ length: 40 }, (_, i) => `s${String(i).padStart(3, '0')}`)]),
     })))
-    fireEvent.click(row('order_id'))
-    fireEvent.click(within(peek() as HTMLElement).getByText(/Walk further upstream/))
-    // ONE CLICK, ONE VISIBLE DELIVERY: the cohort lands on the board.
+    // Everything in hand is DRAWN (2026-08-21): the forty sources are on
+    // the board from the first render, so the peek has no reveal to
+    // offer — its follow button only ever dispatches a FETCH now.
     expect(onBoard('source_000')).toBe(true)
+    fireEvent.click(row('order_id'))
+    expect(within(peek() as HTMLElement).queryByText(/Walk further upstream/)).toBeNull()
   })
 
   // FOCUS THE PARENT, FROM A ROW (user, 2026-08-17: "shouldn't I be

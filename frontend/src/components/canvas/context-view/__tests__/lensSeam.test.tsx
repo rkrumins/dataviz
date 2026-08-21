@@ -190,13 +190,12 @@ async function openLens(props: Parameters<typeof LensSeam>[0]) {
   return utils
 }
 
-/** Show the producer already in hand. Until it is on the board the ⊕
- *  offers THAT (free before costly), which is a different pill. */
+/** The producer already in hand (`u_prior`) is on the board from the
+ *  first render — everything fetched is drawn (2026-08-21) — so there is
+ *  no reveal to click. Kept as the seam's statement of that fact. */
 async function revealPrior() {
-  // The pill is on `b_amount`'s own row ("amount") — its frontier, not
-  // the table's: `T`'s rows are already drawn, so `T`'s own ⊕ defers to
-  // the finer grain that actually owns this offer (`drawnInsideOffers`).
-  fireEvent.click(await screen.findByTitle(/Shows the next hop upstream of amount \(customers\) only · 1 data flow recorded/))
+  await screen.findAllByText('prior_ledger')
+  expect(screen.queryByTitle(/Shows the next hop upstream of amount \(customers\)/)).toBeNull()
 }
 
 /** Collapse `customers`, so its ⊕ has to speak for the columns it hides.
@@ -312,14 +311,12 @@ describe('lens seam — one click, one action, one acknowledgement', () => {
     expect(screen.queryByTitle(/Loads the next hop downstream of collaterals only/)).toBeNull()
   })
 
-  it('reveal: one click shows what is already in hand, and never asks the server', async () => {
+  it('what is already in hand is on the board from the start — no click, no request', async () => {
     const { provider, traceClosure } = makeProvider()
     await openLens({ provider })
-    expect(screen.queryByText('prior_ledger')).toBeNull()
-
-    await revealPrior()
 
     expect(screen.getAllByText('prior_ledger').length).toBeGreaterThan(0)
+    expect(screen.queryByTitle(/Shows the next hop/)).toBeNull()
     expect(traceClosure).toHaveBeenCalledTimes(OPENED_CALLS)   // nothing since the lens opened
   })
 })

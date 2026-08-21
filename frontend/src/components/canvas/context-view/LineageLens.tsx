@@ -518,18 +518,21 @@ export function LineageLens({
   // (pass-through interiors) — the invariant stage is the global
   // enforcement that it didn't remove more than that, checked once,
   // after everything, rather than trusted per-pass.
-  // Full walk: a fetch the DRIVER fired has no click to open a reveal
-  // page (an ⊕ claims its room at click time — see extendWalk), so the
-  // LAYOUT admits every walked node via a derived pinned set. Derived,
-  // never written back into the view state: the share link and the
-  // user's own placements stay theirs, and switching back to "One hop"
-  // returns to the classic reveal-governed picture.
+  // EVERYTHING FETCHED IS DRAWN (user ruling, 2026-08-21). The layout's
+  // reveal budget used to admit twelve root-most groups per direction and
+  // hold the rest behind a "+N" pill — even though the walk had already
+  // brought them back — which read as "One hop doesn't show my immediate
+  // lineage". Now every walked node is admitted through a derived pinned
+  // set in BOTH modes; the reveal budget only ever governs what is NOT in
+  // hand, which after the hands-free hop-1 is nothing. Derived, never
+  // written back into the view state: the share link and the user's own
+  // placements stay theirs.
   const layoutView = useMemo(() => {
-    if (!fullWalkEnabled || !model || model.nodes.length === 0) return view
+    if (!model || model.nodes.length === 0) return view
     const pinned = new Set(view.pinned)
     for (const n of model.nodes) pinned.add(n.urn)
     return { ...view, pinned }
-  }, [fullWalkEnabled, model, view])
+  }, [model, view])
 
   const layout = useMemo(() => buildFocusLayout({
     sg,
