@@ -240,7 +240,6 @@ export function ContextViewCanvas({
   const addNodes = useCanvasStore((s) => s.addNodes)
   const addEdges = useCanvasStore((s) => s.addEdges)
   const setVisibleEdges = useCanvasStore((s) => s.setVisibleEdges)
-  const removeEdgesByNodeIds = useCanvasStore((s) => s.removeEdgesByNodeIds)
   const removeStoreEdges = useCanvasStore((s) => s.removeEdges)
   const removeStoreNodes = useCanvasStore((s) => s.removeNodes)
   const selectNode = useCanvasStore((s) => s.selectNode)
@@ -3037,10 +3036,6 @@ export function ContextViewCanvas({
           for (const id of subtreeIds) next.delete(id)
           return next
         })
-      } else if (traceActive) {
-        // Trace mode: keep the merged lineage/containment edges (addedEdgeIds);
-        // useTraceFilteredHierarchy hides non-context nodes.
-        removeEdgesByNodeIds(subtreeIds, canvasTrace.addedEdgeIds)
       }
       // else — the subtree carries UNSAVED work: leave it FULLY intact in the
       // store (no node or edge removal). The visual collapse is driven by
@@ -3066,7 +3061,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeEdgesByNodeIds, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, canvasTrace.addedEdgeIds, trace.isTracing, autoDrillOnExpand])
+  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand])
 
 
 
@@ -3112,7 +3107,6 @@ export function ContextViewCanvas({
     traceContextSet, isContainmentEdge,
     hoveredNodeId,
     suppressedAggEdgeKeys,
-    traceAddedEdgeIds: canvasTrace.addedEdgeIds,
     // Trace-mode edge bundling: roll every leaf endpoint up to the focus's
     // hierarchy level so per-pair grouping collapses thousands of
     // column-to-column edges into a handful of container-to-container

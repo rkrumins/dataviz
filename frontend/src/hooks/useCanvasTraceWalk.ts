@@ -1,47 +1,41 @@
 /**
- * useCanvasTraceWalk — the NATIVE canvas trace session.
+ * useCanvasTraceWalk — the NATIVE canvas trace SESSION, and nothing else.
  *
  * Trace = the ContextViewCanvas itself shows, upfront, everything relevant
- * to the traced entity. This controller owns that session:
+ * to the traced entity. This controller owns only WHICH entity that is and
+ * the walk that fetches its flow:
  *
  *  - `start(urn)` mounts the existing closure full-walk engine
  *    (`useLensWalk` with `fullWalk` on — deep initial fetch, frontiers
  *    followed to exhaustion under the node budget);
- *  - every walk-model growth wave delta-merges into the canvas store
- *    through `computeTraceWalkDelta` (the legacy spine/re-parent rules),
- *    ONE `addNodes` + ONE `addEdges` per wave;
- *  - `exit()` removes exactly the recorded ids — edges first, then nodes —
- *    so the store returns to its pre-trace content. Expansion is DERIVED
- *    (`expansionUrns`), never written, so its restore is free.
+ *  - `exit()` clears the focus. Nothing to undo: a trace is an OVERLAY
+ *    (`useTraceOverlay` + `buildTraceView`), so leaving one restores the
+ *    canvas for free.
  *
- * `addedEdgeIds` is deliberately ONE stable Set instance whose contents
- * grow as waves merge: every wave also writes the store, which re-renders
- * the canvas, so readers always see fresh contents; the stable identity
- * keeps memo dependency arrays quiet.
+ * IT NEVER WRITES THE CANVAS STORE. It used to delta-merge every walk wave
+ * into it, which is what produced a junk lane of unplaceable nodes, lost
+ * chevrons, and a canvas re-laid-out behind the reader — a merged node
+ * lands wherever the graph says instead of where THE VIEW places it. The
+ * store now holds browse, and only browse.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
-import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
 import {
     useLensWalk,
     FULL_WALK_INITIAL_DEPTH,
     type WalkEntry,
     type FullWalkStatus,
 } from './useLensWalk'
-import {
-    computeTraceWalkDelta,
-    emptyTraceWalkMergeSession,
-    traceExpansionUrns,
-} from './lib/traceWalkMerge'
+import { traceExpansionUrns } from './lib/traceWalkMerge'
 
 const EMPTY_URNS: ReadonlySet<string> = new Set()
 
 export interface CanvasTraceWalk {
     isTracing: boolean
     tracedUrn: string | null
-    /** Trace this urn. A different urn exits the current session first. */
+    /** Trace this urn. */
     start: (urn: string) => void
-    /** Purge everything the trace merged; back to browse. */
+    /** Back to browse. */
     exit: () => void
     /** Status/error/model for the trace bar and counts. */
     walkEntry: WalkEntry | null
@@ -54,8 +48,6 @@ export interface CanvasTraceWalk {
     traceNodeUrns: ReadonlySet<string>
     /** Containment ancestors of every participant — what to expand. */
     expansionUrns: ReadonlySet<string>
-    /** Every edge id the trace merged — the projection's allowlist. */
-    addedEdgeIds: ReadonlySet<string>
 }
 
 export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTraceWalk {
@@ -66,43 +58,12 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
     const fullWalkStatus = tracedUrn ? walk.fullWalkFor(tracedUrn) : null
     const model = walkEntry?.model ?? null
 
-    const sessionRef = useRef(emptyTraceWalkMergeSession())
-    // ONE stable Set instance for the whole hook life (state initializer,
-    // never re-set) — see the header's stability contract.
-    const [addedEdgeIds] = useState(() => new Set<string>())
-
-    // Delta-merge each model growth into the store. Store writes are
-    // external-store writes (zustand), legal in an effect; the session ref
-    // makes re-runs idempotent, so a re-render without growth is a no-op.
-    useEffect(() => {
-        if (!tracedUrn || !model) return
-        const store = useCanvasStore.getState()
-        const knownUrns = new Set<string>(store.nodes.map(n => n.id))
-        const { delta, session } = computeTraceWalkDelta({
-            model, session: sessionRef.current, knownUrns,
-        })
-        if (delta.nodes.length === 0 && delta.edges.length === 0) return
-        sessionRef.current = session
-        for (const e of delta.edges) addedEdgeIds.add(e.id)
-        if (delta.nodes.length > 0) store.addNodes(delta.nodes as unknown as LineageNode[])
-        if (delta.edges.length > 0) store.addEdges(delta.edges as unknown as LineageEdge[])
-    }, [tracedUrn, model, addedEdgeIds])
-
-    const exit = useCallback(() => {
-        const session = sessionRef.current
-        const store = useCanvasStore.getState()
-        if (session.mergedEdgeIds.size > 0) store.removeEdges([...session.mergedEdgeIds])
-        if (session.mergedNodeIds.size > 0) store.removeNodes([...session.mergedNodeIds])
-        sessionRef.current = emptyTraceWalkMergeSession()
-        addedEdgeIds.clear()
-        setTracedUrn(null)
-    }, [addedEdgeIds])
+    const exit = useCallback(() => setTracedUrn(null), [])
 
     const start = useCallback((urn: string) => {
-        if (!urn || tracedUrn === urn) return
-        if (tracedUrn) exit()
+        if (!urn) return
         setTracedUrn(urn)
-    }, [tracedUrn, exit])
+    }, [])
 
     const continueWalk = useCallback(() => {
         if (tracedUrn) walk.continueFullWalk(tracedUrn)
@@ -136,6 +97,5 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         retryWalk,
         traceNodeUrns,
         expansionUrns,
-        addedEdgeIds,
     }
 }

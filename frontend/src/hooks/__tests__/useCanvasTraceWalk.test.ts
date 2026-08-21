@@ -1,16 +1,20 @@
 /**
  * useCanvasTraceWalk — the native canvas trace session controller.
  *
- * Real `useCanvasStore`, real `useLensWalk` full-walk driver, real
- * delta-merge; only the provider (the network) is stubbed. Contract:
- * start(urn) walks the closure to the ends and batch-merges every wave
- * into the store; exit removes exactly what the trace added; derived
- * sets (traceNodeUrns / expansionUrns / addedEdgeIds) feed the canvas.
+ * Real `useCanvasStore`, real `useLensWalk` full-walk driver; only the
+ * provider (the network) is stubbed. The contract this pins is a NEGATIVE
+ * one and it is the whole point of the Stage 1 rebuild: start(urn) walks
+ * the closure to the ends, every wave lands in the MODEL, and the canvas
+ * store is never touched — not on start, not on a wave, not on exit. What
+ * the reader sees is drawn from the model by the overlay
+ * (`useTraceOverlay` / `buildTraceView`), so leaving a trace restores the
+ * canvas for free.
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { useCanvasTraceWalk } from '../useCanvasTraceWalk'
 import { useCanvasStore } from '@/store/canvas'
+import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { GraphDataProvider, TraceV2Result, LensClosureExtras, GraphNode } from '@/providers/GraphDataProvider'
 
 const gn = (urn: string, entityType = 'column'): GraphNode =>
@@ -68,20 +72,37 @@ beforeEach(() => {
 
 const storeNodeIds = () => useCanvasStore.getState().nodes.map(n => n.id).sort()
 const storeEdgeIds = () => useCanvasStore.getState().edges.map(e => e.id).sort()
+const modelNodeUrns = (model: LensWalkModel | null | undefined) =>
+  (model?.nodes ?? []).map(n => n.urn).sort()
+
+/** Counts every change to the store's `nodes`/`edges` identity. */
+function watchStore() {
+  const writes = { count: 0 }
+  const release = useCanvasStore.subscribe((s, prev) => {
+    if (s.nodes !== prev.nodes || s.edges !== prev.edges) writes.count += 1
+  })
+  return { writes, release }
+}
 
 describe('useCanvasTraceWalk', () => {
-  it('start → walk lands → the store gains the flow nodes and edges', async () => {
+  it('start → walk lands → the flow is in the MODEL and the store is untouched', async () => {
     const { provider } = providerByUrn({ F: estate })
+    const { writes, release } = watchStore()
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     act(() => result.current.start('F'))
     expect(result.current.isTracing).toBe(true)
 
-    await waitFor(() => expect(storeNodeIds()).toEqual(['F', 'PLAT', 'T1', 'colA']))
-    expect(storeEdgeIds()).toEqual(['c:PLAT>T1', 'c:T1>colA', 'e1'])
-    expect(result.current.fullWalkStatus?.exhausted).toBe(true)
+    await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
+    expect(modelNodeUrns(result.current.walkEntry?.model)).toEqual(['F', 'PLAT', 'T1', 'colA'])
+    expect(result.current.walkEntry?.model?.lineageEdges.map(e => e.id)).toEqual(['e1'])
+
+    expect(storeNodeIds()).toEqual(['F', 'PLAT'])
+    expect(storeEdgeIds()).toEqual([])
+    expect(writes.count).toBe(0)
+    release()
   })
 
-  it('a second wave merges only the delta', async () => {
+  it('a second wave grows the model — still no store write', async () => {
     // F's closure leaves a frontier on colA; the driver extends it and the
     // second wave brings colB one hop further upstream.
     const { provider, traceClosure } = providerByUrn({
@@ -93,30 +114,38 @@ describe('useCanvasTraceWalk', () => {
         upstreamUrns: new Set(['colB']),
       }),
     })
+    const { writes, release } = watchStore()
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     act(() => result.current.start('F'))
 
     await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
     expect(traceClosure).toHaveBeenCalledTimes(2)
-    expect(storeNodeIds()).toEqual(['F', 'PLAT', 'T1', 'colA', 'colB'])
-    expect(storeEdgeIds()).toEqual(['c:PLAT>T1', 'c:T1>colA', 'e1', 'e2'])
+    expect(modelNodeUrns(result.current.walkEntry?.model)).toEqual(['F', 'PLAT', 'T1', 'colA', 'colB'])
+
+    expect(storeNodeIds()).toEqual(['F', 'PLAT'])
+    expect(storeEdgeIds()).toEqual([])
+    expect(writes.count).toBe(0)
+    release()
   })
 
-  it('exit removes exactly what the trace added — the store equals its pre-trace state', async () => {
+  it('exit clears the focus and leaves the store exactly as it was', async () => {
     const { provider } = providerByUrn({ F: estate })
+    const { writes, release } = watchStore()
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     act(() => result.current.start('F'))
-    await waitFor(() => expect(storeNodeIds()).toContain('colA'))
+    await waitFor(() => expect(result.current.traceNodeUrns.has('colA')).toBe(true))
 
     act(() => result.current.exit())
     expect(result.current.isTracing).toBe(false)
+    expect(result.current.tracedUrn).toBeNull()
+    expect(result.current.traceNodeUrns.size).toBe(0)
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
     expect(storeEdgeIds()).toEqual([])
-    expect(result.current.addedEdgeIds.size).toBe(0)
-    expect(result.current.traceNodeUrns.size).toBe(0)
+    expect(writes.count).toBe(0)
+    release()
   })
 
-  it('re-trace of a different urn exits the old session first', async () => {
+  it('re-trace of a different urn re-focuses; the store still never moves', async () => {
     const { provider } = providerByUrn({
       F: estate,
       G: () => closureResult({
@@ -126,59 +155,63 @@ describe('useCanvasTraceWalk', () => {
         upstreamUrns: new Set(['colG']),
       }),
     })
+    const { writes, release } = watchStore()
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     act(() => result.current.start('F'))
-    await waitFor(() => expect(storeNodeIds()).toContain('colA'))
+    await waitFor(() => expect(result.current.traceNodeUrns.has('colA')).toBe(true))
 
     act(() => result.current.start('G'))
-    await waitFor(() => expect(storeNodeIds()).toContain('colG'))
-    // F's merge is gone; G's is present.
-    expect(storeNodeIds()).toEqual(['F', 'G', 'PLAT', 'colG'])
+    await waitFor(() => expect(result.current.traceNodeUrns.has('colG')).toBe(true))
     expect(result.current.tracedUrn).toBe('G')
+    // F's flow is gone from the session — nothing of it lingers anywhere.
+    expect(result.current.traceNodeUrns.has('colA')).toBe(false)
+    expect(storeNodeIds()).toEqual(['F', 'PLAT'])
+    expect(writes.count).toBe(0)
+    release()
   })
 
-  it('traceNodeUrns and expansionUrns derive from the model; addedEdgeIds is a stable instance', async () => {
+  it('traceNodeUrns and expansionUrns derive from the model', async () => {
     const { provider } = providerByUrn({ F: estate })
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
-    const idleSet = result.current.addedEdgeIds
     expect(result.current.traceNodeUrns.size).toBe(0)
 
     act(() => result.current.start('F'))
     await waitFor(() => expect(result.current.traceNodeUrns.has('colA')).toBe(true))
     expect(result.current.traceNodeUrns.has('F')).toBe(true)
     expect([...result.current.expansionUrns].sort()).toEqual(['PLAT', 'T1'])
-    expect(result.current.addedEdgeIds).toBe(idleSet)   // stable identity
-    await waitFor(() => expect(result.current.addedEdgeIds.has('e1')).toBe(true))
   })
 
-  it('PERF GATE: exit of a 1,000-node trace completes in ≤ 100ms', async () => {
+  it('budget journey: cap → Keep walking → exhausted, the model complete and the store still empty of it', async () => {
     const nodes: GraphNode[] = [gn('F', 'dataset')]
-    const edges: Array<ReturnType<typeof hop>> = []
     const containment: Array<ReturnType<typeof holds>> = []
-    for (let t = 0; t < 100; t++) {
-      nodes.push(gn(`T${t}`, 'dataset'))
-      containment.push(holds('PLAT', `T${t}`))
-      for (let c = 0; c < 10; c++) {
-        const urn = `T${t}:c${c}`
-        nodes.push(gn(urn))
-        containment.push(holds(`T${t}`, urn))
-        if (t > 0) edges.push(hop(`T${t - 1}:c${c}`, urn, `e:${t}:${c}`))
-      }
+    for (let i = 0; i < 1100; i++) {
+      nodes.push(gn(`n${i}`))
+      containment.push(holds('PLAT', `n${i}`))
     }
-    const { provider } = providerByUrn({
+    const { provider, traceClosure } = providerByUrn({
       F: () => closureResult({
-        focus: f('F'), nodes, edges, containmentEdges: containment,
+        focus: f('F'), nodes, containmentEdges: containment,
         upstreamUrns: new Set(nodes.map(n => n.urn)),
+        frontierUp: [{ urn: 'n0', totalCount: 1, nextCursor: null }],
+      }),
+      n0: () => closureResult({
+        focus: f('n0'), nodes: [gn('deeper')], edges: [hop('deeper', 'n0', 'e-deep')],
+        upstreamUrns: new Set(['deeper']),
       }),
     })
+    const { writes, release } = watchStore()
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     act(() => result.current.start('F'))
-    await waitFor(() => expect(useCanvasStore.getState().nodes.length).toBeGreaterThan(1000))
 
-    const t0 = performance.now()
-    act(() => result.current.exit())
-    const elapsed = performance.now() - t0
+    await waitFor(() => expect(result.current.fullWalkStatus?.budgetHit).toBe(true))
+    expect(traceClosure).toHaveBeenCalledTimes(1)
+
+    act(() => result.current.continueWalk())
+    await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
+    expect(result.current.traceNodeUrns.has('deeper')).toBe(true)
+
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
-    expect(elapsed).toBeLessThanOrEqual(100)
+    expect(writes.count).toBe(0)
+    release()
   })
 })
