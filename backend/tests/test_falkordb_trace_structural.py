@@ -1573,9 +1573,11 @@ class _PairFake:
         self.present = set(present)   # (parent, child) the graph really has
         self.fail = fail
         self.queries = 0
+        self.cyphers = []
 
     async def ro_query(self, cypher, params=None, timeout=None, **kwargs):
         self.queries += 1
+        self.cyphers.append(cypher)
         if self.fail:
             raise RuntimeError("Query timed out")
         s_urns = set((params or {}).get("sUrns") or [])
@@ -1588,7 +1590,7 @@ class _PairFake:
         return _Result(rows)
 
 
-def _pair_provider(fake):
+def _pair_provider(fake, labels=None):
     p = FalkorDBProvider(host="x", graph_name="g")
     p._redis = None
     p._ro_query = fake.ro_query
@@ -1596,7 +1598,11 @@ def _pair_provider(fake):
     async def _noop():
         return None
 
+    async def _labels(urns):
+        return {u: (labels or {}).get(u) for u in urns}
+
     p._ensure_connected = _noop
+    p._resolve_urn_labels_bulk = _labels
     return p
 
 
@@ -1661,3 +1667,60 @@ def test_containment_gives_up_querying_after_two_consecutive_failures():
     assert fake.queries == 2                        # not 3
     assert len(edges) == 1200                       # every pair still ships
     assert all(e.properties.get("synthesized") is True for e in edges)
+
+
+def test_containment_pair_query_is_label_anchored():
+    """F12. Both ends of the pair query carry their label, so FalkorDB seeks
+    the per-label URN index instead of scanning.
+
+    This build has no label-less URN index — an unlabeled `WHERE urn IN $list`
+    anchor is a full node/relation scan with per-row membership, measured at
+    7.7s of a 7.8s drill on the 2.08M-node estate and the reason those chunks
+    were timing out into synthesis in the first place.
+    """
+    fake = _PairFake(present={("r", "a")})
+    p = _pair_provider(fake, labels={"r": "Roots", "a": "Node"})
+
+    _run(p._fetch_containment_edges(
+        ["r", "a"], ["HAS"], chains={"a": ["r"]},
+    ))
+
+    assert len(fake.cyphers) == 1
+    cy = fake.cyphers[0]
+    assert "MATCH (s:Roots)-[r:HAS]->(t:Node)" in cy
+    assert "MATCH (s)-[" not in cy and "]->(t)" not in cy
+
+
+def test_containment_pairs_are_grouped_by_the_labels_they_connect():
+    """One query per (source label, target label) actually present — real
+    containment links only a handful of them, so this is a few queries, never
+    label-squared."""
+    fake = _PairFake(present=set())
+    p = _pair_provider(fake, labels={
+        "lyr": "Roots", "o1": "Node", "a1": "Node",
+    })
+
+    _run(p._fetch_containment_edges(
+        ["lyr", "o1", "a1"], ["HAS"],
+        chains={"o1": ["lyr"], "a1": ["o1", "lyr"]},   # Roots>Node and Node>Node
+    ))
+
+    shapes = sorted({c.split(" WHERE")[0] for c in fake.cyphers})
+    assert shapes == [
+        "MATCH (s:Node)-[r:HAS]->(t:Node)",
+        "MATCH (s:Roots)-[r:HAS]->(t:Node)",
+    ]
+
+
+def test_containment_an_unresolvable_label_keeps_the_unlabeled_anchor():
+    """Correctness first: a urn whose label will not resolve still gets asked
+    for — just with the slow pattern, and only for that bounded residue."""
+    fake = _PairFake(present={("r", "a")})
+    p = _pair_provider(fake, labels={"r": "Roots"})      # 'a' unresolved
+
+    edges = _run(p._fetch_containment_edges(
+        ["r", "a"], ["HAS"], chains={"a": ["r"]},
+    ))
+
+    assert "MATCH (s:Roots)-[r:HAS]->(t) " in fake.cyphers[0]
+    assert {(e.source_urn, e.target_urn) for e in edges} == {("r", "a")}

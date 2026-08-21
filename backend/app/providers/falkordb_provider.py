@@ -9972,8 +9972,69 @@ class FalkorDBProvider(GraphDataProvider):
                         properties={"synthesized": True},
                     ))
 
-            for i in range(0, len(all_pairs), CHUNK_PAIRS):
-                chunk = all_pairs[i:i + CHUNK_PAIRS]
+            # LABEL-ANCHORED (F12, 2026-08-21): the pair query used to match
+            # `(s)-[r:REL]->(t)` with BOTH ends unlabeled, so FalkorDB had no
+            # index to seek — this build has no label-less URN index, and an
+            # unlabeled `WHERE urn IN $list` anchor is a full node/relation
+            # scan with per-row IN-list membership (see `_label_buckets`, which
+            # documents the same 4-9s-per-query finding from the aggregation
+            # read path). On the 2.08M-node estate that scan WAS the cost:
+            # 7.7s of a 7.8s drill, and it is what made the chunks time out
+            # and fall through to synthesis. Every ontology label carries a URN
+            # index, so the pairs are grouped by the (source label, target
+            # label) they actually connect and each group is asked with its
+            # anchors labelled — an index seek on both ends. Real containment
+            # only ever links a handful of label pairs (Roots->Node, Node->Node;
+            # layer->object, object->group, group->attribute, group->group), so
+            # this is a few queries, never label-squared.
+            #
+            # A urn whose label will not resolve keeps the unlabeled pattern —
+            # correctness first — but only for that bounded residue.
+            #
+            # Checked BEFORE resolving anything: a caller that has already
+            # spent its budget is not going to issue a single pair query, and
+            # label resolution is itself a round trip (a Redis pipeline read at
+            # best, a bulk Cypher on a cold namespace). Synthesize and go.
+            if budget_secs is not None and (
+                (budget_secs - (time.monotonic() - fetch_started)) <= CHUNK_TIMEOUT_S
+            ):
+                logger.info(
+                    "trace: containment pair-fetch has no budget for %d pairs "
+                    "— synthesizing all of them", len(all_pairs),
+                )
+                _synthesize(all_pairs)
+                return out
+
+            try:
+                pair_labels = await self._resolve_urn_labels_bulk(
+                    sorted({u for pr in all_pairs for u in pr}),
+                )
+            except Exception as exc:
+                logger.debug(
+                    "containment pair-fetch: label resolution failed (%s) — "
+                    "unlabeled anchors for this batch", exc,
+                )
+                pair_labels = {}
+
+            grouped: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
+            for s_urn, t_urn in all_pairs:
+                key = (
+                    _sanitize_label(pair_labels.get(s_urn) or "") or "",
+                    _sanitize_label(pair_labels.get(t_urn) or "") or "",
+                )
+                grouped.setdefault(key, []).append((s_urn, t_urn))
+
+            # One unit of work = one (label pair, <=CHUNK_PAIRS) slice. The
+            # chunking, the residual budget and the give-up-after-N-failures
+            # rules below are unchanged — they just count these units now.
+            units: List[Tuple[Tuple[str, str], List[Tuple[str, str]]]] = []
+            for key in sorted(grouped):
+                group = grouped[key]
+                for i in range(0, len(group), CHUNK_PAIRS):
+                    units.append((key, group[i:i + CHUNK_PAIRS]))
+
+            done_pairs = 0
+            for (s_label, t_label), chunk in units:
 
                 # RESIDUAL BUDGET (2026-08-21 ruling): the caller's remaining
                 # deadline bounds how long this step may spend QUERYING. When
@@ -9989,17 +10050,20 @@ class FalkorDBProvider(GraphDataProvider):
                         logger.info(
                             "trace: containment pair-fetch out of budget after "
                             "%d/%d pairs — synthesizing the remainder",
-                            i, len(all_pairs),
+                            done_pairs, len(all_pairs),
                         )
                 if budget_spent or consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     _synthesize(chunk)
+                    done_pairs += len(chunk)
                     continue
 
                 chunk_set: Set[Tuple[str, str]] = set(chunk)
                 s_urns = sorted({s for s, _ in chunk})
                 t_urns = sorted({t for _, t in chunk})
+                s_anchor = f"(s:{s_label})" if s_label else "(s)"
+                t_anchor = f"(t:{t_label})" if t_label else "(t)"
                 cypher = (
-                    f"MATCH (s)-[r:{rel_alt}]->(t) "
+                    f"MATCH {s_anchor}-[r:{rel_alt}]->{t_anchor} "
                     "WHERE s.urn IN $sUrns AND t.urn IN $tUrns "
                     "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                     "type(r) AS edgeType, id(r) AS edgeId"
@@ -10026,9 +10090,11 @@ class FalkorDBProvider(GraphDataProvider):
                     consecutive_failures += 1
                     logger.warning(
                         "trace: containment pair-fetch chunk failed "
-                        "(%d pairs) — synthesizing from chains: %s",
-                        len(chunk), exc,
+                        "(%d pairs, %s->%s) — synthesizing from chains: %s",
+                        len(chunk), s_label or "<unlabeled>",
+                        t_label or "<unlabeled>", exc,
                     )
+                done_pairs += len(chunk)
 
                 # A chunk that SUCCEEDED is authoritative: a pair it did not
                 # return is a pair the graph does not have (a stale cached
