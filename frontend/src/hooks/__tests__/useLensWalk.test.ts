@@ -17,6 +17,7 @@ import {
   TRACE_CHECKPOINT_NODES,
   WALK_REQUEST_FAILSAFE,
   WALK_PAGE_NODES,
+  WALK_FIRST_PAGE_NODES,
 } from '../useLensWalk'
 import type { GraphDataProvider, TraceV2Result, LensClosureExtras, GraphNode } from '@/providers/GraphDataProvider'
 
@@ -53,7 +54,7 @@ describe('useLensWalk — initial fetch', () => {
 
     expect(traceClosure).toHaveBeenCalledTimes(1)
     expect(traceClosure.mock.calls[0]![0]).toEqual({
-      urn: 'a', direction: 'both', upstreamDepth: 2, downstreamDepth: 2,
+      urn: 'a', direction: 'both', upstreamDepth: 2, downstreamDepth: 2, maxNodes: WALK_FIRST_PAGE_NODES,
     })
     // Every request carries the session's abort signal.
     expect((traceClosure.mock.calls[0] as unknown as [unknown, { signal?: AbortSignal }])[1].signal).toBeInstanceOf(AbortSignal)
@@ -521,7 +522,7 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
     const byUrn = (urn: string, pick: (r: Record<string, unknown>) => boolean = () => true) =>
       traceClosure.mock.calls.map(c => c[0] as Record<string, unknown>).find(r => r.urn === urn && pick(r))!
-    expect(byUrn('a', r => !r.seedCursor).maxNodes).toBeUndefined()           // first paint: default page
+    expect(byUrn('a', r => !r.seedCursor).maxNodes).toBe(WALK_FIRST_PAGE_NODES) // first paint: a SMALL page
     expect(byUrn('a', r => !!r.seedCursor).maxNodes).toBe(WALK_PAGE_NODES)   // the seed drain
     expect(byUrn('h').maxNodes).toBe(WALK_PAGE_NODES)                         // a hub page
     expect(byUrn('b').maxNodes).toBe(WALK_PAGE_NODES)                         // a bulk re-seed
@@ -530,6 +531,7 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
     expect(byUrn('t').maxNodes).toBeUndefined()                               // a click: default page
     expect(WALK_PAGE_NODES).toBe(10_000)
+    expect(WALK_FIRST_PAGE_NODES).toBeLessThan(1_000)
   })
 
   it('one hop: pages a hub by its real cursor, per anchor', async () => {

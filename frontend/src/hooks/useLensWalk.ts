@@ -56,6 +56,12 @@ export const WALK_BATCH_SIZE = 500
  *  hop, 10 pages of 2k in 4.6 s against 2 pages of 10k in 2.5 s, and every
  *  page skipped is a merge, a layout and a render of the board skipped too. */
 export const WALK_PAGE_NODES = 10_000
+/** The page the FIRST request asks for. Small on purpose: the first paint
+ *  is gated on the client laying out and rendering whatever page 1 holds —
+ *  measured on the wide table, a 3,261-node default page took ~2 s to reach
+ *  the board, a 600-node one lands in well under a second — and the
+ *  hands-free continuations above take the big pages from there. */
+export const WALK_FIRST_PAGE_NODES = 600
 /** The one-time memory checkpoint: past this many nodes the walk parks ONCE
  *  and asks; `continuePastCheckpoint` lifts it for the focal for good. */
 export const TRACE_CHECKPOINT_NODES = 50_000
@@ -255,6 +261,7 @@ export function useLensWalk(
         try {
             const res = await provider.traceClosure({
                 urn, direction: 'both', upstreamDepth: effectiveDepth, downstreamDepth: effectiveDepth,
+                maxNodes: WALK_FIRST_PAGE_NODES,
             }, { signal })
             if (session !== sessionRef.current) return   // lens closed mid-flight
             setState(prev => setEntry(prev, cacheKey, {
