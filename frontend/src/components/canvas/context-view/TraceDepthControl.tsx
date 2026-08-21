@@ -26,9 +26,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { ArrowUp, ArrowDown, ChevronDown, Minus, Plus, Workflow } from 'lucide-react'
+import { ArrowUp, ArrowDown, ChevronDown, Eye, Minus, Plus, Workflow } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
+import { LineageCountsToggle } from '../trace/LineageCountsToggle'
 
 export interface TraceDepthControlProps {
   upstreamDepth: number
@@ -152,7 +153,7 @@ export function TraceDepthControl({
               animate={{ opacity: 1, y: 0, scale: 1 }}
               transition={{ duration: 0.15, ease: 'easeOut' }}
               role="dialog"
-              aria-label="Trace depth settings"
+              aria-label="Trace settings"
               style={{
                 position: 'fixed',
                 top: anchor.top,
@@ -166,7 +167,7 @@ export function TraceDepthControl({
                 <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-accent-lineage/25 to-purple-500/15 flex items-center justify-center">
                   <Workflow className="w-3.5 h-3.5 text-accent-lineage" strokeWidth={2.2} />
                 </div>
-                <div className="text-[12px] font-semibold text-ink tracking-tight">Trace Depth</div>
+                <div className="text-[12px] font-semibold text-ink tracking-tight">Trace settings</div>
               </div>
 
               <div className="px-3 pt-2.5 pb-2">
@@ -218,6 +219,17 @@ export function TraceDepthControl({
                     </button>
                   )
                 })}
+              </div>
+
+              <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+              {/* Display — what the trace shows on its cards. */}
+              <div className="px-3 pt-2.5 pb-3">
+                <div className="px-1 pb-1.5 flex items-center gap-1.5 text-[10.5px] uppercase tracking-[0.12em] font-bold text-ink-muted/70">
+                  <Eye className="w-3 h-3" strokeWidth={2.2} />
+                  Display
+                </div>
+                <LineageCountsToggle />
               </div>
             </motion.div>
           )}

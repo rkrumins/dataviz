@@ -21,8 +21,6 @@ import { render, screen, fireEvent, within } from '@testing-library/react'
 import { TraceDockControls } from '../TraceDockControls'
 import { TraceDockTitleBar } from '../TraceDockTitleBar'
 import { TraceDockMetricStrip } from '../TraceDockMetricStrip'
-import { TraceDockSettings } from '../TraceDockSettings'
-import { usePreferencesStore } from '@/store/preferences'
 import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
 import type { TraceConfig, UseUnifiedTraceResult } from '@/hooks/useUnifiedTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -206,43 +204,5 @@ describe('TraceDockMetricStrip — sources outside this view', () => {
   it('reads as one source in the singular', () => {
     const { container } = strip(1)
     expect(within(container).getByText(/1 source outside this view/i)).toBeInTheDocument()
-  })
-})
-
-// ── Settings tab: "Lineage counts on cards" lives here, native mode only ─────
-
-function renderSettings(nativeMode: boolean) {
-  const trace = {
-    config: config(),
-    setConfig: vi.fn(),
-    retrace: vi.fn(async () => {}),
-    result: null,
-  } as unknown as UseUnifiedTraceResult
-  render(
-    <TraceDockSettings
-      trace={trace}
-      granularityOptions={[{ id: 'dataset', name: 'Dataset', level: 2 }]}
-      availableEdgeTypes={['TRANSFORMS']}
-      resolveEdgeColor={() => '#fff'}
-      nativeMode={nativeMode}
-    />,
-  )
-}
-
-describe('TraceDockSettings — lineage counts on cards', () => {
-  it('offers the switch in native mode, ON by default, and flips the persisted preference', () => {
-    usePreferencesStore.setState({ showLineageCounts: true })
-    renderSettings(true)
-    const sw = screen.getByRole('switch', { name: 'Lineage counts on cards' })
-    expect(sw.getAttribute('aria-checked')).toBe('true')
-    fireEvent.click(sw)
-    expect(usePreferencesStore.getState().showLineageCounts).toBe(false)
-    expect(screen.getByRole('switch', { name: 'Lineage counts on cards' }).getAttribute('aria-checked')).toBe('false')
-    usePreferencesStore.setState({ showLineageCounts: true })
-  })
-
-  it('is absent in legacy mode — it describes the cards the native trace draws', () => {
-    renderSettings(false)
-    expect(screen.queryByRole('switch', { name: 'Lineage counts on cards' })).toBeNull()
   })
 })

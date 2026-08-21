@@ -14,6 +14,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { TraceDepthControl } from '../TraceDepthControl'
+import { usePreferencesStore } from '@/store/preferences'
 
 function open(upstream = 25, downstream = 25) {
   const onChange = vi.fn()
@@ -54,5 +55,19 @@ describe('TraceDepthControl — the one depth rule', () => {
     const onChange = open()
     fireEvent.change(screen.getByLabelText('Upstream depth'), { target: { value: '80' } })
     expect(onChange).toHaveBeenCalledWith('upstream', 25)
+  })
+})
+
+describe('TraceDepthControl — the trace settings live here', () => {
+  it('carries the Display switch: "Lineage counts on cards", ON by default, persisted', () => {
+    usePreferencesStore.setState({ showLineageCounts: true })
+    open()
+    expect(screen.getByRole('dialog', { name: 'Trace settings' })).toBeInTheDocument()
+    const sw = screen.getByRole('switch', { name: 'Lineage counts on cards' })
+    expect(sw.getAttribute('aria-checked')).toBe('true')
+    fireEvent.click(sw)
+    expect(usePreferencesStore.getState().showLineageCounts).toBe(false)
+    expect(screen.getByRole('switch', { name: 'Lineage counts on cards' }).getAttribute('aria-checked')).toBe('false')
+    usePreferencesStore.setState({ showLineageCounts: true })
   })
 })

@@ -653,10 +653,10 @@ export async function renderCanvasWithTrace(
       }
     },
     depthPopoverOpen: () =>
-      !!document.querySelector('[role="dialog"][aria-label="Trace depth settings"]'),
+      !!document.querySelector('[role="dialog"][aria-label="Trace settings"]'),
     dockPresent: () => !!document.querySelector('#trace-bottom-dock'),
     depthPresetValues: () => {
-      const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Trace depth settings"]')
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Trace settings"]')
       return [...(dialog?.querySelectorAll<HTMLElement>('button') ?? [])]
         .map(b => b.textContent?.match(/\d+\/\d+/)?.[0] ?? '')
         .filter(Boolean)
