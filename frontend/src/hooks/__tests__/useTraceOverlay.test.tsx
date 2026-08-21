@@ -61,7 +61,7 @@ const grownModel = (): LensWalkModel => {
 }
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(20))
+afterAll(() => expectTestsRan(24))
 
 describe('useTraceOverlay — the seed', () => {
   it('opens the focus chain and leaves the direct partners visible and CLOSED', () => {
@@ -317,5 +317,76 @@ describe('useTraceOverlay — identity', () => {
     expect(result.current.expandPath).toBe(first.expandPath)
     expect(result.current.exit).toBe(first.exit)
     expect(result.current.revealPath).toBe(first.revealPath)
+  })
+})
+
+/**
+ * RESTORE (F8). History entries carry the picture the reader left — which
+ * cards were open — and back/forward have to put it back exactly, not
+ * merely re-open the same focus and let the seed decide.
+ *
+ * Which makes restore the one thing that must WIN OVER THE SEED. A restore
+ * is issued the instant the reader presses Back, while the walk for that
+ * focus is still loading and the seed has not run yet; so it is recorded as
+ * PENDING FOR THAT FOCUS and consumed by the same render-time branch that
+ * would otherwise seed. Whichever arrives first, the reader gets their
+ * picture — never a flash of the seed and then the restore, and never a
+ * restore quietly overwritten by a seed that ran a frame later.
+ */
+describe('useTraceOverlay — restoreExpansion', () => {
+  it('REPLACES the expansion on the focus already on screen — it is not additive', () => {
+    const { result } = renderHook(() => useTraceOverlay(args()))
+    expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
+
+    act(() => result.current.restoreExpansion('cfo', ['INTERMEDIATE_T2']))
+    expect([...result.current.traceExpansion]).toEqual(['INTERMEDIATE_T2'])
+    // The picture follows: the partner is open, the focus chain is not.
+    expect(result.current.view!.visible.has('orders')).toBe(true)
+    expect(result.current.view!.visible.has('cfo')).toBe(false)
+  })
+
+  it('a restore issued while the walk is still loading WINS over the seed when the model lands', () => {
+    const { result, rerender } = renderHook(
+      (a: UseTraceOverlayArgs) => useTraceOverlay(a),
+      { initialProps: args({ model: emptyWalkModel('cfo') }) },
+    )
+    // Pressing Back: the focus is set, the model is not here yet.
+    act(() => result.current.restoreExpansion('cfo', ['INTERMEDIATE_T2', 'orders']))
+    expect(result.current.active).toBe(false)
+
+    rerender(args())
+    // The seed would have given ['cfo', 'tableau'] — the reader's own
+    // picture is what they get instead.
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'orders'])
+    expect(result.current.view!.visible.has('orders.channel')).toBe(true)
+    // And it is consumed: the next wave of the same walk does not re-apply
+    // it over whatever the reader has done since.
+    act(() => result.current.toggle('orders'))
+    rerender(args({ model: grownModel() }))
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2'])
+  })
+
+  it('a restore for ANOTHER focus leaves this one alone until the focus switches', () => {
+    const { result, rerender } = renderHook(
+      (a: UseTraceOverlayArgs) => useTraceOverlay(a),
+      { initialProps: args() },
+    )
+    act(() => result.current.restoreExpansion('aov', ['INTERMEDIATE_T2']))
+    expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
+
+    rerender(args({ focusUrn: 'aov' }))
+    expect([...result.current.traceExpansion]).toEqual(['INTERMEDIATE_T2'])
+  })
+
+  it('exit drops a pending restore — a new trace seeds normally', () => {
+    const { result, rerender } = renderHook(
+      (a: UseTraceOverlayArgs) => useTraceOverlay(a),
+      { initialProps: args({ model: emptyWalkModel('cfo') }) },
+    )
+    act(() => result.current.restoreExpansion('cfo', ['INTERMEDIATE_T2']))
+    act(() => result.current.exit())
+
+    rerender(args())
+    expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
   })
 })

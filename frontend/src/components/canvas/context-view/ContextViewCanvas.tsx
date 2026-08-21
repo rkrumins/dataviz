@@ -1750,6 +1750,13 @@ export function ContextViewCanvas({
       showDownstream: direction !== 'up',
       depthUp: FULL_WALK_INITIAL_DEPTH,
       depthDown: FULL_WALK_INITIAL_DEPTH,
+      // Re-pressing Trace on the focal already on screen does NOT re-seed the
+      // overlay, so recording an empty picture here would leave the entry
+      // describing a trace nobody is looking at. A genuinely new focal has no
+      // picture yet: empty means "as it opens", and the seed decides.
+      traceExpansion: canvasTraceRef.current.tracedUrn === urn
+        ? [...(overlayRef.current?.traceExpansion ?? [])]
+        : [],
     }
     setTraceShowUpstream(view.showUpstream)
     setTraceShowDownstream(view.showDownstream)
@@ -1789,6 +1796,10 @@ export function ContextViewCanvas({
         showDownstream: partial.showDownstream ?? traceShowDownstream,
         depthUp: partial.depthUp ?? traceDepthUp,
         depthDown: partial.depthDown ?? traceDepthDown,
+        // The picture, always — `updateCurrentTraceView` REPLACES the view,
+        // so omitting it would erase the reader's expansion every time they
+        // touched a direction arrow.
+        traceExpansion: [...(overlayRef.current?.traceExpansion ?? [])],
       })
     })
   }, [canvasTrace.tracedUrn, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])

@@ -45,6 +45,13 @@
  * deliberately does NOT key on is the model itself: a full walk arrives in
  * waves, and re-seeding on each one would wipe out everything the reader had
  * opened, over and over, while the walk finished.
+ *
+ * AND ONE THING OUTRANKS THE SEED: a history restore. Pressing Back names a
+ * focus AND the picture the reader left on it, at a moment when that focus's
+ * walk has not landed — so `restoreExpansion` records it as PENDING for that
+ * focus and the seed branch consumes it instead of seeding. Without that the
+ * two would race, and the seed (running a frame later, when the model lands)
+ * would win every time.
  */
 import { useCallback, useMemo, useState } from 'react'
 import { buildTraceView, type TraceCard, type TraceView, type TraceViewInputs } from './lib/traceViewModel'
@@ -80,6 +87,13 @@ export interface TraceOverlay {
   toggle(id: string): void
   /** Reveal/search: open a whole chain at once. Additive. */
   expandPath(ids: readonly string[]): void
+  /** History restore: REPLACE the expansion with the picture the reader
+   *  left on `forFocus`. Issued the moment Back is pressed, which is
+   *  BEFORE the walk for that focus has landed — so when it names a focus
+   *  this overlay is not showing yet (or is still loading), it is held as
+   *  pending and wins over the seed the instant the model arrives. An
+   *  empty `ids` is a legitimate restore of "nothing open". */
+  restoreExpansion(forFocus: string, ids: readonly string[]): void
   /** The containment chain that has to be open for `id` to be on screen:
    *  its ancestors within its lane, nearest first, `id` itself excluded.
    *  Empty for a lane root, for an unknown urn, and while inactive — a
@@ -97,6 +111,9 @@ interface SeedState {
   /** The seed came from a model that HELD the focus — so it is the real one
    *  and no later wave may replace it. False while the walk is still loading. */
   seeded: boolean
+  /** A history restore waiting for its focus's model. Consumed — once — by
+   *  the same render-time branch that would otherwise seed. */
+  pending: { forFocus: string; set: ReadonlySet<string> } | null
 }
 
 function viewInputs(a: UseTraceOverlayArgs, traceExpansion: ReadonlySet<string>): TraceViewInputs | null {
@@ -176,16 +193,27 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   )
 
   const [seed, setSeed] = useState<SeedState>(() => ({
-    forFocus: focusUrn, set: seedExpansion(a), seeded: focusInModel,
+    forFocus: focusUrn, set: seedExpansion(a), seeded: focusInModel, pending: null,
   }))
 
   // Re-seed DURING RENDER. Not an effect: an effect would paint one frame of
   // the previous focus's expansion first, and `react-hooks/set-state-in-effect`
   // forbids it besides.
+  //
+  // A RESTORE WINS HERE. The pending picture is only honoured once the model
+  // holds the focus: consuming it against the loading frame would spend it on
+  // a render that draws nothing, and the real seed a frame later would then
+  // wipe out the very picture the reader pressed Back for.
   let traceExpansion = seed.set
   if (seed.forFocus !== focusUrn || (!seed.seeded && focusInModel)) {
-    traceExpansion = seedExpansion(a)
-    setSeed({ forFocus: focusUrn, set: traceExpansion, seeded: focusInModel })
+    const restore = seed.pending?.forFocus === focusUrn && focusInModel ? seed.pending : null
+    traceExpansion = restore ? restore.set : seedExpansion(a)
+    setSeed({
+      forFocus: focusUrn,
+      set: traceExpansion,
+      seeded: focusInModel,
+      pending: restore ? null : seed.pending,
+    })
   }
 
   // NO BLANK CANVAS. `model` is non-null from the first render of a walk —
@@ -219,10 +247,19 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
     set: new Set([...prev.set, ...ids]),
   })), [])
 
+  // Already showing that focus, already seeded: nothing to wait for, so the
+  // picture goes straight on screen (this is the "resume the trace you are
+  // already in" case, where no focus change would ever re-run the seed).
+  const restoreExpansion = useCallback((forFocus: string, ids: readonly string[]) => setSeed(prev => (
+    prev.forFocus === forFocus && prev.seeded
+      ? { ...prev, set: new Set(ids), pending: null }
+      : { ...prev, pending: { forFocus, set: new Set(ids) } }
+  )), [])
+
   // Drops the expansion. The caller clears its own focus alongside — leaving
   // the focus in place re-seeds on the very next render, by design: exiting a
   // trace that is still focused somewhere is not a state the canvas has.
-  const exit = useCallback(() => setSeed({ forFocus: null, set: EMPTY_EXPANSION, seeded: false }), [])
+  const exit = useCallback(() => setSeed({ forFocus: null, set: EMPTY_EXPANSION, seeded: false, pending: null }), [])
 
   // Lanes are independent of each other, so the first one holding the card
   // is the only one that can hold its chain.
@@ -240,5 +277,5 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
     return []
   }, [view])
 
-  return { active, view, traceExpansion, toggle, expandPath, revealPath, exit }
+  return { active, view, traceExpansion, toggle, expandPath, restoreExpansion, revealPath, exit }
 }
