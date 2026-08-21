@@ -1968,6 +1968,9 @@ export function LineageLens({
                 trailUrns={trailUrns}
                 trailAdjacent={trailAdjacent}
                 reducedMotion={reducedMotion}
+                // C4: while the hands-free walk lands cards the camera
+                // holds its place and the board offers a fit instead.
+                walking={walkProgress?.phase === 'loading' || walkProgress?.phase === 'seeding' || walkProgress?.phase === 'walking'}
                 edgeTypeInfo={edgeTypeInfo}
                 onSelect={setSelection}
                 onIsolate={setIsolated}

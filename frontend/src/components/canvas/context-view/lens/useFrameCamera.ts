@@ -1,4 +1,4 @@
-import { useEffect, useRef, type RefObject } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { CARD_W, BAND_GAP, type FocusCard, type FocusEdge } from './focus-cards'
 
 /**
@@ -74,13 +74,21 @@ export function useFrameCamera(
    *  the store hook `LensPeek` uses for the same question is not
    *  reachable here. A plain ref costs nothing until it is read. */
   containerRef: RefObject<HTMLElement | null>,
+  /** A hands-free walk is landing cards (C4, 2026-08-21). A wide board
+   *  grows by a wave every few seconds for minutes; easing to each wave
+   *  yanked the reader once per request for the whole walk. While this
+   *  is set, arrivals hold the camera still and `grew` reports them so
+   *  the view can OFFER a fit instead of taking one. */
+  walking = false,
 ) {
   const framedRef = useRef<{ focal: string; ids: Set<string> } | null>(null)
+  const [grew, setGrew] = useState(false)
   useEffect(() => {
     if (!rf) return
     const ids = new Set(cards.map(c => c.id))
     const prev = framedRef.current
     const newFocal = !prev || prev.focal !== focalId
+    if (newFocal) setGrew(false)
     // Rows INSIDE a frame do not count as arrivals. A resolving
     // container replaces its rows on every step of the server walk
     // (pass-through levels come and go), and easing to each batch
@@ -91,6 +99,13 @@ export function useFrameCamera(
     if (!newFocal && arrived.length === 0) {
       // Nothing to move to, so nothing to cancel: safe to stamp now.
       framedRef.current = { focal: focalId, ids }
+      return
+    }
+    if (!newFocal && walking) {
+      // The walk is drawing; the reader keeps their place. No move is
+      // scheduled, so stamping now is safe — and the board grew.
+      framedRef.current = { focal: focalId, ids }
+      setGrew(true)
       return
     }
     const t = window.setTimeout(() => {
@@ -138,7 +153,14 @@ export function useFrameCamera(
     // now that touching this file put it under lint. Safe: an `edges`
     // change alone (cards unchanged) re-runs the effect but hits the
     // "nothing arrived" early return, which only stamps the bookkeeping.
-  }, [rf, focalId, cards, edges, reducedMotion, containerRef])
+  }, [rf, focalId, cards, edges, reducedMotion, containerRef, walking])
+
+  /** The reader's own "show me everything": one fit of the whole board. */
+  const fitAll = useCallback(() => {
+    setGrew(false)
+    if (!rf) return
+    void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })
+  }, [rf, reducedMotion])
 
   // ── The extend-ghost nudge (fix round 1) ──────────────────────────
   //
@@ -227,6 +249,8 @@ export function useFrameCamera(
     }
     applyNudge()
   }, [rf, focalId, cards, reducedMotion, containerRef])
+
+  return useMemo(() => ({ grew, fitAll }), [grew, fitAll])
 }
 
 interface Rect { x: number; y: number; w: number; h: number }

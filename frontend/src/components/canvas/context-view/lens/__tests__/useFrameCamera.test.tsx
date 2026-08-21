@@ -10,11 +10,14 @@ const card = (id: string): FocusCard =>
 const wire = (source: string, target: string): FocusEdge =>
   ({ id: `e:${source}>${target}`, source, target }) as unknown as FocusEdge
 
-function Harness({ rf, focalId, cards, edges = [], paneW = 0, paneH = 0 }: {
+function Harness({ rf, focalId, cards, edges = [], paneW = 0, paneH = 0, walking = false, onState }: {
   rf: CameraTarget
   focalId: string
   cards: FocusCard[]
   edges?: FocusEdge[]
+  /** A hands-free walk is landing cards (C4, 2026-08-21). */
+  walking?: boolean
+  onState?: (state: ReturnType<typeof useFrameCamera>) => void
   /** Defaults to 0 — jsdom's own default `getBoundingClientRect` (no
    *  real layout), which every test in this file predates (P5) and does
    *  not care about: at 0×0 nothing ever measures as "already visible",
@@ -24,7 +27,8 @@ function Harness({ rf, focalId, cards, edges = [], paneW = 0, paneH = 0 }: {
   paneH?: number
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
-  useFrameCamera(rf, focalId, cards, edges, true, containerRef)
+  const state = useFrameCamera(rf, focalId, cards, edges, true, containerRef, walking)
+  onState?.(state)
   return (
     <div
       ref={(el) => {
@@ -357,6 +361,65 @@ describe('useFrameCamera', () => {
     rerender(<Harness rf={rf} focalId="a" cards={[card('f'), card('n:x')]} />)
     flush()
     expect(fitView).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * C4 (2026-08-21): a hands-free walk lands cards every few seconds for
+   * minutes on a wide board. Easing to each wave — the expansion rule
+   * above — yanked the reader off whatever they were reading, once per
+   * request, for the whole walk. While the walk is landing cards the
+   * camera holds still and the hook REPORTS that the board grew, so the
+   * view can offer a "Fit" instead of taking it; the reader fits when
+   * they want to, which also clears the flag.
+   */
+  it('holds still while the walk lands cards, and reports that the board grew', () => {
+    let state: ReturnType<typeof useFrameCamera> | null = null
+    const onState = (s: ReturnType<typeof useFrameCamera>) => { state = s }
+    const { rerender } = render(<Harness rf={rf} focalId="a" cards={[card('f')]} walking onState={onState} />)
+    flush()
+    expect(fitView).toHaveBeenCalledTimes(1)          // a new focal still frames itself
+    expect(state!.grew).toBe(false)
+    rerender(<Harness rf={rf} focalId="a" cards={[card('f'), card('n:w1'), card('n:w2')]} edges={[wire('n:w1', 'f')]} walking onState={onState} />)
+    flush()
+    expect(fitView).toHaveBeenCalledTimes(1)          // arrivals did NOT move the camera
+    expect(state!.grew).toBe(true)
+    rerender(<Harness rf={rf} focalId="a" cards={[card('f'), card('n:w1'), card('n:w2'), card('n:w3')]} walking onState={onState} />)
+    flush()
+    expect(fitView).toHaveBeenCalledTimes(1)
+    // The reader asks for the whole board: one fit of everything, flag cleared.
+    act(() => { state!.fitAll() })
+    expect(fitView).toHaveBeenCalledTimes(2)
+    expect(fitView.mock.calls[1][0].nodes).toBeUndefined()
+    expect(fitView.mock.calls[1][0].maxZoom).toBe(FIT_MAX_ZOOM)
+    expect(state!.grew).toBe(false)
+  })
+
+  it('a card the reader expands after the walk still eases the camera as before', () => {
+    let state: ReturnType<typeof useFrameCamera> | null = null
+    const onState = (s: ReturnType<typeof useFrameCamera>) => { state = s }
+    const { rerender } = render(<Harness rf={rf} focalId="a" cards={[card('f'), card('n:x')]} walking onState={onState} />)
+    flush()
+    rerender(<Harness rf={rf} focalId="a" cards={[card('f'), card('n:x')]} walking={false} onState={onState} />)
+    flush()
+    rerender(<Harness rf={rf} focalId="a" cards={[card('f'), card('n:x'), card('n:new')]} edges={[wire('n:new', 'n:x')]} walking={false} onState={onState} />)
+    flush()
+    expect(fitView).toHaveBeenCalledTimes(2)
+    expect(fitView.mock.calls[1][0].nodes).toEqual([{ id: 'n:new' }, { id: 'n:x' }, { id: 'f' }])
+    expect(state!.grew).toBe(false)
+  })
+
+  it('a new focal clears the grew flag — it is a new picture, framed whole', () => {
+    let state: ReturnType<typeof useFrameCamera> | null = null
+    const onState = (s: ReturnType<typeof useFrameCamera>) => { state = s }
+    const { rerender } = render(<Harness rf={rf} focalId="a" cards={[card('f')]} walking onState={onState} />)
+    flush()
+    rerender(<Harness rf={rf} focalId="a" cards={[card('f'), card('n:w1')]} walking onState={onState} />)
+    flush()
+    expect(state!.grew).toBe(true)
+    rerender(<Harness rf={rf} focalId="b" cards={[card('f')]} walking onState={onState} />)
+    flush()
+    expect(state!.grew).toBe(false)
+    expect(fitView).toHaveBeenCalledTimes(2)
   })
 
   it('waits for the instance rather than framing against nothing', () => {
