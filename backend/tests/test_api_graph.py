@@ -142,7 +142,7 @@ class _StubProvider(GraphDataProvider):
     async def trace_closure(
         self, urn, upstream_depth, downstream_depth,
         lineage_edge_types, containment_edge_types, max_nodes, timeout_ms,
-        seed_urns=None, exclude_urns=None, after_cursor=None,
+        seed_urns=None, exclude_urns=None, after_cursor=None, seed_cursor=None,
     ) -> TraceClosureResult:
         # Deterministic scoped closure: the focus + its downstream lineage
         # edge, plus one synthetic frontier entry so response tests can
@@ -309,6 +309,31 @@ async def test_trace_closure_after_cursor_with_seed_urns_422(graph_client):
     resp = await client.post(
         "/api/v1/test-ws/graph/trace/closure",
         json={"urn": urn, "direction": "upstream", "upstreamDepth": 1, "afterCursor": "e:1", "seedUrns": [urn]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_trace_closure_seed_cursor_with_seed_urns_is_a_continuation_not_a_422(graph_client):
+    """A container card's descendants page by keyset exactly like a
+    focus-anchored seed: `seedUrns:[card]` + `seedCursor` is the continuation
+    the client sends for a table it never opened. It used to 422."""
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "both", "seedUrns": [urn], "seedCursor": "s:" + urn},
+    )
+    assert resp.status_code == 200
+
+
+async def test_trace_closure_seed_cursor_with_after_cursor_422(graph_client):
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "upstream", "upstreamDepth": 1, "afterCursor": "e:1", "seedCursor": "s:x"},
     )
     assert resp.status_code == 422
 
@@ -543,7 +568,7 @@ async def test_trace_closure_cache_hit_deserializes_the_subclass(test_client: As
     assert body["nodes"] == [] and body["edges"] == []
     # The subclass fields survived the deserialize — the whole point.
     assert body["frontierUp"] == [
-        {"urn": "urn:cached:hub", "totalCount": 61, "nextCursor": "e:900"}
+        {"urn": "urn:cached:hub", "totalCount": 61, "nextCursor": "e:900", "reason": None}
     ]
     assert body["seedTruncated"] is True
     assert body["truncationReason"] == "max_nodes"

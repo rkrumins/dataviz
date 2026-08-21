@@ -752,13 +752,18 @@ describe('focus-layout — frames only where they clarify', () => {
         expect(cardFor(grown, 'tbl2')).toBeDefined()
         expect(cardFor(grown, 'T')).toBeUndefined()
         expect(cardFor(grown, 'tbl1')!.frameId).toBeNull()
-        // Without the stickiness it would have become the presented grain
-        // and swallowed the card already on the board.
+        // R1 (2026-08-21): a container whose hop-carrying grain lies deeper
+        // is chrome however many tables it holds, so even a FORGETFUL view
+        // state draws both tables as cards and never turns T into one. The
+        // stickiness still guards the shapes where a level's own role can
+        // change (a level that itself carries a hop).
         const forgetful = layout(sg, {
             ...base,
             revealed: new Map([...base.revealed, ['in:c1', 1]]),
         })
-        expect(cardFor(forgetful, 'T')).toBeDefined()
+        expect(cardFor(forgetful, 'T')).toBeUndefined()
+        expect(cardFor(forgetful, 'tbl1')).toBeDefined()
+        expect(cardFor(forgetful, 'tbl2')).toBeDefined()
     })
 
     it('R6: an empty SIDE is the model\'s answer, and an empty band is not', () => {
@@ -990,6 +995,105 @@ describe('focus-layout — pinned (T23 R3, a triage-list placement)', () => {
         const g = layout(sg, { ...base, pinned: new Set([already]) })
         expect(g.cards.filter(c => c.nodeId === already)).toHaveLength(1)
         expect(urns(g).filter(u => u !== 'F')).toHaveLength(REVEAL_PAGE)
+    })
+
+    it('a pinned entity deep inside a closed root is opened through to, like a revealed one', () => {
+        // THE WIDE-TABLE DEFECT (live, 2026-08-21): a one-hop walk brought
+        // back 20,212 nodes — every partner column under its own table under
+        // its own LAYER — and the board drew 13 cards. Every walked node was
+        // pinned, but the spine walk (`openThrough`) only ran for groups a
+        // REVEAL page admitted, so the partner layers stayed closed roots
+        // with everything hidden inside them. A pin must open the way to the
+        // entity exactly as a reveal does.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [
+                wnode('L1', 'layer', 'my-layer'), wnode('T', 'object', 'my-table'), wnode('F', 'attribute', 'focus-col'),
+                wnode('L2', 'layer', 'other-layer'), wnode('P', 'object', 'partner-table'), wnode('pc', 'attribute', 'partner-col'),
+            ],
+            contains: [['L1', 'T'], ['T', 'F'], ['L2', 'P'], ['P', 'pc']],
+            hops: [['pc', 'F']],
+        })
+        const base = initialLensViewState(sg)
+        const g = layout(sg, { ...base, revealed: new Map(), pinned: new Set(['pc']) })
+        // The partner column is on the board, as a row of its table…
+        const row = cardFor(g, 'pc')
+        expect(row).toBeDefined()
+        // …and the table is a drawn frame, not a closed root hiding it.
+        const frame = cardFor(g, 'P')
+        expect(frame).toBeDefined()
+        expect(row!.frameId).toBe(frame!.id)
+        expect(g.edges.some(e => e.source === row!.id || e.target === row!.id)).toBe(true)
+    })
+
+    it('a partner layer holding MANY partner tables is chrome — the tables are the cards (R1: partners at their own grain)', () => {
+        // The second half of the wide-table defect: once the pin opened the
+        // partner layer, the spine walk still only saw THROUGH a root with a
+        // single child. A layer with forty partner tables stayed a closed
+        // group card, every table hidden inside it. R1 says a partner is a
+        // card at ITS OWN grain — the table whose columns carry the hops —
+        // and the containers above it are breadcrumb chrome, however many
+        // siblings they hold.
+        const sg = subgraph({
+            focus: 'F',
+            nodes: [
+                wnode('L1', 'layer', 'my-layer'), wnode('T', 'object', 'my-table'), wnode('F', 'attribute', 'focus-col'),
+                wnode('L2', 'layer', 'other-layer'),
+                wnode('P1', 'object', 'partner-one'), wnode('pc1', 'attribute', 'col-one'),
+                wnode('P2', 'object', 'partner-two'), wnode('pc2', 'attribute', 'col-two'),
+            ],
+            contains: [['L1', 'T'], ['T', 'F'], ['L2', 'P1'], ['P1', 'pc1'], ['L2', 'P2'], ['P2', 'pc2']],
+            hops: [['pc1', 'F'], ['F', 'pc2']],
+        })
+        const base = initialLensViewState(sg)
+        const g = layout(sg, { ...base, revealed: new Map(), pinned: new Set(['pc1', 'pc2']) })
+        for (const [table, col] of [['P1', 'pc1'], ['P2', 'pc2']]) {
+            const frame = cardFor(g, table)
+            const row = cardFor(g, col)
+            expect(frame, table).toBeDefined()
+            expect(row, col).toBeDefined()
+            expect(row!.frameId).toBe(frame!.id)
+        }
+        // The layer above them is not a card on the board.
+        expect(cardFor(g, 'L2')).toBeUndefined()
+    })
+
+    it('ANY ontology: a ragged single-label Node⊃Node⊃Node estate draws every partner at its own grain', () => {
+        // User ruling (2026-08-21): this must work for `Node ⊃ Node ⊃ Node → Node`
+        // where a partner has its own ancestors at a DIFFERENT depth. The
+        // focus A3 sits at depth 3; B2 (a container at depth 2 that carries a
+        // hop of its own) and B4 (a leaf at depth 4 under B3) are partners;
+        // the orphan X has no ancestors at all. Labels are never consulted.
+        const sg = subgraph({
+            focus: 'A3',
+            nodes: [
+                wnode('R1', 'Roots', 'r1'), wnode('A1', 'Node', 'a1'), wnode('A2', 'Node', 'a2'), wnode('A3', 'Node', 'a3'),
+                wnode('R2', 'Roots', 'r2'), wnode('B1', 'Node', 'b1'), wnode('B2', 'Node', 'b2'), wnode('B3', 'Node', 'b3'), wnode('B4', 'Node', 'b4'),
+                wnode('X', 'Node', 'x'),
+            ],
+            contains: [['R1', 'A1'], ['A1', 'A2'], ['A2', 'A3'], ['R2', 'B1'], ['B1', 'B2'], ['B2', 'B3'], ['B3', 'B4']],
+            hops: [['A3', 'B2'], ['B4', 'A3'], ['X', 'A3']],
+        })
+        const base = initialLensViewState(sg)
+        const g = layout(sg, { ...base, revealed: new Map(), pinned: new Set(['B2', 'B4', 'X']) })
+        // B2 carries a hop of its own → a partner card at its own grain,
+        // CLOSED (one level per click, 2026-08-19): B4's hop rolls up onto
+        // it. X stands alone. R2 and B1 are chrome — walked through, never
+        // drawn — whatever their labels say.
+        expect(cardFor(g, 'B2')).toBeDefined()
+        expect(cardFor(g, 'X')).toBeDefined()
+        expect(cardFor(g, 'A3')).toBeDefined()
+        expect(cardFor(g, 'R2')).toBeUndefined()
+        expect(cardFor(g, 'B1')).toBeUndefined()
+        expect([...g.walkedThrough]).toEqual(expect.arrayContaining(['R2', 'B1']))
+        // Every hop is a wire between drawn cards — B4's lands on B2.
+        expect(g.edges).toHaveLength(3)
+        // Opening B2, then B3, is the reader's own one-level-per-click walk
+        // down to the leaf partner.
+        const opened = layout(sg, { ...base, revealed: new Map(), pinned: new Set(['B2', 'B4', 'X']), expandedContainment: new Set(['B2', 'B3']) })
+        expect(cardFor(opened, 'B3')).toBeDefined()
+        expect(cardFor(opened, 'B4')).toBeDefined()
+        expect(cardFor(opened, 'B4')!.frameId).toBe(cardFor(opened, 'B3')!.id)
     })
 
     it('pinning an urn the walk never named is silently ignored, not a crash', () => {

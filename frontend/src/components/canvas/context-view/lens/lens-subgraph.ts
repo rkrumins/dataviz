@@ -62,6 +62,12 @@ export interface LensFrontierEntry {
     totalCount: number | null
     /** Paging cursor for the rest, or null when there is nothing further. */
     nextCursor: string | null
+    /** `cut`: the server's budget/deadline stopped before this anchor — the
+     *  walk is OWED here and the driver completes it hands-free in every
+     *  mode. `depth`: the requested depth ended here — the next hop, offered
+     *  as a pill and drained only by a full walk. The adapter always sets
+     *  it; a hand-built entry without one reads as `depth`. */
+    kind?: 'cut' | 'depth'
 }
 
 export interface LensSubgraphInput<N extends LensNodeLike = LensNodeLike> {
@@ -367,7 +373,30 @@ export function boundaryHops<N extends LensNodeLike>(
     sg: LensSubgraph<N>,
     root: string,
     dir: 'in' | 'out',
-): { subtree: Set<string>; crossing: Set<string>; interiorOnly: Set<string> } {
+): BoundaryHops {
+    // Computed once per (subgraph, root, direction). A subgraph is built
+    // once per model and never mutated, and this is asked once per ⊕
+    // pill per render — ~2,000 times per wave on the wide table, each a
+    // full pass over 46k hops: 25 s of every 60 s in a real-browser
+    // profile of the hands-free walk (C4, 2026-08-21).
+    let perRoot = boundaryCache.get(sg)
+    if (!perRoot) { perRoot = new Map(); boundaryCache.set(sg, perRoot) }
+    const key = `${dir}|${root}`
+    const hit = perRoot.get(key)
+    if (hit) return hit
+    const computed = computeBoundaryHops(sg, root, dir)
+    perRoot.set(key, computed)
+    return computed
+}
+
+interface BoundaryHops { subtree: Set<string>; crossing: Set<string>; interiorOnly: Set<string> }
+const boundaryCache = new WeakMap<object, Map<string, BoundaryHops>>()
+
+function computeBoundaryHops<N extends LensNodeLike>(
+    sg: LensSubgraph<N>,
+    root: string,
+    dir: 'in' | 'out',
+): BoundaryHops {
     const subtree = new Set<string>()
     const stack = [root]
     while (stack.length > 0) {

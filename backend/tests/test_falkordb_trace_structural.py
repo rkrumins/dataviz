@@ -47,6 +47,14 @@ class _TraceFake:
         self.meta = ("cube", 2)
         self.adjacency = {}    # (urn, direction) -> [(other_urn, edge_type)], id(r) == list index
         self.degrees = {}      # urn -> {"in": n, "out": n}; ABSENT = unknown, never zero
+        # Failure switches for the degree-exact walk (trace_closure):
+        #   fail_expand_labels — an expand bucket anchored on one of these
+        #       labels raises (a timed-out bucket);
+        #   fail_seed — the container descent raises (seed enumeration lost);
+        #   fail_walk_degrees — the walk's own degree query raises.
+        self.fail_expand_labels = set()
+        self.fail_seed = False
+        self.fail_walk_degrees = False
 
     def contain(self, parent, child):
         self.children.setdefault(parent, []).append(child)
@@ -137,6 +145,22 @@ class _TraceFake:
                 if s in params["sUrns"] and t in params["tUrns"] and et in params["ltypes"]:
                     rows.append([s, t, et, f"raw-{s}-{t}", {}])
             return _Result(rows)
+        if "count(r) AS degree" in cypher:
+            # _lineage_degrees: the WALK's own per-anchor degree read (one
+            # query per direction per label bucket). Computed from the
+            # lineage list, so the walk's estimates are exact against the
+            # fake; `fail_walk_degrees` turns it into a failed bucket.
+            if self.fail_walk_degrees:
+                raise RuntimeError("degree query failed")
+            incoming = "<-[r" in cypher
+            wanted = set(params["urns"])
+            counts = {u: 0 for u in wanted}
+            for s, t, _ in self.lineage:
+                if incoming and t in wanted:
+                    counts[t] += 1
+                elif not incoming and s in wanted:
+                    counts[s] += 1
+            return _Result([[u, c] for u, c in counts.items()])
         if "WHERE id(r) >= $after" in cypher:
             # _page_raw_lineage_single: cursor page over ONE node's
             # adjacency. `self.adjacency[(urn, direction)]` is an ordered
@@ -145,12 +169,27 @@ class _TraceFake:
             # `WHERE id(r) >= $after ... ORDER BY id(r) LIMIT $limit`. The
             # cursor is INCLUSIVE: it names the next id to consider, so
             # `after=0` is from the start and edge id 0 is reachable.
+            # Without an explicit adjacency the page reads the lineage
+            # list itself (index == id(r)), so a hub seeded by the walk
+            # pages the same edges the expand handler would have returned.
             urn = params["urn"]
             after = params["after"]
             limit = params["limit"]
             incoming = "<-[r" in cypher
-            edges = self.adjacency.get((urn, "incoming" if incoming else "outgoing"), [])
-            page = [(eid, other, et) for eid, (other, et) in enumerate(edges) if eid >= after][:limit]
+            key = (urn, "incoming" if incoming else "outgoing")
+            if key in self.adjacency:
+                edges = self.adjacency[key]
+                page = [(eid, other, et) for eid, (other, et) in enumerate(edges) if eid >= after][:limit]
+            else:
+                page = []
+                for eid, (s, t, et) in enumerate(self.lineage):
+                    if eid < after:
+                        continue
+                    if incoming and t == urn:
+                        page.append((eid, s, et))
+                    elif not incoming and s == urn:
+                        page.append((eid, t, et))
+                page = page[:limit]
             rows = []
             for eid, other, et in page:
                 if incoming:
@@ -170,6 +209,8 @@ class _TraceFake:
             # `id(r)` (same convention as the paging branch), so two parallel
             # edges on one (source, target) pair stay distinct rows.
             frontier = set(params.get("frontier", []))
+            if any(f"(f:{lbl})" in cypher for lbl in self.fail_expand_labels):
+                raise RuntimeError("expand bucket timed out")
             incoming = "<-[r" in cypher
             rows = []
             for eid, (s, t, et) in enumerate(self.lineage):
@@ -193,7 +234,7 @@ class _TraceFake:
             #   (1) does the focus itself carry lineage? → LEAF focus
             focus = params["urn"]
             lin_nodes = {s for s, _, _ in self.lineage} | {t for _, t, _ in self.lineage}
-            return _Result([[focus, None]] if focus in lin_nodes else [])
+            return _Result([[focus, _label(focus)]] if focus in lin_nodes else [])
         if "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label" in cypher:
             #   (2) which containment descendants carry lineage? → the
             #       CONTAINER case, truncated at $cap (mirrors the real
@@ -201,8 +242,11 @@ class _TraceFake:
             #       Asked of ONE anchor (`$urn`, _collect_lineage_seed) or
             #       of a SET (`$seeds`, _descendant_lineage_seed) — the
             #       same descent either way.
+            if self.fail_seed:
+                raise RuntimeError("descent timed out")
             roots = params.get("seeds") or [params["urn"]]
             cap = params["cap"]
+            after = params.get("after")
             lin_nodes = {s for s, _, _ in self.lineage} | {t for _, t, _ in self.lineage}
             desc, stack = set(), list(roots)
             while stack:
@@ -212,16 +256,24 @@ class _TraceFake:
                         desc.add(c)
                         stack.append(c)
             matched = sorted(u for u in desc if u in lin_nodes)
-            return _Result([[u, None] for u in matched[:cap]])
+            if after is not None:
+                # Keyset resume, INCLUSIVE: the cursor names the next
+                # anchor to consider (`d.urn >= $after`).
+                matched = [u for u in matched if u >= after]
+            return _Result([[u, _label(u)] for u in matched[:cap]])
         raise AssertionError(f"unhandled ro_query: {cypher}")
 
 
-def _make_provider(fake, levels=None, hydrate=False):
-    """`hydrate=True` gives every discovered urn a stub node, so tests can
-    assert on what the response SHIPS (`result.nodes`) rather than only on
-    its edges. It also stubs the containment hydration that would follow —
-    that seam has its own tests; here it would just answer Cypher this fake
-    knows nothing about."""
+def _make_provider(fake, levels=None, hydrate=True):
+    """Every discovered urn gets a stub node, so tests can assert on what the
+    response SHIPS (`result.nodes`) and the closure's hydration honesty rule
+    (a node the walk discovered but hydration did not return is a
+    `nodes_failed` page) sees a provider that answers. The containment
+    hydration that follows is stubbed too — that seam has its own tests;
+    here it would just answer Cypher this fake knows nothing about.
+    `hydrate` is kept for call-site compatibility; `False` no longer strips
+    the stubs (a provider that ships no nodes is a failed provider)."""
+    hydrate = True
     p = FalkorDBProvider(host="x", graph_name="g")
     p._entity_type_levels = levels or {"Roots": 0, "Node": 1}
     p._redis = None
@@ -261,7 +313,7 @@ def _make_provider(fake, levels=None, hydrate=False):
         async def _no_chains(urns):
             return {}
 
-        async def _no_containment_edges(urns, ctypes, chains=None):
+        async def _no_containment_edges(urns, ctypes, chains=None, labels=None):
             return []
 
         p.get_nodes_batch = _hydrate
@@ -582,11 +634,12 @@ def test_expand_raw_lineage_set_never_filters_far_endpoints_in_the_db():
 
     p._ro_query = spy
 
-    out = _run(p._expand_raw_lineage_set(
+    out, failed = _run(p._expand_raw_lineage_set(
         frontier=["hub"], frontier_labels={"hub": "Hub"},
         direction="outgoing", ltypes=["FLOWS"], limit=50, timeout_secs=2.0,
     ))
     assert {r["otherUrn"] for r in out} == {"keep1", "known", "keep2"}
+    assert failed == set()
     assert all("$exclude" not in c for c in seen)
 
 
@@ -605,18 +658,20 @@ def test_collect_lineage_seed_takes_every_lineage_bearing_participant():
     fake.lineage = [("leaf_a", "leaf_b", "FLOWS"), ("dom", "elsewhere", "FLOWS")]
     p = _make_provider(fake)
 
-    seed, capped, _after = _run(p._collect_lineage_seed(
+    seed, failed = _run(p._collect_lineage_seed(
         "dom", "Domain", ["FLOWS"], ["HAS"], cap=10, timeout_secs=2.0,
     ))
     urns = {u for u, _ in seed}
     assert urns == {"dom", "leaf_a", "leaf_b"}
-    assert capped is False
+    assert failed is False
 
 
-def test_collect_lineage_seed_seed_capped_reflects_limit_hit():
-    """seed_capped is False when the descendants query returns fewer rows
-    than its LIMIT, True when it returns exactly `cap` rows (the cap was
-    hit and more may exist)."""
+def test_collect_lineage_seed_enumerates_in_urn_order_up_to_cap():
+    """The seed is an ENUMERATION, not a verdict: descendants come back in urn
+    order, at most `cap` of them, and whether the page is partial is decided
+    by the walk (which asks for `max_nodes + 1` so a capped enumeration always
+    leaves a known pending anchor for the cursor). A cap the estate fits
+    under returns everything; a smaller cap trims the tail, never the head."""
     fake = _TraceFake()
     fake.contain("dom", "leaf_a")
     fake.contain("dom", "leaf_b")
@@ -626,15 +681,22 @@ def test_collect_lineage_seed_seed_capped_reflects_limit_hit():
     ]
     p = _make_provider(fake)
 
-    _, capped_small, _a1 = _run(p._collect_lineage_seed(
+    all_rows, failed = _run(p._collect_lineage_seed(
         "dom", "Domain", ["FLOWS"], ["HAS"], cap=10, timeout_secs=2.0,
     ))
-    assert capped_small is False
+    assert [u for u, _ in all_rows] == ["leaf_a", "leaf_b", "leaf_c"]
+    assert failed is False
 
-    _, capped_hit, _a2 = _run(p._collect_lineage_seed(
-        "dom", "Domain", ["FLOWS"], ["HAS"], cap=3, timeout_secs=2.0,
+    trimmed, _ = _run(p._collect_lineage_seed(
+        "dom", "Domain", ["FLOWS"], ["HAS"], cap=2, timeout_secs=2.0,
     ))
-    assert capped_hit is True
+    assert [u for u, _ in trimmed] == ["leaf_a", "leaf_b"]
+
+    resumed, _ = _run(p._collect_lineage_seed(
+        "dom", "Domain", ["FLOWS"], ["HAS"], cap=2, timeout_secs=2.0, after_urn="leaf_b",
+    ))
+    # Inclusive keyset: the cursor names the next anchor to consider.
+    assert [u for u, _ in resumed] == ["leaf_b", "leaf_c"]
 
 
 def test_page_raw_lineage_single_pages_disjoint_by_edge_id():
@@ -1150,11 +1212,12 @@ def test_trace_closure_rejects_an_unreadable_cursor():
 
 
 def test_trace_closure_a_capped_seed_still_walks_and_still_says_so():
-    """A fat container: 8 lineage-bearing leaves, budget 8. Half the budget is
-    reserved for the WALK, so the seed takes 4 and the hops get the rest — the
-    user sees real lineage, not a board of nodes with no edges on it. The
-    response still admits both partial truths: `seedTruncated` for the leaves it
-    never seeded, `truncationReason` for the caller that reads one flag."""
+    """A fat container: 8 lineage-bearing leaves, budget 8. The walk is
+    degree-exact: it walks as many leaves as FIT (each with its whole hop) and
+    names the first it could not afford as the seed cursor — the user sees real
+    lineage, never a board of nodes with no edges on it. The response still
+    admits both partial truths: `seedTruncated` for the leaves it never walked,
+    `truncationReason` for the caller that reads one flag."""
     fake = _TraceFake()
     for i in range(1, 9):
         fake.contain("dom", f"leaf_{i}")
@@ -1174,23 +1237,25 @@ def test_trace_closure_a_capped_seed_still_walks_and_still_says_so():
     assert result.seed_truncated is True
     assert result.truncated is True
     assert result.truncation_reason == "max_nodes"
-    # THE point of reserving budget: lineage actually came back.
+    # THE point: lineage actually came back, and every leaf that came back
+    # came back WHOLE. Room 7, one leaf + one sink each: three leaves.
     got_edges = {(e.source_urn, e.target_urn) for e in result.edges}
     assert got_edges == {("leaf_1", "sink_1"), ("leaf_2", "sink_2"), ("leaf_3", "sink_3")}
     shipped = {n.urn for n in result.nodes}
-    assert len(shipped) == 8
-    assert "leaf_4" in shipped and "leaf_5" not in shipped   # seed took half, not all
-    # And the frontier is the handful of real walk candidates — leaf_4 was
-    # seeded but never expanded — not one entry per node on the board.
-    assert [(f.urn, f.total_count) for f in result.frontier_down] == [("leaf_4", 1)]
+    assert len(shipped) == 7
+    # A leaf the page could not afford is never shipped half-done — it is the
+    # cursor (inclusive-next), not a board of nodes with no edges on them.
+    assert "leaf_4" not in shipped
+    assert result.frontier_down == []
+    assert result.seed_cursor == "s:leaf_4"
 
 
 def test_trace_closure_a_clean_walk_off_a_capped_seed_is_still_partial():
-    """The seed cap has to survive a walk that goes perfectly. Here every hop
-    completes inside its budget, so nothing in the walk sets a truncation
-    reason — and the answer is STILL partial, because the leaves it started
-    from were only some of the container's. Drop that fold and the response
-    quietly claims to be the whole picture."""
+    """A partial SEED has to survive a walk that goes perfectly. Every walked
+    leaf completes inside its budget, so nothing in the hops sets a truncation
+    reason — and the answer is STILL partial, because the leaves it walked were
+    only some of the container's. Drop that fold and the response quietly
+    claims to be the whole picture."""
     fake = _TraceFake()
     for i in range(1, 5):
         fake.contain("dom", f"leaf_{i}")
@@ -1208,23 +1273,24 @@ def test_trace_closure_a_clean_walk_off_a_capped_seed_is_still_partial():
     result = _run(p.trace_closure(
         "dom", upstream_depth=0, downstream_depth=1,
         lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
-        max_nodes=8, timeout_ms=5000,
+        max_nodes=5, timeout_ms=5000,
     ))
 
     assert {(e.source_urn, e.target_urn) for e in result.edges} == {
         ("leaf_1", "sink_1"), ("leaf_2", "sink_2"),
     }
-    assert result.frontier_down == []       # the walk itself ran out of graph
+    assert result.frontier_down == []       # every walked leaf is whole; nothing half-read
+    assert result.seed_cursor == "s:leaf_3"  # leaf_3 and leaf_4 wait for the next page
     assert result.seed_truncated is True
     assert result.truncated is True
     assert result.truncation_reason == "max_nodes"
 
 
 def test_trace_closure_asks_each_hop_for_only_what_still_fits():
-    """The per-hop LIMIT is the REMAINING budget, not `max_nodes` flat. Asking
-    for the whole budget every hop fetches rows the budget check can only throw
-    away — paid for in the database, dropped in Python, and every dropped row
-    takes its edge down with it."""
+    """Each expansion asks for exactly what the anchors' degrees promise, plus
+    one — the extra row is the concurrent-write tripwire. Asking for the whole
+    budget every hop fetched rows the budget check could only throw away —
+    paid for in the database, dropped in Python, each taking its edge down."""
     fake = _TraceFake()
     fake.lineage = [
         ("f", "a1", "FLOWS"), ("f", "a2", "FLOWS"),
@@ -1247,8 +1313,8 @@ def test_trace_closure_asks_each_hop_for_only_what_still_fits():
         max_nodes=20, timeout_ms=5000,
     ))
 
-    # Hop 1 runs with 1 node in hand, hop 2 with 3.
-    assert limits == [19, 17]
+    # Hop 1: f has out-degree 2 → LIMIT 3. Hop 2: a1 + a2 have 1 each → LIMIT 3.
+    assert limits == [3, 3]
     assert len(result.edges) == 4
     assert result.truncated is False
 
@@ -1285,8 +1351,16 @@ def test_trace_closure_cut_and_exclusion_leave_no_edge_pointing_at_nothing():
     for e in result.edges:
         assert e.source_urn in drawable and e.target_urn in drawable
     got_edges = {(e.source_urn, e.target_urn) for e in result.edges}
+    # Room 3 at hop 2, split between the sides: p1 needs 3 new nodes and does
+    # not fit up's share of 2; d1 needs 2 (the seam into `known` costs nothing)
+    # and is walked WHOLE, including the edges the old ring cut dropped.
     assert ("d1", "known") in got_edges      # the seam survived …
-    assert ("d1", "e1") not in got_edges     # … the cut edge did not
+    assert ("d1", "e1") in got_edges and ("d1", "e2") in got_edges
+    assert ("q1", "p1") not in got_edges     # … and nothing half-read was shipped
+    # p1 is re-offered as a cursor-less cut entry with its real degree.
+    assert [(f.urn, f.total_count, f.next_cursor, f.reason) for f in result.frontier_up] == [
+        ("p1", 3, None, "cut"),
+    ]
 
 
 def test_trace_closure_keeps_parallel_edges_between_one_pair():
@@ -1334,10 +1408,10 @@ def test_trace_closure_frontier_probe_says_unknown_and_drops_the_drained():
 
 def test_trace_closure_a_hop_that_hits_its_own_limit_still_reports_truncated():
     """The silent-truncation trap. One direction, 12 children, max_nodes 8: the
-    hop's own LIMIT stops it at 7 rows, so the per-row budget check never fires
-    and every row that arrived was shipped. Without noticing that the hop came
-    back FULL, the response would claim `truncated: false` while five children
-    it never asked about sat in the graph — the client would believe it had the
+    hub cannot fit the page, so it is PAGED — 7 rows by edge id — and the
+    response says so with a real cursor. Without noticing the page came back
+    FULL, the response would claim `truncated: false` while five children it
+    never asked about sat in the graph — the client would believe it had the
     hub's whole fan-out."""
     fake = _TraceFake()
     fake.lineage = [("hub", f"c{i}", "FLOWS") for i in range(12)]
@@ -1357,10 +1431,10 @@ def test_trace_closure_a_hop_that_hits_its_own_limit_still_reports_truncated():
     assert result.truncated is True
     assert result.truncation_reason == "max_nodes"
     assert [(f.urn, f.total_count) for f in result.frontier_down] == [("hub", 12)]
-    # A node the BUDGET cut off can be resumed, so it says how: page it from
-    # the start. Half its adjacency was left unread and only the cursor path
-    # can finish it — a re-root would just re-run the same truncated hop.
-    assert result.frontier_down[0].next_cursor == "e:0"
+    # A paged hub resumes exactly one past the last edge id it shipped (ids
+    # 0..6) — never `e:0`, which would re-ship the page the client holds.
+    assert result.frontier_down[0].next_cursor == "e:7"
+    assert result.frontier_down[0].reason == "cut"
 
 
 def test_trace_closure_asymmetric_depth_keeps_the_shallow_side_frontier():

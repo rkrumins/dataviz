@@ -639,6 +639,9 @@ interface FocusGraphViewProps {
    *  overrides it for as long as the pointer rests somewhere. */
   isolatedId?: string | null
   reducedMotion: boolean
+  /** A hands-free walk is landing cards (C4, 2026-08-21): the camera
+   *  holds still for arrivals and the board offers a fit instead. */
+  walking?: boolean
   edgeTypeInfo?: EdgeTypeInfoMap
   onSelect: (nodeId: string | null) => void
   /** Stick the isolation on this card, or clear it with null. */
@@ -3894,9 +3897,33 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url)
 }
 
+/**
+ * C4 (2026-08-21): how far OUT the reader may zoom. A one-hop board of a
+ * few hundred partner cards is many screens wide; the old 25% floor
+ * meant "Fit" could not fit it and the reader could not zoom out to see
+ * it either — the board ran off the pane in every direction.
+ */
+export const LENS_MIN_ZOOM = 0.02
+
+/**
+ * Mount only the cards in view. A 2,700-card board re-rendered every
+ * card on every wave of the hands-free walk; React Flow's culling keeps
+ * the DOM to what the pane shows. Off under vitest: jsdom has no
+ * layout, so every card would read as off-screen and every board test
+ * would see an empty pane. Paused during the PNG export, which
+ * rasterizes the DOM and needs every card in it.
+ */
+const CULL_OFFSCREEN = import.meta.env.MODE !== 'test'
+
+/** Two frames: enough for React Flow to mount and measure the cards the
+ *  culling had kept out of the DOM. */
+const twoFrames = () => new Promise<void>(resolve => {
+  requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+})
+
 /** House-styled zoom cluster (React Flow's default chrome doesn't
  *  match the lens). Must render inside <ReactFlow> for useReactFlow. */
-function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayout }: {
+function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayout, onPauseCulling }: {
   reducedMotion: boolean
   exportName?: string
   /** The VISIBLE picture and who it's about — source for the data export. */
@@ -3904,6 +3931,8 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
   focalUrn: string
   /** Present only once something has been dragged. */
   onResetLayout?: () => void
+  /** Bring every card into the DOM for the capture, then let go. */
+  onPauseCulling: (paused: boolean) => void
 }) {
   const rf = useReactFlow()
   const [exporting, setExporting] = useState(false)
@@ -3936,7 +3965,9 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
       ?.querySelector<HTMLElement>('.react-flow__viewport')
     if (!viewport || exporting) return
     setExporting(true)
+    onPauseCulling(true)
     try {
+      await twoFrames()
       const { toPng } = await import('html-to-image')
       // THE HOOK'S BOUNDS, NOT THE BARE FUNCTION'S. The standalone
       // `getNodesBounds` cannot resolve sub-flow geometry without a node
@@ -3971,6 +4002,7 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
       // Rasterization can fail on exotic content (e.g. blocked images);
       // the graph itself is unaffected — just release the button.
     } finally {
+      onPauseCulling(false)
       setExporting(false)
     }
   }
@@ -4085,6 +4117,7 @@ export function FocusGraphView({
   trailUrns = EMPTY_TRAIL,
   trailAdjacent = EMPTY_TRAIL,
   reducedMotion,
+  walking = false,
   edgeTypeInfo,
   onSelect,
   onIsolate: onIsolateProp,
@@ -4586,7 +4619,10 @@ export function FocusGraphView({
   // can read it because IT is one of those children; this can't be).
   // A ref costs nothing until the effect that uses it actually runs.
   const containerRef = useRef<HTMLDivElement | null>(null)
-  useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion, containerRef)
+  const camera = useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion, containerRef, walking)
+  // The PNG export needs every card in the DOM; culling is paused for
+  // the capture (see `CULL_OFFSCREEN`).
+  const [cullPaused, setCullPaused] = useState(false)
 
   // The PEEK belongs to a ROW: a click on one asks "what is this", and
   // this is the answer, beside it. Top-level cards keep the lens's own
@@ -4666,8 +4702,9 @@ export function FocusGraphView({
           onInit={setRf}
           fitView
           fitViewOptions={{ padding: 0.15, maxZoom: FIT_MAX_ZOOM }}
-          minZoom={0.25}
+          minZoom={LENS_MIN_ZOOM}
           maxZoom={2}
+          onlyRenderVisibleElements={CULL_OFFSCREEN && !cullPaused}
           panOnDrag
           zoomOnScroll
           zoomOnDoubleClick={false}
@@ -4728,6 +4765,7 @@ export function FocusGraphView({
             graph={graph}
             focalUrn={focalId}
             onResetLayout={moved.size > 0 ? resetLayout : undefined}
+            onPauseCulling={setCullPaused}
           />
           {peekCard && (
             <LensPeek
@@ -4814,6 +4852,18 @@ export function FocusGraphView({
           )}
         </ReactFlow>
       </ReactFlowProvider>
+      {/* C4: cards landed while the walk was drawing and the camera held
+          its place — the fit is OFFERED, never taken. */}
+      {camera.grew && (
+        <button
+          type="button"
+          onClick={camera.fitAll}
+          className="absolute top-3 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-1.5 rounded-full border border-accent-lineage/30 bg-canvas-elevated px-3 py-1 text-[11px] font-medium text-accent-lineage shadow-md hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+        >
+          <LucideIcons.Maximize2 className="w-3 h-3" />
+          Board grew · Fit
+        </button>
+      )}
       </RowCursorStoreContext.Provider>
       </FollowContext.Provider>
       </TrailStoreContext.Provider>

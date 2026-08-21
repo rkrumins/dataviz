@@ -37,7 +37,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useRelationshipTypes } from '@/store/schema'
 import { relationshipLabel } from '@/lib/relationshipLabel'
-import type { WalkEntry, LensWalkDir, FullWalkStatus } from '@/hooks/useLensWalk'
+import type { WalkEntry, LensWalkDir, WalkProgress } from '@/hooks/useLensWalk'
 import { emptyWalkModel, type LensWalkNode } from './lens/closure-adapter'
 import {
   boundaryFrontierFilter,
@@ -218,9 +218,9 @@ export interface LensWalkApi {
    *  retrying one is the same click on the same pill, so the ⊕ simply
    *  calls `extend` again and the two can never drift apart. */
   retry: (focusUrn: string) => void
-  /** Page the FOCUS's own capped contents (the model's seedCursor) —
-   *  the "Load more contents" affordance on the floors strip. Optional
-   *  so older hosts keep compiling. */
+  /** Page the FOCUS's own capped contents (the model's seedCursor). The
+   *  walk hook does this by itself now; kept optional so older hosts keep
+   *  compiling. */
   pageSeeds?: (focusUrn: string) => void
 }
 
@@ -297,15 +297,20 @@ export interface LineageLensProps {
   onLocateAll?: (nodeIds: string[]) => void | Promise<void>
   /** Escalate to a full server trace from the focal node (closes the lens). */
   onTrace?: (nodeId: string) => void
-  /** Full walk (trace mode) — the hook auto-follows every frontier; the
-   *  lens only SAYS where the walk stands and offers its two controls.
-   *  All four absent = the feature is not wired, nothing renders. */
+  /** The walk completes HANDS-FREE in both modes (2026-08-21); the lens
+   *  only SAYS where it stands — the immediate lineage loading, the full
+   *  flow walking, complete — and offers the two valves: the one-time
+   *  memory checkpoint ("Continue") and a retry for failed steps. Absent =
+   *  the feature is not wired, nothing renders. */
   fullWalkEnabled?: boolean
-  fullWalkStatus?: FullWalkStatus | null
-  /** Switch between One hop (server-lazy ⊕ walking) and Full flow. */
+  walkProgress?: WalkProgress | null
+  /** Switch between One hop (the focus's immediate lineage, then ⊕ walking)
+   *  and Full flow. */
   onFullWalkToggle?: (on: boolean) => void
-  /** Grant a budget-capped walk another round / re-arm a stalled one. */
-  onFullWalkContinue?: () => void
+  /** Lift the one-time memory checkpoint. */
+  onWalkContinue?: () => void
+  /** Give failed walk steps one more attempt. */
+  onWalkRetry?: () => void
   /** Feature-flagged out-of-view preview for the focal node: partners
    *  that exist in the data source but are outside this view's scope.
    *  Advisory only — never part of the canvas. */
@@ -334,9 +339,10 @@ export function LineageLens({
   onOpenDetails,
   onTrace,
   fullWalkEnabled = false,
-  fullWalkStatus = null,
+  walkProgress = null,
   onFullWalkToggle,
-  onFullWalkContinue,
+  onWalkContinue,
+  onWalkRetry,
   externalPreview,
 }: LineageLensProps) {
   const { entries, cursor } = history
@@ -512,18 +518,21 @@ export function LineageLens({
   // (pass-through interiors) — the invariant stage is the global
   // enforcement that it didn't remove more than that, checked once,
   // after everything, rather than trusted per-pass.
-  // Full walk: a fetch the DRIVER fired has no click to open a reveal
-  // page (an ⊕ claims its room at click time — see extendWalk), so the
-  // LAYOUT admits every walked node via a derived pinned set. Derived,
-  // never written back into the view state: the share link and the
-  // user's own placements stay theirs, and switching back to "One hop"
-  // returns to the classic reveal-governed picture.
+  // EVERYTHING FETCHED IS DRAWN (user ruling, 2026-08-21). The layout's
+  // reveal budget used to admit twelve root-most groups per direction and
+  // hold the rest behind a "+N" pill — even though the walk had already
+  // brought them back — which read as "One hop doesn't show my immediate
+  // lineage". Now every walked node is admitted through a derived pinned
+  // set in BOTH modes; the reveal budget only ever governs what is NOT in
+  // hand, which after the hands-free hop-1 is nothing. Derived, never
+  // written back into the view state: the share link and the user's own
+  // placements stay theirs.
   const layoutView = useMemo(() => {
-    if (!fullWalkEnabled || !model || model.nodes.length === 0) return view
+    if (!model || model.nodes.length === 0) return view
     const pinned = new Set(view.pinned)
     for (const n of model.nodes) pinned.add(n.urn)
     return { ...view, pinned }
-  }, [fullWalkEnabled, model, view])
+  }, [model, view])
 
   const layout = useMemo(() => buildFocusLayout({
     sg,
@@ -1351,18 +1360,24 @@ export function LineageLens({
                 {walkStatus === 'loading' && (
                   <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/70" aria-label="Fetching lineage from the data source" />
                 )}
-                {/* Full walk — where the trace stands, off the same model
-                    the board draws. Walking gets its own spinner because
-                    the initial fetch's one above stops at 'done' while
-                    the frontier ops are still landing hops. */}
-                {fullWalkStatus?.walking && (
-                  <span className="flex items-center gap-1 text-accent-lineage/90">
+                {/* Where the walk stands, off the same model the board
+                    draws. Counts tick — no percent, no total (the total is
+                    unknowable, a percent would lie). The phases get their
+                    own spinner because the initial fetch's one above stops
+                    at 'done' while pages are still landing. */}
+                {(walkProgress?.phase === 'seeding' || walkProgress?.phase === 'walking') && (
+                  <span className="flex items-center gap-1 text-accent-lineage/90" data-testid="lens-walk-narration">
                     <LucideIcons.Loader2 className="w-3 h-3 animate-spin" />
-                    {`tracing the full flow · ${model?.nodes.length ?? 0} nodes`}
+                    {walkProgress.phase === 'walking'
+                      ? `walking the full flow · ${walkProgress.nodes.toLocaleString()} nodes · ${walkProgress.flows.toLocaleString()} flows · ${walkProgress.requests} requests`
+                      : `loading the immediate lineage · ${walkProgress.nodes.toLocaleString()} nodes · ${walkProgress.flows.toLocaleString()} flows · ${walkProgress.requests} requests`}
                   </span>
                 )}
-                {fullWalkStatus?.exhausted && (
+                {walkProgress?.phase === 'done' && fullWalkEnabled && (
                   <span className="text-ink-muted/80">full flow drawn</span>
+                )}
+                {walkProgress?.phase === 'done' && !fullWalkEnabled && walkProgress.requests > 1 && (
+                  <span className="text-ink-muted/80">immediate lineage complete</span>
                 )}
               </p>
             </div>
@@ -1876,70 +1891,38 @@ export function LineageLens({
               </button>
             </div>
           )}
-          {/* The partial-picture strip. The old copy announced a cap in
-              engine jargon ("stopped early (max_nodes)") and offered no way
-              onward — read as "your lineage is gone". This one states what
-              IS on the board, says more exists, and hands over the levers:
-              page the focus's own contents (seedCursor), or hand the whole
-              neighbourhood to the full-flow walker ("Load everything" =
-              the header's Full flow switch — counts then resolve as the
-              walk drains every frontier, with the budget/stall strips
-              below narrating the journey). */}
-          {walkStatus === 'done' && (model?.truncated || model?.seedTruncated) && (
-            <div className="flex items-center gap-2 px-4 py-1.5 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] text-[10.5px] text-ink-muted">
-              <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
-              <span>
-                {`Partial picture — ${model?.upstreamUrns.size ?? 0} upstream · ${model?.downstreamUrns.size ?? 0} downstream on the board`}
-                {model?.seedTruncated ? ', contents partially loaded' : ''}
-                {'. More exists at the source.'}
-              </span>
-              <span className="ml-auto flex items-center gap-3 flex-shrink-0">
-                {model?.seedCursor && walkApi.pageSeeds && nodeId && (
-                  <button
-                    type="button"
-                    onClick={() => walkApi.pageSeeds?.(nodeId)}
-                    className="font-semibold hover:underline"
-                  >
-                    Load more contents
-                  </button>
-                )}
-                {onFullWalkToggle && !fullWalkEnabled && (
-                  <button
-                    type="button"
-                    onClick={() => onFullWalkToggle(true)}
-                    className="font-semibold hover:underline"
-                  >
-                    Load everything
-                  </button>
-                )}
-              </span>
-            </div>
-          )}
-          {/* Full walk stopped short of the ends — say WHY and offer the
-              way onward, same narration contract as the strips above. */}
-          {fullWalkStatus?.budgetHit && (
+          {/* The walk's two valves. There is no budget strip any more: the
+              immediate lineage and the full flow both complete by
+              themselves (the header chip narrates, counts ticking). What
+              can still stop a walk is the one-time MEMORY checkpoint —
+              asked once, lifted for good — and a failed step, which is
+              never retried silently. */}
+          {walkProgress?.phase === 'checkpoint' && (
             <div className="flex items-center gap-2 px-4 py-1.5 border-b border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
               <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
-              <span>{`The flow continues past ${model?.nodes.length ?? 0} nodes — the walk paused at its safety budget.`}</span>
-              {onFullWalkContinue && (
+              <span>{`This flow is larger than ${walkProgress.nodes.toLocaleString()} nodes. Loading the rest may slow this browser — continue?`}</span>
+              {onWalkContinue && (
                 <button
                   type="button"
-                  onClick={onFullWalkContinue}
+                  onClick={onWalkContinue}
                   className="ml-auto flex-shrink-0 font-semibold hover:underline"
                 >
-                  Keep walking
+                  Continue
                 </button>
               )}
             </div>
           )}
-          {fullWalkStatus?.stalled && (
+          {walkProgress?.phase === 'error' && walkStatus === 'done' && (
             <div className="flex items-center gap-2 px-4 py-1.5 border-b border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
               <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
-              <span>Part of the flow could not be walked — some steps failed at the data source.</span>
-              {onFullWalkContinue && (
+              <span>
+                {`Part of the lineage could not be loaded — ${walkProgress.pending.toLocaleString()} step${walkProgress.pending === 1 ? '' : 's'} failed at the data source.`}
+                {` ${model?.upstreamUrns.size ?? 0} upstream · ${model?.downstreamUrns.size ?? 0} downstream are on the board.`}
+              </span>
+              {onWalkRetry && (
                 <button
                   type="button"
-                  onClick={onFullWalkContinue}
+                  onClick={onWalkRetry}
                   className="ml-auto flex-shrink-0 font-semibold hover:underline"
                 >
                   Try again
@@ -1985,6 +1968,9 @@ export function LineageLens({
                 trailUrns={trailUrns}
                 trailAdjacent={trailAdjacent}
                 reducedMotion={reducedMotion}
+                // C4: while the hands-free walk lands cards the camera
+                // holds its place and the board offers a fit instead.
+                walking={walkProgress?.phase === 'loading' || walkProgress?.phase === 'seeding' || walkProgress?.phase === 'walking'}
                 edgeTypeInfo={edgeTypeInfo}
                 onSelect={setSelection}
                 onIsolate={setIsolated}

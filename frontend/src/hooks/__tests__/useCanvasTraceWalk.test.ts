@@ -92,7 +92,7 @@ describe('useCanvasTraceWalk', () => {
     act(() => result.current.start('F'))
     expect(result.current.isTracing).toBe(true)
 
-    await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
     expect(modelNodeUrns(result.current.walkEntry?.model)).toEqual(['F', 'PLAT', 'T1', 'colA'])
     expect(result.current.walkEntry?.model?.lineageEdges.map(e => e.id)).toEqual(['e1'])
 
@@ -118,7 +118,7 @@ describe('useCanvasTraceWalk', () => {
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     act(() => result.current.start('F'))
 
-    await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
     expect(traceClosure).toHaveBeenCalledTimes(2)
     expect(modelNodeUrns(result.current.walkEntry?.model)).toEqual(['F', 'PLAT', 'T1', 'colA', 'colB'])
 
@@ -175,10 +175,10 @@ describe('useCanvasTraceWalk', () => {
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     expect(result.current.isTracing).toBe(false)
     expect(result.current.walkEntry).toBeNull()
-    expect(result.current.fullWalkStatus).toBeNull()
+    expect(result.current.progress).toBeNull()
   })
 
-  it('budget journey: cap → Keep walking → exhausted, the model complete and the store still empty of it', async () => {
+  it('a wide flow walks to completion hands-free — no budget, no "Keep walking" — and the store still never moves', async () => {
     const nodes: GraphNode[] = [gn('F', 'dataset')]
     const containment: Array<ReturnType<typeof holds>> = []
     for (let i = 0; i < 1100; i++) {
@@ -189,7 +189,7 @@ describe('useCanvasTraceWalk', () => {
       F: () => closureResult({
         focus: f('F'), nodes, containmentEdges: containment,
         upstreamUrns: new Set(nodes.map(n => n.urn)),
-        frontierUp: [{ urn: 'n0', totalCount: 1, nextCursor: null }],
+        frontierUp: [{ urn: 'n0', totalCount: 1, nextCursor: null, reason: 'depth' }],
       }),
       n0: () => closureResult({
         focus: f('n0'), nodes: [gn('deeper')], edges: [hop('deeper', 'n0', 'e-deep')],
@@ -200,12 +200,12 @@ describe('useCanvasTraceWalk', () => {
     const { result } = renderHook(() => useCanvasTraceWalk(provider))
     act(() => result.current.start('F'))
 
-    await waitFor(() => expect(result.current.fullWalkStatus?.budgetHit).toBe(true))
-    expect(traceClosure).toHaveBeenCalledTimes(1)
-
-    act(() => result.current.continueWalk())
-    await waitFor(() => expect(result.current.fullWalkStatus?.exhausted).toBe(true))
+    // 1,101 nodes used to park the walk at a 1,000-node budget and wait for
+    // a click. Now the depth entry is drained by itself.
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+    expect(traceClosure).toHaveBeenCalledTimes(2)
     expect(modelNodeUrns(result.current.walkEntry?.model)).toContain('deeper')
+    expect(result.current.progress).toMatchObject({ phase: 'done', pending: 0, requests: 2 })
 
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
     expect(writes.count).toBe(0)

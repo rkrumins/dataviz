@@ -500,21 +500,22 @@ async def test_stale_result_caches_with_negative_ttl_and_no_lkg() -> None:
     assert not any(graph_cache._LKG_PREFIX in k for k in keys)
 
 
-def _closure(frontier: list) -> Any:
+def _closure(frontier: list, **overrides: Any) -> Any:
     """A real TraceClosureResult, because the heuristic reads its fields by
     name — a stand-in model would pass while the real one is spelled
     differently."""
     from backend.common.models.graph import (
         GraphNode, TraceClosureResult, TraceFocus,
     )
-    return TraceClosureResult(
-        nodes=[GraphNode(urn="u1", entityType="dataset", displayName="u1")],
-        edges=[],
-        focus=TraceFocus(urn="u1", level=0, entityType="dataset"),
-        effectiveLevel=0,
-        frontierUp=frontier,
-        frontierDown=[],
-    )
+    return TraceClosureResult(**{
+        "nodes": [GraphNode(urn="u1", entityType="dataset", displayName="u1")],
+        "edges": [],
+        "focus": TraceFocus(urn="u1", level=0, entityType="dataset"),
+        "effectiveLevel": 0,
+        "frontierUp": frontier,
+        "frontierDown": [],
+        **overrides,
+    })
 
 
 async def _cache_closure(result: Any):
@@ -549,6 +550,41 @@ async def test_a_closure_whose_probe_never_ran_is_not_pinned_for_the_full_ttl() 
     assert redis.set.await_count == 1                       # no LKG mirror
     assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
     assert not any(graph_cache._LKG_PREFIX in c.args[0] for c in redis.set.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_a_max_nodes_page_is_complete_by_contract_and_cached_for_the_full_ttl() -> None:
+    """The degree-exact walk makes a budget-cut page a pure function of
+    (graph, request): every anchor it ships is whole, and the cursor names
+    exactly where the next page starts. Such a page is THE answer to that
+    request and deserves the full TTL — it used to be re-TTL'd to the
+    negative window like a degraded one, so page one of every wide focus
+    was never a cache hit."""
+    from backend.common.models.graph import TraceFrontierNode
+
+    redis = await _cache_closure(_closure(
+        [TraceFrontierNode(urn="a", totalCount=3, reason="cut")],
+        truncated=True, truncationReason="max_nodes", seedTruncated=True, seedCursor="s:b",
+    ))
+
+    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["timeout", "seed_failed", "nodes_failed", "ancestors_failed"])
+async def test_a_failed_page_is_not_pinned(reason: str) -> None:
+    """A FAILURE is still degraded: the same request may well succeed in a
+    moment, and pinning the failed page would serve the failure for the
+    full TTL. (The walk reports failures ahead of max_nodes for exactly
+    this reason.)"""
+    from backend.common.models.graph import TraceFrontierNode
+
+    redis = await _cache_closure(_closure(
+        [TraceFrontierNode(urn="a", totalCount=3, reason="cut")],
+        truncated=True, truncationReason=reason,
+    ))
+
+    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
 
 
 @pytest.mark.asyncio

@@ -172,6 +172,7 @@ import { ExportDialog } from '@/features/import-export/ExportDialog'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
+import { TraceWalkIndicator } from './TraceWalkIndicator'
 
 // Re-export for backward compatibility
 export { defaultReferenceModelLayers } from './constants'
@@ -1997,9 +1998,16 @@ export function ContextViewCanvas({
       traceEdges: new Set(traceModel.lineageEdges.map(e => e.id ?? `${e.sourceUrn}>${e.targetUrn}`)),
       lineageResult: null,
       isInherited: false,
-      truncated: traceModel.truncated || (canvasTrace.fullWalkStatus?.budgetHit ?? false),
-      truncationReason: traceModel.truncationReason
-        ?? (canvasTrace.fullWalkStatus?.budgetHit ? 'max_nodes' : undefined),
+      // Partiality is DERIVED from the model (what is still owed), never a
+      // budget park — there is no budget. The dock's truncation notice
+      // therefore only speaks for a walk that genuinely lost something
+      // (a failed step) or is parked at the memory checkpoint.
+      truncated: traceModel.truncated
+        || canvasTrace.progress?.phase === 'checkpoint'
+        || canvasTrace.progress?.phase === 'error',
+      truncationReason: canvasTrace.progress?.phase === 'checkpoint'
+        ? 'checkpoint'
+        : (canvasTrace.progress?.phase === 'error' ? (canvasTrace.progress.error ?? 'timeout') : (traceModel.truncationReason ?? undefined)),
     }
     return {
       ...trace,
@@ -2007,7 +2015,8 @@ export function ContextViewCanvas({
       focusId: tracedNodeId,
       result,
       error: canvasTrace.walkEntry?.status === 'error' ? canvasTrace.walkEntry.error : null,
-      isLoading: canvasTrace.walkEntry?.status === 'loading' || (canvasTrace.fullWalkStatus?.walking ?? false),
+      isLoading: canvasTrace.walkEntry?.status === 'loading'
+        || canvasTrace.progress?.phase === 'seeding' || canvasTrace.progress?.phase === 'walking',
       upstreamCount: traceParticipants.upstream.length,
       downstreamCount: traceParticipants.downstream.length,
       showUpstream: traceShowUpstream,
@@ -2056,8 +2065,9 @@ export function ContextViewCanvas({
       // that stopped short of exhaustion.
       retrace: async () => {
         if (canvasTrace.walkEntry?.status === 'error') { canvasTrace.retryWalk(); return }
-        const walk = canvasTrace.fullWalkStatus
-        if (walk?.budgetHit || walk?.stalled) canvasTrace.continueWalk()
+        const phase = canvasTrace.progress?.phase
+        if (phase === 'checkpoint') canvasTrace.continuePastCheckpoint()
+        else if (phase === 'error') canvasTrace.retryWalk()
       },
     }
   }, [traceActive, traceModel, tracedNodeId, trace, canvasTrace, traceParticipants, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown, dockHistoryEntries, traceHistory, traceHistoryGo, recordTraceView])
@@ -4243,6 +4253,31 @@ export function ContextViewCanvas({
             />
         )}
 
+        {/* THE CAPSULE — the board narrates while the trace computes (D4).
+            Visible from the FIRST click: the session opens instantly but the
+            overlay only draws once the model holds the focus, and the walk
+            then runs hands-free for as long as the flow is wide. Pointer
+            events only on its own buttons (the board underneath stays
+            interactive), and — like the dock — no AnimatePresence: it
+            unmounts with the trace. Keyed on the focus so a new trace
+            re-arms the finished beat. */}
+        {traceActive && canvasTrace.progress && (
+          <TraceWalkIndicator
+            key={tracedNodeId ?? ''}
+            phase={canvasTrace.progress.phase}
+            nodes={canvasTrace.progress.nodes}
+            flows={canvasTrace.progress.flows}
+            requests={canvasTrace.progress.requests}
+            pending={canvasTrace.progress.pending}
+            error={canvasTrace.progress.error}
+            upCount={overlay.view?.counts.up ?? 0}
+            downCount={overlay.view?.counts.down ?? 0}
+            onCancel={exitCanvasTrace}
+            onContinue={canvasTrace.continuePastCheckpoint}
+            onRetry={canvasTrace.retryWalk}
+          />
+        )}
+
 
         {/* Aggregation truncation banner — backend signal that the visible
             edge set was capped. The "computing" and "last computed Xh ago"
@@ -4597,9 +4632,10 @@ export function ContextViewCanvas({
             void locateManyOnCanvas(ids)
           }}
           fullWalkEnabled={lensFullWalk}
-          fullWalkStatus={lensFocal ? lensWalk.fullWalkFor(lensFocal) : null}
+          walkProgress={lensFocal ? lensWalk.walkProgressFor(lensFocal) : null}
           onFullWalkToggle={setLensFullWalk}
-          onFullWalkContinue={() => { if (lensFocal) lensWalk.continueFullWalk(lensFocal) }}
+          onWalkContinue={() => { if (lensFocal) lensWalk.continuePastCheckpoint(lensFocal) }}
+          onWalkRetry={() => { if (lensFocal) lensWalk.retryWalk(lensFocal) }}
         />
 
         {/* Blank (hand-built) model guidance — the full-canvas hero on a truly

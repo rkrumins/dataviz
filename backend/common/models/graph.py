@@ -352,6 +352,13 @@ class TraceFrontierNode(BaseModel):
     urn: str
     total_count: Optional[int] = Field(None, alias="totalCount")   # full-graph degree that direction; None = unknown
     next_cursor: Optional[str] = Field(None, alias="nextCursor")   # only on the paging shape
+    # WHY the node is on the frontier. ``cut``: the node budget or the
+    # deadline stopped the walk before this anchor — the client completes it
+    # hands-free (re-root via ``seedUrns``, or page by ``nextCursor`` for a
+    # hub). ``depth``: the requested depth ended here — the next hop, offered
+    # as a pill, never drained by a one-hop client. Additive: old payloads
+    # carry None.
+    reason: Optional[Literal["cut", "depth"]] = None
 
     class Config:
         populate_by_name = True

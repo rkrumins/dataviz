@@ -40,6 +40,7 @@ import {
     focusAncestorChain,
     projectLensEdges,
     visibleLensNodes,
+    type LensEdgeLike,
     type LensSubgraph,
     type LensSubgraphNode,
     type ProjectedLensEdge,
@@ -515,6 +516,29 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const seed = new Set(population)
 
     const groupCache = new Map<string, RevealGroup[]>()
+    // Lineage hops by endpoint, built once per layout on first use.
+    let bySourceIdx: Map<string, LensEdgeLike[]> | null = null
+    let byTargetIdx: Map<string, LensEdgeLike[]> | null = null
+    const hopsBySource = (): Map<string, LensEdgeLike[]> => {
+        if (bySourceIdx === null) {
+            bySourceIdx = new Map()
+            for (const hop of sg.lineageEdges) {
+                const list = bySourceIdx.get(hop.sourceUrn)
+                if (list) list.push(hop); else bySourceIdx.set(hop.sourceUrn, [hop])
+            }
+        }
+        return bySourceIdx
+    }
+    const hopsByTarget = (): Map<string, LensEdgeLike[]> => {
+        if (byTargetIdx === null) {
+            byTargetIdx = new Map()
+            for (const hop of sg.lineageEdges) {
+                const list = byTargetIdx.get(hop.targetUrn)
+                if (list) list.push(hop); else byTargetIdx.set(hop.targetUrn, [hop])
+            }
+        }
+        return byTargetIdx
+    }
     /**
      * Groups of not-yet-shown neighbours reachable from `near`, ranked.
      * Weight is raw hops — the wire the reveal would draw.
@@ -538,15 +562,19 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const hit = groupCache.get(cacheKey)
         if (hit) return hit
         const byRoot = new Map<string, { weight: number; members: Map<string, number> }>()
-        for (const hop of sg.lineageEdges) {
-            const from = dir === 'in' ? hop.targetUrn : hop.sourceUrn
+        // Only the subtree's OWN hops, by endpoint index — scanning every
+        // lineage edge per card was O(cards × edges) on a 20k-node model.
+        const index = dir === 'in' ? hopsByTarget() : hopsBySource()
+        for (const from of subtree) {
+            for (const hop of index.get(from) ?? []) {
             const far = dir === 'in' ? hop.sourceUrn : hop.targetUrn
-            if (!subtree.has(from) || subtree.has(far) || seed.has(far)) continue
+            if (subtree.has(far) || seed.has(far)) continue
             const root = rootOf(far)
             const group = byRoot.get(root) ?? { weight: 0, members: new Map<string, number>() }
             group.weight += 1
             group.members.set(far, (group.members.get(far) ?? 0) + 1)
             byRoot.set(root, group)
+            }
         }
         const ranked = [...byRoot.entries()]
             .map(([root, g]) => ({
@@ -633,7 +661,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // pinned entity reaches the board through its own container exactly
     // the way any other admission does, and becomes a full citizen of
     // everything downstream (weight, rank, wires, Reach).
-    for (const urn of view.pinned) admit(urn)
+    const pinnedRoots = new Set<string>()
+    for (const urn of view.pinned) {
+        if (!model.has(urn)) continue
+        admit(urn)
+        pinnedRoots.add(rootOf(urn))
+    }
 
     // ── the column a card sits in: its signed hop distance ───────────
 
@@ -722,6 +755,20 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const isLeafHopCarrier = (urn: string): boolean =>
         carriesHop.has(urn) && (nodeOf(urn)?.children.length ?? 0) === 0
 
+    const holdsCache = new Map<string, boolean>()
+    /** Does anything in this entity's population subtree carry a hop? The
+     *  containers above that grain are chrome the answer sits under. */
+    const holdsHopCarrier = (urn: string): boolean => {
+        const hit = holdsCache.get(urn)
+        if (hit !== undefined) return hit
+        let out = false
+        for (const inside of subtreeOf(urn)) {
+            if (inside !== urn && population.has(inside) && carriesHop.has(inside)) { out = true; break }
+        }
+        holdsCache.set(urn, out)
+        return out
+    }
+
     /** Levels the layout opens by itself, and — of those — the ones it
      *  opens WITHOUT drawing, because they are chrome the answer sits
      *  under. Separate sets: a container holding rows is opened AND
@@ -749,19 +796,30 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // counted, searchable and paged in place — and draw it. Never
         // above the focus, where nothing is drawn at all (R1).
         if (!above && kids.some(isLeafHopCarrier)) { spine.add(urn); return }
-        // Otherwise chrome, and seen through: a level above the focus, or
-        // a PASS-THROUGH the data source has not itself named as a
-        // lineage end. Sticky, because the population only grows: a level
-        // once drawn through stays drawn through for this view state, or
-        // the arrival of a second child would turn it into a card and
-        // swallow the one already on the board.
-        if (above || view.walkedThrough.has(urn) || (kids.length === 1 && !carriesHop.has(urn))) {
+        // Otherwise chrome, and seen through: a level above the focus, a
+        // PASS-THROUGH the data source has not itself named as a lineage
+        // end, or — R1, partners at THEIR OWN grain — any container whose
+        // hop-carrying grain lies deeper (a layer holding forty partner
+        // tables is breadcrumb chrome; the tables are the cards). Sticky,
+        // because the population only grows: a level once drawn through
+        // stays drawn through for this view state, or the arrival of a
+        // second child would turn it into a card and swallow the one
+        // already on the board.
+        const holding = kids.filter(holdsHopCarrier)
+        if (above || view.walkedThrough.has(urn) || (kids.length === 1 && !carriesHop.has(urn))
+            || (!carriesHop.has(urn) && holding.length > 0)) {
             spine.add(urn)
             walkedThrough.add(urn)
-            for (const kid of kids) openThrough(kid)
+            for (const kid of (holding.length > 0 ? holding : kids)) openThrough(kid)
         }
     }
     for (const group of admittedGroups) openThrough(group.root)
+    // A PIN OPENS THE WAY TO ITS ENTITY exactly as a reveal does. Pinned
+    // entities used to be admitted to the population and then left inside
+    // CLOSED roots: the spine walk ran only for reveal-admitted groups, so
+    // a one-hop walk of 20,212 nodes drew 13 cards (live, 2026-08-21 —
+    // every partner layer a closed root with its tables hidden inside).
+    for (const root of pinnedRoots) openThrough(root)
     // The focus's own contents deliberately do NOT join the walk. FOCUS
     // +1 (2026-08-19, re-refined the same day): the focus's frame shows
     // its direct children as CLOSED rows with honest counts, and that is
@@ -1017,50 +1075,45 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     }
 
     /**
-     * WHICH ROW OF `frameUrn` SPEAKS FOR THIS ENDPOINT — the child of
-     * that container the endpoint is, or sits inside. Null when the
-     * endpoint is outside it entirely.
-     *
-     * A hop inside an opened warehouse can name a COLUMN two levels
-     * down; the frame's own arrangement is about its rows, so the hop is
-     * asked which row it enters and leaves by, never at what depth.
-     */
-    const rowUnder = (frameUrn: string, endpoint: string): string | null => {
-        let cursor: string | null = endpoint
-        const guard = new Set<string>()
-        while (cursor && !guard.has(cursor)) {
-            const parent: string | null = model.get(cursor)?.parent ?? null
-            if (parent === frameUrn) return cursor
-            guard.add(cursor)
-            cursor = parent
-        }
-        return null
-    }
-
-    /**
      * The lineage that stays INSIDE a container, stated in its own rows —
      * what `frame-flow` arranges the rows by and routes through the
      * gutter. Deduped by row pair: two columns of one table feeding two
      * columns of another is ONE flow between those two rows, which is
      * what the reader sees and what the lane allocator must budget for.
      */
-    const internalHopsCache = new Map<string, InternalEdgeRef[]>()
+    // ONE PASS, NOT ONE PER FRAME (2026-08-21). A hop is internal to exactly
+    // ONE container — the lowest ancestor the two endpoints share: above it
+    // both endpoints sit in the same row (`s === t`), below it one is
+    // outside. Scanning every projected bundle per frame was O(frames ×
+    // bundles): a one-hop walk of a 2,935-column table (~500 frames, ~3k
+    // bundles) spent half a second here per merge. Indexed lazily, once.
+    let internalHopsIndex: Map<string, InternalEdgeRef[]> | null = null
     const internalHopsOf = (frameUrn: string): InternalEdgeRef[] => {
-        const hit = internalHopsCache.get(frameUrn)
-        if (hit) return hit
-        const out: InternalEdgeRef[] = []
-        const seen = new Set<string>()
-        for (const hop of projected) {
-            const s = rowUnder(frameUrn, hop.sourceUrn)
-            const t = rowUnder(frameUrn, hop.targetUrn)
-            if (!s || !t || s === t) continue
-            const id = `${s}>${t}`
-            if (seen.has(id)) continue
-            seen.add(id)
-            out.push({ id, source: s, target: t })
+        if (internalHopsIndex === null) {
+            internalHopsIndex = new Map()
+            const seenByFrame = new Map<string, Set<string>>()
+            for (const hop of projected) {
+                // Root-first chains; walk them in step from the root and stop
+                // at the first divergence — that is the row pair, under the
+                // last shared ancestor.
+                const a = [...ancestorsOf(hop.sourceUrn), hop.sourceUrn]
+                const b = [...ancestorsOf(hop.targetUrn), hop.targetUrn]
+                let i = 0
+                while (i < a.length && i < b.length && a[i] === b[i]) i++
+                if (i === 0 || i >= a.length || i >= b.length) continue   // no shared container, or one is the other's ancestor
+                const frame = a[i - 1]!
+                const s = a[i]!, t = b[i]!
+                const id = `${s}>${t}`
+                let seen = seenByFrame.get(frame)
+                if (!seen) { seen = new Set(); seenByFrame.set(frame, seen) }
+                if (seen.has(id)) continue
+                seen.add(id)
+                let list = internalHopsIndex.get(frame)
+                if (!list) { list = []; internalHopsIndex.set(frame, list) }
+                list.push({ id, source: s, target: t })
+            }
         }
-        internalHopsCache.set(frameUrn, out)
-        return out
+        return internalHopsIndex.get(frameUrn) ?? []
     }
 
     const needle = query.trim().toLowerCase()
@@ -1068,19 +1121,33 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
     /** Raw hops this card's subtree carries to the rest of the picture —
      *  what the wires into it add up to, and the rank of its slot. */
-    const weightCache = new Map<string, number>()
-    const weightOf = (urn: string): number => {
-        const hit = weightCache.get(urn)
-        if (hit !== undefined) return hit
-        const sub = subtreeOf(urn)
-        let n = 0
+    // CROSSINGS, INDEXED ONCE (2026-08-21). "Hops that cross this entity's
+    // subtree boundary" used to be a scan of every lineage edge per card —
+    // O(cards × edges), 1.3 s per merge on the wide table's 20k-node model.
+    // A hop crosses the boundary of exactly the ancestors-or-self of one
+    // endpoint that are NOT ancestors-or-self of the other, so one pass over
+    // the edges, walking two short chains each, counts every entity at once.
+    let crossIndex: Map<string, { in: number; out: number }> | null = null
+    const crossings = (): Map<string, { in: number; out: number }> => {
+        if (crossIndex !== null) return crossIndex
+        crossIndex = new Map()
+        const bump = (urn: string, key: 'in' | 'out') => {
+            let c = crossIndex!.get(urn)
+            if (!c) { c = { in: 0, out: 0 }; crossIndex!.set(urn, c) }
+            c[key] += 1
+        }
         for (const hop of sg.lineageEdges) {
             if (!population.has(hop.sourceUrn) || !population.has(hop.targetUrn)) continue
-            if (sub.has(hop.sourceUrn) === sub.has(hop.targetUrn)) continue
-            n += 1
+            const a = new Set([...ancestorsOf(hop.sourceUrn), hop.sourceUrn])
+            const b = new Set([...ancestorsOf(hop.targetUrn), hop.targetUrn])
+            for (const u of a) if (!b.has(u)) bump(u, 'out')     // leaves u's subtree
+            for (const u of b) if (!a.has(u)) bump(u, 'in')      // arrives into u's subtree
         }
-        weightCache.set(urn, n)
-        return n
+        return crossIndex
+    }
+    const weightOf = (urn: string): number => {
+        const c = crossings().get(urn)
+        return c ? c.in + c.out : 0
     }
     /**
      * `weightOf` split by direction — the hops crossing this card's own
@@ -1093,25 +1160,9 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      * both sides (its columns carry the lineage; the table itself has
      * none of its own).
      */
-    const crossCache = new Map<string, { in: number; out: number }>()
-    const crossingOf = (urn: string): { in: number; out: number } => {
-        const hit = crossCache.get(urn)
-        if (hit) return hit
-        const sub = subtreeOf(urn)
-        let arrives = 0
-        let leaves = 0
-        for (const hop of sg.lineageEdges) {
-            if (!population.has(hop.sourceUrn) || !population.has(hop.targetUrn)) continue
-            const from = sub.has(hop.sourceUrn)
-            const to = sub.has(hop.targetUrn)
-            if (from === to) continue
-            if (to) arrives += 1
-            else leaves += 1
-        }
-        const out = { in: arrives, out: leaves }
-        crossCache.set(urn, out)
-        return out
-    }
+    const NO_CROSSINGS = { in: 0, out: 0 } as const
+    const crossingOf = (urn: string): { in: number; out: number } =>
+        crossings().get(urn) ?? NO_CROSSINGS
 
     /** A card already on the board keeps the slot it was first drawn in;
      *  anything else ranks by weight, behind all of them. */
@@ -1394,15 +1445,29 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     /** The type of the one hop this card carries, when it carries exactly
      *  one — a frame states a shared relationship once instead of every
      *  row repeating it. */
+    // Indexed once, lazily, AFTER emit has assigned every card id (its only
+    // callers run then): scanning every projected bundle per row card was
+    // O(rows × bundles) — six seconds per rebuild on a 4,000-row board.
+    let edgeTypesByCard: Map<string, Set<string>> | null = null
     const edgeTypeOf = (cardId: string): string => {
-        const types = new Set<string>()
-        for (const bundle of projected) {
-            const s = cardIdByUrn.get(bundle.sourceUrn)
-            const t = cardIdByUrn.get(bundle.targetUrn)
-            if (s !== cardId && t !== cardId) continue
-            types.add((bundle.edgeTypeNorm || '').toUpperCase())
+        if (edgeTypesByCard === null) {
+            edgeTypesByCard = new Map()
+            const add = (id: string | undefined, type: string) => {
+                if (!id) return
+                let set = edgeTypesByCard!.get(id)
+                if (!set) { set = new Set(); edgeTypesByCard!.set(id, set) }
+                set.add(type)
+            }
+            for (const bundle of projected) {
+                const type = (bundle.edgeTypeNorm || '').toUpperCase()
+                const s = cardIdByUrn.get(bundle.sourceUrn)
+                const t = cardIdByUrn.get(bundle.targetUrn)
+                add(s, type)
+                if (t !== s) add(t, type)
+            }
         }
-        return types.size === 1 ? [...types][0] : ''
+        const types = edgeTypesByCard.get(cardId)
+        return types && types.size === 1 ? [...types][0]! : ''
     }
 
     /**

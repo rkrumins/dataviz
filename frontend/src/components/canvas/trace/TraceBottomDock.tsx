@@ -305,6 +305,10 @@ export function TraceBottomDock({
                     onReduceDepth={handleReduceDepth}
                     onJumpToUrn={onJumpToUrn}
                     outsideView={outsideView}
+                    nativeMode={nativeMode}
+                    // The native `retrace` MEANS "this walk did not finish":
+                    // continue past the checkpoint, or retry the failed step.
+                    onContinue={() => void trace.retrace()}
                   />
                 )}
                 {tab === 'drilldowns' && (
