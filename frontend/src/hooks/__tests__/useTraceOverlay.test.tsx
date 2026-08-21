@@ -15,6 +15,7 @@ import { renderHook, act } from '@testing-library/react'
 import { useTraceOverlay, type UseTraceOverlayArgs } from '../useTraceOverlay'
 import type { TraceView } from '../lib/traceViewModel'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
+import { emptyWalkModel, type LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import { countTest, expectTestsRan } from '@/test/canary'
 import type { ViewLayerConfig } from '@/types/schema'
 
@@ -42,8 +43,25 @@ const cardOf = (v: TraceView | null, id: string) => {
   return undefined
 }
 
+/** The same walk, one node further along — what a full walk's next wave
+ *  looks like: same focus, a bigger model. */
+const grownModel = (): LensWalkModel => {
+  const base = estate.model
+  const extra = {
+    ...base.nodes[0],
+    id: 'orders.extra', urn: 'orders.extra', displayName: 'orders.extra', entityType: 'schemaField',
+    data: { urn: 'orders.extra', label: 'orders.extra', type: 'schemaField', childCount: 0 },
+  } as (typeof base.nodes)[number]
+  return {
+    ...base,
+    nodes: [...base.nodes, extra],
+    containmentEdges: [...base.containmentEdges, { sourceUrn: 'orders', targetUrn: 'orders.extra' }],
+    upstreamUrns: new Set([...base.upstreamUrns, 'orders.extra']),
+  }
+}
+
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(10))
+afterAll(() => expectTestsRan(13))
 
 describe('useTraceOverlay — the seed', () => {
   it('opens the focus chain and leaves the direct partners visible and CLOSED', () => {
@@ -178,15 +196,59 @@ describe('useTraceOverlay — placement passthrough', () => {
   })
 })
 
+describe('useTraceOverlay — the seed waits for a model that holds the focus', () => {
+  // The canvas sets the focus the instant Trace is pressed; the walk hook
+  // answers with a LOADING entry whose model is empty but not null. Seeding
+  // off that and latching is how a trace lands with every chain shut.
+  it('seeds from the first model that contains the focus, not from the loading one', () => {
+    const { result, rerender } = renderHook(
+      (a: UseTraceOverlayArgs) => useTraceOverlay(a),
+      { initialProps: args({ model: emptyWalkModel('cfo') }) },
+    )
+    // The loading frame: active, but there is nothing yet to open.
+    expect(result.current.active).toBe(true)
+    expect(result.current.view!.lanes).toEqual([])
+    expect([...result.current.traceExpansion]).toEqual(['cfo'])
+
+    rerender(args())
+    expect(visibleIds(result.current.view)).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
+    expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
+  })
+
+  it('seeds ONCE: a later wave of the same walk leaves the reader’s expansion alone', () => {
+    const { result, rerender } = renderHook(
+      (a: UseTraceOverlayArgs) => useTraceOverlay(a),
+      { initialProps: args({ model: emptyWalkModel('cfo') }) },
+    )
+    rerender(args())
+    act(() => result.current.toggle('INTERMEDIATE_T2'))
+    expect(result.current.view!.visible.has('orders')).toBe(true)
+
+    // The walk grows — same focus, bigger model. Nothing the reader opened
+    // may close, and nothing they closed may re-open.
+    rerender(args({ model: grownModel() }))
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'cfo', 'tableau'])
+    expect(result.current.view!.visible.has('orders')).toBe(true)
+    // The wave DID land — the new node is a card, sitting closed inside the
+    // dataset the reader has not opened.
+    expect(cardOf(result.current.view, 'orders.extra')).toBeDefined()
+    expect(result.current.view!.visible.has('orders.extra')).toBe(false)
+  })
+})
+
 describe('useTraceOverlay — identity', () => {
-  it('re-rendering with identical inputs does not rebuild the view', () => {
-    const stable = args()
-    const { result, rerender } = renderHook((a: UseTraceOverlayArgs) => useTraceOverlay(a), { initialProps: stable })
-    const first = result.current.view
-    rerender(stable)
-    expect(result.current.view).toBe(first)
-    // The callbacks are stable too — a canvas passes them straight to rows.
-    rerender(stable)
-    expect(result.current.view).toBe(first)
+  it('a fresh args object with identical fields rebuilds nothing', () => {
+    const { result, rerender } = renderHook((a: UseTraceOverlayArgs) => useTraceOverlay(a), { initialProps: args() })
+    const first = result.current
+    // A NEW object every time — exactly what a canvas passes on every render.
+    rerender(args())
+    expect(result.current.view).toBe(first.view)
+    rerender(args())
+    expect(result.current.view).toBe(first.view)
+    // The callbacks are stable too: a canvas hands them straight to every row,
+    // and a new identity there re-renders the whole tree.
+    expect(result.current.toggle).toBe(first.toggle)
+    expect(result.current.expandPath).toBe(first.expandPath)
+    expect(result.current.exit).toBe(first.exit)
   })
 })

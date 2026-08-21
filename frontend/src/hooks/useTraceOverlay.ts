@@ -31,6 +31,20 @@
  * `focusUrn` changes (React's "adjusting state on prop change"), never in an
  * effect. Any other input changing — a direction toggle, a depth, a layer
  * edit — leaves the reader's expansion exactly as they left it.
+ *
+ * AND IT WAITS FOR A MODEL THAT HOLDS THE FOCUS. The canvas sets `focusUrn`
+ * the instant the reader presses Trace, while the walk hook hands back a
+ * LOADING entry carrying an EMPTY model — non-null, so a seed keyed on the
+ * focus alone fires immediately, seeds nothing but the focus itself over an
+ * empty graph, and latches. The trace then lands with every chain closed. It
+ * would read as a flake, too: a re-trace of a cached focus has its model in
+ * hand on the first render and seeds perfectly.
+ *
+ * So the latch has TWO conditions — a new focus, or a first model that
+ * actually contains the focus — and `seeded` records which happened. What it
+ * deliberately does NOT key on is the model itself: a full walk arrives in
+ * waves, and re-seeding on each one would wipe out everything the reader had
+ * opened, over and over, while the walk finished.
  */
 import { useCallback, useMemo, useState } from 'react'
 import { buildTraceView, type TraceCard, type TraceView, type TraceViewInputs } from './lib/traceViewModel'
@@ -70,6 +84,9 @@ const EMPTY_EXPANSION: ReadonlySet<string> = new Set<string>()
 interface SeedState {
   forFocus: string | null
   set: ReadonlySet<string>
+  /** The seed came from a model that HELD the focus — so it is the real one
+   *  and no later wave may replace it. False while the walk is still loading. */
+  seeded: boolean
 }
 
 function viewInputs(a: UseTraceOverlayArgs, traceExpansion: ReadonlySet<string>): TraceViewInputs | null {
@@ -135,29 +152,43 @@ function seedExpansion(a: UseTraceOverlayArgs): ReadonlySet<string> {
 export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   // Field by field: the canvas re-creates the args object every render, so a
   // memo over `a` itself would rebuild the view on every unrelated keystroke.
+  // `placement` is unpacked for the same reason — the canvas rebuilds that
+  // object too, and depending on it would undo the whole point.
   const { model, focusUrn, layers, assignments, viewIsCurated } = a
-  const { showUpstream, showDownstream, depthUp, depthDown, placement } = a
+  const { showUpstream, showDownstream, depthUp, depthDown } = a
+  const { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns } = a.placement ?? {}
 
-  const [seed, setSeed] = useState<SeedState>(() => ({ forFocus: focusUrn, set: seedExpansion(a) }))
+  // O(n) over the walk's nodes, but only when the model or the focus changes
+  // — which is exactly when the answer can change.
+  const focusInModel = useMemo(
+    () => !!focusUrn && !!model && model.nodes.some(n => n.urn === focusUrn),
+    [model, focusUrn],
+  )
 
-  // Re-seed DURING RENDER when the focus changes. Not an effect: an effect
-  // would paint one frame of the previous focus's expansion first, and
-  // `react-hooks/set-state-in-effect` forbids it besides.
+  const [seed, setSeed] = useState<SeedState>(() => ({
+    forFocus: focusUrn, set: seedExpansion(a), seeded: focusInModel,
+  }))
+
+  // Re-seed DURING RENDER. Not an effect: an effect would paint one frame of
+  // the previous focus's expansion first, and `react-hooks/set-state-in-effect`
+  // forbids it besides.
   let traceExpansion = seed.set
-  if (seed.forFocus !== focusUrn) {
+  if (seed.forFocus !== focusUrn || (!seed.seeded && focusInModel)) {
     traceExpansion = seedExpansion(a)
-    setSeed({ forFocus: focusUrn, set: traceExpansion })
+    setSeed({ forFocus: focusUrn, set: traceExpansion, seeded: focusInModel })
   }
 
   const view = useMemo<TraceView | null>(() => (
     model && focusUrn
       ? buildTraceView({
         model, focusUrn, layers, assignments, viewIsCurated, traceExpansion,
-        showUpstream, showDownstream, depthUp, depthDown, placement,
+        showUpstream, showDownstream, depthUp, depthDown,
+        placement: { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns },
       })
       : null
   ), [model, focusUrn, layers, assignments, viewIsCurated, traceExpansion,
-    showUpstream, showDownstream, depthUp, depthDown, placement])
+    showUpstream, showDownstream, depthUp, depthDown,
+    backendAssignments, unassignedFallbackLayerId, branchCreatedUrns])
 
   const toggle = useCallback((id: string) => setSeed(prev => {
     const next = new Set(prev.set)
@@ -173,7 +204,7 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   // Drops the expansion. The caller clears its own focus alongside — leaving
   // the focus in place re-seeds on the very next render, by design: exiting a
   // trace that is still focused somewhere is not a state the canvas has.
-  const exit = useCallback(() => setSeed({ forFocus: null, set: EMPTY_EXPANSION }), [])
+  const exit = useCallback(() => setSeed({ forFocus: null, set: EMPTY_EXPANSION, seeded: false }), [])
 
   return { active: !!focusUrn && !!model, view, traceExpansion, toggle, expandPath, exit }
 }

@@ -25,6 +25,15 @@
  * happens before that and is excluded by construction — resetting any later
  * would exclude the trace's own merge, which is precisely the thing being
  * gated, and the assertion could then never fail.
+ *
+ * NOTHING IS ALLOWED TO FAIL QUIETLY. The canvas catches and logs a great
+ * deal — a malformed provider answer, a view re-fetch that never resolves —
+ * and every one of those leaves the canvas running in a degraded state that
+ * looks exactly like a healthy one. A stub that returned the wrong shape once
+ * parked the assignment store at `error` with empty assignments, and the only
+ * trace of it was a line on stderr. So the harness records every
+ * `console.error` and THROWS on the next checkpoint (end of mount, end of
+ * `startTrace`). A stub that drifts from the real contract fails loudly.
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -61,6 +70,9 @@ export interface TraceCanvasHarness {
   isTracing(): boolean
   /** Let every pending promise and effect settle. */
   settle(): Promise<void>
+  /** Everything the canvas logged as an error. Checked automatically at the
+   *  end of mount and of `startTrace`; exposed for diagnosis. */
+  consoleErrors(): string[]
 }
 
 const CARD_ID_PREFIX = 'layer-node-'
@@ -68,6 +80,8 @@ const CARD_ID_PREFIX = 'layer-node-'
 /** The canvas store outlives any one mount, so a previous harness's spy would
  *  keep counting into a dead tally. One live spy at a time. */
 let releaseSpy: (() => void) | null = null
+let releaseFetch: (() => void) | null = null
+let releaseConsole: (() => void) | null = null
 
 /** jsdom reports no geometry; the virtualizer and the flow overlay both need
  *  some. Idempotent — several harnesses may mount in one file. */
@@ -126,19 +140,85 @@ function closureFor(estate: TraceEstate, focusUrn: string): TraceV2Result & Lens
   } as unknown as TraceV2Result & LensClosureExtras
 }
 
+/** parent urn → child urns, from the estate's containment. */
+function childrenOf(estate: TraceEstate): Map<string, string[]> {
+  const kids = new Map<string, string[]>()
+  for (const c of estate.model.containmentEdges) {
+    kids.set(c.sourceUrn, [...(kids.get(c.sourceUrn) ?? []), c.targetUrn])
+  }
+  return kids
+}
+
 /** The network. `traceClosure` answers the whole estate in one response;
- *  everything else the canvas may reach for answers empty rather than
- *  throwing, so a stray read can never masquerade as a trace failure. */
+ *  every other read answers from the same estate, in the REAL result shape.
+ *  A shape that only looks right is worse than none: `setAssignmentResult`
+ *  reads `parentMap`/`edges`/`unassignedEntityIds`/`stats.computeTimeMs`, and
+ *  an object missing them throws into a catch that parks the assignment store
+ *  at `error` with no assignments at all — silently. */
 function stubProvider(estate: TraceEstate, focusUrn: string): GraphDataProvider {
   const closure = closureFor(estate, focusUrn)
+  const nodes = wireNodes(estate)
+  const byUrn = new Map(nodes.map(n => [n.urn, n]))
+  const kids = childrenOf(estate)
+  const parentMap = new Map<string, string>()
+  for (const c of estate.model.containmentEdges) {
+    if (!parentMap.has(c.targetUrn)) parentMap.set(c.targetUrn, c.sourceUrn)
+  }
+  const childrenFor = (parentUrn: string): GraphNode[] =>
+    (kids.get(parentUrn) ?? []).map(urn => byUrn.get(urn)).filter((n): n is GraphNode => !!n)
+  const assignments = new Map(Object.entries(estate.assignments).map(([entityId, a]) => [
+    entityId,
+    { entityId, layerId: a.layerId, isInherited: false },
+  ]))
   return {
     scopeKey: 'harness',
     traceClosure: async () => closure,
-    getChildren: async () => ({ nodes: [], edges: [], totalCount: 0 }),
-    getNodes: async () => wireNodes(estate),
+    getChildren: async (parentUrn: string) => childrenFor(parentUrn),
+    getChildrenWithEdges: async (parentUrn: string) => ({
+      children: childrenFor(parentUrn),
+      containmentEdges: (kids.get(parentUrn) ?? []).map(child => ({
+        id: `c:${parentUrn}>${child}`, sourceUrn: parentUrn, targetUrn: child, edgeType: 'CONTAINS',
+      })),
+      lineageEdges: [],
+      totalChildren: (kids.get(parentUrn) ?? []).length,
+      hasMore: false,
+      nextCursor: null,
+    }),
+    getParent: async (childUrn: string) => byUrn.get(parentMap.get(childUrn) ?? '') ?? null,
+    getNodes: async () => nodes,
     getEdges: async () => [],
-    computeLayerAssignments: async () => ({ assignments: [], unassigned: [] }),
+    computeLayerAssignments: async () => ({
+      assignments,
+      parentMap,
+      edges: [],
+      unassignedEntityIds: nodes.map(n => n.urn).filter(urn => !assignments.has(urn)),
+      stats: { totalNodes: nodes.length, assignedNodes: assignments.size, computeTimeMs: 0 },
+    }),
   } as unknown as GraphDataProvider
+}
+
+/** The HTTP surface. The canvas re-fetches its own view on mount to pick up
+ *  the branch-effective layout; left to the real `fetch` that is an
+ *  ERR_INVALID_URL (a relative path with no origin) swallowed into a
+ *  `console.error`. Answer it with the layout the store already holds, so the
+ *  effect finds nothing to change and returns. */
+function stubFetch(estate: TraceEstate): () => void {
+  const original = globalThis.fetch
+  const view = {
+    id: 'harness-view',
+    config: {
+      layout: { type: 'reference', referenceLayout: { layers: estate.layers, assignments: estate.assignments } },
+      content: { entityScope: 'curated' },
+    },
+  }
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    const body = url.includes('/api/v1/views/') ? view : {}
+    return new Response(JSON.stringify(body), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    })
+  }) as typeof globalThis.fetch
+  return () => { globalThis.fetch = original }
 }
 
 /** The browse canvas behind the trace: the estate's entities and their
@@ -188,9 +268,26 @@ export async function renderCanvasWithTrace(
   opts: { focus: string },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
+  releaseFetch?.()
+  releaseFetch = stubFetch(estate)
   usePreferencesStore.setState({ canvasDensity: 'spacious' } as never)
   seedBrowse(estate)
   seedView(estate)
+
+  // Every swallowed failure, made loud. See the file header.
+  const errors: string[] = []
+  releaseConsole?.()
+  const realError = console.error
+  console.error = (...parts: unknown[]) => {
+    errors.push(parts.map(part => (part instanceof Error ? part.message : String(part))).join(' '))
+    realError(...parts)
+  }
+  releaseConsole = () => { console.error = realError }
+  const assertQuiet = (when: string): void => {
+    if (errors.length > 0) {
+      throw new Error(`the canvas logged ${errors.length} error(s) during ${when}:\n  ${errors.join('\n  ')}`)
+    }
+  }
 
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
@@ -206,9 +303,16 @@ export async function renderCanvasWithTrace(
     </QueryClientProvider>,
   )
 
+  // Macrotasks AND animation frames. The flow overlay redraws its edges on a
+  // rAF (`scheduleUpdate`), so a settle that only drains timers reads the DOM
+  // before the wires are painted — `wires()` comes back empty and a trace that
+  // drew nothing looks exactly like one that drew the wrong thing.
   const settle = async (): Promise<void> => {
     for (let i = 0; i < 6; i++) {
-      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+      await act(async () => {
+        await new Promise(resolve => requestAnimationFrame(() => resolve(undefined)))
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
     }
   }
 
@@ -233,10 +337,12 @@ export async function renderCanvasWithTrace(
     if (rows().length === 0) throw new Error('canvas drew no cards')
   }, { timeout: 4000 })
   await settle()
+  assertQuiet('mount')
 
   return {
     settle,
     isTracing,
+    consoleErrors: () => [...errors],
     async startTrace(urn: string) {
       act(() => { useCanvasStore.getState().selectNode(urn) })
       await settle()
@@ -248,6 +354,7 @@ export async function renderCanvasWithTrace(
         if (!isTracing()) throw new Error('the canvas did not enter trace mode')
       }, { timeout: 4000 })
       await settle()
+      assertQuiet('the trace')
     },
     visibleCardIds: () => rows().map(row => row.id.slice(CARD_ID_PREFIX.length)),
     chevron: (id: string) => {
