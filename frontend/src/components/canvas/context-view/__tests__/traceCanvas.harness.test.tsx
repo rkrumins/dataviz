@@ -22,7 +22,7 @@ import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(15))
+afterAll(() => expectTestsRan(17))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -401,6 +401,44 @@ describe('the trace overlay on the real canvas', () => {
     await h.openDrawer('tableau')
     expect(h.drawerEditTabs()).toBe(0)
     expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // Leaving a trace has to leave NOTHING. An exit animation on the dock kept
+  // it mounted at opacity 0 with pointer events on — an invisible bar across
+  // the bottom of the canvas that swallowed clicks, still announcing the
+  // trace to screen readers. (Found by the live browser probe; same stranded
+  // -AnimatePresence class this codebase has hit before.)
+  it('the dock leaves with the trace, not a frame later', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    await h.startTrace('cfo')
+    expect(h.dockPresent()).toBe(true)
+
+    h.pressEscape()
+    await h.settle()
+    expect(h.isTracing()).toBe(false)
+    expect(h.dockPresent()).toBe(false)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // Escape is layered. With the depth popover open it means "close this",
+  // not "throw away the trace I am reading" — the destructive reading of an
+  // ambiguous key is the wrong one.
+  it('Escape closes an open popover first, and only then the trace', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    await h.startTrace('cfo')
+    await h.openDepthPopover()
+    expect(h.depthPopoverOpen()).toBe(true)
+
+    h.pressEscape()
+    await h.settle()
+    expect(h.depthPopoverOpen()).toBe(false)
+    expect(h.isTracing()).toBe(true)      // the trace survives
+
+    h.pressEscape()
+    await h.settle()
+    expect(h.isTracing()).toBe(false)     // …and the next one leaves it
+    expect(h.dockPresent()).toBe(false)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 })

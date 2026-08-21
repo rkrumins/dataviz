@@ -193,7 +193,13 @@ export function TraceBottomDock({
       aria-label="Trace dock"
       initial={{ opacity: 0, y: 24 }}
       animate={{ opacity: 1, y: 0, height: dockHeight }}
-      exit={{ opacity: 0, y: 24 }}
+      // NO `exit`. With one, AnimatePresence keeps this mounted after the
+      // trace ends and — because the exit animation never completes here —
+      // strands a 1520x64 invisible bar across the bottom of the canvas:
+      // opacity 0, pointer-events on, role="region" still announcing the
+      // trace to screen readers. Same class as the stranded popovers this
+      // codebase has hit before; the cure is the same, drop the exit and let
+      // it unmount with `traceActive`. The entrance still animates.
       transition={MOTION.modalSpring}
       style={{ height: dockHeight }}
       className={cn(

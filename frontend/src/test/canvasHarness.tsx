@@ -96,6 +96,12 @@ export interface TraceCanvasHarness {
   depthPreset(label: string | RegExp): Promise<void>
   /** The depth presets the control offers, as `${up}/${down}` pairs. */
   depthPresetValues(): string[]
+  /** Open the header's depth popover without picking anything. */
+  openDepthPopover(): Promise<void>
+  /** Is that popover on screen? */
+  depthPopoverOpen(): boolean
+  /** Is the trace dock in the DOM at all? (Not "visible" — mounted.) */
+  dockPresent(): boolean
   /** Scrub a Settings-tab depth slider and RELEASE it — the commit edge that
    *  fires the dock's "apply". Requires `openDockSettings()` first. */
   commitDockDepth(value: number): Promise<void>
@@ -637,6 +643,16 @@ export async function renderCanvasWithTrace(
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: label })) })
       await settle()
     },
+    async openDepthPopover() {
+      const chip = screen.getByRole('button', { name: /^depth/i })
+      if (chip.getAttribute('aria-expanded') !== 'true') {
+        await act(async () => { fireEvent.click(chip) })
+        await settle()
+      }
+    },
+    depthPopoverOpen: () =>
+      !!document.querySelector('[role="dialog"][aria-label="Trace depth settings"]'),
+    dockPresent: () => !!document.querySelector('#trace-bottom-dock'),
     depthPresetValues: () => {
       const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Trace depth settings"]')
       return [...(dialog?.querySelectorAll<HTMLElement>('button') ?? [])]

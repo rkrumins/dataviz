@@ -2074,6 +2074,18 @@ export function ContextViewCanvas({
       const t = e.target as HTMLElement | null
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
       if (e.key === 'Escape') {
+        // Escape is layered. A popover open over the dock (the depth
+        // settings, an edge-type menu) owns the first press — it is what the
+        // reader is looking at, and taking the whole trace down instead is a
+        // destructive answer to "close this". Let it consume that press; the
+        // next one, with nothing open, leaves the trace.
+        //
+        // Deliberately NOT keyed on `e.defaultPrevented`: useCanvasKeyboard
+        // preventDefaults EVERY Escape for its clear-selection handler, so
+        // that flag is always true here and would retire the exit entirely.
+        // The open dialog is the real signal, and it is precise — the
+        // popovers unmount on close, leaving nothing behind to match.
+        if (document.querySelector('[role="dialog"]')) return
         e.preventDefault()
         exitCanvasTrace()
         return
@@ -4204,9 +4216,11 @@ export function ContextViewCanvas({
 
       <div data-canvas-body className="flex-1 w-full h-full relative overflow-hidden bg-canvas flex flex-col">
         {/* Trace UI lives in TraceBottomDock at the bottom of canvas-body.
-            EntityDrawer keeps the right rail. Both surfaces are independent. */}
-        <AnimatePresence>
-          {traceActive && (
+            EntityDrawer keeps the right rail. Both surfaces are independent.
+            NO AnimatePresence: the dock has no exit animation to wait for
+            (see TraceBottomDock), so wrapping it would only keep it mounted
+            after the trace ends. It unmounts with `traceActive`. */}
+        {traceActive && (
             <TraceBottomDock
               trace={dockTrace}
               displayMap={displayMap}
@@ -4227,8 +4241,7 @@ export function ContextViewCanvas({
               nativeMode={traceActive}
               outsideView={overlay.view?.outsideView ?? 0}
             />
-          )}
-        </AnimatePresence>
+        )}
 
 
         {/* Aggregation truncation banner — backend signal that the visible
