@@ -619,17 +619,20 @@ async def test_hub_truncates_then_pages_its_whole_adjacency(estate):
         max_nodes=5, timeout_ms=15000,
     )
 
-    # The seed takes the hub, leaving max_nodes-1 for the hop, whose own LIMIT
-    # stops it at 4 rows and marks the whole ring cut.
+    # The hub cannot fit the page (12 partners, room for 4), so it is PAGED by
+    # edge id: four rows, and a REAL cursor one past the last id shipped.
     assert initial.truncated and initial.truncation_reason == "max_nodes"
     assert len(initial.edges) == 4
     assert {e.target_urn for e in initial.edges} <= set(HUB_PARTNERS)
     # The hub is the only thing worth offering: its partners are fully shown.
     assert [(f.urn, f.total_count) for f in initial.frontier_down] == [("hub", 12)]
-    # A node the BUDGET cut off can be resumed, and says how: page it from the
-    # start. Only the cursor path can finish a hub — a re-root would re-run
-    # the same truncated hop — so this entry has to carry a cursor.
-    assert initial.frontier_down[0].next_cursor == "e:0"
+    # Only the cursor path can finish a hub — a re-root would re-run the same
+    # page — so this entry carries one, and never `e:0` (which would re-ship
+    # the four rows the client already holds).
+    assert initial.frontier_down[0].next_cursor == "e:4"
+    assert initial.frontier_down[0].reason == "cut"
+    # The edge-id-0 partner is in the FIRST response, not lost off its front.
+    assert first_partner in {e.target_urn for e in initial.edges}
 
     pages, cursor = [], initial.frontier_down[0].next_cursor
     while cursor is not None:
@@ -644,13 +647,12 @@ async def test_hub_truncates_then_pages_its_whole_adjacency(estate):
         cursor = entry.next_cursor if entry else None
 
     partners = [{e.target_urn for e in pg.edges} for pg in pages]
-    assert [len(s) for s in partners] == [5, 5, 2]
-    for i, left in enumerate(partners):
-        for right in partners[i + 1:]:
+    assert [len(s) for s in partners] == [5, 3]
+    shown_first = {e.target_urn for e in initial.edges}
+    for i, left in enumerate([shown_first, *partners]):
+        for right in [shown_first, *partners][i + 1:]:
             assert not left & right, f"pages overlap on {left & right}"
-    assert set().union(*partners) == set(HUB_PARTNERS)
-    # The edge-id-0 partner is in the FIRST page, not lost off the front of it.
-    assert first_partner in partners[0]
+    assert shown_first | set().union(*partners) == set(HUB_PARTNERS)
     # Drained: the hub is not offered again, so the client stops on its own.
     assert not any(f.urn == "hub" for f in pages[-1].frontier_down)
     # Every page is one hub's adjacency — the hub itself is never re-walked.
@@ -658,7 +660,7 @@ async def test_hub_truncates_then_pages_its_whole_adjacency(estate):
     # These partners are genuine dead ends (nothing flows out of them), and a
     # real degree probe says so, so no page offers a chevron on one. The
     # partners that DO have more are the next test.
-    assert [f.urn for pg in pages for f in pg.frontier_down] == ["hub", "hub"]
+    assert [f.urn for pg in pages for f in pg.frontier_down] == ["hub"]
 
 
 # ── Estate: a hub whose partners carry lineage of their own ───────────
@@ -741,15 +743,16 @@ CAPPED_SEED = "CREATE " + ", ".join([
 
 
 async def test_a_capped_container_seed_still_walks_and_says_it_is_partial(estate):
-    """The half-seed path, live. ``max_nodes`` reserves half its budget for the
-    seed, so a container with more lineage-bearing leaves than that gets only
-    some of them — and the response has to say so while STILL walking. Setting
-    the flag as a truncation mid-method would have failed the loop's
-    ``not truncation_reason`` guard and shipped a board of nodes with no edges
-    on it, which is the one thing a lineage view must never be.
+    """The partial-seed page, live. A container with more lineage-bearing
+    leaves than one page can walk ships the leaves that FIT — each with its
+    whole hop — and says so while STILL walking: ``seedTruncated``, a
+    ``seedCursor`` naming the first leaf it could not afford, and
+    ``truncationReason`` for the caller that reads one flag. Never a board of
+    nodes with no edges on it, which is the one thing a lineage view must
+    never be.
 
-    This is also a live instance of the endpoint's second honesty corner:
-    ``truncated: true`` with an EMPTY frontier. The walk was cut at the seed,
+    This is also a live instance of the endpoint's honesty corner:
+    ``truncated: true`` with an EMPTY frontier. The page was cut at the seed,
     but every boundary node it did reach proved fully shown by the degree
     probe, so there is genuinely nothing to offer expanding."""
     p = await estate("capped", CAPPED_SEED)
@@ -757,21 +760,22 @@ async def test_a_capped_container_seed_still_walks_and_says_it_is_partial(estate
     r = await p.trace_closure(
         urn="K", upstream_depth=0, downstream_depth=1,
         lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
-        max_nodes=12, timeout_ms=15000,   # seed cap = 12 // 2 = 6, of 7 leaves
+        max_nodes=8, timeout_ms=15000,   # room 7: g0..g2 cost 2 each, g3 costs 1
     )
 
     assert r.seed_truncated is True
+    assert r.seed_cursor == "s:g4"
     # Folded in at the RETURN, not mid-walk — the response is partial and says
     # so, and the walk still happened.
     assert r.truncated is True
     assert r.truncation_reason == "max_nodes"
 
     docs = {n.urn for n in r.nodes if n.urn.startswith("g")}
-    assert len(docs) == 6, f"the seed cap did not bite: {sorted(docs)}"
-    assert r.edges, "a capped seed must still walk"
+    assert docs == {"g0", "g1", "g2", "g3"}, f"the page did not stop at the budget: {sorted(docs)}"
+    assert r.edges, "a partial seed must still walk"
+    assert {(e.source_urn, e.target_urn) for e in r.edges} == {("g0", "s0"), ("g1", "s1"), ("g2", "s2")}
     for e in r.edges:
         assert e.edge_type == "FLOWS_TO"
-        assert e.source_urn in docs and e.target_urn.startswith("s")
     assert r.frontier_up == [] and r.frontier_down == []
 
 
@@ -1029,3 +1033,346 @@ async def test_uncapped_seed_ships_no_cursor(estate):
     )
     assert r.seed_cursor is None
     assert r.seed_truncated is False
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# SCALE GATES — the degree-exact walk at the widths that broke the ring walk
+# ══════════════════════════════════════════════════════════════════════════
+#
+# A 2,935-column table on the 520k-node dev graph got 1,014 of its 17,567
+# hop-1 edges from a one-hop request (984 upstream partners, 15 downstream)
+# because the hop budget was one LIMIT shared by both directions. The estate
+# below is the same shape, at a size a throwaway graph can hold:
+#
+#   tbl ⊃ c1000000..c1001499   (1,500 columns, fixed-width urns so urn order
+#                               is numeric order)
+#   c_i → d_(i mod 300)         (shared sinks — the under-fill case)
+#   u_(i mod 50) → c_i          for i < 500 (shared sources)
+#   d_j → e_(j mod 100)         (a second hop for the deep-walk gate)
+#   chub → h0000..h2999         (a hub column no page can hold)
+
+WIDE_TABLE_SEED = """
+CREATE (tbl:Box {urn:'tbl', displayName:'wide-table'})
+WITH tbl
+UNWIND range(0, 1499) AS i
+CREATE (c:Doc {urn: 'c' + toString(1000000 + i), displayName: 'col-' + toString(i)})
+CREATE (tbl)-[:CONTAINS]->(c)
+WITH c, i
+MERGE (d:Sink {urn: 'd' + toString(1000 + (i % 300))})
+CREATE (c)-[:FLOWS_TO]->(d)
+WITH c, d, i
+MERGE (e:Sink {urn: 'e' + toString(1000 + (i % 100))})
+MERGE (d)-[:FLOWS_TO]->(e)
+WITH c, i WHERE i < 500
+MERGE (u:Sink {urn: 'u' + toString(1000 + (i % 50))})
+CREATE (u)-[:FLOWS_TO]->(c)
+"""
+
+WIDE_TABLE_HUB = """
+CREATE (hub:Doc {urn:'chub', displayName:'hub-column'})
+WITH hub
+UNWIND range(0, 2999) AS i
+CREATE (h:Sink {urn: 'h' + toString(10000 + i)})
+CREATE (hub)-[:FLOWS_TO]->(h)
+"""
+
+
+def _cols(r):
+    return {n.urn for n in r.nodes if n.urn.startswith("c1")}
+
+
+def _edge_pairs(r):
+    return {(e.source_urn, e.target_urn) for e in r.edges}
+
+
+async def _drain_seed_pages(p, urn, *, max_nodes, up=1, down=1, exclude=True, limit=60):
+    """Page the focus's seed cursor to exhaustion; returns the pages."""
+    pages, cursor, known = [], None, set()
+    for _ in range(limit):
+        r = await p.trace_closure(
+            urn=urn, upstream_depth=up, downstream_depth=down,
+            lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+            max_nodes=max_nodes, timeout_ms=30000, seed_cursor=cursor,
+            exclude_urns=sorted(known)[:2000] if (exclude and known) else None,
+        )
+        pages.append(r)
+        known |= {n.urn for n in r.nodes}
+        cursor = r.seed_cursor
+        if cursor is None:
+            return pages
+    raise AssertionError("the seed cursor never drained")
+
+
+async def test_wide_table_pages_are_complete_per_seed_and_disjoint(estate):
+    """I1 at scale: every column a page ships has ALL of its hop-1 edges in
+    that page (both directions), no column is shipped twice, the union of the
+    pages is the whole table, and nothing is ever ``e:0``."""
+    import time as _time
+    p = await estate("widetable", WIDE_TABLE_SEED)
+    degrees = await p.get_node_degrees([f"c{1000000 + i}" for i in range(1500)], LTYPES)
+    assert len(degrees) == 1500, "the degree probe must know every column"
+
+    t0 = _time.monotonic()
+    pages = await _drain_seed_pages(p, "tbl", max_nodes=400)
+    wall = _time.monotonic() - t0
+
+    seen = set()
+    for pg in pages:
+        cols = _cols(pg)
+        assert not (cols & seen), f"a column shipped twice: {sorted(cols & seen)[:5]}"
+        seen |= cols
+        pairs = _edge_pairs(pg)
+        for c in cols:
+            shown_out = sum(1 for s, _ in pairs if s == c)
+            shown_in = sum(1 for _, t in pairs if t == c)
+            assert (shown_in, shown_out) == (degrees[c]["in"], degrees[c]["out"]), \
+                f"{c} shipped half-done: {(shown_in, shown_out)} vs {degrees[c]}"
+        assert len(pg.nodes) <= 400 + 1 + 0  # ancestors (tbl) never count, but tbl is the focus
+        for f in [*pg.frontier_up, *pg.frontier_down]:
+            assert f.next_cursor != "e:0"
+            assert f.reason in ("cut", "depth")
+        assert pg.truncated == (pg.seed_cursor is not None) or pg.truncation_reason == "max_nodes"
+    assert seen == {f"c{1000000 + i}" for i in range(1500)}
+    print(f"\n[wide-table] {len(pages)} pages, {wall * 1000:.0f} ms total, "
+          f"max page {max(len(pg.nodes) for pg in pages)} nodes")
+    assert len(pages) >= 4
+
+
+async def test_both_directions_survive_a_small_page(estate):
+    """The starvation case, live: a page too small for the whole hop-1 must
+    still populate BOTH directions (the old ring LIMIT gave one side 984
+    partners and the other 15)."""
+    p = await estate("widetable2", WIDE_TABLE_SEED)
+    r = await p.trace_closure(
+        urn="tbl", upstream_depth=1, downstream_depth=1,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=50, timeout_ms=30000,
+    )
+    assert r.upstream_urns and r.downstream_urns
+    assert r.seed_cursor is not None and r.truncation_reason == "max_nodes"
+    assert len(r.nodes) <= 51
+    for f in [*r.frontier_up, *r.frontier_down]:
+        assert f.next_cursor != "e:0"
+
+
+async def test_table_pages_agree_with_each_column(estate):
+    """Tracing the table must show what tracing its columns shows: every
+    sampled column's own one-hop closure is a subset of the table's pages."""
+    p = await estate("widetable3", WIDE_TABLE_SEED)
+    pages = await _drain_seed_pages(p, "tbl", max_nodes=500)
+    table_edges = set().union(*(_edge_pairs(pg) for pg in pages))
+    for i in range(0, 1500, 75):
+        col = f"c{1000000 + i}"
+        own = await p.trace_closure(
+            urn=col, upstream_depth=1, downstream_depth=1,
+            lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+            max_nodes=100, timeout_ms=15000,
+        )
+        assert own.truncated is False
+        assert _edge_pairs(own) <= table_edges, f"{col}'s edges are missing from the table trace"
+
+
+async def test_hub_column_pages_with_strictly_increasing_real_cursors(estate):
+    """A column with 3,000 partners is paged by edge id: every cursor is real
+    and strictly increasing, pages never overlap, and the union is complete."""
+    p = await estate("widehub", WIDE_TABLE_SEED)
+    await p._query(WIDE_TABLE_HUB)
+    first = await p.trace_closure(
+        urn="chub", upstream_depth=0, downstream_depth=1,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=500, timeout_ms=30000,
+    )
+    entry = next(f for f in first.frontier_down if f.urn == "chub")
+    assert entry.reason == "cut" and entry.total_count == 3000
+    assert entry.next_cursor and entry.next_cursor.startswith("e:") and entry.next_cursor != "e:0"
+    partners = [{e.target_urn for e in first.edges}]
+    cursors = [int(entry.next_cursor[2:])]
+    cursor = entry.next_cursor
+    for _ in range(20):
+        page = await p.trace_closure(
+            urn="chub", upstream_depth=0, downstream_depth=1,
+            lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+            max_nodes=500, timeout_ms=30000, after_cursor=cursor,
+        )
+        partners.append({e.target_urn for e in page.edges})
+        nxt = next((f.next_cursor for f in page.frontier_down if f.urn == "chub"), None)
+        if nxt is None:
+            break
+        assert int(nxt[2:]) > cursors[-1], "cursors must strictly increase"
+        cursors.append(int(nxt[2:]))
+        cursor = nxt
+    else:
+        raise AssertionError("runaway hub paging")
+    for i, left in enumerate(partners):
+        for right in partners[i + 1:]:
+            assert not (left & right)
+    assert set().union(*partners) == {f"h{10000 + i}" for i in range(3000)}
+
+
+async def test_cursorless_cuts_reseeded_in_batches_complete_the_deep_walk(estate):
+    """Hop-2 cuts are cursor-less entries the client re-roots in BULK via
+    ``seedUrns`` (≤200 per request). Draining them that way reaches exactly
+    the closure a single huge page would have returned."""
+    p = await estate("widedeep", WIDE_TABLE_SEED)
+    one_shot = await p.trace_closure(
+        urn="tbl", upstream_depth=2, downstream_depth=2,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=10000, timeout_ms=60000,
+    )
+    assert one_shot.truncated is False and one_shot.seed_cursor is None
+
+    pages = await _drain_seed_pages(p, "tbl", max_nodes=300, up=2, down=2)
+    edges = set().union(*(_edge_pairs(pg) for pg in pages))
+    known = set().union(*({n.urn for n in pg.nodes} for pg in pages))
+    cuts_up = {f.urn for pg in pages for f in pg.frontier_up if f.reason == "cut" and f.next_cursor is None}
+    cuts_down = {f.urn for pg in pages for f in pg.frontier_down if f.reason == "cut" and f.next_cursor is None}
+    requests = len(pages)
+    for _round in range(40):
+        if not cuts_up and not cuts_down:
+            break
+        for side, cuts in (("up", cuts_up), ("down", cuts_down)):
+            batch = sorted(cuts)[:200]
+            if not batch:
+                continue
+            r = await p.trace_closure(
+                urn=batch[0], upstream_depth=1 if side == "up" else 0,
+                downstream_depth=1 if side == "down" else 0,
+                lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+                max_nodes=2000, timeout_ms=30000,
+                seed_urns=batch, exclude_urns=sorted(known)[:2000],
+            )
+            requests += 1
+            edges |= _edge_pairs(r)
+            known |= {n.urn for n in r.nodes}
+            cuts -= set(batch)
+            fr = r.frontier_up if side == "up" else r.frontier_down
+            cuts |= {f.urn for f in fr if f.reason == "cut" and f.next_cursor is None}
+    else:
+        raise AssertionError("cut entries never drained")
+    assert edges == _edge_pairs(one_shot)
+    print(f"\n[deep-walk] {requests} requests to match one 10k page ({len(edges)} edges)")
+
+
+async def test_a_tiny_deadline_is_flagged_never_silent(estate):
+    """A request whose budget is spent before the walk starts ships a page
+    that SAYS so — `timeout`, no cursor, no edges — never an empty page that
+    claims to be complete."""
+    p = await estate("widetimeout", WIDE_TABLE_SEED)
+    r = await p.trace_closure(
+        urn="tbl", upstream_depth=1, downstream_depth=1,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=400, timeout_ms=1,
+    )
+    assert r.truncated is True
+    assert r.truncation_reason == "timeout"
+    assert r.seed_cursor is None
+    assert r.edges == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ONTOLOGY GATE — a single-label, ragged estate (user ruling: ANY ontology)
+# ══════════════════════════════════════════════════════════════════════════
+#
+#   Roots ⊃ N1 ⊃ N2 ⊃ N3 (all `Node`), with lineage at EVERY depth and
+#   partners whose own ancestors sit at a DIFFERENT depth:
+#
+#     left:  R1 ⊃ A1 ⊃ A2 ⊃ A3            right: R2 ⊃ B1 ⊃ B2 ⊃ B3 ⊃ B4
+#     A3 → B2      (leaf at depth 3 feeds a container at depth 2)
+#     A2 → B4      (container at depth 2 feeds a leaf at depth 4)
+#     A1 → C1      (depth 1 → depth 1, R3 ⊃ C1)
+#     X  → A3      (an orphan-root node feeds the leaf)
+#     deep chain D0 ⊃ D1 ⊃ ... ⊃ D11 → A2  (a 12-deep containment spine)
+
+RAGGED_NODES_SEED = """
+CREATE
+ (r1:Roots {urn:'R1'}), (a1:Node {urn:'A1'}), (a2:Node {urn:'A2'}), (a3:Node {urn:'A3'}),
+ (r2:Roots {urn:'R2'}), (b1:Node {urn:'B1'}), (b2:Node {urn:'B2'}), (b3:Node {urn:'B3'}), (b4:Node {urn:'B4'}),
+ (r3:Roots {urn:'R3'}), (c1:Node {urn:'C1'}),
+ (x:Node {urn:'X'}),
+ (r1)-[:HAS]->(a1), (a1)-[:HAS]->(a2), (a2)-[:HAS]->(a3),
+ (r2)-[:HAS]->(b1), (b1)-[:HAS]->(b2), (b2)-[:HAS]->(b3), (b3)-[:HAS]->(b4),
+ (r3)-[:HAS]->(c1),
+ (a3)-[:FLOWS_TO]->(b2),
+ (a2)-[:FLOWS_TO]->(b4),
+ (a1)-[:FLOWS_TO]->(c1),
+ (x)-[:FLOWS_TO]->(a3)
+WITH a2
+UNWIND range(0, 11) AS i
+MERGE (d:Node {urn: 'D' + toString(100 + i)})
+WITH a2, collect(d) AS ds
+UNWIND range(0, 10) AS i
+WITH a2, ds, ds[i] AS parent, ds[i + 1] AS child
+CREATE (parent)-[:HAS]->(child)
+WITH a2, ds
+WITH a2, ds[11] AS leaf
+CREATE (leaf)-[:FLOWS_TO]->(a2)
+"""
+
+RAGGED_LTYPES = ["FLOWS_TO"]
+RAGGED_CTYPES = ["HAS"]
+
+
+async def _ragged_truth(p, focus):
+    """Every lineage edge incident to the focus or any containment descendant
+    of it — what a one-hop picture must contain, straight from Cypher. Two
+    queries, not one: FalkorDB rejects `collect(DISTINCT d) + [f]` (mixing a
+    node alias with an aggregation) — the same engine limit the seed query
+    had to work around."""
+    own = await p._ro_query(
+        "MATCH (f {urn:$u})-[r:FLOWS_TO]-() RETURN DISTINCT startNode(r).urn, endNode(r).urn",
+        params={"u": focus},
+    )
+    below = await p._ro_query(
+        "MATCH (f {urn:$u})-[:HAS*1..16]->(d)-[r:FLOWS_TO]-() "
+        "RETURN DISTINCT startNode(r).urn, endNode(r).urn",
+        params={"u": focus},
+    )
+    return {(row[0], row[1]) for res in (own, below) for row in (res.result_set or [])}
+
+
+@pytest.mark.parametrize("focus", ["R1", "A1", "A2", "A3", "B2", "D100", "C1"])
+async def test_ragged_single_label_estate_one_hop_is_complete_at_every_depth(estate, focus):
+    """The user's ruling: this must work for `Node ⊃ Node ⊃ Node → Node` where
+    the partner has its own ancestors at another depth. A focus at any depth
+    — root, container, leaf, a 12-deep spine's top — gets exactly the edges
+    incident to itself and its descendants, every endpoint shipped with its
+    ancestor chain, nothing cut."""
+    p = await estate("ragged", RAGGED_NODES_SEED, ctypes=RAGGED_CTYPES)
+    truth = await _ragged_truth(p, focus)
+    assert truth, f"fixture drift: {focus} has no incident lineage"
+
+    r = await p.trace_closure(
+        urn=focus, upstream_depth=1, downstream_depth=1,
+        lineage_edge_types=RAGGED_LTYPES, containment_edge_types=RAGGED_CTYPES,
+        max_nodes=2000, timeout_ms=15000,
+    )
+
+    assert r.truncated is False and r.seed_cursor is None
+    assert _edge_pairs(r) == truth
+    shipped = {n.urn for n in r.nodes}
+    for s, t in truth:
+        assert s in shipped and t in shipped
+    # Every endpoint outside the focus's own subtree arrives with its chain.
+    containment = {(e.source_urn, e.target_urn) for e in r.containment_edges}
+    parents = {t: s for s, t in containment}
+    for s, t in truth:
+        for end in (s, t):
+            if end in ("X", "R1", "R2", "R3"):
+                continue        # roots / the orphan have no parent
+            assert end in parents, f"{end} shipped without its containment parent"
+    for f in [*r.frontier_up, *r.frontier_down]:
+        assert f.reason == "depth" and f.next_cursor is None
+
+
+async def test_ragged_estate_twelve_deep_spine_seeds_through_the_hop_bound(estate):
+    """The only ontology-shaped constant is the containment descent bound
+    (≥16). A 12-deep single-label spine whose LEAF carries the lineage must
+    still seed from its top."""
+    p = await estate("raggedspine", RAGGED_NODES_SEED, ctypes=RAGGED_CTYPES)
+    r = await p.trace_closure(
+        urn="D100", upstream_depth=0, downstream_depth=1,
+        lineage_edge_types=RAGGED_LTYPES, containment_edge_types=RAGGED_CTYPES,
+        max_nodes=2000, timeout_ms=15000,
+    )
+    assert _edge_pairs(r) == {("D111", "A2")}
+    assert r.truncated is False

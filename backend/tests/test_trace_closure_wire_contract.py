@@ -160,7 +160,19 @@ def test_trace_frontier_node_alias_round_trip():
     from_snake = TraceFrontierNode.model_validate(snake_payload)
 
     assert from_alias == from_snake
-    assert from_alias.model_dump(by_alias=True) == alias_payload
+    assert from_alias.model_dump(by_alias=True) == {**alias_payload, "reason": None}
+
+
+def test_trace_frontier_node_reason_is_additive_and_bounded():
+    """`reason` says WHY a node is on the frontier: `cut` = the budget or the
+    deadline stopped the walk there (a one-hop client completes it hands-free
+    by re-rooting), `depth` = the requested depth ended there (the next hop —
+    a pill). Old payloads without it still validate."""
+    assert TraceFrontierNode.model_validate({"urn": "u1"}).reason is None
+    assert TraceFrontierNode.model_validate({"urn": "u1", "reason": "cut"}).reason == "cut"
+    assert TraceFrontierNode(urn="u1", reason="depth").model_dump(by_alias=True)["reason"] == "depth"
+    with pytest.raises(ValidationError):
+        TraceFrontierNode.model_validate({"urn": "u1", "reason": "because"})
 
 
 # ── TraceClosureResult ───────────────────────────────────────────────────
@@ -199,8 +211,8 @@ def test_trace_closure_result_alias_round_trip():
         "effectiveLevel": 0,
         "truncated": True,
         "truncationReason": "max_nodes",
-        "frontierUp": [{"urn": "up1", "totalCount": 5, "nextCursor": None}],
-        "frontierDown": [{"urn": "down1", "totalCount": None, "nextCursor": "e:1"}],
+        "frontierUp": [{"urn": "up1", "totalCount": 5, "nextCursor": None, "reason": "depth"}],
+        "frontierDown": [{"urn": "down1", "totalCount": None, "nextCursor": "e:1", "reason": "cut"}],
         "seedTruncated": True,
     }
     from_alias = TraceClosureResult.model_validate(alias_payload)
@@ -213,8 +225,8 @@ def test_trace_closure_result_alias_round_trip():
         "effective_level": 0,
         "truncated": True,
         "truncation_reason": "max_nodes",
-        "frontier_up": [{"urn": "up1", "total_count": 5, "next_cursor": None}],
-        "frontier_down": [{"urn": "down1", "total_count": None, "next_cursor": "e:1"}],
+        "frontier_up": [{"urn": "up1", "total_count": 5, "next_cursor": None, "reason": "depth"}],
+        "frontier_down": [{"urn": "down1", "total_count": None, "next_cursor": "e:1", "reason": "cut"}],
         "seed_truncated": True,
     }
     from_snake = TraceClosureResult.model_validate(snake_payload)
@@ -222,8 +234,8 @@ def test_trace_closure_result_alias_round_trip():
     assert from_alias == from_snake
 
     dumped = from_alias.model_dump(by_alias=True)
-    assert dumped["frontierUp"] == [{"urn": "up1", "totalCount": 5, "nextCursor": None}]
-    assert dumped["frontierDown"] == [{"urn": "down1", "totalCount": None, "nextCursor": "e:1"}]
+    assert dumped["frontierUp"] == [{"urn": "up1", "totalCount": 5, "nextCursor": None, "reason": "depth"}]
+    assert dumped["frontierDown"] == [{"urn": "down1", "totalCount": None, "nextCursor": "e:1", "reason": "cut"}]
     assert dumped["seedTruncated"] is True
 
 

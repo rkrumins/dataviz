@@ -142,7 +142,7 @@ class _StubProvider(GraphDataProvider):
     async def trace_closure(
         self, urn, upstream_depth, downstream_depth,
         lineage_edge_types, containment_edge_types, max_nodes, timeout_ms,
-        seed_urns=None, exclude_urns=None, after_cursor=None,
+        seed_urns=None, exclude_urns=None, after_cursor=None, seed_cursor=None,
     ) -> TraceClosureResult:
         # Deterministic scoped closure: the focus + its downstream lineage
         # edge, plus one synthetic frontier entry so response tests can
@@ -543,7 +543,7 @@ async def test_trace_closure_cache_hit_deserializes_the_subclass(test_client: As
     assert body["nodes"] == [] and body["edges"] == []
     # The subclass fields survived the deserialize — the whole point.
     assert body["frontierUp"] == [
-        {"urn": "urn:cached:hub", "totalCount": 61, "nextCursor": "e:900"}
+        {"urn": "urn:cached:hub", "totalCount": 61, "nextCursor": "e:900", "reason": None}
     ]
     assert body["seedTruncated"] is True
     assert body["truncationReason"] == "max_nodes"
