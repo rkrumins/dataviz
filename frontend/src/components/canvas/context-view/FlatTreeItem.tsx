@@ -166,7 +166,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     : undefined
 
   const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || 0
-  const hasChildren = node.children.length > 0 || childCount > 0
+  // In TRACE mode the chevron is the GRAPH's answer to "is there anything
+  // inside this?", never `children.length` — the trace holds only the
+  // children that carry lineage, so a table with 300 columns would offer a
+  // chevron that opens onto one row, or none at all.
+  const hasChildren = isTracing ? childCount > 0 : (node.children.length > 0 || childCount > 0)
 
   // Advanced-search roll-up: number of matches sitting anywhere in this
   // node's subtree (N levels deep, deduped per hit). Drives the
@@ -188,12 +192,15 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     ancestorBreakdown: ancestorMatchBreakdown,
     isSpotlightDim,
   } = useSearchHighlight(urnOrId, { isSelected })
-  // In trace mode, useTraceFilteredHierarchy already prunes node.children to
-  // the trace context, so children.length reflects what the user will see on
-  // expand. The graph-wide childCount would mislead them with siblings the
-  // trace filter immediately hides.
+  // The collapsed-row count. Browse counts what expanding will show. TRACE
+  // states what is inside the card ON THIS LINEAGE — the view model's own
+  // `onLineage` (participants in the subtree, self excluded), which is the
+  // same statement the Lens makes and the honest invitation beside the
+  // chevron: the graph-wide childCount would promise rows the trace hides,
+  // and `children.length` is only whatever happens to be open.
+  const onLineageCount = (node.data.onLineage as number) || 0
   const descendantCount = hasChildren && !isExpanded
-    ? (isTracing ? node.children.length : (childCount || node.children.length))
+    ? (isTracing ? onLineageCount : (childCount || node.children.length))
     : 0
 
   // Density-aware sizing — driven by usePreferencesStore.canvasDensity. The
@@ -651,7 +658,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             "transition-opacity duration-150",
             isHovered && "opacity-0 pointer-events-none",
           )}>
-            +{descendantCount}
+            {isTracing ? `${descendantCount} on this lineage` : `+${descendantCount}`}
           </span>
         )}
 
