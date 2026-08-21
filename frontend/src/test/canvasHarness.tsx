@@ -116,6 +116,18 @@ export interface TraceCanvasHarness {
   connectPickerOpen(): boolean
   /** Is the row's drag-to-connect handle rendered? */
   connectHandle(id: string): boolean
+  /** The "missing connections" chip's count, or null when it is absent. */
+  missingConnections(): number | null
+  /** Right-click a layer column header. */
+  layerContextMenu(): Promise<void>
+  /** Is a context menu on screen? */
+  contextMenuOpen(): boolean
+  /** Everything the canvas logged as a warning. */
+  consoleWarnings(): string[]
+  /** Open the entity drawer on a node. */
+  openDrawer(id: string): Promise<void>
+  /** How many "Edit" mode tabs the drawer offers (0 = read-only). */
+  drawerEditTabs(): number
   /** The lineage lines on screen, as drawn. */
   wires(): Array<{ source: string; target: string }>
   /** Writes to the canvas store's `nodes`/`edges` since the trace started. */
@@ -297,9 +309,15 @@ function stubFetch(estate: TraceEstate): () => void {
   return () => { globalThis.fetch = original }
 }
 
-/** The browse canvas behind the trace: the estate's entities and their
- *  containment, and NO lineage — every wire on screen must have come from
- *  the trace. */
+/** The browse canvas behind the trace: the estate's entities, their
+ *  containment, and ONE browse lineage edge.
+ *
+ *  That edge earns its place. Every wire the trace draws must have come from
+ *  the trace, so the browse lineage is deliberately minimal — but a canvas
+ *  with none at all cannot catch the class of bug where the trace re-projects
+ *  BROWSE edges against the TRACE's node map. This one runs from `snowflake`,
+ *  which the curated view places nowhere, so browse honestly reports it as a
+ *  connection it cannot show, and a trace must not inherit that count. */
 function seedBrowse(estate: TraceEstate): void {
   const nodes: LineageNode[] = wireNodes(estate).map(n => toCanvasNode(n))
   const edges: LineageEdge[] = estate.model.containmentEdges.map(c => ({
@@ -309,6 +327,13 @@ function seedBrowse(estate: TraceEstate): void {
     type: 'lineage',
     data: { edgeType: 'CONTAINS', relationship: 'CONTAINS' },
   }) as unknown as LineageEdge)
+  edges.push({
+    id: 'l:snowflake>tableau',
+    source: 'snowflake',
+    target: 'tableau',
+    type: 'lineage',
+    data: { edgeType: 'TRANSFORMS', relationship: 'TRANSFORMS' },
+  } as unknown as LineageEdge)
   const store = useCanvasStore.getState()
   store.setGraph(nodes, edges)
   store.setHydrationPhase('complete')
@@ -366,13 +391,24 @@ export async function renderCanvasWithTrace(
 
   // Every swallowed failure, made loud. See the file header.
   const errors: string[] = []
+  const warnings: string[] = []
   releaseConsole?.()
   const realError = console.error
+  const realWarn = console.warn
+  const fmt = (parts: unknown[]) =>
+    parts.map(part => (part instanceof Error ? part.message : String(part))).join(' ')
   console.error = (...parts: unknown[]) => {
-    errors.push(parts.map(part => (part instanceof Error ? part.message : String(part))).join(' '))
+    errors.push(fmt(parts))
     realError(...parts)
   }
-  releaseConsole = () => { console.error = realError }
+  // Warnings are NOT fatal (the app warns legitimately), but a trace that
+  // makes the edge projection complain is reporting a picture it does not
+  // have — so a test can ask.
+  console.warn = (...parts: unknown[]) => {
+    warnings.push(fmt(parts))
+    realWarn(...parts)
+  }
+  releaseConsole = () => { console.error = realError; console.warn = realWarn }
   const assertQuiet = (when: string): void => {
     if (errors.length > 0) {
       throw new Error(`the canvas logged ${errors.length} error(s) during ${when}:\n  ${errors.join('\n  ')}`)
@@ -540,6 +576,38 @@ export async function renderCanvasWithTrace(
     },
     connectPickerOpen: () =>
       [...document.querySelectorAll('h3')].some(h => h.textContent?.trim() === 'Connect'),
+    missingConnections: () => {
+      // The chip reads "<n> connections outside this view" (curated) or
+      // "… not on canvas" (open). Absent entirely when the count is 0.
+      const label = [...document.querySelectorAll<HTMLElement>('span')]
+        .find(el => /^connections (outside this view|not on canvas)$/.test(el.textContent?.trim() ?? ''))
+      const count = label?.previousElementSibling?.textContent?.trim()
+      if (count === undefined) return null
+      return Number(count.replace(/,/g, ''))
+    },
+    async layerContextMenu() {
+      // Right-click EMPTY layer space — the column's scroll area, which is
+      // what carries `onLayerContextMenu` (cards handle their own).
+      // The FIRST scroller belongs to a chrome panel that marks itself
+      // interactive, and the handler deliberately bails for those; the layer
+      // columns' own scrollers are the ones that carry the menu.
+      const area = [...document.querySelectorAll<HTMLElement>('.custom-scrollbar')]
+        .find(el => !el.closest('[data-canvas-interactive]'))
+      if (!area) throw new Error('no layer scroll area')
+      await act(async () => { fireEvent.contextMenu(area) })
+      await settle()
+    },
+    contextMenuOpen: () =>
+      [...document.querySelectorAll('span')]
+        .some(el => /^(Node|Edge|Canvas) Actions$/.test(el.textContent?.trim() ?? '')),
+    consoleWarnings: () => [...warnings],
+    async openDrawer(id: string) {
+      await act(async () => { useCanvasStore.getState().openNodeDrawer(id) })
+      await settle()
+    },
+    drawerEditTabs: () =>
+      [...document.querySelectorAll('button')]
+        .filter(b => /^edit$/i.test(b.textContent?.trim() ?? '')).length,
     connectHandle: (id: string) => {
       const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)
       return !!row?.querySelector('[aria-label="Drag to connect"]')

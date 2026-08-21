@@ -22,7 +22,7 @@ import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(13))
+afterAll(() => expectTestsRan(15))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -356,6 +356,50 @@ describe('the trace overlay on the real canvas', () => {
 
     await h.historyBack()
     expect(h.visibleCardIds().sort()).toEqual(opened)
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // The "missing connections" chip counts BROWSE lineage the canvas could not
+  // place. During a trace the projection was being handed the browse lineage
+  // against the TRACE's node map, so every edge pointing outside the trace
+  // picture read as unplaceable — a number the reader cannot act on, and a
+  // console.warn per render behind it.
+  it('the missing-connections chip reports browse, and says nothing during a trace', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    // Control: browse genuinely has one — snowflake feeds tableau, and the
+    // curated view places snowflake nowhere.
+    expect(h.missingConnections()).toBe(1)
+
+    const warnedBefore = h.consoleWarnings().length
+    await h.startTrace('cfo')
+
+    // Absent, not zero-with-a-chip: the trace has nothing of its own to report.
+    expect(h.missingConnections()).toBeNull()
+    expect(h.consoleWarnings().slice(warnedBefore).filter(w => w.includes('useEdgeProjection'))).toEqual([])
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // Read-only has to be literal: the panels that hang off the canvas write to
+  // the same places the canvas does — the layer menu rewrites the reference
+  // layout, the drawer's Edit tab stages entity changes.
+  it('the layer menu and the drawer offer no edits during a trace', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', draft: true })
+
+    // Controls: both are live in browse.
+    await h.layerContextMenu()
+    expect(h.contextMenuOpen()).toBe(true)
+    h.pressEscape()
+    await h.openDrawer('tableau')
+    expect(h.drawerEditTabs()).toBe(1)
+
+    await h.startTrace('cfo')
+
+    await h.layerContextMenu()
+    expect(h.contextMenuOpen()).toBe(false)
+    await h.openDrawer('tableau')
+    expect(h.drawerEditTabs()).toBe(0)
     expect(h.storeWrites()).toBe(0)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)

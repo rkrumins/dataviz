@@ -133,6 +133,11 @@ const EMPTY_DRILLDOWNS: Map<string, TraceV2Result> = new Map()
 /** The native trace draws through the overlay, never through the browse
  *  hierarchy filter — so the filter is fed nothing and stays pass-through. */
 const EMPTY_TRACE_NODES: ReadonlySet<string> = new Set<string>()
+/** Fed to the edge projection while the OVERLAY is drawing: the trace's wires
+ *  come from its own ledger, so the browse lineage has nothing to say and
+ *  projecting it only produces noise (see the call site). */
+const EMPTY_EDGES: unknown[] = []
+const EMPTY_AGG_EDGES: Map<string, unknown> = new Map()
 /** Trailing edge for recording the reader's expansion into the history
  *  entry. One reveal opens a whole chain and one drill peels a level per
  *  click; without this each of those rewrites the entry (and its
@@ -2522,6 +2527,8 @@ export function ContextViewCanvas({
     useHierarchyBuilderStore.getState().openBuild({ layerId })
   }, [])
   const handleLayerContextMenuOpen = useCallback((e: React.MouseEvent, layerId: string) => {
+    // Rename / delete / reorder a layer all rewrite the reference layout.
+    if (traceWriteLockedRef.current()) return
     interactions.openContextMenu(e, {
       type: 'canvas',
       position: { x: e.clientX, y: e.clientY },
@@ -3420,8 +3427,20 @@ export function ContextViewCanvas({
   // ledger has already decided the grain (see traceWireLedger), so the
   // projection would be re-deciding it from a store that holds none of the
   // trace's lineage anyway.
+  // WHILE THE OVERLAY DRAWS, give the projection nothing. Its output is
+  // already discarded (the wires come from the trace's own ledger), but it
+  // was being handed the BROWSE lineage against the TRACE's node map — so
+  // every browse edge with an endpoint outside the trace picture resolved to
+  // nothing and was counted as "hidden", inflating the missing-connections
+  // chip on every real trace and firing the projection's console.warn. It
+  // also spent an O(E) pass per render to produce that.
+  //
+  // Keyed on `overlay.active`, not `traceActive`: during the walk the canvas
+  // is still showing BROWSE and must keep its wires and its honest count.
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount } = useEdgeProjection({
-    edges, aggregatedEdges, nodesByLayer: renderByLayer, expandedNodes,
+    edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
+    aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
+    nodesByLayer: renderByLayer, expandedNodes,
     displayFlat: renderFlat, displayMap: renderMap, urnToIdMap,
     showLineageFlow, isTracing: overlay.active,
     traceContextSet, isContainmentEdge,
@@ -4402,7 +4421,10 @@ export function ContextViewCanvas({
           // live in the trace dock) — suppressed until exit.
           selectedExternal={traceActive ? null : selectedExternalLineage}
           onPreviewExternal={externalLineagePreview ? () => { void handlePreviewExternal() } : undefined}
-          unresolvedEdgeCount={showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
+          // The chip counts BROWSE connections the canvas could not place. A
+          // drawing trace has none to report (see the projection call site);
+          // during the walk the browse picture — and its count — still stand.
+          unresolvedEdgeCount={!overlay.active && showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
           unassignedEntities={unassignedEntities}
           onOpenEntity={openNodeDrawer}
           aggDetailShown={aggDetailStatus.shown}
@@ -4847,6 +4869,8 @@ export function ContextViewCanvas({
         {!builderOpen && !buildOpen && drawerNodeId && (
           <EntityDrawer
             key="entity-drawer"
+            // Read-only for the whole trace window, like the canvas behind it.
+            writesLocked={traceActive}
             onFocusConnections={openLens}
             onTraceUp={(nodeId) => startCanvasTrace(nodeId, 'up')}
             onTraceDown={(nodeId) => startCanvasTrace(nodeId, 'down')}
