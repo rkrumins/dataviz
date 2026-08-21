@@ -15,6 +15,7 @@
 import { cn } from '@/lib/utils'
 import { exact, percent } from '@/lib/formatMetric'
 import { MARK, useChartTheme } from './chartTheme'
+import { humaniseKey } from '@/lib/domainLabels'
 
 export interface ShareSlice {
     key: string
@@ -112,7 +113,6 @@ export function StackedShareBar({ slices, labelOf, className }: Props) {
     )
 }
 
-export function humanise(key: string): string {
-    const spaced = key.replace(/[_-]/g, ' ').trim()
-    return spaced.charAt(0).toUpperCase() + spaced.slice(1)
-}
+/** @deprecated Use `humaniseKey` from `@/lib/domainLabels` directly. Kept as a
+ *  re-export so the chart's default label path has one implementation. */
+export const humanise = humaniseKey

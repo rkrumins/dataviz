@@ -138,6 +138,8 @@ export interface TopUser {
 export interface TopView {
     viewId: string
     name: string
+    /** True when the viewer may not know this view's name. Counts stay real. */
+    redacted?: boolean
     workspaceId: string
     visibility: string
     viewType: string
@@ -149,7 +151,10 @@ export interface TopView {
 export interface Leaderboards {
     topUsers: TopUser[]
     topViews: TopView[]
-    topWorkspaces: { workspaceId: string; name: string; activity: number; opens: number }[]
+    topWorkspaces: {
+        workspaceId: string; name: string; activity: number; opens: number
+        redacted?: boolean
+    }[]
     topCreators: { userId: string; name: string; viewsCreated: number }[]
 }
 
@@ -218,9 +223,15 @@ export interface SemanticAdoption {
     sourcesDrifting: number
 }
 
+/**
+ * `reliability` and `access` are an OPERATOR's view — they name where the data
+ * is unreliable and who is waiting to get in — so the server omits them for a
+ * non-privileged viewer. Optional here rather than nullable: the field is
+ * absent, not empty.
+ */
 export interface PlatformHealth {
-    reliability: Reliability
-    access: AccessFriction
+    reliability?: Reliability
+    access?: AccessFriction
     semanticLayer: SemanticAdoption
 }
 
@@ -260,6 +271,19 @@ export interface AnalyticsSummary {
     /** Ranked, most significant first. Empty on a young install — the strip
      *  says nothing rather than manufacturing observations. */
     insights: Insight[]
+    /**
+     * Present only when the document was redacted for this viewer. Absent for
+     * administrators and auditors, who see everything.
+     */
+    redaction?: {
+        applied: true
+        visibleWorkspaces: number
+        /** False when the viewer's workspace access could not be resolved, so
+         *  something locked may be locked wrongly. Say so rather than showing a
+         *  confident redaction we cannot stand behind. */
+        accessResolved: boolean
+        hidden: string[]
+    }
     coverage: {
         /** When view-open tracking began. `null` means no opens recorded yet —
          *  the charts say so rather than implying nobody opened anything. */
@@ -276,15 +300,21 @@ export interface WorkspaceAnalyticsRow {
     name: string
     createdAt: string
     isActive: boolean
-    members: number
-    views: number
-    newViews: number
-    dataSources: number
-    activity: number
-    opens: number
-    activeUsers: number
-    nodes: number
-    edges: number
+    /**
+     * True when the viewer is not a member. The row still EXISTS — it is
+     * counted in the totals above the table — but every specific below is
+     * `null` rather than `0`, because zero is a claim and null is a refusal.
+     */
+    redacted?: boolean
+    members: number | null
+    views: number | null
+    newViews: number | null
+    dataSources: number | null
+    activity: number | null
+    opens: number | null
+    activeUsers: number | null
+    nodes: number | null
+    edges: number | null
     lastActivityAt: string | null
     dormant: boolean
 }

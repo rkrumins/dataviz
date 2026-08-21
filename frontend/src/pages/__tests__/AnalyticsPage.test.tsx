@@ -85,7 +85,7 @@ const SUMMARY = {
         usersByStatus: [{ key: 'active', count: 10 }, { key: 'pending', count: 2 }],
         usersBySignupSource: [{ key: 'local_signup', count: 12 }],
         viewsByVisibility: [{ key: 'private', count: 5 }, { key: 'workspace', count: 2 }],
-        viewsByType: [{ key: 'graph', count: 7 }],
+        viewsByType: [{ key: 'graph', count: 7 }, { key: 'reference', count: 4 }],
         activityByAction: [{ key: 'created', count: 3 }],
         collaborationRate: 0.29,
         contentConcentration: 0.8,
@@ -293,6 +293,112 @@ describe('AnalyticsPage', () => {
         expect(await screen.findByText(/faded lines show the previous period/i))
             .toBeInTheDocument()
         expect(screen.getByText(/bucketed in UTC/i)).toBeInTheDocument()
+    })
+
+    // ── Terminology ─────────────────────────────────────────────────
+
+    it('calls a reference view a Context View', async () => {
+        // The stored enum is `reference`; every other surface in the product
+        // says "Context View". Analytics used to render the raw key.
+        renderAt('/analytics?tab=content')
+        expect(await screen.findByText('Context View')).toBeInTheDocument()
+        expect(screen.queryByText(/^Reference$/)).toBeNull()
+    })
+
+    // ── Self-explanatory metrics ────────────────────────────────────
+
+    it('explains what a metric means, on demand', async () => {
+        const user = userEvent.setup()
+        renderAt('/analytics?tab=engagement')
+
+        const button = await screen.findByRole('button', { name: /what does "stickiness" mean/i })
+        // Click, not hover: hover cards strobe across a KPI row and do not
+        // exist on touch at all.
+        await user.click(button)
+
+        const tip = await screen.findByRole('tooltip')
+        expect(within(tip).getByText(/daily or occasionally/i)).toBeInTheDocument()
+        expect(within(tip).getByText(/how it's calculated/i)).toBeInTheDocument()
+        expect(within(tip).getByText(/why it matters/i)).toBeInTheDocument()
+
+        await user.keyboard('{Escape}')
+        await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull())
+    })
+
+    // ── Redaction ───────────────────────────────────────────────────
+
+    const REDACTED = {
+        ...SUMMARY,
+        redaction: {
+            applied: true as const,
+            visibleWorkspaces: 1,
+            accessResolved: true,
+            hidden: ['Individual activity and names'],
+        },
+        leaderboards: { ...SUMMARY.leaderboards, topUsers: [], topCreators: [] },
+        health: { semanticLayer: SUMMARY.health.semanticLayer },
+    }
+
+    it('says individual activity is hidden rather than that nobody was active', async () => {
+        // The bug this prevents: an empty leaderboard and a withheld one look
+        // identical, and "nobody has been active" is a false statement to make
+        // to someone who simply may not see who was.
+        vi.mocked(analyticsService.getSummary).mockResolvedValue(REDACTED as never)
+        renderAt('/analytics')
+
+        expect(await screen.findByText(/individual activity is hidden/i)).toBeInTheDocument()
+        expect(screen.queryByText(/nobody has been active/i)).toBeNull()
+    })
+
+    it('still shows platform-wide totals to a redacted viewer', async () => {
+        vi.mocked(analyticsService.getSummary).mockResolvedValue(REDACTED as never)
+        renderAt('/analytics')
+        // The notice explains the shape of what they are looking at.
+        expect(await screen.findByText(/you're seeing the platform-wide view/i))
+            .toBeInTheDocument()
+        // And the aggregates are still there — that is the whole point.
+        expect(screen.getAllByText(/active users/i).length).toBeGreaterThan(0)
+        expect(screen.getAllByText(/total users/i).length).toBeGreaterThan(0)
+    })
+
+    it('withholds operational health from a redacted viewer', async () => {
+        vi.mocked(analyticsService.getSummary).mockResolvedValue(REDACTED as never)
+        renderAt('/analytics?tab=health')
+
+        expect(await screen.findByText(/data freshness is hidden/i)).toBeInTheDocument()
+        expect(screen.getByText(/access requests are hidden/i)).toBeInTheDocument()
+        // Semantic coverage is a platform fact and stays.
+        expect(screen.getByText(/semantic layer coverage/i)).toBeInTheDocument()
+    })
+
+    it('warns rather than lies when access could not be resolved', async () => {
+        vi.mocked(analyticsService.getSummary).mockResolvedValue({
+            ...REDACTED,
+            redaction: { ...REDACTED.redaction, accessResolved: false },
+        } as never)
+        renderAt('/analytics')
+        expect(await screen.findByText(/couldn't confirm your workspace access/i))
+            .toBeInTheDocument()
+    })
+
+    it('locks a workspace row instead of dropping it', async () => {
+        vi.mocked(analyticsService.getSummary).mockResolvedValue(REDACTED as never)
+        vi.mocked(analyticsService.listWorkspaces).mockResolvedValue([
+            WORKSPACE_ROWS[0],
+            {
+                workspaceId: 'ws2', name: 'Restricted workspace', redacted: true,
+                createdAt: '2026-02-01T00:00:00+00:00', isActive: true,
+                members: null, views: null, newViews: null, dataSources: null,
+                activity: null, opens: null, activeUsers: null,
+                nodes: null, edges: null, lastActivityAt: null, dormant: false,
+            },
+        ] as never)
+        renderAt('/analytics?tab=workspaces')
+
+        // Both rows present: the table must agree with the totals above it.
+        expect(await screen.findByText('Finance')).toBeInTheDocument()
+        expect(screen.getByText('Restricted workspace')).toBeInTheDocument()
+        expect(screen.getByText(/you are not a member/i)).toBeInTheDocument()
     })
 
     it('surfaces a load failure instead of rendering empty charts', async () => {

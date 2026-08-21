@@ -37,7 +37,7 @@ import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Iterable, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Sequence
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,6 +67,9 @@ from backend.app.db.models import (
 )
 from backend.app.db.repositories import stats_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
+
+if TYPE_CHECKING:  # pragma: no cover — annotation only
+    from backend.app.services.analytics_scope import ViewerScope
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +159,16 @@ class Window:
 
 class InvalidWindow(ValueError):
     """A caller-supplied date range that cannot be measured."""
+
+
+class WorkspaceForbidden(PermissionError):
+    """The workspace exists, and this caller may not see inside it.
+
+    Deliberately distinct from "not found". The workspace-analytics table
+    already discloses that it EXISTS (as a locked row), so answering 404 here
+    would be a lie that protects nothing — and it would send someone hunting
+    for a typo in an id that is perfectly correct.
+    """
 
 
 def previous_window(w: Window) -> Window:
@@ -479,6 +492,7 @@ async def platform_summary(
     session: AsyncSession, *, days: Optional[int] = None,
     start: Optional[str] = None, end: Optional[str] = None,
     now: Optional[datetime] = None,
+    scope: Optional["ViewerScope"] = None,
 ) -> dict:
     """Everything the platform-wide Analytics dashboard renders, for one window."""
     now = now or datetime.now(timezone.utc)
@@ -680,7 +694,8 @@ async def platform_summary(
     # function of what the dashboard already says, so they can never disagree
     # with the charts beneath them.
     doc["insights"] = _narrative(doc, window_label=_window_label(w))
-    return doc
+    # Redaction is the last thing that happens, over the finished document.
+    return redact_summary(doc, scope) if scope is not None else doc
 
 
 async def _first_open_at(session: AsyncSession) -> Optional[str]:
@@ -694,6 +709,133 @@ async def _first_open_at(session: AsyncSession) -> Optional[str]:
         select(func.min(ProductEventORM.created_at))
         .where(ProductEventORM.event_type == VIEW_OPENED)
     )).scalar()
+
+
+# ── Redaction ────────────────────────────────────────────────────────
+# Applied as a LAST PASS over the finished document rather than threaded through
+# every query. Two reasons, and both are about the failure mode:
+#
+#   * A redactor that lives in one place can be read in one sitting and tested
+#     on its own. A redaction condition sprinkled across twenty queries is
+#     correct only until someone adds the twenty-first.
+#   * When it is a filter over a known shape, a field ADDED later is redacted by
+#     default only if we say so explicitly — so the allow-lists below name what
+#     survives, never what is removed. A new leaderboard is hidden until someone
+#     decides otherwise, which is the right way round.
+
+#: What a workspace is called when the viewer may not know its name.
+REDACTED_WORKSPACE = "Restricted workspace"
+REDACTED_VIEW = "Restricted view"
+
+
+def _redact_workspace_row(row: dict) -> dict:
+    """One workspace the viewer is not a member of.
+
+    The row SURVIVES — that is the whole design. Dropping it would make the
+    table disagree with the totals above it, and "12 workspaces, 4 you can open"
+    is a more honest picture than a table that quietly shows four. What goes is
+    everything that describes the place: its name, its size, who is in it, and
+    what they did.
+    """
+    return {
+        "workspaceId": row["workspaceId"],
+        "name": REDACTED_WORKSPACE,
+        "redacted": True,
+        # Age is the one fact kept, and only because the table sorts and groups
+        # by it; it says nothing about the work inside.
+        "createdAt": row["createdAt"],
+        "isActive": row["isActive"],
+        "members": None, "views": None, "newViews": None, "dataSources": None,
+        "activity": None, "opens": None, "activeUsers": None,
+        "nodes": None, "edges": None,
+        "lastActivityAt": None, "dormant": False,
+    }
+
+
+def _redact_view_row(row: dict, scope) -> dict:
+    """A popular view. Its NAME leaks what a private workspace is working on."""
+    if scope.can_see(row.get("workspaceId")):
+        return row
+    return {
+        **row,
+        "name": REDACTED_VIEW,
+        "redacted": True,
+        # Counts stay: they are what makes it "popular", and they name nothing.
+        "visibility": "restricted",
+        "viewType": "restricted",
+    }
+
+
+def redact_summary(doc: dict, scope) -> dict:
+    """Apply ``scope`` to a finished platform summary.
+
+    Aggregates are left ALONE — totals, series, breakdowns, adoption, value
+    moments and graph scale all describe the platform rather than any person or
+    place, and they are the reason a non-privileged viewer is here at all.
+    """
+    if scope.privileged:
+        return doc
+
+    doc = dict(doc)
+
+    # People: nothing, for anyone. Not "colleagues only", not "names without
+    # emails" — see ``ViewerScope.shows_people``. The empty lists carry a
+    # reason so the UI can say "hidden" instead of "nobody was active", which
+    # is a different and false statement.
+    doc["leaderboards"] = {
+        "topUsers": [],
+        "topCreators": [],
+        "topViews": [
+            _redact_view_row(v, scope)
+            for v in doc["leaderboards"].get("topViews", [])
+        ],
+        "topWorkspaces": [
+            w if scope.can_see(w.get("workspaceId"))
+            else {**w, "name": REDACTED_WORKSPACE, "redacted": True}
+            for w in doc["leaderboards"].get("topWorkspaces", [])
+        ],
+    }
+
+    # Operations: who is waiting for access, and where the data is unreliable.
+    # An operator's view of the platform, and it names people by implication.
+    health = dict(doc.get("health") or {})
+    if not scope.shows_operations:
+        health.pop("access", None)
+        health.pop("reliability", None)
+    doc["health"] = health
+
+    # Insights are generated FROM the fields above, so any rule that reads a
+    # redacted one must not survive. Allow-listed by key rather than filtered by
+    # inspection: a new rule is hidden from the public tier until someone has
+    # looked at what it says.
+    doc["insights"] = [
+        i for i in doc.get("insights", []) if i["key"] in _PUBLIC_INSIGHTS
+    ]
+
+    doc["redaction"] = {
+        "applied": True,
+        "visibleWorkspaces": len(scope.visible_workspaces),
+        # False means we could not resolve the caller's access, so anything
+        # locked may be locked wrongly. The UI says so rather than presenting a
+        # confident redaction it cannot stand behind.
+        "accessResolved": scope.workspaces_known,
+        "hidden": [
+            "Individual activity and names",
+            "Names of workspaces you are not in",
+            "Access requests, invites and refresh health",
+        ],
+    }
+    return doc
+
+
+#: Insight rules whose text is derived only from platform-wide aggregates.
+#: Everything else — anything quoting a workspace, a person, or operational
+#: health — is withheld from a non-privileged reader.
+_PUBLIC_INSIGHTS = frozenset({
+    "signups", "active", "views", "signup-mix", "stickiness",
+    "trace-empty", "search-miss", "funnel-leak", "concentration",
+    "semantic-coverage",
+})
 
 
 # ── Narrative insights ───────────────────────────────────────────────
@@ -1670,6 +1812,7 @@ async def workspace_rows(
     session: AsyncSession, *, days: Optional[int] = None,
     start: Optional[str] = None, end: Optional[str] = None,
     now: Optional[datetime] = None,
+    scope: Optional["ViewerScope"] = None,
 ) -> list[dict]:
     """One aggregate row per live workspace — the Workspaces tab's table.
 
@@ -1742,7 +1885,11 @@ async def workspace_rows(
             "lastActivityAt": last_activity.get(ws.id),
             # Churn risk: it exists, it has content, and nobody touched it.
             "dormant": window_activity == 0,
+            "redacted": False,
         })
+    if scope is not None and not scope.privileged:
+        rows = [r if scope.can_see(r["workspaceId"]) else _redact_workspace_row(r)
+                for r in rows]
     return rows
 
 
@@ -1807,6 +1954,7 @@ async def workspace_detail(
     days: Optional[int] = None,
     start: Optional[str] = None, end: Optional[str] = None,
     now: Optional[datetime] = None,
+    scope: Optional["ViewerScope"] = None,
 ) -> Optional[dict]:
     """Full insights for one workspace. ``None`` when it doesn't exist."""
     now = now or datetime.now(timezone.utc)
@@ -1819,6 +1967,11 @@ async def workspace_detail(
     )).scalar_one_or_none()
     if workspace is None:
         return None
+    # A drill-in is all specifics — names, contributors, what they built. There
+    # is no useful redacted version of this page, so refuse rather than render
+    # an outline of one.
+    if scope is not None and not scope.can_see(workspace_id):
+        raise WorkspaceForbidden(workspace_id)
 
     live_view = [ViewORM.deleted_at.is_(None), ViewORM.workspace_id == workspace_id]
     ws_activity = [ViewActivityLogORM.workspace_id == workspace_id]

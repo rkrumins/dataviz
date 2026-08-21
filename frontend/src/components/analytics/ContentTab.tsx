@@ -7,12 +7,14 @@ import { exact, percent, shortDate } from '@/lib/formatMetric'
 import type {
     AnalyticsRangeSelection, AnalyticsSummary,
 } from '@/services/analyticsService'
+import { viewTypeLabel, visibilityLabel } from '@/lib/domainLabels'
 import { KpiCard } from './KpiCard'
+import { WithheldPanel } from './Redacted'
 import { Leaderboard } from './Leaderboard'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
 import { BarSeriesChart } from './charts/BarSeriesChart'
-import { StackedShareBar, humanise } from './charts/StackedShareBar'
+import { StackedShareBar } from './charts/StackedShareBar'
 import { comparisonLabel, rangeLabel } from './RangePicker'
 
 export function ContentTab({
@@ -35,12 +37,12 @@ export function ContentTab({
                     trend={series.viewsCreated} accent="indigo"
                 />
                 <KpiCard
-                    label="Shared openly" value={percent(breakdowns.collaborationRate)} icon={Share2}
+                    label="Shared openly" metric="collaboration" value={percent(breakdowns.collaborationRate)} icon={Share2}
                     sub="views visible beyond their author"
                     accent="emerald"
                 />
                 <KpiCard
-                    label="Top-10 share" value={percent(breakdowns.contentConcentration)} icon={Eye}
+                    label="Top-10 share" metric="concentration" value={percent(breakdowns.contentConcentration)} icon={Eye}
                     sub="of opens going to ten views"
                     higherIsBetter={false}
                     accent="amber"
@@ -69,9 +71,15 @@ export function ContentTab({
                     isStale={isStale}
                     isEmpty={breakdowns.viewsByType.length === 0}
                 >
-                    <StackedShareBar slices={breakdowns.viewsByType} />
+                    <StackedShareBar slices={breakdowns.viewsByType} labelOf={viewTypeLabel} />
                 </ChartFrame>
 
+                {data.redaction?.applied ? (
+                    <WithheldPanel
+                        title="Top builders is hidden"
+                        reason="Per-person contribution is visible to administrators and auditors only. The view counts above include everyone's work."
+                    />
+                ) : (
                 <ChartFrame
                     title="Top builders"
                     subtitle={`Views created in ${rangeLabel(range).toLowerCase()}`}
@@ -89,6 +97,7 @@ export function ContentTab({
                         }))}
                     />
                 </ChartFrame>
+                )}
             </div>
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
@@ -137,7 +146,7 @@ export function ContentTab({
                         rows={leaderboards.topViews.map((v) => ({
                             id: v.viewId,
                             label: v.name,
-                            meta: `${v.viewType} · ${visibilityLabel(v.visibility)}`,
+                            meta: `${viewTypeLabel(v.viewType)} · ${visibilityLabel(v.visibility)}`,
                             value: v.opens,
                             detail: `${exact(v.uniqueViewers)} ${v.uniqueViewers === 1 ? 'person' : 'people'}`,
                         }))}
@@ -148,11 +157,3 @@ export function ContentTab({
     )
 }
 
-function visibilityLabel(key: string): string {
-    switch (key) {
-        case 'private': return 'Private to author'
-        case 'workspace': return 'Whole workspace'
-        case 'enterprise': return 'Everyone'
-        default: return humanise(key)
-    }
-}

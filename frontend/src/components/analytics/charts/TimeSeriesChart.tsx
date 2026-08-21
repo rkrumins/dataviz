@@ -11,7 +11,7 @@
  * that x, so the pointer never has to land on a 2px line to read a value. The
  * hit targets are full-height column bands — the reader aims at a date.
  */
-import { useId, useMemo, useState } from 'react'
+import { useCallback, useId, useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import { exact, niceTicks, shortDate } from '@/lib/formatMetric'
@@ -103,35 +103,37 @@ export function TimeSeriesChart({
         return { max: Math.max(peak, t[t.length - 1] ?? peak), ticks: t }
     }, [series, ghosted])
 
+    // The scales are `useCallback`ed rather than recreated per render, so the
+    // memoised layers below can depend on them HONESTLY. Left as plain arrow
+    // functions they would be new on every hover, and the memos would either
+    // invalidate constantly (no saving) or omit them from the dependency list
+    // and quietly hold a stale scale after a resize.
     const stepX = buckets.length > 1 ? plotW / (buckets.length - 1) : 0
-    const x = (i: number) => PAD.left + (buckets.length > 1 ? i * stepX : plotW / 2)
-    const y = (v: number) => PAD.top + plotH * (1 - v / max)
+    const x = useCallback(
+        (i: number) => PAD.left + (buckets.length > 1 ? i * stepX : plotW / 2),
+        [buckets.length, stepX, plotW],
+    )
+    const y = useCallback(
+        (v: number) => PAD.top + plotH * (1 - v / max),
+        [plotH, max],
+    )
 
     // Show at most ~7 x labels; past that they collide and stop being readable.
     const labelEvery = Math.max(1, Math.ceil(buckets.length / 7))
     const active = hover
 
-    return (
-        <div ref={wrapRef} className={cn('relative', className)}>
-            <svg
-                width={width}
-                height={height}
-                viewBox={`0 0 ${width} ${height}`}
-                className="overflow-visible"
-                role="img"
-                aria-label={`${series.map((s) => s.label).join(', ')} over time`}
-                onMouseLeave={() => setHover(null)}
-            >
-                <defs>
-                    {series.filter((s) => s.area).map((s) => (
-                        <linearGradient key={s.key} id={`${gradientId}-${s.key}`} x1="0" y1="0" x2="0" y2="1">
-                            {/* A wash, never a saturated block. */}
-                            <stop offset="0%" stopColor={theme.series[s.slot % theme.series.length]} stopOpacity={0.16} />
-                            <stop offset="100%" stopColor={theme.series[s.slot % theme.series.length]} stopOpacity={0} />
-                        </linearGradient>
-                    ))}
-                </defs>
-
+    // ── Static layers ────────────────────────────────────────────────
+    // Hover lives in this component's state, so every pointer move re-runs
+    // the whole render. Memoising the layers that do NOT depend on it means
+    // React reuses the identical element trees and skips reconciling them —
+    // a mousemove repaints a crosshair, two dots and a tooltip instead of
+    // every gridline, polyline and axis label in the chart.
+    //
+    // `series`, `buckets` and `theme` are all referentially stable across a
+    // hover change (they come from props and a memoised hook, and the parent
+    // does not re-render on hover), so these memos genuinely hold.
+    const staticGrid = useMemo(() => (
+        <>
                 {/* Gridlines: hairline, SOLID, one step off the surface. Dashing
                     reads as "threshold" when it is only a grid. */}
                 {ticks.map((t) => (
@@ -160,7 +162,11 @@ export function TimeSeriesChart({
                         </text>
                     ) : null
                 ))}
+        </>
+    ), [ticks, buckets, labelEvery, width, padRight, theme, height, x, y])
 
+    const staticMarks = useMemo(() => (
+        <>
                 {/* Annotations sit under the crosshair and under every mark:
                     they explain the data, they are not part of it. */}
                 {(annotations ?? []).map((a) => {
@@ -184,14 +190,6 @@ export function TimeSeriesChart({
                         </g>
                     )
                 })}
-
-                {active !== null && (
-                    <line
-                        x1={x(active)} y1={PAD.top} x2={x(active)} y2={PAD.top + plotH}
-                        stroke={theme.muted} strokeWidth={1}
-                    />
-                )}
-
                 {/* Ghosts first, so the live lines paint over them. Thinner
                     and faded: a comparison should never out-shout the thing it
                     is a comparison FOR. No end dot, no label — the reader is
@@ -240,17 +238,14 @@ export function TimeSeriesChart({
                                     strokeWidth={MARK.surfaceGap}
                                 />
                             )}
-                            {active !== null && (
-                                <circle
-                                    cx={x(active)} cy={y(s.values[active] ?? 0)}
-                                    r={MARK.dotRadius} fill={color}
-                                    stroke={theme.surface} strokeWidth={MARK.surfaceGap}
-                                />
-                            )}
                         </g>
                     )
                 })}
+        </>
+    ), [annotations, buckets, ghosted, series, gradientId, plotH, theme, x, y])
 
+    const staticTail = useMemo(() => (
+        <>
                 {/* Direct labels, sparingly: the endpoint only, and only while
                     series are few enough that the labels don't converge. */}
                 {showEndLabels && series.map((s) => {
@@ -290,6 +285,56 @@ export function TimeSeriesChart({
                         className="outline-none focus-visible:fill-black/[0.03] dark:focus-visible:fill-white/[0.04]"
                     />
                 ))}
+        </>
+    ), [showEndLabels, series, buckets, plotH, plotW, stepX, showPrevious, x, y])
+
+    return (
+        <div ref={wrapRef} className={cn('relative', className)}>
+            <svg
+                width={width}
+                height={height}
+                viewBox={`0 0 ${width} ${height}`}
+                className="overflow-visible"
+                role="img"
+                aria-label={`${series.map((s) => s.label).join(', ')} over time`}
+                onMouseLeave={() => setHover(null)}
+            >
+                <defs>
+                    {series.filter((s) => s.area).map((s) => (
+                        <linearGradient key={s.key} id={`${gradientId}-${s.key}`} x1="0" y1="0" x2="0" y2="1">
+                            {/* A wash, never a saturated block. */}
+                            <stop offset="0%" stopColor={theme.series[s.slot % theme.series.length]} stopOpacity={0.16} />
+                            <stop offset="100%" stopColor={theme.series[s.slot % theme.series.length]} stopOpacity={0} />
+                        </linearGradient>
+                    ))}
+                </defs>
+
+                {staticGrid}
+
+                {active !== null && (
+                    <line
+                        x1={x(active)} y1={PAD.top} x2={x(active)} y2={PAD.top + plotH}
+                        stroke={theme.muted} strokeWidth={1}
+                    />
+                )}
+
+                {staticMarks}
+
+                {/* Hover dots live OUTSIDE the marks layer above. Inside it,
+                    every pointer move would invalidate the memo and repaint
+                    every polyline in the chart; out here only these few
+                    circles change. */}
+                {active !== null && series.map((s) => (
+                    <circle
+                        key={`hover-${s.key}`}
+                        cx={x(active)} cy={y(s.values[active] ?? 0)}
+                        r={MARK.dotRadius}
+                        fill={theme.series[s.slot % theme.series.length]}
+                        stroke={theme.surface} strokeWidth={MARK.surfaceGap}
+                    />
+                ))}
+
+                {staticTail}
             </svg>
 
             {active !== null && (

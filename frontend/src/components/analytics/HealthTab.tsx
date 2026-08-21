@@ -21,11 +21,13 @@ import {
 
 import { cn } from '@/lib/utils'
 import { compact, exact, percent } from '@/lib/formatMetric'
+import { humaniseKey } from '@/lib/domainLabels'
 import type { AnalyticsRangeSelection, AnalyticsSummary } from '@/services/analyticsService'
 import { KpiCard } from './KpiCard'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
-import { StackedShareBar, humanise } from './charts/StackedShareBar'
+import { StackedShareBar } from './charts/StackedShareBar'
+import { WithheldPanel } from './Redacted'
 import { rangeLabel } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
 
@@ -42,7 +44,17 @@ export function HealthTab({
 
     return (
         <div className={cn('space-y-6 transition-opacity', isStale && 'opacity-50')}>
-            {/* ── Data trust ─────────────────────────────────────────── */}
+            {/* ── Data trust ───────────────────────────────────────────
+                Withheld for non-privileged viewers: refresh failures name
+                which sources are unreliable, which is an operator's business.
+                The panel still occupies the space so the page does not reflow
+                into a different layout depending on who is reading it. */}
+            {!reliability ? (
+                <WithheldPanel
+                    title="Data freshness is hidden"
+                    reason="Refresh outcomes are visible to administrators and auditors. Ask one of them if you need to know how current a data source is."
+                />
+            ) : (
             <section aria-labelledby="health-reliability">
                 <h2 id="health-reliability" className="text-sm font-bold text-ink mb-1">
                     Data freshness
@@ -53,7 +65,7 @@ export function HealthTab({
 
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     <KpiCard
-                        label="Refresh success"
+                        label="Refresh success" metric="refreshSuccess"
                         value={reliability.successRate == null
                             ? '—' : percent(reliability.successRate)}
                         sub={reliability.refreshes
@@ -98,14 +110,14 @@ export function HealthTab({
                         emptyLabel="No refresh activity in this range."
                         series={reliability.byOutcome.map((row, i) => ({
                             key: row.key,
-                            label: humanise(row.key),
+                            label: humaniseKey(row.key),
                             color: row.key === 'Other' ? theme.neutralMark : theme.series[i % theme.series.length],
                             shape: 'bar' as const,
                         }))}
                         table={
                             <ChartTable
                                 rowLabel="Outcome"
-                                rows={reliability.byOutcome.map((r) => humanise(r.key))}
+                                rows={reliability.byOutcome.map((r) => humaniseKey(r.key))}
                                 columns={[{
                                     key: 'count', label: 'Refreshes',
                                     values: reliability.byOutcome.map((r) => r.count),
@@ -113,12 +125,22 @@ export function HealthTab({
                             />
                         }
                     >
-                        <StackedShareBar slices={reliability.byOutcome} labelOf={humanise} />
+                        <StackedShareBar slices={reliability.byOutcome} labelOf={humaniseKey} />
                     </ChartFrame>
                 )}
             </section>
 
-            {/* ── Access friction ────────────────────────────────────── */}
+            )}
+
+            {/* ── Access friction ──────────────────────────────────────
+                Withheld likewise: pending requests and invite acceptance
+                identify people by implication. */}
+            {!access ? (
+                <WithheldPanel
+                    title="Access requests are hidden"
+                    reason="Who is waiting for access, and how quickly requests are answered, is visible to administrators and auditors."
+                />
+            ) : (
             <section aria-labelledby="health-access">
                 <h2 id="health-access" className="text-sm font-bold text-ink mb-1">
                     Access friction
@@ -149,7 +171,7 @@ export function HealthTab({
                         higherIsBetter={false}
                     />
                     <KpiCard
-                        label="Invite acceptance"
+                        label="Invite acceptance" metric="inviteAcceptance"
                         value={access.acceptanceRate == null
                             ? '—' : percent(access.acceptanceRate)}
                         sub={`${exact(access.invitesRedeemed)} of ${exact(access.invitesSent)} redeemed`}
@@ -167,7 +189,11 @@ export function HealthTab({
                 </div>
             </section>
 
-            {/* ── Semantic layer adoption ────────────────────────────── */}
+            )}
+
+            {/* ── Semantic layer adoption ──────────────────────────────
+                Shown to everyone: it is a platform fact, not an operational
+                one, and names nothing. */}
             <section aria-labelledby="health-semantic">
                 <h2 id="health-semantic" className="text-sm font-bold text-ink mb-1">
                     Semantic layer coverage
@@ -179,7 +205,7 @@ export function HealthTab({
 
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                     <KpiCard
-                        label="Sources with a semantic layer"
+                        label="Sources with a semantic layer" metric="semanticCoverage"
                         value={semanticLayer.coverage == null
                             ? '—' : percent(semanticLayer.coverage)}
                         sub={`${exact(semanticLayer.sourcesWithOntology)} of ${exact(semanticLayer.sourcesTotal)} sources`}

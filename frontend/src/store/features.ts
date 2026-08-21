@@ -53,6 +53,11 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     semanticLayerAutoSuggest: true,
     semanticLayerVersionHistory: true,
     semanticLayerNonAdminEditing: false,  // fail CLOSED — see above
+    // Fail CLOSED, same reasoning: this WIDENS who can read platform-wide
+    // growth and how many workspaces exist. Guessing "on" while the real value
+    // is still in flight would publish that to everyone for a few hundred
+    // milliseconds, and it is not a disclosure you can take back.
+    analyticsPublicEnabled: false,
     signupEnabled: false,                 // fail CLOSED — this one is a door
     // Fail OPEN, unlike signupEnabled, and the asymmetry is the point: seeding
     // this `false` would re-create the bug it exists to control. A visitor

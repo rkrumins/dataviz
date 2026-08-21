@@ -33,6 +33,7 @@ import { EngagementTab } from '@/components/analytics/EngagementTab'
 import { ContentTab } from '@/components/analytics/ContentTab'
 import { WorkspacesTab } from '@/components/analytics/WorkspacesTab'
 import { HealthTab } from '@/components/analytics/HealthTab'
+import { RedactionNotice } from '@/components/analytics/Redacted'
 import { WorkspaceInsightsPanel } from '@/components/analytics/WorkspaceInsightsPanel'
 
 type AnalyticsTab =
@@ -188,6 +189,16 @@ export function AnalyticsPage() {
                 className="flex-1 min-h-0 overflow-y-auto"
             >
                 <PageContainer gutter="shell" className="py-6 pb-20">
+                    {/* One notice at the top, not a caveat beside every
+                        hidden thing. Absent entirely for privileged readers. */}
+                    {summary.data?.redaction && (
+                        <RedactionNotice
+                            visibleWorkspaces={summary.data.redaction.visibleWorkspaces}
+                            accessResolved={summary.data.redaction.accessResolved}
+                            hidden={summary.data.redaction.hidden}
+                            className="mb-5"
+                        />
+                    )}
                     {summary.error ? (
                         <ErrorPanel message={summary.error.message} />
                     ) : summary.isLoading || !summary.data ? (

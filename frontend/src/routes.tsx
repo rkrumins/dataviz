@@ -4,6 +4,7 @@ import { AppLayout } from '@/components/layout/AppLayout'
 import { CanvasLayout } from '@/components/layout/CanvasLayout'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 import { RequireNav } from '@/components/auth/RequireNav'
+import { RequireAnalytics } from '@/components/auth/RequireAnalytics'
 import { RequireFeature } from '@/components/RequireFeature'
 import { lazyWithRetry } from '@/lib/lazyWithRetry'
 import { RouteErrorBoundary } from '@/components/RouteErrorBoundary'
@@ -163,14 +164,16 @@ export const router = createBrowserRouter([
         ),
       },
       // Platform analytics — growth, engagement, and per-workspace insights.
-      // Gated on the same anyPerm spec the sidebar item uses, so the section
-      // and its route can never disagree about who may see it.
+      // Guarded by `RequireAnalytics` rather than `RequireNav`: the door is a
+      // permission OR the `analyticsPublicEnabled` flag, and a catalogue spec
+      // cannot say "or the flag is on". The guard and the sidebar item read the
+      // same hook, so they cannot disagree about who may see it.
       {
         path: 'analytics',
         element: (
-          <RequireNav group="sidebar" sectionKey="analytics">
+          <RequireAnalytics>
             <Lazy><AnalyticsPage /></Lazy>
-          </RequireNav>
+          </RequireAnalytics>
         ),
       },
       // Per-data-source overview (owner's home for one catalog item).

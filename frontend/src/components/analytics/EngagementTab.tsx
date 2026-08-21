@@ -7,13 +7,15 @@ import { exact, percent, shortDate } from '@/lib/formatMetric'
 import type {
     AnalyticsRangeSelection, AnalyticsSummary,
 } from '@/services/analyticsService'
+import { viewActionLabel } from '@/lib/domainLabels'
 import { KpiCard } from './KpiCard'
 import { Leaderboard } from './Leaderboard'
+import { WithheldPanel } from './Redacted'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
 import { TimeSeriesChart } from './charts/TimeSeriesChart'
 import { BarSeriesChart } from './charts/BarSeriesChart'
-import { StackedShareBar, humanise } from './charts/StackedShareBar'
+import { StackedShareBar } from './charts/StackedShareBar'
 import { FunnelStrip } from './charts/FunnelStrip'
 import { comparisonLabel, rangeLabel } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
@@ -33,17 +35,17 @@ export function EngagementTab({
         <div className="space-y-5">
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 <KpiCard
-                    label="Active users" value={totals.activeUsers.current ?? 0} icon={Activity}
+                    label="Active users" metric="activeUsers" value={totals.activeUsers.current ?? 0} icon={Activity}
                     changePct={totals.activeUsers.changePct} comparisonLabel={vs}
                     trend={series.activeUsers} accent="indigo"
                 />
                 <KpiCard
-                    label="Stickiness" value={percent(engagement.stickiness)} icon={Flame}
+                    label="Stickiness" metric="stickiness" value={percent(engagement.stickiness)} icon={Flame}
                     sub={`${exact(engagement.dau)} daily of ${exact(engagement.mau)} monthly`}
                     accent="amber"
                 />
                 <KpiCard
-                    label="View opens" value={totals.viewOpens.current ?? 0} icon={MousePointerClick}
+                    label="View opens" metric="viewOpens" value={totals.viewOpens.current ?? 0} icon={MousePointerClick}
                     changePct={totals.viewOpens.changePct} comparisonLabel={vs}
                     trend={series.viewOpens} trendTone="emerald" accent="cyan"
                 />
@@ -85,7 +87,7 @@ export function EngagementTab({
                         accent="indigo"
                     />
                     <KpiCard
-                        label="Traces that found lineage"
+                        label="Traces that found lineage" metric="traceSuccess"
                         value={value.traceSuccessRate == null
                             ? '—' : percent(value.traceSuccessRate)}
                         icon={Route}
@@ -103,7 +105,7 @@ export function EngagementTab({
                         accent="cyan"
                     />
                     <KpiCard
-                        label="Searches that matched"
+                        label="Searches that matched" metric="searchHit"
                         value={value.searchHitRate == null
                             ? '—' : percent(value.searchHitRate)}
                         icon={Search}
@@ -209,7 +211,7 @@ export function EngagementTab({
                     isEmpty={breakdowns.activityByAction.length === 0}
                     emptyLabel="No actions recorded in this range."
                 >
-                    <StackedShareBar slices={breakdowns.activityByAction} labelOf={actionLabel} />
+                    <StackedShareBar slices={breakdowns.activityByAction} labelOf={viewActionLabel} />
                 </ChartFrame>
             </div>
 
@@ -234,6 +236,12 @@ export function EngagementTab({
                     />
                 </ChartFrame>
 
+                {data.redaction?.applied ? (
+                    <WithheldPanel
+                        title="Individual activity is hidden"
+                        reason="Who did what is visible to administrators and auditors only. Every count on this page still includes everyone's activity."
+                    />
+                ) : (
                 <ChartFrame
                     title="Most active people"
                     subtitle={`Ranked across ${rangeLabel(range).toLowerCase()}`}
@@ -252,6 +260,7 @@ export function EngagementTab({
                         }))}
                     />
                 </ChartFrame>
+                )}
             </div>
         </div>
     )
@@ -270,21 +279,3 @@ function Notice({ children }: { children: React.ReactNode }) {
 }
 
 /** Activity-log verbs, said the way a person would say them. */
-function actionLabel(key: string): string {
-    switch (key) {
-        case 'created': return 'Created a view'
-        case 'updated': return 'Edited a view'
-        case 'visibility_changed': return 'Changed who can see it'
-        case 'shared': return 'Shared'
-        case 'unshared': return 'Unshared'
-        case 'favourited': return 'Favourited'
-        case 'unfavourited': return 'Unfavourited'
-        case 'deleted': return 'Deleted'
-        case 'restored': return 'Restored'
-        case 'data_changed': return 'Underlying data changed'
-        case 'publish_requested': return 'Asked to publish'
-        case 'publish_denied': return 'Publish denied'
-        case 'admin_viewed': return 'Admin opened a private view'
-        default: return humanise(key)
-    }
-}

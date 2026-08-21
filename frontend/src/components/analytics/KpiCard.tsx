@@ -18,6 +18,10 @@ import { ArrowDownRight, ArrowUpRight, Minus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Sparkline, type SparklineTone } from '@/components/ui/Sparkline'
 import { compact, exact, signedPercent } from '@/lib/formatMetric'
+import { MetricInfo } from './MetricInfo'
+import type { METRICS } from './metricDefinitions'
+
+type MetricKey = keyof typeof METRICS
 
 export interface KpiCardProps {
     label: string
@@ -33,6 +37,8 @@ export interface KpiCardProps {
     trendTone?: SparklineTone
     higherIsBetter?: boolean
     accent?: 'indigo' | 'amber' | 'cyan' | 'pink' | 'violet' | 'emerald'
+    /** Key into `metricDefinitions` — adds the "what does this mean?" button. */
+    metric?: MetricKey
     onClick?: () => void
     className?: string
 }
@@ -49,7 +55,7 @@ const ACCENTS = {
 export function KpiCard({
     label, value, changePct, comparisonLabel, sub, icon: Icon,
     trend, trendTone = 'indigo', higherIsBetter = true, accent = 'indigo',
-    onClick, className,
+    metric, onClick, className,
 }: KpiCardProps) {
     const delta = signedPercent(changePct ?? null)
     const good = changePct == null || changePct === 0
@@ -90,7 +96,13 @@ export function KpiCard({
             <p className="text-2xl font-bold text-ink leading-none">
                 {typeof value === 'number' ? compact(value) : value}
             </p>
-            <p className="mt-1.5 text-xs font-medium text-ink-secondary">{label}</p>
+            {/* The definition sits with the LABEL, not the value: the label is
+                the term someone doesn't recognise, and it is where their eye
+                already is when they wonder. */}
+            <p className="mt-1.5 flex items-center gap-1 text-xs font-medium text-ink-secondary">
+                {label}
+                {metric && <MetricInfo metric={metric} />}
+            </p>
 
             <div className="mt-2 flex items-center gap-1.5 min-h-[18px]">
                 {delta ? (

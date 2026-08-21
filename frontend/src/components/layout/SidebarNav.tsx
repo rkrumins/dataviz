@@ -23,6 +23,7 @@ import { useWorkspaceContext } from '@/hooks/useWorkspaceContext'
 import { useIsClipped } from '@/hooks/useIsClipped'
 import { cn } from '@/lib/utils'
 import { useNavPermission, usePermissionsReady } from '@/store/auth'
+import { useAnalyticsAccess } from '@/hooks/useAnalyticsAccess'
 import { useSidebarSpec } from '@/store/navCatalogue'
 import { useHelpPanelStore } from '@/store/helpPanel'
 import { useOnboardingProgress } from '@/hooks/useOnboardingProgress'
@@ -542,7 +543,9 @@ export function SidebarNav() {
   const workspacesVisible = useNavPermission(useSidebarSpec('workspaces'))
   const ingestionVisible  = useNavPermission(useSidebarSpec('ingestion'))
   const schemaVisible     = useNavPermission(useSidebarSpec('schema'))
-  const analyticsVisible  = useNavPermission(useSidebarSpec('analytics'))
+  // The one row whose visibility is a permission OR a feature flag —
+  // `analyticsPublicEnabled` opens a redacted section to everyone else.
+  const analyticsVisible  = useAnalyticsAccess().allowed
   const adminVisible      = useNavPermission(useSidebarSpec('admin'))
 
   const visibility: Record<NavigationTab, boolean> = {

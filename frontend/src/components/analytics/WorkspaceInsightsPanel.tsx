@@ -9,6 +9,7 @@ import { useEffect, useRef } from 'react'
 import { Activity, LayoutGrid, MousePointerClick, Users, X } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { viewTypeLabel, visibilityLabel } from '@/lib/domainLabels'
 import type { AnalyticsRangeSelection } from '@/services/analyticsService'
 import { timeAgo } from '@/lib/timeAgo'
 import { exact, shortDate } from '@/lib/formatMetric'
@@ -176,13 +177,13 @@ export function WorkspaceInsightsPanel({
                                     title="Who can see what"
                                     isEmpty={data.breakdowns.viewsByVisibility.length === 0}
                                 >
-                                    <StackedShareBar slices={data.breakdowns.viewsByVisibility} />
+                                    <StackedShareBar slices={data.breakdowns.viewsByVisibility} labelOf={visibilityLabel} />
                                 </ChartFrame>
                                 <ChartFrame
                                     title="Kinds of view"
                                     isEmpty={data.breakdowns.viewsByType.length === 0}
                                 >
-                                    <StackedShareBar slices={data.breakdowns.viewsByType} />
+                                    <StackedShareBar slices={data.breakdowns.viewsByType} labelOf={viewTypeLabel} />
                                 </ChartFrame>
                             </div>
 

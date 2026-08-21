@@ -134,7 +134,7 @@ SEED_CATEGORIES: list[dict[str, Any]] = [
     _category("display", "Display & UI", "Palette", "blue", 6, preview=True),
     _category("security", "Security", "Shield", "rose", 7, preview=True),
     _category("integrations", "Integrations", "Plug", "sky", 8, preview=True),
-    _category("analytics", "Analytics", "BarChart3", "teal", 9, preview=True),
+    _category("analytics", "Analytics", "BarChart3", "teal", 9),
     _category("experimental", "Experimental", "FlaskConical", "fuchsia", 10, preview=True),
     _category("performance", "Performance", "Zap", "orange", 11, preview=True),
     _category("other", "Other", "LayoutTemplate", "slate", 99, preview=True),
@@ -142,6 +142,39 @@ SEED_CATEGORIES: list[dict[str, Any]] = [
 
 
 SEED_DEFINITIONS: list[dict[str, Any]] = [
+    # ── Analytics ──────────────────────────────────────────────────────────────
+    {
+        "key": "analyticsPublicEnabled",
+        "name": "Analytics for everyone",
+        "description": (
+            "Open the Analytics section to every signed-in person, not just administrators "
+            "and auditors. Everyone sees platform-wide growth and usage; workspaces they "
+            "are not a member of stay locked, and no individual's activity is ever shown."
+        ),
+        "impact_when_off": (
+            "Analytics disappears from the sidebar for everyone except administrators, "
+            "auditors and organisation admins, and the server refuses their requests. "
+            "Privileged users keep the full section either way — this switch only decides "
+            "whether everyone else gets the redacted view."
+        ),
+        "category_id": "analytics",
+        "type": "boolean",
+        # OFF by default, and deliberately: this widens who can see how many people
+        # use the platform and how many workspaces exist. That is a disclosure
+        # decision an operator should make on purpose, not inherit from a default.
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turning this on is a disclosure decision. Non-privileged people see aggregate "
+            "growth and usage for the whole platform, plus full detail for workspaces they "
+            "belong to. Names of other workspaces, their data sources, and every per-person "
+            "leaderboard stay hidden no matter who is looking."
+        ),
+        "sort_order": 0,
+        "deprecated": False,
+    },
+
     # ── Editing ────────────────────────────────────────────────────────────────
     {
         "key": "editModeEnabled",

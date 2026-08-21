@@ -16,6 +16,7 @@ import type {
 } from '@/services/analyticsService'
 import { HeroFigure, KpiCard } from './KpiCard'
 import { InsightStrip } from './InsightStrip'
+import { WithheldPanel } from './Redacted'
 import { AdoptionMatrix } from './AdoptionMatrix'
 import { Leaderboard } from './Leaderboard'
 import { ChartFrame } from './charts/ChartFrame'
@@ -40,6 +41,8 @@ export function OverviewTab({
 }: Props) {
     const theme = useChartTheme()
     const { totals, series, engagement, leaderboards, graph } = data
+    // Present only when the server redacted this document for us.
+    const redacted = data.redaction?.applied === true
     const vs = comparisonLabel(range)
 
     return (
@@ -80,7 +83,7 @@ export function OverviewTab({
 
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 <KpiCard
-                    label="Total users" value={totals.users.total} icon={Users}
+                    label="Total users" metric="totalUsers" value={totals.users.total} icon={Users}
                     changePct={totals.users.changePct} comparisonLabel={vs}
                     sub={`${exact(totals.users.current ?? 0)} new in range`}
                     trend={series.signups} accent="indigo"
@@ -179,6 +182,16 @@ export function OverviewTab({
             />
 
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                {/* An empty leaderboard and a WITHHELD one look identical
+                    unless we say which. "Nobody has been active" is a false
+                    statement to make to someone who simply may not see who
+                    was. */}
+                {redacted ? (
+                    <WithheldPanel
+                        title="Individual activity is hidden"
+                        reason="Who did what is visible to administrators and auditors only. The platform-wide counts above include everyone."
+                    />
+                ) : (
                 <ChartFrame
                     title="Most active people"
                     subtitle={`Ranked by everything they did in ${rangeLabel(range).toLowerCase()}`}
@@ -197,6 +210,7 @@ export function OverviewTab({
                         }))}
                     />
                 </ChartFrame>
+                )}
 
                 <ChartFrame
                     title="Most popular views"

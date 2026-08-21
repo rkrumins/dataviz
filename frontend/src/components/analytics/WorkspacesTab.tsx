@@ -9,11 +9,12 @@
  * of the distribution is still readable at a glance.
  */
 import { useMemo, useState } from 'react'
-import { ArrowUpDown, MoonStar } from 'lucide-react'
+import { ArrowUpDown, Lock, MoonStar } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import type { AnalyticsRangeSelection } from '@/services/analyticsService'
 import { timeAgo } from '@/lib/timeAgo'
+import { WithheldValue } from './Redacted'
 import { compact, exact } from '@/lib/formatMetric'
 import type { WorkspaceAnalyticsRow } from '@/services/analyticsService'
 import { useChartTheme } from './charts/chartTheme'
@@ -122,8 +123,13 @@ export function WorkspacesTab({
                     </thead>
                     <tbody>
                         {sorted.map((row) => {
+                            const locked = row.redacted === true
                             const value = Number(row[sortKey]) || 0
-                            const share = peak > 0 ? value / peak : 0
+                            // A locked row has no measurement to shade, so it
+                            // gets no distribution bar — painting one from a
+                            // null would draw a 0% bar that reads as "this
+                            // workspace does nothing".
+                            const share = locked || peak <= 0 ? 0 : value / peak
                             const selected = row.workspaceId === selectedId
                             return (
                                 <tr
@@ -137,26 +143,49 @@ export function WorkspacesTab({
                                     style={share > 0 ? {
                                         backgroundImage: `linear-gradient(to right, ${theme.series[0]}1f ${share * 100}%, transparent ${share * 100}%)`,
                                     } : undefined}
-                                    onClick={() => onSelect(row.workspaceId)}
-                                    tabIndex={0}
+                                    // A locked row opens nothing, so it is not a
+                                    // button: giving it a click target and a
+                                    // focus stop would promise a drill-in that
+                                    // answers 403.
+                                    onClick={locked ? undefined : () => onSelect(row.workspaceId)}
+                                    tabIndex={locked ? -1 : 0}
                                     onKeyDown={(e) => {
+                                        if (locked) return
                                         if (e.key === 'Enter' || e.key === ' ') {
                                             e.preventDefault()
                                             onSelect(row.workspaceId)
                                         }
                                     }}
-                                    aria-label={`Open analytics for ${row.name}`}
+                                    aria-label={locked
+                                        ? 'A workspace you are not a member of'
+                                        : `Open analytics for ${row.name}`}
                                     className={cn(
-                                        'cursor-pointer border-b border-glass-border last:border-b-0 outline-none transition-colors',
+                                        'border-b border-glass-border last:border-b-0 outline-none transition-colors',
+                                        locked
+                                            ? 'cursor-default'
+                                            : 'cursor-pointer',
                                         selected
                                             ? 'bg-indigo-500/[0.07]'
-                                            : 'hover:bg-black/[0.02] dark:hover:bg-white/[0.03] focus-visible:bg-black/[0.03] dark:focus-visible:bg-white/[0.04]',
+                                            : !locked && 'hover:bg-black/[0.02] dark:hover:bg-white/[0.03] focus-visible:bg-black/[0.03] dark:focus-visible:bg-white/[0.04]',
                                     )}
                                 >
                                     <td className="px-3 py-2.5">
                                         <span className="flex items-center gap-2">
-                                            <span className="font-semibold text-ink truncate">{row.name}</span>
-                                            {row.dormant && (
+                                            {locked && (
+                                                <Lock
+                                                    className="h-3 w-3 shrink-0 text-ink-muted/70"
+                                                    aria-hidden
+                                                />
+                                            )}
+                                            <span className={cn(
+                                                'truncate',
+                                                locked
+                                                    ? 'italic text-ink-muted'
+                                                    : 'font-semibold text-ink',
+                                            )}>
+                                                {row.name}
+                                            </span>
+                                            {!locked && row.dormant && (
                                                 <span
                                                     title="No activity in the selected range"
                                                     className="rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-600 dark:text-amber-400"
@@ -166,7 +195,9 @@ export function WorkspacesTab({
                                             )}
                                         </span>
                                         <span className="block text-[10px] text-ink-muted">
-                                            {row.dataSources} {row.dataSources === 1 ? 'source' : 'sources'}
+                                            {locked
+                                                ? 'You are not a member'
+                                                : `${row.dataSources} ${row.dataSources === 1 ? 'source' : 'sources'}`}
                                         </span>
                                     </td>
                                     <Cell value={row.members} />
@@ -196,7 +227,18 @@ export function WorkspacesTab({
     )
 }
 
-function Cell({ value, compactValue }: { value: number; compactValue?: boolean }) {
+function Cell({
+    value, compactValue,
+}: { value: number | null; compactValue?: boolean }) {
+    // `null` is a refusal, not a measurement. Rendering it as 0 would put a
+    // real-looking number in a column people sort and total.
+    if (value === null) {
+        return (
+            <td className="px-3 py-2.5 text-right text-ink-muted/70">
+                <WithheldValue />
+            </td>
+        )
+    }
     return (
         <td className="px-3 py-2.5 text-right tabular-nums text-ink" title={exact(value)}>
             {compactValue ? compact(value) : exact(value)}

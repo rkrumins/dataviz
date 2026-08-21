@@ -782,3 +782,245 @@ async def test_previous_window_is_equal_length_and_adjacent():
     # Ends the day before the current window opens — no gap, no overlap.
     assert prev.end[:10] == w.start[:10]
     assert prev.days == 30
+
+
+# ── Public tier & redaction ─────────────────────────────────────────
+#
+# Everything here is a disclosure test. A failure means somebody can see
+# something they should not, which is the one class of bug in this file that
+# cannot be fixed after the fact.
+
+from backend.app.services.analytics_scope import ViewerScope
+
+
+def _public(*workspace_ids: str, known: bool = True) -> ViewerScope:
+    return ViewerScope(
+        privileged=False,
+        visible_workspaces=frozenset(workspace_ids),
+        workspaces_known=known,
+    )
+
+
+_PRIVILEGED = ViewerScope(privileged=True, visible_workspaces=frozenset())
+
+
+async def test_public_tier_shows_no_individual_activity(db_session):
+    """No leaderboards, no names, no emails — not even for colleagues."""
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_public("ws_live"))
+
+    assert doc["leaderboards"]["topUsers"] == []
+    assert doc["leaderboards"]["topCreators"] == []
+    # And nothing anywhere in the document carries an address.
+    assert "@x.io" not in json.dumps(doc)
+
+
+async def test_privileged_tier_is_unredacted(db_session):
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_PRIVILEGED)
+
+    assert doc["leaderboards"]["topUsers"], "admins keep the people leaderboard"
+    assert "redaction" not in doc
+    assert "access" in doc["health"]
+
+
+async def test_restricted_workspaces_are_locked_not_removed(db_session):
+    """The row survives so the table agrees with the totals above it."""
+    await _seed(db_session)
+    rows = await analytics_repo.workspace_rows(
+        db_session, days=7, now=NOW, scope=_public("ws_live"))
+
+    by_id = {r["workspaceId"]: r for r in rows}
+    assert set(by_id) == {"ws_live", "ws_quiet"}, "no workspace disappears"
+
+    mine = by_id["ws_live"]
+    assert mine["redacted"] is False
+    assert mine["name"] == "Live"
+    assert mine["views"] is not None
+
+    theirs = by_id["ws_quiet"]
+    assert theirs["redacted"] is True
+    assert theirs["name"] == analytics_repo.REDACTED_WORKSPACE
+    # Every specific is gone, not zeroed — zero is a claim, null is a refusal.
+    for field in ("members", "views", "dataSources", "activity", "opens",
+                  "activeUsers", "nodes", "edges", "lastActivityAt"):
+        assert theirs[field] is None, f"{field} leaked"
+
+
+async def test_totals_still_count_workspaces_you_cannot_open(db_session):
+    """Aggregates cover the platform, or two people read different totals off
+    the same page and both believe it."""
+    await _seed(db_session)
+    everything = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_PRIVILEGED)
+    restricted = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_public())   # member of nothing
+
+    for key in ("users", "workspaces", "views", "viewOpens"):
+        assert restricted["totals"][key] == everything["totals"][key], key
+    assert restricted["series"] == everything["series"]
+
+
+async def test_operational_health_is_privileged_only(db_session):
+    """Who is waiting for access, and where the data is unreliable."""
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_public("ws_live"))
+
+    assert "access" not in doc["health"]
+    assert "reliability" not in doc["health"]
+    # Semantic-layer coverage is a platform fact, not an operational one.
+    assert "semanticLayer" in doc["health"]
+
+
+async def test_insights_quoting_hidden_data_are_withheld(db_session):
+    """A rule is public only if its TEXT comes from public aggregates."""
+    await _seed(db_session)
+    db_session.add_all([
+        ProductEventORM(id=f"pev_pe{i}", event_type="lineage.trace_empty",
+                        actor_id="usr_old", payload="{}", created_at=_iso(1))
+        for i in range(8)
+    ])
+    await db_session.commit()
+
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_public("ws_live"))
+    keys = {i["key"] for i in doc["insights"]}
+    # Derived from platform-wide event counts — safe.
+    assert "trace-empty" in keys
+    # Nothing outside the allow-list survives, so a rule added later is hidden
+    # until somebody has looked at what it says.
+    assert keys <= analytics_repo._PUBLIC_INSIGHTS
+
+
+async def test_redaction_notice_says_what_was_withheld(db_session):
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_public("ws_live"))
+
+    notice = doc["redaction"]
+    assert notice["applied"] is True
+    assert notice["visibleWorkspaces"] == 1
+    assert notice["accessResolved"] is True
+    assert notice["hidden"], "the UI needs something to show"
+
+
+async def test_unresolved_access_is_flagged_not_guessed(db_session):
+    """An empty workspace map we could not populate is not 'no access'."""
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_public(known=False))
+    assert doc["redaction"]["accessResolved"] is False
+
+
+async def test_drilling_into_a_workspace_you_are_not_in_is_refused(db_session):
+    await _seed(db_session)
+    with pytest.raises(analytics_repo.WorkspaceForbidden):
+        await analytics_repo.workspace_detail(
+            db_session, "ws_quiet", days=7, now=NOW, scope=_public("ws_live"))
+
+    # The one they belong to still opens.
+    mine = await analytics_repo.workspace_detail(
+        db_session, "ws_live", days=7, now=NOW, scope=_public("ws_live"))
+    assert mine is not None and mine["name"] == "Live"
+
+
+def test_cache_never_serves_one_audience_the_other_s_document():
+    """The leak this key exists to prevent: an admin warming the cache and
+    handing their unredacted document to the next non-privileged reader."""
+    from backend.app.api.v1.endpoints.analytics import _cache_key
+
+    args = {"days": 30}
+    admin = _cache_key("summary", _PRIVILEGED, args)
+    member = _cache_key("summary", _public("ws_a"), args)
+    other = _cache_key("summary", _public("ws_b"), args)
+    unknown = _cache_key("summary", _public("ws_a", known=False), args)
+
+    assert len({admin, member, other, unknown}) == 4, "audiences share a key"
+    # Identical access shares an entry — that is the point of caching at all.
+    assert member == _cache_key("summary", _public("ws_a"), args)
+    # And a different window is still a different document.
+    assert member != _cache_key("summary", _public("ws_a"), {"days": 7})
+
+
+# ── The flag, at the endpoint ───────────────────────────────────────
+
+def _prime_flag(**values):
+    """Prime the singleton flag cache so the gate resolves without a DB hop.
+    Mirrors `test_feature_gates.py`'s helper."""
+    import time as _time
+
+    from backend.app.services.feature_flags import feature_flags
+    feature_flags._cache = dict(values)
+    feature_flags._cache_ts = _time.monotonic()
+
+
+@pytest.fixture
+def _flag_cache():
+    from backend.app.services.feature_flags import feature_flags
+    feature_flags.invalidate()
+    yield
+    feature_flags.invalidate()
+
+
+async def _as(test_client, perms, url=SUMMARY):
+    def _claims():
+        return PermissionClaims(sid="sess_test", global_perms=perms, ws_perms={})
+
+    app.dependency_overrides[get_permission_claims] = _claims
+    try:
+        return await test_client.get(url)
+    finally:
+        app.dependency_overrides.pop(get_permission_claims, None)
+
+
+async def test_flag_off_refuses_a_non_privileged_caller(test_client, db_session, _flag_cache):
+    await _seed(db_session)
+    _prime_flag(analyticsPublicEnabled=False)
+
+    res = await _as(test_client, ())
+    assert res.status_code == 403
+    # The typed refusal every feature gate raises, so the client needs no
+    # special case for this one.
+    assert res.json()["detail"]["type"] == "feature_disabled"
+    assert res.json()["detail"]["feature"] == "analyticsPublicEnabled"
+
+
+async def test_flag_on_serves_a_redacted_document(test_client, db_session, _flag_cache):
+    await _seed(db_session)
+    _prime_flag(analyticsPublicEnabled=True)
+
+    res = await _as(test_client, ())
+    assert res.status_code == 200
+    body = res.json()
+    assert body["redaction"]["applied"] is True
+    assert body["leaderboards"]["topUsers"] == []
+    assert body["totals"]["users"]["total"] > 0, "aggregates still answer"
+
+
+@pytest.mark.parametrize(
+    "perms",
+    [("system:admin",), ("system:org-admin",), ("system:audit:read",)],
+)
+async def test_privileged_callers_are_never_gated_by_the_flag(
+    test_client, db_session, _flag_cache, perms,
+):
+    """Turning the switch off must not take an administrator's own dashboard
+    away — it decides whether EVERYONE ELSE gets in."""
+    await _seed(db_session)
+    _prime_flag(analyticsPublicEnabled=False)
+
+    res = await _as(test_client, perms)
+    assert res.status_code == 200
+    assert "redaction" not in res.json()
+
+
+async def test_an_unreadable_flag_fails_closed(test_client, db_session, _flag_cache):
+    """Security posture: if we cannot tell what the operator wanted, assume the
+    narrower world. Failing open would publish headcount on a DB hiccup."""
+    await _seed(db_session)
+    _prime_flag()   # cache primed, key absent — the flag has no resolvable value
+
+    assert (await _as(test_client, ())).status_code == 403

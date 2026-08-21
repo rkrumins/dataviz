@@ -120,6 +120,30 @@ class FeatureWiring:
 
 
 FEATURE_WIRING: dict[str, FeatureWiring] = {
+    # ── Analytics ──────────────────────────────────────────────────────────────
+    "analyticsPublicEnabled": FeatureWiring(
+        key="analyticsPublicEnabled",
+        # SECURITY, and for the same reason `semanticLayerNonAdminEditing` is:
+        # this WIDENS who may read. If the value cannot be resolved we must
+        # assume the operator wanted the narrower world — privileged only.
+        # Failing open here would publish platform headcount and workspace
+        # existence to everyone because a database hiccup, which is not a
+        # mistake you can take back.
+        posture="security",
+        server_gates=(
+            "GET /admin/analytics/* — a caller without system:audit:read, "
+            "system:org-admin or system:admin is refused outright when this is off, "
+            "and served a redacted document when it is on",
+        ),
+        ui_surfaces=(
+            "The Analytics item in the sidebar, for non-privileged people",
+            "The /analytics route guard",
+        ),
+        still_allowed=(
+            "Administrators, auditors and organisation admins keep the full "
+            "Analytics section regardless of this switch",
+        ),
+    ),
     # ── Lineage ────────────────────────────────────────────────────────────────
     "versioningEnabled": FeatureWiring(
         key="versioningEnabled",

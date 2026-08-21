@@ -7,12 +7,13 @@ import { exact, percent, shortDate } from '@/lib/formatMetric'
 import type {
     AnalyticsRangeSelection, AnalyticsSummary,
 } from '@/services/analyticsService'
+import { signupSourceLabel } from '@/lib/domainLabels'
 import { KpiCard } from './KpiCard'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
 import { TimeSeriesChart } from './charts/TimeSeriesChart'
 import { BarSeriesChart } from './charts/BarSeriesChart'
-import { StackedShareBar, humanise } from './charts/StackedShareBar'
+import { StackedShareBar } from './charts/StackedShareBar'
 import { HeatmapGrid } from './charts/HeatmapGrid'
 import { comparisonLabel, rangeLabel, rangeSpanDays } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
@@ -122,7 +123,7 @@ export function GrowthTab({
                     isStale={isStale}
                     isEmpty={breakdowns.usersBySignupSource.length === 0}
                 >
-                    <StackedShareBar slices={breakdowns.usersBySignupSource} labelOf={sourceLabel} />
+                    <StackedShareBar slices={breakdowns.usersBySignupSource} labelOf={signupSourceLabel} />
                 </ChartFrame>
 
                 <ChartFrame
@@ -214,13 +215,3 @@ function GrowthRow({
 }
 
 /** The raw enum values read like column names; these are what they mean. */
-function sourceLabel(key: string): string {
-    switch (key) {
-        case 'local_signup': return 'Signed up directly'
-        case 'sso_jit': return 'Provisioned by SSO'
-        case 'invite': return 'Invited'
-        case 'admin_created': return 'Created by an admin'
-        case 'admin_linked': return 'Linked by an admin'
-        default: return humanise(key)
-    }
-}
