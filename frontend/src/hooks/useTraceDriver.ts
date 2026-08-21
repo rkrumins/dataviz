@@ -64,7 +64,7 @@ import {
 } from '@/components/canvas/context-view/lens/closure-adapter'
 import { pairKey } from './lib/traceWireLedger'
 
-export type TracePhase = 'idle' | 'coarse' | 'walking' | 'complete' | 'error'
+export type TracePhase = 'idle' | 'coarse' | 'walking' | 'ceiling' | 'complete' | 'error'
 export type TraceDriverStatus = 'loading' | 'done' | 'error'
 
 /** Failsafe against a server that hands back a cursor for ever. NOT a budget:
@@ -92,6 +92,20 @@ const WALK_BULK_SEEDS = 200
  *  only so a server bug cannot become an unbounded request loop, and it sits
  *  far past any real flow. */
 const WALK_FAILSAFE_REQUESTS = 100_000
+/**
+ * THE MEMORY CEILING (user decision 2026-08-21) — a bound on what the CLIENT
+ * holds, never on what it may ask for.
+ *
+ * "No constraints" and "the entire lineage" are not always compatible:
+ * measured on `perf-load-test-solidatus`, 2,080,000 of its 2,083,229 nodes
+ * carry lineage, so a container's closure is effectively the whole graph —
+ * ~11,500 requests and half an hour, against a browser that cannot hold more
+ * than tens of thousands of nodes. So the walk keeps going hands-free until
+ * the MODEL passes this many nodes, and then stops MERGING and says so. The
+ * frontier and its cursors are kept, so "keep walking" resumes for another
+ * ceiling's worth — on the reader's word, not on a timer.
+ */
+export const WALK_MODEL_CEILING_NODES = 25_000
 
 export interface TraceDriver {
     /** The accumulated picture. Non-null from the first render of a session
@@ -109,6 +123,12 @@ export interface TraceDriver {
     completePairs: ReadonlySet<string>
     /** Requests this session has issued, for the capsule's narration. */
     requests: number
+    /** The walk stopped because the MODEL is full, not because the flow
+     *  ended. `nodesHeld` and `frontierRemaining` are what the capsule and
+     *  the dock say out loud; `continueWalk` buys another ceiling's worth. */
+    ceiling: { hit: boolean; nodesHeld: number; frontierRemaining: number }
+    /** Grant another ceiling's worth of model and resume. */
+    continueWalk: () => void
     /** Fetch one card's contents and their hop-1 lineage. Idempotent. */
     drill: (urn: string) => void
     /** Re-run the coarse fetch for the current focus. */
@@ -368,6 +388,9 @@ export function useTraceDriver(
     /** Frontier ops that FAILED. Never auto-retried — the walk stops honestly
      *  instead of looping on a broken hop; `retry()` clears them. */
     const failedOps = useRef<Set<string>>(new Set())
+    /** How big the model is allowed to get before the walk pauses. Grows one
+     *  ceiling at a time, and only when the reader asks. */
+    const ceilingRef = useRef(WALK_MODEL_CEILING_NODES)
     /** Boundaries this walk is FINISHED with: the response that answered them
      *  was not truncated, so there is nothing left behind them and a later
      *  response naming them again is telling us what we know.
@@ -413,6 +436,7 @@ export function useTraceDriver(
         failedOps.current = new Set()
         firedAt.current = new Map()
         settledOps.current = new Set()
+        ceilingRef.current = WALK_MODEL_CEILING_NODES
         requestsRef.current = 0
         return generation.current
     }, [])
@@ -590,6 +614,13 @@ export function useTraceDriver(
             const model = modelRef.current
             if (!model) return
             if (requestsRef.current >= WALK_FAILSAFE_REQUESTS) return
+            if (model.nodes.length >= ceilingRef.current) {
+                // FULL, not finished. Everything needed to carry on is kept —
+                // the frontier, its cursors, the progress ledger — so
+                // `continueWalk` is a resume and not a re-walk.
+                setState(prev => (prev.focusUrn === null ? prev : { ...prev, phase: 'ceiling' }))
+                return
+            }
             const ops = collectWalkOps(
                 model, failedOps.current, settledOps.current, firedAt.current, WALK_CONCURRENCY,
             )
@@ -682,8 +713,14 @@ export function useTraceDriver(
                 ? { ...prev, phase: 'walking', requests: requestsRef.current } : prev))
             await runBackgroundWalk(gen, focusUrn)
             if (gen !== generation.current) return
+            // The walk returns for two reasons: the flow ran out, or the MODEL
+            // did. Only the first is "complete" — overwriting the ceiling here
+            // would tell the reader the whole lineage is on screen when a
+            // frontier is standing right behind it saying otherwise.
+            const full = (modelRef.current?.nodes.length ?? 0) >= ceilingRef.current
             setState(prev => (prev.focusUrn === focusUrn
-                ? { ...prev, phase: 'complete', requests: requestsRef.current } : prev))
+                ? { ...prev, phase: full ? 'ceiling' : 'complete', requests: requestsRef.current }
+                : prev))
         })()
 
         return () => { controller.current?.abort() }
@@ -802,6 +839,29 @@ export function useTraceDriver(
      *  session; a walk that stopped on broken hops clears them and resumes,
      *  because throwing away a picture the reader is already reading to
      *  re-fetch it from scratch is the opposite of what they asked for. */
+    /** Resume the walk after a pause — the ceiling, or a round of failures. */
+    const resumeWalk = useCallback((gen: number) => {
+        void (async () => {
+            await runBackgroundWalk(gen, sessionFocus.current ?? '')
+            if (gen !== generation.current) return
+            setState(prev => (prev.focusUrn === null ? prev
+                : {
+                    ...prev,
+                    // Another pause is possible: a ceiling's worth may not be
+                    // the end either.
+                    phase: (modelRef.current?.nodes.length ?? 0) >= ceilingRef.current ? 'ceiling' : 'complete',
+                    requests: requestsRef.current,
+                }))
+        })()
+    }, [runBackgroundWalk])
+
+    const continueWalk = useCallback(() => {
+        if (phaseRef.current !== 'ceiling') return
+        ceilingRef.current += WALK_MODEL_CEILING_NODES
+        setState(prev => (prev.focusUrn === null ? prev : { ...prev, phase: 'walking' }))
+        resumeWalk(generation.current)
+    }, [resumeWalk])
+
     const retry = useCallback(() => {
         if (modelRef.current && modelRef.current.nodes.length > 0 && failedOps.current.size > 0) {
             const gen = generation.current
@@ -870,8 +930,14 @@ export function useTraceDriver(
         drilled: state.drilled,
         completePairs,
         requests: state.requests,
+        ceiling: {
+            hit: state.phase === 'ceiling',
+            nodesHeld: state.model?.nodes.length ?? 0,
+            frontierRemaining: (state.model?.frontierUp.length ?? 0) + (state.model?.frontierDown.length ?? 0),
+        },
         drill,
         retry,
+        continueWalk,
         abort,
     }
 }

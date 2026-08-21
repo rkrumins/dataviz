@@ -16,7 +16,7 @@
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
-import { useTraceDriver, computeCompletePairs } from '../useTraceDriver'
+import { useTraceDriver, computeCompletePairs, WALK_MODEL_CEILING_NODES } from '../useTraceDriver'
 import { pairKey } from '../lib/traceWireLedger'
 import type {
     GraphDataProvider, GraphNode, TraceV2Result, LensClosureExtras,
@@ -715,4 +715,78 @@ describe('useTraceDriver — a coarse response without the focus', () => {
         await waitFor(() => expect(result.current.phase).toBe('complete'))
         expect(result.current.error).toBeNull()
     })
+})
+
+// ── the memory ceiling ──────────────────────────────────────────────────
+//
+// User decision on §8.1: a bound on what the CLIENT HOLDS, never a budget on
+// what it may ask for. Some foci have a closure the size of the graph —
+// 2,080,000 of 2,083,229 nodes on `perf-load-test-solidatus` carry lineage —
+// and no browser holds that. So the walk runs hands-free until the model is
+// full, then stops MERGING and says so, keeping everything it needs to carry
+// on when the reader asks.
+
+describe('useTraceDriver — the memory ceiling', () => {
+    /** A walk with no end: every boundary yields a fresh one. */
+    function endlessWalk() {
+        let n = 0
+        return () => {
+            const batch = Array.from({ length: 400 }, () => gn(`n${n++}`))
+            return res({
+                nodes: batch,
+                upstreamUrns: new Set(batch.map(b => b.urn)),
+                frontierUp: batch.slice(0, 3).map(b => ({ urn: b.urn, totalCount: null, nextCursor: null })),
+            } as Partial<TraceV2Result & LensClosureExtras>)
+        }
+    }
+
+    it('stops merging at the ceiling and keeps what it needs to carry on', async () => {
+        const { provider } = makeProvider(() => coarseResponse(), endlessWalk())
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+
+        await waitFor(() => expect(result.current.phase).toBe('ceiling'), { timeout: 20000 })
+        expect(result.current.ceiling.hit).toBe(true)
+        expect(result.current.ceiling.nodesHeld).toBeGreaterThanOrEqual(WALK_MODEL_CEILING_NODES)
+        // FULL, not finished — and it says which.
+        expect(result.current.ceiling.frontierRemaining).toBeGreaterThan(0)
+        expect(result.current.error).toBeNull()
+    }, 30000)
+
+    it('continueWalk buys another ceiling`s worth, and only at the ceiling', async () => {
+        const { provider, traceClosure } = makeProvider(() => coarseResponse(), endlessWalk())
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+        await waitFor(() => expect(result.current.phase).toBe('ceiling'), { timeout: 20000 })
+
+        const held = result.current.ceiling.nodesHeld
+        const asked = traceClosure.mock.calls.length
+        act(() => result.current.continueWalk())
+        await waitFor(() => expect(result.current.phase).toBe('ceiling'), { timeout: 20000 })
+
+        expect(result.current.ceiling.nodesHeld).toBeGreaterThan(held)
+        expect(traceClosure.mock.calls.length).toBeGreaterThan(asked)
+    }, 40000)
+
+    it('a walk that ENDS never reaches the ceiling, and continueWalk costs nothing', async () => {
+        const { provider, traceClosure } = makeProvider(() => coarseResponse())
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
+
+        expect(result.current.ceiling.hit).toBe(false)
+        const asked = traceClosure.mock.calls.length
+        act(() => result.current.continueWalk())
+        expect(traceClosure.mock.calls.length).toBe(asked)
+    })
+
+    it('leaving at the ceiling still stops everything', async () => {
+        const { provider, traceClosure } = makeProvider(() => coarseResponse(), endlessWalk())
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+        await waitFor(() => expect(result.current.phase).toBe('ceiling'), { timeout: 20000 })
+
+        act(() => result.current.abort())
+        const stopped = traceClosure.mock.calls.length
+        act(() => result.current.continueWalk())
+        await new Promise(resolve => setTimeout(resolve, 30))
+        expect(result.current.phase).toBe('idle')
+        expect(traceClosure.mock.calls.length).toBe(stopped)
+    }, 30000)
 })

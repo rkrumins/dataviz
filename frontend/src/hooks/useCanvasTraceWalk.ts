@@ -26,7 +26,9 @@
  * it — but two of its four fields are now permanently false. `budgetHit` is
  * the ceiling the ruling removed ("we must not apply any constraints"): there
  * is nothing to grant, so "Keep walking" has nothing to do and `continueWalk`
- * is a no-op. `stalled` is false because a walk that stopped on broken hops
+ * is a no-op anywhere but AT the ceiling — the one bound left, and it bounds
+ * what the browser HOLDS rather than what the trace may ask for. `stalled` is
+ * false because a walk that stopped on broken hops
  * reports an ERROR the dock's retrace re-arms, rather than a fourth state
  * nobody acts on. What remains is `walking` (the coarse paint, the background
  * walk, or an expansion in flight) and `exhausted` (the flow is complete).
@@ -49,8 +51,8 @@ export interface CanvasTraceWalk {
     /** Status/error/model for the trace bar and counts. */
     walkEntry: WalkEntry | null
     fullWalkStatus: FullWalkStatus | null
-    /** Kept for the dock's "Keep walking": a NO-OP now — there is no budget
-     *  to grant. More detail comes from opening a card, not from a grant. */
+    /** "Keep walking": grant another ceiling's worth of MODEL and resume.
+     *  A no-op anywhere but at the ceiling. */
     continueWalk: () => void
     /** Re-kick a failed coarse fetch. */
     retryWalk: () => void
@@ -68,6 +70,9 @@ export interface CanvasTraceWalk {
     drilled: ReadonlySet<string>
     /** Requests this session has issued, for the capsule's narration. */
     requests: number
+    /** The walk paused because the model is full — what the capsule and the
+     *  dock say out loud. */
+    ceiling: { hit: boolean; nodesHeld: number; frontierRemaining: number }
 }
 
 export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTraceWalk {
@@ -75,7 +80,7 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
     const driver = useTraceDriver(tracedUrn, provider)
 
     const { model, phase, status, error, inFlight, completePairs, drilled, requests } = driver
-    const { drill, retry, abort } = driver
+    const { drill, retry, abort, ceiling } = driver
 
     // The walk hook's contract: a session always has an entry, and its model
     // is non-null from the first render (empty until the coarse response
@@ -99,9 +104,11 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
                 // expansion the reader asked for — all of it is "walking".
                 walking: phase === 'coarse' || phase === 'walking' || inFlight.size > 0,
                 exhausted: phase === 'complete' && inFlight.size === 0,
-                // See the file header: the ruling removed the budget, and a
-                // lazy session has no standing frontier ops to stall on.
-                budgetHit: false,
+                // THE ONE CEILING LEFT is a bound on what the browser HOLDS,
+                // not on what the trace may ask for — so "Keep walking" is
+                // once again a real move, and this is the state it belongs
+                // to. (F19: it exists only at the ceiling.)
+                budgetHit: phase === 'ceiling',
                 stalled: false,
             }
             : null
@@ -118,11 +125,12 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
             : drilled
     ), [phase, model, drilled])
 
-    // FLOORS UNTIL THE WALK IS DONE. The coarse paint has counted its hop-1
+    // FLOORS UNTIL THE WALK IS DONE — and a walk paused at the ceiling is
+    // emphatically not done: there is a frontier behind it saying so. The coarse paint has counted its hop-1
     // partners and nothing else, and the background walk is still finding
     // more — so every count is a lower bound until the flow is exhausted, at
     // which point it is exact.
-    const countsAreFloors = phase === 'coarse' || phase === 'walking' 
+    const countsAreFloors = phase === 'coarse' || phase === 'walking' || phase === 'ceiling' 
 
     const exit = useCallback(() => {
         setTracedUrn(null)
@@ -134,7 +142,7 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         setTracedUrn(urn)
     }, [])
 
-    const continueWalk = useCallback(() => {}, [])
+
 
     return {
         isTracing: tracedUrn !== null,
@@ -143,7 +151,7 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         exit,
         walkEntry,
         fullWalkStatus,
-        continueWalk,
+        continueWalk: driver.continueWalk,
         retryWalk: retry,
         drill,
         inFlight,
@@ -152,5 +160,6 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         phase,
         drilled: drilledForCards,
         requests,
+        ceiling,
     }
 }
