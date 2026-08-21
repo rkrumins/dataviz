@@ -386,6 +386,24 @@ Every defect the two reviews surfaced ships in this build with a pin.
 - **G1 Layout untouched.** Browse layout, node positions, column order, and
   the store are byte-identical before and after a trace (store snapshot +
   `nodeLayerMap` parity pins). Trace mode reads the store; it never writes.
+
+  **Scope: GRAPH CONTENT.** "The store is never written" binds
+  `useCanvasStore`'s `nodes` and `edges` — the graph the canvas draws, and
+  the only thing exiting a trace has to restore. It does not bind the store's
+  view-state keys. `visibleEdges` in particular IS published during a trace,
+  by ruling (Task 8 fix round 1, IMPORTANT 4): it is the "what is on screen
+  right now" mirror the entity drawer reads, so during a trace it must carry
+  the overlay's own wires — leaving it stale would make the drawer contradict
+  the canvas. Selection and drawer state are view-state on the same footing.
+  The harness's store spy counts `nodes`/`edges` identity changes only, for
+  this reason; every G1 assertion in it (`storeWrites() === 0`) is a claim
+  about graph content.
+
+  The guarantee holds for the WHOLE trace window — from the moment Trace is
+  pressed, not from the moment the overlay has something to draw. The walk in
+  between is when the reader is still looking at browse and its affordances
+  still work, so every write path is gated on the session, not on
+  `overlay.active` (Task 8 fix round 2).
 - **G2 Containment at any depth.** Harness fixtures at depth 1, 3 and 10
   (recursive Node⊃…⊃Node): every level keeps its chevron (graph-counted),
   expands lazily, collapses visually, and wires re-project at every level.
