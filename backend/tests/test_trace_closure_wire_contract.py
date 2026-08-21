@@ -335,12 +335,23 @@ def test_max_nodes_none_uses_trace_max_nodes():
     assert provider.calls[0]["max_nodes"] == ContextEngine.TRACE_MAX_NODES
 
 
-def test_max_nodes_over_cap_clamps_to_trace_max_nodes():
+def test_max_nodes_over_cap_clamps_to_the_hard_ceiling():
+    # 2026-08-19: an explicit maxNodes may ESCALATE past the default page
+    # size (the full-walk driver's big-page lane — one 6000-node BFS beats
+    # thousands of frontier round trips), clamped by the hard ceiling.
     provider = _CapturingClosureProvider()
     eng = _make_engine(provider)
     req = TraceClosureRequest.model_validate({"urn": "u1", "maxNodes": 99999})
     _run(ContextEngine.trace_closure(eng, req))
-    assert provider.calls[0]["max_nodes"] == ContextEngine.TRACE_MAX_NODES
+    assert provider.calls[0]["max_nodes"] == ContextEngine.TRACE_MAX_NODES_HARD
+
+
+def test_max_nodes_escalation_between_default_and_hard_cap_passes_through():
+    provider = _CapturingClosureProvider()
+    eng = _make_engine(provider)
+    req = TraceClosureRequest.model_validate({"urn": "u1", "maxNodes": 6000})
+    _run(ContextEngine.trace_closure(eng, req))
+    assert provider.calls[0]["max_nodes"] == 6000
 
 
 def test_max_nodes_under_cap_passes_through():
