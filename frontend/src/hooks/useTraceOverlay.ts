@@ -68,6 +68,10 @@ export interface UseTraceOverlayArgs {
 }
 
 export interface TraceOverlay {
+  /** The overlay is DRAWING. False until the walk hands back a model that
+   *  actually contains the focus — see `useTraceOverlay`'s "no blank canvas"
+   *  note — so the canvas keeps showing browse for the whole walk rather
+   *  than emptying out and filling back in. */
   active: boolean
   view: TraceView | null
   traceExpansion: ReadonlySet<string>
@@ -76,6 +80,12 @@ export interface TraceOverlay {
   toggle(id: string): void
   /** Reveal/search: open a whole chain at once. Additive. */
   expandPath(ids: readonly string[]): void
+  /** The containment chain that has to be open for `id` to be on screen:
+   *  its ancestors within its lane, nearest first, `id` itself excluded.
+   *  Empty for a lane root, for an unknown urn, and while inactive — a
+   *  reveal of something this trace does not hold opens nothing rather than
+   *  going to fetch it. Pure; pass it to `expandPath` to act on it. */
+  revealPath(id: string): string[]
   exit(): void
 }
 
@@ -178,15 +188,23 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
     setSeed({ forFocus: focusUrn, set: traceExpansion, seeded: focusInModel })
   }
 
+  // NO BLANK CANVAS. `model` is non-null from the first render of a walk —
+  // the walk hook hands back a LOADING entry carrying an EMPTY one — so an
+  // overlay that went live on `!!model` would blank every column for the
+  // length of the walk and then fill them back in. It goes live only once
+  // the model actually CONTAINS the focus; until then the canvas keeps
+  // rendering browse and the dock carries the loading state.
+  const active = !!focusUrn && !!model && focusInModel
+
   const view = useMemo<TraceView | null>(() => (
-    model && focusUrn
+    active && model && focusUrn
       ? buildTraceView({
         model, focusUrn, layers, assignments, viewIsCurated, traceExpansion,
         showUpstream, showDownstream, depthUp, depthDown,
         placement: { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns },
       })
       : null
-  ), [model, focusUrn, layers, assignments, viewIsCurated, traceExpansion,
+  ), [active, model, focusUrn, layers, assignments, viewIsCurated, traceExpansion,
     showUpstream, showDownstream, depthUp, depthDown,
     backendAssignments, unassignedFallbackLayerId, branchCreatedUrns])
 
@@ -206,5 +224,21 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   // trace that is still focused somewhere is not a state the canvas has.
   const exit = useCallback(() => setSeed({ forFocus: null, set: EMPTY_EXPANSION, seeded: false }), [])
 
-  return { active: !!focusUrn && !!model, view, traceExpansion, toggle, expandPath, exit }
+  // Lanes are independent of each other, so the first one holding the card
+  // is the only one that can hold its chain.
+  const revealPath = useCallback((id: string): string[] => {
+    for (const lane of view?.lanes ?? []) {
+      if (!lane.cards.has(id)) continue
+      const chain: string[] = []
+      let cursor = lane.cards.get(id)?.parentId ?? null
+      while (cursor && !chain.includes(cursor)) {
+        chain.push(cursor)
+        cursor = lane.cards.get(cursor)?.parentId ?? null
+      }
+      return chain
+    }
+    return []
+  }, [view])
+
+  return { active, view, traceExpansion, toggle, expandPath, revealPath, exit }
 }

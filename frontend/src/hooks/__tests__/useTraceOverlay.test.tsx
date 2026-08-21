@@ -61,7 +61,7 @@ const grownModel = (): LensWalkModel => {
 }
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(13))
+afterAll(() => expectTestsRan(17))
 
 describe('useTraceOverlay — the seed', () => {
   it('opens the focus chain and leaves the direct partners visible and CLOSED', () => {
@@ -205,9 +205,12 @@ describe('useTraceOverlay — the seed waits for a model that holds the focus', 
       (a: UseTraceOverlayArgs) => useTraceOverlay(a),
       { initialProps: args({ model: emptyWalkModel('cfo') }) },
     )
-    // The loading frame: active, but there is nothing yet to open.
-    expect(result.current.active).toBe(true)
-    expect(result.current.view!.lanes).toEqual([])
+    // The loading frame draws NOTHING — the canvas keeps showing browse
+    // until the focus lands (see "no blank canvas" below). The seed still
+    // provisionally holds the focus, so the latch can tell this frame apart
+    // from the real one.
+    expect(result.current.active).toBe(false)
+    expect(result.current.view).toBeNull()
     expect([...result.current.traceExpansion]).toEqual(['cfo'])
 
     rerender(args())
@@ -236,6 +239,69 @@ describe('useTraceOverlay — the seed waits for a model that holds the focus', 
   })
 })
 
+describe('useTraceOverlay — no blank canvas while the walk runs', () => {
+  // The walk hook hands back a LOADING entry carrying an EMPTY model, so an
+  // overlay that went live on `!!model` would blank every column for the
+  // length of the walk and fill them back in when it landed. It goes live
+  // only once the model actually CONTAINS the focus.
+  it('an empty model is not active and draws nothing', () => {
+    const { result } = renderHook(() => useTraceOverlay(args({ model: emptyWalkModel('cfo') })))
+    expect(result.current.active).toBe(false)
+    expect(result.current.view).toBeNull()
+  })
+
+  it('a model that does not hold the focus is not active either', () => {
+    // A stale wave for a DIFFERENT focus is not this trace's picture.
+    const { result } = renderHook(() => useTraceOverlay(args({ focusUrn: 'nobody' })))
+    expect(result.current.active).toBe(false)
+    expect(result.current.view).toBeNull()
+  })
+
+  it('goes live on the wave that brings the focus, and seeds then', () => {
+    const { result, rerender } = renderHook(
+      (a: UseTraceOverlayArgs) => useTraceOverlay(a),
+      { initialProps: args({ model: emptyWalkModel('cfo') }) },
+    )
+    expect(result.current.active).toBe(false)
+
+    rerender(args())
+    expect(result.current.active).toBe(true)
+    expect(result.current.view).not.toBeNull()
+    // The seed ran against the REAL model, not the empty one it latched on.
+    expect([...result.current.traceExpansion].sort()).toEqual(['cfo', 'tableau'])
+  })
+
+  it('no focus at all: inactive', () => {
+    const { result } = renderHook(() => useTraceOverlay(args({ focusUrn: null })))
+    expect(result.current.active).toBe(false)
+    expect(result.current.view).toBeNull()
+  })
+})
+
+describe('useTraceOverlay — revealPath', () => {
+  it('returns the containment chain to a buried card, nearest first, excluding itself', () => {
+    const { result } = renderHook(() => useTraceOverlay(args()))
+    // orders.channel sits INTERMEDIATE_T2 ⊃ orders ⊃ orders.channel.
+    expect(result.current.revealPath('orders.channel')).toEqual(['orders', 'INTERMEDIATE_T2'])
+  })
+
+  it('a lane root, an unknown urn and an inactive overlay all open nothing', () => {
+    const { result } = renderHook(() => useTraceOverlay(args()))
+    expect(result.current.revealPath('INTERMEDIATE_T2')).toEqual([])
+    expect(result.current.revealPath('not-in-this-trace')).toEqual([])
+
+    const idle = renderHook(() => useTraceOverlay(args({ model: emptyWalkModel('cfo') })))
+    expect(idle.result.current.revealPath('orders.channel')).toEqual([])
+  })
+
+  it('feeding it to expandPath is what puts the card on screen', () => {
+    const { result } = renderHook(() => useTraceOverlay(args()))
+    expect(result.current.view!.visible.has('orders.channel')).toBe(false)
+    act(() => result.current.expandPath(result.current.revealPath('orders.channel')))
+    expect(result.current.view!.visible.has('orders.channel')).toBe(true)
+  })
+})
+
 describe('useTraceOverlay — identity', () => {
   it('a fresh args object with identical fields rebuilds nothing', () => {
     const { result, rerender } = renderHook((a: UseTraceOverlayArgs) => useTraceOverlay(a), { initialProps: args() })
@@ -250,5 +316,6 @@ describe('useTraceOverlay — identity', () => {
     expect(result.current.toggle).toBe(first.toggle)
     expect(result.current.expandPath).toBe(first.expandPath)
     expect(result.current.exit).toBe(first.exit)
+    expect(result.current.revealPath).toBe(first.revealPath)
   })
 })

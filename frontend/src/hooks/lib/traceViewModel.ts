@@ -434,3 +434,33 @@ export function lanesToHierarchy(lanes: TraceLane[]): Array<{ layerId: string; n
     }
   })
 }
+
+/**
+ * The three shapes the canvas renders from, built once from the lanes:
+ * `byLayer` (what each column draws), `flat` and `map` (the lookups the
+ * canvas's own hooks index by). Lives here rather than in the component so
+ * the trace's render source is testable without mounting a canvas.
+ *
+ * Only layers with a lane appear. Columns come from the view's layer list,
+ * so a layer with no trace content still renders — empty — and the canvas
+ * does not re-flow underneath the reader.
+ */
+export function lanesToRenderTrees(lanes: TraceLane[]): {
+  byLayer: Map<string, HierarchyNode[]>
+  flat: HierarchyNode[]
+  map: Map<string, HierarchyNode>
+} {
+  const byLayer = new Map<string, HierarchyNode[]>()
+  const flat: HierarchyNode[] = []
+  const map = new Map<string, HierarchyNode>()
+  const walk = (n: HierarchyNode): void => {
+    flat.push(n)
+    map.set(n.id, n)
+    for (const child of n.children) walk(child)
+  }
+  for (const lane of lanesToHierarchy(lanes)) {
+    byLayer.set(lane.layerId, lane.nodes)
+    for (const root of lane.nodes) walk(root)
+  }
+  return { byLayer, flat, map }
+}

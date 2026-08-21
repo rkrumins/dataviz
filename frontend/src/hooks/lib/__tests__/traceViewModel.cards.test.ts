@@ -8,7 +8,7 @@
  * chains under it anchor at the highest ancestor the VIEW actually places.
  */
 import { describe, it, expect } from 'vitest'
-import { buildTraceView, lanesToHierarchy } from '../traceViewModel'
+import { buildTraceView, lanesToHierarchy, lanesToRenderTrees } from '../traceViewModel'
 import { cfoEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
 import type { TraceViewInputs } from '../traceViewModel'
 import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
@@ -224,5 +224,49 @@ describe('buildTraceView — Roots ⊃ Node ×10 (self-nesting, level-less)', ()
       if (d < 10) cursor = cursor.children[0]
     }
     expect(cursor.children).toEqual([])
+  })
+})
+
+describe('lanesToRenderTrees — the canvas\'s render source', () => {
+  // The canvas draws from three shapes: what each column renders, and the
+  // flat list + id map its own hooks index by. They must agree with each
+  // other and with the VISIBLE tree — a map holding a card no column draws
+  // is how an edge gets projected onto a row that is not there.
+  it('keys columns by layer and indexes exactly the cards those columns draw', () => {
+    const v = view(['tableau', 'cfo'])
+    const { byLayer, flat, map } = lanesToRenderTrees(v.lanes)
+
+    expect([...byLayer.keys()]).toEqual(v.lanes.map(l => l.layerId))
+    expect(byLayer.get('warehouse')!.map(n => n.id)).toEqual(['INTERMEDIATE_T2', 'REPORTING'])
+    expect(byLayer.get('report')!.map(n => n.id)).toEqual(['tableau'])
+
+    // flat and map are the SAME set, and it is the visible set.
+    expect(flat.map(n => n.id).sort()).toEqual([...v.visible].sort())
+    expect([...map.keys()].sort()).toEqual([...v.visible].sort())
+    for (const node of flat) expect(map.get(node.id)).toBe(node)
+  })
+
+  it('descends into open cards and stops at closed ones', () => {
+    const closed = lanesToRenderTrees(view(['tableau', 'cfo']).lanes)
+    expect(closed.map.has('orders')).toBe(false)
+
+    const open = lanesToRenderTrees(view(['tableau', 'cfo', 'INTERMEDIATE_T2']).lanes)
+    expect(open.map.has('orders')).toBe(true)
+    expect(open.byLayer.get('warehouse')![0].children.map(n => n.id)).toEqual(['orders'])
+    // One level only — `orders` stays closed, so its columns are not indexed.
+    expect(open.map.has('orders.channel')).toBe(false)
+  })
+
+  it('a layer with no lane simply has no entry — the column renders empty', () => {
+    const { byLayer } = lanesToRenderTrees(view(['tableau', 'cfo'], { showUpstream: false }).lanes)
+    expect(byLayer.has('warehouse')).toBe(false)
+  })
+
+  it('carries the trace counts the renderer reads for chevrons and pills', () => {
+    const { map } = lanesToRenderTrees(view(['tableau', 'cfo']).lanes)
+    const t2 = map.get('INTERMEDIATE_T2')!
+    expect(t2.data.childCount).toBe(1)      // the GRAPH's count — the chevron
+    expect(t2.data.onLineage).toBe(3)       // orders + its two columns
+    expect(t2.data.traceRole).toBe('up')
   })
 })
