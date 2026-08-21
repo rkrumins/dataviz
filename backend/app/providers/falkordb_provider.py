@@ -8136,8 +8136,12 @@ class FalkorDBProvider(GraphDataProvider):
             elif truncation_reason is None:
                 anchor_set = set(anchor_urns)
                 stopped_after: Optional[str] = None      # last anchor fully walked
+                pending_rollups: List[Tuple[str, Dict[str, Any]]] = []
                 for start in range(0, len(anchor_urns), CLOSURE_LAZY_ANCHOR_CHUNK):
-                    if len(edges_by_id) >= CLOSURE_LAZY_EDGE_CEILING:
+                    # Rollups are held back for the depth rule below, so they
+                    # have to be counted here or a rollup-heavy page never
+                    # notices it is full.
+                    if len(edges_by_id) + len(pending_rollups) >= CLOSURE_LAZY_EDGE_CEILING:
                         # The page is full. Its resume is the keyset cursor
                         # over the ANCHORS — one cursor, exact, and the next
                         # page starts strictly past the last one walked.
@@ -8170,8 +8174,21 @@ class FalkorDBProvider(GraphDataProvider):
                             cut = cut_up if direction == "up" else cut_down
                             cut.update(dict.fromkeys(chunk))
                         for rec in recs:
-                            _record(rec)
                             other = rec.get("otherUrn")
+                            # A ROLLUP UPHILL IS SOMEBODY ELSE'S LINEAGE.
+                            # Rollups are materialised per containment-level
+                            # PAIR, so a table carries :AGGREGATED edges to
+                            # every database, application and domain its flow
+                            # touches. Following those is what made a trace of
+                            # one table "keep going and going across every
+                            # ancestor" — the database's rollup summarises
+                            # every table in it, not this one. Deferred here
+                            # and resolved by depth below; raw hops are
+                            # unaffected, being leaf-grain by nature.
+                            if str(rec.get("edgeType") or "").upper() == agg:
+                                pending_rollups.append((direction, rec))
+                                continue
+                            _record(rec)
                             if not other or other in anchor_set:
                                 continue
                             discovered.add(other)
@@ -8182,6 +8199,35 @@ class FalkorDBProvider(GraphDataProvider):
                                 downstream_urns.add(other)
                                 depth_down[other] = None
                     stopped_after = chunk[-1]
+
+                # ---- the rollups that point at this grain or finer --------
+                # One chain lookup for the whole page (Redis-cached), then the
+                # rule: keep a rollup only when the far endpoint sits at the
+                # focus's containment depth or deeper. Same-grain rollups are
+                # the coarse statement the reader asked for; the grain rule
+                # retires them as raw evidence lands. Shallower ones are the
+                # estate, and they are not this trace.
+                if pending_rollups:
+                    far = {r.get("otherUrn") for _, r in pending_rollups if r.get("otherUrn")}
+                    try:
+                        depths = await self._compute_and_store_ancestors_bulk([urn, *far])
+                    except Exception:
+                        depths = {}
+                    focus_depth = len(depths.get(urn) or [])
+                    for direction, rec in pending_rollups:
+                        other = rec.get("otherUrn")
+                        if other and len(depths.get(other) or []) < focus_depth:
+                            continue
+                        _record(rec)
+                        if not other or other in anchor_set:
+                            continue
+                        discovered.add(other)
+                        if direction == "up":
+                            upstream_urns.add(other)
+                            depth_up[other] = None
+                        else:
+                            downstream_urns.add(other)
+                            depth_down[other] = None
 
                 # The card's contents are walked in urn order, so an
                 # unfinished page resumes exactly where it stopped. The

@@ -583,3 +583,84 @@ def test_direction_zeroing_is_honoured_on_both_shapes():
     assert res.edges == []
     assert res.upstream_urns == set()
     assert {n.urn for n in res.nodes} == {"cfo", "aov", "tableau"}
+
+
+# ── a trace of X is X's lineage, not its estate's ───────────────────────
+
+
+def _ancestor_rollup_estate():
+    """Domain ⊃ App ⊃ Database ⊃ Table ⊃ Column, with the flow authored at
+    every grain — which is how the rollup lane is actually materialised: per
+    containment-level PAIR, so a table carries :AGGREGATED edges to every
+    database, application and domain its flow touches.
+
+    Tracing the TABLE must follow the table's own lineage and the column's,
+    and none of the estate's. The database's rollup summarises every table in
+    it — that is somebody else's trace."""
+    f = _LazyFake()
+    for side in ("", "2"):
+        for urn, label in [
+            (f"D{side}", "domain"), (f"A{side}", "application"),
+            (f"DB{side}", "database"), (f"T{side}", "table"), (f"c{side}", "column"),
+        ]:
+            f.label(urn, label)
+        f.contain(f"D{side}", f"A{side}")
+        f.contain(f"A{side}", f"DB{side}")
+        f.contain(f"DB{side}", f"T{side}")
+        f.contain(f"T{side}", f"c{side}")
+    # The estate's own flow, at every ancestor grain.
+    f.rollup("D", "D2", 900)
+    f.rollup("A", "A2", 400)
+    f.rollup("DB", "DB2", 90)
+    # THIS table's flow: at its own grain, and the raw hop beneath it…
+    f.rollup("T", "T2", 2)
+    f.flow("c", "c2")
+    # …and the cross-level rollups the lane also materialises FROM the table.
+    f.rollup("T", "DB2", 2)
+    f.rollup("T", "A2", 2)
+    f.rollup("T", "D2", 2)
+    return f
+
+
+def test_a_table_s_trace_does_not_follow_its_database_s_rollups():
+    p = _make_provider(_ancestor_rollup_estate())
+    res = _lazy(p, "T")
+
+    drawn = {(e.source_urn, e.target_urn) for e in res.edges}
+    # The table's own grain: kept.
+    assert ("T", "T2") in drawn
+    # Uphill from the table — the estate's lineage, not this table's.
+    for uphill in (("T", "DB2"), ("T", "A2"), ("T", "D2")):
+        assert uphill not in drawn, f"{uphill} is a rollup to a SHALLOWER grain"
+    # And nothing between the ancestors themselves, which the walk never
+    # anchored on in the first place.
+    for estate in (("D", "D2"), ("A", "A2"), ("DB", "DB2")):
+        assert estate not in drawn
+
+
+def test_the_shallower_partners_are_not_participants_and_not_frontier():
+    p = _make_provider(_ancestor_rollup_estate())
+    res = _lazy(p, "T")
+
+    # D2/A2/DB2 may SHIP — they are T2's ancestors, and a partner the client
+    # cannot place is a partner it drops — but only as hosts.
+    assert res.upstream_urns | res.downstream_urns == {"T2"}
+    boundary = {f.urn for f in res.frontier_up} | {f.urn for f in res.frontier_down}
+    assert boundary == {"T2"}, f"the frontier names something above the focus: {boundary}"
+
+
+def test_a_partner_at_the_focus_s_own_depth_survives():
+    # The rule is DEPTH, not "no rollups": a table-to-table rollup is exactly
+    # the coarse statement the first paint exists to make.
+    p = _make_provider(_ancestor_rollup_estate())
+    res = _lazy(p, "T")
+    weights = {(e.source_urn, e.target_urn): e.properties.get("weight") for e in res.edges}
+    assert weights.get(("T", "T2")) == 2
+
+
+def test_tracing_the_column_follows_only_the_column_s_hop():
+    p = _make_provider(_ancestor_rollup_estate())
+    res = _lazy(p, "c")
+
+    assert {(e.source_urn, e.target_urn) for e in res.edges} == {("c", "c2")}
+    assert res.upstream_urns | res.downstream_urns == {"c2"}

@@ -793,3 +793,51 @@ describe('useTraceDriver — the memory ceiling', () => {
         expect(traceClosure.mock.calls.length).toBe(stopped)
     }, 30000)
 })
+
+// ── a trace of X is X's lineage, not its estate's ───────────────────────
+//
+// Ruling 2026-08-21: the trace of X follows only edges incident to X or X's
+// DESCENDANTS. X's ancestors host it for placement; their own rollups — a
+// database's, an application's, a domain's — summarise every table beneath
+// them, and that is somebody else's trace.
+
+describe('useTraceDriver — the walk never asks about the estate', () => {
+    it('every background page is a FINE page: no grain, so no rollups', async () => {
+        const asked: Record<string, unknown>[] = []
+        const { provider } = makeProvider(() => coarseResponse(), req => {
+            asked.push(req)
+            return res({ focus: { urn: String(req.urn), level: 0, entityType: '' } })
+        })
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+        await waitFor(() => expect(['complete', 'stalled']).toContain(result.current.phase))
+
+        expect(asked.length).toBeGreaterThan(0)
+        for (const req of asked) {
+            // No `grain` means the eager closure, where the engine strips
+            // :AGGREGATED out of the lineage types — the Lens's own rule, and
+            // what keeps the walk from following a rollup as if it were a hop.
+            expect(req.grain, `a background page asked for a grain: ${JSON.stringify(req)}`).toBeUndefined()
+            expect(req.drill).toBeUndefined()
+        }
+    })
+
+    it('seeds only from the focus and the partners the flow reached', async () => {
+        const asked: Record<string, unknown>[] = []
+        const { provider } = makeProvider(() => coarseResponse(), req => {
+            asked.push(req)
+            return res({ focus: { urn: String(req.urn), level: 0, entityType: '' } })
+        })
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+        await waitFor(() => expect(['complete', 'stalled']).toContain(result.current.phase))
+
+        // The coarse paint reached exactly one partner. Everything the walk
+        // asks about is the focus or something the flow led to — never a card
+        // the model merely holds for placement (`root`, `proot`, `tableau`).
+        const reachable = new Set([FOCUS, 'P'])
+        for (const req of asked) {
+            for (const seed of (req.seedUrns as string[] | undefined) ?? []) {
+                expect(reachable.has(seed), `walked from a host, not a participant: ${seed}`).toBe(true)
+            }
+        }
+    })
+})
