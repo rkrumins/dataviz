@@ -22,7 +22,7 @@ import { cfoEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(28))
+afterAll(() => expectTestsRan(33))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -687,4 +687,113 @@ describe('the background walk finishes the flow', () => {
     expect(h.countPill('REPORTING')).toBe('1 on this lineage')
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
+})
+
+// ── THE CAPSULE ─────────────────────────────────────────────────────────
+//
+// The user's report, twice: "trace chrome on, browse picture underneath,
+// nothing happening." Every one of those words was accurate — the session
+// opens on the click, the overlay only draws once the model holds the focus,
+// and the background walk runs behind it for as long as the flow is wide.
+// The capsule owns that whole window. These legs are about the wiring the
+// component tests cannot see: that it is mounted from the FIRST click, that
+// it reads the live driver rather than a snapshot, that it leaves when the
+// flow does, and that its Cancel is a real way out and not a decoration.
+describe('the capsule narrates the trace', () => {
+  it('is on the board from the first click, before anything has been drawn', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', deferTrace: true })
+    const browse = h.visibleCardIds().sort()
+
+    await h.startTrace('cfo')
+    // The closure is still in flight: the board is the browse board, and the
+    // capsule is the only thing saying otherwise.
+    expect(h.visibleCardIds().sort()).toEqual(browse)
+    expect(h.capsulePhase()).toBe('coarse')
+    expect(h.capsuleText()).toContain('Finding the focus…')
+    // The way out is offered before the first byte lands.
+    await h.capsuleAction(/cancel/i)
+    expect(h.isTracing()).toBe(false)
+  }, 30000)
+
+  it('narrates the walk with the driver`s own live numbers', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true, holdWalk: true })
+    await h.startTrace('cfo')
+
+    // The coarse picture has landed and the walk is widening it behind it.
+    expect(h.capsulePhase()).toBe('walking')
+    const said = h.capsuleText() ?? ''
+    expect(said).toContain('Mapping the flow')
+    expect(said).toMatch(/\d+ nodes? · \d+ requests?/)
+    // Counts read as FLOORS while the walk is still finding partners.
+    expect(said).toMatch(/↑ \d+\+/)
+    expect(said).toMatch(/\d+\+ ↓/)
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('leaves once the flow is complete — the dock owns the permanent numbers', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    await h.startTrace('cfo')
+    expect(h.capsulePhase()).toBe('complete')
+    expect(h.capsuleText()).toMatch(/Complete — \d+ nodes?/)
+
+    await h.wait(700)
+    expect(h.capsuleText()).toBeNull()
+    // The trace itself is untouched: only the narration left.
+    expect(h.isTracing()).toBe(true)
+    expect(h.dockPresent()).toBe(true)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('Cancel mid-walk leaves the trace with the canvas exactly as it was', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true, holdWalk: true })
+    const before = h.snapshotStore()
+    await h.startTrace('cfo')
+    expect(h.capsulePhase()).toBe('walking')
+
+    await h.capsuleAction(/cancel/i)
+    expect(h.isTracing()).toBe(false)
+    expect(h.capsuleText()).toBeNull()
+    expect(h.dockPresent()).toBe(false)
+    expect(h.snapshotStore()).toEqual(before)
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // The ONE bound left in the engine is on what the browser HOLDS, never on
+  // what the trace may ask for — so at the ceiling the capsule has a real
+  // question to put to the reader, and answering it must resume the walk
+  // rather than restart it.
+  it('at the ceiling it offers Keep walking, and one click resumes where it stopped', async () => {
+    // Deliberately NOT `lazy`: the coarse answer leaves no boundary of its
+    // own, so the only frontier on the board is the one the endless block
+    // filed — which makes "how much did resuming cost" a number rather than
+    // a wave whose width depends on the estate.
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', endlessWalk: true })
+    await h.startTrace('cfo')
+
+    const heldAt = (): number => Number(
+      (h.capsuleText() ?? '').match(/Showing the first ([\d,]+)/)?.[1].replace(/,/g, '') ?? '0',
+    )
+    expect(h.capsulePhase()).toBe('ceiling')
+    expect(h.capsuleText()).toMatch(/Showing the first [\d,]+ of a flow that continues/)
+    expect(h.capsuleText()).toMatch(/more boundar(y|ies) to follow/)
+    const held = heldAt()
+    expect(held).toBeGreaterThanOrEqual(25000)
+
+    const calls = h.providerCalls()
+    const paints = h.paintCalls()
+    await h.capsuleAction(/keep walking/i)
+
+    // A RESUME, NOT A RE-WALK. The frontier, its cursors and the progress
+    // ledger were all kept, so carrying on costs the one boundary that was
+    // left standing — and, decisively, not a second coarse paint: a restart
+    // would show up here as the reader paying for the first picture twice.
+    expect(h.providerCalls()).toBe(calls + 1)
+    expect(h.paintCalls()).toBe(paints)
+    expect(h.capsulePhase()).toBe('ceiling')
+    expect(heldAt()).toBeGreaterThan(held)
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 120000)
 })

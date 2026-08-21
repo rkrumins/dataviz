@@ -213,6 +213,107 @@
     0%, 100% { opacity: 0.55; transform: scale(1); }
     50%      { opacity: 1;    transform: scale(1.05); }
   }
+  /* ── THE TRACE CAPSULE ──────────────────────────────────────────────
+     Chrome for `TraceWalkIndicator`, the capsule that narrates a trace
+     while it computes.
+
+     Its signature is the SOUNDING LINE: from an indigo origin, a cyan
+     filament reaches upstream and an amber one downstream — the trace
+     metaphor in the colours the wires themselves land in. There is no
+     spinner and no percent bar, because the walk's total is unknowable
+     until it ends and a bar that filled would be a lie about it.
+
+     THE LINE MEANS THE GRAIN. While the focus is still being found
+     (`coarse`) the filaments are barely out of the origin; the moment the
+     walk starts they reach their full span and the glint travels outward
+     from the centre. At the ceiling the span holds but nothing moves —
+     the flow continues, and it is the reader's call whether it carries on.
+
+     Reduced motion freezes every travel; the filaments, their colours and
+     their spans always remain, so the phase stays readable. */
+  .nx-trace-capsule {
+    animation: nx-trace-capsule-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes nx-trace-capsule-in {
+    from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+    to   { opacity: 1; transform: none; }
+  }
+  /* The finished beat glides out over exactly the window the component
+     holds it for, so the unmount lands on an already-faded capsule. */
+  [data-trace-phase="complete"] .nx-trace-capsule {
+    animation: nx-trace-capsule-out 600ms ease-in both;
+  }
+  @keyframes nx-trace-capsule-out {
+    0%, 55% { opacity: 1; transform: none; }
+    100%    { opacity: 0; transform: translateY(-6px) scale(0.985); }
+  }
+  /* The origin glyph shares the traced node's pulse identity at capsule
+     scale, so capsule and focus read as one thing. */
+  .nx-trace-origin-pulse {
+    box-shadow: 0 0 8px 1px rgba(99, 102, 241, 0.6);
+    animation: trace-pulse 2.4s ease-in-out infinite;
+  }
+  .nx-trace-sounding {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1 1 0%;
+    min-width: 0;
+    height: 5px;
+  }
+  .nx-trace-sounding-origin {
+    width: 5px;
+    height: 5px;
+    border-radius: 9999px;
+    background: rgba(99, 102, 241, 0.95);
+    flex: none;
+  }
+  .nx-trace-sounding-up,
+  .nx-trace-sounding-down {
+    flex: 1 1 0%;
+    height: 2px;
+    border-radius: 9999px;
+    background-size: 200% 100%;
+    transition: transform 700ms cubic-bezier(0.22, 1, 0.36, 1), opacity 400ms ease;
+    animation: nx-trace-sounding-glint 1.6s linear infinite;
+  }
+  .nx-trace-sounding-up {
+    background-image: linear-gradient(to left, rgba(6, 182, 212, 0.9), rgba(6, 182, 212, 0.18), rgba(6, 182, 212, 0.9));
+    transform-origin: right center;
+    animation-direction: reverse;
+  }
+  .nx-trace-sounding-down {
+    background-image: linear-gradient(to right, rgba(245, 158, 11, 0.9), rgba(245, 158, 11, 0.18), rgba(245, 158, 11, 0.9));
+    transform-origin: left center;
+  }
+  /* Nothing has been found yet, so the line has not reached out. */
+  [data-trace-phase="coarse"] .nx-trace-sounding-up,
+  [data-trace-phase="coarse"] .nx-trace-sounding-down {
+    transform: scaleX(0.16);
+  }
+  /* Held at the ceiling: the span is real, the movement is not. */
+  [data-trace-phase="ceiling"] .nx-trace-sounding-up,
+  [data-trace-phase="ceiling"] .nx-trace-sounding-down {
+    animation: none;
+    opacity: 0.5;
+  }
+  @keyframes nx-trace-sounding-glint {
+    0%   { background-position: 0% 0; }
+    100% { background-position: -200% 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .nx-trace-capsule,
+    [data-trace-phase="complete"] .nx-trace-capsule,
+    .nx-trace-origin-pulse,
+    .nx-trace-sounding-up,
+    .nx-trace-sounding-down {
+      animation: none;
+    }
+    .nx-trace-sounding-up,
+    .nx-trace-sounding-down {
+      transition: none;
+    }
+  }
   .nx-edge-trace {
     /* Tighter glow — original `0 0 6px ... 0.7` extended visibly past the
        stroke and read as overlapping the node bodies during trace. The

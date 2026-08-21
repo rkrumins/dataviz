@@ -172,6 +172,7 @@ import { ExportDialog } from '@/features/import-export/ExportDialog'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
+import { TraceWalkIndicator } from './TraceWalkIndicator'
 
 // Re-export for backward compatibility
 export { defaultReferenceModelLayers } from './constants'
@@ -4246,6 +4247,32 @@ export function ContextViewCanvas({
               nativeMode={traceActive}
               outsideView={overlay.view?.outsideView ?? 0}
             />
+        )}
+
+        {/* THE CAPSULE — the board narrates while the trace computes.
+            Visible from the FIRST click: the session opens instantly but the
+            overlay only draws once the model holds the focus, and the walk
+            then runs for as long as the flow is wide. Without this the reader
+            sees trace chrome over the browse picture and reads it as broken.
+            Fixed top-centre, pointer-events only on its own buttons (the
+            board underneath stays interactive), and — like the dock — NO
+            AnimatePresence: it unmounts with the trace. Keyed on the focus so
+            a new trace re-arms the finished beat. */}
+        {traceActive && canvasTrace.phase !== 'idle' && (
+          <TraceWalkIndicator
+            key={canvasTrace.tracedUrn ?? ''}
+            phase={canvasTrace.phase}
+            nodesHeld={canvasTrace.ceiling.nodesHeld}
+            requests={canvasTrace.requests}
+            upCount={overlay.view?.counts.up ?? 0}
+            downCount={overlay.view?.counts.down ?? 0}
+            countsAreFloors={canvasTrace.countsAreFloors}
+            frontierRemaining={canvasTrace.ceiling.frontierRemaining}
+            error={canvasTrace.walkEntry?.error ?? null}
+            onCancel={exitCanvasTrace}
+            onContinue={canvasTrace.continueWalk}
+            onRetry={canvasTrace.retryWalk}
+          />
         )}
 
 

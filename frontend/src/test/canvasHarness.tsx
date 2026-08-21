@@ -50,6 +50,7 @@ import { useBranchStore } from '@/store/branchStore'
 import { useFeaturesStore } from '@/store/features'
 import type { GraphDataProvider, GraphNode, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
+import { WALK_MODEL_CEILING_NODES } from '@/hooks/useTraceDriver'
 import type { ViewLayerConfig } from '@/types/schema'
 
 /** What `src/test/fixtures/traceEstates.ts` hands back. */
@@ -156,9 +157,23 @@ export interface TraceCanvasHarness {
   /** Everything the canvas logged as an error. Checked automatically at the
    *  end of mount and of `startTrace`; exposed for diagnosis. */
   consoleErrors(): string[]
+  /** Everything the trace capsule is saying — headline, live counts and all
+   *  — or null when it is not on the board. */
+  capsuleText(): string | null
+  /** Which phase the capsule is narrating (`data-trace-phase`), or null. */
+  capsulePhase(): string | null
+  /** Click one of the capsule's own actions by its label. Scoped to the
+   *  capsule, so it can never reach the dock's controls by accident. */
+  capsuleAction(label: RegExp): Promise<void>
+  /** Advance REAL time — the capsule's finished beat, the dock's cross-fade.
+   *  `settle` drains microtasks and frames but barely moves the clock. */
+  wait(ms: number): Promise<void>
 }
 
 const CARD_ID_PREFIX = 'layer-node-'
+/** The closed partner card a never-exhausting walk hangs its blocks off —
+ *  `cfoEstate`'s container, which a trace draws CLOSED. */
+const CLOSED_HOST = 'INTERMEDIATE_T2'
 
 /** The canvas store outlives any one mount, so a previous harness's spy would
  *  keep counting into a dead tally. One live spy at a time. */
@@ -378,6 +393,41 @@ function isWalkOp(req: {
   return !req.grain && !req.drill && (!!req.seedUrns?.length || !!req.afterCursor)
 }
 
+/** One block of a NEVER-EXHAUSTING walk: one node more than the driver's
+ *  model ceiling, so a single block crosses it on its own and the walk
+ *  pauses at `ceiling` instead of running out. Every block leaves a boundary
+ *  standing, so there is always somewhere left to go — which is precisely
+ *  the state the capsule's "Keep walking" exists for.
+ *
+ *  The block hangs off a CLOSED partner card and carries no lineage of its
+ *  own, so none of it reaches the render trees: this fixture is about what
+ *  the capsule says, and 25,000 rows would only be measuring jsdom. */
+const CEILING_BLOCK = WALK_MODEL_CEILING_NODES + 1
+
+function endlessBlock(
+  anchorUrn: string, hostUrn: string, block: number,
+): TraceV2Result & LensClosureExtras {
+  const nodes: GraphNode[] = []
+  const containmentEdges: Array<{ sourceUrn: string; targetUrn: string }> = []
+  for (let i = 0; i < CEILING_BLOCK; i++) {
+    const urn = `w${block}.${i}`
+    nodes.push({
+      urn, displayName: urn, entityType: 'schemaField', childCount: 0, properties: {},
+    } as unknown as GraphNode)
+    containmentEdges.push({ sourceUrn: hostUrn, targetUrn: urn })
+  }
+  return {
+    focus: { urn: anchorUrn, level: 0, entityType: '' },
+    nodes, edges: [], containmentEdges,
+    upstreamUrns: new Set<string>(), downstreamUrns: new Set<string>(),
+    effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+    truncated: false, truncationReason: null,
+    frontierUp: [],
+    frontierDown: [{ urn: `w${block}.0`, totalCount: null, nextCursor: null }],
+    seedTruncated: false, seedCursor: null,
+  } as unknown as TraceV2Result & LensClosureExtras
+}
+
 /** parent urn → child urns, from the estate's containment. */
 function childrenOf(estate: TraceEstate): Map<string, string[]> {
   const kids = new Map<string, string[]>()
@@ -401,7 +451,10 @@ function stubProvider(
   stall?: boolean,
   lazy?: boolean,
   holdWalk?: boolean,
+  endlessWalk?: boolean,
 ): GraphDataProvider {
+  /** Which block a never-exhausting walk is up to. */
+  let block = 0
   const closure = closureFor(estate, focusUrn, stall)
   const lazily = lazyServer(estate)
   const nodes = wireNodes(estate)
@@ -436,6 +489,13 @@ function stubProvider(
       // the FIRST picture has to stop the walk landing on top of it.
       if (holdWalk && isWalkOp(req)) await new Promise(() => {})
       if (gate) await gate.promise
+      // A FLOW THAT NEVER RUNS OUT. Each walk op answers with a block big
+      // enough to fill the model on its own, so the walk parks at the
+      // ceiling and "Keep walking" buys exactly one more.
+      if (endlessWalk && isWalkOp(req)) {
+        block += 1
+        return endlessBlock(req.urn, CLOSED_HOST, block)
+      }
       // The whole-estate answer is a legitimate coarse response for an estate
       // one hop wide, and it is what the Stage 1 gates were written against.
       // `lazy` swaps in the REAL contract so a test can drive the journey.
@@ -566,6 +626,9 @@ export async function renderCanvasWithTrace(
     /** Hold the BACKGROUND walk, so the board stays on the coarse paint and a
      *  test can look at the first picture rather than the finished one. */
     holdWalk?: boolean
+    /** Answer every walk op with a block that fills the model on its own, so
+     *  the walk parks at the ceiling and never exhausts. */
+    endlessWalk?: boolean
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -628,7 +691,10 @@ export async function renderCanvasWithTrace(
   render(
     <QueryClientProvider client={queryClient}>
       <ProviderOverride value={{
-        provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, opts.lazy, opts.holdWalk),
+        provider: stubProvider(
+          estate, opts.focus, providerCalls, gate,
+          opts.stallWalk, opts.lazy, opts.holdWalk, opts.endlessWalk,
+        ),
         isLoading: false, error: null, scopeKind: 'ready',
         workspaceId: 'harness-ws', dataSourceId: null,
         providerReady: true, providerVersion: 1,
@@ -672,6 +738,10 @@ export async function renderCanvasWithTrace(
   const rows = (): HTMLElement[] =>
     [...document.querySelectorAll<HTMLElement>(`[id^="${CARD_ID_PREFIX}"]`)]
   const isTracing = (): boolean => !!document.querySelector('[data-trace-active="true"]')
+  // The trace capsule. Located by its phase attribute rather than by text,
+  // so a test can ask what it SAYS without already knowing the answer.
+  const capsule = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>('[data-trace-phase]')
 
   // The canvas is only ready to be read once the browse hydration has drawn
   // its first cards — asserting before that reads an empty canvas as a
@@ -912,6 +982,21 @@ export async function renderCanvasWithTrace(
     },
     setLineageCounts: async (on: boolean) => {
       act(() => { usePreferencesStore.setState({ showLineageCounts: on }) })
+      await settle()
+    },
+    wait,
+    capsuleText: () => capsule()?.textContent?.trim() ?? null,
+    capsulePhase: () => capsule()?.getAttribute('data-trace-phase') ?? null,
+    async capsuleAction(label: RegExp) {
+      const root = capsule()
+      const button = [...(root?.querySelectorAll('button') ?? [])]
+        .find(b => label.test(b.textContent ?? ''))
+      if (!button) {
+        throw new Error(
+          `the capsule offers no ${label} — it says: ${root?.textContent ?? '(not on the board)'}`,
+        )
+      }
+      await act(async () => { fireEvent.click(button) })
       await settle()
     },
   }
