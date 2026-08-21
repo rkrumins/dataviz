@@ -56,6 +56,11 @@ export interface TraceCard {
    *  chevron is, so an expand that costs a request still reads as an
    *  expand. */
   loading: boolean
+  /** This card's contents have been FETCHED — so `onLineage` is now the
+   *  whole truth about what is inside it on this lineage, and a 0 means
+   *  "nothing", not "not asked yet". The chevron reads exactly this
+   *  difference. */
+  drilled: boolean
   /** Min lineage hop from the focus subtree (null = host only). */
   hop: number | null
   /** `'focus'` is the focus SIDE — the focus and everything inside it, which
@@ -93,6 +98,10 @@ export interface TraceViewInputs {
   /** Cards whose contents are in flight — a lazy engine fetches them when the
    *  reader opens them, and the row says so. */
   inFlight?: ReadonlySet<string>
+  /** Cards whose contents the model HOLDS. Omitted = all of them (the eager
+   *  assumption); anything less is what lets a row tell "nothing inside" from
+   *  "nobody has asked yet". */
+  drilled?: ReadonlySet<string>
   /** The rest of the canvas's placement chain, so the overlay anchors a node
    *  exactly where the canvas behind it would. All optional: omit for a view
    *  that places purely by assignments and rules. */
@@ -338,6 +347,7 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
         onLineage: inside,
         expanded: i.traceExpansion.has(urn),
         loading: i.inFlight?.has(urn) ?? false,
+        drilled: i.drilled?.has(urn) ?? true,
         hop: hopOf(urn),
         role: roleBy.get(urn) ?? 'host',
         data: dataOf(urn),
@@ -427,6 +437,7 @@ export function lanesToHierarchy(lanes: TraceLane[]): Array<{ layerId: string; n
         traceRole: card.role,
         traceHop: card.hop,
         traceLoading: card.loading,
+        traceDrilled: card.drilled,
       },
       children,
       ...(parentId === undefined ? {} : { parentId }),

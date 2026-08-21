@@ -175,19 +175,20 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // which would promise rows the trace will never show.
   //
   // WHO KNOWS THAT, THOUGH, DEPENDS ON WHAT HAS BEEN FETCHED. `onLineage`
-  // counts participants the model actually holds, and under the lazy engine
-  // a card nobody has opened holds NONE of its contents yet — so a strict
-  // `onLineage > 0` would take the chevron off every closed partner and
-  // leave the reader with nothing to open. A card the lineage runs THROUGH
-  // (any role but host) is different: its flow demonstrably passes through
-  // something inside it, so its graph child count is an honest invitation,
-  // and opening it is what goes and gets them. A HOST keeps the strict rule
-  // — it hosts, it is not on the flow, and it must not invite.
+  // counts participants the model actually HOLDS, and the lazy engine paints
+  // a partner card before anything inside it has been fetched — so a strict
+  // `onLineage > 0` would take the chevron off every closed card on the
+  // board and leave the reader nothing to open at all.
+  //
+  // So the rule reads the difference between "nothing inside" and "nobody
+  // has asked yet": an UNDRILLED card with graph children offers the chevron
+  // (clicking it is what goes and gets them, and the row spins meanwhile),
+  // and once its contents are in hand the strict rule takes over — a drill
+  // that found nothing contributing retracts the chevron.
   const traceOnLineage = (node.data.onLineage as number) || 0
-  const traceRoleForChevron = node.data.traceRole as string | undefined
+  const traceDrilled = node.data.traceDrilled !== false
   const hasChildren = isTracing
-    ? traceOnLineage > 0
-      || (!!traceRoleForChevron && traceRoleForChevron !== 'host' && childCount > 0)
+    ? traceOnLineage > 0 || (childCount > 0 && !traceDrilled)
     : (node.children.length > 0 || childCount > 0)
   // A TRACE EXPAND CAN COST A REQUEST. The lazy engine fetches a card's
   // contents when the reader opens it, so the row wears the same spinner

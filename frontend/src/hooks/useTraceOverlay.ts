@@ -80,6 +80,8 @@ export interface UseTraceOverlayArgs {
   onDrill?: (urn: string) => void
   /** Cards whose contents are in flight, straight through to the cards. */
   inFlight?: ReadonlySet<string>
+  /** Cards whose contents the model holds, straight through to the cards. */
+  drilled?: ReadonlySet<string>
   /** Pairs whose raw detail is fully loaded (the driver's ledger). Under a
    *  lazy engine the model is NOT the fine closure, so the wire ledger needs
    *  telling which pairs it may vouch for. */
@@ -147,6 +149,7 @@ function viewInputs(a: UseTraceOverlayArgs, traceExpansion: ReadonlySet<string>)
     placement: a.placement,
     completePairs: a.completePairs,
     inFlight: a.inFlight,
+    drilled: a.drilled,
   }
 }
 
@@ -211,7 +214,7 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   // object too, and depending on it would undo the whole point.
   const { model, focusUrn, layers, assignments, viewIsCurated } = a
   const { showUpstream, showDownstream, depthUp, depthDown } = a
-  const { onDrill, inFlight, completePairs } = a
+  const { onDrill, inFlight, completePairs, drilled } = a
   const { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns } = a.placement ?? {}
 
   // O(n) over the walk's nodes, but only when the model or the focus changes
@@ -264,12 +267,12 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
       ? buildTraceView({
         model, focusUrn, layers, assignments, viewIsCurated, traceExpansion,
         showUpstream, showDownstream, depthUp, depthDown,
-        completePairs, inFlight,
+        completePairs, inFlight, drilled,
         placement: { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns },
       })
       : null
   ), [active, model, focusUrn, layers, assignments, viewIsCurated, traceExpansion,
-    showUpstream, showDownstream, depthUp, depthDown, completePairs, inFlight,
+    showUpstream, showDownstream, depthUp, depthDown, completePairs, inFlight, drilled,
     backendAssignments, unassignedFallbackLayerId, branchCreatedUrns])
 
   // A CARD THAT OPENS MAY HAVE TO BE FETCHED. `toggle` keeps ONE identity —

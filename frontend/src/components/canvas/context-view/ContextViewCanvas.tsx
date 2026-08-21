@@ -1690,6 +1690,7 @@ export function ContextViewCanvas({
     // assumption — is exactly what a lazy engine stops guaranteeing.
     onDrill: canvasTrace.drill,
     inFlight: canvasTrace.inFlight,
+    drilled: canvasTrace.drilled,
     completePairs: canvasTrace.completePairs,
   })
   // Read by the interaction callbacks (toggle, reveal, the write guards),
