@@ -1738,6 +1738,40 @@ export function ContextViewCanvas({
     expansionRecordRef.current = null
   }, [])
 
+  // Every view-param change while tracing is recorded on the CURRENT
+  // history entry, so back/forward restore the trace as it was left.
+  // Called from the setters' own event paths (never an effect).
+  // Reads the live view off refs rather than deps, which is what lets it be
+  // called from a TIMER (the expansion recorder below) and keeps it out of
+  // the dock adapter's dependency list.
+  const recordTraceView = useCallback((partial: Partial<{ showUpstream: boolean; showDownstream: boolean; depthUp: number; depthDown: number }>) => {
+    const live = traceViewParamsRef.current
+    setTraceHistory(h => {
+      const cur = currentTraceEntry(h)
+      if (!cur || cur.urn !== canvasTraceRef.current.tracedUrn) return h
+      return updateCurrentTraceView(h, {
+        showUpstream: partial.showUpstream ?? live.showUpstream,
+        showDownstream: partial.showDownstream ?? live.showDownstream,
+        depthUp: partial.depthUp ?? live.depthUp,
+        depthDown: partial.depthDown ?? live.depthDown,
+        // The picture, always — `updateCurrentTraceView` REPLACES the view,
+        // so omitting it would erase the reader's expansion every time they
+        // touched a direction arrow.
+        traceExpansion: [...(overlayRef.current?.traceExpansion ?? [])],
+      })
+    })
+  }, [])
+
+  // Write a pending record NOW. Every navigation calls this first: the timer
+  // is 250 ms behind the click and the reader is faster than that, so a card
+  // opened just before Back would otherwise be dropped on the floor. Only
+  // for the focus it was scheduled for — the record describes THAT trace.
+  const flushExpansionRecord = useCallback(() => {
+    const pending = expansionRecordRef.current
+    cancelExpansionRecord()
+    if (pending && canvasTraceRef.current.tracedUrn === pending.forFocus) recordTraceView({})
+  }, [cancelExpansionRecord, recordTraceView])
+
   // Low-level entry shared by fresh traces and history restores. A trace
   // with the flow overlay off is a contradiction — tracing IS asking to
   // see the flow — and entering one collapses the sticky drawer once, so
@@ -1788,17 +1822,19 @@ export function ContextViewCanvas({
     setTraceShowDownstream(view.showDownstream)
     setTraceDepthUp(view.depthUp)
     setTraceDepthDown(view.depthDown)
-    cancelExpansionRecord()
+    // Same reason as `traceHistoryGo`: the entry being left keeps its picture.
+    flushExpansionRecord()
     setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeId, view, timestamp: Date.now() }))
     beginTrace(urn)
-  }, [displayMap, beginTrace, cancelExpansionRecord])
+  }, [displayMap, beginTrace, flushExpansionRecord])
 
   // History restore: the entry's own view params, no push (back/forward
   // move the cursor, they never rewrite the trail).
   const restoreTraceEntry = useCallback((entry: TraceHistoryEntryRecord) => {
-    // A toggle from the trace being LEFT must not land on the entry being
-    // restored — the flush is 250 ms behind the click that scheduled it.
-    cancelExpansionRecord()
+    // Its one caller, `traceHistoryGo`, has already flushed any pending
+    // record onto the entry being LEFT — which is why nothing is cancelled
+    // here: a bare cancel would drop the reader's picture instead of keeping
+    // it, and the flush leaves nothing armed to land on this entry.
     setTraceShowUpstream(entry.view.showUpstream)
     setTraceShowDownstream(entry.view.showDownstream)
     // ONE DEPTH RULE, even for history written under the old 100-hop control.
@@ -1811,39 +1847,22 @@ export function ContextViewCanvas({
       overlayRef.current?.restoreExpansion(entry.urn, entry.view.traceExpansion)
     }
     beginTrace(entry.urn)
-  }, [beginTrace, cancelExpansionRecord])
+  }, [beginTrace])
   const traceHistoryGo = useCallback((next: TraceHistoryStack) => {
     if (next === traceHistory) return
-    setTraceHistory(next)
+    // A toggle inside the debounce window belongs to the entry the reader is
+    // LEAVING, so it is written while the cursor is still on it and only then
+    // does the cursor move. TWO QUEUED UPDATERS, applied in order: the cursor
+    // move has to ride on the recorded stack, because `next` was computed
+    // from the pre-flush one and setting it as a value would discard the
+    // record it never saw.
+    flushExpansionRecord()
+    setTraceHistory(h => traceHistoryJump(h, next.cursor))
     const entry = currentTraceEntry(next)
     if (entry) restoreTraceEntry(entry)
-  }, [traceHistory, restoreTraceEntry])
+  }, [traceHistory, restoreTraceEntry, flushExpansionRecord])
   const traceBack = useCallback(() => traceHistoryGo(traceHistoryBack(traceHistory)), [traceHistoryGo, traceHistory])
   const traceForward = useCallback(() => traceHistoryGo(traceHistoryForward(traceHistory)), [traceHistoryGo, traceHistory])
-
-  // Every view-param change while tracing is recorded on the CURRENT
-  // history entry, so back/forward restore the trace as it was left.
-  // Called from the setters' own event paths (never an effect).
-  // Reads the live view off refs rather than deps, which is what lets it be
-  // called from a TIMER (the expansion recorder below) and keeps it out of
-  // the dock adapter's dependency list.
-  const recordTraceView = useCallback((partial: Partial<{ showUpstream: boolean; showDownstream: boolean; depthUp: number; depthDown: number }>) => {
-    const live = traceViewParamsRef.current
-    setTraceHistory(h => {
-      const cur = currentTraceEntry(h)
-      if (!cur || cur.urn !== canvasTraceRef.current.tracedUrn) return h
-      return updateCurrentTraceView(h, {
-        showUpstream: partial.showUpstream ?? live.showUpstream,
-        showDownstream: partial.showDownstream ?? live.showDownstream,
-        depthUp: partial.depthUp ?? live.depthUp,
-        depthDown: partial.depthDown ?? live.depthDown,
-        // The picture, always — `updateCurrentTraceView` REPLACES the view,
-        // so omitting it would erase the reader's expansion every time they
-        // touched a direction arrow.
-        traceExpansion: [...(overlayRef.current?.traceExpansion ?? [])],
-      })
-    })
-  }, [])
 
   // WHAT THE READER HAS OPEN, on a trailing edge. The timer reads the
   // expansion at FIRE time, so it records where the reader ended up rather

@@ -22,7 +22,7 @@ import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(11))
+afterAll(() => expectTestsRan(13))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -308,6 +308,54 @@ describe('the trace overlay on the real canvas', () => {
 
     await h.historyForward()
     expect(h.visibleCardIds().sort()).toEqual(second)
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // THE DANGEROUS CASE for "a view control never fetches": a walk that did
+  // NOT finish. `retrace` legitimately means `continueWalk` there, and
+  // `continueFullWalk` grants budget on every call and re-arms failed
+  // frontiers — so a depth slider still wired to "apply" would put a real
+  // request behind a scrub. Keep walking is the notice's job, not the
+  // slider's.
+  it('a depth scrub costs nothing even on a stalled walk', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', stallWalk: true })
+    await h.startTrace('cfo')
+    // The initial closure, plus the frontier op that failed: the walk is now
+    // sitting stalled, which is the only state where retrace does anything.
+    const stalled = h.providerCalls()
+    expect(stalled).toBeGreaterThan(1)
+
+    await h.openDockSettings()
+    await h.commitDockDepth(4)
+    await h.commitDockDepth(9)
+
+    expect(h.providerCalls()).toBe(stalled)
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // The recorder is 250 ms behind the click, and Back is faster than that.
+  // The picture belongs to the entry the reader is LEAVING, so it has to be
+  // written before the cursor moves off it — not dropped.
+  it('a toggle made just before navigating is kept, not lost to the debounce', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    await h.startTrace('cfo')
+    h.pressEscape()
+    await h.settle()
+    await h.startTrace('REPORTING')
+
+    await h.historyBack()
+    const landed = h.visibleCardIds().sort()
+
+    // Open a card and navigate away IMMEDIATELY — inside the debounce window.
+    await h.toggle('INTERMEDIATE_T2')
+    const opened = h.visibleCardIds().sort()
+    expect(opened).not.toEqual(landed)
+    await h.historyForward()
+
+    await h.historyBack()
+    expect(h.visibleCardIds().sort()).toEqual(opened)
     expect(h.storeWrites()).toBe(0)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)

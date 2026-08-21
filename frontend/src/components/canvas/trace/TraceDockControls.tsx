@@ -5,6 +5,13 @@ import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
 import { TraceDockSlider } from './TraceDockSlider'
 import { TraceDockEdgeFilter } from './TraceDockEdgeFilter'
 
+/** The native engine's "apply": there is nothing to apply. Depth already
+ *  re-projected on change; the only thing `onApply` could still reach is
+ *  `continueWalk`, which grants budget and re-arms failed frontiers — a
+ *  network round-trip behind a control whose contract is that it makes none.
+ *  Continuing an unfinished walk belongs to the truncation notice. */
+const NO_APPLY = (): void => {}
+
 export interface GranularityOption {
   id: string
   name: string
@@ -48,6 +55,10 @@ export function TraceDockControls({
   onApply,
   nativeMode = false,
 }: TraceDockControlsProps) {
+  // The other `onApply` callers (edge filter, level select) are withdrawn in
+  // native mode already; the sliders are the one control that survives, so
+  // this is the whole seam.
+  const commit = nativeMode ? NO_APPLY : onApply
   const isAllSelected = config.lineageEdgeTypes.length === 0
   const effectiveSet = new Set(isAllSelected ? availableEdgeTypes : config.lineageEdgeTypes)
 
@@ -79,7 +90,7 @@ export function TraceDockControls({
         value={config.upstreamDepth}
         max={nativeMode ? FULL_WALK_INITIAL_DEPTH : undefined}
         onChange={v => onChangeConfig({ upstreamDepth: v })}
-        onCommit={onApply}
+        onCommit={commit}
       />
 
       <TraceDockSlider
@@ -89,7 +100,7 @@ export function TraceDockControls({
         value={config.downstreamDepth}
         max={nativeMode ? FULL_WALK_INITIAL_DEPTH : undefined}
         onChange={v => onChangeConfig({ downstreamDepth: v })}
-        onCommit={onApply}
+        onCommit={commit}
       />
 
       {!nativeMode && (

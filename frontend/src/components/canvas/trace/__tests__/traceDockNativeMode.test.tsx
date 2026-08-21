@@ -74,6 +74,30 @@ describe('TraceDockControls — nativeMode', () => {
     expect(screen.getByText(/downstream depth/i)).toBeInTheDocument()
   })
 
+  // THE SLIDER'S COMMIT IS A FETCH ON THE WRONG DAY. onMouseUp/onKeyUp fire
+  // `onApply` → `trace.retrace()`, and on a stalled or budget-hit walk the
+  // adapter answers that with `continueWalk()` — which grants budget on EVERY
+  // call and re-arms failed frontiers. So letting a scrub through would put a
+  // network round-trip behind a control whose whole contract is that it never
+  // makes one. "Keep walking" belongs to the truncation notice, not here.
+  it('committing a depth slider makes no request in native mode', () => {
+    const { onChangeConfig, onApply } = renderControls(true)
+    const slider = screen.getAllByRole('slider')[0]!
+    fireEvent.change(slider, { target: { value: '3' } })
+    fireEvent.mouseUp(slider)
+    fireEvent.keyUp(slider, { key: 'ArrowLeft' })
+
+    // The view still moves — this is a no-op APPLY, not a dead control.
+    expect(onChangeConfig).toHaveBeenCalledWith({ upstreamDepth: 3 })
+    expect(onApply).not.toHaveBeenCalled()
+  })
+
+  it('legacy mode still applies on commit', () => {
+    const { onApply } = renderControls(false)
+    fireEvent.mouseUp(screen.getAllByRole('slider')[0]!)
+    expect(onApply).toHaveBeenCalled()
+  })
+
   it('caps the depth sliders at the walk\u2019s own ceiling — one depth rule', () => {
     renderControls(true)
     for (const slider of screen.getAllByRole('slider')) {

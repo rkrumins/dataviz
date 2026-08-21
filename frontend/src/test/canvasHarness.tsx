@@ -96,6 +96,9 @@ export interface TraceCanvasHarness {
   depthPreset(label: string | RegExp): Promise<void>
   /** The depth presets the control offers, as `${up}/${down}` pairs. */
   depthPresetValues(): string[]
+  /** Scrub a Settings-tab depth slider and RELEASE it — the commit edge that
+   *  fires the dock's "apply". Requires `openDockSettings()` first. */
+  commitDockDepth(value: number): Promise<void>
   /** Click the dock's ←/→ trace-history arrows. */
   historyBack(): Promise<void>
   historyForward(): Promise<void>
@@ -175,7 +178,7 @@ function wireNodes(estate: TraceEstate): GraphNode[] {
 
 /** The estate model, back in the wire shape `toLensClosure` consumes — ONE
  *  response, no frontier, so the walk is complete the moment it lands. */
-function closureFor(estate: TraceEstate, focusUrn: string): TraceV2Result & LensClosureExtras {
+function closureFor(estate: TraceEstate, focusUrn: string, stall?: boolean): TraceV2Result & LensClosureExtras {
   return {
     focus: { urn: focusUrn, level: 0, entityType: '' },
     nodes: wireNodes(estate),
@@ -191,7 +194,8 @@ function closureFor(estate: TraceEstate, focusUrn: string): TraceV2Result & Lens
     downstreamUrns: new Set(estate.model.downstreamUrns),
     effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
     truncated: false, truncationReason: null,
-    frontierUp: [], frontierDown: [], seedTruncated: false,
+    frontierUp: stall ? [{ urn: focusUrn, totalCount: null, nextCursor: null }] : [],
+    frontierDown: [], seedTruncated: false,
   } as unknown as TraceV2Result & LensClosureExtras
 }
 
@@ -215,8 +219,9 @@ function stubProvider(
   focusUrn: string,
   calls: { traceClosure: number },
   gate?: { promise: Promise<void> },
+  stall?: boolean,
 ): GraphDataProvider {
-  const closure = closureFor(estate, focusUrn)
+  const closure = closureFor(estate, focusUrn, stall)
   const nodes = wireNodes(estate)
   const byUrn = new Map(nodes.map(n => [n.urn, n]))
   const kids = childrenOf(estate)
@@ -235,6 +240,13 @@ function stubProvider(
     traceClosure: async () => {
       calls.traceClosure += 1
       if (gate) await gate.promise
+      // A STALLED WALK. The first answer reports a frontier, every frontier op
+      // after it fails — which is exactly `fullWalkStatus.stalled`: candidates
+      // remain, none is loading, and each one already carries its 'error'
+      // marker. `runFrontierOp` swallows the rejection (no console noise), so
+      // the canvas sits in the state where `continueWalk` is the ONLY thing
+      // that would go back to the network.
+      if (stall && calls.traceClosure > 1) throw new Error('frontier op refused (harness)')
       return closure
     },
     getChildren: async (parentUrn: string) => childrenFor(parentUrn),
@@ -329,7 +341,7 @@ function seedView(estate: TraceEstate): void {
 
 export async function renderCanvasWithTrace(
   estate: TraceEstate,
-  opts: { focus: string; deferTrace?: boolean; draft?: boolean },
+  opts: { focus: string; deferTrace?: boolean; draft?: boolean; stallWalk?: boolean },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
   releaseFetch?.()
@@ -380,7 +392,7 @@ export async function renderCanvasWithTrace(
   render(
     <QueryClientProvider client={queryClient}>
       <ProviderOverride value={{
-        provider: stubProvider(estate, opts.focus, providerCalls, gate),
+        provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk),
         isLoading: false, error: null, scopeKind: 'ready',
         workspaceId: 'harness-ws', dataSourceId: null,
         providerReady: true, providerVersion: 1,
@@ -562,6 +574,15 @@ export async function renderCanvasWithTrace(
       return [...(dialog?.querySelectorAll<HTMLElement>('button') ?? [])]
         .map(b => b.textContent?.match(/\d+\/\d+/)?.[0] ?? '')
         .filter(Boolean)
+    },
+    async commitDockDepth(value: number) {
+      const slider = document.querySelector<HTMLInputElement>('#trace-bottom-dock-body input[type="range"]')
+      if (!slider) throw new Error('the dock Settings sliders are not on screen')
+      await act(async () => {
+        fireEvent.change(slider, { target: { value: String(value) } })
+        fireEvent.mouseUp(slider)
+      })
+      await settle()
     },
     async historyBack() {
       const button = document.querySelector<HTMLButtonElement>('[aria-label="Previous trace"]')

@@ -61,7 +61,7 @@ const grownModel = (): LensWalkModel => {
 }
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(24))
+afterAll(() => expectTestsRan(25))
 
 describe('useTraceOverlay — the seed', () => {
   it('opens the focus chain and leaves the direct partners visible and CLOSED', () => {
@@ -376,6 +376,30 @@ describe('useTraceOverlay — restoreExpansion', () => {
 
     rerender(args({ focusUrn: 'aov' }))
     expect([...result.current.traceExpansion]).toEqual(['INTERMEDIATE_T2'])
+  })
+
+  // A pending restore belongs to the navigation that issued it. If the reader
+  // abandons that navigation — traces something else instead — it must not sit
+  // there waiting to fire on some later, unrelated visit to the same focus.
+  it('a superseded restore is dropped, not left armed for the next visit', () => {
+    const { result, rerender } = renderHook(
+      (a: UseTraceOverlayArgs) => useTraceOverlay(a),
+      { initialProps: args({ focusUrn: 'aov', model: emptyWalkModel('aov') }) },
+    )
+    act(() => result.current.restoreExpansion('aov', ['INTERMEDIATE_T2']))
+
+    // The reader goes somewhere else entirely…
+    rerender(args({ focusUrn: 'cfo' }))
+    // …and only later traces the original focus again, fresh.
+    rerender(args({ focusUrn: 'aov' }))
+
+    // Exactly what a trace that never had a pending restore would open.
+    const fresh = renderHook(() => useTraceOverlay(args({ focusUrn: 'aov' })))
+    expect([...result.current.traceExpansion].sort())
+      .toEqual([...fresh.result.current.traceExpansion].sort())
+    // The discriminator: the seed always opens the focus's own chain, and the
+    // stale restore named only a partner's host.
+    expect(result.current.traceExpansion.has('aov')).toBe(true)
   })
 
   it('exit drops a pending restore — a new trace seeds normally', () => {

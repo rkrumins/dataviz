@@ -208,11 +208,17 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   if (seed.forFocus !== focusUrn || (!seed.seeded && focusInModel)) {
     const restore = seed.pending?.forFocus === focusUrn && focusInModel ? seed.pending : null
     traceExpansion = restore ? restore.set : seedExpansion(a)
+    // A pending restore belongs to the navigation that issued it. Landing on
+    // a DIFFERENT focus means the reader abandoned that navigation, so it is
+    // dropped rather than left armed to fire on some later, unrelated visit
+    // to the focus it named. It survives only while its own focus is still
+    // the one on screen, waiting for a model that holds it.
+    const superseded = seed.forFocus !== focusUrn && seed.pending?.forFocus !== focusUrn
     setSeed({
       forFocus: focusUrn,
       set: traceExpansion,
       seeded: focusInModel,
-      pending: restore ? null : seed.pending,
+      pending: restore || superseded ? null : seed.pending,
     })
   }
 

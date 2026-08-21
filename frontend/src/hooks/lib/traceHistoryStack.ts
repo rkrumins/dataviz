@@ -8,6 +8,12 @@
  * toggles, hop depths, and WHICH CARDS WERE OPEN), so "back" restores the
  * trace AS IT WAS VIEWED — the same picture, not just the same focus.
  *
+ * An EMPTY `traceExpansion` means "as the trace opened" — the overlay's own
+ * seed — never "everything closed". One consequence worth knowing: stepping
+ * forward to an "as it opened" entry for the focal ALREADY on screen restores
+ * nothing, so the reader keeps the picture they are looking at rather than
+ * watching it re-seed under them.
+ *
  * One deliberate rule: pushing the CURRENT focal again never adds an
  * entry — it updates the current entry's view params in place. A Root
  * Cause → Impact flip on the same node is one trace, not two; without
