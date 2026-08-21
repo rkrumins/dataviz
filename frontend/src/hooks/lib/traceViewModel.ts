@@ -26,7 +26,7 @@
  * many participants sit INSIDE the card ("N things inside X carry lineage
  * here", the same statement the lens makes).
  */
-import { buildLensSubgraph } from '@/components/canvas/context-view/lens/lens-subgraph'
+import { buildLensSubgraph, focusAncestorChain } from '@/components/canvas/context-view/lens/lens-subgraph'
 import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
 import { resolveLayerAssignment, type GraphNode } from '@/providers/GraphDataProvider'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -174,6 +174,14 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
     if (e.sourceUrn === i.focusUrn) rollupDown.add(e.targetUrn)
   }
 
+  // THE FOCUS'S OWN ANCESTORS are hosts, always. The reader asked for this
+  // table's lineage, not its database's — and a database sits on the answer
+  // only to hold the table in place. Left as participants they would be
+  // counted, scoped by the direction toggles and, worst, drilled: the walk
+  // would set off across the estate the container summarises. This is the
+  // view-model half of the same rule the closure enforces on the wire.
+  const focusAncestors = focusAncestorChain(sg)
+
   const roleBy = new Map<string, TraceCard['role']>()
   // Per-direction hops, kept apart on purpose: an upstream distance is only
   // ever measured against depthUp and a downstream one against depthDown.
@@ -186,6 +194,10 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
     hopDownBy.set(urn, hopDown)
     if (focusSide.has(urn)) {
       roleBy.set(urn, 'focus')
+      continue
+    }
+    if (focusAncestors.has(urn)) {
+      roleBy.set(urn, 'host')
       continue
     }
     const up = hopUp !== null || i.model.upstreamUrns.has(urn)

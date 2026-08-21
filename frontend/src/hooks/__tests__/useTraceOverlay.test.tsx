@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useTraceOverlay, FOCUS_AUTO_OPEN_MAX, type UseTraceOverlayArgs } from '../useTraceOverlay'
 import type { TraceView } from '../lib/traceViewModel'
-import { cfoEstate, deepChainEstate, fieldGrainEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
+import { ancestorRollupEstate, cfoEstate, deepChainEstate, fieldGrainEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
 import { emptyWalkModel, type LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import { countTest, expectTestsRan } from '@/test/canary'
 import type { ViewLayerConfig } from '@/types/schema'
@@ -61,7 +61,7 @@ const grownModel = (): LensWalkModel => {
 }
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(39))
+afterAll(() => expectTestsRan(42))
 
 describe('useTraceOverlay — the seed', () => {
   it('opens the focus chain and leaves the direct partners visible and CLOSED', () => {
@@ -634,5 +634,55 @@ describe('useTraceOverlay — partner grain is about DEPTH, not type', () => {
     // few enough), the partner side stops at the partner card.
     expect(result.current.traceExpansion.has('x3')).toBe(true)
     expect(result.current.traceExpansion.has('y5')).toBe(false)
+  })
+})
+
+describe('useTraceOverlay — a trace is about the focus, not its ancestors', () => {
+  const estate = ancestorRollupEstate()
+  const trace = (model: typeof estate.model) => renderHook(() => useTraceOverlay({
+    ...args(), model, focusUrn: 'T',
+    layers: estate.layers, assignments: estate.assignments,
+  }))
+
+  it('the estate above the focus HOSTS the picture and is never on it', () => {
+    const { result } = trace(estate.model)
+    // D ⊃ A ⊃ DB are open, because that is how the reader sees T at all…
+    for (const host of ['D', 'A', 'DB']) {
+      expect(visibleIds(result.current.view)).toContain(host)
+      expect(cardOf(result.current.view, host)?.role).toBe('host')
+    }
+    // …and the answer is the partner at T's own grain, closed, with its
+    // hosts opened down to it.
+    expect(cardOf(result.current.view, "T'")?.role).toBe('down')
+    expect(result.current.traceExpansion.has("DB'")).toBe(true)
+    expect(result.current.traceExpansion.has("T'")).toBe(false)
+    // Two downstream participants: the partner table and the column inside
+    // it that carries the raw hop. Nothing above them counts.
+    expect(result.current.view?.counts).toEqual({ up: 0, down: 2 })
+  })
+
+  it('an ancestor handed to it as UPSTREAM is still only a host', () => {
+    // The model the old closure shipped: T's own database, application and
+    // domain arrive marked as things on this lineage. They are not — they
+    // are where T lives. The view model refuses them on its own, so a
+    // regression on the wire cannot put the estate back on the canvas.
+    const { result } = trace(estate.poisonedModel)
+    for (const ancestor of ['D', 'A', 'DB']) {
+      expect(cardOf(result.current.view, ancestor)?.role).toBe('host')
+    }
+    expect(result.current.view?.counts.up).toBe(0)
+  })
+
+  it('an ancestor is never scoped away by a direction toggle', () => {
+    // A host has no direction, so turning downstream off must not take the
+    // ground out from under the focus.
+    const { result } = renderHook(() => useTraceOverlay({
+      ...args(), model: estate.poisonedModel, focusUrn: 'T',
+      layers: estate.layers, assignments: estate.assignments,
+      showDownstream: false, showUpstream: false,
+    }))
+    for (const host of ['D', 'A', 'DB', 'T']) {
+      expect(visibleIds(result.current.view)).toContain(host)
+    }
   })
 })

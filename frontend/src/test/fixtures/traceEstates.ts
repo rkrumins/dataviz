@@ -147,3 +147,66 @@ export function deepChainEstate() {
   const layers: ViewLayerConfig[] = [{ id: 'all', name: 'All', order: 0, entityTypes: ['domain'] }]
   return { model, layers, assignments: { x0: { layerId: 'all' }, y0: { layerId: 'all' } } }
 }
+
+/**
+ * THE ANCESTOR ESTATE — the shape behind the user's report on 2026-08-21:
+ * "trace on a table keeps going and going across every ancestor; it opens
+ * lineage for the database this table belongs to, the application, the data
+ * domain."
+ *
+ *   D ⊃ A ⊃ DB ⊃ T ⊃ c        (and the mirror side D' ⊃ A' ⊃ DB' ⊃ T' ⊃ c')
+ *
+ * Flow is authored at EVERY grain, which is what rollups are: `c→c'` raw,
+ * and `T→T'`, `DB→DB'`, `A→A'`, `D→D'` as summaries of that one column hop,
+ * one per containment-level PAIR. The table also carries the CROSS-LEVEL
+ * rollups a real estate materialises — `T→DB'`, `T→A'`, `T→D'` — and those
+ * are the ones that used to drag the world in: each far endpoint summarises
+ * every table beneath it, so following it answers a question nobody asked.
+ *
+ * `model()` is what the fixed closure ships for T. `poisonedModel()` is what
+ * the OLD one shipped — ancestor-grain partners AND the focus's own D/A/DB
+ * marked upstream — kept so the view model's own guard has something to
+ * refuse.
+ */
+export function ancestorRollupEstate() {
+  const chain = ['D', 'A', 'DB', 'T', 'c']
+  const types = ['domain', 'application', 'database', 'table', 'column']
+  const nodes: LensWalkNode[] = []
+  const containmentEdges: Array<{ sourceUrn: string; targetUrn: string }> = []
+  for (const side of ['', "'"]) {
+    chain.forEach((name, depth) => {
+      nodes.push(wn(`${name}${side}`, types[depth], depth < chain.length - 1 ? 1 : 0))
+      if (depth > 0) containmentEdges.push(has(`${chain[depth - 1]}${side}`, `${name}${side}`))
+    })
+  }
+  const layers: ViewLayerConfig[] = [{ id: 'all', name: 'All', order: 0, entityTypes: ['domain'] }]
+  const assignments = { D: { layerId: 'all' }, "D'": { layerId: 'all' } }
+
+  const base = {
+    focusUrn: 'T', nodes, containmentEdges,
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null,
+    seedTruncated: false, seedCursor: null,
+  }
+  // What the closure ships now: the raw hop, plus the ONE rollup whose far
+  // endpoint stands at the focus's own grain.
+  const model: LensWalkModel = {
+    ...base,
+    lineageEdges: [raw('c', "c'"), roll('T', "T'", 2)],
+    upstreamUrns: new Set(),
+    downstreamUrns: new Set(["c'", "T'"]),
+  }
+  // What it used to ship: three uphill rollups whose partners summarise the
+  // estate, and — via the frontier walking back down them — the focus's OWN
+  // database, application and domain marked as things on this lineage.
+  const poisonedModel: LensWalkModel = {
+    ...base,
+    lineageEdges: [
+      raw('c', "c'"), roll('T', "T'", 2),
+      roll('T', "DB'", 90), roll('T', "A'", 400), roll('T', "D'", 900),
+      roll('DB', "DB'", 90), roll('A', "A'", 400), roll('D', "D'", 900),
+    ],
+    upstreamUrns: new Set(['DB', 'A', 'D']),
+    downstreamUrns: new Set(["c'", "T'", "DB'", "A'", "D'"]),
+  }
+  return { model, poisonedModel, layers, assignments }
+}
