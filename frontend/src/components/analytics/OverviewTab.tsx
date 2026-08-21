@@ -149,7 +149,7 @@ export function OverviewTab({
                 </ChartFrame>
 
                 <ChartFrame
-                    title="Active people"
+                    title="Active users"
                     subtitle="Distinct people who did something, per period"
                     isStale={isStale}
                     isEmpty={series.activeUsers.every((v) => v === 0)}

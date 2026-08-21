@@ -106,7 +106,7 @@ export function WorkspaceInsightsPanel({
                                     accent="cyan"
                                 />
                                 <KpiCard
-                                    label="Active people" metric="activeUsers" value={data.totals.activeUsers.current ?? 0}
+                                    label="Active users" metric="activeUsers" value={data.totals.activeUsers.current ?? 0}
                                     icon={Users}
                                     changePct={data.totals.activeUsers.changePct}
                                     comparisonLabel={comparisonLabel(range)}
