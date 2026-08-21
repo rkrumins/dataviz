@@ -463,6 +463,71 @@ describe('P0 — perf harness (Task 20)', () => {
    * row spans), so the point of the number is that they stay that way —
    * held to T20 P3's own budget verbatim, not to a new one.
    */
+  /**
+   * THE WIDE TABLE (2026-08-21). A hands-free one-hop walk of a 2,935-column
+   * table brings back ~20k nodes — every partner column under its table
+   * under its layer — and pins all of them. Live, each of the ten page
+   * merges then cost 0.8 → 3.1 s of PURE layout: `weightOf`/`crossingOf`
+   * scanned every lineage edge once PER CARD and `internalHopsOf` every
+   * projected bundle per frame (O(cards × edges)). Indexed once per layout
+   * by ancestor chain they are O(edges × depth). This estate is the same
+   * shape at a size a test can hold; the number is a regression tripwire,
+   * not a tight budget (jsdom, parallel runs).
+   */
+  describe('(wide table) a 20k-node one-hop model, every node pinned', () => {
+    const REGRESSION_CEILING_MS = 1500   // measured 158 ms; 61,500 ms before the indexes
+    it('500 partner tables × 40 columns lay out well under a second per rebuild', () => {
+      const wnode = (urn: string, type: string): LensWalkNode => ({
+        id: urn, type: 'generic', position: { x: 0, y: 0 },
+        data: { urn, label: urn, type }, urn, displayName: urn, entityType: type,
+      }) as unknown as LensWalkNode
+      const nodes: LensWalkNode[] = [wnode('L0', 'layer'), wnode('T', 'object')]
+      const lineageEdges: Array<{ id: string; sourceUrn: string; targetUrn: string; edgeType: string }> = []
+      const containmentEdges: Array<{ sourceUrn: string; targetUrn: string }> = [{ sourceUrn: 'L0', targetUrn: 'T' }]
+      const COLS = 400, TABLES = 500, PER = 40
+      for (let c = 0; c < COLS; c++) {
+        nodes.push(wnode(`c${c}`, 'attribute'))
+        containmentEdges.push({ sourceUrn: 'T', targetUrn: `c${c}` })
+      }
+      for (let t = 0; t < TABLES; t++) {
+        const layer = `L${1 + (t % 3)}`
+        if (t < 3) nodes.push(wnode(layer, 'layer'))
+        nodes.push(wnode(`p${t}`, 'object'))
+        containmentEdges.push({ sourceUrn: layer, targetUrn: `p${t}` })
+        for (let k = 0; k < PER; k++) {
+          const urn = `p${t}_${k}`
+          nodes.push(wnode(urn, 'attribute'))
+          containmentEdges.push({ sourceUrn: `p${t}`, targetUrn: urn })
+          const col = `c${(t * PER + k) % COLS}`
+          if (t % 2 === 0) lineageEdges.push({ id: `h${t}_${k}`, sourceUrn: urn, targetUrn: col, edgeType: 'FLOWS_TO' })
+          else lineageEdges.push({ id: `h${t}_${k}`, sourceUrn: col, targetUrn: urn, edgeType: 'FLOWS_TO' })
+        }
+      }
+      expect(nodes.length).toBeGreaterThan(20_000)
+      const sg = buildLensSubgraph({ focusUrn: 'T', nodes, lineageEdges, containmentEdges })
+      const base = initialLensViewState(sg)
+      const view = { ...base, pinned: new Set(nodes.map(n => n.urn)) }
+      const input = {
+        sg, view, query: '', hiddenTypes: new Set<string>(),
+        extendStatus: new Map(), childrenAll: new Map(), childrenAllStatus: new Map(),
+        walkStatus: 'done' as const,
+      }
+      const warm = buildFocusLayout(input)
+      // The premise: every partner table is a frame on the board.
+      expect(warm.cards.filter(c => c.nodeId?.startsWith('p') && c.kind === 'frame').length).toBe(TABLES)
+
+      const samples: number[] = []
+      for (let i = 0; i < 3; i++) {
+        const t0 = performance.now()
+        buildFocusLayout(input)
+        samples.push(performance.now() - t0)
+      }
+      const best = Math.min(...samples)
+      console.log(`[wide-table] nodes=${nodes.length} cards=${warm.cards.length} edges=${warm.edges.length} best=${best.toFixed(0)}ms samples=${samples.map(x => x.toFixed(0)).join(',')}`)
+      expect(best).toBeLessThan(REGRESSION_CEILING_MS)
+    }, 120_000)
+  })
+
   describe('(in-frame routing) a dense container rebuild stays inside T20\'s budget', () => {
     const REGRESSION_CEILING_MS = 50 * 4
     it('50 tables in one warehouse, repeated rebuild', () => {
