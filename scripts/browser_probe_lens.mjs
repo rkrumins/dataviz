@@ -128,10 +128,19 @@ for (const s of samples) { const k = `${s.n}|${s.cards}|${s.strips.join(',')}|${
 const final = samples[samples.length - 1]
 console.log('\n== FINAL: cards in DOM =', final.cards, '| requests =', requests.length, '| strips =', JSON.stringify(final.strips), '| scale =', final.scale, '| grew pill =', final.grew, '| wall =', (final.t / 1000).toFixed(1), 's')
 // Fit the whole board and read the zoom + how many cards the DOM now holds.
+// Density (Part H): which rung is pressed, and how the board divides into frames, rows and loose cards.
+const density = await evalJs(`(() => { const g = document.querySelector('[role="group"][aria-label="How much of the picture to fold"]'); if (!g) return null; const on = [...g.querySelectorAll('button')].find(b => b.getAttribute('aria-pressed') === 'true'); const nodes = [...document.querySelectorAll('.react-flow__node')]; const frames = nodes.filter(n => n.querySelector('[role="list"], [aria-label^="Rows"], .nx-frame-rows')).length; const rows = nodes.filter(n => n.closest('.react-flow__node')?.parentElement?.closest('.react-flow__node')).length; return { rung: on?.textContent?.trim() ?? null, nodes: nodes.length, frames, rows } })()`)
+console.log('== density:', JSON.stringify(density))
 const fit = await evalJs(`(() => { const b = [...document.querySelectorAll('button')].find(b => /board grew/i.test(b.textContent)) ?? document.querySelector('button[aria-label="Fit the lineage in view"]'); if (!b) return 'no fit button'; b.click(); return 'clicked ' + b.textContent.trim() })()`)
 await sleep(1500)
 const afterFit = await evalJs(`(() => ({ scale: Number((/scale\\(([\\d.e-]+)\\)/.exec(document.querySelector('.react-flow__viewport')?.style.transform ?? '') ?? [])[1] ?? NaN), dom: document.querySelectorAll('.react-flow__node').length, grew: [...document.querySelectorAll('button')].some(b => /board grew/i.test(b.textContent)) }))()`)
 console.log('== after Fit:', fit, JSON.stringify(afterFit))
 const zoomed = await evalJs(`(async () => { const b = document.querySelector('button[aria-label="Zoom in"]'); for (let i = 0; i < 6; i++) { b?.click(); await new Promise(r => setTimeout(r, 250)) } return { scale: Number((/scale\\(([\\d.e-]+)\\)/.exec(document.querySelector('.react-flow__viewport')?.style.transform ?? '') ?? [])[1] ?? NaN), dom: document.querySelectorAll('.react-flow__node').length } })()`)
 console.log('== after zooming in 6×:', JSON.stringify(zoomed))
+if (process.env.DENSITY_SWEEP) {
+  for (const rung of ['Every card', 'Overview', 'Grouped']) {
+    const r = await evalJs(`(async () => { const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(rung)}); if (!b) return 'no button'; b.click(); await new Promise(r => setTimeout(r, 2500)); const fitB = document.querySelector('button[aria-label="Fit the lineage in view"]'); fitB?.click(); await new Promise(r => setTimeout(r, 800)); return { rung: ${JSON.stringify(rung)}, dom: document.querySelectorAll('.react-flow__node').length, scale: Number((/scale\\(([\\d.e-]+)\\)/.exec(document.querySelector('.react-flow__viewport')?.style.transform ?? '') ?? [])[1] ?? NaN), chip: ([...document.querySelectorAll('p,span')].map(x => x.textContent).find(t => /connections/.test(t)) ?? '').slice(0, 60) } })()`)
+    console.log('== rung', JSON.stringify(r))
+  }
+}
 ws.close(); chrome.kill(); process.exit(0)
