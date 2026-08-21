@@ -635,3 +635,55 @@ describe('useTraceDriver — the walk behind the paint', () => {
         expect(traceClosure.mock.calls.length).toBe(stopped)
     })
 })
+
+// ── the seed/exclude trap ───────────────────────────────────────────────
+//
+// `excludeUrns` says what must not be re-SHIPPED. It has never said where a
+// walk may START — but a client's seeds are BY CONSTRUCTION nodes it already
+// holds, so "exclude everything I hold" puts every seed inside its own
+// exclude list. The provider was hardened against that reading; sending it
+// anyway is asking a walk to start from nothing and trusting the far end not
+// to take us literally. Measured live on 2026-08-21: all 29 background pages
+// did exactly this, and the walk died three hops in — SILVER, INTERMEDIATE_T1
+// and INTERMEDIATE_T2 never arrived, and the canvas contradicted its own dock
+// (two empty lanes against "38 upstream").
+
+describe('useTraceDriver — no request excludes its own seeds', () => {
+    it('never puts a seed inside its own excludeUrns', async () => {
+        const asked: Record<string, unknown>[] = []
+        const { provider } = makeProvider(() => coarseResponse(), req => {
+            asked.push(req)
+            return res({
+                focus: { urn: String(req.urn), level: 0, entityType: '' },
+                nodes: [gn('beyond')],
+                upstreamUrns: new Set(['beyond']),
+            } as Partial<TraceV2Result & LensClosureExtras>)
+        })
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
+
+        expect(asked.length).toBeGreaterThan(0)
+        for (const req of asked) {
+            const seeds = new Set((req.seedUrns as string[] | undefined) ?? [])
+            const excluded = (req.excludeUrns as string[] | undefined) ?? []
+            const overlap = excluded.filter(u => seeds.has(u))
+            expect(overlap, `request for ${String(req.urn)} excludes its own seed(s)`).toEqual([])
+        }
+    })
+
+    it('still excludes what it holds, so the server stops re-naming it', async () => {
+        const asked: Record<string, unknown>[] = []
+        const { provider } = makeProvider(() => coarseResponse(), req => {
+            asked.push(req)
+            return res({ focus: { urn: String(req.urn), level: 0, entityType: '' } })
+        })
+        const { result } = renderHook(() => useTraceDriver(FOCUS, provider))
+        await waitFor(() => expect(result.current.phase).toBe('complete'))
+
+        // The bulk drain of P: everything else in the model is fair game to
+        // exclude — the focus, its chain, its contents — just not P itself.
+        const drain = asked.find(r => (r.seedUrns as string[] | undefined)?.includes('P'))!
+        expect(drain.excludeUrns as string[]).toContain(FOCUS)
+        expect(drain.excludeUrns as string[]).not.toContain('P')
+    })
+})

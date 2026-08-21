@@ -145,11 +145,27 @@ const IDLE: DriverState = {
  *  what the request is nominally anchored on. */
 interface WalkOp { urn: string; urns: string[]; dir: 'up' | 'down'; cursor: string | null }
 
-/** URNs the client already holds. Budget steering for `excludeUrns`, never
- *  correctness — the merge dedupes regardless. Mirrors the Lens's own helper
- *  so the two engines send the same requests. */
-function knownUrns(model: LensWalkModel): string[] {
-    return model.nodes.map(n => n.urn)
+/**
+ * URNs the client already holds, MINUS the ones this request is walking FROM.
+ *
+ * THE SEED/EXCLUDE TRAP (memory `lens-walk-rebuild-2026-08-13`, and the
+ * provider's own `wanted` comment): `excludeUrns` says what must not be
+ * re-SHIPPED. It has never said where a walk may START — but a client's seeds
+ * are BY CONSTRUCTION nodes it already holds, so "everything I hold" puts
+ * every seed inside its own exclude list. The provider was hardened against
+ * that reading; sending it anyway is asking a walk to start from nothing and
+ * trusting the far end not to take us literally. Measured live on 2026-08-21:
+ * all 29 background pages did exactly this.
+ */
+function excludesFor(model: LensWalkModel, seeds: readonly string[]): string[] {
+    const walking = new Set(seeds)
+    const out: string[] = []
+    for (const n of model.nodes) {
+        if (walking.has(n.urn)) continue
+        out.push(n.urn)
+        if (out.length >= 2000) break
+    }
+    return out
 }
 
 /** The fine-grain request behind one frontier op. NO `grain` — this is the
@@ -167,9 +183,8 @@ function walkRequest(op: WalkOp, model: LensWalkModel): TraceClosureRequest {
             // resolves each seed down to whatever grain carries lineage
             // beneath it, and it walks the whole SET in one hop.
             seedUrns: op.urns,
-            // Budget steering, not correctness — but it is also what stops the
-            // server naming rings the client has already drained.
-            excludeUrns: knownUrns(model).slice(0, 2000),
+            // Never the seeds themselves — see `excludesFor`.
+            excludeUrns: excludesFor(model, op.urns),
         }
 }
 

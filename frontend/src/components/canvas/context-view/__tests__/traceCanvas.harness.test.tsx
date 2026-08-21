@@ -22,7 +22,7 @@ import { cfoEstate, rootsNodeEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(25))
+afterAll(() => expectTestsRan(26))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -598,6 +598,35 @@ describe('the background walk finishes the flow', () => {
     // something in there and clicking is what goes and gets it.
     expect(h.chevron('REPORTING')).toBe(true)
     expect(h.countPill('REPORTING')).toBeNull()
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // THE HARD GATE from the live probe: pages merge into the MODEL, and
+  // nothing opens. A background walk that moved the reader's expansion would
+  // be the board rearranging itself under them while they read it. (One
+  // harness per test — the harness owns module-level spies, so a second mount
+  // in the same test leaves both canvases in the DOM.)
+  it('the walk changes the model, never the picture', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', lazy: true })
+    await h.startTrace('cfo')
+
+    // Exactly the rows the coarse paint put up — asserted against the R1
+    // picture the `holdWalk` test above pins, so the two cannot drift.
+    expect(h.visibleCardIds().sort())
+      .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
+    // The partners the reader has not opened are still closed: their contents
+    // arrived in the model and stayed out of the picture.
+    expect(h.visibleCardIds()).not.toContain('orders')
+    expect(h.visibleCardIds()).not.toContain('rpt')
+    // The wires ARE allowed to refine — that is the walk's whole point — but
+    // only between cards that are on screen.
+    const onScreen = new Set(h.visibleCardIds())
+    for (const wire of h.wires()) {
+      expect(onScreen.has(wire.source), `wire from off-screen ${wire.source}`).toBe(true)
+      expect(onScreen.has(wire.target), `wire to off-screen ${wire.target}`).toBe(true)
+    }
+    expect(h.wires().length).toBeGreaterThan(0)
+    expect(h.storeWrites()).toBe(0)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 
