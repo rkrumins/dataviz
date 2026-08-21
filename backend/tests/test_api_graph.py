@@ -313,6 +313,31 @@ async def test_trace_closure_after_cursor_with_seed_urns_422(graph_client):
     assert resp.status_code == 422
 
 
+async def test_trace_closure_seed_cursor_with_seed_urns_is_a_continuation_not_a_422(graph_client):
+    """A container card's descendants page by keyset exactly like a
+    focus-anchored seed: `seedUrns:[card]` + `seedCursor` is the continuation
+    the client sends for a table it never opened. It used to 422."""
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "both", "seedUrns": [urn], "seedCursor": "s:" + urn},
+    )
+    assert resp.status_code == 200
+
+
+async def test_trace_closure_seed_cursor_with_after_cursor_422(graph_client):
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/trace/closure",
+        json={"urn": urn, "direction": "upstream", "upstreamDepth": 1, "afterCursor": "e:1", "seedCursor": "s:x"},
+    )
+    assert resp.status_code == 422
+
+
 async def test_trace_closure_after_cursor_with_exclude_urns_422(graph_client):
     client, engine = graph_client
     urn = _get_sample_urn(engine)

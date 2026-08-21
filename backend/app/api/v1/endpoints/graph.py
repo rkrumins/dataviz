@@ -873,21 +873,30 @@ async def trace_closure(
     nodes the client already holds is never lost. ``afterCursor`` pages a
     single node's adjacency in a single direction instead of walking further.
 
-    Three honesty corners of the wire contract clients must read correctly:
+    The walk is DEGREE-EXACT: every anchor a page ships is complete in each
+    requested direction, the page never exceeds ``maxNodes``, and nothing is
+    dropped without a ``truncationReason``. Honesty corners clients must read
+    correctly:
       * ``truncated: true`` with EMPTY ``frontierUp``/``frontierDown`` is
-        reachable — the walk was cut, but everything reachable-and-unfinished
-        proved fully shown by the degree probe. Read it as "nothing more to
-        expand here despite the cut", not as a contradiction.
+        reachable — the page was cut (a ``seedCursor`` names the next anchor),
+        but everything reachable-and-unfinished proved fully shown by the
+        degree probe. Read it as "nothing more to expand here despite the
+        cut", not as a contradiction.
       * A frontier entry's ``totalCount`` is the full-graph degree in that
         direction — a cue, not a ledger. It counts edges the response may
         already be showing, so it can overstate what is still to come.
-      * A cursor names the NEXT edge id to consider, so ``e:0`` means from
-        the start and is a legal opening cursor. A frontier entry carries
-        ``nextCursor`` only when it can be RESUMED: entries cut by the node
-        budget or the deadline carry ``e:0`` (page them from the start; your
-        merge dedupes the overlap with what you already hold), a full page
-        carries one past its last row, and a depth-exhausted entry carries
-        none at all — re-root that one with ``seedUrns`` instead.
+      * ``reason`` says WHY a node is on the frontier: ``cut`` — the node
+        budget or the deadline stopped the walk before it (complete it hands-
+        free: re-root it with ``seedUrns``, hundreds per request, or page a hub
+        by its ``nextCursor``); ``depth`` — the requested depth ended there
+        (the next hop; a one-hop client offers it, never drains it).
+      * A cursor names the NEXT edge id to consider. A frontier entry carries
+        ``nextCursor`` only for a HUB whose adjacency was actually paged —
+        one past the last row shipped; ``e:0`` is never minted. Budget cuts
+        and depth boundaries carry none.
+      * ``seedCursor`` is INCLUSIVE: ``s:<urn>`` names the first anchor the
+        next page will walk. It is legal with ``seedUrns`` (a container
+        card's descendants page by keyset too).
 
     Same bulkheads and never-504 contract as ``/trace/v2``. Unlike the
     legacy trace routes, this endpoint IS enrolled in fair-share: a
@@ -905,12 +914,13 @@ async def trace_closure(
             raise HTTPException(status_code=422, detail="afterCursor must match ^e:\\d+$")
 
     if request.seed_cursor is not None:
-        # A seed-page continuation re-collects the FOCUS's own contents past
-        # the keyset boundary — it has no meaning combined with hub paging
-        # (a different cursor space) or an explicit seed list (which skips
-        # the container seed walk entirely).
-        if request.after_cursor is not None or request.seed_urns:
-            raise HTTPException(status_code=422, detail="seedCursor cannot be combined with afterCursor or seedUrns")
+        # A seed-page continuation resumes the keyset enumeration of
+        # lineage-bearing descendants — of the FOCUS, or of an explicit seed
+        # list (a container card the client never opened pages its columns
+        # the same way). It has no meaning combined with hub paging, which is
+        # a different cursor space.
+        if request.after_cursor is not None:
+            raise HTTPException(status_code=422, detail="seedCursor cannot be combined with afterCursor")
         if not request.seed_cursor.startswith("s:") or len(request.seed_cursor) <= 2:
             raise HTTPException(status_code=422, detail="seedCursor must match ^s:.+$")
 
