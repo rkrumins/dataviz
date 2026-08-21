@@ -232,14 +232,28 @@ class VersionedBranchProvider:
         # explicit seeds (or the focus) plus their containment descendants.
         seeds = set(seed_urns or [urn])
         seeds.add(urn)
+        seed_truncated = False
         if ctypes:
             frontier = list(seeds)
             for _ in range(hop_bound):
-                if not frontier or len(seeds) >= max_nodes:
+                if not frontier:
+                    break
+                if len(seeds) >= max_nodes:
+                    # The container's own contents outran the cap. Said out
+                    # loud: the descent stopped with descendants unvisited, so
+                    # the lineage below them was never walked and the response
+                    # is a partial view of the focus — silence here reads as
+                    # "this container has no more inside it".
+                    seed_truncated = True
                     break
                 kids = await _edges(sources=frontier, types=ctypes)
                 frontier = [e.target_urn for e in kids if e.target_urn not in seeds]
                 seeds.update(frontier)
+            else:
+                # Fell out of the hop bound with a live frontier: same story,
+                # a self-nesting draft deeper than `hop_bound`.
+                if frontier:
+                    seed_truncated = True
 
         # ── Lineage BFS, per-direction depths, capped at max_nodes.
         discovered = set(seeds)
@@ -318,10 +332,20 @@ class VersionedBranchProvider:
             downstreamUrns=downstream_urns,
             focus=TraceFocus(urn=urn, level=0, entityType=focus_type),
             effectiveLevel=0, isInherited=False, inheritedFromUrn=None,
-            truncated=truncation is not None,
-            truncationReason=truncation,
+            # A capped seed descent is a truncation of the RESPONSE, not just
+            # of the seed set — `truncated` has to say so even when the lineage
+            # BFS itself ran to completion on the seeds it was given.
+            truncated=(truncation is not None) or seed_truncated,
+            truncationReason=truncation or ("max_nodes" if seed_truncated else None),
             frontierUp=[], frontierDown=[],
-            seedTruncated=False, seedCursor=None,
+            # No cursor: this provider never issues one (see the docstring), so
+            # a capped seed descent here is NOT resumable — the client's only
+            # recourse is a narrower focus. `_edges` pages nothing either: it
+            # chunks its INPUT urns but takes whatever one `get_edges` call
+            # returns under `limit`, so a draft with a very wide single node
+            # can silently under-report its edges. Draft-scale by assumption;
+            # revisit if drafts ever grow past it.
+            seedTruncated=seed_truncated, seedCursor=None,
         )
 
     async def expand_aggregated(

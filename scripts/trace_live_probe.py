@@ -100,7 +100,11 @@ class Api:
         self._cookies = {c.name: c.value for c in self.s.cookies}
         if "nx_access" not in " ".join(self._cookies):
             sys.exit("Login returned no session cookie.")
-        return (r.json().get("user") or {}).get("email", "<unknown>")
+        # Confirm WHO without printing it: probe output gets pasted into
+        # reports and tickets, and the admin's address is not needed to know
+        # the session is good.
+        user = r.json().get("user") or {}
+        return user.get("id") or "<signed in>"
 
     def _csrf(self) -> Optional[str]:
         # The CSRF cookie may be environment-scoped (nx_csrf_<env>); match by prefix.
@@ -450,7 +454,7 @@ def main() -> None:
     email, password = _read_credentials(args.env_file)
     api = Api(args.base)
     who = api.login(email, password)
-    print(f"signed in as {who}  ->  {args.base}")
+    print(f"signed in ({who})  ->  {args.base}")
 
     if args.list:
         print(f"\n{'workspace':<26}{'dataSourceId':<24}{'label':<34}graph")

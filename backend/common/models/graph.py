@@ -337,6 +337,16 @@ class TraceResult(BaseModel):
     inherited_from_urn: Optional[str] = Field(None, alias="inheritedFromUrn")
     truncated: bool = False
     # "max_nodes" | "timeout" | "degree_cap" | "cycle_detected" | "orphan" | None
+    #
+    # The focus-closure walk (TraceClosureResult) additionally reports:
+    #   "nodes_failed"    nothing hydrated — every label bucket failed, or the
+    #                     walk's urns are gone from the graph. The response's
+    #                     `nodes` is empty and its containment tree with it.
+    #   "nodes_partial"   SOME label buckets failed. The lineage is real but
+    #                     incomplete; participants are missing, not absent.
+    #   "ancestors_failed" the ancestor-chain read itself failed or timed out,
+    #                     so there were no chains to nest or even synthesize
+    #                     from. Never reported merely because the walk was slow.
     truncation_reason: Optional[str] = Field(None, alias="truncationReason")
 
     class Config:

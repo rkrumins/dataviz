@@ -119,3 +119,29 @@ def test_continuation_cursors_are_a_safe_empty_page():
     r = _closure(_provider(), after_cursor="e:5")
     assert r.nodes == [] and r.edges == []
     assert r.truncated is False
+
+
+def test_a_capped_seed_descent_is_said_out_loud():
+    """The seed descent collects the focus's containment descendants BEFORE the
+    lineage walk starts. When `max_nodes` cuts it short, the response is a
+    partial view of the focus — the lineage under the descendants it never
+    reached was never walked. Silence there reads as "nothing more inside".
+
+    `max_nodes=1` cuts the descent at the focus itself (P ⊃ F ⊃ c1).
+    """
+    r = _closure(_provider(), urn="P", max_nodes=1)
+
+    assert r.seed_truncated is True
+    assert r.truncated is True
+    assert r.truncation_reason == "max_nodes"
+    # And it is NOT resumable — this provider issues no cursors, so the client
+    # must re-focus rather than page.
+    assert r.seed_cursor is None
+
+
+def test_an_uncapped_seed_descent_says_nothing():
+    """The flag has to stay off for a descent that completed, or every draft
+    trace would claim to be partial."""
+    r = _closure(_provider(), urn="P")
+
+    assert r.seed_truncated is False

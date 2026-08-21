@@ -153,18 +153,22 @@ class _TraceFake:
             page = [(eid, other, et) for eid, (other, et) in enumerate(edges) if eid >= after][:limit]
             rows = []
             for eid, other, et in page:
+                # [edgeId, sourceUrn, targetUrn, edgeType, weight,
+                #  otherUrn, otherLabel] — `weight` is the rollup lane's
+                # count, NULL on a raw hop (which is all this fake has).
                 if incoming:
-                    rows.append([eid, other, urn, et, other, None])
+                    rows.append([eid, other, urn, et, None, other, None])
                 else:
-                    rows.append([eid, urn, other, et, other, None])
+                    rows.append([eid, urn, other, et, None, other, None])
             return _Result(rows)
         if "AS otherUrn" in cypher:
             # _expand_raw_lineage_set: one BFS hop over raw lineage for a
             # frontier SET. Incoming (upstream) matches edges whose TARGET
             # is in the frontier; outgoing (downstream) whose SOURCE is.
             # ``otherUrn`` is the far (newly discovered) endpoint. Row
-            # shape: [sourceUrn, targetUrn, edgeId, edgeType, otherUrn,
-            # otherLabel]. There is NO exclude filter here — the hop returns
+            # shape: [sourceUrn, targetUrn, edgeId, edgeType, weight,
+            # otherUrn, otherLabel] (`weight` NULL on a raw hop). There is
+            # NO exclude filter here — the hop returns
             # every incident row and the caller drops the NODE in Python
             # while keeping its EDGE. The lineage list INDEX is the edge's
             # `id(r)` (same convention as the paging branch), so two parallel
@@ -179,7 +183,7 @@ class _TraceFake:
                     other = t
                 else:
                     continue
-                rows.append([s, t, f"raw-{eid}", et, other, None])
+                rows.append([s, t, f"raw-{eid}", et, None, other, None])
             # `LIMIT $limit` is part of the query, not an afterthought the
             # caller applies: a hop that asks for 3 rows gets 3 rows back, so
             # what the caller asked for is observable in what it receives.
@@ -251,6 +255,15 @@ def _make_provider(fake, levels=None, hydrate=False):
     p._collect_ancestor_urns = _no_ancestors
     p.get_node_degrees = _degrees
 
+    # `trace_closure` hydrates through the DETAILED seam (it needs the
+    # bucket-failure count `get_nodes_batch` throws away). Resolve
+    # `p.get_nodes_batch` at CALL time so the `hydrate=True` swap below — and
+    # any per-test override — is still what answers.
+    async def _detailed(urns):
+        return await p.get_nodes_batch(urns), 0
+
+    p._get_nodes_batch_detailed = _detailed
+
     if hydrate:
         async def _hydrate(urns):
             return [
@@ -261,7 +274,7 @@ def _make_provider(fake, levels=None, hydrate=False):
         async def _no_chains(urns):
             return {}
 
-        async def _no_containment_edges(urns, ctypes, chains=None):
+        async def _no_containment_edges(urns, ctypes, chains=None, budget_secs=None):
             return []
 
         p.get_nodes_batch = _hydrate
@@ -819,7 +832,7 @@ def test_trace_closure_a_drained_frontier_is_a_dead_end_not_a_frontier():
     more behind it."""
     fake = _TraceFake()
     fake.lineage = [("c0", "c1", "FLOWS"), ("c1", "c2", "FLOWS")]
-    p = _make_provider(fake)
+    p = _make_provider(fake, hydrate=True)
 
     result = _run(p.trace_closure(
         "c0", upstream_depth=5, downstream_depth=5,
@@ -1203,7 +1216,7 @@ def test_trace_closure_a_clean_walk_off_a_capped_seed_is_still_partial():
         ("src_4", "leaf_4", "FLOWS"),
     ]
     fake.degrees = {f"sink_{i}": {"in": 1, "out": 0} for i in (1, 2)}
-    p = _make_provider(fake)
+    p = _make_provider(fake, hydrate=True)
 
     result = _run(p.trace_closure(
         "dom", upstream_depth=0, downstream_depth=1,
@@ -1230,7 +1243,7 @@ def test_trace_closure_asks_each_hop_for_only_what_still_fits():
         ("f", "a1", "FLOWS"), ("f", "a2", "FLOWS"),
         ("a1", "b1", "FLOWS"), ("a2", "b2", "FLOWS"),
     ]
-    p = _make_provider(fake)
+    p = _make_provider(fake, hydrate=True)
     limits = []
     orig = fake.ro_query
 
@@ -1429,7 +1442,7 @@ def _with_real_containment(p, chains):
     async def _chains(urns):
         return {u: list(chains.get(u, [])) for u in urns}
 
-    async def _containment(urns, ctypes, chains=None):
+    async def _containment(urns, ctypes, chains=None, budget_secs=None):
         held = set(urns)
         return [
             GraphEdge(
@@ -1493,3 +1506,158 @@ def test_trace_closure_reports_ancestors_failed_only_on_a_real_failure():
 
     assert result.truncation_reason == "ancestors_failed"
     assert result.containment_edges == []
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1. Four seams that could each put a WRONG or a SILENTLY EMPTY
+# containment tree on the wire.
+# ---------------------------------------------------------------------------
+
+
+def test_trace_closure_says_nodes_failed_when_hydration_returns_nothing():
+    """A hydration that swallows its own failures must not read as an empty
+    graph. `get_nodes_batch` catches per-bucket, so a total failure returns []
+    without raising — the containment step is then skipped by its own
+    `and nodes_by_urn` guard and the response ships containmentEdges=[] with
+    truncationReason NULL. Silent [] by a second route."""
+    fake = _TraceFake()
+    fake.lineage = [("c0", "c1", "FLOWS")]
+    p = _make_provider(fake, hydrate=True)
+
+    async def _all_buckets_failed(urns):
+        return [], 2      # what a total bucket wipe looks like from inside
+
+    p._get_nodes_batch_detailed = _all_buckets_failed
+
+    result = _run(p.trace_closure(
+        "c1", upstream_depth=25, downstream_depth=25,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=1000, timeout_ms=5000,
+    ))
+
+    assert result.truncation_reason == "nodes_failed"
+    assert result.truncated is True
+
+
+def test_trace_closure_says_nodes_partial_when_only_some_buckets_failed():
+    """Participants are MISSING, not absent — a different sentence from
+    `nodes_failed`, and the client can say so."""
+    fake = _TraceFake()
+    fake.lineage = [("c0", "c1", "FLOWS")]
+    p = _make_provider(fake, hydrate=True)
+    full = p.get_nodes_batch
+
+    async def _one_bucket_failed(urns):
+        return await full(urns), 1
+
+    p._get_nodes_batch_detailed = _one_bucket_failed
+
+    result = _run(p.trace_closure(
+        "c1", upstream_depth=25, downstream_depth=25,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+        max_nodes=1000, timeout_ms=5000,
+    ))
+
+    assert result.truncation_reason == "nodes_partial"
+    # The lineage it DID find still ships.
+    assert {n.urn for n in result.nodes} >= {"c0", "c1"}
+
+
+# ── _fetch_containment_edges: synthesis is for FAILED chunks only ──────────
+
+
+class _PairFake:
+    """Answers the containment pair-fetch, and can be told to fail."""
+
+    def __init__(self, present, fail=False):
+        self.present = set(present)   # (parent, child) the graph really has
+        self.fail = fail
+        self.queries = 0
+
+    async def ro_query(self, cypher, params=None, timeout=None, **kwargs):
+        self.queries += 1
+        if self.fail:
+            raise RuntimeError("Query timed out")
+        s_urns = set((params or {}).get("sUrns") or [])
+        t_urns = set((params or {}).get("tUrns") or [])
+        rows = [
+            [s, t, "HAS", 100 + i]
+            for i, (s, t) in enumerate(sorted(self.present))
+            if s in s_urns and t in t_urns
+        ]
+        return _Result(rows)
+
+
+def _pair_provider(fake):
+    p = FalkorDBProvider(host="x", graph_name="g")
+    p._redis = None
+    p._ro_query = fake.ro_query
+
+    async def _noop():
+        return None
+
+    p._ensure_connected = _noop
+    return p
+
+
+def test_containment_a_successful_chunk_is_authoritative():
+    """A pair the graph did not return is a pair the graph does NOT have — a
+    stale cached chain, or a link typed outside `ctypes`. Inventing it would
+    put an edge on the canvas the graph denies."""
+    fake = _PairFake(present={("r", "a")})       # chain claims r->a AND r->b
+    p = _pair_provider(fake)
+
+    edges = _run(p._fetch_containment_edges(
+        ["r", "a", "b"], ["HAS"], chains={"a": ["r"], "b": ["r"]},
+    ))
+
+    assert {(e.source_urn, e.target_urn) for e in edges} == {("r", "a")}
+    assert all(not e.properties.get("synthesized") for e in edges)
+
+
+def test_containment_a_failed_chunk_synthesizes_all_of_its_pairs():
+    """The chains are the truth when the query cannot answer."""
+    fake = _PairFake(present={("r", "a")}, fail=True)
+    p = _pair_provider(fake)
+
+    edges = _run(p._fetch_containment_edges(
+        ["r", "a", "b"], ["HAS"], chains={"a": ["r"], "b": ["r"]},
+    ))
+
+    assert {(e.source_urn, e.target_urn) for e in edges} == {("r", "a"), ("r", "b")}
+    # ...and every one of them SAYS it was synthesized: the id is derived and
+    # the edgeType is a guess, so no consumer may treat it as addressable.
+    assert all(e.properties.get("synthesized") is True for e in edges)
+    assert all(e.id.startswith("containment:") for e in edges)
+
+
+def test_containment_spent_budget_synthesizes_without_querying():
+    """A budget of zero must still ship the chain — synthesis needs no query.
+    This is what replaces the old `deadline < 2.0 -> ancestors_failed` bail,
+    which spent the same budget and shipped nothing."""
+    fake = _PairFake(present={("r", "a")})
+    p = _pair_provider(fake)
+
+    edges = _run(p._fetch_containment_edges(
+        ["r", "a"], ["HAS"], chains={"a": ["r"]}, budget_secs=0.0,
+    ))
+
+    assert fake.queries == 0
+    assert {(e.source_urn, e.target_urn) for e in edges} == {("r", "a")}
+    assert all(e.properties.get("synthesized") is True for e in edges)
+
+
+def test_containment_gives_up_querying_after_two_consecutive_failures():
+    """Each doomed chunk costs a FULL timeout; two in a row is enough evidence.
+    Coverage is unaffected — the remainder is synthesized."""
+    pairs = {f"c{i}": ["r"] for i in range(1200)}    # 1200 pairs -> 3 chunks
+    fake = _PairFake(present=set(), fail=True)
+    p = _pair_provider(fake)
+
+    edges = _run(p._fetch_containment_edges(
+        ["r"] + list(pairs), ["HAS"], chains=pairs,
+    ))
+
+    assert fake.queries == 2                        # not 3
+    assert len(edges) == 1200                       # every pair still ships
+    assert all(e.properties.get("synthesized") is True for e in edges)

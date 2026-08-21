@@ -419,3 +419,71 @@ async def test_legacy_blob_stripped_on_write(fresh_provider):
         f"legacy n.properties blob was not stripped: {legacy_blob!r}"
     )
     assert native == "TABLE"
+
+
+# ---------------------------------------------------------------------------
+# childCount is LAYERED (2026-08-21 ruling). `_node_from_props` is the
+# UNCOUNTED floor and echoes the stored property; the counted read paths
+# overwrite it with a live count(child). Nulling the floor — which an earlier
+# ruling did — cost every uncounted path (get_parent, get_ancestors,
+# get_upstream/downstream, get_full_lineage, trace_at_level) its chevron.
+# ---------------------------------------------------------------------------
+
+
+def test_node_from_props_echoes_the_stored_child_count():
+    """The uncounted floor. Stale beats absent: absent means no affordance."""
+    node = _node_from_props(
+        {"urn": "urn:x", "displayName": "X", "childCount": 7}, "container",
+    )
+    assert node.child_count == 7
+
+
+def test_node_from_props_reports_none_when_the_property_is_absent():
+    """No property and no count = genuinely unknown, and it says so rather
+    than inventing a 0 that would render a leaf."""
+    node = _node_from_props({"urn": "urn:x", "displayName": "X"}, "container")
+    assert node.child_count is None
+
+
+def test_the_stored_property_is_never_a_user_property():
+    """`childCount` is reserved — it must not leak into the Properties panel
+    just because the read path now reads it again."""
+    node = _node_from_props(
+        {"urn": "urn:x", "displayName": "X", "childCount": 7}, "container",
+    )
+    assert "childCount" not in node.properties
+
+
+def test_a_counted_read_overrides_the_stored_property():
+    """get_nodes_batch counts live and OVERWRITES a stale stored value — the
+    graph, not the ingest-time snapshot, decides."""
+    import asyncio
+
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    p = FalkorDBProvider(host="x", graph_name="g")
+    p.set_containment_edge_types(["HAS"], from_ontology=True)
+
+    async def _noop():
+        return None
+
+    async def _buckets(urns):
+        return [("container", list(urns))]
+
+    class _Res:
+        # one row: (node props, live count) — the stored property says 7,
+        # the graph says 2.
+        result_set = [[{"urn": "urn:x", "displayName": "X", "childCount": 7,
+                        "entityType": "container"}, 2]]
+
+    async def _ro_query(cypher, params=None, timeout=None, **kw):
+        assert "count(child)" in cypher      # it really did ask the graph
+        return _Res()
+
+    p._ensure_connected = _noop
+    p._label_buckets = _buckets
+    p._ro_query = _ro_query
+    p._redis = None
+
+    nodes = asyncio.run(p.get_nodes_batch(["urn:x"]))
+    assert [n.child_count for n in nodes] == [2]
