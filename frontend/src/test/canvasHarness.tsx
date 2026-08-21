@@ -21,7 +21,10 @@
  *    what makes cards exist to be asserted on.
  *
  * THE SPY. `storeWrites()` counts every change to `useCanvasStore`'s `nodes`
- * or `edges` identity FROM THE MOMENT THE TRACE STARTS. Browse hydration
+ * or `edges` identity FROM THE MOMENT THE TRACE STARTS. Only those two: a
+ * trace legitimately writes `visibleEdges` (the "what is on screen" mirror
+ * the entity drawer reads) and selection/drawer state. What exiting a trace
+ * has to restore is the GRAPH, and that is `nodes`/`edges`. Browse hydration
  * happens before that and is excluded by construction — resetting any later
  * would exclude the trace's own merge, which is precisely the thing being
  * gated, and the assertion could then never fail.
@@ -55,12 +58,30 @@ export interface TraceEstate {
 }
 
 export interface TraceCanvasHarness {
-  /** Select `urn` and press Trace Lineage, then wait for the walk to land. */
+  /** Select `urn` and press Trace Lineage, then wait for the walk to land.
+   *  With `deferTrace`, returns as soon as the session is open — the closure
+   *  is still pending until `resolveTrace()`. */
   startTrace(urn: string): Promise<void>
+  /** `deferTrace` only: let the pending `traceClosure` resolve, then settle.
+   *  Lets a test look at the canvas DURING the walk. */
+  resolveTrace(): Promise<void>
   /** The card rows the canvas is currently drawing, by entity id. */
   visibleCardIds(): string[]
   /** Does this card offer a chevron (i.e. the graph says it has children)? */
   chevron(id: string): boolean
+  /** The "+N" / "N on this lineage" pill on a card row, if it has one. */
+  countPill(id: string): string | null
+  /** Every layer-header count tooltip currently on screen. */
+  headerTitles(): string[]
+  /** Is the child-search magnifier offered on this card? */
+  childSearchButton(id: string): boolean
+  /** Click that magnifier, opening the column's inline search box. */
+  openChildSearch(id: string): Promise<void>
+  /** Type into an open child-search box — the real keystroke path into the
+   *  canvas's `onSearchChildren`. Returns false if no box is open. */
+  typeChildSearch(query: string): Promise<boolean>
+  /** Click a card's expand chevron. */
+  toggle(id: string): Promise<void>
   /** The lineage lines on screen, as drawn. */
   wires(): Array<{ source: string; target: string }>
   /** Writes to the canvas store's `nodes`/`edges` since the trace started. */
@@ -155,7 +176,11 @@ function childrenOf(estate: TraceEstate): Map<string, string[]> {
  *  reads `parentMap`/`edges`/`unassignedEntityIds`/`stats.computeTimeMs`, and
  *  an object missing them throws into a catch that parks the assignment store
  *  at `error` with no assignments at all — silently. */
-function stubProvider(estate: TraceEstate, focusUrn: string): GraphDataProvider {
+function stubProvider(
+  estate: TraceEstate,
+  focusUrn: string,
+  gate?: { promise: Promise<void> },
+): GraphDataProvider {
   const closure = closureFor(estate, focusUrn)
   const nodes = wireNodes(estate)
   const byUrn = new Map(nodes.map(n => [n.urn, n]))
@@ -172,7 +197,10 @@ function stubProvider(estate: TraceEstate, focusUrn: string): GraphDataProvider 
   ]))
   return {
     scopeKey: 'harness',
-    traceClosure: async () => closure,
+    traceClosure: async () => {
+      if (gate) await gate.promise
+      return closure
+    },
     getChildren: async (parentUrn: string) => childrenFor(parentUrn),
     getChildrenWithEdges: async (parentUrn: string) => ({
       children: childrenFor(parentUrn),
@@ -265,7 +293,7 @@ function seedView(estate: TraceEstate): void {
 
 export async function renderCanvasWithTrace(
   estate: TraceEstate,
-  opts: { focus: string },
+  opts: { focus: string; deferTrace?: boolean },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
   releaseFetch?.()
@@ -289,11 +317,19 @@ export async function renderCanvasWithTrace(
     }
   }
 
+  // With `deferTrace` the walk hangs until the test releases it, so a test
+  // can read the canvas while the closure is still in flight — the window in
+  // which the reader must keep seeing BROWSE rather than a blank canvas.
+  let releaseTrace: () => void = () => {}
+  const gate = opts.deferTrace
+    ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
+    : undefined
+
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={queryClient}>
       <ProviderOverride value={{
-        provider: stubProvider(estate, opts.focus),
+        provider: stubProvider(estate, opts.focus, gate),
         isLoading: false, error: null, scopeKind: 'ready',
         workspaceId: 'harness-ws', dataSourceId: null,
         providerReady: true, providerVersion: 1,
@@ -356,6 +392,11 @@ export async function renderCanvasWithTrace(
       await settle()
       assertQuiet('the trace')
     },
+    async resolveTrace() {
+      releaseTrace()
+      await settle()
+      assertQuiet('resolving the trace')
+    },
     visibleCardIds: () => rows().map(row => row.id.slice(CARD_ID_PREFIX.length)),
     chevron: (id: string) => {
       const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)
@@ -363,6 +404,45 @@ export async function renderCanvasWithTrace(
       // The toggle is always in the DOM; a card with nothing inside it
       // renders it inert (`pointer-events-none`) rather than removing it.
       return !!toggle && !toggle.className.includes('pointer-events-none')
+    },
+    countPill: (id: string) => {
+      const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)
+      const pill = [...(row?.querySelectorAll<HTMLElement>('span') ?? [])]
+        .find(el => /^\+?\d[\d,]*( on this lineage)?$/.test(el.textContent?.trim() ?? ''))
+      return pill?.textContent?.trim() ?? null
+    },
+    headerTitles: () =>
+      [...document.querySelectorAll<HTMLElement>('[title]')]
+        .map(el => el.getAttribute('title') ?? '')
+        .filter(Boolean),
+    childSearchButton: (id: string) => {
+      const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)
+      return [...(row?.querySelectorAll('button') ?? [])]
+        .some(b => b.getAttribute('title') === 'Search children')
+    },
+    async openChildSearch(id: string) {
+      const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)
+      const button = [...(row?.querySelectorAll('button') ?? [])]
+        .find(b => b.getAttribute('title') === 'Search children')
+      if (!button) throw new Error(`no child-search button on ${id}`)
+      await act(async () => { fireEvent.click(button) })
+      await settle()
+    },
+    async typeChildSearch(query: string) {
+      // The column's own input, driven the way a reader drives it — no prop
+      // capture, no mock: this is the exact path to `onSearchChildren`.
+      const input = document.querySelector<HTMLInputElement>('input[placeholder^="Search node"]')
+      if (!input) return false
+      await act(async () => { fireEvent.change(input, { target: { value: query } }) })
+      await settle()
+      return true
+    },
+    async toggle(id: string) {
+      const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)
+      const button = row?.querySelector('button')
+      if (!button) throw new Error(`no toggle on ${id}`)
+      await act(async () => { fireEvent.click(button) })
+      await settle()
     },
     wires: () => [...document.querySelectorAll<SVGGElement>('g[data-edge-id]')].map(g => ({
       source: g.getAttribute('data-edge-src') ?? '',

@@ -199,6 +199,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // chevron: the graph-wide childCount would promise rows the trace hides,
   // and `children.length` is only whatever happens to be open.
   const onLineageCount = (node.data.onLineage as number) || 0
+  // TRACE TINT: a row the lineage actually runs through wears the lineage
+  // accent — the same one click-highlight uses. HOSTS deliberately do not:
+  // they are the containers the flow passes through, never things on it, and
+  // tinting them would make a lane of chrome look like the answer.
+  const traceRole = node.data.traceRole as string | undefined
+  const isOnLineage = isTracing && !!traceRole && traceRole !== 'host'
   const descendantCount = hasChildren && !isExpanded
     ? (isTracing ? onLineageCount : (childCount || node.children.length))
     : 0
@@ -384,7 +390,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // Focus node (trace target)
         isFocusNode && "ring-2 ring-accent-lineage/60 ring-offset-1 ring-offset-canvas shadow-lg shadow-accent-lineage/20",
         // Highlighted in trace
-        isHighlighted && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
+        (isHighlighted || isOnLineage) && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
         // Click-highlight: subtle glow on connected nodes
         isClickHighlighted && !isSelected && "ring-1 ring-blue-400/40 bg-gradient-to-r from-blue-500/10 to-transparent",
         // Hover-highlight: lighter ephemeral glow on connected nodes
@@ -601,7 +607,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         <span className={cn(
           "font-medium tracking-tight transition-colors duration-200",
           textClass,
-          isHighlighted ? "text-accent-lineage" : isSelected ? "text-ink" : "text-ink/90",
+          (isHighlighted || isOnLineage) ? "text-accent-lineage" : isSelected ? "text-ink" : "text-ink/90",
           isHovered && !isSelected && "text-ink",
           // Strikethrough for a delete (staged or committed) makes the destruction intent unmissable
           isPendingDelete && "line-through decoration-rose-300/80 decoration-2",
@@ -734,8 +740,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           </button>
         )}
 
-        {/* Search children button */}
-        {hasChildren && onToggleSearch && (
+        {/* Search children button. Hidden while tracing: child search
+            REPLACES a parent's loaded children in the canvas store, which a
+            trace can never undo on exit, so the handler refuses it — and an
+            affordance that does nothing is worse than no affordance. */}
+        {hasChildren && onToggleSearch && !isTracing && (
           <button
             onClick={(e) => {
               e.stopPropagation()

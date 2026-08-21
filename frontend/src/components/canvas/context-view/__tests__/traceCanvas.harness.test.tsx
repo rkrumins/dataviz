@@ -22,7 +22,7 @@ import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(2))
+afterAll(() => expectTestsRan(5))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -65,6 +65,71 @@ describe('the trace overlay on the real canvas', () => {
       .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'orders', 'tableau'])
     expect(h.storeWrites()).toBe(0)
     expect(h.snapshotStore()).toEqual(before)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // CHILD SEARCH is the one browse action that could not be undone: it
+  // `removeNodes`/`removeEdges` a parent's loaded children and `addGraph`s
+  // the hits, recording nothing about what it dropped. Both halves are
+  // checked here — the affordance is withdrawn, and the handler behind it
+  // refuses anyway.
+  it('child search is withdrawn during a trace, and refuses if reached', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+
+    // Browse offers it, and opening the box is a normal browse interaction.
+    expect(h.childSearchButton('tableau')).toBe(true)
+    await h.openChildSearch('tableau')
+
+    await h.startTrace('cfo')
+    const before = h.snapshotStore()
+
+    // The magnifier is gone from trace rows…
+    expect(h.childSearchButton('tableau')).toBe(false)
+    // …and the box opened before the trace is still mounted, so this really
+    // does reach the canvas's handler — the exact keystroke path, no mock.
+    expect(await h.typeChildSearch('orders')).toBe(true)
+
+    expect(h.storeWrites()).toBe(0)
+    expect(h.snapshotStore()).toEqual(before)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // A walk takes as long as it takes. The canvas must not empty out for the
+  // duration and fill back in — the reader keeps the picture they had until
+  // the trace has something real to replace it with.
+  it('the walk never blanks the canvas: browse stays until the focus lands', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', deferTrace: true })
+    const browse = h.visibleCardIds().sort()
+    expect(browse).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'tableau'])
+
+    await h.startTrace('cfo')
+    // The session is open — the dock and its loading state are live…
+    expect(h.isTracing()).toBe(true)
+    // …and the canvas is still the browse canvas, unchanged.
+    expect(h.visibleCardIds().sort()).toEqual(browse)
+
+    await h.resolveTrace()
+    expect(h.visibleCardIds().sort())
+      .toEqual(['INTERMEDIATE_T2', 'REPORTING', 'aov', 'cfo', 'tableau'])
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // Counts a reader can act on: the row says what is inside it on this
+  // lineage, the column says what the whole lane contributes. Neither counts
+  // rows — hosts are containers the flow passes through, never things on it.
+  it('rows and columns report what is ON THIS LINEAGE, not what is loaded', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    await h.startTrace('cfo')
+
+    // orders + its two columns sit inside INTERMEDIATE_T2 on this flow.
+    expect(h.countPill('INTERMEDIATE_T2')).toBe('3 on this lineage')
+
+    const lineageHeaders = h.headerTitles().filter(t => t.endsWith('on this lineage')).sort()
+    // Warehouse: INTERMEDIATE_T2(3)+itself, REPORTING(2)+itself = 7.
+    // Report: the four inside tableau — tableau itself is a HOST, so it is
+    // not one of them.
+    expect(lineageHeaders).toEqual(['4 on this lineage', '7 on this lineage'])
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 })
