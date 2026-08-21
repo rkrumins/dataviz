@@ -46,8 +46,16 @@ export type LensWalkDir = 'up' | 'down'
 export const FULL_WALK_INITIAL_DEPTH = 25
 /** Requests the driver holds in flight at once. */
 export const FULL_WALK_CONCURRENCY = 4
-/** Cursor-less frontier anchors re-seeded per request (wire cap is 500). */
-export const WALK_BATCH_SIZE = 200
+/** Cursor-less frontier anchors re-seeded per request — the wire cap, so a
+ *  big page (`WALK_PAGE_NODES`) has enough anchors to fill from. */
+export const WALK_BATCH_SIZE = 500
+/** The page every CONTINUATION asks for — the server's hard ceiling
+ *  (`TRACE_MAX_NODES_HARD`). The first request keeps the default (2,000) so
+ *  the focus paints fast; everything the driver fires to complete the
+ *  picture takes the biggest page it can: measured on the wide table's one
+ *  hop, 10 pages of 2k in 4.6 s against 2 pages of 10k in 2.5 s, and every
+ *  page skipped is a merge, a layout and a render of the board skipped too. */
+export const WALK_PAGE_NODES = 10_000
 /** The one-time memory checkpoint: past this many nodes the walk parks ONCE
  *  and asks; `continuePastCheckpoint` lifts it for the focal for good. */
 export const TRACE_CHECKPOINT_NODES = 50_000
@@ -345,7 +353,7 @@ export function useLensWalk(
         if (followUp !== null) {
             const cursor = followUp
             const base = mergedModel
-            void runFrontierOp(cardUrn, dir, (m) => ({ ...buildRequest(base ?? m), seedCursor: cursor }), statusKey, mergeCtx)
+            void runFrontierOp(cardUrn, dir, (m) => ({ ...buildRequest(base ?? m), seedCursor: cursor, maxNodes: WALK_PAGE_NODES }), statusKey, mergeCtx)
         }
     }, [provider, focusUrn, bumpRequests])
 
@@ -365,6 +373,7 @@ export function useLensWalk(
             direction: dir === 'up' ? 'upstream' : 'downstream',
             ...depthFields(dir, 1),
             afterCursor: cursor,
+            maxNodes: WALK_PAGE_NODES,
         }), `${dir}:${cardUrn}`, { rootUrn: cardUrn, direction: dir })
     }, [runFrontierOp])
 
@@ -384,6 +393,7 @@ export function useLensWalk(
             downstreamDepth: entry.depth,
             seedCursor: cursor,
             excludeUrns: knownUrns(baseModel),
+            maxNodes: WALK_PAGE_NODES,
         }), `seed:${walkFocusUrn}`, { rootUrn: walkFocusUrn, direction: 'both' })
     }, [provider, runFrontierOp])
 
@@ -398,6 +408,7 @@ export function useLensWalk(
             ...depthFields(dir, 1),
             seedUrns: anchors,
             excludeUrns: knownUrns(baseModel),
+            maxNodes: WALK_PAGE_NODES,
         }), `bulk:${dir}:${walkFocusUrn}`, { rootUrn: anchors[0]!, direction: dir, clearFrontierRoots: anchors })
     }, [runFrontierOp])
 

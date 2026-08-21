@@ -16,6 +16,7 @@ import {
   WALK_BATCH_SIZE,
   TRACE_CHECKPOINT_NODES,
   WALK_REQUEST_FAILSAFE,
+  WALK_PAGE_NODES,
 } from '../useLensWalk'
 import type { GraphDataProvider, TraceV2Result, LensClosureExtras, GraphNode } from '@/providers/GraphDataProvider'
 
@@ -318,6 +319,7 @@ describe('useLensWalk — page (integration with the real closure-adapter)', () 
     const pageReq = traceClosure.mock.calls.map(c => c[0] as Record<string, unknown>).find(r => r.afterCursor === 'e:0')
     expect(pageReq).toEqual({
       urn: 'urn:li:table:t_report', direction: 'downstream', upstreamDepth: 0, downstreamDepth: 1, afterCursor: 'e:0',
+      maxNodes: WALK_PAGE_NODES,
     })
     // The exhausted-toward-e:41 cursor REPLACES the earlier e:0 one…
     expect(result.current.walkFor(FOCUS_URN)!.model.frontierDown).toEqual([
@@ -465,7 +467,7 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     expect(traceClosure).toHaveBeenCalledTimes(2)
     expect(traceClosure.mock.calls[1]![0]).toEqual({
       urn: 'a', direction: 'both', upstreamDepth: 1, downstreamDepth: 1,
-      seedCursor: 's:c3', excludeUrns: ['a', 'c1', 'c2'],
+      seedCursor: 's:c3', excludeUrns: ['a', 'c1', 'c2'], maxNodes: WALK_PAGE_NODES,
     })
     expect(result.current.walkFor('a')!.model.seedCursor).toBeNull()
     expect(result.current.walkFor('a')!.model.truncated).toBe(false)
@@ -486,11 +488,48 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     expect(traceClosure).toHaveBeenCalledTimes(2)
     expect(traceClosure.mock.calls[1]![0]).toEqual({
       urn: 'b', direction: 'downstream', upstreamDepth: 0, downstreamDepth: 1,
-      seedUrns: ['b', 'c'], excludeUrns: ['a', 'b', 'c', 'd'],
+      seedUrns: ['b', 'c'], excludeUrns: ['a', 'b', 'c', 'd'], maxNodes: WALK_PAGE_NODES,
     })
     const model = result.current.walkFor('a')!.model
     expect(model.frontierDown.map(x => x.urn)).toEqual(['d'])      // the next hop stays a pill
     expect(model.truncated).toBe(false)
+  })
+
+  /**
+   * B3 (2026-08-21): the first request stays small so the focus paints
+   * fast (493 ms on the wide table); everything the driver fires to
+   * COMPLETE the picture asks for the server's biggest page. Measured on
+   * the wide table's one hop: 10 pages of 2k in 4.6 s versus 2 pages of
+   * 10k in 2.5 s, and every page the client skips is one merge, one
+   * layout and one render of a 2,000-card board it skips too. A click on
+   * a ⊕ is not a continuation — it keeps the default page.
+   */
+  it('continuations ask for big pages — the first paint and a ⊕ click do not', async () => {
+    const { provider, traceClosure } = providerByUrn({
+      a: (req) => req.seedCursor
+        ? closureResult({ focus: f('a'), nodes: [gn('c3')] })
+        : closureResult({
+          focus: f('a'), nodes: [gn('a'), gn('c1'), gn('h'), gn('b'), gn('t')],
+          truncated: true, truncationReason: 'max_nodes', seedTruncated: true, seedCursor: 's:c3',
+          frontierDown: [cut('h', 9, 'e:7'), cut('b', 2), depth('t', 3)],
+        }),
+      h: () => closureResult({ focus: f('h'), nodes: [gn('x')] }),
+      b: () => closureResult({ focus: f('b'), nodes: [gn('b1')] }),
+      t: () => closureResult({ focus: f('t'), nodes: [gn('t1')] }),
+    })
+    const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+    await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+    const byUrn = (urn: string, pick: (r: Record<string, unknown>) => boolean = () => true) =>
+      traceClosure.mock.calls.map(c => c[0] as Record<string, unknown>).find(r => r.urn === urn && pick(r))!
+    expect(byUrn('a', r => !r.seedCursor).maxNodes).toBeUndefined()           // first paint: default page
+    expect(byUrn('a', r => !!r.seedCursor).maxNodes).toBe(WALK_PAGE_NODES)   // the seed drain
+    expect(byUrn('h').maxNodes).toBe(WALK_PAGE_NODES)                         // a hub page
+    expect(byUrn('b').maxNodes).toBe(WALK_PAGE_NODES)                         // a bulk re-seed
+
+    act(() => result.current.extend('t', 'down', ['t']))
+    await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+    expect(byUrn('t').maxNodes).toBeUndefined()                               // a click: default page
+    expect(WALK_PAGE_NODES).toBe(10_000)
   })
 
   it('one hop: pages a hub by its real cursor, per anchor', async () => {
@@ -502,6 +541,7 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
     expect(traceClosure.mock.calls[1]![0]).toEqual({
       urn: 'h', direction: 'downstream', upstreamDepth: 0, downstreamDepth: 1, afterCursor: 'e:7',
+      maxNodes: WALK_PAGE_NODES,
     })
   })
 
@@ -521,7 +561,7 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
     expect(traceClosure.mock.calls[2]![0]).toEqual({
       urn: 'tbl', direction: 'upstream', upstreamDepth: 1, downstreamDepth: 0,
-      seedUrns: ['tbl'], seedCursor: 's:c20', excludeUrns: ['a', 'tbl', 'c1'],
+      seedUrns: ['tbl'], seedCursor: 's:c20', excludeUrns: ['a', 'tbl', 'c1'], maxNodes: WALK_PAGE_NODES,
     })
     expect(result.current.walkFor('a')!.model.nodes.map(n => n.urn).sort()).toEqual(['a', 'c1', 'c20', 'tbl'])
   })
