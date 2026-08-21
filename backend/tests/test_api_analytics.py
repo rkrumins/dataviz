@@ -103,13 +103,20 @@ async def _seed(session):
                            action="updated", actor="usr_prev", created_at=_iso(9)),
     ])
     session.add_all([
+        # `subject_id` mirrors what `view_repo.record_view_visit` writes — it
+        # is the column analytics groups on, so a fixture that omitted it would
+        # be testing an empty table.
         ProductEventORM(id="pev_1", event_type="view.opened", actor_id="usr_old",
+                        subject_id="view_a",
                         payload=json.dumps({"viewId": "view_a"}), created_at=_iso(2)),
         ProductEventORM(id="pev_2", event_type="view.opened", actor_id="usr_new1",
+                        subject_id="view_a",
                         payload=json.dumps({"viewId": "view_a"}), created_at=_iso(1)),
         ProductEventORM(id="pev_3", event_type="view.opened", actor_id="usr_new1",
+                        subject_id="view_c",
                         payload=json.dumps({"viewId": "view_c"}), created_at=_iso(1)),
         ProductEventORM(id="pev_old", event_type="view.opened", actor_id="usr_prev",
+                        subject_id="view_a",
                         payload=json.dumps({"viewId": "view_a"}), created_at=_iso(9)),
         # A different signal entirely — must never be counted as an open.
         ProductEventORM(id="pev_docs", event_type="docs.feedback", actor_id="usr_old",
@@ -344,6 +351,7 @@ async def test_telemetry_summary_ignores_view_opens(db_session):
     # Ten times as many opens as real signals — the shape the filter exists for.
     session.add_all([
         ProductEventORM(id=f"pe_open_{i}", event_type="view.opened", actor_id="usr_old",
+                        subject_id="view_a",
                         payload=json.dumps({"viewId": "view_a"}), created_at=_iso(1))
         for i in range(10)
     ])
@@ -1127,7 +1135,7 @@ async def test_enterprise_published_views_are_named_for_everyone(db_session):
     await _seed(db_session)
     db_session.add_all([
         ProductEventORM(id=f"pev_ent{i}", event_type="view.opened",
-                        actor_id="usr_old",
+                        actor_id="usr_old", subject_id="view_a",
                         payload=json.dumps({"viewId": "view_a"}), created_at=_iso(1))
         for i in range(3)
     ])
@@ -1146,6 +1154,7 @@ async def test_a_creator_keeps_reach_to_their_own_view(db_session):
     await _seed(db_session)
     db_session.add(ProductEventORM(
         id="pev_own", event_type="view.opened", actor_id="usr_new1",
+        subject_id="view_b",
         payload=json.dumps({"viewId": "view_b"}), created_at=_iso(1)))
     await db_session.commit()
 
@@ -1327,6 +1336,65 @@ async def test_workspace_rows_carry_no_hidden_fields(db_session):
     blob = json.dumps(rows)
     assert "Quiet" not in blob and "Live" not in blob
     assert "usr_" not in blob, "a workspace row carried a user id"
+
+
+async def test_a_real_view_open_is_counted(db_session):
+    """The writer and the reader must agree on ``subject_id``.
+
+    Every other open in this file is a hand-built row that MIRRORS
+    ``record_view_visit``. This one goes through it. Analytics now groups on
+    the column rather than decoding the payload, so a writer that stopped
+    setting it would not fail anything — opens would simply stop being counted,
+    the dashboard would read zero, and it would look like nobody was using the
+    product.
+    """
+    from backend.app.db.repositories import view_repo
+
+    await _seed(db_session)
+    before = await analytics_repo.platform_summary(db_session, days=7, now=NOW)
+
+    await view_repo.record_view_visit(db_session, "view_a", "usr_brand_new")
+    await db_session.commit()
+
+    after = await analytics_repo.platform_summary(db_session, days=7, now=NOW)
+    assert after["totals"]["viewOpens"]["total"] == \
+        before["totals"]["viewOpens"]["total"] + 1, (
+            "an open written by the real writer was not counted"
+        )
+    alpha = next(v for v in after["leaderboards"]["topViews"] if v["viewId"] == "view_a")
+    assert alpha["uniqueViewers"] >= 1
+
+
+async def test_an_unattributable_open_still_counts_but_ranks_nothing(db_session):
+    """The two halves of an open whose subject is missing.
+
+    The migration stamps a row it could not attribute with the empty string so
+    the `IS NULL` backfill predicate terminates. Such a row should still count
+    as usage — somebody opened something, and dropping it would understate the
+    platform — but it must never become a view in a ranking, because there is
+    no view to name. Platform totals and per-view breakdowns are separate
+    queries precisely so these two answers can differ.
+    """
+    await _seed(db_session)
+    before = await analytics_repo.platform_summary(db_session, days=7, now=NOW)
+
+    db_session.add_all([
+        ProductEventORM(id="pev_blank", event_type="view.opened",
+                        actor_id="usr_old", subject_id="",
+                        payload="{}", created_at=_iso(1)),
+        ProductEventORM(id="pev_null", event_type="view.opened",
+                        actor_id="usr_old", subject_id=None,
+                        payload="{}", created_at=_iso(1)),
+    ])
+    await db_session.commit()
+
+    after = await analytics_repo.platform_summary(db_session, days=7, now=NOW)
+    assert after["totals"]["viewOpens"]["total"] == \
+        before["totals"]["viewOpens"]["total"] + 2, "usage was dropped"
+    # And no phantom row reached a leaderboard.
+    assert all(v["viewId"] for v in after["leaderboards"]["topViews"])
+    assert len(after["leaderboards"]["topViews"]) == \
+        len(before["leaderboards"]["topViews"])
 
 
 async def test_the_drill_in_obeys_the_privacy_level(db_session):

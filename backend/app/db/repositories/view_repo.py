@@ -1244,13 +1244,20 @@ async def record_view_visit(
     # opens on Tuesday". Analytics needs the second question, so the open is
     # ALSO appended to the immutable product-event log.
     #
-    # The payload carries the view id and nothing else. Its workspace is
-    # already knowable from the view itself, and resolving it here would put a
-    # second SELECT on a path that runs every time anyone opens anything;
-    # analytics maps view → workspace once, at read time, instead.
+    # ``subject_id`` is the same view id as the payload's, denormalised into a
+    # real column so analytics can GROUP BY it instead of decoding every event
+    # in the window. Free here — the id is already in hand — and it is what
+    # keeps this table's read cost flat as the write rate grows.
+    #
+    # The workspace is deliberately still absent. It is knowable from the view,
+    # and resolving it would put a second SELECT on a path that runs every time
+    # anyone opens anything; analytics groups by view first, which collapses
+    # millions of events into one row per opened view, and maps only those to
+    # their workspaces.
     session.add(ProductEventORM(
         event_type="view.opened",
         actor_id=user_id,
+        subject_id=view_id,
         payload=json.dumps({"viewId": view_id}),
     ))
     await session.flush()

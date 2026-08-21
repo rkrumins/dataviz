@@ -365,78 +365,98 @@ def _metric(total: int, current: int, previous: int) -> dict:
     }
 
 
-def _decode(payload: Optional[str]) -> dict:
-    if not payload:
-        return {}
-    try:
-        value = json.loads(payload)
-    except (ValueError, TypeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+#: Ceiling on an ``IN (...)`` list. Every driver and planner has a limit
+#: somewhere above this; staying well below it costs one extra round trip on a
+#: very wide window and removes a whole class of "works until it doesn't".
+_IN_CHUNK = 900
 
 
 @dataclass
 class _OpenFold:
-    """One pass over the windowed ``view.opened`` payloads.
-
-    ``product_events`` keeps its subject in a JSON column, so per-view and
-    per-workspace open counts cannot be grouped in portable SQL. Everything
-    payload-derived is folded here, once, from a single narrow SELECT.
-    """
+    """Windowed ``view.opened`` counts, per view and rolled up per workspace."""
 
     by_view: Counter
     by_workspace: Counter
-    viewers_by_view: dict[str, set[str]]
+    #: Distinct actors per view, already counted in SQL rather than carried
+    #: around as a set of ids — the set only ever had its length read.
+    viewers_by_view: dict[str, int]
     total: int
 
 
-async def _view_workspaces(session: AsyncSession) -> dict[str, str]:
-    """``{view_id: workspace_id}`` for every view, live or soft-deleted.
+async def _workspaces_for_views(
+    session: AsyncSession, view_ids: Iterable[str],
+) -> dict[str, str]:
+    """``{view_id: workspace_id}`` for the given views, live or soft-deleted.
 
-    Open events carry only the view id, so this is where an open becomes
-    attributable to a workspace. Deleted views stay in the map on purpose —
-    their opens really did happen, and dropping them would quietly understate
-    a workspace's past traffic.
+    Only for views that were actually OPENED in the window — after the group-by
+    that is at most a few thousand ids, not the whole catalogue. Deleted views
+    stay in the map on purpose: their opens really did happen, and dropping
+    them would quietly understate a workspace's past traffic.
     """
-    return {
-        vid: ws_id
-        for vid, ws_id in (await session.execute(
+    ids = [v for v in view_ids if v]
+    if not ids:
+        return {}
+    out: dict[str, str] = {}
+    # Chunked so a wide window cannot build an IN-list past what a driver or a
+    # query planner will take.
+    for i in range(0, len(ids), _IN_CHUNK):
+        rows = (await session.execute(
             select(ViewORM.id, ViewORM.workspace_id)
+            .where(ViewORM.id.in_(ids[i:i + _IN_CHUNK]))
         )).all()
-        if vid and ws_id
-    }
+        out.update({vid: ws for vid, ws in rows if vid and ws})
+    return out
 
 
 async def _fold_opens(
     session: AsyncSession, *, since: str, until: Optional[str] = None,
     workspace_id: Optional[str] = None,
 ) -> _OpenFold:
+    """Opens per view for one window, grouped in SQL.
+
+    This used to SELECT every event in the window and decode its JSON payload
+    in Python, because the subject lived inside that payload. On the one table
+    designed to grow with usage that made the dashboard's cost linear in how
+    successful the product was: a year-long window on a busy platform is tens
+    of millions of rows, per pass.
+
+    ``subject_id`` is the same view id in a real column, so both aggregates are
+    now grouped queries served by ``idx_product_events_subject``, and what
+    comes back is one row per view that was opened rather than one per open.
+    """
     bounds = [ProductEventORM.created_at >= since]
     if until:
         bounds.append(ProductEventORM.created_at < until)
-    stmt = (
-        select(ProductEventORM.payload, ProductEventORM.actor_id)
-        .where(ProductEventORM.event_type == VIEW_OPENED, *bounds)
-    )
-    view_to_ws = await _view_workspaces(session)
+    where = [
+        ProductEventORM.event_type == VIEW_OPENED,
+        ProductEventORM.subject_id.isnot(None),
+        ProductEventORM.subject_id != "",
+        *bounds,
+    ]
+
+    counted = (await session.execute(
+        select(
+            ProductEventORM.subject_id,
+            func.count().label("opens"),
+            func.count(func.distinct(ProductEventORM.actor_id)).label("viewers"),
+        ).where(*where).group_by(ProductEventORM.subject_id)
+    )).all()
+
+    view_to_ws = await _workspaces_for_views(session, (row[0] for row in counted))
 
     by_view: Counter = Counter()
     by_workspace: Counter = Counter()
-    viewers: dict[str, set[str]] = defaultdict(set)
+    viewers: dict[str, int] = {}
     total = 0
-    for payload, actor in (await session.execute(stmt)).all():
-        view_id = _decode(payload).get("viewId")
-        if not view_id:
-            continue
+    for view_id, opens, unique_viewers in counted:
         ws_id = view_to_ws.get(view_id)
         if workspace_id is not None and ws_id != workspace_id:
             continue
-        total += 1
-        by_view[view_id] += 1
-        if actor:
-            viewers[view_id].add(actor)
+        total += opens
+        by_view[view_id] = opens
+        viewers[view_id] = unique_viewers
         if ws_id:
-            by_workspace[ws_id] += 1
+            by_workspace[ws_id] += opens
     return _OpenFold(by_view=by_view, by_workspace=by_workspace,
                      viewers_by_view=viewers, total=total)
 
@@ -1865,7 +1885,7 @@ async def _leaderboards(session: AsyncSession, w: Window, *, opens: _OpenFold) -
             # `ViewerScope.can_see_view`. Never rendered.
             "createdBy": view_rows[vid].created_by,
             "opens": int(opens.by_view.get(vid, 0)),
-            "uniqueViewers": len(opens.viewers_by_view.get(vid, ())),
+            "uniqueViewers": opens.viewers_by_view.get(vid, 0),
             "favourites": int(favourites.get(vid, 0)),
         }
         for vid in ranked_view_ids if vid in view_rows
@@ -2275,7 +2295,7 @@ async def workspace_detail(
                 "visibility": view_rows[vid].visibility,
                 "viewType": view_rows[vid].view_type,
                 "opens": int(opens.by_view.get(vid, 0)),
-                "uniqueViewers": len(opens.viewers_by_view.get(vid, ())),
+                "uniqueViewers": opens.viewers_by_view.get(vid, 0),
                 "favourites": 0,
             }
             for vid in ranked_view_ids if vid in view_rows
