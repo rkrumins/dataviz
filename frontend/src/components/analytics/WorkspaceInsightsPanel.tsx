@@ -16,6 +16,7 @@ import { exact, shortDate } from '@/lib/formatMetric'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useWorkspaceAnalyticsDetail } from '@/hooks/useAnalytics'
 import { ViewLink } from './EntityLink'
+import { WithheldPanel } from './Redacted'
 import { KpiCard } from './KpiCard'
 import { Leaderboard } from './Leaderboard'
 import { ChartFrame } from './charts/ChartFrame'
@@ -23,7 +24,7 @@ import { ChartTable } from './charts/ChartTable'
 import { TimeSeriesChart } from './charts/TimeSeriesChart'
 import { BarSeriesChart } from './charts/BarSeriesChart'
 import { StackedShareBar } from './charts/StackedShareBar'
-import { comparisonLabel, rangeLabel } from './RangePicker'
+import { comparisonLabel, rangePhrase } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
 
 export function WorkspaceInsightsPanel({
@@ -91,21 +92,21 @@ export function WorkspaceInsightsPanel({
                         <div className={cn('space-y-4 transition-opacity', isFetching && 'opacity-60')}>
                             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                                 <KpiCard
-                                    label="Views" value={data.totals.views.total} icon={LayoutGrid}
+                                    label="Views" metric="views" value={data.totals.views.total} icon={LayoutGrid}
                                     changePct={data.totals.views.changePct}
                                     comparisonLabel={comparisonLabel(range)}
                                     sub={`${exact(data.totals.views.current ?? 0)} new in range`}
                                     accent="indigo"
                                 />
                                 <KpiCard
-                                    label="View opens" value={data.totals.viewOpens.total}
+                                    label="View opens" metric="viewOpens" value={data.totals.viewOpens.total}
                                     icon={MousePointerClick}
                                     changePct={data.totals.viewOpens.changePct}
                                     comparisonLabel={comparisonLabel(range)}
                                     accent="cyan"
                                 />
                                 <KpiCard
-                                    label="Active people" value={data.totals.activeUsers.current ?? 0}
+                                    label="Active people" metric="activeUsers" value={data.totals.activeUsers.current ?? 0}
                                     icon={Users}
                                     changePct={data.totals.activeUsers.changePct}
                                     comparisonLabel={comparisonLabel(range)}
@@ -113,7 +114,7 @@ export function WorkspaceInsightsPanel({
                                     accent="emerald"
                                 />
                                 <KpiCard
-                                    label="Actions" value={data.totals.activity.current ?? 0}
+                                    label="Actions" metric="actionsTaken" value={data.totals.activity.current ?? 0}
                                     icon={Activity}
                                     changePct={data.totals.activity.changePct}
                                     comparisonLabel={comparisonLabel(range)}
@@ -123,7 +124,7 @@ export function WorkspaceInsightsPanel({
 
                             <ChartFrame
                                 title="Activity over time"
-                                subtitle={`Actions and active people across ${rangeLabel(range).toLowerCase()}`}
+                                subtitle={`Actions and active people across ${rangePhrase(range)}`}
                                 series={[
                                     { key: 'actions', label: 'Actions', color: theme.series[0], shape: 'line' },
                                     { key: 'people', label: 'Active people', color: theme.series[1], shape: 'line' },
@@ -206,6 +207,19 @@ export function WorkspaceInsightsPanel({
                                         }))}
                                     />
                                 </ChartFrame>
+                                {/* An empty roster and a WITHHELD one render
+                                    identically unless we say which, and "nobody
+                                    has contributed here" is a false statement to
+                                    make to someone who simply may not see who
+                                    did. */}
+                                {data.redaction?.applied && !data.redaction.showsPeople ? (
+                                    <WithheldPanel
+                                        title="Contributors are hidden"
+                                        reason={data.redaction.member
+                                            ? 'Who did what in this workspace is visible to administrators and auditors. The activity totals above count everyone.'
+                                            : 'You are not a member of this workspace, so the people in it are not named here. The activity totals above count everyone.'}
+                                    />
+                                ) : (
                                 <ChartFrame
                                     title="Top contributors"
                                     isEmpty={data.topContributors.length === 0}
@@ -221,6 +235,7 @@ export function WorkspaceInsightsPanel({
                                         }))}
                                     />
                                 </ChartFrame>
+                                )}
                             </div>
 
                             <ChartFrame title="Graph scale" subtitle="Across this workspace's data sources">

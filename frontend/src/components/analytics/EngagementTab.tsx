@@ -17,7 +17,7 @@ import { TimeSeriesChart } from './charts/TimeSeriesChart'
 import { BarSeriesChart } from './charts/BarSeriesChart'
 import { StackedShareBar } from './charts/StackedShareBar'
 import { FunnelStrip } from './charts/FunnelStrip'
-import { comparisonLabel, rangeLabel } from './RangePicker'
+import { comparisonLabel, previousLabel, rangePhrase } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
 
 export function EngagementTab({
@@ -27,6 +27,7 @@ export function EngagementTab({
     range: AnalyticsRangeSelection
     isStale: boolean
 }) {
+    const theme = useChartTheme()
     const { totals, series, engagement, breakdowns, leaderboards, coverage } = data
     const value = data.valueMoments
     const vs = comparisonLabel(range)
@@ -50,7 +51,7 @@ export function EngagementTab({
                     trend={series.viewOpens} trendTone="emerald" accent="cyan"
                 />
                 <KpiCard
-                    label="Actions taken" value={totals.activity.current ?? 0} icon={Repeat}
+                    label="Actions taken" metric="actionsTaken" value={totals.activity.current ?? 0} icon={Repeat}
                     changePct={totals.activity.changePct} comparisonLabel={vs}
                     trend={series.activityEvents} trendTone="slate" accent="violet"
                 />
@@ -150,11 +151,16 @@ export function EngagementTab({
                     isStale={isStale}
                     isEmpty={series.activeUsers.every((v) => v === 0)}
                     emptyLabel="No recorded activity in this range."
+                    series={[{ key: 'active', label: 'Active users', color: theme.series[0], shape: 'area' }]}
+                    ghostLabel={previousLabel(range)}
                     table={
                         <ChartTable
                             rowLabel="Date"
                             rows={series.buckets.map((b) => shortDate(b, true))}
-                            columns={[{ key: 'active', label: 'Active users', values: series.activeUsers }]}
+                            columns={[
+                                { key: 'active', label: 'Active users', values: series.activeUsers },
+                                { key: 'prev', label: previousLabel(range), values: series.previous.activeUsers },
+                            ]}
                         />
                     }
                 >
@@ -171,7 +177,7 @@ export function EngagementTab({
 
                 <ChartFrame
                     title="Activation funnel"
-                    subtitle={`Everyone who signed up in ${rangeLabel(range).toLowerCase()}`}
+                    subtitle={`Everyone who signed up in ${rangePhrase(range)}`}
                     isStale={isStale}
                     isEmpty={(engagement.funnel[0]?.count ?? 0) === 0}
                     emptyLabel="Nobody signed up in this range."
@@ -247,7 +253,7 @@ export function EngagementTab({
                 ) : (
                 <ChartFrame
                     title="Most active people"
-                    subtitle={`Ranked across ${rangeLabel(range).toLowerCase()}`}
+                    subtitle={`Ranked across ${rangePhrase(range)}`}
                     isStale={isStale}
                     isEmpty={leaderboards.topUsers.length === 0}
                     emptyLabel="Nobody has been active in this range."

@@ -24,7 +24,7 @@ import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
 import { TimeSeriesChart } from './charts/TimeSeriesChart'
 import { BarSeriesChart } from './charts/BarSeriesChart'
-import { comparisonLabel, rangeLabel } from './RangePicker'
+import { comparisonLabel, previousLabel, rangeLabel, rangePhrase } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
 import { shortDate } from '@/lib/formatMetric'
 
@@ -92,31 +92,34 @@ export function OverviewTab({
                     trend={series.signups} accent="indigo"
                 />
                 <KpiCard
-                    label="Workspaces" value={totals.workspaces.total} icon={Boxes}
+                    label="Workspaces" metric="workspaces" value={totals.workspaces.total} icon={Boxes}
                     changePct={totals.workspaces.changePct} comparisonLabel={vs}
                     sub={`${exact(totals.workspaces.current ?? 0)} new in range`}
                     trend={series.workspacesCreated} trendTone="amber" accent="amber"
                 />
                 <KpiCard
-                    label="Views" value={totals.views.total} icon={LayoutGrid}
+                    label="Views" metric="views" value={totals.views.total} icon={LayoutGrid}
                     changePct={totals.views.changePct} comparisonLabel={vs}
                     sub={`${exact(totals.views.current ?? 0)} created in range`}
                     trend={series.viewsCreated} trendTone="emerald" accent="cyan"
                 />
                 <KpiCard
-                    label="View opens" value={totals.viewOpens.total} icon={MousePointerClick}
+                    label="View opens" metric="viewOpens" value={totals.viewOpens.total} icon={MousePointerClick}
                     changePct={totals.viewOpens.changePct} comparisonLabel={vs}
                     sub={`${exact(totals.viewOpens.current ?? 0)} in range`}
                     trend={series.viewOpens} trendTone="indigo" accent="pink"
                 />
             </div>
 
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                {/* Cumulative and new are the same measure at two scales, so
-                    they get two charts — never two y-axes on one plot. */}
+            {/* Three measures, three frames. Accounts, people and opens differ
+                by an order of magnitude each — on one plot the smallest of
+                them is a flat line along the baseline, which is not a finding,
+                it is a rendering artefact. Never two y-axes; never two
+                magnitudes sharing one. */}
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
                 <ChartFrame
                     title="User growth"
-                    subtitle={`Total accounts over ${rangeLabel(range).toLowerCase()}`}
+                    subtitle={`Total accounts over ${rangePhrase(range)}`}
                     isStale={isStale}
                     isEmpty={series.cumulativeUsers.every((v) => v === 0)}
                     emptyLabel="No accounts yet."
@@ -139,40 +142,62 @@ export function OverviewTab({
                 </ChartFrame>
 
                 <ChartFrame
-                    title="Engagement"
+                    title="Active people"
                     subtitle="Distinct people who did something, per period"
                     isStale={isStale}
                     isEmpty={series.activeUsers.every((v) => v === 0)}
                     emptyLabel="No recorded activity in this range."
-                    series={[
-                        { key: 'active', label: 'Active users', color: theme.series[0], shape: 'line' },
-                        { key: 'opens', label: 'View opens', color: theme.series[1], shape: 'line' },
-                    ]}
+                    series={[{ key: 'active', label: 'Active users', color: theme.series[0], shape: 'line' }]}
+                    ghostLabel={previousLabel(range)}
                     table={
                         <ChartTable
                             rowLabel="Date"
                             rows={series.buckets.map((b) => shortDate(b, true))}
                             columns={[
                                 { key: 'active', label: 'Active users', values: series.activeUsers },
-                                { key: 'opens', label: 'View opens', values: series.viewOpens },
+                                { key: 'prev', label: 'Previous period', values: series.previous.activeUsers },
                             ]}
                         />
                     }
                 >
                     <TimeSeriesChart
                         buckets={series.buckets}
-                        series={[
-                            {
-                                key: 'active', label: 'Active users',
-                                values: series.activeUsers, slot: 0,
-                                previous: series.previous.activeUsers,
-                            },
-                            {
-                                key: 'opens', label: 'View opens',
-                                values: series.viewOpens, slot: 1,
-                                previous: series.previous.viewOpens,
-                            },
-                        ]}
+                        series={[{
+                            key: 'active', label: 'Active users',
+                            values: series.activeUsers, slot: 0,
+                            previous: series.previous.activeUsers,
+                        }]}
+                        annotations={data.annotations}
+                    />
+                </ChartFrame>
+
+                <ChartFrame
+                    title="View opens"
+                    subtitle="How many times a saved view was opened"
+                    isStale={isStale}
+                    isEmpty={series.viewOpens.every((v) => v === 0)}
+                    emptyLabel="No views opened in this range."
+                    series={[{ key: 'opens', label: 'View opens', color: theme.series[1], shape: 'line' }]}
+                    ghostLabel={previousLabel(range)}
+                    table={
+                        <ChartTable
+                            rowLabel="Date"
+                            rows={series.buckets.map((b) => shortDate(b, true))}
+                            columns={[
+                                { key: 'opens', label: 'View opens', values: series.viewOpens },
+                                { key: 'prev', label: 'Previous period', values: series.previous.viewOpens },
+                            ]}
+                        />
+                    }
+                >
+                    <TimeSeriesChart
+                        buckets={series.buckets}
+                        series={[{
+                            key: 'opens', label: 'View opens',
+                            values: series.viewOpens, slot: 1,
+                            previous: series.previous.viewOpens,
+                        }]}
+                        annotations={data.annotations}
                     />
                 </ChartFrame>
             </div>
@@ -181,7 +206,7 @@ export function OverviewTab({
                 leaderboards because "what gets used" outranks "who used it". */}
             <AdoptionMatrix
                 rows={data.adoption}
-                subtitle={`Feature usage across ${rangeLabel(range).toLowerCase()}`}
+                subtitle={`Feature usage across ${rangePhrase(range)}`}
             />
 
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
@@ -197,7 +222,7 @@ export function OverviewTab({
                 ) : (
                 <ChartFrame
                     title="Most active people"
-                    subtitle={`Ranked by everything they did in ${rangeLabel(range).toLowerCase()}`}
+                    subtitle={`Ranked by everything they did in ${rangePhrase(range)}`}
                     isStale={isStale}
                     isEmpty={leaderboards.topUsers.length === 0}
                     emptyLabel="Nobody has been active in this range."

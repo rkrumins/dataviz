@@ -28,7 +28,7 @@ import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
 import { StackedShareBar } from './charts/StackedShareBar'
 import { WithheldPanel } from './Redacted'
-import { rangeLabel } from './RangePicker'
+import { rangePhrase } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
 
 export function HealthTab({
@@ -40,21 +40,19 @@ export function HealthTab({
 }) {
     const theme = useChartTheme()
     const { reliability, access, semanticLayer } = data.health
-    const window = rangeLabel(range).toLowerCase()
+    const window = `in ${rangePhrase(range)}`
 
     return (
         <div className={cn('space-y-6 transition-opacity', isStale && 'opacity-50')}>
             {/* ── Data trust ───────────────────────────────────────────
                 Withheld for non-privileged viewers: refresh failures name
                 which sources are unreliable, which is an operator's business.
-                The panel still occupies the space so the page does not reflow
-                into a different layout depending on who is reading it. */}
-            {!reliability ? (
-                <WithheldPanel
-                    title="Data freshness is hidden"
-                    reason="Refresh outcomes are visible to administrators and auditors. Ask one of them if you need to know how current a data source is."
-                />
-            ) : (
+
+                The HEADING and its description stay for everyone, and only the
+                figures are withheld. A reader who cannot see the numbers should
+                still learn that the platform tracks this and what it is for —
+                hiding the section wholesale teaches them nothing and makes the
+                page a different page depending on who opens it. */}
             <section aria-labelledby="health-reliability">
                 <h2 id="health-reliability" className="text-sm font-bold text-ink mb-1">
                     Data freshness
@@ -63,6 +61,14 @@ export function HealthTab({
                     Rising usage on stale data is the worst kind of good news.
                 </p>
 
+                {!reliability ? (
+                <WithheldPanel
+                    title="Refresh outcomes are hidden"
+                    shape="stats"
+                    reason="How often each source refreshes, and how often it fails, is visible to administrators and auditors. Ask one of them if you need to know how current a data source is."
+                />
+                ) : (
+                <>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     <KpiCard
                         label="Refresh success" metric="refreshSuccess"
@@ -91,7 +97,7 @@ export function HealthTab({
                         accent="cyan"
                     />
                     <KpiCard
-                        label="Never refreshed"
+                        label="Never refreshed" metric="neverRefreshed"
                         value={compact(reliability.sourcesUntouched)}
                         sub={`No activity ${window} — staleness hides here`}
                         icon={Clock}
@@ -128,19 +134,13 @@ export function HealthTab({
                         <StackedShareBar slices={reliability.byOutcome} labelOf={humaniseKey} />
                     </ChartFrame>
                 )}
+                </>
+                )}
             </section>
-
-            )}
 
             {/* ── Access friction ──────────────────────────────────────
                 Withheld likewise: pending requests and invite acceptance
-                identify people by implication. */}
-            {!access ? (
-                <WithheldPanel
-                    title="Access requests are hidden"
-                    reason="Who is waiting for access, and how quickly requests are answered, is visible to administrators and auditors."
-                />
-            ) : (
+                identify people by implication. Heading kept, as above. */}
             <section aria-labelledby="health-access">
                 <h2 id="health-access" className="text-sm font-bold text-ink mb-1">
                     Access friction
@@ -149,6 +149,14 @@ export function HealthTab({
                     Every row here is a person who wanted in and is still waiting.
                 </p>
 
+                {!access ? (
+                <WithheldPanel
+                    title="Access requests are hidden"
+                    shape="stats"
+                    reason="Who is waiting for access, and how quickly requests are answered, is visible to administrators and auditors."
+                />
+                ) : (
+                <>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     <KpiCard
                         label="Pending requests"
@@ -187,9 +195,9 @@ export function HealthTab({
                         accent="indigo"
                     />
                 </div>
+                </>
+                )}
             </section>
-
-            )}
 
             {/* ── Semantic layer adoption ──────────────────────────────
                 Shown to everyone: it is a platform fact, not an operational
@@ -214,7 +222,7 @@ export function HealthTab({
                             ? 'amber' : 'emerald'}
                     />
                     <KpiCard
-                        label="Sources drifting"
+                        label="Sources drifting" metric="sourcesDrifting"
                         value={compact(semanticLayer.sourcesDrifting)}
                         sub="Schema moved since the mapping was written"
                         icon={AlertTriangle}
@@ -222,7 +230,7 @@ export function HealthTab({
                         higherIsBetter={false}
                     />
                     <KpiCard
-                        label="Entity types modelled"
+                        label="Entity types modelled" metric="entityTypes"
                         value={compact(data.graph.entityTypes)}
                         sub={`${compact(data.graph.nodes)} nodes · ${compact(data.graph.edges)} edges`}
                         icon={Layers}

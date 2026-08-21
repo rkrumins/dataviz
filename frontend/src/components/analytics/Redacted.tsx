@@ -51,12 +51,17 @@ function Silhouette({ shape }: { shape: Shape }) {
     const bar = 'rounded-full bg-black/[0.055] dark:bg-white/[0.07]'
 
     if (shape === 'stats') {
+        // Mirrors `KpiCard`'s geometry — icon square, figure, label, delta
+        // chip — so the panel occupies the same box the real row would and the
+        // page does not change height depending on who is reading it.
         return (
             <div aria-hidden className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {Array.from({ length: 4 }, (_, i) => (
-                    <div key={i} className="rounded-xl border border-glass-border p-3.5">
-                        <div className={cn(bar, 'h-6 w-14')} />
-                        <div className={cn(bar, 'mt-2 h-2.5')} style={{ width: `${pseudo(i, 45, 80)}%` }} />
+                    <div key={i} className="rounded-2xl border border-glass-border p-4">
+                        <div className={cn(bar, 'mb-3 h-8 w-8 rounded-xl')} />
+                        <div className={cn(bar, 'h-6')} style={{ width: `${pseudo(i, 40, 62)}%` }} />
+                        <div className={cn(bar, 'mt-1.5 h-2.5')} style={{ width: `${pseudo(i + 9, 55, 85)}%` }} />
+                        <div className={cn(bar, 'mt-2 h-3 w-11 rounded-md opacity-60')} />
                     </div>
                 ))}
             </div>
@@ -118,22 +123,36 @@ export function WithheldPanel({
                 className,
             )}
         >
-            {/* The shape of what is missing, drawn from nothing. */}
-            <div className="pointer-events-none select-none opacity-70">
+            {/* The shape of what is missing, drawn from nothing — pushed back
+                far enough that it reads as texture rather than as content that
+                failed to load.
+
+                Deliberately NOT a scrim over a full-strength silhouette: the
+                `canvas-*` tokens hold complete colours rather than channel
+                triples, so Tailwind's opacity modifier is inert on them (see
+                tailwind.config.js) and `bg-canvas-elevated/80` would either
+                paint solid or paint nothing. Fading the silhouette itself needs
+                no alpha on a token, and there is nothing to hide behind a scrim
+                anyway — every bar here is invented. */}
+            <div className="pointer-events-none select-none opacity-[0.45] blur-[1px]">
                 <Silhouette shape={shape} />
             </div>
 
-            {/* The explanation sits ON the silhouette, so the panel reads as
-                one thing rather than as a placeholder with a caption. */}
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-gradient-to-b from-canvas-elevated/70 via-canvas-elevated/90 to-canvas-elevated px-6 text-center backdrop-blur-[2px]">
-                <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-glass-border bg-canvas-elevated shadow-sm">
-                    <Lock className="h-4 w-4 text-ink-muted" />
-                </span>
-                <p className="text-xs font-bold text-ink">{title}</p>
-                <p className="max-w-xs text-[11px] leading-relaxed text-ink-muted">
-                    {reason}
-                </p>
-                {action}
+            {/* The explanation sits in a real card on top, so the panel reads as
+                one considered object rather than as text floating in a gap. */}
+            <div className="absolute inset-0 flex items-center justify-center px-4">
+                <div className="flex max-w-lg items-start gap-3 rounded-xl border border-glass-border bg-canvas-elevated px-4 py-3 text-left shadow-md">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-glass-border bg-canvas-base">
+                        <Lock className="h-3.5 w-3.5 text-ink-muted" />
+                    </span>
+                    <div className="min-w-0">
+                        <p className="text-xs font-bold text-ink">{title}</p>
+                        <p className="mt-0.5 text-[11px] leading-relaxed text-ink-muted">
+                            {reason}
+                        </p>
+                        {action && <div className="mt-2">{action}</div>}
+                    </div>
+                </div>
             </div>
         </section>
     )

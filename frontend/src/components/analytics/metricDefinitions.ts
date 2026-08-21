@@ -44,6 +44,48 @@ export const METRICS: Record<string, MetricDefinition> = {
         how: 'All-time count, not limited by the date range. The change compares accounts created in this period against the one before.',
         why: 'The headline number for growth. Read it next to active users — a gap that widens means people are signing up and not coming back.',
     },
+    workspaces: {
+        title: 'Workspaces',
+        what: 'Every workspace that exists and has not been deleted.',
+        how: 'All-time count, not limited by the date range. The change compares workspaces created in this period against the one before.',
+        why: 'Workspace count is reach across teams. Read it beside the dormant count — created and abandoned is not growth.',
+    },
+    views: {
+        title: 'Views',
+        what: 'Saved views across every workspace — context views, canvases and the rest.',
+        how: 'All-time count of views not deleted. The change compares views created in this period against the one before.',
+        why: 'What people have built. Views created without opens means effort is going in and nothing is coming back out.',
+    },
+    actionsTaken: {
+        title: 'Actions taken',
+        what: 'Every recorded thing a person did to a view — created, edited, shared, renamed, deleted, opened.',
+        how: 'Rows in the view activity log inside the range. One row per action, so one busy person can move this a long way.',
+        why: 'Depth of use, as opposed to how many people showed up. Compare it against active users to see whether use is broad or concentrated.',
+    },
+    semanticLayers: {
+        title: 'Semantic layers',
+        what: 'Ontologies that give raw technical metadata a business meaning — what a table IS, not just what it is called.',
+        how: 'Published ontologies across all workspaces, with context models counted separately beneath.',
+        why: 'Sources without one show column names and types only. Coverage here is what makes lineage readable by people who did not build the pipeline.',
+    },
+    neverRefreshed: {
+        title: 'Never refreshed',
+        what: 'Live data sources that were not refreshed at any point in the selected period.',
+        how: 'Sources with no refresh recorded inside the range. A source refreshed the day before the range starts still counts here.',
+        why: 'Lineage drawn from a stale source looks exactly as confident as lineage drawn from a current one. This is where that risk sits.',
+    },
+    sourcesDrifting: {
+        title: 'Sources drifting',
+        what: 'Sources whose schema has changed since their mapping was written.',
+        how: 'Detected by comparing the current schema against the one the mapping was authored against.',
+        why: 'Drift silently breaks lineage: the graph keeps drawing edges from columns that have moved or gone. Re-map these first.',
+    },
+    entityTypes: {
+        title: 'Entity types modelled',
+        what: 'How many distinct kinds of thing the graph knows about — table, dashboard, job, and so on.',
+        how: 'Distinct entity types across every node currently in the graph.',
+        why: 'Breadth of modelling. A graph with two entity types is a table list; lineage gets useful as the estate around the tables is described too.',
+    },
     stickiness: {
         title: 'Stickiness',
         what: 'Whether people use this daily or occasionally.',

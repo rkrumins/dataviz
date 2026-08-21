@@ -143,6 +143,27 @@ const WORKSPACE_ROWS = [{
     lastActivityAt: '2026-06-15T09:00:00+00:00', dormant: false,
 }]
 
+/** One workspace drill-in, as the detail endpoint returns it. */
+const DETAIL = {
+    workspaceId: 'ws1', name: 'Finance', description: null,
+    createdAt: '2026-01-01T00:00:00+00:00', isActive: true,
+    windowDays: 30, generatedAt: SUMMARY.generatedAt,
+    range: SUMMARY.range, bucket: 'day' as const,
+    totals: Object.fromEntries(
+        ['views', 'viewOpens', 'activeUsers', 'activity', 'members', 'dataSources', 'contextModels']
+            .map((k) => [k, { total: 4, current: 2, previous: 1, changePct: 100 }]),
+    ) as never,
+    series: {
+        buckets: SUMMARY.series.buckets,
+        viewsCreated: [1, 0, 1], cumulativeViews: [2, 2, 3],
+        activityEvents: [1, 2, 1], activeUsers: [1, 2, 2], viewOpens: [2, 3, 4],
+    },
+    breakdowns: { viewsByVisibility: [], viewsByType: [], activityByAction: [] },
+    topViews: [],
+    topContributors: [],
+    graph: { nodes: 10, edges: 20, entityTypes: 3, sourcesWithStats: 1 },
+}
+
 /** The range object a preset resolves to — the shape the service now takes. */
 const preset = (days: number) => ({ kind: 'preset' as const, days })
 
@@ -397,8 +418,13 @@ describe('AnalyticsPage', () => {
         vi.mocked(analyticsService.getSummary).mockResolvedValue(REDACTED as never)
         renderAt('/analytics?tab=health')
 
-        expect(await screen.findByText(/data freshness is hidden/i)).toBeInTheDocument()
+        expect(await screen.findByText(/refresh outcomes are hidden/i)).toBeInTheDocument()
         expect(screen.getByText(/access requests are hidden/i)).toBeInTheDocument()
+        // The section HEADINGS stay for everyone — only the figures under them
+        // are withheld. A reader who may not see the numbers should still learn
+        // that the platform tracks this and what it is for.
+        expect(screen.getByRole('heading', { name: /data freshness/i })).toBeInTheDocument()
+        expect(screen.getByRole('heading', { name: /access friction/i })).toBeInTheDocument()
         // Semantic coverage is a platform fact and stays.
         expect(screen.getByText(/semantic layer coverage/i)).toBeInTheDocument()
     })
@@ -492,6 +518,38 @@ describe('AnalyticsPage', () => {
 
         expect(await screen.findByText(/you're seeing figures for/i)).toBeInTheDocument()
         expect(screen.queryByText(/only administrators and auditors/i)).toBeNull()
+    })
+
+    it('says contributors are hidden rather than that nobody contributed', async () => {
+        // The drill-in's roster is the one place an email address could reach a
+        // reader who may not see people. An EMPTY leaderboard and a withheld one
+        // render identically unless the panel says which.
+        vi.mocked(analyticsService.getSummary).mockResolvedValue(REDACTED as never)
+        vi.mocked(analyticsService.getWorkspace).mockResolvedValue({
+            ...DETAIL,
+            redaction: { applied: true, showsPeople: false, member: false },
+        } as never)
+        renderAt('/analytics?tab=workspaces')
+
+        await userEvent.click(await screen.findByText('Finance'))
+
+        expect(await screen.findByText(/contributors are hidden/i)).toBeInTheDocument()
+        expect(screen.queryByText(/nobody has contributed here/i)).toBeNull()
+    })
+
+    it('names contributors in a workspace the reader belongs to', async () => {
+        vi.mocked(analyticsService.getSummary).mockResolvedValue(REDACTED as never)
+        vi.mocked(analyticsService.getWorkspace).mockResolvedValue({
+            ...DETAIL,
+            topContributors: [{ userId: 'u1', name: 'Ada Lovelace', events: 9 }],
+            redaction: { applied: true, showsPeople: true, member: true },
+        } as never)
+        renderAt('/analytics?tab=workspaces')
+
+        await userEvent.click(await screen.findByText('Finance'))
+
+        expect(await screen.findByText('Ada Lovelace')).toBeInTheDocument()
+        expect(screen.queryByText(/contributors are hidden/i)).toBeNull()
     })
 
     it('surfaces a load failure instead of rendering empty charts', async () => {

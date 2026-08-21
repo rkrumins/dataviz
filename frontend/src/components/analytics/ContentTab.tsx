@@ -16,7 +16,8 @@ import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
 import { BarSeriesChart } from './charts/BarSeriesChart'
 import { StackedShareBar } from './charts/StackedShareBar'
-import { comparisonLabel, rangeLabel } from './RangePicker'
+import { comparisonLabel, previousLabel, rangePhrase } from './RangePicker'
+import { useChartTheme } from './charts/chartTheme'
 
 export function ContentTab({
     data, range, isStale,
@@ -25,6 +26,7 @@ export function ContentTab({
     range: AnalyticsRangeSelection
     isStale: boolean
 }) {
+    const theme = useChartTheme()
     const { totals, series, breakdowns, leaderboards } = data
     const vs = comparisonLabel(range)
 
@@ -32,7 +34,7 @@ export function ContentTab({
         <div className="space-y-5">
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 <KpiCard
-                    label="Views" value={totals.views.total} icon={LayoutGrid}
+                    label="Views" metric="views" value={totals.views.total} icon={LayoutGrid}
                     changePct={totals.views.changePct} comparisonLabel={vs}
                     sub={`${exact(totals.views.current ?? 0)} created in range`}
                     trend={series.viewsCreated} accent="indigo"
@@ -49,7 +51,7 @@ export function ContentTab({
                     accent="amber"
                 />
                 <KpiCard
-                    label="Semantic layers" value={totals.ontologies.total} icon={PenLine}
+                    label="Semantic layers" metric="semanticLayers" value={totals.ontologies.total} icon={PenLine}
                     changePct={totals.ontologies.changePct} comparisonLabel={vs}
                     sub={`${exact(totals.contextModels.total)} context models`}
                     accent="violet"
@@ -86,7 +88,7 @@ export function ContentTab({
                 ) : (
                 <ChartFrame
                     title="Top builders"
-                    subtitle={`Views created in ${rangeLabel(range).toLowerCase()}`}
+                    subtitle={`Views created in ${rangePhrase(range)}`}
                     isStale={isStale}
                     isEmpty={leaderboards.topCreators.length === 0}
                     emptyLabel="Nobody created a view in this range."
@@ -111,11 +113,16 @@ export function ContentTab({
                     isStale={isStale}
                     isEmpty={series.viewsCreated.every((v) => v === 0)}
                     emptyLabel="No views created in this range."
+                    series={[{ key: 'created', label: 'Views created', color: theme.series[0], shape: 'bar' }]}
+                    ghostLabel={previousLabel(range)}
                     table={
                         <ChartTable
                             rowLabel="Date"
                             rows={series.buckets.map((b) => shortDate(b, true))}
-                            columns={[{ key: 'created', label: 'Views created', values: series.viewsCreated }]}
+                            columns={[
+                                { key: 'created', label: 'Views created', values: series.viewsCreated },
+                                { key: 'prev', label: previousLabel(range), values: series.previous.viewsCreated },
+                            ]}
                         />
                     }
                 >

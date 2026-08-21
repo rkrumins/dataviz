@@ -51,6 +51,20 @@ export function rangeLabel(range: AnalyticsRangeSelection): string {
         ?? `Last ${range.days} days`
 }
 
+/** The PREPOSITIONAL form of the same slice: "the last 30 days", so a sentence
+ *  can say "in {rangePhrase(range)}" instead of the ungrammatical "in last 30
+ *  days". A custom range is already a phrase and takes no article. */
+export function rangePhrase(range: AnalyticsRangeSelection): string {
+    if (range.kind === 'custom') return rangeLabel(range)
+    return `the ${rangeLabel(range).toLowerCase()}`
+}
+
+/** "Previous 30 days" — the ghost line's own name in a chart legend. */
+export function previousLabel(range: AnalyticsRangeSelection): string {
+    const span = rangeSpanDays(range)
+    return `Previous ${span} day${span === 1 ? '' : 's'}`
+}
+
 /** "vs previous 30 days" — names what a delta is measured against. A delta with
  *  no stated baseline is a number people quietly invent a baseline for. */
 export function comparisonLabel(range: AnalyticsRangeSelection): string {

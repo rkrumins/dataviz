@@ -5,8 +5,11 @@
  * stops distinguishing them and a table is simply the better instrument — and
  * here every column is a different measure, which no single chart encodes.
  *
- * The one visual is a proportional bar behind the sorted column, so the shape
- * of the distribution is still readable at a glance.
+ * The one visual is a proportional meter inside the sorted column's cells, so
+ * the shape of the distribution is still readable at a glance. Deliberately in
+ * the CELL rather than across the row: a row-wide wash or rule is 100% wide on
+ * the top row by definition, and at that width it reads as selection or as a
+ * section divider, whichever the reader happens to expect.
  */
 import { useMemo, useState } from 'react'
 import { ArrowUpDown, Lock, MoonStar } from 'lucide-react'
@@ -20,7 +23,7 @@ import { RequestAccessButton } from './RequestAccessButton'
 import { compact, exact } from '@/lib/formatMetric'
 import type { WorkspaceAnalyticsRow } from '@/services/analyticsService'
 import { useChartTheme } from './charts/chartTheme'
-import { rangeLabel } from './RangePicker'
+import { rangePhrase } from './RangePicker'
 
 type SortKey = 'name' | 'members' | 'views' | 'newViews' | 'activity'
     | 'opens' | 'activeUsers' | 'nodes' | 'lastActivityAt'
@@ -84,7 +87,7 @@ export function WorkspacesTab({
                     <span>
                         <strong className="font-semibold">{dormant}</strong>
                         {dormant === 1 ? ' workspace has' : ' workspaces have'} seen no
-                        activity in {rangeLabel(range).toLowerCase()}. Worth a look before
+                        activity in {rangePhrase(range)}. Worth a look before
                         they quietly become abandoned.
                     </span>
                 </p>
@@ -93,7 +96,7 @@ export function WorkspacesTab({
             <div className="overflow-x-auto rounded-2xl border border-glass-border bg-canvas-elevated shadow-sm">
                 <table className="w-full text-xs">
                     <caption className="sr-only">
-                        Per-workspace analytics for {rangeLabel(range).toLowerCase()}
+                        Per-workspace analytics for {rangePhrase(range)}
                     </caption>
                     <thead>
                         <tr className="border-b border-glass-border">
@@ -132,19 +135,17 @@ export function WorkspacesTab({
                             // null would draw a 0% bar that reads as "this
                             // workspace does nothing".
                             const share = locked || peak <= 0 ? 0 : value / peak
+                            // Only the column being sorted carries a meter —
+                            // eight of them at once would be a heatmap nobody
+                            // asked for.
+                            const meterFor = (key: SortKey) =>
+                                key === sortKey && share > 0
+                                    ? { share, color: theme.series[0] }
+                                    : undefined
                             const selected = row.workspaceId === selectedId
                             return (
                                 <tr
                                     key={row.workspaceId}
-                                    // The sorted column's distribution, painted as
-                                    // the ROW's background rather than an absolute
-                                    // overlay — a positioned bar either sits above
-                                    // the text or (with a negative z-index) behind
-                                    // the card entirely, and there is no z-index
-                                    // that reliably lands between the two.
-                                    style={share > 0 ? {
-                                        backgroundImage: `linear-gradient(to right, ${theme.series[0]}1f ${share * 100}%, transparent ${share * 100}%)`,
-                                    } : undefined}
                                     // A locked row opens nothing, so it is not a
                                     // button: giving it a click target and a
                                     // focus stop would promise a drill-in that
@@ -217,13 +218,13 @@ export function WorkspacesTab({
                                             </span>
                                         )}
                                     </td>
-                                    <Cell value={row.members} />
-                                    <Cell value={row.views} />
-                                    <Cell value={row.newViews} />
-                                    <Cell value={row.activeUsers} />
-                                    <Cell value={row.opens} />
-                                    <Cell value={row.activity} />
-                                    <Cell value={row.nodes} compactValue />
+                                    <Cell value={row.members} meter={meterFor('members')} />
+                                    <Cell value={row.views} meter={meterFor('views')} />
+                                    <Cell value={row.newViews} meter={meterFor('newViews')} />
+                                    <Cell value={row.activeUsers} meter={meterFor('activeUsers')} />
+                                    <Cell value={row.opens} meter={meterFor('opens')} />
+                                    <Cell value={row.activity} meter={meterFor('activity')} />
+                                    <Cell value={row.nodes} compactValue meter={meterFor('nodes')} />
                                     <td className="px-3 py-2.5 text-ink-muted whitespace-nowrap">
                                         {row.lastActivityAt ? timeAgo(row.lastActivityAt) : '—'}
                                     </td>
@@ -245,8 +246,13 @@ export function WorkspacesTab({
 }
 
 function Cell({
-    value, compactValue,
-}: { value: number | null; compactValue?: boolean }) {
+    value, compactValue, meter,
+}: {
+    value: number | null
+    compactValue?: boolean
+    /** Share of the column's peak, for the one column being sorted. */
+    meter?: { share: number; color: string }
+}) {
     // `null` is a refusal, not a measurement. Rendering it as 0 would put a
     // real-looking number in a column people sort and total.
     if (value === null) {
@@ -257,8 +263,24 @@ function Cell({
         )
     }
     return (
-        <td className="px-3 py-2.5 text-right tabular-nums text-ink" title={exact(value)}>
+        <td className="relative px-3 py-2.5 text-right tabular-nums text-ink" title={exact(value)}>
             {compactValue ? compact(value) : exact(value)}
+            {/* Absolutely positioned so sorting a different column never
+                changes the row height, and grown leftwards from the right edge
+                so it lines up under its own right-aligned figure. A floor of 3%
+                keeps the smallest non-zero value visible as a mark rather than
+                as nothing. */}
+            {meter && (
+                <span
+                    aria-hidden
+                    className="absolute bottom-1.5 right-3 h-[3px] rounded-full"
+                    style={{
+                        width: `calc((100% - 24px) * ${Math.max(meter.share, 0.03)})`,
+                        backgroundColor: meter.color,
+                        opacity: 0.55,
+                    }}
+                />
+            )}
         </td>
     )
 }

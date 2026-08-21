@@ -19,6 +19,9 @@ import { BarChart3, Table2 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 
+/** Matches `strokeOpacity` on the ghost polyline in `TimeSeriesChart`. */
+const GHOST_OPACITY = 0.28
+
 export interface ChartSeriesMeta {
     key: string
     label: string
@@ -36,6 +39,15 @@ interface Props {
     emptyLabel?: string
     /** The accessible table twin. Omit only for charts that are already text. */
     table?: React.ReactNode
+    /**
+     * Names the faded previous-period line, for charts that draw one.
+     *
+     * Without it a single-series chart showing a ghost puts two lines on the
+     * plot and no key beside them, which is a puzzle rather than a comparison.
+     * The swatch is derived here — from the first series' colour at the ghost's
+     * own opacity — so the legend and the mark cannot drift apart.
+     */
+    ghostLabel?: string
     /** Held at reduced opacity while a new range loads — never a skeleton. */
     isStale?: boolean
     action?: React.ReactNode
@@ -44,11 +56,14 @@ interface Props {
 }
 
 export function ChartFrame({
-    title, subtitle, series = [], isEmpty, emptyLabel, table,
+    title, subtitle, series = [], isEmpty, emptyLabel, table, ghostLabel,
     isStale, action, className, children,
 }: Props) {
     const [showTable, setShowTable] = useState(false)
     const headingId = useId()
+    const legend: (ChartSeriesMeta & { faded?: boolean })[] = ghostLabel && series[0]
+        ? [...series, { key: '__ghost', label: ghostLabel, color: series[0].color, shape: 'line', faded: true }]
+        : series
 
     return (
         <section
@@ -88,11 +103,12 @@ export function ChartFrame({
                 </div>
             </header>
 
-            {/* Two or more series always get a legend — identity is never
-                colour alone. The swatch mirrors the mark it stands for. */}
-            {series.length > 1 && !showTable && (
+            {/* Two or more MARKS always get a legend — identity is never colour
+                alone, and a ghost is a mark like any other. The swatch mirrors
+                the mark it stands for. */}
+            {legend.length > 1 && !showTable && (
                 <ul className="flex flex-wrap items-center gap-x-4 gap-y-1.5 mb-3">
-                    {series.map((s) => (
+                    {legend.map((s) => (
                         <li key={s.key} className="flex items-center gap-1.5">
                             <span
                                 aria-hidden
@@ -102,9 +118,12 @@ export function ChartFrame({
                                         ? 'w-3.5 h-[2px] rounded-full'
                                         : 'w-2.5 h-2.5 rounded-[3px]',
                                 )}
-                                style={{ backgroundColor: s.color }}
+                                style={{ backgroundColor: s.color, opacity: s.faded ? GHOST_OPACITY : 1 }}
                             />
-                            <span className="text-[11px] font-medium text-ink-secondary">
+                            <span className={cn(
+                                'text-[11px] font-medium',
+                                s.faded ? 'text-ink-muted' : 'text-ink-secondary',
+                            )}>
                                 {s.label}
                             </span>
                         </li>

@@ -59,6 +59,15 @@ interface Props {
      * giving it a mark's weight would put it in competition with the values.
      */
     annotations?: { bucket: string; title: string }[]
+    /**
+     * Anchor the y-axis here instead of at zero.
+     *
+     * Only for measures DEFINED relative to a value — an index where 100 means
+     * "unchanged since the start of the window". For a count, zero is the
+     * baseline and anything else exaggerates the shape, so this stays
+     * undefined. Clamped to the data so it can never clip a series.
+     */
+    baseline?: number
     className?: string
 }
 
@@ -69,7 +78,7 @@ const LABEL_GUTTER = 52
 
 export function TimeSeriesChart({
     buckets, series, height = 220, labelEnds = true, showPrevious = true,
-    annotations, className,
+    annotations, baseline, className,
 }: Props) {
     const theme = useChartTheme()
     const gradientId = useId()
@@ -90,18 +99,33 @@ export function TimeSeriesChart({
         [showPrevious, series, buckets.length],
     )
 
-    const { max, ticks } = useMemo(() => {
+    const { min, max, ticks } = useMemo(() => {
         // The ghost is inside the scale on purpose: leaving it out would let a
         // previous period larger than this one run off the top of the plot,
         // which reads as "we were doing fine" rather than "we shrank".
-        const peak = Math.max(
-            1,
+        const all = [
             ...series.flatMap((s) => s.values),
             ...ghosted.flatMap((s) => s.previous ?? []),
-        )
-        const t = niceTicks(peak)
-        return { max: Math.max(peak, t[t.length - 1] ?? peak), ticks: t }
-    }, [series, ghosted])
+        ]
+        const peak = Math.max(1, ...all)
+        if (baseline === undefined) {
+            const t = niceTicks(peak)
+            return { min: 0, max: Math.max(peak, t[t.length - 1] ?? peak), ticks: t }
+        }
+        // An anchored scale: `baseline` is the value the measure is defined
+        // relative to, so the axis starts there rather than at zero. Never
+        // above the data — a floor that clipped a series would be a lie, not a
+        // zoom.
+        const floor = Math.min(baseline, ...all)
+        const span = niceTicks(Math.max(1, peak - floor))
+        const step = span[1] ?? 1
+        const top = floor + (span[span.length - 1] ?? 1)
+        return {
+            min: floor,
+            max: Math.max(top, peak),
+            ticks: span.map((t) => floor + t).filter((t) => t <= Math.max(top, peak) + step * 0.001),
+        }
+    }, [series, ghosted, baseline])
 
     // The scales are `useCallback`ed rather than recreated per render, so the
     // memoised layers below can depend on them HONESTLY. Left as plain arrow
@@ -114,8 +138,8 @@ export function TimeSeriesChart({
         [buckets.length, stepX, plotW],
     )
     const y = useCallback(
-        (v: number) => PAD.top + plotH * (1 - v / max),
-        [plotH, max],
+        (v: number) => PAD.top + plotH * (1 - (v - min) / Math.max(1, max - min)),
+        [plotH, max, min],
     )
 
     // Show at most ~7 x labels; past that they collide and stop being readable.
@@ -165,13 +189,19 @@ export function TimeSeriesChart({
         </>
     ), [ticks, buckets, labelEvery, width, padRight, theme, height, x, y])
 
+    // Only the annotations that land on a bucket in this window — the plot and
+    // the key below it must name exactly the same set.
+    const marked = useMemo(
+        () => (annotations ?? []).filter((a) => buckets.includes(a.bucket)),
+        [annotations, buckets],
+    )
+
     const staticMarks = useMemo(() => (
         <>
                 {/* Annotations sit under the crosshair and under every mark:
                     they explain the data, they are not part of it. */}
-                {(annotations ?? []).map((a) => {
+                {marked.map((a) => {
                     const i = buckets.indexOf(a.bucket)
-                    if (i < 0) return null
                     return (
                         <g key={`${a.bucket}-${a.title}`}>
                             <line
@@ -242,27 +272,40 @@ export function TimeSeriesChart({
                     )
                 })}
         </>
-    ), [annotations, buckets, ghosted, series, gradientId, plotH, theme, x, y])
+    ), [marked, buckets, ghosted, series, gradientId, plotH, theme, x, y])
 
     const staticTail = useMemo(() => (
         <>
                 {/* Direct labels, sparingly: the endpoint only, and only while
-                    series are few enough that the labels don't converge. */}
-                {showEndLabels && series.map((s) => {
+                    series are few enough that the labels don't converge.
+
+                    "Few enough" was a COUNT, which is the wrong test: three
+                    series whose endpoints land within a few pixels of each
+                    other overprint into an unreadable smudge however few they
+                    are. Endpoints closer than a line-height to one already
+                    placed are dropped — the tooltip and the table still carry
+                    the exact values. */}
+                {showEndLabels && (() => {
+                    const placed: number[] = []
+                    return series.map((s) => {
                     const last = s.values[s.values.length - 1]
                     if (last === undefined) return null
+                    const at = y(last)
+                    if (placed.some((p) => Math.abs(p - at) < 11)) return null
+                    placed.push(at)
                     return (
                         <text
                             key={`end-${s.key}`}
                             x={x(s.values.length - 1) + 8}
-                            y={y(last)} dy="0.32em"
+                            y={at} dy="0.32em"
                             className="fill-ink font-semibold tabular-nums"
                             style={{ fontSize: 10 }}
                         >
                             {exact(last)}
                         </text>
                     )
-                })}
+                    })
+                })()}
 
                 {/* Hit bands — full plot height, one per bucket, wider than any
                     mark. The reader aims at a date, not at a line. */}
@@ -353,6 +396,33 @@ export function TimeSeriesChart({
                     }))}
                     leftPct={((x(active) - PAD.left) / plotW) * 100}
                 />
+            )}
+
+            {/* The annotation KEY. The flag on the plot carries an SVG
+                `<title>`, which is a hover tooltip and nothing else: it does
+                not print, does not survive a screenshot, and cannot be reached
+                by keyboard — so an unexplained vertical rule reads as a
+                rendering artefact. Naming each mark once, below the plot,
+                costs a line and cannot collide with anything. */}
+            {marked.length > 0 && (
+                <ul className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+                    {marked.map((a) => (
+                        <li key={`${a.bucket}-${a.title}`} className="flex items-center gap-1.5 text-[11px]">
+                            <span
+                                aria-hidden
+                                className="h-1.5 w-1.5 shrink-0 rounded-full"
+                                style={{ backgroundColor: theme.neutralMark }}
+                            />
+                            {/* No year: the key must read as the same date the
+                                axis prints, and "Jun 8, 26" also scans as a
+                                range rather than as one day. */}
+                            <span className="font-semibold text-ink-secondary tabular-nums">
+                                {shortDate(a.bucket)}
+                            </span>
+                            <span className="text-ink-muted">{a.title}</span>
+                        </li>
+                    ))}
+                </ul>
             )}
         </div>
     )

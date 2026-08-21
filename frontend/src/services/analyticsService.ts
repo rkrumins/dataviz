@@ -369,8 +369,20 @@ export interface WorkspaceAnalyticsDetail {
         activityByAction: ClassCount[]
     }
     topViews: TopView[]
-    topContributors: { userId: string; name: string; email: string | null; events: number }[]
+    /** `email` is dropped by the server's allow-list for anyone who may not see
+     *  people, so it is optional here rather than `string | null`. */
+    topContributors: { userId: string; name: string; email?: string | null; events: number }[]
     graph: GraphScale
+    /**
+     * Present when the server filtered this document. `member` says whether the
+     * reader is actually in the workspace — reporting on a workspace never
+     * makes it one, so the roster is gated on this rather than on reachability.
+     */
+    redaction?: {
+        applied: boolean
+        showsPeople: boolean
+        member: boolean
+    }
 }
 
 /**

@@ -1,6 +1,7 @@
 /**
  * GrowthTab — where new accounts come from, and whether they stay.
  */
+import { useMemo } from 'react'
 import { CalendarClock, UserPlus, Users, Boxes } from 'lucide-react'
 
 import { exact, percent, shortDate } from '@/lib/formatMetric'
@@ -15,7 +16,7 @@ import { TimeSeriesChart } from './charts/TimeSeriesChart'
 import { BarSeriesChart } from './charts/BarSeriesChart'
 import { StackedShareBar } from './charts/StackedShareBar'
 import { HeatmapGrid } from './charts/HeatmapGrid'
-import { comparisonLabel, rangeLabel, rangeSpanDays } from './RangePicker'
+import { comparisonLabel, previousLabel, rangePhrase, rangeSpanDays } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
 
 export function GrowthTab({
@@ -27,6 +28,25 @@ export function GrowthTab({
 }) {
     const theme = useChartTheme()
     const { totals, series, engagement, breakdowns } = data
+
+    // Three cumulative totals whose magnitudes differ by more than an order of
+    // magnitude — users in the thousands, workspaces in the tens. On a shared
+    // axis the smallest is a flat line on the baseline, which reads as "no
+    // growth" when it may be the fastest-growing of the three. Indexing every
+    // line to 100 at the start of the window is the standard answer, and it is
+    // the one that matches the question the frame asks: which is pulling ahead?
+    // The table keeps the absolute counts beside the index so nothing is lost.
+    const indexed = useMemo(() => {
+        const toIndex = (values: number[]) => {
+            const base = values.find((v) => v > 0) ?? 0
+            return base === 0 ? values.map(() => 0) : values.map((v) => Math.round((v / base) * 100))
+        }
+        return {
+            users: toIndex(series.cumulativeUsers),
+            workspaces: toIndex(series.cumulativeWorkspaces),
+            views: toIndex(series.cumulativeViews),
+        }
+    }, [series.cumulativeUsers, series.cumulativeWorkspaces, series.cumulativeViews])
     const vs = comparisonLabel(range)
     const growth = engagement.growthAccounting
 
@@ -45,13 +65,15 @@ export function GrowthTab({
                 />
                 <KpiCard
                     label="Activation rate"
+                    metric="activation"
                     value={percent(engagement.activationRate)}
                     icon={Users}
-                    sub="new accounts that built a view"
+                    sub="new accounts that traced lineage"
                     accent="emerald"
                 />
                 <KpiCard
                     label="Time to first view"
+                    metric="timeToValue"
                     value={engagement.medianDaysToFirstView === null
                         ? '—'
                         : `${engagement.medianDaysToFirstView}d`}
@@ -65,15 +87,20 @@ export function GrowthTab({
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <ChartFrame
                     title="New accounts"
-                    subtitle={`Signups per period over ${rangeLabel(range).toLowerCase()}`}
+                    subtitle={`Signups per period over ${rangePhrase(range)}`}
                     isStale={isStale}
                     isEmpty={series.signups.every((v) => v === 0)}
                     emptyLabel="No signups in this range."
+                    series={[{ key: 'signups', label: 'Signups', color: theme.series[0], shape: 'bar' }]}
+                    ghostLabel={previousLabel(range)}
                     table={
                         <ChartTable
                             rowLabel="Date"
                             rows={series.buckets.map((b) => shortDate(b, true))}
-                            columns={[{ key: 'signups', label: 'Signups', values: series.signups }]}
+                            columns={[
+                                { key: 'signups', label: 'Signups', values: series.signups },
+                                { key: 'prev', label: previousLabel(range), values: series.previous.signups },
+                            ]}
                         />
                     }
                 >
@@ -84,8 +111,8 @@ export function GrowthTab({
                 </ChartFrame>
 
                 <ChartFrame
-                    title="Cumulative growth"
-                    subtitle="Users, workspaces and views, all rising together or not"
+                    title="Cumulative growth, indexed"
+                    subtitle="Each line starts at 100 — the question is which is pulling ahead"
                     isStale={isStale}
                     isEmpty={series.cumulativeUsers.every((v) => v === 0)}
                     series={[
@@ -98,6 +125,9 @@ export function GrowthTab({
                             rowLabel="Date"
                             rows={series.buckets.map((b) => shortDate(b, true))}
                             columns={[
+                                { key: 'usersIdx', label: 'Users (index)', values: indexed.users },
+                                { key: 'workspacesIdx', label: 'Workspaces (index)', values: indexed.workspaces },
+                                { key: 'viewsIdx', label: 'Views (index)', values: indexed.views },
                                 { key: 'users', label: 'Users', values: series.cumulativeUsers },
                                 { key: 'workspaces', label: 'Workspaces', values: series.cumulativeWorkspaces },
                                 { key: 'views', label: 'Views', values: series.cumulativeViews },
@@ -108,10 +138,11 @@ export function GrowthTab({
                     <TimeSeriesChart
                         buckets={series.buckets}
                         series={[
-                            { key: 'users', label: 'Users', values: series.cumulativeUsers, slot: 0 },
-                            { key: 'workspaces', label: 'Workspaces', values: series.cumulativeWorkspaces, slot: 1 },
-                            { key: 'views', label: 'Views', values: series.cumulativeViews, slot: 2 },
+                            { key: 'users', label: 'Users', values: indexed.users, slot: 0 },
+                            { key: 'workspaces', label: 'Workspaces', values: indexed.workspaces, slot: 1 },
+                            { key: 'views', label: 'Views', values: indexed.views, slot: 2 },
                         ]}
+                        baseline={100}
                     />
                 </ChartFrame>
             </div>
