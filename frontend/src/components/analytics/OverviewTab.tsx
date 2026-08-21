@@ -17,6 +17,7 @@ import type {
 import { HeroFigure, KpiCard } from './KpiCard'
 import { InsightStrip } from './InsightStrip'
 import { WithheldPanel } from './Redacted'
+import { ViewLink, WorkspaceLink } from './EntityLink'
 import { AdoptionMatrix } from './AdoptionMatrix'
 import { Leaderboard } from './Leaderboard'
 import { ChartFrame } from './charts/ChartFrame'
@@ -41,8 +42,10 @@ export function OverviewTab({
 }: Props) {
     const theme = useChartTheme()
     const { totals, series, engagement, leaderboards, graph } = data
-    // Present only when the server redacted this document for us.
-    const redacted = data.redaction?.applied === true
+    // Whether OTHER people may be named. Not `redaction.applied` — that is
+    // true for every non-privileged reader, including at the privacy levels
+    // whose whole purpose is to show colleagues.
+    const peopleHidden = !!data.redaction && !data.redaction.showsPeople
     const vs = comparisonLabel(range)
 
     return (
@@ -186,7 +189,7 @@ export function OverviewTab({
                     unless we say which. "Nobody has been active" is a false
                     statement to make to someone who simply may not see who
                     was. */}
-                {redacted ? (
+                {peopleHidden ? (
                     <WithheldPanel
                         title="Individual activity is hidden"
                         reason="Who did what is visible to administrators and auditors only. The platform-wide counts above include everyone."
@@ -224,7 +227,7 @@ export function OverviewTab({
                         slot={1}
                         rows={leaderboards.topViews.map((v) => ({
                             id: v.viewId,
-                            label: v.name,
+                            label: <ViewLink viewId={v.viewId} name={v.name} canOpen={v.canOpen} />,
                             meta: `${v.viewType} · ${v.visibility}`,
                             value: v.opens,
                             detail: `${compact(v.uniqueViewers)} ${v.uniqueViewers === 1 ? 'person' : 'people'}`,
@@ -245,7 +248,7 @@ export function OverviewTab({
                         onRowClick={(row) => onWorkspaceClick(row.id)}
                         rows={leaderboards.topWorkspaces.map((w) => ({
                             id: w.workspaceId,
-                            label: w.name,
+                            label: <WorkspaceLink workspaceId={w.workspaceId} name={w.name} canOpen={w.canOpen} />,
                             value: w.activity + w.opens,
                             detail: `${compact(w.opens)} opens`,
                         }))}

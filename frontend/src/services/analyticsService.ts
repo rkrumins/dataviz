@@ -140,6 +140,12 @@ export interface TopView {
     name: string
     /** True when the viewer may not know this view's name. Counts stay real. */
     redacted?: boolean
+    /**
+     * Whether a LINK into this view should be rendered — a stricter question
+     * than whether it is named. Reporting on something is not a door into it,
+     * so a link appears only where the app would actually open it.
+     */
+    canOpen?: boolean
     workspaceId: string
     visibility: string
     viewType: string
@@ -154,6 +160,7 @@ export interface Leaderboards {
     topWorkspaces: {
         workspaceId: string; name: string; activity: number; opens: number
         redacted?: boolean
+        canOpen?: boolean
     }[]
     topCreators: { userId: string; name: string; viewsCreated: number }[]
 }
@@ -277,7 +284,15 @@ export interface AnalyticsSummary {
      */
     redaction?: {
         applied: true
-        visibleWorkspaces: number
+        /** The operator's chosen level. Governs people and operations only. */
+        mode: 'strict' | 'internal' | 'full'
+        showsPeople: boolean
+        showsOperations: boolean
+        /** An operator has opened workspace REPORTING to everyone, so a
+         *  workspace can be named without being openable. */
+        reportsAllWorkspaces: boolean
+        /** `null` when the viewer can see every workspace anyway. */
+        visibleWorkspaces: number | null
         /** False when the viewer's workspace access could not be resolved, so
          *  something locked may be locked wrongly. Say so rather than showing a
          *  confident redaction we cannot stand behind. */
@@ -306,6 +321,8 @@ export interface WorkspaceAnalyticsRow {
      * `null` rather than `0`, because zero is a claim and null is a refusal.
      */
     redacted?: boolean
+    /** Whether a link into the workspace should be rendered. See `TopView`. */
+    canOpen?: boolean
     members: number | null
     views: number | null
     newViews: number | null

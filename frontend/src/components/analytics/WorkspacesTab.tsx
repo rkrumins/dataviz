@@ -15,6 +15,8 @@ import { cn } from '@/lib/utils'
 import type { AnalyticsRangeSelection } from '@/services/analyticsService'
 import { timeAgo } from '@/lib/timeAgo'
 import { WithheldValue } from './Redacted'
+import { WorkspaceLink } from './EntityLink'
+import { RequestAccessButton } from './RequestAccessButton'
 import { compact, exact } from '@/lib/formatMetric'
 import type { WorkspaceAnalyticsRow } from '@/services/analyticsService'
 import { useChartTheme } from './charts/chartTheme'
@@ -177,14 +179,18 @@ export function WorkspacesTab({
                                                     aria-hidden
                                                 />
                                             )}
-                                            <span className={cn(
-                                                'truncate',
-                                                locked
-                                                    ? 'italic text-ink-muted'
-                                                    : 'font-semibold text-ink',
-                                            )}>
-                                                {row.name}
-                                            </span>
+                                            {locked ? (
+                                                <span className="truncate italic text-ink-muted">
+                                                    {row.name}
+                                                </span>
+                                            ) : (
+                                                <WorkspaceLink
+                                                    workspaceId={row.workspaceId}
+                                                    name={row.name}
+                                                    canOpen={row.canOpen}
+                                                    className="truncate font-semibold text-ink"
+                                                />
+                                            )}
                                             {!locked && row.dormant && (
                                                 <span
                                                     title="No activity in the selected range"
@@ -194,11 +200,22 @@ export function WorkspacesTab({
                                                 </span>
                                             )}
                                         </span>
-                                        <span className="block text-[10px] text-ink-muted">
-                                            {locked
-                                                ? 'You are not a member'
-                                                : `${row.dataSources} ${row.dataSources === 1 ? 'source' : 'sources'}`}
-                                        </span>
+                                        {locked ? (
+                                            // The moment someone finds a workspace
+                                            // they want is the moment to let them
+                                            // ask for it, rather than sending them
+                                            // to find somebody on chat.
+                                            <span className="mt-1 flex items-center gap-2">
+                                                <span className="text-[10px] text-ink-muted">
+                                                    You are not a member
+                                                </span>
+                                                <RequestAccessButton workspaceId={row.workspaceId} />
+                                            </span>
+                                        ) : (
+                                            <span className="block text-[10px] text-ink-muted">
+                                                {row.dataSources} {row.dataSources === 1 ? 'source' : 'sources'}
+                                            </span>
+                                        )}
                                     </td>
                                     <Cell value={row.members} />
                                     <Cell value={row.views} />

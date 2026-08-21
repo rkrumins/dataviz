@@ -15,7 +15,12 @@ import { useChartTheme } from './charts/chartTheme'
 
 export interface LeaderboardRow {
     id: string
-    label: string
+    /**
+     * The name. Pass a node rather than a string to make it a link — see
+     * `EntityLink`, which decides linkability from the same `canOpen` the
+     * server computed, so a link can never point somewhere the app refuses.
+     */
+    label: React.ReactNode
     /** Secondary line — email, workspace, view type. */
     meta?: string
     value: number

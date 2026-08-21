@@ -15,6 +15,7 @@ import { timeAgo } from '@/lib/timeAgo'
 import { exact, shortDate } from '@/lib/formatMetric'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useWorkspaceAnalyticsDetail } from '@/hooks/useAnalytics'
+import { ViewLink } from './EntityLink'
 import { KpiCard } from './KpiCard'
 import { Leaderboard } from './Leaderboard'
 import { ChartFrame } from './charts/ChartFrame'
@@ -198,7 +199,7 @@ export function WorkspaceInsightsPanel({
                                         slot={1}
                                         rows={data.topViews.map((v) => ({
                                             id: v.viewId,
-                                            label: v.name,
+                                            label: <ViewLink viewId={v.viewId} name={v.name} canOpen={v.canOpen} />,
                                             meta: v.viewType,
                                             value: v.opens,
                                             detail: `${exact(v.uniqueViewers)} ${v.uniqueViewers === 1 ? 'person' : 'people'}`,

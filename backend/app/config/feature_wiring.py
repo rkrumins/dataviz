@@ -121,6 +121,49 @@ class FeatureWiring:
 
 FEATURE_WIRING: dict[str, FeatureWiring] = {
     # ── Analytics ──────────────────────────────────────────────────────────────
+    "analyticsWorkspaceVisibility": FeatureWiring(
+        key="analyticsWorkspaceVisibility",
+        # SECURITY: it widens what Analytics reports past what workspace
+        # permissions allow, so an unreadable value must mean the narrower
+        # world — follow RBAC.
+        posture="security",
+        server_gates=(
+            "GET /admin/analytics/* — when on, workspace names and figures are "
+            "reported for every workspace rather than only the reader's own. "
+            "Does NOT grant access to the workspace itself.",
+        ),
+        ui_surfaces=(
+            "Locked rows in the Workspaces table",
+            "Redacted names in the workspace and view leaderboards",
+        ),
+        still_allowed=(
+            "Platform-wide totals always count every workspace",
+            "Opening a workspace still requires the usual permissions",
+        ),
+    ),
+    "analyticsPrivacyMode": FeatureWiring(
+        key="analyticsPrivacyMode",
+        # SECURITY, and it is a LADDER rather than a switch — "strict" is the
+        # narrow end, so an unreadable value resolves there. Failing to the
+        # permissive end would publish per-person activity because a database
+        # hiccup, and a disclosure cannot be taken back.
+        posture="security",
+        server_gates=(
+            "GET /admin/analytics/* — decides whether a non-privileged reader "
+            "is shown individual activity (internal, full) and operational "
+            "health (full). Never affects workspace or view access, which "
+            "follow the app's own permissions.",
+        ),
+        ui_surfaces=(
+            "Leaderboards and per-person panels on Overview, Engagement and Content",
+            "The freshness and access-friction sections of the Health tab",
+        ),
+        still_allowed=(
+            "Platform-wide counts and trends at every level",
+            "Full detail for workspaces the reader can already open",
+            "Their own activity, at every level",
+        ),
+    ),
     "analyticsPublicEnabled": FeatureWiring(
         key="analyticsPublicEnabled",
         # SECURITY, and for the same reason `semanticLayerNonAdminEditing` is:

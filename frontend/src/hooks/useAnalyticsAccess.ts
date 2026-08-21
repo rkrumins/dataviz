@@ -28,6 +28,12 @@ import { useSidebarSpec } from '@/store/navCatalogue'
 
 export const ANALYTICS_PUBLIC_FLAG = 'analyticsPublicEnabled'
 
+/** How much a non-privileged reader is shown. Mirrors `PrivacyMode` server-side. */
+export const ANALYTICS_PRIVACY_FLAG = 'analyticsPrivacyMode'
+
+/** Whether Analytics reports on workspaces the reader cannot open. */
+export const ANALYTICS_WORKSPACE_FLAG = 'analyticsWorkspaceVisibility'
+
 export interface AnalyticsAccess {
     /** Show the nav item / allow the route. */
     allowed: boolean

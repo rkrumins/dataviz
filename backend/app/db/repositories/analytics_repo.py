@@ -745,6 +745,7 @@ def _redact_workspace_row(row: dict) -> dict:
         # by it; it says nothing about the work inside.
         "createdAt": row["createdAt"],
         "isActive": row["isActive"],
+        "canOpen": False,
         "members": None, "views": None, "newViews": None, "dataSources": None,
         "activity": None, "opens": None, "activeUsers": None,
         "nodes": None, "edges": None,
@@ -753,9 +754,24 @@ def _redact_workspace_row(row: dict) -> dict:
 
 
 def _redact_view_row(row: dict, scope) -> dict:
-    """A popular view. Its NAME leaks what a private workspace is working on."""
-    if scope.can_see(row.get("workspaceId")):
-        return row
+    """A popular view. Its NAME leaks what a private workspace is working on —
+    unless the reader could already open it, which is more often than the first
+    version of this assumed. ``can_see_view`` mirrors
+    ``view_access.can_read_view``: enterprise-published views are readable by
+    anyone, and a creator keeps reach to their own work."""
+    if scope.can_see_view(
+        workspace_id=row.get("workspaceId"),
+        visibility=row.get("visibility"),
+        created_by=row.get("createdBy"),
+    ):
+        # Named. Whether it also LINKS is the stricter question: an
+        # enterprise-published view opens for anyone, a workspace-scoped one
+        # only for a member.
+        return {
+            **row,
+            "canOpen": (row.get("visibility") == "enterprise")
+            or scope.can_open(row.get("workspaceId")),
+        }
     return {
         **row,
         "name": REDACTED_VIEW,
@@ -763,6 +779,7 @@ def _redact_view_row(row: dict, scope) -> dict:
         # Counts stay: they are what makes it "popular", and they name nothing.
         "visibility": "restricted",
         "viewType": "restricted",
+        "canOpen": False,
     }
 
 
@@ -777,27 +794,49 @@ def redact_summary(doc: dict, scope) -> dict:
         return doc
 
     doc = dict(doc)
+    boards = doc["leaderboards"]
 
-    # People: nothing, for anyone. Not "colleagues only", not "names without
-    # emails" — see ``ViewerScope.shows_people``. The empty lists carry a
-    # reason so the UI can say "hidden" instead of "nobody was active", which
-    # is a different and false statement.
+    # People. Whether colleagues may be named is now the operator's decision
+    # (``analyticsPrivacyMode``) rather than a rule this module invented — in a
+    # deployment where every reader is an employee, these names are already in
+    # the workspace member lists and hiding them protects nobody.
+    #
+    # Emails are stripped at EVERY level regardless. A display name identifies
+    # a colleague; an address is a credential-shaped identifier with no place
+    # on a dashboard.
+    if scope.shows_people:
+        people = [
+            {**u, "email": None} for u in boards.get("topUsers", [])
+        ]
+        creators = list(boards.get("topCreators", []))
+    else:
+        # Their OWN row survives at every level: it is their data, and hiding
+        # it from them protects nobody.
+        people = [
+            {**u, "email": None} for u in boards.get("topUsers", [])
+            if scope.is_self(u.get("userId"))
+        ]
+        creators = [
+            c for c in boards.get("topCreators", [])
+            if scope.is_self(c.get("userId"))
+        ]
+
     doc["leaderboards"] = {
-        "topUsers": [],
-        "topCreators": [],
+        "topUsers": people,
+        "topCreators": creators,
         "topViews": [
-            _redact_view_row(v, scope)
-            for v in doc["leaderboards"].get("topViews", [])
+            _redact_view_row(v, scope) for v in boards.get("topViews", [])
         ],
         "topWorkspaces": [
-            w if scope.can_see(w.get("workspaceId"))
-            else {**w, "name": REDACTED_WORKSPACE, "redacted": True}
-            for w in doc["leaderboards"].get("topWorkspaces", [])
+            {**w, "canOpen": scope.can_open(w.get("workspaceId"))}
+            if scope.can_see(w.get("workspaceId"))
+            else {**w, "name": REDACTED_WORKSPACE, "redacted": True, "canOpen": False}
+            for w in boards.get("topWorkspaces", [])
         ],
     }
 
     # Operations: who is waiting for access, and where the data is unreliable.
-    # An operator's view of the platform, and it names people by implication.
+    # An operator's view of the platform, and a map of where the gaps are.
     health = dict(doc.get("health") or {})
     if not scope.shows_operations:
         health.pop("access", None)
@@ -808,33 +847,58 @@ def redact_summary(doc: dict, scope) -> dict:
     # redacted one must not survive. Allow-listed by key rather than filtered by
     # inspection: a new rule is hidden from the public tier until someone has
     # looked at what it says.
-    doc["insights"] = [
-        i for i in doc.get("insights", []) if i["key"] in _PUBLIC_INSIGHTS
-    ]
+    allowed = set(_PUBLIC_INSIGHTS)
+    if scope.shows_people:
+        allowed |= _PEOPLE_INSIGHTS
+    if scope.shows_operations:
+        allowed |= _OPERATIONS_INSIGHTS
+    doc["insights"] = [i for i in doc.get("insights", []) if i["key"] in allowed]
 
     doc["redaction"] = {
         "applied": True,
-        "visibleWorkspaces": len(scope.visible_workspaces),
+        "mode": scope.privacy.value,
+        "showsPeople": scope.shows_people,
+        "showsOperations": scope.shows_operations,
+        # True when an operator has opened workspace reporting to everyone, so
+        # the UI can explain WHY a workspace it cannot open is nonetheless named.
+        "reportsAllWorkspaces": scope.reports_all_workspaces,
+        "visibleWorkspaces": (
+            None if scope.sees_all_workspaces else len(scope.visible_workspaces)
+        ),
         # False means we could not resolve the caller's access, so anything
         # locked may be locked wrongly. The UI says so rather than presenting a
         # confident redaction it cannot stand behind.
         "accessResolved": scope.workspaces_known,
+        # Named precisely, because a generic "some things are hidden" teaches
+        # people the dashboard is unreliable rather than that it is scoped.
         "hidden": [
-            "Individual activity and names",
-            "Names of workspaces you are not in",
-            "Access requests, invites and refresh health",
+            *([] if scope.shows_people else ["Individual activity and names"]),
+            *([] if scope.sees_all_workspaces
+              else ["Names of workspaces you are not in"]),
+            *([] if scope.shows_operations
+              else ["Access requests, invites and refresh health"]),
         ],
     }
     return doc
 
 
 #: Insight rules whose text is derived only from platform-wide aggregates.
-#: Everything else — anything quoting a workspace, a person, or operational
-#: health — is withheld from a non-privileged reader.
+#: Safe at every level, because they quote counts and rates and nothing else.
 _PUBLIC_INSIGHTS = frozenset({
     "signups", "active", "views", "signup-mix", "stickiness",
     "trace-empty", "search-miss", "funnel-leak", "concentration",
     "semantic-coverage",
+})
+
+#: Rules that describe the behaviour of individuals in aggregate ("more people
+#: went quiet than kept using it"). Nobody is named, but it is a statement
+#: about the workforce, so it rides with the people setting.
+_PEOPLE_INSIGHTS = frozenset({"dormancy"})
+
+#: Rules quoting operational health — where the data is unreliable, and who is
+#: waiting for access.
+_OPERATIONS_INSIGHTS = frozenset({
+    "refresh-failures", "stale-sources", "access-backlog", "invite-acceptance",
 })
 
 
@@ -1706,6 +1770,9 @@ async def _leaderboards(session: AsyncSession, w: Window, *, opens: _OpenFold) -
             "workspaceId": view_rows[vid].workspace_id,
             "visibility": view_rows[vid].visibility,
             "viewType": view_rows[vid].view_type,
+            # Carried so the redactor can honour the creator's own reach — see
+            # `ViewerScope.can_see_view`. Never rendered.
+            "createdBy": view_rows[vid].created_by,
             "opens": int(opens.by_view.get(vid, 0)),
             "uniqueViewers": len(opens.viewers_by_view.get(vid, ())),
             "favourites": int(favourites.get(vid, 0)),
@@ -1886,10 +1953,17 @@ async def workspace_rows(
             # Churn risk: it exists, it has content, and nobody touched it.
             "dormant": window_activity == 0,
             "redacted": False,
+            # Whether a link into the workspace should be rendered. Stricter
+            # than being named: reporting on a workspace is not a door into it.
+            "canOpen": True,
         })
     if scope is not None and not scope.privileged:
-        rows = [r if scope.can_see(r["workspaceId"]) else _redact_workspace_row(r)
-                for r in rows]
+        rows = [
+            {**r, "canOpen": scope.can_open(r["workspaceId"])}
+            if scope.can_see(r["workspaceId"])
+            else _redact_workspace_row(r)
+            for r in rows
+        ]
     return rows
 
 

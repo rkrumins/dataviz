@@ -1024,3 +1024,150 @@ async def test_an_unreadable_flag_fails_closed(test_client, db_session, _flag_ca
     _prime_flag()   # cache primed, key absent — the flag has no resolvable value
 
     assert (await _as(test_client, ())).status_code == 403
+
+
+# ── Alignment with the app's own permission model ───────────────────
+#
+# Three ways Analytics used to be STRICTER than the product it reports on.
+# Being over-cautious looks harmless and is not: a dashboard that hides what
+# the rest of the app shows teaches people its numbers are unreliable.
+
+from backend.app.services.analytics_scope import PrivacyMode
+
+
+def _scope(**kw) -> ViewerScope:
+    base = dict(privileged=False, visible_workspaces=frozenset(),
+                privacy=PrivacyMode.INTERNAL)
+    base.update(kw)
+    return ViewerScope(**base)
+
+
+async def test_org_viewer_sees_every_workspace(db_session):
+    """`system:org-viewer` already short-circuits every workspace:*:read in
+    `permission_service`. Analytics ignoring it was a bug."""
+    await _seed(db_session)
+    rows = await analytics_repo.workspace_rows(
+        db_session, days=7, now=NOW,
+        scope=_scope(sees_all_workspaces=True),
+    )
+    assert all(r["redacted"] is False for r in rows)
+    assert {r["name"] for r in rows} == {"Live", "Quiet"}
+    # And they may genuinely open them — this is real access, not reporting.
+    assert all(r["canOpen"] for r in rows)
+
+
+async def test_enterprise_published_views_are_named_for_everyone(db_session):
+    """`view_access.can_read_view` returns True for enterprise visibility on
+    ANY authenticated user, so hiding the name was pure inconsistency."""
+    await _seed(db_session)
+    db_session.add_all([
+        ProductEventORM(id=f"pev_ent{i}", event_type="view.opened",
+                        actor_id="usr_old",
+                        payload=json.dumps({"viewId": "view_a"}), created_at=_iso(1))
+        for i in range(3)
+    ])
+    await db_session.commit()
+
+    # view_a is enterprise-visibility and lives in ws_live.
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_scope())   # member of nothing
+    named = {v["name"] for v in doc["leaderboards"]["topViews"]}
+    assert "Alpha" in named, "an enterprise-published view must keep its name"
+    alpha = next(v for v in doc["leaderboards"]["topViews"] if v["name"] == "Alpha")
+    assert alpha["canOpen"] is True, "anyone can open an enterprise view"
+
+
+async def test_a_creator_keeps_reach_to_their_own_view(db_session):
+    await _seed(db_session)
+    db_session.add(ProductEventORM(
+        id="pev_own", event_type="view.opened", actor_id="usr_new1",
+        payload=json.dumps({"viewId": "view_b"}), created_at=_iso(1)))
+    await db_session.commit()
+
+    # view_b is PRIVATE, in ws_live, created by usr_new1.
+    mine = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_scope(user_id="usr_new1"))
+    assert "Beta" in {v["name"] for v in mine["leaderboards"]["topViews"]}
+
+    theirs = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_scope(user_id="usr_old"))
+    beta = [v for v in theirs["leaderboards"]["topViews"] if v["name"] == "Beta"]
+    assert not beta, "someone else's private view stays hidden"
+
+
+# ── Privacy modes ───────────────────────────────────────────────────
+
+async def test_strict_names_nobody_but_still_answers(db_session):
+    """The DataHub-shaped floor: aggregates and popular published items are
+    useful to everyone even when no individual is named."""
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW,
+        scope=_scope(privacy=PrivacyMode.STRICT, visible_workspaces=frozenset({"ws_live"})))
+
+    assert doc["leaderboards"]["topUsers"] == []
+    assert doc["totals"]["users"]["total"] > 0
+    assert doc["redaction"]["mode"] == "strict"
+    assert doc["redaction"]["showsPeople"] is False
+
+
+async def test_internal_names_colleagues_but_never_emails(db_session):
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_scope(privacy=PrivacyMode.INTERNAL))
+
+    assert doc["leaderboards"]["topUsers"], "colleagues are named at this level"
+    # An address is a credential-shaped identifier, stripped at EVERY level.
+    assert all(u["email"] is None for u in doc["leaderboards"]["topUsers"])
+    assert "@x.io" not in json.dumps(doc)
+    # Operations stay privileged until `full`.
+    assert "access" not in doc["health"]
+
+
+async def test_full_adds_operations(db_session):
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_scope(privacy=PrivacyMode.FULL))
+    assert "access" in doc["health"]
+    assert "reliability" in doc["health"]
+
+
+async def test_your_own_row_survives_the_strictest_level(db_session):
+    """It is their data. Hiding it from them protects nobody."""
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW,
+        scope=_scope(privacy=PrivacyMode.STRICT, user_id="usr_old"))
+    assert [u["userId"] for u in doc["leaderboards"]["topUsers"]] == ["usr_old"]
+
+
+# ── Workspace reporting vs. workspace access ────────────────────────
+
+async def test_reporting_on_a_workspace_is_not_a_door_into_it(db_session):
+    """The whole reason `can_see` and `can_open` are separate predicates."""
+    await _seed(db_session)
+    rows = await analytics_repo.workspace_rows(
+        db_session, days=7, now=NOW,
+        scope=_scope(visible_workspaces=frozenset({"ws_live"}),
+                     reports_all_workspaces=True),
+    )
+    by_id = {r["workspaceId"]: r for r in rows}
+
+    # Named and measured, because an operator opened reporting…
+    assert by_id["ws_quiet"]["redacted"] is False
+    assert by_id["ws_quiet"]["name"] == "Quiet"
+    assert by_id["ws_quiet"]["views"] is not None
+    # …but no link, because they still cannot open it.
+    assert by_id["ws_quiet"]["canOpen"] is False
+    assert by_id["ws_live"]["canOpen"] is True
+
+
+async def test_workspace_reporting_off_locks_rows_as_before(db_session):
+    await _seed(db_session)
+    rows = await analytics_repo.workspace_rows(
+        db_session, days=7, now=NOW,
+        scope=_scope(visible_workspaces=frozenset({"ws_live"})),
+    )
+    by_id = {r["workspaceId"]: r for r in rows}
+    assert by_id["ws_quiet"]["redacted"] is True
+    assert by_id["ws_quiet"]["views"] is None

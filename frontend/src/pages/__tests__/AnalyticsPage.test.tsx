@@ -6,13 +6,14 @@
  * isn't validated lets `?range=99` reach the API as a 422.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { AnalyticsPage } from '@/pages/AnalyticsPage'
 import { analyticsService } from '@/services/analyticsService'
+import { useAuthStore } from '@/store/auth'
 
 // jsdom has no matchMedia, and the charts ask it which palette to draw with.
 // A browser always answers; the test environment has to be told to.
@@ -158,6 +159,16 @@ function renderAt(path: string) {
 
 describe('AnalyticsPage', () => {
     beforeEach(() => {
+        // Zustand state survives between tests, so a test that seeds admin
+        // claims would silently privilege every test after it. Reset first.
+        act(() => {
+            useAuthStore.setState({
+                status: 'authenticated',
+                isAuthenticated: true,
+                permissions: { sid: 's1', global: [], ws: {} },
+                permissionsStatus: 'ready',
+            })
+        })
         vi.mocked(analyticsService.getSummary).mockResolvedValue(SUMMARY as never)
         vi.mocked(analyticsService.listWorkspaces).mockResolvedValue(WORKSPACE_ROWS as never)
         vi.mocked(analyticsService.getWorkspace).mockResolvedValue({} as never)
@@ -331,6 +342,10 @@ describe('AnalyticsPage', () => {
         ...SUMMARY,
         redaction: {
             applied: true as const,
+            mode: 'strict' as const,
+            showsPeople: false,
+            showsOperations: false,
+            reportsAllWorkspaces: false,
             visibleWorkspaces: 1,
             accessResolved: true,
             hidden: ['Individual activity and names'],
@@ -354,11 +369,28 @@ describe('AnalyticsPage', () => {
         vi.mocked(analyticsService.getSummary).mockResolvedValue(REDACTED as never)
         renderAt('/analytics')
         // The notice explains the shape of what they are looking at.
-        expect(await screen.findByText(/you're seeing the platform-wide view/i))
+        expect(await screen.findByText(/you're seeing figures for/i))
             .toBeInTheDocument()
         // And the aggregates are still there — that is the whole point.
         expect(screen.getAllByText(/active users/i).length).toBeGreaterThan(0)
         expect(screen.getAllByText(/total users/i).length).toBeGreaterThan(0)
+    })
+
+    it('shows colleagues at the internal level, not just to admins', async () => {
+        // The bug this catches: the guards keyed on `redaction.applied`, which
+        // is true for EVERY non-privileged reader — so colleagues stayed hidden
+        // at the very level whose purpose is to show them.
+        vi.mocked(analyticsService.getSummary).mockResolvedValue({
+            ...REDACTED,
+            redaction: {
+                ...REDACTED.redaction, mode: 'internal' as const, showsPeople: true,
+            },
+            leaderboards: SUMMARY.leaderboards,
+        } as never)
+        renderAt('/analytics')
+
+        expect(await screen.findByText('Ada Lovelace')).toBeInTheDocument()
+        expect(screen.queryByText(/individual activity is hidden/i)).toBeNull()
     })
 
     it('withholds operational health from a redacted viewer', async () => {
@@ -398,7 +430,68 @@ describe('AnalyticsPage', () => {
         // Both rows present: the table must agree with the totals above it.
         expect(await screen.findByText('Finance')).toBeInTheDocument()
         expect(screen.getByText('Restricted workspace')).toBeInTheDocument()
-        expect(screen.getByText(/you are not a member/i)).toBeInTheDocument()
+        // A locked row is a dead end unless it offers a way forward, and the
+        // product already has an access-request queue to put them in.
+        expect(screen.getByRole('button', { name: /request access/i }))
+            .toBeInTheDocument()
+    })
+
+    it('links a workspace you can open, and does not link one you cannot', async () => {
+        vi.mocked(analyticsService.getSummary).mockResolvedValue(REDACTED as never)
+        vi.mocked(analyticsService.listWorkspaces).mockResolvedValue([
+            { ...WORKSPACE_ROWS[0], canOpen: true },
+            {
+                ...WORKSPACE_ROWS[0], workspaceId: 'ws3', name: 'Reported Only',
+                canOpen: false, redacted: false,
+            },
+        ] as never)
+        renderAt('/analytics?tab=workspaces')
+
+        // Openable → a real link, pointing where the app would actually go.
+        const link = await screen.findByRole('link', { name: 'Finance' })
+        expect(link).toHaveAttribute('href', '/workspaces/ws1')
+
+        // Named because an operator opened reporting, but not openable — so no
+        // link. Reporting on something is not a door into it.
+        expect(screen.queryByRole('link', { name: 'Reported Only' })).toBeNull()
+        expect(screen.getByText('Reported Only')).toBeInTheDocument()
+    })
+
+    it('tells an administrator what everyone else can see', async () => {
+        // The setting is otherwise invisible to the person who owns it: they
+        // would have to sign in as somebody else to check what they changed.
+        act(() => {
+            useAuthStore.setState({
+                status: 'authenticated',
+                isAuthenticated: true,
+                permissions: { sid: 's1', global: ['system:admin'], ws: {} },
+                permissionsStatus: 'ready',
+            })
+        })
+        renderAt('/analytics')
+        expect(await screen.findByText(/only administrators and auditors/i))
+            .toBeInTheDocument()
+        // Read-only: the control itself lives in settings, one click away.
+        expect(screen.getByRole('link', { name: /change/i }))
+            .toHaveAttribute('href', '/admin/features')
+    })
+
+    it('shows a reader their own limits, not the deployment posture', async () => {
+        // The mirror image: a non-privileged reader gets the redaction notice
+        // in the second person and never sees the operator's status line.
+        act(() => {
+            useAuthStore.setState({
+                status: 'authenticated',
+                isAuthenticated: true,
+                permissions: { sid: 's1', global: [], ws: { ws1: ['workspace:view:read'] } },
+                permissionsStatus: 'ready',
+            })
+        })
+        vi.mocked(analyticsService.getSummary).mockResolvedValue(REDACTED as never)
+        renderAt('/analytics')
+
+        expect(await screen.findByText(/you're seeing figures for/i)).toBeInTheDocument()
+        expect(screen.queryByText(/only administrators and auditors/i)).toBeNull()
     })
 
     it('surfaces a load failure instead of rendering empty charts', async () => {

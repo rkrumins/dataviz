@@ -34,6 +34,7 @@ import { ContentTab } from '@/components/analytics/ContentTab'
 import { WorkspacesTab } from '@/components/analytics/WorkspacesTab'
 import { HealthTab } from '@/components/analytics/HealthTab'
 import { RedactionNotice } from '@/components/analytics/Redacted'
+import { PublicPosture } from '@/components/analytics/PublicPosture'
 import { WorkspaceInsightsPanel } from '@/components/analytics/WorkspaceInsightsPanel'
 
 type AnalyticsTab =
@@ -191,11 +192,13 @@ export function AnalyticsPage() {
                 <PageContainer gutter="shell" className="py-6 pb-20">
                     {/* One notice at the top, not a caveat beside every
                         hidden thing. Absent entirely for privileged readers. */}
+                    {/* Operators see what everyone ELSE sees; readers see what
+                        they themselves are missing. Two audiences, two
+                        sentences, never both at once. */}
+                    <PublicPosture className="mb-5" />
                     {summary.data?.redaction && (
                         <RedactionNotice
-                            visibleWorkspaces={summary.data.redaction.visibleWorkspaces}
-                            accessResolved={summary.data.redaction.accessResolved}
-                            hidden={summary.data.redaction.hidden}
+                            redaction={summary.data.redaction}
                             className="mb-5"
                         />
                     )}

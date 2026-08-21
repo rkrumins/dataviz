@@ -8,6 +8,7 @@ import type {
     AnalyticsRangeSelection, AnalyticsSummary,
 } from '@/services/analyticsService'
 import { viewTypeLabel, visibilityLabel } from '@/lib/domainLabels'
+import { ViewLink } from './EntityLink'
 import { KpiCard } from './KpiCard'
 import { WithheldPanel } from './Redacted'
 import { Leaderboard } from './Leaderboard'
@@ -74,7 +75,10 @@ export function ContentTab({
                     <StackedShareBar slices={breakdowns.viewsByType} labelOf={viewTypeLabel} />
                 </ChartFrame>
 
-                {data.redaction?.applied ? (
+                {/* Keyed on showsPeople, not on `applied`: `applied` is
+                    true for every non-privileged reader, so keying on it
+                    hid colleagues at the level that exists to show them. */}
+                {data.redaction && !data.redaction.showsPeople ? (
                     <WithheldPanel
                         title="Top builders is hidden"
                         reason="Per-person contribution is visible to administrators and auditors only. The view counts above include everyone's work."
@@ -145,7 +149,7 @@ export function ContentTab({
                         slot={1}
                         rows={leaderboards.topViews.map((v) => ({
                             id: v.viewId,
-                            label: v.name,
+                            label: <ViewLink viewId={v.viewId} name={v.name} canOpen={v.canOpen} />,
                             meta: `${viewTypeLabel(v.viewType)} · ${visibilityLabel(v.visibility)}`,
                             value: v.opens,
                             detail: `${exact(v.uniqueViewers)} ${v.uniqueViewers === 1 ? 'person' : 'people'}`,

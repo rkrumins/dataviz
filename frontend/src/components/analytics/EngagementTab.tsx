@@ -236,7 +236,10 @@ export function EngagementTab({
                     />
                 </ChartFrame>
 
-                {data.redaction?.applied ? (
+                {/* Keyed on showsPeople, not on `applied`: `applied` is
+                    true for every non-privileged reader, so keying on it
+                    hid colleagues at the level that exists to show them. */}
+                {data.redaction && !data.redaction.showsPeople ? (
                     <WithheldPanel
                         title="Individual activity is hidden"
                         reason="Who did what is visible to administrators and auditors only. Every count on this page still includes everyone's activity."

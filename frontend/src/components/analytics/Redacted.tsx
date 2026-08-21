@@ -6,46 +6,136 @@
  * unless you say which is which, and the empty one is a lie — "nobody was
  * active" instead of "you may not see who was".
  *
- * So every withheld thing here states three facts: that something is hidden,
- * why, and what would change it. A lock with no explanation is just a wall.
+ * WHY THE SILHOUETTE IS SYNTHETIC
+ * The obvious premium treatment is to render the real component behind frosted
+ * glass. It is also a security bug: CSS blur is a paint effect, so every value
+ * is still in the DOM and one view-source away. Everything below draws a FAKE
+ * shape — deterministic, valueless bars that mimic the real layout — so the
+ * reader learns what kind of thing is missing and how much of it there is
+ * without a single real number reaching their browser.
  *
- * Deliberately quiet. These sit next to real data, and a loud "ACCESS DENIED"
- * would make a normal state feel like a failure — most people are not supposed
- * to see most workspaces, and that is unremarkable.
+ * TWO KINDS OF LOCK, TWO AFFORDANCES
+ *   * **Policy** — an operator chose a privacy level. Nothing the reader can
+ *     do; say so plainly and don't offer a button that leads nowhere.
+ *   * **Access** — they are not a member. That IS actionable, and the product
+ *     already has an access-request flow, so the lock becomes its entry point.
+ *
+ * Deliberately quiet throughout. Most people are not supposed to see most
+ * workspaces; that is unremarkable, and styling it like a failure would make a
+ * normal state feel like one.
  */
-import { Lock, ShieldQuestion } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { Lock, ShieldQuestion, Sparkles } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import type { AnalyticsSummary } from '@/services/analyticsService'
+
+type Redaction = NonNullable<AnalyticsSummary['redaction']>
+
+/** Silhouette shapes, matching the geometry of the real components. */
+type Shape = 'leaderboard' | 'stats' | 'chart' | 'none'
 
 /**
- * A whole panel the viewer may not have — a leaderboard, an operational
- * section. Occupies the same box the real thing would, so the page does not
- * reflow into a different layout depending on who is reading it.
+ * Deterministic pseudo-widths. `Math.random` would re-roll on every render and
+ * make the placeholder shimmer as the page updates, which reads as loading
+ * rather than as locked.
+ */
+function pseudo(i: number, min: number, max: number): number {
+    const t = (Math.sin(i * 12.9898) * 43758.5453) % 1
+    return min + Math.abs(t) * (max - min)
+}
+
+function Silhouette({ shape }: { shape: Shape }) {
+    if (shape === 'none') return null
+
+    const bar = 'rounded-full bg-black/[0.055] dark:bg-white/[0.07]'
+
+    if (shape === 'stats') {
+        return (
+            <div aria-hidden className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {Array.from({ length: 4 }, (_, i) => (
+                    <div key={i} className="rounded-xl border border-glass-border p-3.5">
+                        <div className={cn(bar, 'h-6 w-14')} />
+                        <div className={cn(bar, 'mt-2 h-2.5')} style={{ width: `${pseudo(i, 45, 80)}%` }} />
+                    </div>
+                ))}
+            </div>
+        )
+    }
+
+    if (shape === 'chart') {
+        return (
+            <div aria-hidden className="flex h-28 items-end gap-1.5">
+                {Array.from({ length: 16 }, (_, i) => (
+                    <div
+                        key={i}
+                        className="flex-1 rounded-t-[3px] bg-black/[0.055] dark:bg-white/[0.07]"
+                        style={{ height: `${pseudo(i, 20, 95)}%` }}
+                    />
+                ))}
+            </div>
+        )
+    }
+
+    // leaderboard — rank chip, name, value. The shape people recognise.
+    return (
+        <div aria-hidden className="space-y-2.5">
+            {Array.from({ length: 5 }, (_, i) => (
+                <div key={i} className="flex items-center gap-3">
+                    <div className={cn(bar, 'h-5 w-5 shrink-0 rounded-md')} />
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                        <div className={cn(bar, 'h-2.5')} style={{ width: `${pseudo(i, 35, 70)}%` }} />
+                        <div className={cn(bar, 'h-1.5 opacity-60')} style={{ width: `${pseudo(i + 40, 20, 45)}%` }} />
+                    </div>
+                    <div className={cn(bar, 'h-2.5 w-10 shrink-0')} />
+                </div>
+            ))}
+        </div>
+    )
+}
+
+/**
+ * A whole panel the viewer may not have. Occupies the box the real thing
+ * would, so the page does not reflow into a different layout depending on who
+ * is reading it.
  */
 export function WithheldPanel({
-    title, reason, className,
+    title, reason, shape = 'leaderboard', action, className,
 }: {
     title: string
-    /** Why it is hidden, in a sentence a non-admin can act on. */
+    /** Why it is hidden, in a sentence a non-admin can act on or accept. */
     reason: string
+    shape?: Shape
+    /** Only for locks the reader can actually do something about. */
+    action?: ReactNode
     className?: string
 }) {
     return (
-        <div
-            role="note"
+        <section
+            aria-label={title}
             className={cn(
-                'flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-glass-border bg-black/[0.015] dark:bg-white/[0.015] px-6 py-10 text-center',
+                'relative overflow-hidden rounded-xl border border-glass-border bg-canvas-elevated p-4',
                 className,
             )}
         >
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-glass-border bg-canvas-elevated">
-                <Lock className="h-4 w-4 text-ink-muted" />
-            </span>
-            <p className="text-xs font-bold text-ink">{title}</p>
-            <p className="max-w-xs text-[11px] leading-relaxed text-ink-muted">
-                {reason}
-            </p>
-        </div>
+            {/* The shape of what is missing, drawn from nothing. */}
+            <div className="pointer-events-none select-none opacity-70">
+                <Silhouette shape={shape} />
+            </div>
+
+            {/* The explanation sits ON the silhouette, so the panel reads as
+                one thing rather than as a placeholder with a caption. */}
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-gradient-to-b from-canvas-elevated/70 via-canvas-elevated/90 to-canvas-elevated px-6 text-center backdrop-blur-[2px]">
+                <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-glass-border bg-canvas-elevated shadow-sm">
+                    <Lock className="h-4 w-4 text-ink-muted" />
+                </span>
+                <p className="text-xs font-bold text-ink">{title}</p>
+                <p className="max-w-xs text-[11px] leading-relaxed text-ink-muted">
+                    {reason}
+                </p>
+                {action}
+            </div>
+        </section>
     )
 }
 
@@ -65,22 +155,35 @@ export function WithheldValue({ label = 'Hidden' }: { label?: string }) {
 }
 
 /**
- * The page-level notice: this document has been redacted, and here is what was
- * taken out. Shown once, at the top, rather than repeating a caveat beside
+ * Turn the server's redaction record into a sentence. Precise rather than
+ * generic: "some things are hidden" teaches people the dashboard is
+ * unreliable, where naming exactly what is missing teaches them it is scoped.
+ */
+export function describeRedaction(r: Redaction): string {
+    if (r.showsPeople && r.showsOperations && r.reportsAllWorkspaces) {
+        return 'Everything except workspaces you cannot open.'
+    }
+    const parts: string[] = []
+    if (!r.showsPeople) parts.push('who did what')
+    if (!r.reportsAllWorkspaces) parts.push("names of workspaces you're not in")
+    if (!r.showsOperations) parts.push('access requests and data-refresh health')
+    return parts.length ? `Hidden: ${parts.join(', ')}.` : ''
+}
+
+/**
+ * The page-level notice, shown once at the top rather than repeated beside
  * every hidden thing.
  */
 export function RedactionNotice({
-    visibleWorkspaces, accessResolved, hidden, className,
+    redaction, className,
 }: {
-    visibleWorkspaces: number
-    accessResolved: boolean
-    hidden: string[]
+    redaction: Redaction
     className?: string
 }) {
     // An unresolved workspace map is a different message. Presenting a
     // confident redaction we cannot stand behind would have someone believe
     // they are locked out of workspaces they are actually in.
-    if (!accessResolved) {
+    if (!redaction.accessResolved) {
         return (
             <div
                 role="status"
@@ -104,6 +207,18 @@ export function RedactionNotice({
         )
     }
 
+    const scope = redaction.reportsAllWorkspaces
+        ? 'every workspace on the platform'
+        : redaction.visibleWorkspaces === null
+            ? 'every workspace on the platform'
+            : redaction.visibleWorkspaces === 0
+                ? 'the whole platform, though you are not a member of any workspace yet'
+                : `the whole platform, with full detail for the ${
+                    redaction.visibleWorkspaces === 1
+                        ? 'workspace' : `${redaction.visibleWorkspaces} workspaces`
+                } you belong to`
+    const hidden = describeRedaction(redaction)
+
     return (
         <div
             role="note"
@@ -112,18 +227,17 @@ export function RedactionNotice({
                 className,
             )}
         >
-            <Lock className="mt-0.5 h-4 w-4 shrink-0 text-ink-muted" />
+            <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-indigo-500" />
             <div className="min-w-0 flex-1">
                 <p className="text-xs font-bold text-ink">
-                    You're seeing the platform-wide view
+                    You're seeing figures for {scope}
                 </p>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-ink-muted">
-                    Totals and trends below cover the whole platform, including{' '}
-                    {visibleWorkspaces === 0
-                        ? 'workspaces you are not a member of'
-                        : `the ${visibleWorkspaces === 1 ? 'workspace' : `${visibleWorkspaces} workspaces`} you belong to and others you don't`}
-                    . Hidden: {hidden.join(' · ').toLowerCase()}.
-                </p>
+                {hidden && (
+                    <p className="mt-0.5 text-[11px] leading-relaxed text-ink-muted">
+                        {hidden} Totals and trends always count everything, so the
+                        numbers describe the whole platform either way.
+                    </p>
+                )}
             </div>
         </div>
     )
