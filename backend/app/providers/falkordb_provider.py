@@ -7730,6 +7730,7 @@ class FalkorDBProvider(GraphDataProvider):
                 if len(nodes_by_urn) > 1:
                     containment_edges_list = await self._fetch_containment_edges(
                         list(nodes_by_urn.keys()), ctypes, chains=chains,
+                        labels={u: str(n.entity_type) for u, n in nodes_by_urn.items() if n.entity_type},
                     )
             except Exception:
                 st.reasons.append("ancestors_failed")
@@ -9680,8 +9681,16 @@ class FalkorDBProvider(GraphDataProvider):
     async def _fetch_containment_edges(
         self, urns: List[str], ctypes: List[str],
         chains: Optional[Dict[str, List[str]]] = None,
+        labels: Optional[Dict[str, str]] = None,
     ) -> List[GraphEdge]:
         """Containment edges where both endpoints are in ``urns``.
+
+        ``labels`` (urn → entity label), when the caller has them in hand
+        (the closure hydrates every participant, so it always does), anchors
+        each pair chunk on the PARENT's label: ``MATCH (s:Label)-[r]->(t)``
+        is an index seek, while the unlabeled form scanned the whole graph
+        once per chunk — measured ~520 ms per 400 pairs on a 520k-node
+        estate, eight chunks per page.
 
         Pair-list driven: builds the parent→child pairs we expect to exist
         from the cached ancestor chains (already populated by aggregation
@@ -9737,16 +9746,25 @@ class FalkorDBProvider(GraphDataProvider):
             # that still fails SYNTHESIZES its edges straight from the
             # ancestor chains — the chains are the truth; the query only
             # decorates real ids/types onto them.
-            all_pairs = sorted(pairs)
             out: List[GraphEdge] = []
             CHUNK_PAIRS = 400
-            for i in range(0, len(all_pairs), CHUNK_PAIRS):
-                chunk = all_pairs[i:i + CHUNK_PAIRS]
+            # Bucket by the parent's label when known: one index-anchored
+            # query per (label, chunk) instead of one scan per chunk.
+            by_label: Dict[str, List[Tuple[str, str]]] = {}
+            for pair in sorted(pairs):
+                by_label.setdefault((labels or {}).get(pair[0]) or "", []).append(pair)
+            chunks: List[Tuple[str, List[Tuple[str, str]]]] = []
+            for lbl, lbl_pairs in by_label.items():
+                for i in range(0, len(lbl_pairs), CHUNK_PAIRS):
+                    chunks.append((lbl, lbl_pairs[i:i + CHUNK_PAIRS]))
+            for lbl, chunk in chunks:
                 chunk_set: Set[Tuple[str, str]] = set(chunk)
                 s_urns = sorted({s for s, _ in chunk})
                 t_urns = sorted({t for _, t in chunk})
+                sl = _sanitize_label(lbl) if lbl else ""
+                s_clause = f":{sl}" if sl else ""
                 cypher = (
-                    f"MATCH (s)-[r:{rel_alt}]->(t) "
+                    f"MATCH (s{s_clause})-[r:{rel_alt}]->(t) "
                     "WHERE s.urn IN $sUrns AND t.urn IN $tUrns "
                     "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                     "type(r) AS edgeType, id(r) AS edgeId"

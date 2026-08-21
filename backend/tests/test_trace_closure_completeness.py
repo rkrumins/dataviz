@@ -473,3 +473,45 @@ def test_zero_degree_anchors_cost_no_query():
     assert _edges(r) == {("f", "a"), ("f", "b")}
     assert expands == [["f"]]
     assert r.frontier_down == []
+
+
+# ── Containment pair-fetch anchors on a LABEL (no full scans) ────────────
+
+def test_containment_pairs_are_fetched_label_bucketed_when_labels_are_known():
+    """Live on the 520k-node graph, each 400-pair chunk of
+    `MATCH (s)-[r:HAS]->(t) WHERE s.urn IN … AND t.urn IN …` cost ~520 ms —
+    an unlabeled anchor has no index, so every chunk scanned the graph, and
+    eight chunks made the containment step the slowest part of a page. The
+    walk hydrates every participant, so the labels are in hand: bucket the
+    pairs by the parent's label and the seek is an index read."""
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    p = FalkorDBProvider(host="x", graph_name="g")
+    p._redis = None
+    seen = []
+
+    async def _ro_query(cypher, params=None, timeout=None, **kwargs):
+        seen.append((cypher, params))
+        rows = []
+        for s in params["sUrns"]:
+            for t in params["tUrns"]:
+                if (s, t) in {("tbl_a", "col_1"), ("tbl_a", "col_2"), ("grp_x", "col_3")}:
+                    rows.append([s, t, "HAS", f"{s}|{t}"])
+        return type("R", (), {"result_set": rows})()
+
+    p._ro_query = _ro_query
+    chains = {"col_1": ["tbl_a"], "col_2": ["tbl_a"], "col_3": ["grp_x", "tbl_b"], "tbl_a": [], "grp_x": ["tbl_b"], "tbl_b": []}
+    labels = {"col_1": "attribute", "col_2": "attribute", "col_3": "attribute", "tbl_a": "object", "grp_x": "group", "tbl_b": "object"}
+
+    edges = _run(p._fetch_containment_edges(
+        list(chains), ["HAS"], chains=chains, labels=labels,
+    ))
+
+    assert {(e.source_urn, e.target_urn) for e in edges} == {
+        ("tbl_a", "col_1"), ("tbl_a", "col_2"), ("grp_x", "col_3"), ("tbl_b", "grp_x"),
+    }
+    assert seen, "the pair query must still run (real ids/types)"
+    for cypher, _ in seen:
+        assert "MATCH (s:" in cypher, f"unlabeled anchor would scan the graph: {cypher}"
+    # One query per parent label, not one scan per chunk.
+    assert {c.split("MATCH (s:")[1].split(")")[0] for c, _ in seen} == {"object", "group"}

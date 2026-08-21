@@ -313,7 +313,7 @@ def _make_provider(fake, levels=None, hydrate=True):
         async def _no_chains(urns):
             return {}
 
-        async def _no_containment_edges(urns, ctypes, chains=None):
+        async def _no_containment_edges(urns, ctypes, chains=None, labels=None):
             return []
 
         p.get_nodes_batch = _hydrate
