@@ -98,7 +98,19 @@ inner-first accounting reproduces the raw count (database/department residual 0 
 Lens one hop: **first cards 212 ms after the first request** (21 cards from the coarse page),
 complete at 7.2 s in 4 requests. Canvas trace: narrates from ≈1.1 s, 50k checkpoint hands-free.
 
-Suites after both parts: frontend **3,072 tests / 322 files** green (`ActivityFeedList` flaked once
+**Partner grain (2026-08-22, from the user's screenshots; commits `feat(lens): the density rung decides how
+the partners LAND…` and `…shows its strongest five rows…`).** The Tableau one hop was at half zoom with six
+tables per band — under any card budget, but every table opened to eight column rows: the cost was rows.
+The density rung now says how a partner LANDS: **Overview** closed (the card, its count on its own line,
+its chevron), **Grouped** the strongest `OPEN_PARTNERS_PER_BAND = 3` per band open to their strongest
+`BUNDLE_WINDOW = 5` rows and the rest closed, **Every card** all open; a partner the reader opened stays
+open at any rung with the full window. Two defects from the same screenshots: the focal said "Fed by 11
+sources" over an empty upstream band (a container whose contents feed each other — Reach now counts
+partners outside the focus side), and "One hop" drew a HOP 2 band (a 2/3 left in storage by the retired
+depth control — v4 migrates it to 1). Browser, Tableau one hop: Grouped 27 nodes at zoom 0.60 (was 44 at
+0.36), Overview 12 at 1.36, Every card 44 at 0.36.
+
+Suites after both parts: frontend **3,083 tests / 322 files** green (`ActivityFeedList` flaked once
 across midnight and passes alone); backend unit 233 + live gate 35 green; `tsc` 61; eslint on the
 touched files clean.
 
