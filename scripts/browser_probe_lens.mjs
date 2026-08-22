@@ -47,6 +47,13 @@ await send('Page.navigate', { url: `${APP}/login` }); await sleep(1500)
 const loginStatus = await evalJs(`fetch('/api/v1/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:${JSON.stringify(env.ADMIN_EMAIL)},password:${JSON.stringify(env.ADMIN_PASSWORD)}})}).then(r=>r.status)`)
 console.log('login', loginStatus)
 
+// 1b. a density preference for the run (DENSITY=overview|grouped|all) — the
+// store is persisted under `nexus-preferences`; seed it before the app reads it.
+if (process.env.DENSITY) {
+  await evalJs(`(() => { const raw = localStorage.getItem('nexus-preferences'); const cur = raw ? JSON.parse(raw) : { state: {}, version: 5 }; cur.state = { ...(cur.state ?? {}), lensDensity: ${JSON.stringify(process.env.DENSITY)} }; cur.version = 5; localStorage.setItem('nexus-preferences', JSON.stringify(cur)); return 'seeded' })()`)
+  console.log('density preference seeded:', process.env.DENSITY)
+}
+
 // 2. open the view with a Lens share link on the focus
 const share = { v: 3, entries: [...(process.env.TRAIL ? process.env.TRAIL.split(',') : []), focusUrn], cursor: (process.env.TRAIL ? process.env.TRAIL.split(',').length : 0), mode: 'graph', direction: 'both', depth: Number(process.env.DEPTH ?? 1), revealed: [], opened: [focusUrn], collapsed: [], frameAll: [], framePages: [], frameQueries: [], pinned: [], railWindow: null, condensedOpen: [] }
 const token = Buffer.from(JSON.stringify(share), 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
@@ -83,7 +90,7 @@ for (let i = 0; i < Math.round(420 * 1000 / SAMPLE_MS); i++) {
     const strips = [...document.querySelectorAll('button')].map(b => b.textContent.trim()).filter(t => /continue|try again|keep walking|load everything|load more/i.test(t))
     const chip = [...document.querySelectorAll('p,span')].map(x => x.textContent).find(t => /full flow drawn|immediate lineage complete/i.test(t)) ?? null
     const oneHop = document.querySelector('button[aria-pressed="true"]')?.textContent?.trim() ?? null
-    const scale = Number((/scale\(([\d.e-]+)\)/.exec(document.querySelector('.react-flow__viewport')?.style.transform ?? '') ?? [])[1] ?? NaN)
+    const scale = (() => { const t = document.querySelector('.react-flow__viewport')?.style.transform ?? ''; const i = t.indexOf('scale('); return i < 0 ? NaN : Number(t.slice(i + 6, t.indexOf(')', i))) })()
     const grew = !!document.querySelector('button')?.ownerDocument && [...document.querySelectorAll('button')].some(b => /board grew/i.test(b.textContent))
     const capsule = document.querySelector('[role="status"][data-trace-phase]')
     const capsuleText = capsule ? (capsule.getAttribute('data-trace-phase') + ': ' + capsule.textContent.trim().replace(/\\s+/g, ' ').slice(0, 120)) : null
@@ -150,6 +157,11 @@ const firstReq = requests[0]?.t ?? null
 const firstCards = samples.find(s => s.cards > 0)
 console.log(`\n== first paint: first request at ${firstReq} ms, first cards in the DOM at ${firstCards?.t ?? '?'} ms (${firstCards && firstReq != null ? firstCards.t - firstReq : '?'} ms after the request, ${firstCards?.cards ?? 0} cards)`)
 const final = samples[samples.length - 1]
+if (process.env.SCREENSHOT_DIR) {
+  const { writeFileSync } = await import('node:fs')
+  const shot = await send('Page.captureScreenshot', { format: 'png' })
+  writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-settled.png`, Buffer.from(shot.result.data, 'base64'))
+}
 console.log('\n== FINAL: cards in DOM =', final.cards, '| requests =', requests.length, '| strips =', JSON.stringify(final.strips), '| scale =', final.scale, '| grew pill =', final.grew, '| wall =', (final.t / 1000).toFixed(1), 's')
 // Fit the whole board and read the zoom + how many cards the DOM now holds.
 // Density (Part H): which rung is pressed, and how the board divides into frames, rows and loose cards.

@@ -4781,8 +4781,9 @@ export function FocusGraphView({
           // A user-driven move carries its event; the camera's own moves do not.
           onMoveStart={(event) => { if (event) setReaderMoved(true) }}
           onMove={(_, viewport) => setFocusOff(!camera.focusInView(viewport))}
-          fitView
-          fitViewOptions={{ padding: 0.15, maxZoom: FIT_MAX_ZOOM }}
+          // No `fitView` prop: React Flow's own fit-on-init framed the coarse
+          // first paint WHOLE — the tiny focus — a beat before the camera's
+          // focus-first framing (2026-08-22). The camera owns every move.
           minZoom={LENS_MIN_ZOOM}
           maxZoom={2}
           onlyRenderVisibleElements={CULL_OFFSCREEN && !cullPaused}
