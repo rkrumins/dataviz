@@ -133,7 +133,10 @@ export function TraceRecentPopover({
       <div className="py-1">
         {history.map((entry, idx) => {
           const node = displayMap.get(entry.focusId) ?? displayMap.get(entry.focusUrn)
-          const name = node?.name ?? entry.focusUrn
+          // The host's resolved name first: the canvas can only name what it
+          // has loaded, and this list outlives any one page — it printed raw
+          // urns for everything else.
+          const name = node?.name ?? entry.label ?? entry.focusUrn.split(/[:/]/).pop() ?? entry.focusUrn
           const typeId = node?.typeId
           const isActive = entry.focusId === activeFocusId
           return (

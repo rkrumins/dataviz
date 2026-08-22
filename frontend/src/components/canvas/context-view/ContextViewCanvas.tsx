@@ -126,6 +126,7 @@ import {
   type TraceHistoryEntryRecord,
 } from '@/hooks/lib/traceHistoryStack'
 import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
+import { useResolvedNames } from '@/hooks/useResolvedNames'
 
 /** The native canvas trace has no per-edge drilldowns — the closure walk
  *  model is complete at leaf grain. One shared empty map keeps the trace
@@ -1978,31 +1979,67 @@ export function ContextViewCanvas({
   const tracedNodeId = canvasTrace.tracedUrn
     ? (urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
     : null
+  // A HISTORY OUTLIVES THE PAGE, so it cannot be labelled from what the page
+  // has loaded (2026-08-22). After a reload the canvas holds its lane roots
+  // and nothing else, and the launcher read URN tails —
+  // `intermediate_t2_17d10688` — that turned into names later, if and when
+  // the reader happened to expand the container each entity lives in. What
+  // the canvas cannot name, the data source answers: one batched lookup for
+  // the unnamed urns, each asked at most once.
+  const unnamedHistoryUrns = useMemo(() => (
+    traceHistory.entries
+      .filter(e => !(displayMap.get(urnToIdMap.get(e.urn) ?? e.focusId)?.name || displayMap.get(e.focusId)?.name))
+      .map(e => e.urn)
+  ), [traceHistory, displayMap, urnToIdMap])
+  const historyNames = useResolvedNames(unnamedHistoryUrns, provider)
+  /** One name per entry: the canvas first (it is already showing that name),
+   *  the data source for everything else, and the urn tail only when neither
+   *  has anything. Both the launcher and the dock's Recent list read it. */
+  const historyLabels = useMemo(() => new Map<string, string>(
+    traceHistory.entries.map(entry => [
+      entry.urn,
+      displayMap.get(urnToIdMap.get(entry.urn) ?? entry.focusId)?.name
+        || displayMap.get(entry.focusId)?.name
+        || historyNames.get(entry.urn)
+        || entry.urn.split(/[:/]/).pop()
+        || entry.urn,
+    ]),
+  ), [traceHistory, displayMap, urnToIdMap, historyNames])
   // Launcher entries for the header's "pick up where you left off"
   // panel: resolved labels, direction mode, STACK index (newest first).
   const headerTraceHistory = useMemo(() => (
     traceHistory.entries.map((e, i) => ({
       index: i,
-      label: displayMap.get(urnToIdMap.get(e.urn) ?? e.focusId)?.name
-        ?? displayMap.get(e.focusId)?.name
-        ?? e.urn.split(/[:/]/).pop()
-        ?? e.urn,
+      label: historyLabels.get(e.urn) ?? e.urn,
       mode: (e.view.showUpstream && e.view.showDownstream ? 'both' : e.view.showUpstream ? 'up' : 'down') as 'up' | 'down' | 'both',
       timestamp: e.timestamp,
     })).reverse()
-  ), [traceHistory, displayMap, urnToIdMap])
+  ), [traceHistory, historyLabels])
+  // PICKING AN ENTRY IS NOT BACK/FORWARD. `traceHistoryGo` is the cursor
+  // walk, where "the cursor is already there" rightly means there is nothing
+  // to do — but a click on a row is a request to be looking at that trace,
+  // and after a reload the cursor sits on the newest entry with no trace on
+  // screen at all. That row did nothing when clicked; it is the likeliest
+  // row in the list.
   const resumeTraceHistory = useCallback((index: number) => {
-    traceHistoryGo(traceHistoryJump(traceHistory, index))
-  }, [traceHistoryGo, traceHistory])
+    const entry = traceHistory.entries[index]
+    if (!entry) return
+    flushExpansionRecord()
+    setTraceHistory(h => traceHistoryJump(h, index))
+    restoreTraceEntry(entry)
+  }, [traceHistory, flushExpansionRecord, restoreTraceEntry])
   const clearTraceHistory = useCallback(() => setTraceHistory(emptyTraceHistory()), [])
 
   // Legacy-shaped history entries for the dock's Recent popover.
   const dockHistoryEntries = useMemo(() => [...traceHistory.entries].reverse().map(e => ({
     focusId: e.focusId,
     focusUrn: e.urn,
+    // Same name the launcher shows, resolved the same way — the dock's
+    // Recent list printed the whole urn when the canvas could not name it.
+    label: historyLabels.get(e.urn) ?? e.urn,
     timestamp: e.timestamp,
     config: { ...trace.config, upstreamDepth: e.view.depthUp, downstreamDepth: e.view.depthDown },
-  })), [traceHistory, trace.config])
+  })), [traceHistory, trace.config, historyLabels])
   const dockTrace = useMemo<UseUnifiedTraceResult>(() => {
     if (!traceActive || !traceModel || !tracedNodeId) return trace
     const result: TraceResult = {
