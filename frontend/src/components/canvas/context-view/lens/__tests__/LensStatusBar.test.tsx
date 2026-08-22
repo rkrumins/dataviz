@@ -28,6 +28,18 @@ describe('LensStatusBar', () => {
     expect(legend).toHaveTextContent('bundle')
   })
 
+  it('explains the two marks a card can carry: ⊕ more to fetch, ⊘ a dead end', () => {
+    // The two most-asked-about glyphs on the board (2026-08-23). ⊕ is
+    // also a gesture — press it — but what it MEANS belongs beside the
+    // wires it might bring.
+    render(<LensStatusBar cards={4} wires={2} bundles={0} zoom={null} />)
+    const marks = screen.getByRole('list', { name: /what the marks mean/i })
+    expect(marks).toHaveTextContent('⊕')
+    expect(marks).toHaveTextContent(/more to fetch/i)
+    expect(marks).toHaveTextContent('⊘')
+    expect(marks).toHaveTextContent(/nothing further/i)
+  })
+
   it('states what is on the board, and the zoom once it is known', () => {
     const { rerender } = render(<LensStatusBar cards={23} wires={108} bundles={2} zoom={0.9136} />)
     expect(screen.getByRole('note', { name: /on the board/i })).toHaveTextContent('23 cards · 108 wires · 2 bundles · 91%')

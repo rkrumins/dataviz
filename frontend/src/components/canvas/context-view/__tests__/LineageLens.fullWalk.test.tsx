@@ -252,3 +252,45 @@ describe('LineageLens — the Path names where you have been (2026-08-22)', () =
     expect(trail()).not.toMatch(/gold_af963e43/)
   })
 })
+
+describe('LineageLens — a name we do not know is not printed (2026-08-23)', () => {
+  // A COLD SHARE-LINK OPEN: no canvas node, no model yet, so the only
+  // "label" available is a slice of the URN —
+  // `executive_board_dashboard_de06a1ba`. That is an identifier, not a
+  // name, and printing it as one (in the title, and in the capsule's
+  // "Mapping the lineage of …") reads as a broken product. Until a real
+  // name arrives the room says it is finding the focus, and the title
+  // holds its place.
+  const URN = 'urn:li:dashboard:executive_board_dashboard_de06a1ba'
+  const cold = (over: Partial<ComponentProps<typeof LineageLens>> = {}) => renderLens({
+    history: { entries: [URN], cursor: 0 },
+    walk: { model: walkModel(URN, []), status: 'loading', error: null, extendStatus: new Map(), depth: 1 },
+    walkProgress: null,
+    ...over,
+  })
+
+  it('prints no URN fragment: the capsule says it is finding the focus, the title waits', () => {
+    cold()
+    expect(document.body.textContent).not.toMatch(/executive_board_dashboard/)
+    expect(screen.getByRole('status')).toHaveTextContent(/finding the focus/i)
+    expect(screen.getByTestId('lens-title-pending')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
+  })
+
+  it('the moment a real name arrives — from the canvas or the walk — it is used everywhere', () => {
+    cold({ labelHintFor: (urn) => (urn === URN ? 'Executive Board Dashboard' : null) })
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('Executive Board Dashboard')
+    expect(screen.getByRole('status')).toHaveTextContent(/Mapping the lineage of Executive Board Dashboard/)
+    expect(screen.queryByTestId('lens-title-pending')).toBeNull()
+  })
+
+  it('a walk that lands the focus names it, with no hint at all', () => {
+    const named = { ...wnode(URN), data: { urn: URN, label: 'Executive Board Dashboard', type: 'dashboard' } } as unknown as LensWalkNode
+    renderLens({
+      history: { entries: [URN], cursor: 0 },
+      walk: doneWalk(walkModel(URN, [named])),
+    })
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('Executive Board Dashboard')
+    expect(document.body.textContent).not.toMatch(/executive_board_dashboard_de06a1ba/)
+  })
+})

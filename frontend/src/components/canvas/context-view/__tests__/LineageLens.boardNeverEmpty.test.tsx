@@ -55,7 +55,7 @@ describe('the rendered board is never empty while the model has the focus (T25 C
     // The condensation stage only runs when the reader has asked for it
     // (the header's "Steps" control, off by default), and this test's
     // whole subject is recovering from THAT stage's output.
-    usePreferencesStore.setState({ lensViewMode: 'graph', lensCondenseSteps: true })
+    usePreferencesStore.setState({ lensCondenseSteps: true })
     const walk: WalkEntry = {
       model: walkModel('F', {
         nodes: [wnode('F', 'dataset', 'shipments'), wnode('U', 'dataset', 'sensor_feed')],

@@ -380,11 +380,17 @@ column it lives in wider, and every level you open inside it wider again —
 so the columns either side move along to keep a clear gap. However deep you
 drill, a card is never drawn over another column.
 
+Until the data source has told the Lens what the entity is CALLED — opening a
+shared link cold, before anything has loaded — the title holds its place
+rather than showing an identifier, and the capsule says it is *finding the
+focus*. The name appears the moment it is known.
+
 Along the bottom, a **status bar**: the gestures as keycaps (**Click**
 inspect · **⊕** walk a hop · **▸** open what is inside · **↵** preview ·
-**Esc** close), a legend for what the wires mean — blue **upstream**, amber
+**Esc** close), a legend for the marks and the wires — **⊕** a card with more to fetch this
+way, **⊘** a confirmed dead end, then blue **upstream**, amber
 **downstream**, dashed **≈ coarse** (a count the data source summarised, not
-yet counted flow by flow), heavy **bundle** — and, on the right, what is on
+yet counted flow by flow) and heavy **bundle** — and, on the right, what is on
 the board right now: cards, wires, bundles and the zoom.
 
 Press **Esc** to close — a row preview first if one is open, then the Lens

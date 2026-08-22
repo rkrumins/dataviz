@@ -179,14 +179,6 @@ interface PreferencesState {
   toggleSubtleCanvasTreeLines: () => void
   resetCanvasDisplaySettings: () => void
 
-  /** Lineage Lens body. The graph IS the Lens (2026-08-22): the three-column
-   *  list is retired — no control offers it, a stored 'list' migrates to
-   *  'graph' (v5) — and its rendering path is kept one release for a safe
-   *  rollback, reachable only by setting this directly.
-   *  @deprecated 'list' is retired; the field stays 'graph'. */
-  lensViewMode: 'graph' | 'list'
-  /** @deprecated the Graph | List toggle is gone; nothing calls this in the product. */
-  setLensViewMode: (mode: 'graph' | 'list') => void
 
   /** What a newly opened container frame shows: only the entities inside
    *  it that carry lineage to the focused entity (default — that is the
@@ -410,8 +402,6 @@ export const usePreferencesStore = create<PreferencesState>()(
       }),
 
       // Lineage Lens body mode
-      lensViewMode: 'graph',
-      setLensViewMode: (lensViewMode) => set({ lensViewMode }),
       lensFrameChildren: 'connected',
       setLensFrameChildren: (lensFrameChildren) => set({ lensFrameChildren }),
       lensCondenseSteps: false,
@@ -461,14 +451,22 @@ export const usePreferencesStore = create<PreferencesState>()(
       // becomes 'graph', so the Lens opens as the graph for everyone.
       // v6 (2026-08-22): `lensWires` — the wires between two containers
       // fold into one bundle when there are many; the default is 'auto'.
-      version: 6,
+      // v7 (2026-08-23): the Lens's List body is GONE — the branch, its
+      // columns and this preference are removed, so the key is dropped
+      // rather than migrated. A state written before v5 no longer needs
+      // its 'list' → 'graph' step either; nothing reads the field.
+      version: 7,
       migrate: (persisted, version) => {
         let state = persisted as Record<string, unknown>
         if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
         if (version < 3) state = { ...state, lensDensity: 'grouped' }
         if (version < 4) state = { ...state, lensInitialDepth: 1 }
-        if (version < 5) state = { ...state, lensViewMode: 'graph' }
         if (version < 6) state = { ...state, lensWires: 'auto' }
+        if (version < 7) {
+          const next = { ...state }
+          delete next.lensViewMode
+          state = next
+        }
         return state
       },
     }
