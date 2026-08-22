@@ -167,8 +167,10 @@ accelerator only: absent or stale rollups cost nothing, and counts render as
 
 **Caching.** A closure page `truncated` for `max_nodes` is complete by
 contract and deterministic, so it is cached for the full TTL; any failure
-reason stays on the short negative TTL; `grain` is part of the key. Wide
-pages need `GRAPH_CACHE_MAX_PAYLOAD_BYTES` raised (8 MB on dev).
+reason stays on the short negative TTL; `grain` is part of the key. A wide
+page is ~2.5 MB, larger than the library's 1 MiB per-payload cap, so the
+compose stack raises `GRAPH_CACHE_MAX_PAYLOAD_BYTES` to 8 MiB for every
+service that holds a cache client (see `docs/SETUP.md`).
 
 ## Configuration
 
