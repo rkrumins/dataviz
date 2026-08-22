@@ -95,6 +95,7 @@ import { LayerColumn } from './LayerColumn'
 import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom } from './fitZoom'
+import { shiftToClear } from './drawerClearance'
 import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
   EMPTY_LENS_HISTORY,
@@ -2798,6 +2799,41 @@ export function ContextViewCanvas({
     revealPulseRef.current += 1
     setRevealTarget({ id: nodeId, pulse: revealPulseRef.current })
   }, [])
+
+  // THE DRAWER MUST NOT HIDE ITS OWN SUBJECT (2026-08-22). It is a flex
+  // sibling, not a floating panel: opening it takes 420-560 px off the
+  // board's width and the columns do not move, so the card that was just
+  // clicked — usually the rightmost thing on screen — ends up outside the
+  // visible box ("the drawer overflows the node"). Once the drawer's spring
+  // has settled, nudge the board by the LEAST that clears the row; the
+  // container's `scroll-smooth` makes that a glide, and a row already in
+  // view costs nothing. The reader's own scroll position is otherwise left
+  // exactly where they put it.
+  useEffect(() => {
+    const container = horizontalScrollRef.current
+    if (!drawerNodeId || !container) return
+    let frame = 0
+    let width = -1
+    let still = 0
+    let frames = 0
+    const whenSettled = () => {
+      const now = container.clientWidth
+      still = now === width ? still + 1 : 0
+      width = now
+      frames += 1
+      // Three identical frames means the width has stopped moving — which is
+      // true immediately when the drawer merely swapped entities and never
+      // resized. The frame cap keeps a window being dragged from holding
+      // this open indefinitely.
+      if (still < 3 && frames < 60) { frame = requestAnimationFrame(whenSettled); return }
+      const row = document.getElementById(`layer-node-${drawerNodeId}`)
+      if (!row) return                       // off-window: the reveal paths own that
+      const shift = shiftToClear(row.getBoundingClientRect(), container.getBoundingClientRect())
+      if (shift !== 0) container.scrollLeft += shift
+    }
+    frame = requestAnimationFrame(whenSettled)
+    return () => cancelAnimationFrame(frame)
+  }, [drawerNodeId])
 
   // F9 — REVEAL WHILE TRACING opens the OVERLAY's chain. The browse reveal
   // below walks `parentMap` and lazy-LOADS whichever ancestors the store is
