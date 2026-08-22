@@ -252,6 +252,15 @@ scroll, never fold a category into More) — two rows where there were four, no 
 name · Back · Center on focus · PATH GOLD › Tableau › Snowflake · search · help · share · close / six chips ·
 six type chips.
 
+**Direction first class + the status bar (2026-08-22, last).** Direction became an always-expanded segmented
+control at the head of the controls row — "which side of the story is the question itself, not a setting" —
+and never folds into More. The footer, one italic sentence of hints over a wide blank, is now a **status
+bar**: gestures as keycaps on the left (dropping the least-critical caps at narrow widths rather than
+clipping mid-word), a legend of what the four wire kinds mean in the middle, and live board facts on the
+right ("27 cards · 21 wires · 2 bundles · 79%", the zoom read on move-end). The header's middle, blank
+before a walk, now carries the Path's own empty state ("Double-click a card to focus it — your path appears
+here"). Verified at 2,000 and 1,280 px.
+
 ## Not built, and why
 
 - ~~Coarse first paint~~ — built in the evening on the user's call (see above).

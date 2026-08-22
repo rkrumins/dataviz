@@ -161,6 +161,11 @@ if (process.env.SCREENSHOT_DIR) {
   const { writeFileSync } = await import('node:fs')
   const shot = await send('Page.captureScreenshot', { format: 'png' })
   writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-settled.png`, Buffer.from(shot.result.data, 'base64'))
+  const H = Number((process.env.WINDOW ?? '1600,1000').split(',')[1])
+  const W = Number((process.env.WINDOW ?? '1600,1000').split(',')[0])
+  const foot = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: H - 90, width: W, height: 90, scale: 1 } })
+  writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-footer.png`, Buffer.from(foot.result.data, 'base64'))
+  console.log('== footer:', await evalJs(`document.querySelector('[aria-label="On the board"]')?.textContent ?? null`))
 }
 console.log('\n== FINAL: cards in DOM =', final.cards, '| requests =', requests.length, '| strips =', JSON.stringify(final.strips), '| scale =', final.scale, '| grew pill =', final.grew, '| wall =', (final.t / 1000).toFixed(1), 's')
 // Fit the whole board and read the zoom + how many cards the DOM now holds.

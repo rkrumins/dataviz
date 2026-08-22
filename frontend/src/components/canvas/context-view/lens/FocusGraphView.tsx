@@ -651,6 +651,9 @@ interface FocusGraphViewProps {
   /** A counter the host bumps to ask for "Center on the focus" from
    *  outside the board — the header's own button (2026-08-22). */
   recenterSignal?: number
+  /** The zoom once a move has settled — the status bar reads it. Once
+   *  per gesture (move end), never per frame. */
+  onViewportSettle?: (zoom: number) => void
   edgeTypeInfo?: EdgeTypeInfoMap
   onSelect: (nodeId: string | null) => void
   /** Stick the isolation on this card, or clear it with null. */
@@ -4228,6 +4231,7 @@ export function FocusGraphView({
   walking = false,
   recenterKey = '',
   recenterSignal = 0,
+  onViewportSettle,
   edgeTypeInfo,
   onSelect,
   onIsolate: onIsolateProp,
@@ -4874,6 +4878,7 @@ export function FocusGraphView({
           // A user-driven move carries its event; the camera's own moves do not.
           onMoveStart={(event) => { if (event) setReaderMoved(true) }}
           onMove={(_, viewport) => setFocusOff(!camera.focusInView(viewport))}
+          onMoveEnd={(_, viewport) => onViewportSettle?.(viewport.zoom)}
           // No `fitView` prop: React Flow's own fit-on-init framed the coarse
           // first paint WHOLE — the tiny focus — a beat before the camera's
           // focus-first framing (2026-08-22). The camera owns every move.

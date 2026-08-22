@@ -2990,6 +2990,20 @@ describe('the header explains itself (2026-08-22)', () => {
     expect(both).toHaveAttribute('aria-pressed', 'false')
   })
 
+  it('with no walk yet, the Path\'s own place says what will appear there', () => {
+    // The header's middle is the Path's room. Before there is a path it
+    // was blank; now it teaches the gesture that fills it (2026-08-22).
+    renderLens(['b'], simple())
+    expect(screen.queryByRole('navigation', { name: /path/i })).toBeNull()
+    expect(screen.getByText(/double-click a card to focus it/i)).toBeInTheDocument()
+  })
+
+  it('once a path exists it takes that room, and the hint is gone', () => {
+    renderLens(['a', 'b'], simple(), { onJumpTo: vi.fn() })
+    expect(screen.getByRole('navigation', { name: /path/i })).toBeInTheDocument()
+    expect(screen.queryByText(/double-click a card to focus it/i)).toBeNull()
+  })
+
   it('choosing an option closes the menu and the chip reads the new value', () => {
     renderLens(['b'], simple())
     chooseView('Density', /^Overview/)

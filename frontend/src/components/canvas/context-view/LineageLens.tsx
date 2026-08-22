@@ -76,6 +76,7 @@ import type { ReactNode } from 'react'
 import { ControlTip } from './lens/ControlTip'
 import { useToolbarOverflow } from './lens/useToolbarOverflow'
 import { ViewControl } from './lens/ViewControl'
+import { LensStatusBar } from './lens/LensStatusBar'
 import * as Popover from '@radix-ui/react-popover'
 import { LensSkeleton } from './lens/LensSkeleton'
 
@@ -529,6 +530,8 @@ export function LineageLens({
   const lensViewMode = usePreferencesStore((s) => s.lensViewMode)
   // Bumped by the header's Center on focus; the board centres on it.
   const [recenterSignal, setRecenterSignal] = useState(0)
+  // The board's zoom, once a move has settled — the status bar's last fact.
+  const [boardZoom, setBoardZoom] = useState<number | null>(null)
   const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
   const condenseSteps = usePreferencesStore((s) => s.lensCondenseSteps)
   const setCondenseSteps = usePreferencesStore((s) => s.setLensCondenseSteps)
@@ -1838,7 +1841,13 @@ export function LineageLens({
                 </button>
               </div>
             </nav>
-              ) : <div className="flex-1" aria-hidden="true" />}
+              ) : (
+                // The Path's own room before there is a path: the gesture
+                // that fills it, said once, quietly (2026-08-22).
+                <p className="flex-1 min-w-0 mx-2 truncate text-[10.5px] text-ink-muted/60 italic">
+                  Double-click a card to focus it — your path appears here
+                </p>
+              )}
               <div className="ml-auto flex items-center gap-1.5 flex-shrink-0">
               <div className="relative flex-shrink-0">
                 <LucideIcons.Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-ink-muted/70" />
@@ -2085,6 +2094,7 @@ export function LineageLens({
                 // reader wherever the previous layout had them (2026-08-22).
                 recenterKey={`${density}|${condenseSteps ? 'condensed' : 'every'}|${directionFilter}`}
                 recenterSignal={recenterSignal}
+                onViewportSettle={setBoardZoom}
                 edgeTypeInfo={edgeTypeInfo}
                 onSelect={setSelection}
                 onIsolate={setIsolated}
@@ -2441,13 +2451,19 @@ export function LineageLens({
             </div>
           )}
 
-          {/* Footer */}
+          {/* THE STATUS BAR (2026-08-22) — gestures as keycaps, what the
+              wires mean, what is on the board. It was a sentence of
+              hints and a wide blank. */}
+          {lensViewMode === 'graph' ? (
+            <LensStatusBar
+              cards={boardGraph.cards.length}
+              wires={boardGraph.edges.length}
+              bundles={boardGraph.edges.filter(e => e.bundle).length}
+              zoom={boardZoom}
+            />
+          ) : (
           <div className="flex items-center gap-2 px-4 py-2.5 border-t border-black/[0.08] dark:border-white/[0.08]">
-            <p className="text-[10.5px] text-ink-muted/80">
-              {lensViewMode === 'graph'
-                ? 'Click a card to inspect · ⊕ to walk a hop · ▸ to open what is inside · Scroll or ↑↓ inside it · Enter to preview, Shift+Enter to focus · Esc to close'
-                : 'Click a connection to re-center · Esc to close'}
-            </p>
+            <p className="text-[10.5px] text-ink-muted/80">Click a connection to re-center · Esc to close</p>
             {/* The footer's two actions — "Reveal N on canvas" and "Trace
                 from here" — are withdrawn for now (user, 2026-08-17).
                 Both LEAVE the lens to do something to the canvas behind
@@ -2460,6 +2476,7 @@ export function LineageLens({
                 coarser-grain rows) so bringing these back is a JSX
                 change, not a re-plumb. */}
           </div>
+          )}
 
           {/* LEAVING THE ROOM. A walk is work — hops fetched one click at
               a time, containers opened, a path followed — and it lives

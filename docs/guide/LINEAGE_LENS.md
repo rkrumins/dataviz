@@ -367,6 +367,13 @@ and the menu closes. Only on a very narrow window do the chips you reach for
 least fold into a **More** menu; Density and Wires stay on the row, and
 Direction never folds.
 
+Along the bottom, a **status bar**: the gestures as keycaps (**Click**
+inspect · **⊕** walk a hop · **▸** open what is inside · **↵** preview ·
+**Esc** close), a legend for what the wires mean — blue **upstream**, amber
+**downstream**, dashed **≈ coarse** (a count the data source summarised, not
+yet counted flow by flow), heavy **bundle** — and, on the right, what is on
+the board right now: cards, wires, bundles and the zoom.
+
 Press **Esc** to close — a row preview first if one is open, then the Lens
 itself. Clicking the backdrop closes it outright. To follow a chain across
 the *canvas* instead, with the browse picture still underneath, use a
