@@ -185,6 +185,19 @@ screenshot; no jsdom pin (layout only).
 Suites: frontend **3,110 tests / 322 files** green (the known d3-drag jsdom error), `tsc` 61, eslint on
 touched files at the HEAD counts (one pre-existing fast-refresh warning).
 
+**Three more (2026-08-22, late afternoon).** (1) *The List body is retired*: the Graph | List toggle is
+gone, `lensViewMode` migrates `'list' → 'graph'` (preferences v5), the list branch stays one release
+behind the store for rollback and is marked `@deprecated`; the guided tour's step on it became a Density
+step (`data-tour="lens-density"`). (2) *Docs*: the User Guide's Lens page (density/grouping, the capsule
+and stages, Walk modes, Center on the focus, no depth control, no footer actions, no List) and the canvas
+Trace section of Exploring the Graph; the Documentation section's Context Engine page gained the
+`/trace/closure` contract (request/result fields, the six invariants, coarse first paint, caching) and the
+Frontend reference lists the Lens/trace pipeline files. (3) *The Path names where you have been*: the trail
+read each chip off the current model, so a focus you had left fell back to its URN fragment
+(`gold_af963e43 › Snowflake › …`); the lens now remembers every name it has shown and asks the canvas
+(`labelHintFor`) for stops it never drew. Frontend 3,113 tests green (`ShareViewDialog` flaked once under
+the full run and passes alone — unrelated), `tsc` 61.
+
 ## Not built, and why
 
 - ~~Coarse first paint~~ — built in the evening on the user's call (see above).

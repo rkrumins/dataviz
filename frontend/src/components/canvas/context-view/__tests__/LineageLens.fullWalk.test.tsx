@@ -171,7 +171,7 @@ describe('LineageLens — the capsule says it is calculating (2026-08-22)', () =
       history: { entries: ['urn:li:dashboard:executive_board_dashboard_de06a1ba'], cursor: 0 },
       walk: { model: walkModel('urn:li:dashboard:executive_board_dashboard_de06a1ba', []), status: 'loading', error: null, extendStatus: new Map(), depth: 1 },
       walkProgress: null,
-      focalLabelHint: 'Executive Board Dashboard',
+      labelHintFor: (urn) => urn === 'urn:li:dashboard:executive_board_dashboard_de06a1ba' ? 'Executive Board Dashboard' : null,
     })
     expect(screen.getByRole('status')).toHaveTextContent(/Mapping the lineage of Executive Board Dashboard/)
     expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('Executive Board Dashboard')
@@ -218,5 +218,39 @@ describe('LineageLens — the picture forms where the cards will land (2026-08-2
       />,
     )
     expect(screen.queryByTestId('lens-skeleton')).toBeNull()
+  })
+})
+
+describe('LineageLens — the Path names where you have been (2026-08-22)', () => {
+  // "gold_af963e43 › Snowflake › INTERMEDIATE_T1 › …": the trail read each
+  // chip off the CURRENT model, so a focus you had left — whose node the
+  // new model does not carry — fell back to its URN fragment. The lens
+  // now remembers every name it has shown, and asks the canvas for the
+  // ones it never saw.
+  const GOLD = 'urn:li:container:gold_af963e43'
+  const named = (urn: string, label: string): LensWalkNode =>
+    ({ ...wnode(urn), data: { urn, label, type: 'container' }, displayName: label }) as unknown as LensWalkNode
+  const lens = (history: { entries: string[]; cursor: number }, walk: WalkEntry, labelHintFor?: (urn: string) => string | null) => (
+    <LineageLens
+      history={history}
+      walk={walk}
+      walkApi={{ extend: vi.fn(), page: vi.fn(), retry: vi.fn() }}
+      onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()} onJumpTo={vi.fn()}
+      labelHintFor={labelHintFor}
+    />
+  )
+  const trail = () => screen.getByRole('navigation', { name: /path/i }).textContent ?? ''
+
+  it('a focus you have left keeps its name in the trail after the model moves on', () => {
+    const { rerender } = render(lens({ entries: [GOLD], cursor: 0 }, doneWalk(walkModel(GOLD, [named(GOLD, 'GOLD')]))))
+    rerender(lens({ entries: [GOLD, 'F'], cursor: 1 }, doneWalk(walkModel('F', [wnode('F')]))))
+    expect(trail()).toMatch(/GOLD/)
+    expect(trail()).not.toMatch(/gold_af963e43/)
+  })
+
+  it('a focus the lens never saw is named by the canvas, not by its URN', () => {
+    render(lens({ entries: [GOLD, 'F'], cursor: 1 }, doneWalk(walkModel('F', [wnode('F')])), (urn) => (urn === GOLD ? 'GOLD' : null)))
+    expect(trail()).toMatch(/GOLD/)
+    expect(trail()).not.toMatch(/gold_af963e43/)
   })
 })

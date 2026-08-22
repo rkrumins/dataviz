@@ -179,8 +179,13 @@ interface PreferencesState {
   toggleSubtleCanvasTreeLines: () => void
   resetCanvasDisplaySettings: () => void
 
-  /** Lineage Lens body: interactive graph (default) or the list columns. */
+  /** Lineage Lens body. The graph IS the Lens (2026-08-22): the three-column
+   *  list is retired — no control offers it, a stored 'list' migrates to
+   *  'graph' (v5) — and its rendering path is kept one release for a safe
+   *  rollback, reachable only by setting this directly.
+   *  @deprecated 'list' is retired; the field stays 'graph'. */
   lensViewMode: 'graph' | 'list'
+  /** @deprecated the Graph | List toggle is gone; nothing calls this in the product. */
   setLensViewMode: (mode: 'graph' | 'list') => void
 
   /** What a newly opened container frame shows: only the entities inside
@@ -443,12 +448,15 @@ export const usePreferencesStore = create<PreferencesState>()(
       // storage, so "One hop" quietly fetched two or three hops — a HOP 2
       // band under a control that says one. A share link still carries its
       // own depth for the focal it names; the preference is one hop.
-      version: 4,
+      // v5 (2026-08-22): the Lens's List body is retired — a stored 'list'
+      // becomes 'graph', so the Lens opens as the graph for everyone.
+      version: 5,
       migrate: (persisted, version) => {
         let state = persisted as Record<string, unknown>
         if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
         if (version < 3) state = { ...state, lensDensity: 'grouped' }
         if (version < 4) state = { ...state, lensInitialDepth: 1 }
+        if (version < 5) state = { ...state, lensViewMode: 'graph' }
         return state
       },
     }

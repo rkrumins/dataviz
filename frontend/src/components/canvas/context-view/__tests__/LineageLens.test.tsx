@@ -1184,13 +1184,14 @@ describe('the shell around the picture', () => {
     usePreferencesStore.setState({ lensInitialDepth: 1 })
   })
 
-  it('the body toggle switches to the list and persists the preference', () => {
+  it('the Graph | List toggle is gone — the graph is the Lens (2026-08-22)', () => {
+    // The list body is retired: kept behind the store for a release, never
+    // offered. Nothing in the header switches bodies any more.
     usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['b'], simple())
+    expect(screen.queryByRole('button', { name: 'List' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Graph' })).toBeNull()
     expect(screen.queryByText('Upstream')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'List' }))
-    expect(screen.getByText('Upstream')).toBeTruthy()
-    expect(usePreferencesStore.getState().lensViewMode).toBe('list')
   })
 
   it('the container default is a preference, persisted like the body mode', () => {
@@ -2961,8 +2962,6 @@ describe('the header explains itself (2026-08-22)', () => {
       [/^Both$/, /upstream and downstream/i],
       [/^Root cause$/, /what feeds this entity/i],
       [/^Impact$/, /what this entity feeds/i],
-      [/^Graph$/, /cards and wires/i],
-      [/^List$/, /columns/i],
     ]
     for (const [name, meaning] of expectations) {
       const button = screen.getByRole('button', { name })

@@ -41,3 +41,11 @@ describe('preferences — lensInitialDepth is one hop again', () => {
   })
 })
 
+describe('preferences — the List body is retired (2026-08-22)', () => {
+  it("a stored 'list' migrates to 'graph': the Lens opens as the graph for everyone", () => {
+    const migrate = usePreferencesStore.persist.getOptions().migrate!
+    expect((migrate({ lensViewMode: 'list' }, 4) as Record<string, unknown>).lensViewMode).toBe('graph')
+    expect((migrate({ lensViewMode: 'graph', lensDensity: 'all' }, 4) as Record<string, unknown>).lensDensity).toBe('all')
+    expect(usePreferencesStore.persist.getOptions().version).toBe(5)
+  })
+})

@@ -14,13 +14,19 @@ Here you'll learn to:
   node's own chip, the Anchor Rail, or a curated View.
 - **Read its layout** — sources on the left, consumers on the right, the
   focused entity in the middle.
+- **Watch it load** — the Lens says what it is doing, stage by stage, and
+  draws the immediate picture before the details arrive.
+- **Choose the grain** — Overview, Grouped or Every card — so a hundred
+  tables read as the databases they sit in, one click from their rows.
 - **Walk a chain** of connections one hop at a time, straight from the data
-  source, with Back/Forward to retrace every step.
-- **Rearrange it** by dragging cards around, with every connection following.
+  source, or let the Lens walk the whole flow for you, with Back/Forward to
+  retrace every step.
+- **Rearrange it** by dragging cards around, with every connection following,
+  and come back to the focus with one click.
 - **Open a container** into just the entities inside it that touch your focus,
   at any depth — or into everything it holds, with the connected ones marked.
-- **Set how far a new focus reaches**, look at just the cause or just the
-  impact, and see how any card connects back to what you're looking at.
+- **Look at just the cause or just the impact**, and see how any card connects
+  back to what you're looking at.
 - **Share exactly what you found**, or export it as data.
 - **See lineage beyond a View's boundary** and preview what sits outside it.
 
@@ -81,11 +87,53 @@ entity loaded. The Lens never answers a lineage question by reading the
 canvas; it asks the data source directly, one hop at a time, and shows exactly
 what came back.
 
-Prefer scanning to exploring? The **Graph | List** toggle in the header swaps
-the body for the classic three-column list (sources | focal | consumers,
-grouped by parent with type chips). Both bodies count connections the same
-way off the same walk, so the two never disagree. The Lens remembers your
-choice.
+### How much of the picture is folded — Density
+
+A focus with a hundred partner tables is not a hundred cards. Partners that
+**share a container** fold into it: five fact tables under `GOLD` are one
+`GOLD` frame with the tables as its rows, eighteen databases of two hundred
+tables are eighteen frames. The **Density** control in the header is *your*
+preference — it follows you from lens to lens, and the numbers on the board
+are identical at every rung; only the grain folds:
+
+| Rung | What a shared container shows | What a click does |
+| --- | --- | --- |
+| **Overview** | The container as one **closed card** with its counts ("5 on this lineage · of 8") | Opens it into a frame of its rows, one level at a time |
+| **Grouped** *(default)* | The container as an **open frame** showing its strongest five rows, "N more" behind; the three strongest ungrouped partners open to their columns | A row's chevron opens what's inside it |
+| **Every card** | Every card on its own, however many | — |
+
+A partner with no siblings stays a card with its container named beside it
+(`⋯› REPORTING`) — grouping one thing under its parent would be a click for
+nothing. Every crumb like that is a button: click `REPORTING` and it becomes
+the subject.
+
+**Steps** is the other fold, for long chains: **Every step** (the default)
+draws every hop on a pass-through path as its own card; **Condensed** folds a
+run of single pass-through steps into one "via N steps" connector you can
+open.
+
+### While it loads
+
+From the moment Focus opens, a **capsule** at the top of the board says what
+is happening — the same capsule a canvas Trace shows, so the two read alike:
+
+- **The four stages** every walk has — **Focus · Picture · Flows · Drawn** —
+  with the current one breathing. *Focus* is the data source finding the
+  entity; *Picture* is the immediate lineage on the board; *Flows* is the
+  detailed connections arriving page by page; *Drawn* is complete.
+- **The numbers** — nodes, flows, requests — tick as each page lands, with
+  "N more to go" when the data source has said how many steps are still owed,
+  and the seconds elapsed once it has been a few.
+- **A beat on the line** under the numbers for every page that lands, and a
+  line of guidance on a longer wait.
+
+There is never a percentage: the size of a lineage is unknowable until it has
+been walked, and a bar that fills would lie. Under the first fetch the board
+shows the **shape of the answer** — ghost sources, a ghost focus, ghost
+consumers, shimmering — until the real cards take its place; the immediate
+picture usually lands well inside a second, with the finer detail ("≈" counts
+become exact, wires land on columns) filling in behind it. Once the walk
+finishes, the capsule says **Complete** and leaves.
 
 ```mermaid
 flowchart LR
@@ -142,28 +190,19 @@ The Lens is built for exploring, not just reading:
   path from that point.
 - **Follow a card further** — hover its edge (or a row's, or the focus's own)
   for its follow control, a compact **⊕** at rest that opens into a plain
-  verb on hover: **"Load upstream"**, **"Show 3 more sources"**. Click, and
-  the Lens grows the board from *exactly that entity* — a row's follow seeds
-  the walk from that row alone, not its whole table. The Lens starts by
-  fetching just your focus and its immediate neighbours — one hop each way by
-  default, or however many you've set (below) — directly from the data
-  source. Click a follow control and the Lens shows more of that entity's
-  lineage: instantly, if an earlier hop already brought back more than fit on
-  the board (the control reads "Show N more" — cards that will actually
-  appear), or with a quick fetch for *that one entity's* next hop once
-  there's nothing left in hand (the control reads "Load upstream", with no
-  number attached — never a fabricated one). Either way **one click puts
-  something on the board** — what comes back is drawn where it lands, in its
-  own hop column, the moment it arrives — and it adds exactly that, never
-  more, and never a guess. The raw connection count behind a fetch lives in
-  the control's own hover text, the peek, and on the wires — never on the
-  control's face, which speaks a verb. A hub with more connections than fit
-  in one response hands back a bookmark, and the same follow control keeps
-  pulling from where it left off, unnoticed, until the hub is drained. A
-  **⊘** where a follow control would be is a genuine dead end: the data
-  source has confirmed there is nothing further that way, and the Lens only
-  ever says that once the walk has actually finished asking — never as a
-  guess.
+  verb on hover: **"Load upstream"**. Click, and the Lens fetches *that one
+  entity's* next hop from the data source and grows the board from exactly
+  there — a row's follow seeds the walk from that row alone, not its whole
+  table. What comes back is drawn where it lands, in its own hop column, the
+  moment it arrives, and it adds exactly that — never more, never a guess.
+  The raw connection count behind a fetch lives in the control's hover text,
+  the peek, and on the wires — never on the control's face, which speaks a
+  verb. A hub with more connections than fit in one response hands back a
+  bookmark, and the Lens keeps pulling from where it left off, unnoticed,
+  until the hub is drained. A **⊘** where a follow control would be is a
+  genuine dead end: the data source has confirmed there is nothing further
+  that way, and the Lens only ever says that once the walk has actually
+  finished asking — never as a guess.
 - **Spotlight anything** by hovering or clicking it — its lineage cone lights
   up on the board, everything else quiets to a floor. Click to stick it, and
   a chip at the bottom states its scope honestly: how much of its lineage is
@@ -234,11 +273,15 @@ The Lens is built for exploring, not just reading:
   away. A new search starts the list again at the top, and the counts say
   what they're scoped to. Typing a name no loaded row has, while browsing
   from the keyboard, hands your letters straight to it.
-- **Choose how far a new focus reaches** with the depth control in the header
-  (**1 / 2 / 3** hops each way). This only governs what happens the *next*
-  time you focus somewhere new — an entity already on the board keeps
-  whatever depth it was fetched at, so turning the dial up never re-fetches
-  what you're already looking at.
+- **Choose how far the Lens walks on its own** with the **Walk** control in
+  the header. **One hop** (the default) loads and draws the *whole* immediate
+  lineage — every upstream source and downstream consumer, however many,
+  with no "load more" to click — and leaves the next hop to you, one ⊕ at a
+  time. **Full flow** keeps walking every frontier until the end-to-end flow
+  is drawn, hands-free; on a very large flow it pauses once, around fifty
+  thousand nodes, to ask whether to continue, since the rest may slow your
+  browser. If a step fails at the data source the capsule says so and offers
+  **Try again** — what is already on the board stays.
 - **Look at just one side of the story** with the direction control —
   **Both**, **Root cause** (upstream only), or **Impact** (downstream only).
   This only changes what's drawn: the Lens still holds both directions
@@ -254,6 +297,15 @@ The Lens is built for exploring, not just reading:
   opening and loading more, so the picture grows around it instead of
   resetting; **Tidy up** in the corner controls puts everything back where the
   Lens placed it.
+- **Come back to the focus.** A small board is fitted whole; a large one opens
+  **centred on the focus** at a readable size, with its sources and consumers
+  a band either side and the rest a scroll away — never a tiny sliver you
+  have to zoom into. Switching Density, Steps or direction re-centres the
+  same way, and **Center on the focus** at the top of the corner controls
+  does it on demand. While a walk lands cards the camera holds still and a
+  **Board grew · Fit** pill offers the whole picture; when the walk ends the
+  camera settles on the focus once — unless you have already moved it
+  yourself.
 - **Filter connections** with the search box in the header — matching cards
   stay bright while the rest dim, so you can spot what matters in a crowded
   picture at a glance. The filter searches what's currently on the board; open
@@ -280,27 +332,24 @@ the same opening, expanding and filtering apply to that entity's own
 neighbours.
 
 First time here? The Lens offers a **one-minute guided tour** when the graph
-opens; replay it any time from the **Help** panel while you're on a view.
-
-At the bottom, two controls escalate beyond looking:
-
-- **Reveal all on canvas** frames the focal node's neighbours together on the
-  canvas.
-- **Trace from here** hands off to a full lineage **Trace**, the deliberate way
-  to follow a chain across many hops. See [Reading Lineage](/guide/reading-lineage)
-  for how tracing works.
+opens; replay it any time from the **Help** panel while you're on a view. And
+every control in the header explains itself: rest the pointer on any of them
+— **Next**, **Walk**, **Steps**, **Density**, the direction presets — and a
+small note names it and says what it does.
 
 Press **Esc** to close — a row preview first if one is open, then the Lens
-itself. Clicking the backdrop closes it outright.
+itself. Clicking the backdrop closes it outright. To follow a chain across
+the *canvas* instead, with the browse picture still underneath, use a
+**Trace** — see [Exploring the Graph](/guide/exploring-graph).
 
 ## When to reach for it
 
 Open the Lens whenever a node is *too connected to read on the canvas*. A hub
 table feeding forty dashboards, a widely-reused dimension, a column referenced
 everywhere — on the canvas these show as a dense fan the ambient budget
-summarises. The Lens lists **every** connection, grouped by type and searchable,
-so "what actually depends on this?" becomes a question you can answer in
-seconds.
+summarises. The Lens draws **every** connection — grouped by the containers
+they share, folded to the grain you choose, and searchable — so "what
+actually depends on this?" becomes a question you can answer in seconds.
 
 ## Curated views and lineage beyond your scope
 

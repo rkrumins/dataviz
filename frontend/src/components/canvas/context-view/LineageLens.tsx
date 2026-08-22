@@ -78,6 +78,18 @@ import { LensSkeleton } from './lens/LensSkeleton'
 /** Leaves one ⊕ extend ships to the server. A hub can stand for
  *  thousands of participants; the request has to stay a request. */
 const SEED_CAP = 500
+/** Every node of a subgraph that carries a real name, folded into `prev`. */
+function rememberNames(sg: LensSubgraph<LensWalkNode>, prev: ReadonlyMap<string, string>): ReadonlyMap<string, string> {
+  let names: Map<string, string> | null = null
+  for (const [urn, entry] of sg.nodes) {
+    const data = entry.node?.data as { label?: string; businessLabel?: string } | undefined
+    const label = data?.label ?? data?.businessLabel
+    if (!label || prev.get(urn) === label) continue
+    names ??= new Map(prev)
+    names.set(urn, label)
+  }
+  return names ?? prev
+}
 /** The capsule's decision buttons never render on the Lens (checkpoint and
  *  error keep their strips), but the props are required. */
 const noop = () => {}
@@ -320,10 +332,11 @@ export interface LineageLensProps {
    *  the feature is not wired, nothing renders. */
   fullWalkEnabled?: boolean
   walkProgress?: WalkProgress | null
-  /** The focus's name as the canvas that opened the lens knows it — read
-   *  only until the model holds the focus, so the header and the capsule
-   *  never open on a URN fragment (`executive_board_dashboard_de06a1ba`). */
-  focalLabelHint?: string | null
+  /** A name the canvas that opened the lens knows for a URN, or null. Read
+   *  only for nodes no model in hand carries — the focus before its first
+   *  page lands (so the header and the capsule never open on a URN
+   *  fragment), and a Path stop the lens never drew (a restored link). */
+  labelHintFor?: (urn: string) => string | null
   /** Switch between One hop (the focus's immediate lineage, then ⊕ walking)
    *  and Full flow. */
   onFullWalkToggle?: (on: boolean) => void
@@ -360,7 +373,7 @@ export function LineageLens({
   onTrace,
   fullWalkEnabled = false,
   walkProgress = null,
-  focalLabelHint = null,
+  labelHintFor,
   onFullWalkToggle,
   onWalkContinue,
   onWalkRetry,
@@ -497,7 +510,6 @@ export function LineageLens({
   const setDirectionFilter = (dir: LensDirectionFilter) => setDirectionState({ nodeId, dir })
 
   const lensViewMode = usePreferencesStore((s) => s.lensViewMode)
-  const setLensViewMode = usePreferencesStore((s) => s.setLensViewMode)
   const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
   const condenseSteps = usePreferencesStore((s) => s.lensCondenseSteps)
   const setCondenseSteps = usePreferencesStore((s) => s.setLensCondenseSteps)
@@ -1121,9 +1133,24 @@ export function LineageLens({
   const TRAIL_CAP = 6
   const collapseTrail = entries.length > TRAIL_CAP && !showFullTrail
 
+  // EVERY NAME THE LENS HAS SHOWN (2026-08-22). The Path trail read each
+  // chip off the CURRENT model, so a focus you had left — whose node the
+  // new model does not carry — fell back to its URN fragment
+  // ("gold_af963e43 › Snowflake › …"). Names seen in any model this
+  // session are remembered; a stop never drawn here (a restored link) is
+  // asked of the canvas. Folded on the model change itself (the
+  // previous-render pattern), never in an effect.
+  const [labelMemory, setLabelMemory] = useState<{ sg: typeof sg; names: ReadonlyMap<string, string> }>(
+    () => ({ sg, names: rememberNames(sg, new Map()) }),
+  )
+  if (labelMemory.sg !== sg) setLabelMemory({ sg, names: rememberNames(sg, labelMemory.names) })
   const labelFor = useCallback(
-    (urn: string) => labelOf(urn, sg.nodes.get(urn)?.node),
-    [sg],
+    (urn: string) => {
+      const node = sg.nodes.get(urn)?.node
+      if (node) return labelOf(urn, node)
+      return labelMemory.names.get(urn) ?? labelHintFor?.(urn) ?? labelOf(urn, undefined)
+    },
+    [sg, labelMemory.names, labelHintFor],
   )
   const parentOf = useCallback(
     (urn: string) => sg.nodes.get(urn)?.parent ?? null,
@@ -1331,7 +1358,7 @@ export function LineageLens({
   if (!nodeId) return null
 
   const focalNode = sg.nodes.get(nodeId)?.node
-  const focalLabel = focalNode || !focalLabelHint ? labelOf(nodeId, focalNode) : focalLabelHint
+  const focalLabel = labelFor(nodeId)
   const focalType = (focalNode?.data?.type as string) ?? focalNode?.entityType ?? 'entity'
   const focalColor = generateColorFromType(focalType)
   const focalParentId = parentOf(nodeId)
@@ -1695,6 +1722,7 @@ export function LineageLens({
                   numbers agree across all three; only the grain folds. */}
               {lensViewMode === 'graph' && (
                 <div
+                  data-tour="lens-density"
                   role="group"
                   aria-label="How much of the picture to fold"
                   className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
@@ -1780,50 +1808,11 @@ export function LineageLens({
                   ))}
                 </div>
               )}
-              {/* Graph | List body toggle — the graph is the premium
-                  default; the columns stay one click away (persisted). */}
-              <div data-tour="lens-toggle" className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]">
-                <ControlTip name="Graph" meaning="Explore the lineage as cards and wires">
-                  {(tip) => (
-                    <button
-                      type="button"
-                      onClick={() => setLensViewMode('graph')}
-                      aria-describedby={tip['aria-describedby']}
-                      aria-pressed={lensViewMode === 'graph'}
-                      className={cn(
-                        tip.peer,
-                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                        lensViewMode === 'graph'
-                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                          : 'text-ink-muted hover:text-ink',
-                      )}
-                    >
-                      <LucideIcons.Network className="w-3 h-3" />
-                      Graph
-                    </button>
-                  )}
-                </ControlTip>
-                <ControlTip name="List" meaning="Scan every connection as columns">
-                  {(tip) => (
-                    <button
-                      type="button"
-                      onClick={() => setLensViewMode('list')}
-                      aria-describedby={tip['aria-describedby']}
-                      aria-pressed={lensViewMode === 'list'}
-                      className={cn(
-                        tip.peer,
-                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                        lensViewMode === 'list'
-                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                          : 'text-ink-muted hover:text-ink',
-                      )}
-                    >
-                      <LucideIcons.List className="w-3 h-3" />
-                      List
-                    </button>
-                  )}
-                </ControlTip>
-              </div>
+              {/* The Graph | List body toggle stood here until 2026-08-22. The
+                  graph IS the Lens: the three-column list is retired (no
+                  control offers it; a stored preference migrates to
+                  'graph'), and its rendering below is kept one release
+                  behind `lensViewMode` for a safe rollback. */}
               <div className="relative">
                 <LucideIcons.Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-ink-muted/70" />
                 <input
@@ -1863,7 +1852,7 @@ export function LineageLens({
               without dropping the trail (browser history, not a
               destructive stack). ── */}
           {entries.length > 1 && onJumpTo && (
-            <div className="flex items-center gap-1 px-4 py-2 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] overflow-x-auto custom-scrollbar whitespace-nowrap">
+            <nav aria-label="Path" className="flex items-center gap-1 px-4 py-2 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] overflow-x-auto custom-scrollbar whitespace-nowrap">
               <span className="flex-shrink-0 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ink-muted/60 mr-1">
                 Path
               </span>
@@ -2027,7 +2016,7 @@ export function LineageLens({
                   {shareCopied ? 'Copied' : 'Copy link to this view'}
                 </button>
               </div>
-            </div>
+            </nav>
           )}
 
           {/* ── Walk narration — a failed or capped walk is SAID, never
@@ -2091,8 +2080,12 @@ export function LineageLens({
           {/* ── Body — the SAME layout at every depth: re-centering
               swaps the focal in place instead of flipping to a
               different presentation. Two bodies, one model: the
-              interactive hop-band GRAPH (default) or the classic
-              two-column LIST, switched from the header toggle. ── */}
+              interactive hop-band GRAPH — the Lens — and, DEPRECATED
+              since 2026-08-22, the classic two-column LIST: no control
+              offers it any more and a stored preference migrates to
+              'graph'; the branch below stays one release for a safe
+              rollback (`usePreferencesStore.setState({ lensViewMode:
+              'list' })`) and then goes. ── */}
           {lensViewMode === 'graph' ? (
           <div className="flex-1 min-h-0 flex flex-col">
             {/* Type chips — an explicit, reversible filter, and hidden
