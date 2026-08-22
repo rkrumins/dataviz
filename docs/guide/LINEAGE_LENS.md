@@ -353,17 +353,19 @@ who and where: the entity's name and counts, **Back / Forward** and
 **Center on focus**, the **Path** you have walked (every stop a chip you can
 jump to, with *Show on canvas*, *Copy path* and *Copy link* at its end), and
 — always, never behind a menu — the **Filter connections** search, with
-help, share and close beside it. The second is how the picture draws: six
-**category chips** on the left, each showing its current value —
-**Direction · Both**, **Density · Grouped**, **Wires · Auto**, **Walk · One
+help, share and close beside it. The second is how the picture draws. It
+opens with **Direction**, always expanded — **Both · Root cause · Impact** —
+because which side of the story you are looking at is the question itself,
+never a setting to click into. Then five **category chips**, each showing
+its current value — **Density · Grouped**, **Wires · Auto**, **Walk · One
 hop**, **Steps · Every step**, **Next · Connected** — and the **type chips**
 on the right (SCHEMAFIELD 506 · DATASET 43 …), which filter the board by
-entity type. Rest the pointer on a category chip and a note says what it is
-about; **click** it and a menu opens with every option, each with its name
-and a line of what it does, the current one checked — choose, and the menu
-closes. Only on a very narrow window do the chips you reach for least fold
-into a **More** menu; the day-to-day ones — Direction, Density, Wires — stay
-on the row.
+entity type. Rest the pointer on any of them and a note says what it is
+about; **click** a category chip and a menu opens with every option, each
+with its name and a line of what it does, the current one checked — choose,
+and the menu closes. Only on a very narrow window do the chips you reach for
+least fold into a **More** menu; Density and Wires stay on the row, and
+Direction never folds.
 
 Press **Esc** to close — a row preview first if one is open, then the Lens
 itself. Clicking the backdrop closes it outright. To follow a chain across

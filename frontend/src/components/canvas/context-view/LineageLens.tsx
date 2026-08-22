@@ -1410,19 +1410,43 @@ export function LineageLens({
   // groups in a row crowded the search box off the header; six chips
   // showing their current value fit beside each other with room to spare.
   const viewControls: Partial<Record<ToolbarGroupId, ReactNode>> = lensViewMode !== 'graph' ? {} : {
+    // DIRECTION IS FIRST CLASS (2026-08-22): the question itself — upstream,
+    // downstream, or the whole story — is never behind a click. An
+    // always-expanded segmented control heads the row; the chips follow.
     direction: (
-      <ViewControl
+      <div
         data-tour="lens-direction"
-        caption="Direction"
-        meaning="Which side of the story to show"
-        value={directionFilter}
-        onChange={setDirectionFilter}
-        options={[
-          { value: 'both', label: 'Both', Icon: LucideIcons.ArrowLeftRight, meaning: 'Upstream and downstream' },
-          { value: 'in', label: 'Root cause', Icon: LucideIcons.ArrowDownLeft, meaning: 'Only what feeds this entity — upstream' },
-          { value: 'out', label: 'Impact', Icon: LucideIcons.ArrowUpRight, meaning: 'Only what this entity feeds — downstream' },
-        ]}
-      />
+        role="group"
+        aria-label="Which side of the story to show"
+        className="flex items-center h-7 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+      >
+        {([
+          { dir: 'both', Icon: LucideIcons.ArrowLeftRight, label: 'Both', meaning: 'Upstream and downstream — the whole story' },
+          { dir: 'in', Icon: LucideIcons.ArrowDownLeft, label: 'Root cause', meaning: 'Only what feeds this entity — upstream' },
+          { dir: 'out', Icon: LucideIcons.ArrowUpRight, label: 'Impact', meaning: 'Only what this entity feeds — downstream' },
+        ] as const).map(({ dir, Icon, label, meaning }) => (
+          <ControlTip key={dir} name={label} meaning={meaning}>
+            {(tip) => (
+              <button
+                type="button"
+                onClick={() => setDirectionFilter(dir)}
+                aria-describedby={tip['aria-describedby']}
+                aria-pressed={directionFilter === dir}
+                className={cn(
+                  tip.peer,
+                  'flex items-center gap-1 h-6 px-2 rounded-md text-[11px] font-semibold whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                  directionFilter === dir
+                    ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                    : 'text-ink-muted hover:text-ink',
+                )}
+              >
+                <Icon className="w-3 h-3" />
+                {label}
+              </button>
+            )}
+          </ControlTip>
+        ))}
+      </div>
     ),
     density: (
       <ViewControl
@@ -1952,7 +1976,7 @@ export function LineageLens({
                     control into More: the toolbar measures them as
                     flexible (data-toolbar-flex). */}
                 {(typeChips.length > 1 || layout.hiddenByChips > 0) && (
-                  <div data-toolbar-flex className="ml-auto min-w-0 flex items-center justify-end gap-x-2 overflow-x-auto custom-scrollbar whitespace-nowrap">
+                  <div data-toolbar-flex className="ml-auto min-w-0 flex items-center gap-x-2 overflow-x-auto custom-scrollbar whitespace-nowrap">
                     {typeChips.length > 1 && (
                       <TypeChips chips={typeChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} className="flex-nowrap" />
                     )}

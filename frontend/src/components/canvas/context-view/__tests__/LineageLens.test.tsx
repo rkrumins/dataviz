@@ -2951,7 +2951,6 @@ describe('the header explains itself (2026-08-22)', () => {
   it('every category is a chip showing its current value, explained on hover and open to its options', () => {
     renderLens(['b'], simple(), { onFullWalkToggle: vi.fn() })
     const expectations: Array<[string, string, RegExp, Array<[RegExp, RegExp]>]> = [
-      ['Direction', 'Both', /which side of the story/i, [[/^Both/, /upstream and downstream/i], [/^Root cause/, /what feeds this entity/i], [/^Impact/, /what this entity feeds/i]]],
       ['Density', 'Grouped', /how much of the picture is folded/i, [[/^Overview/, /start at the high level/i], [/^Grouped/, /strongest rows first/i], [/^Every card/, /every card on its own/i]]],
       ['Wires', 'Auto', /how the wires between two containers draw/i, [[/^Auto/, /more than 12/i], [/^Bundled/, /one wire per pair of containers/i], [/^Every wire/, /however many/i]]],
       ['Walk', 'One hop', /how far the lens walks on its own/i, [[/^One hop/, /⊕ on a card fetches its next hop/i], [/^Full flow/, /until the whole end-to-end flow is drawn/i]]],
@@ -2969,6 +2968,26 @@ describe('the header explains itself (2026-08-22)', () => {
       fireEvent.click(chip)                                     // the chip toggles its menu closed
       expect(screen.queryByRole('menu')).toBeNull()
     }
+  })
+
+  it('Direction is first class: Both · Root cause · Impact always on the row, never behind a menu', () => {
+    // "It is critical users are able to see upstream, downstream or full
+    // lineage without having to click into Direction."
+    renderLens(['b'], simple())
+    const group = screen.getByRole('group', { name: /which side of the story/i })
+    const both = within(group).getByRole('button', { name: 'Both' })
+    const up = within(group).getByRole('button', { name: 'Root cause' })
+    const down = within(group).getByRole('button', { name: 'Impact' })
+    expect(both).toHaveAttribute('aria-pressed', 'true')
+    expect(up).toHaveAttribute('aria-pressed', 'false')
+    expect(describedBy(up).textContent).toMatch(/what feeds this entity/i)
+    expect(describedBy(down).textContent).toMatch(/what this entity feeds/i)
+    expect(screen.queryByRole('button', { name: /^Direction: / })).toBeNull()       // not a chip
+    // It heads the row, before the first chip.
+    expect(group.compareDocumentPosition(screen.getByRole('button', { name: /^Density: / })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    fireEvent.click(up)
+    expect(up).toHaveAttribute('aria-pressed', 'true')
+    expect(both).toHaveAttribute('aria-pressed', 'false')
   })
 
   it('choosing an option closes the menu and the chip reads the new value', () => {
@@ -2997,7 +3016,7 @@ describe('the header explains itself (2026-08-22)', () => {
       renderLens(['b'], simple(), { onFullWalkToggle: vi.fn() })
       const more = screen.getByRole('button', { name: /^More view controls/ })
       expect(more).toHaveTextContent('3')
-      expect(screen.getByRole('button', { name: /^Direction: / })).toBeInTheDocument()
+      expect(screen.getByRole('group', { name: /which side of the story/i })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /^Density: / })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /^Wires: / })).toBeInTheDocument()
       expect(screen.queryByRole('button', { name: /^Steps: / })).toBeNull()
