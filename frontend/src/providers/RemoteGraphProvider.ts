@@ -709,6 +709,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             frontierDown: raw.frontierDown ?? [],
             seedTruncated: raw.seedTruncated ?? false,
             seedCursor: (raw as { seedCursor?: string | null }).seedCursor ?? null,
+            grain: (raw as { grain?: 'fine' | 'coarse' | null }).grain ?? null,
         }
     }
 

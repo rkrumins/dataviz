@@ -18,11 +18,11 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { act, fireEvent, screen } from '@testing-library/react'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
-import { cfoEstate } from '@/test/fixtures/traceEstates'
+import { cfoEstate, coarseThenFineEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(19))
+afterAll(() => expectTestsRan(20))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -168,6 +168,42 @@ describe('the trace overlay on the real canvas', () => {
     await h.settle()
     expect(h.isTracing()).toBe(false)
     expect(document.querySelector('[data-trace-phase]')).toBeNull()
+    expect(h.snapshotStore()).toEqual(before)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  /**
+   * THE COARSE FIRST PAINT (Part G, 2026-08-21). The cells land before a raw
+   * hop does: the partner tables sit closed under their open database with
+   * "≈N flows" pills, the department and database are hosts, and nothing
+   * is written to the store. When the fine page lands the same cards carry
+   * the raw counts and the "≈" is gone.
+   */
+  it('the coarse page paints the partner tables with ≈ counts under their hosts; the fine page refines them in place', async () => {
+    const h = await renderCanvasWithTrace(coarseThenFineEstate(), { focus: 'orders', deferFine: true })
+    const before = h.snapshotStore()
+    await h.startTrace('orders')
+    await h.settle()
+    // Drawing from the cells alone.
+    expect(h.isTracing()).toBe(true)
+    expect(h.visibleCardIds().sort()).toEqual(['balances', 'dept', 'journal', 'ledger_db', 'orders', 'orders_db'])
+    expect(h.countPill('journal')).toBe('≈30 flows')
+    expect(h.countPill('balances')).toBe('≈10 flows')
+    // No rows have landed yet, so the chevron — which opens only onto
+    // contributing children — is still inert; it wakes with the fine page.
+    expect(h.chevron('journal')).toBe(false)
+    expect(h.wires().map(w => `${w.source}>${w.target}`).sort()).toEqual(['orders>balances', 'orders>journal'])
+    expect(h.storeWrites()).toBe(0)
+
+    await h.resolveTrace()
+    expect(h.chevron('journal')).toBe(true)
+    expect(h.countPill('journal')).toBe('2 on this lineage')
+    expect(h.countPill('balances')).toBe('1 on this lineage')
+    // Raw-backed now, and landing at the finest visible grain: the focus's
+    // own columns (open as rows) feed the two closed tables.
+    expect([...new Set(h.wires().map(w => w.target))].sort()).toEqual(['balances', 'journal'])
+    expect(h.wires().every(w => w.source.startsWith('orders.c'))).toBe(true)
+    expect(h.storeWrites()).toBe(0)
     expect(h.snapshotStore()).toEqual(before)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)

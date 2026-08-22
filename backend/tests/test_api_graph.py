@@ -327,6 +327,19 @@ async def test_trace_closure_seed_cursor_with_seed_urns_is_a_continuation_not_a_
     assert resp.status_code == 200
 
 
+async def test_trace_closure_coarse_is_one_shot_422_with_a_cursor_or_seeds(graph_client):
+    """The coarse page is focus-anchored and one shot: a cursor or a seed
+    list names a continuation it cannot honour."""
+    client, engine = graph_client
+    urn = _get_sample_urn(engine)
+    for extra in ({"seedCursor": "s:x"}, {"afterCursor": "e:1", "direction": "upstream", "upstreamDepth": 1}, {"seedUrns": [urn]}):
+        resp = await client.post(
+            "/api/v1/test-ws/graph/trace/closure",
+            json={"urn": urn, "grain": "coarse", **extra},
+        )
+        assert resp.status_code == 422, extra
+
+
 async def test_trace_closure_seed_cursor_with_after_cursor_422(graph_client):
     client, engine = graph_client
     urn = _get_sample_urn(engine)

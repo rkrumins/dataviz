@@ -32,7 +32,7 @@ import { resolveLayerAssignment, type GraphNode } from '@/providers/GraphDataPro
 import type { HierarchyNode } from '@/types/hierarchy'
 import type { ViewLayerConfig } from '@/types/schema'
 import { buildLayerRules, resolveRootLayer } from './resolveRootLayer'
-import { buildLedger, buildTraceWires, type TraceWire } from './traceWireLedger'
+import { buildLedger, buildTraceWires, rollupResiduals, type TraceWire } from './traceWireLedger'
 
 export type { TraceWire } from './traceWireLedger'
 
@@ -50,6 +50,10 @@ export interface TraceCard {
    *  SELF EXCLUDED — a participant leaf reads 0. The same statement the Lens
    *  makes, "N things inside X carry lineage here". */
   onLineage: number
+  /** A partner known only from a rollup cell (Part G): the flows the cell
+   *  summarises, read as "≈N" while `onLineage` is 0 because its rows have
+   *  not landed yet. Absent once raw evidence replaces the cell. */
+  approx?: number
   expanded: boolean
   /** Min lineage hop from the focus subtree (null = host only). */
   hop: number | null
@@ -149,12 +153,19 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
   // that container's columns rather than on the container itself. The edge's
   // OWN direction says which side it is on: a rollup INTO the focus comes
   // from upstream, one out of it goes downstream.
+  // …and only while the cell still says something (Part G, 2026-08-21): the
+  // coarse page ships a cell to every container level above a partner —
+  // the table, its database, its department — and inner-first accounting
+  // leaves a residual only on the levels with flows of their own. A
+  // database whose cell is fully stated by its tables' cells is a HOST the
+  // picture passes through on the way to them, never a partner beside them.
+  const residuals = rollupResiduals(i.model, i.completePairs)
   const rollupUp = new Set<string>()
   const rollupDown = new Set<string>()
   for (const e of i.model.lineageEdges) {
     if (e.kind !== 'rollup') continue
-    if (e.targetUrn === i.focusUrn) rollupUp.add(e.sourceUrn)
-    if (e.sourceUrn === i.focusUrn) rollupDown.add(e.targetUrn)
+    if (e.targetUrn === i.focusUrn && (residuals.get(e.sourceUrn) ?? 0) > 0) rollupUp.add(e.sourceUrn)
+    if (e.sourceUrn === i.focusUrn && (residuals.get(e.targetUrn) ?? 0) > 0) rollupDown.add(e.targetUrn)
   }
 
   const roleBy = new Map<string, TraceCard['role']>()
@@ -328,6 +339,7 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
         id: urn, urn, label: labelOf(urn), type: typeOf(urn), parentId, depth,
         childCount: childCountOf(sg.nodes.get(urn)?.node),
         onLineage: inside,
+        ...((residuals.get(urn) ?? 0) > 0 ? { approx: residuals.get(urn)! } : {}),
         expanded: i.traceExpansion.has(urn),
         hop: hopOf(urn),
         role: roleBy.get(urn) ?? 'host',
@@ -415,6 +427,7 @@ export function lanesToHierarchy(lanes: TraceLane[]): Array<{ layerId: string; n
         ...card.data,
         childCount: card.childCount,
         onLineage: card.onLineage,
+        ...(card.approx != null ? { traceApprox: card.approx } : {}),
         traceRole: card.role,
         traceHop: card.hop,
       },

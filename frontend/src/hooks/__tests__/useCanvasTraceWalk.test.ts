@@ -119,7 +119,8 @@ describe('useCanvasTraceWalk', () => {
     act(() => result.current.start('F'))
 
     await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
-    expect(traceClosure).toHaveBeenCalledTimes(2)
+    // The first paint's two legs (fine + coarse), then the extend.
+    expect(traceClosure).toHaveBeenCalledTimes(3)
     expect(modelNodeUrns(result.current.walkEntry?.model)).toEqual(['F', 'PLAT', 'T1', 'colA', 'colB'])
 
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
@@ -203,9 +204,10 @@ describe('useCanvasTraceWalk', () => {
     // 1,101 nodes used to park the walk at a 1,000-node budget and wait for
     // a click. Now the depth entry is drained by itself.
     await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
-    expect(traceClosure).toHaveBeenCalledTimes(2)
+    // The first paint's two legs (fine + coarse), then the bulk re-seed.
+    expect(traceClosure).toHaveBeenCalledTimes(3)
     expect(modelNodeUrns(result.current.walkEntry?.model)).toContain('deeper')
-    expect(result.current.progress).toMatchObject({ phase: 'done', pending: 0, requests: 2 })
+    expect(result.current.progress).toMatchObject({ phase: 'done', pending: 0, requests: 3 })
 
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
     expect(writes.count).toBe(0)

@@ -101,3 +101,45 @@ export function tableEstate() {
   return { model, layers, assignments }
 }
 
+/**
+ * THE COARSE FIRST PAINT's page (Part G, 2026-08-21), before a raw hop has
+ * landed: the focus table `orders` with the rollup cells incident to it —
+ * partner tables `journal` (30) and `balances` (10), their database (40),
+ * its department (40) — as the aggregation worker stamps them per
+ * containment-level pair. Inner-first: the tables are the cards, the
+ * database and department are hosts (their cells are fully stated inside).
+ */
+export function coarseCellsEstate() {
+  const nodes = [
+    wn('dept', 'container', 2), wn('ledger_db', 'container', 2), wn('journal', 'dataset', 2), wn('balances', 'dataset', 1),
+    wn('orders_db', 'container', 1), wn('orders', 'dataset', 2),
+  ]
+  const containmentEdges = [has('dept', 'ledger_db'), has('ledger_db', 'journal'), has('ledger_db', 'balances'), has('dept', 'orders_db'), has('orders_db', 'orders')]
+  const lineageEdges = [roll('orders', 'journal', 30), roll('orders', 'balances', 10), roll('orders', 'ledger_db', 40), roll('orders', 'dept', 40)]
+  const model: LensWalkModel = {
+    focusUrn: 'orders', nodes, lineageEdges, containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    coarseUpstreamUrns: new Set(), coarseDownstreamUrns: new Set(['journal', 'balances', 'ledger_db', 'dept']),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [{ id: 'warehouse', name: 'Warehouse', order: 0, entityTypes: ['container'] }]
+  const assignments = { dept: { layerId: 'warehouse' } }
+  return { model, layers, assignments }
+}
+
+/** `coarseCellsEstate` once the raw pages have landed too: the focus's
+ *  columns, the partners' columns, and the real flows — three into
+ *  `journal`, one into `balances`. The harness serves the cells as the
+ *  coarse page and the raw hops as the fine page. */
+export function coarseThenFineEstate() {
+  const base = coarseCellsEstate()
+  const nodes = [...base.model.nodes, wn('orders.c0', 'schemaField'), wn('orders.c1', 'schemaField'), wn('journal.a', 'schemaField'), wn('journal.b', 'schemaField'), wn('balances.a', 'schemaField')]
+  const containmentEdges = [...base.model.containmentEdges, has('orders', 'orders.c0'), has('orders', 'orders.c1'), has('journal', 'journal.a'), has('journal', 'journal.b'), has('balances', 'balances.a')]
+  const lineageEdges = [...base.model.lineageEdges, raw('orders.c0', 'journal.a'), raw('orders.c1', 'journal.a'), raw('orders.c1', 'journal.b'), raw('orders.c0', 'balances.a')]
+  const model: LensWalkModel = {
+    ...base.model, nodes, containmentEdges, lineageEdges,
+    downstreamUrns: new Set(['journal.a', 'journal.b', 'balances.a']),
+  }
+  return { model, layers: base.layers, assignments: base.assignments }
+}
+

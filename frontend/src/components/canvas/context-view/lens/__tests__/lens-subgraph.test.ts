@@ -304,8 +304,8 @@ describe('projectLensEdges — directional projection', () => {
     const result = projectLensEdges(sg, population, visible)
     expect(result).toHaveLength(2)
     const byKey = new Map(result.map(e => [`${e.sourceUrn}>${e.targetUrn}`, e]))
-    expect(byKey.get('A>B')).toEqual({ sourceUrn: 'A', targetUrn: 'B', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS' })
-    expect(byKey.get('B>A')).toEqual({ sourceUrn: 'B', targetUrn: 'A', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS' })
+    expect(byKey.get('A>B')).toEqual({ sourceUrn: 'A', targetUrn: 'B', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS', coarse: false })
+    expect(byKey.get('B>A')).toEqual({ sourceUrn: 'B', targetUrn: 'A', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS', coarse: false })
   })
 
   it('collapses hops from two children of a collapsed container into one bundle, weight 2, container as endpoint', () => {
@@ -318,7 +318,7 @@ describe('projectLensEdges — directional projection', () => {
     const population = new Set(['D1', 'a1', 'a1b', 'D2'])
     const visible = new Set(['D1', 'D2'])   // a1 / a1b collapsed under D1
     expect(projectLensEdges(sg, population, visible)).toEqual([
-      { sourceUrn: 'D1', targetUrn: 'D2', weight: 2, isLeafEdge: false, edgeTypeNorm: 'FLOWS' },
+      { sourceUrn: 'D1', targetUrn: 'D2', weight: 2, isLeafEdge: false, edgeTypeNorm: 'FLOWS', coarse: false },
     ])
   })
 
@@ -344,7 +344,7 @@ describe('projectLensEdges — directional projection', () => {
     const population = new Set(['X', 'Y'])
     const visible = new Set(['X', 'Y'])
     expect(projectLensEdges(sg, population, visible)).toEqual([
-      { sourceUrn: 'X', targetUrn: 'Y', weight: 2, isLeafEdge: false, edgeTypeNorm: '' },
+      { sourceUrn: 'X', targetUrn: 'Y', weight: 2, isLeafEdge: false, edgeTypeNorm: '', coarse: false },
     ])
   })
 
@@ -467,3 +467,24 @@ describe('boundaryHops — computed once per subgraph, root and direction', () =
     expect(ms).toBeLessThan(150)
   })
 })
+
+describe('projectLensEdges — a rollup cell weighs what it summarises (Part G)', () => {
+  it('a cell of 30 is a bundle of weight 30, coarse, never a leaf edge; a raw hop beside it stays exact', () => {
+    const sg = buildLensSubgraph({
+      focusUrn: 'F',
+      nodes: ['F', 'P', 'c', 'q'].map(n),
+      containmentEdges: [ce('F', 'c'), ce('P', 'q')],
+      lineageEdges: [
+        { id: 'agg', sourceUrn: 'F', targetUrn: 'P', edgeType: 'AGGREGATED', kind: 'rollup', weight: 30 },
+        { id: 'r', sourceUrn: 'c', targetUrn: 'q', edgeType: 'FLOWS', kind: 'raw', weight: null },
+      ],
+    })
+    const all = new Set(['F', 'P', 'c', 'q'])
+    const byKey = new Map(projectLensEdges(sg, all, all).map(b => [`${b.sourceUrn}>${b.targetUrn}`, b]))
+    expect(byKey.get('F>P')).toEqual({ sourceUrn: 'F', targetUrn: 'P', weight: 30, isLeafEdge: false, edgeTypeNorm: 'AGGREGATED', coarse: true })
+    expect(byKey.get('c>q')).toEqual({ sourceUrn: 'c', targetUrn: 'q', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS', coarse: false })
+    expect(sg.nodes.get('F')!.degreeDown).toBe(30)
+    expect(sg.nodes.get('P')!.degreeUp).toBe(30)
+  })
+})
+

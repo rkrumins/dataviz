@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it, beforeAll } from 'vitest'
 
-import { toLensClosure, mergeClosures, emptyWalkModel } from '../closure-adapter'
+import { toLensClosure, mergeClosures, emptyWalkModel, type LensWalkModel } from '../closure-adapter'
 import { buildLensSubgraph } from '../lens-subgraph'
 import type {
     GraphNode,
@@ -428,6 +428,53 @@ describe('mergeClosures — bulk drains', () => {
       rootUrn: 'a', direction: 'down', clearFrontierRoots: ['a', 'b'],
     })
     expect(m.frontierDown.map(f => f.urn)).toEqual(['b', 'c'])
+  })
+})
+
+describe('mergeClosures — a coarse page merges without authority (Part G)', () => {
+  const base = (over: Partial<TraceV2Result & LensClosureExtras> = {}): TraceV2Result & LensClosureExtras => ({
+    nodes: [], edges: [], containmentEdges: [],
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    focus: { urn: 'F', level: 0, entityType: 'dataset' },
+    effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+    truncated: false, truncationReason: null,
+    frontierUp: [], frontierDown: [], seedTruncated: false,
+    ...over,
+  })
+  const node = (urn: string) => ({ urn, displayName: urn, entityType: 'dataset', properties: {} })
+  const cell = (s: string, t: string, weight: number) =>
+    ({ id: `agg:${s}>${t}`, sourceUrn: s, targetUrn: t, edgeType: 'AGGREGATED', properties: { weight } }) as never
+
+  it('keeps the fine page\'s seed cursor and frontier when the coarse page lands second', () => {
+    const fine = toLensClosure(base({
+      nodes: [node('F'), node('c1')], truncated: true, truncationReason: 'max_nodes', seedTruncated: true, seedCursor: 's:c2',
+      frontierDown: [{ urn: 'c1', totalCount: 9, nextCursor: 'e:3', reason: 'cut' }],
+    }), 'F')
+    const merged = mergeClosures(fine, base({
+      nodes: [node('F'), node('P')], edges: [cell('F', 'P', 40)], downstreamUrns: new Set(['P']),
+    }), { rootUrn: 'F', direction: 'both', authoritative: false })
+    expect(merged.seedCursor).toBe('s:c2')
+    expect(merged.frontierDown.map(f => f.urn)).toEqual(['c1'])
+    expect(merged.lineageEdges.find(e => e.id === 'agg:F>P')).toMatchObject({ kind: 'rollup', weight: 40 })
+    expect(merged.nodes.map(n => n.urn).sort()).toEqual(['F', 'P', 'c1'])
+    expect(merged.downstreamUrns.has('P')).toBe(true)
+  })
+
+  it('order does not matter: coarse-then-fine and fine-then-coarse are the same model', () => {
+    const coarseRes = base({ nodes: [node('F'), node('P')], edges: [cell('F', 'P', 40)], downstreamUrns: new Set(['P']) })
+    const fineRes = base({
+      nodes: [node('F'), node('c1')], truncated: true, truncationReason: 'max_nodes', seedTruncated: true, seedCursor: 's:c2',
+      frontierDown: [{ urn: 'c1', totalCount: 9, nextCursor: 'e:3', reason: 'cut' }],
+    })
+    const a = mergeClosures(toLensClosure(coarseRes, 'F'), fineRes, { rootUrn: 'F', direction: 'both' })
+    const b = mergeClosures(toLensClosure(fineRes, 'F'), coarseRes, { rootUrn: 'F', direction: 'both', authoritative: false })
+    const shape = (m: LensWalkModel) => ({
+      nodes: m.nodes.map(n => n.urn).sort(), edges: m.lineageEdges.map(e => e.id).sort(),
+      up: [...m.upstreamUrns].sort(), down: [...m.downstreamUrns].sort(),
+      seedCursor: m.seedCursor, frontierDown: m.frontierDown.map(f => f.urn), truncated: m.truncated,
+    })
+    expect(shape(a)).toEqual(shape(b))
+    expect(a.seedCursor).toBe('s:c2')
   })
 })
 

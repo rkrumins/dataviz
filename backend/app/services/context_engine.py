@@ -1381,12 +1381,33 @@ class ContextEngine:
             edge_types = [t for t in declared_types if t]
         containment_types = list(resolved.containment_edge_types or [])
         max_nodes = min(req.max_nodes or ContextEngine.TRACE_MAX_NODES, ContextEngine.TRACE_MAX_NODES_HARD)
+
+        # THE COARSE FIRST PAINT (Part G, 2026-08-21): the rollup cells incident
+        # to the focus, served by the provider's rollup lane when it has one.
+        # The synthetic type the fine walk strips is exactly what this lane
+        # reads. A provider without the lane (drafts, versioned branches)
+        # serves the request with the fine walk below, and the result says so.
+        if getattr(req, "grain", None) == "coarse":
+            coarse_fn = getattr(self.provider, "trace_closure_coarse", None)
+            if coarse_fn is not None:
+                async with self._trace_semaphore():
+                    result = await coarse_fn(
+                        urn=req.urn,
+                        direction=req.direction,
+                        aggregated_edge_type=next(iter(SYNTHETIC_LINEAGE_EDGE_TYPES)),
+                        containment_edge_types=containment_types,
+                        max_cells=max_nodes,
+                        timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
+                    )
+                result.grain = "coarse"
+                return result
+
         fn = getattr(self.provider, "trace_closure", None)
         if fn is None:
             raise NotImplementedError("provider does not support trace_closure")
 
         async with self._trace_semaphore():
-            return await fn(
+            result = await fn(
                 urn=req.urn,
                 upstream_depth=req.upstream_depth if req.direction in ("upstream", "both") else 0,
                 downstream_depth=req.downstream_depth if req.direction in ("downstream", "both") else 0,
@@ -1399,6 +1420,9 @@ class ContextEngine:
                 after_cursor=req.after_cursor,
                 seed_cursor=req.seed_cursor,
             )
+        if getattr(req, "grain", None) is not None:
+            result.grain = "fine"
+        return result
 
     # ------------------------------------------------------------------ #
     # Trace v2 wrappers — skeleton-first contract                          #

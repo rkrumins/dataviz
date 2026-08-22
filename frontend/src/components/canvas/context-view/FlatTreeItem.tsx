@@ -216,6 +216,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const descendantCount = hasChildren && !isExpanded
     ? (isTracing ? (showLineageCounts ? onLineageCount : 0) : (childCount || node.children.length))
     : 0
+  // THE COARSE FIRST PAINT (Part G): a partner known only from a rollup
+  // cell has no rows on this lineage yet — its pill says what the cell
+  // says, "≈N flows", until the raw pages replace it.
+  const traceApprox = isTracing && showLineageCounts && !isExpanded && descendantCount === 0
+    ? ((node.data.traceApprox as number | undefined) ?? 0)
+    : 0
 
   // Density-aware sizing — driven by usePreferencesStore.canvasDensity. The
   // virtualizer in LayerColumn reads the same density via densityRowHeights()
@@ -667,7 +673,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           ``right-[3.125rem]`` when a badge is present so it lands
           to the LEFT of the badge, never on top of it. */}
       <div className="flex items-center gap-1.5 flex-shrink-0 relative z-[5]">
-        {descendantCount > 0 && (
+        {(descendantCount > 0 || traceApprox > 0) && (
           <span className={cn(
             "text-[11px] px-2 py-1 rounded-lg flex-shrink-0",
             "bg-white/[0.06] border border-white/[0.08]",
@@ -675,7 +681,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             "transition-opacity duration-150",
             isHovered && "opacity-0 pointer-events-none",
           )}>
-            {isTracing ? `${descendantCount} on this lineage` : `+${descendantCount}`}
+            {descendantCount > 0
+              ? (isTracing ? `${descendantCount} on this lineage` : `+${descendantCount}`)
+              : `≈${traceApprox.toLocaleString()} flow${traceApprox === 1 ? '' : 's'}`}
           </span>
         )}
 

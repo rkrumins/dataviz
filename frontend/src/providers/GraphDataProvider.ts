@@ -558,6 +558,12 @@ export interface TraceClosureRequest {
      *  the NEXT keyset page of the focus's lineage-bearing contents and
      *  walks from those. Mutually exclusive with afterCursor/seedUrns. */
     seedCursor?: string
+    /** The grain of the answer (Part G, 2026-08-21). 'coarse' asks for the
+     *  `:AGGREGATED` rollup cells incident to the focus — partner
+     *  containers and how many flows, one shot, milliseconds on the server
+     *  — the first paint the raw pages refine behind. Absent/'fine' is the
+     *  degree-exact walk. One shot: never with a cursor or seeds. */
+    grain?: 'fine' | 'coarse'
 }
 
 /** One frontier boundary node as the closure wire ships it — pre-normalization.
@@ -585,6 +591,10 @@ export interface LensClosureExtras {
      *  null/absent when the focus's contents are fully seeded. Send back
      *  as the request's `seedCursor` for the next page of contents. */
     seedCursor?: string | null
+    /** Which grain actually served the page: 'coarse' from the rollup
+     *  lane, 'fine' when a coarse request fell back to the walk (a
+     *  provider without rollups), absent from servers that predate it. */
+    grain?: 'fine' | 'coarse' | null
 }
 
 /**

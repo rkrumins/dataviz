@@ -571,6 +571,25 @@ async def test_a_max_nodes_page_is_complete_by_contract_and_cached_for_the_full_
 
 
 @pytest.mark.asyncio
+async def test_a_coarse_page_is_complete_and_cached_for_the_full_ttl() -> None:
+    """A coarse page has no frontier and no cursor — it is the whole
+    answer to its request — and a cap cut is `max_nodes` like the fine
+    walk's. Both keep the full TTL."""
+    redis = await _cache_closure(_closure([], grain="coarse"))
+    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
+    redis = await _cache_closure(_closure([], grain="coarse", truncated=True, truncationReason="max_nodes"))
+    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
+
+
+def test_grain_separates_the_cache_key() -> None:
+    from backend.common.models.graph import TraceClosureRequest
+    fine = TraceClosureRequest.model_validate({"urn": "u1"}).model_dump(mode="json", by_alias=True, exclude_none=True)
+    coarse = TraceClosureRequest.model_validate({"urn": "u1", "grain": "coarse"}).model_dump(mode="json", by_alias=True, exclude_none=True)
+    scope = CacheScope("ws1", "ds1")
+    assert graph_cache._build_key(scope, "g", ENDPOINT_TRACE_CLOSURE, fine) != graph_cache._build_key(scope, "g", ENDPOINT_TRACE_CLOSURE, coarse)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reason", ["timeout", "seed_failed", "nodes_failed", "ancestors_failed"])
 async def test_a_failed_page_is_not_pinned(reason: str) -> None:
     """A FAILURE is still degraded: the same request may well succeed in a

@@ -204,6 +204,18 @@ interface PreferencesState {
   lensCondenseSteps: boolean
   setLensCondenseSteps: (on: boolean) => void
 
+  /** How much of the Lens picture is FOLDED (Part H, 2026-08-21) — the
+   *  reader's own starting grain, so it follows them from lens to lens:
+   *  'overview' lands a band's bundle hosts (the databases a wall of
+   *  tables sits in) as closed cards with counts; 'grouped' — the
+   *  default, the user's ruling — as frames showing their strongest
+   *  rows; 'all' draws every card and folds nothing. "Some users might
+   *  wanna see it all but some might just wanna start at the high
+   *  level." Separate from `lensCondenseSteps` on purpose: chain folding
+   *  is off by default under an earlier ruling, grouping is on. */
+  lensDensity: 'overview' | 'grouped' | 'all'
+  setLensDensity: (density: 'overview' | 'grouped' | 'all') => void
+
   /** How many hops each direction the Lens fetches when it opens on a
    *  NEW entity. One is the answer to "what feeds this", which is what
    *  people open the lens for — the only value a fresh focal is ever
@@ -392,6 +404,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       setLensFrameChildren: (lensFrameChildren) => set({ lensFrameChildren }),
       lensCondenseSteps: false,
       setLensCondenseSteps: (lensCondenseSteps) => set({ lensCondenseSteps }),
+      lensDensity: 'grouped',
+      setLensDensity: (lensDensity) => set({ lensDensity }),
       lensInitialDepth: 1,
 
       // Icon picker recents
@@ -421,10 +435,20 @@ export const usePreferencesStore = create<PreferencesState>()(
       // subtree; All stays one click away. The whole state persists (no
       // partialize), so each default change needs a one-time migrate; an
       // explicit choice made AFTER v2 ships persists untouched.
-      version: 2,
+      // v3 (2026-08-21): `lensDensity` arrives, default 'grouped' (USER
+      // RULING: a band of 200 partner tables folds into its databases by
+      // default; Every card stays one click away). Nothing else moves.
+      // v4 (2026-08-22): `lensInitialDepth` back to 1. The header's 1/2/3
+      // control was retired (T28 R1) but a 2 or 3 it had written stayed in
+      // storage, so "One hop" quietly fetched two or three hops — a HOP 2
+      // band under a control that says one. A share link still carries its
+      // own depth for the focal it names; the preference is one hop.
+      version: 4,
       migrate: (persisted, version) => {
-        const state = persisted as Record<string, unknown>
-        if (version < 2) return { ...state, lensFrameChildren: 'connected' }
+        let state = persisted as Record<string, unknown>
+        if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
+        if (version < 3) state = { ...state, lensDensity: 'grouped' }
+        if (version < 4) state = { ...state, lensInitialDepth: 1 }
         return state
       },
     }

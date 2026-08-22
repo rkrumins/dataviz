@@ -1089,13 +1089,20 @@ function FrameAncestry({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   )
 }
 
-/** Where a TOP-LEVEL card lives. Rows never carry one: inside a frame
- *  the header already names the owner, right above them, and repeating
- *  it on every row is the noise the frame was for. */
-function ProvenanceRibbon({ card }: { card: FocusCard }) {
+/** Where a TOP-LEVEL card lives — and a way UP to it. Rows never carry
+ *  one: inside a frame the header already names the owner, right above
+ *  them, and repeating it on every row is the noise the frame was for.
+ *
+ *  The owner is a button, like every other crumb on the board (frame
+ *  header, focal, peek): click `GOLD` on a closed `fact_orders` and GOLD
+ *  becomes the subject. It was the one crumb that only LOOKED like one,
+ *  and Overview lands every partner closed — "we seem to have lost the
+ *  ability to navigate up the containment" (2026-08-22). */
+function ProvenanceRibbon({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   if (card.ancestry.length === 0 && !card.parentLabel) return null
   const chain = card.ancestry.length > 0 ? card.ancestry : [card.parentLabel!]
   const owner = chain[chain.length - 1]
+  const ownerId = card.ancestryIds[chain.length - 1] ?? card.parentId ?? ''
   return (
     <span className="flex items-center gap-1 min-w-0" title={`in ${chain.join(' › ')}`}>
       <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/50" />
@@ -1108,7 +1115,15 @@ function ProvenanceRibbon({ card }: { card: FocusCard }) {
           Snowflake, which identifies nothing and reads as something
           broken. Below the floor the row's own counts give up their space
           instead; the tooltip carries the whole chain either way. */}
-      <TailName className="text-ink-muted min-w-[3.5rem]" title={`in ${chain.join(' › ')}`}>{owner}</TailName>
+      <button
+        type="button"
+        aria-label={`Focus on ${owner}`}
+        disabled={ownerId === ''}
+        onClick={(e) => { e.stopPropagation(); ctx.onFocus(ownerId) }}
+        className="nodrag group/crumb flex min-w-0 disabled:pointer-events-none"
+      >
+        <TailName className="text-ink-muted min-w-[3.5rem] group-hover/crumb:text-accent-lineage transition-colors" title={`in ${chain.join(' › ')}`}>{owner}</TailName>
+      </button>
     </span>
   )
 }
@@ -1924,6 +1939,19 @@ const RowContent = memo(function RowContent({ card, ctx, onTrail }: {
               <ContentsCount card={card} />
             </>
           )}
+          {/* THE COARSE FIRST PAINT (Part G): a partner whose flows are
+              known only from a rollup cell — its own contents not yet
+              loaded — says how many, "≈", until the raw pages replace the
+              cell. The one count on a row that is a fact about the
+              entity rather than about the walk. */}
+          {!card.contents && card.approx && card.count > 0 && (
+            <>
+              {(card.showType || card.edgeTypeNorm) && <span className="text-ink-muted/40">·</span>}
+              <span className="tabular-nums" title={`About ${card.count.toLocaleString()} flows, from the data source's own summary — the detail is still loading`}>
+                {`≈${card.count.toLocaleString()} flow${card.count === 1 ? '' : 's'}`}
+              </span>
+            </>
+          )}
           {card.description && (
             <span className="truncate min-w-0 italic text-ink-muted/60">{card.description}</span>
           )}
@@ -1992,7 +2020,7 @@ const EntityContent = memo(function EntityContent({ card, ctx, onTrail }: {
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug min-w-0">
           {(card.ancestry.length > 0 || card.parentLabel) && (
             <>
-              <ProvenanceRibbon card={card} />
+              <ProvenanceRibbon card={card} ctx={ctx} />
               <span className="text-ink-muted/40">·</span>
             </>
           )}
@@ -2010,13 +2038,17 @@ const EntityContent = memo(function EntityContent({ card, ctx, onTrail }: {
               </span>
             </>
           )}
-          {/* No ×N on a frame either — same accumulator, same reason. */}
-          {card.contents && (
-            <>
-              <ContentsCount card={card} />
-            </>
-          )}
         </p>
+        {/* THE DRILL CUE. On a closed top-level card the count is what a
+            click will show ("10 on this lineage · of 12"), so it gets a
+            line of its own rather than the tail of the provenance line,
+            where it truncated to "10 on this lineag…" beside the ribbon.
+            (Rows keep the one-line form: see the row renderer.) */}
+        {card.contents && (
+          <p className="text-[9.5px] text-ink-muted leading-snug min-w-0 whitespace-nowrap">
+            <ContentsCount card={card} />
+          </p>
+        )}
       </div>
       <CardActions card={card} ctx={ctx} />
       <WalkPills card={card} ctx={ctx} />
@@ -2447,9 +2479,9 @@ const FrameContent = memo(function FrameContent({ card, ctx, focalStats, isFocal
                     follow controls sit OUTSIDE the truncating run, fixed
                     size, so they never fight the sentence for room. */}
                 <span className="truncate min-w-0 flex-1 tabular-nums">
-                  {orientationHalf('Fed by', 'source', 'upstream', focalReach.up, focalReach.moreUp, focalReach.upSystems, 'No upstream sources')}
+                  {orientationHalf('Fed by', 'source', 'upstream', focalReach.up, focalReach.moreUp, focalReach.upSystems, 'No upstream sources', focalReach.approxUp ?? 0)}
                   {' · '}
-                  {orientationHalf('feeds', 'consumer', 'downstream', focalReach.down, focalReach.moreDown, focalReach.downSystems, 'feeds nothing downstream')}
+                  {orientationHalf('feeds', 'consumer', 'downstream', focalReach.down, focalReach.moreDown, focalReach.downSystems, 'feeds nothing downstream', focalReach.approxDown ?? 0)}
                 </span>
                 {card.pillUp && <InlineFollow card={card} pill={card.pillUp} dir="in" ctx={ctx} />}
                 {card.pillDown && <InlineFollow card={card} pill={card.pillDown} dir="out" ctx={ctx} />}
@@ -3203,6 +3235,9 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     /** The layout says this bundle's badge has something to say and room
      *  to say it (see `FocusEdge.labelVisible`). */
     labelVisible?: boolean
+    /** A rollup cell is in this bundle (Part G): the count is "≈" and the
+     *  wire draws coarse wherever it is. */
+    approx?: boolean
     /** Too many badges on this board for all of them to be read. */
     labelDense?: boolean
     /** THE TRAIL: this bundle connects two consecutive stops on the
@@ -3301,7 +3336,10 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // while it is actually part of an isolated cone. The un-isolated
   // board's bundles are unchanged — `grainCoarse` sits on the data
   // whether or not anything is isolated, and `onCone` is what gates it.
-  const seam = onCone && (d.grainCoarse ?? false)
+  // A ROLLUP-BACKED wire (Part G) is coarse wherever it is: its count is a
+  // summary the raw pages have not yet confirmed, so it wears the seam's
+  // dash and an "≈" on its label until raw evidence replaces it.
+  const seam = (d.approx ?? false) || (onCone && (d.grainCoarse ?? false))
   // Whichever end sits FARTHER from the anchor is the coarse
   // CONTINUATION — the same "walk further from here" a card's own ⊕
   // already offers on that side, dispatched through the identical action.
@@ -3480,7 +3518,7 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
                 aria-label="This connection loops back"
               />
             )}
-            {showCount && `×${d.count.toLocaleString()}`}
+            {showCount && `${d.approx ? '≈' : '×'}${d.count.toLocaleString()}`}
           </div>
         </EdgeLabelRenderer>
       )}
@@ -3739,14 +3777,14 @@ function LensPeek({ card, host, ctx, onDismiss }: {
             title={`${card.drawnIn.toLocaleString()} on this board${card.flowsIn > card.drawnIn ? `, ${(card.flowsIn - card.drawnIn).toLocaleString()} not fetched yet` : ''}`}
           >
             <LucideIcons.ArrowDownLeft className="w-3 h-3" />
-            {card.flowsIn.toLocaleString()}{card.flowsInExact ? '' : '+'} in
+            {card.approx ? '≈' : ''}{card.flowsIn.toLocaleString()}{card.flowsInExact ? '' : '+'} in
           </span>
           <span
             className="flex items-center gap-1 text-amber-600 dark:text-amber-400"
             title={`${card.drawnOut.toLocaleString()} on this board${card.flowsOut > card.drawnOut ? `, ${(card.flowsOut - card.drawnOut).toLocaleString()} not fetched yet` : ''}`}
           >
             <LucideIcons.ArrowUpRight className="w-3 h-3" />
-            {card.flowsOut.toLocaleString()}{card.flowsOutExact ? '' : '+'} out
+            {card.approx ? '≈' : ''}{card.flowsOut.toLocaleString()}{card.flowsOutExact ? '' : '+'} out
           </span>
           <span className="text-ink-muted/70">
             {flows === 0
@@ -4533,7 +4571,7 @@ export function FocusGraphView({
         data: {
           count: e.count, dimmed: e.dimmed, tint, mutedTint, cycleBack: e.cycleBack, reducedMotion,
           cycleAnchor: e.cycleAnchor, labelVisible: e.labelVisible, labelDense, trail,
-          labelT: e.labelT, grainCoarse: e.grainCoarse, seamSlotted: e.seamSlotted, sameAncestorFrame: e.sameAncestorFrame,
+          labelT: e.labelT, grainCoarse: e.grainCoarse, approx: e.approx ?? false, seamSlotted: e.seamSlotted, sameAncestorFrame: e.sameAncestorFrame,
           motionDense,
           inFrameLane: e.inFrameLane,
           sourcePillUp: cardById.get(e.source)?.pillUp ?? null,
@@ -4853,12 +4891,17 @@ export function FocusGraphView({
         </ReactFlow>
       </ReactFlowProvider>
       {/* C4: cards landed while the walk was drawing and the camera held
-          its place — the fit is OFFERED, never taken. */}
+          its place — the fit is OFFERED, never taken. While the walk runs
+          the capsule owns the top-centre (2026-08-22), so the offer sits
+          below it rather than under it. */}
       {camera.grew && (
         <button
           type="button"
           onClick={camera.fitAll}
-          className="absolute top-3 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-1.5 rounded-full border border-accent-lineage/30 bg-canvas-elevated px-3 py-1 text-[11px] font-medium text-accent-lineage shadow-md hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+          className={cn(
+            'absolute left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-1.5 rounded-full border border-accent-lineage/30 bg-canvas-elevated px-3 py-1 text-[11px] font-medium text-accent-lineage shadow-md hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-[top]',
+            walking ? 'top-[4.75rem]' : 'top-3',
+          )}
         >
           <LucideIcons.Maximize2 className="w-3 h-3" />
           Board grew · Fit

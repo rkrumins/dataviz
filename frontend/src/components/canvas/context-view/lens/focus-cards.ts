@@ -47,7 +47,14 @@ export const edgeLabelFor = (norm: string, info?: EdgeTypeInfoMap): string =>
  */
 export function orientationHalf(
   verb: string, noun: string, dirWord: string, count: number, floor: boolean, systems: number, zero: string,
+  /** Partners known only from the coarse page's cells (Part G) — read
+   *  as "≈N" while the raw sets are still empty, never as "nothing". */
+  approx = 0,
 ): string {
+  if (count === 0 && approx > 0) {
+    const sys = systems > 1 ? ` across ${systems} systems` : ''
+    return `${verb} ≈${approx.toLocaleString()} ${noun}${approx === 1 ? '' : 's'}${sys}`
+  }
   if (count === 0) {
     return floor ? `nothing loaded ${dirWord} yet — the data source may have more` : zero
   }
@@ -66,6 +73,27 @@ export const ANCESTRY_CAP = 6
  *  fixed window is what keeps a 500-column table the same size as a
  *  5-column one; what MOVES it is a scroll rather than a page click. */
 export const FRAME_WINDOW = 8
+/** FAN-IN BUNDLES (Part H, 2026-08-21; the budget gate dropped 2026-08-22):
+ *  cards sharing a parent fold into a frame under it whenever there are
+ *  two or more of them — a database holding its tables as rows. The rule
+ *  reads parent pointers only, never ontology. These are its rows: the
+ *  strongest first, "N more" behind.
+ *  Narrower than a frame the reader opened on purpose (`FRAME_WINDOW`):
+ *  eighteen bundles of five read; eighteen of eight are a wall again. */
+export const BUNDLE_WINDOW = 5
+/**
+ * PARTNER GRAIN (Part H, 2026-08-22). How many partner frames a hop band
+ * opens to their rows by itself under the Grouped rung — the strongest
+ * first; the rest land closed, counted, one click from their rows. Six
+ * tables each opened to eight column rows were a wall at half zoom even
+ * with six well under the card budget: the cost was rows, not cards.
+ */
+export const OPEN_PARTNERS_PER_BAND = 3
+/** How much of the picture is folded — the reader's preference (see
+ *  `usePreferencesStore.lensDensity`): 'overview' lands bundle hosts as
+ *  CLOSED cards with counts, 'grouped' as open frames showing their
+ *  strongest rows, 'all' draws every card and folds nothing. */
+export type LensDensity = 'overview' | 'grouped' | 'all'
 /** Same, but in "everything inside" mode — rows are shorter there, so a
  *  couple more fit in the same height. */
 export const FRAME_WINDOW_ALL = 10
@@ -374,6 +402,11 @@ export interface LensReach {
    *  spread across a dozen platforms are a different picture entirely. */
   upSystems: number
   downSystems: number
+  /** Partner CARDS known only from the coarse page's cells (Part G) —
+   *  the endpoints whose residual is above zero — per side. Read as a
+   *  "≈N" floor while the raw-grain sets are still empty. */
+  approxUp?: number
+  approxDown?: number
 }
 
 export interface FocusCard {
@@ -403,6 +436,9 @@ export interface FocusCard {
   parentLabel: string | null
   /** Raw hops this card's subtree carries to the rest of the picture. */
   count: number
+  /** The count includes a rollup cell's summary (Part G): it reads "≈N"
+   *  until raw evidence replaces the cell. */
+  approx?: boolean
   /** WHAT THIS CARD IS CONNECTED TO, per side — the sentence a row
    *  states in words when you point at it ("17 flows · 12 in / 5 out").
    *
@@ -564,6 +600,9 @@ export interface FocusEdge {
   source: string
   target: string
   count: number
+  /** A rollup cell is in this bundle: the count is a summary ("≈N flows")
+   *  and the wire draws coarse (Part G). */
+  approx?: boolean
   edgeTypeNorm: string
   dimmed: boolean
   /** This hop runs BACKWARDS in the picture's own hop numbering, so it
@@ -674,6 +713,9 @@ export interface FocusGraph {
    *  `LensViewState.walkedThrough`; see the note there for why the grain
    *  has to be sticky. */
   walkedThrough: ReadonlySet<string>
+  /** The containers this build folded a band's cards into (Part H):
+   *  their rows are the cards the band would otherwise have shown. */
+  bundled: ReadonlySet<string>
   /** Where every entity drawn so far SITS, by first-draw order. The
    *  consumer folds it back into `LensViewState.drawnRank`; a card on the
    *  board never moves because the walk grew under it. */

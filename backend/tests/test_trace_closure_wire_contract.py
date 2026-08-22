@@ -117,6 +117,7 @@ def test_trace_closure_request_alias_round_trip():
         "excludeUrns": ["x1"],
         "afterCursor": "e:123",
         "seedCursor": None,
+        "grain": None,
     }
     from_alias = TraceClosureRequest.model_validate(alias_payload)
 
@@ -131,6 +132,7 @@ def test_trace_closure_request_alias_round_trip():
         "exclude_urns": ["x1"],
         "after_cursor": "e:123",
         "seed_cursor": None,
+        "grain": None,
     }
     from_snake = TraceClosureRequest.model_validate(snake_payload)
 
@@ -560,3 +562,80 @@ def test_a_source_with_any_real_type_still_filters_the_synthetic_one():
     eng = _engine_with_ontology(provider, _OntologyWithSyntheticTypes())
     _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate({"urn": "u1"})))
     assert "AGGREGATED" not in provider.calls[0]["lineage_edge_types"]
+
+
+# ── grain: the coarse first paint's wire (Part G, 2026-08-21) ──────────────
+
+
+class _CoarseCapableProvider(_CapturingClosureProvider):
+    def __init__(self):
+        super().__init__()
+        self.coarse_calls = []
+
+    async def trace_closure_coarse(self, **kwargs):
+        self.coarse_calls.append(kwargs)
+        return TraceClosureResult(
+            nodes=[], edges=[], containmentEdges=[],
+            upstreamUrns=set(), downstreamUrns=set(),
+            focus=TraceFocus(urn=kwargs["urn"], level=0, entityType="x"),
+            effectiveLevel=0, isInherited=False, inheritedFromUrn=None,
+            truncated=False, truncationReason=None,
+        )
+
+
+def test_grain_is_optional_and_absent_from_the_dump_when_unset():
+    """An old client sends no `grain`; its cache key (built from the
+    exclude_none dump) must not change by a byte."""
+    req = TraceClosureRequest.model_validate({"urn": "u1"})
+    assert req.grain is None
+    assert "grain" not in req.model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert TraceClosureRequest.model_validate({"urn": "u1", "grain": "coarse"}).grain == "coarse"
+
+
+def test_grain_coarse_dispatches_to_the_rollup_lane_and_the_result_says_so():
+    provider = _CoarseCapableProvider()
+    eng = _make_engine(provider)
+    req = TraceClosureRequest.model_validate({"urn": "u1", "direction": "upstream", "grain": "coarse"})
+    result = _run(ContextEngine.trace_closure(eng, req))
+    assert provider.calls == []                       # the fine walk never ran
+    assert len(provider.coarse_calls) == 1
+    call = provider.coarse_calls[0]
+    assert call["urn"] == "u1" and call["direction"] == "upstream"
+    assert call["aggregated_edge_type"] == "AGGREGATED"
+    assert call["containment_edge_types"] == ["HAS"]
+    assert result.grain == "coarse"
+
+
+def test_grain_coarse_falls_back_to_the_fine_walk_when_the_provider_has_no_rollup_lane():
+    """Drafts and versioned branches have no rollup lane: the request is
+    served by the fine walk, and the result says `fine` so the client can
+    tell it is the same page its fine leg brings."""
+    provider = _CapturingClosureProvider()
+    eng = _make_engine(provider)
+    req = TraceClosureRequest.model_validate({"urn": "u1", "grain": "coarse"})
+    result = _run(ContextEngine.trace_closure(eng, req))
+    assert len(provider.calls) == 1
+    assert result.grain == "fine"
+
+
+def test_grain_fine_or_unset_never_touches_the_rollup_lane():
+    provider = _CoarseCapableProvider()
+    eng = _make_engine(provider)
+    for payload in ({"urn": "u1"}, {"urn": "u1", "grain": "fine"}):
+        _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate(payload)))
+    assert provider.coarse_calls == []
+    assert len(provider.calls) == 2
+
+
+def test_trace_closure_result_carries_grain_optionally():
+    base = {
+        "nodes": [], "edges": [], "containmentEdges": [],
+        "upstreamUrns": [], "downstreamUrns": [],
+        "focus": {"urn": "u1", "level": 0, "entityType": "x"},
+        "effectiveLevel": 0, "isInherited": False, "inheritedFromUrn": None,
+        "truncated": False, "truncationReason": None,
+        "frontierUp": [], "frontierDown": [], "seedTruncated": False, "seedCursor": None,
+    }
+    assert TraceClosureResult.model_validate(base).grain is None
+    assert TraceClosureResult.model_validate({**base, "grain": "coarse"}).model_dump(by_alias=True)["grain"] == "coarse"
+

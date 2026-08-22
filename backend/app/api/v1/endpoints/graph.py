@@ -923,6 +923,11 @@ async def trace_closure(
             raise HTTPException(status_code=422, detail="seedCursor cannot be combined with afterCursor")
         if not request.seed_cursor.startswith("s:") or len(request.seed_cursor) <= 2:
             raise HTTPException(status_code=422, detail="seedCursor must match ^s:.+$")
+    if getattr(request, "grain", None) == "coarse":
+        # The coarse page is focus-anchored and one shot (Part G): a cursor
+        # or a seed list names a continuation it cannot honour.
+        if request.after_cursor is not None or request.seed_cursor is not None or request.seed_urns:
+            raise HTTPException(status_code=422, detail="grain=coarse is one shot: it cannot be combined with afterCursor, seedCursor or seedUrns")
 
     await _enforce_fair_share(engine, ENDPOINT_TRACE_CLOSURE)
     response.headers["X-Provider-Health"] = _provider_health_header(engine)

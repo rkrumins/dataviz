@@ -7767,6 +7767,185 @@ class FalkorDBProvider(GraphDataProvider):
             seedCursor=(f"s:{next_seed_after}" if next_seed_after else None),
         )
 
+    async def trace_closure_coarse(
+        self,
+        urn: str,
+        direction: str,
+        aggregated_edge_type: str,
+        containment_edge_types: List[str],
+        max_cells: int,
+        timeout_ms: int,
+    ) -> TraceClosureResult:
+        """The COARSE first paint (Part G, 2026-08-21): every ``:AGGREGATED``
+        rollup cell INCIDENT to the focus, both directions, one shot.
+
+        A cell is "which container feeds / consumes this one, and how many
+        flows" — the picture the browse canvas reads, answered from an
+        index seek in milliseconds. The fine walk (``trace_closure``) takes
+        seconds on a wide table because it enumerates and hydrates the
+        table's own columns; this ships the partner containers first so
+        the board has a picture while the raw pages land behind it.
+
+        What it deliberately does NOT do: filter by depth or label (every
+        incident cell ships — which endpoints are cards is the client's
+        inner-first accounting, so a ``Node ⊃ Node ⊃ Node`` estate with
+        partners at different depths needs no special case here), walk
+        past hop 1 (rollup transitivity is not leaf transitivity), or
+        claim to be the truth (cells are derived and can lag; raw evidence
+        replaces them pair by pair on the client).
+
+        Honesty is the fine walk's: a failed read is ``timeout`` (never an
+        unflagged empty page), a partner that does not hydrate drops its
+        cell and files ``nodes_failed``, the ancestor chain and containment
+        always ship (the ``TraceResult`` invariant), and a page cut at
+        ``max_cells`` says ``max_nodes`` with the heaviest cells kept.
+        """
+        await self._ensure_connected()
+        deadline = time.monotonic() + max(0.6, timeout_ms / 1000.0)
+        reasons: List[str] = []
+
+        focus_node = await self.get_node(urn)
+        focus_level = self._get_node_level(focus_node.entity_type) if focus_node else None
+        focus_entity_type = str(focus_node.entity_type) if focus_node else "unknown"
+        focus_label = (await self._get_cached_label(urn)) or (focus_entity_type if focus_node else "")
+        anchor = f"(f:{_sanitize_label(focus_label)} {{urn: $urn}})" if focus_label else "(f {urn: $urn})"
+
+        agg_types = self._alias_rel_types([aggregated_edge_type]) or [aggregated_edge_type]
+        agg = _sanitize_label(agg_types[0])
+        ctypes = self._alias_rel_types(list(containment_edge_types or []))
+        cap = max(1, int(max_cells))
+
+        # One query per direction, heaviest first, one row past the cap so a
+        # cut is known rather than inferred. The arrow is in the pattern
+        # text (``-[r:…]->`` / ``<-[r:…]-``) — the shape the tests fake.
+        def _query(incoming: bool) -> str:
+            pattern = f"{anchor}<-[r:{agg}]-(p)" if incoming else f"{anchor}-[r:{agg}]->(p)"
+            return (
+                f"MATCH {pattern} "
+                "RETURN p.urn AS partner, labels(p)[0] AS label, coalesce(r.weight, 0) AS weight, "
+                "r.sourceDepth AS sd, r.targetDepth AS td, r.latestUpdate AS lu, r.sourceEdgeTypes AS types "
+                "ORDER BY weight DESC, partner LIMIT $cap"
+            )
+
+        edges_by_id: Dict[str, GraphEdge] = {}
+        upstream_urns: Set[str] = set()
+        downstream_urns: Set[str] = set()
+        partners: Set[str] = set()
+        for incoming in (True, False):
+            if incoming and direction == "downstream":
+                continue
+            if not incoming and direction == "upstream":
+                continue
+            remaining = deadline - time.monotonic()
+            try:
+                res = await self._ro_query(
+                    _query(incoming),
+                    {"urn": urn, "cap": cap + 1},
+                    timeout=max(0.6, min(CLOSURE_QUERY_CAP_SECS, remaining)),
+                    op="trace.closure_coarse",
+                )
+                rows = list(res.result_set or [])
+            except Exception:
+                reasons.append("timeout")
+                continue
+            if len(rows) > cap:
+                rows = rows[:cap]
+                reasons.append("max_nodes")
+            for row in rows:
+                partner, _label, weight, sd, td, lu, types = (list(row) + [None] * 7)[:7]
+                if not partner or partner == urn:
+                    continue
+                src, tgt = (partner, urn) if incoming else (urn, partner)
+                eid = f"agg:{src}>{tgt}"
+                edges_by_id[eid] = GraphEdge(
+                    id=eid,
+                    sourceUrn=src,
+                    targetUrn=tgt,
+                    edgeType=agg_types[0],
+                    properties={
+                        "weight": weight if isinstance(weight, (int, float)) else 0,
+                        "sourceDepth": sd,
+                        "targetDepth": td,
+                        "latestUpdate": lu,
+                        "sourceEdgeTypes": list(types) if isinstance(types, (list, tuple)) else [],
+                    },
+                )
+                partners.add(partner)
+                (upstream_urns if incoming else downstream_urns).add(partner)
+
+        # ── the fine walk's own tail: hydrate, honesty, chains, containment ──
+        discovered = {urn, *partners}
+        nodes_by_urn: Dict[str, GraphNode] = {}
+        try:
+            hydrated = await self.get_nodes_batch(list(discovered))
+            nodes_by_urn = {n.urn: n for n in hydrated if n}
+        except Exception:
+            reasons.append("nodes_failed")
+        if focus_node and urn not in nodes_by_urn:
+            nodes_by_urn[urn] = focus_node
+        missing = [u for u in discovered if u not in nodes_by_urn]
+        if missing:
+            reasons.append("nodes_failed")
+            keep = set(nodes_by_urn)
+            edges_by_id = {
+                eid: e for eid, e in edges_by_id.items()
+                if e.source_urn in keep and e.target_urn in keep
+            }
+            upstream_urns &= keep
+            downstream_urns &= keep
+
+        containment_edges_list: List[GraphEdge] = []
+        if ctypes and nodes_by_urn:
+            try:
+                chains = await self._compute_and_store_ancestors_bulk(list(nodes_by_urn.keys()))
+                seen_anc: Set[str] = set()
+                ancestor_urns: List[str] = []
+                for chain in chains.values():
+                    for ancestor in chain or []:
+                        if ancestor and ancestor not in seen_anc:
+                            seen_anc.add(ancestor)
+                            ancestor_urns.append(ancestor)
+                new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+                if new_ancestors:
+                    for n in await self.get_nodes_batch(new_ancestors):
+                        if n:
+                            nodes_by_urn[n.urn] = n
+                if len(nodes_by_urn) > 1:
+                    containment_edges_list = await self._fetch_containment_edges(
+                        list(nodes_by_urn.keys()), ctypes, chains=chains,
+                        labels={u: str(n.entity_type) for u, n in nodes_by_urn.items() if n.entity_type},
+                    )
+            except Exception:
+                reasons.append("ancestors_failed")
+
+        truncation_reason: Optional[str] = None
+        for candidate in ("timeout", "nodes_failed", "ancestors_failed", "max_nodes"):
+            if candidate in reasons:
+                truncation_reason = candidate
+                break
+
+        return TraceClosureResult(
+            nodes=list(nodes_by_urn.values()),
+            edges=list(edges_by_id.values()),
+            containmentEdges=containment_edges_list,
+            upstreamUrns=upstream_urns,
+            downstreamUrns=downstream_urns,
+            focus=TraceFocus(
+                urn=urn,
+                level=focus_level if focus_level is not None else 0,
+                entityType=focus_entity_type,
+            ),
+            effectiveLevel=focus_level if focus_level is not None else 0,
+            isInherited=False,
+            inheritedFromUrn=None,
+            truncated=(truncation_reason is not None),
+            truncationReason=truncation_reason,
+            frontierUp=[],
+            frontierDown=[],
+            seedTruncated=False,
+            seedCursor=None,
+        )
+
     async def expand_aggregated(
         self,
         source_urn: str,

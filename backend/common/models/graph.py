@@ -197,6 +197,15 @@ class TraceClosureRequest(BaseModel):
     # descendants (urn > cursor) and walks from those. Mutually exclusive
     # with afterCursor and seedUrns (endpoint-validated).
     seed_cursor: Optional[str] = Field(None, alias="seedCursor")
+    # The grain of the answer (Part G, 2026-08-21). 'coarse' asks for the
+    # `:AGGREGATED` rollup cells incident to the focus — partner containers
+    # and how many flows, one shot, in milliseconds — the first paint the
+    # raw pages refine behind. Absent/'fine' is the degree-exact walk. A
+    # provider without a rollup lane (drafts, versioned branches) serves a
+    # coarse request with the fine walk and the result says `grain: fine`.
+    # Optional and omitted from the dump when unset, so an old client's
+    # cache key does not change by a byte.
+    grain: Optional[Literal["fine", "coarse"]] = Field(None, alias="grain")
 
     class Config:
         populate_by_name = True
@@ -376,6 +385,10 @@ class TraceClosureResult(TraceResult):
     # or None when the focus's contents are fully seeded. Send back as the
     # request's seedCursor to walk the next page of contents.
     seed_cursor: Optional[str] = Field(None, alias="seedCursor")
+    # Which grain actually served this page — 'coarse' for the rollup
+    # lane, 'fine' when a coarse request fell back to the degree-exact
+    # walk, None from providers that predate the field.
+    grain: Optional[Literal["fine", "coarse"]] = None
 
 
 class TraceResultV2(TraceResult):

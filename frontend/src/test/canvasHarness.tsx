@@ -198,24 +198,51 @@ function wireNodes(estate: TraceEstate): GraphNode[] {
 
 /** The estate model, back in the wire shape `toLensClosure` consumes — ONE
  *  response, no frontier, so the walk is complete the moment it lands. */
-function closureFor(estate: TraceEstate, focusUrn: string, stall?: boolean): TraceV2Result & LensClosureExtras {
+function closureFor(
+  estate: TraceEstate,
+  focusUrn: string,
+  stall?: boolean,
+  /** The COARSE page (Part G): the estate's rollup cells alone, labelled
+   *  `grain: 'coarse'`, its partners in the coarse direction sets. The fine
+   *  page is everything else — the raw hops. */
+  grain: 'fine' | 'coarse' = 'fine',
+): TraceV2Result & LensClosureExtras {
+  const coarse = grain === 'coarse'
+  const edges = estate.model.lineageEdges.filter(e => coarse ? e.kind === 'rollup' : e.kind !== 'rollup')
+  const coarseUrns = (side: 'up' | 'down') => new Set(edges
+    .filter(e => side === 'up' ? e.targetUrn === focusUrn : e.sourceUrn === focusUrn)
+    .map(e => side === 'up' ? e.sourceUrn : e.targetUrn))
+  // The real coarse page ships the cells' endpoints, their ancestor chains
+  // and the focus chain — never the contents of anything (the fine pages
+  // bring those).
+  const parentOf = new Map<string, string>()
+  for (const c of estate.model.containmentEdges) if (!parentOf.has(c.targetUrn)) parentOf.set(c.targetUrn, c.sourceUrn)
+  const shipped = new Set<string>()
+  if (coarse) {
+    const climb = (urn: string) => { let cur: string | undefined = urn; while (cur && !shipped.has(cur)) { shipped.add(cur); cur = parentOf.get(cur) } }
+    climb(focusUrn)
+    for (const e of edges) { climb(e.sourceUrn); climb(e.targetUrn) }
+  }
   return {
     focus: { urn: focusUrn, level: 0, entityType: '' },
-    nodes: wireNodes(estate),
-    edges: estate.model.lineageEdges.map(e => ({
+    nodes: coarse ? wireNodes(estate).filter(n => shipped.has(n.urn)) : wireNodes(estate),
+    edges: edges.map(e => ({
       id: e.id ?? `${e.sourceUrn}>${e.targetUrn}`,
       sourceUrn: e.sourceUrn,
       targetUrn: e.targetUrn,
       edgeType: e.edgeType,
       properties: e.weight === null || e.weight === undefined ? {} : { weight: e.weight },
     })),
-    containmentEdges: estate.model.containmentEdges,
-    upstreamUrns: new Set(estate.model.upstreamUrns),
-    downstreamUrns: new Set(estate.model.downstreamUrns),
+    containmentEdges: coarse
+      ? estate.model.containmentEdges.filter(c => shipped.has(c.sourceUrn) && shipped.has(c.targetUrn))
+      : estate.model.containmentEdges,
+    upstreamUrns: coarse ? coarseUrns('up') : new Set(estate.model.upstreamUrns),
+    downstreamUrns: coarse ? coarseUrns('down') : new Set(estate.model.downstreamUrns),
     effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
     truncated: false, truncationReason: null,
-    frontierUp: stall ? [{ urn: focusUrn, totalCount: null, nextCursor: null }] : [],
+    frontierUp: !coarse && stall ? [{ urn: focusUrn, totalCount: null, nextCursor: null }] : [],
     frontierDown: [], seedTruncated: false,
+    grain,
   } as unknown as TraceV2Result & LensClosureExtras
 }
 
@@ -240,8 +267,12 @@ function stubProvider(
   calls: { traceClosure: number },
   gate?: { promise: Promise<void> },
   stall?: boolean,
+  /** `deferTrace` holds BOTH legs of the first paint; `deferFine` holds
+   *  only the fine page, so the coarse cells land alone first (Part G). */
+  gateFineOnly?: boolean,
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
+  const coarsePage = closureFor(estate, focusUrn, stall, 'coarse')
   const nodes = wireNodes(estate)
   const byUrn = new Map(nodes.map(n => [n.urn, n]))
   const kids = childrenOf(estate)
@@ -257,8 +288,15 @@ function stubProvider(
   ]))
   return {
     scopeKey: 'harness',
-    traceClosure: async () => {
+    traceClosure: async (req?: { grain?: string }) => {
       calls.traceClosure += 1
+      // THE COARSE LEG (Part G) answers at once with the estate's cells —
+      // the window in which a deferred fine page is still out is exactly
+      // the coarse-first picture a test wants to read.
+      if (req?.grain === 'coarse') {
+        if (gate && !gateFineOnly) await gate.promise
+        return coarsePage
+      }
       if (gate) await gate.promise
       // A STALLED WALK. The first answer reports a frontier, every frontier op
       // after it fails — which is exactly `fullWalkStatus.stalled`: candidates
@@ -374,7 +412,7 @@ function seedView(estate: TraceEstate): void {
 
 export async function renderCanvasWithTrace(
   estate: TraceEstate,
-  opts: { focus: string; deferTrace?: boolean; draft?: boolean; stallWalk?: boolean },
+  opts: { focus: string; deferTrace?: boolean; deferFine?: boolean; draft?: boolean; stallWalk?: boolean },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
   releaseFetch?.()
@@ -427,7 +465,7 @@ export async function renderCanvasWithTrace(
   // can read the canvas while the closure is still in flight — the window in
   // which the reader must keep seeing BROWSE rather than a blank canvas.
   let releaseTrace: () => void = () => {}
-  const gate = opts.deferTrace
+  const gate = opts.deferTrace || opts.deferFine
     ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
     : undefined
 
@@ -436,7 +474,7 @@ export async function renderCanvasWithTrace(
   render(
     <QueryClientProvider client={queryClient}>
       <ProviderOverride value={{
-        provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk),
+        provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace),
         isLoading: false, error: null, scopeKind: 'ready',
         workspaceId: 'harness-ws', dataSourceId: null,
         providerReady: true, providerVersion: 1,
@@ -523,7 +561,7 @@ export async function renderCanvasWithTrace(
     countPill: (id: string) => {
       const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)
       const pill = [...(row?.querySelectorAll<HTMLElement>('span') ?? [])]
-        .find(el => /^\+?\d[\d,]*( on this lineage)?$/.test(el.textContent?.trim() ?? ''))
+        .find(el => /^(\+?\d[\d,]*( on this lineage)?|≈\d[\d,]* flows?)$/.test(el.textContent?.trim() ?? ''))
       return pill?.textContent?.trim() ?? null
     },
     headerTitles: () =>

@@ -39,6 +39,14 @@ function closureResult(
   }
 }
 
+/** Every request that is not the coarse first-paint leg (Part G fires one
+ *  `grain: 'coarse'` request beside each focal's first fine page). The pins
+ *  below count and index the walk's OWN requests, as they always did. */
+const fineCalls = (traceClosure: { mock: { calls: unknown[][] } }) =>
+  traceClosure.mock.calls.filter(c => (c[0] as Record<string, unknown>).grain !== 'coarse')
+const expectFineCalls = (traceClosure: { mock: { calls: unknown[][] } }, n: number) =>
+  expect(fineCalls(traceClosure)).toHaveLength(n)
+
 function makeProvider(impl?: (req: Record<string, unknown>) => unknown) {
   const traceClosure = vi.fn(async (req: Record<string, unknown>) =>
     impl ? impl(req) : closureResult({ focus: { urn: req.urn as string, level: 0, entityType: 'table' } }))
@@ -52,18 +60,18 @@ describe('useLensWalk — initial fetch', () => {
 
     await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('done'))
 
-    expect(traceClosure).toHaveBeenCalledTimes(1)
-    expect(traceClosure.mock.calls[0]![0]).toEqual({
+    expectFineCalls(traceClosure, 1)
+    expect(fineCalls(traceClosure)[0]![0]).toEqual({
       urn: 'a', direction: 'both', upstreamDepth: 2, downstreamDepth: 2, maxNodes: WALK_FIRST_PAGE_NODES,
     })
     // Every request carries the session's abort signal.
-    expect((traceClosure.mock.calls[0] as unknown as [unknown, { signal?: AbortSignal }])[1].signal).toBeInstanceOf(AbortSignal)
+    expect((fineCalls(traceClosure)[0] as unknown as [unknown, { signal?: AbortSignal }])[1].signal).toBeInstanceOf(AbortSignal)
   })
 
   it('defaults depth to 1 when the prop is omitted', async () => {
     const { provider, traceClosure } = makeProvider()
     renderHook(() => useLensWalk('a', provider))
-    await waitFor(() => expect(traceClosure).toHaveBeenCalledTimes(1))
+    await waitFor(() => expectFineCalls(traceClosure, 1))
     expect(traceClosure).toHaveBeenCalledWith(expect.objectContaining({ upstreamDepth: 1, downstreamDepth: 1 }), expect.anything())
   })
 
@@ -81,7 +89,7 @@ describe('useLensWalk — initial fetch', () => {
     rerender({ focal: 'a' })
     // Cache hit — the entry is already there, instantly, with no new call.
     expect(result.current.walkFor('a')?.status).toBe('done')
-    expect(traceClosure).toHaveBeenCalledTimes(2)
+    expectFineCalls(traceClosure, 2)
   })
 
   it('degrades to unsupported when the provider lacks traceClosure, with zero calls', async () => {
@@ -112,7 +120,7 @@ describe('useLensWalk — initial fetch', () => {
     rerender({ focal: null })
     rerender({ focal: 'a' })
     await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('done'))
-    expect(traceClosure).toHaveBeenCalledTimes(2)
+    expectFineCalls(traceClosure, 2)
   })
 
   it('reports an error and recovers via explicit retry (never an automatic loop)', async () => {
@@ -123,17 +131,17 @@ describe('useLensWalk — initial fetch', () => {
     })
     const { result } = renderHook(() => useLensWalk('a', provider))
     await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('error'))
-    expect(traceClosure).toHaveBeenCalledTimes(1)
+    expectFineCalls(traceClosure, 1)
     expect(result.current.walkFor('a')!.error).toBe('backend down')
 
     // No automatic retry loop.
     await new Promise(r => setTimeout(r, 20))
-    expect(traceClosure).toHaveBeenCalledTimes(1)
+    expectFineCalls(traceClosure, 1)
 
     fail = false
     act(() => result.current.retry('a'))
     await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('done'))
-    expect(traceClosure).toHaveBeenCalledTimes(2)
+    expectFineCalls(traceClosure, 2)
     expect(result.current.walkFor('a')!.error).toBeNull()
   })
 })
@@ -232,17 +240,17 @@ describe('useLensWalk — extend (integration with the real closure-adapter)', (
     })
     const { result } = renderHook(() => useLensWalk(FOCUS_URN, provider))
     await waitFor(() => expect(result.current.walkProgressFor(FOCUS_URN)?.phase).toBe('done'))
-    const settled = traceClosure.mock.calls.length
+    const settled = fineCalls(traceClosure).length
 
     act(() => result.current.extend('urn:li:table:t_raw', 'up', []))
     await waitFor(() => expect(result.current.walkFor(FOCUS_URN)!.extendStatus.get('up:urn:li:table:t_raw')).toBe('error'))
-    expect(traceClosure).toHaveBeenCalledTimes(settled + 1)
+    expectFineCalls(traceClosure, settled + 1)
 
     fail = false
     act(() => result.current.retryExtend('urn:li:table:t_raw', 'up', ['urn:li:table:t_src_a', 'urn:li:table:t_src_b']))
     await waitFor(() => expect(result.current.walkFor(FOCUS_URN)!.model.nodes).toHaveLength(22))
     expect(result.current.walkFor(FOCUS_URN)!.extendStatus.has('up:urn:li:table:t_raw')).toBe(false)
-    expect(traceClosure).toHaveBeenCalledTimes(settled + 2)
+    expectFineCalls(traceClosure, settled + 2)
   })
 })
 
@@ -286,7 +294,7 @@ describe('useLensWalk — the click is acknowledged, once, per pill', () => {
     const { provider, traceClosure } = hangingProvider()
     const { result } = renderHook(() => useLensWalk(FOCUS_URN, provider))
     await waitFor(() => expect(result.current.walkProgressFor(FOCUS_URN)?.phase).toBe('done'))
-    const settled = traceClosure.mock.calls.length
+    const settled = fineCalls(traceClosure).length
 
     // No awaiting: the spinner is state set BEFORE the request goes out,
     // so a pill acknowledges the press without waiting for the server.
@@ -295,7 +303,7 @@ describe('useLensWalk — the click is acknowledged, once, per pill', () => {
 
     act(() => result.current.extend('urn:li:table:t_raw', 'up', []))
     act(() => result.current.extend('urn:li:table:t_raw', 'up', []))
-    expect(traceClosure).toHaveBeenCalledTimes(settled + 1)   // ONE extend
+    expectFineCalls(traceClosure, settled + 1)   // ONE extend
   })
 })
 
@@ -392,8 +400,9 @@ describe('useLensWalk — extend/page precondition (entry must be done)', () => 
 
     // Calling extend now must be a silent no-op.
     act(() => result.current.extend('card', 'up', []))
-    expect(traceClosure).toHaveBeenCalledTimes(1)
-    expect(result.current.walkFor('a')!.extendStatus.size).toBe(0)
+    expectFineCalls(traceClosure, 1)
+    // Only the first paint's own fine leg is in flight — no extend spinner.
+    expect([...result.current.walkFor('a')!.extendStatus.keys()].filter(k => !k.startsWith('fine:'))).toEqual([])
 
     // Let the initial fetch land — its model must be intact, because
     // nothing was ever merged in to be wiped.
@@ -402,7 +411,7 @@ describe('useLensWalk — extend/page precondition (entry must be done)', () => 
     })
     await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('done'))
     expect(result.current.walkFor('a')!.model.nodes.map(n => n.urn)).toEqual(['n1'])
-    expect(traceClosure).toHaveBeenCalledTimes(1)
+    expectFineCalls(traceClosure, 1)
   })
 
   it('extend on an entry that errored, or a focal never fetched, is also a no-op', async () => {
@@ -416,7 +425,7 @@ describe('useLensWalk — extend/page precondition (entry must be done)', () => 
 
     act(() => result.current.extend('card', 'up', []))
     act(() => result.current.page('card', 'down', 'e:0'))
-    expect(traceClosure).toHaveBeenCalledTimes(1)
+    expectFineCalls(traceClosure, 1)
     expect(result.current.walkFor('a')!.extendStatus.size).toBe(0)
   })
 })
@@ -465,8 +474,8 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
 
-    expect(traceClosure).toHaveBeenCalledTimes(2)
-    expect(traceClosure.mock.calls[1]![0]).toEqual({
+    expectFineCalls(traceClosure, 2)
+    expect(fineCalls(traceClosure)[1]![0]).toEqual({
       urn: 'a', direction: 'both', upstreamDepth: 1, downstreamDepth: 1,
       seedCursor: 's:c3', excludeUrns: ['a', 'c1', 'c2'], maxNodes: WALK_PAGE_NODES,
     })
@@ -486,8 +495,8 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
 
-    expect(traceClosure).toHaveBeenCalledTimes(2)
-    expect(traceClosure.mock.calls[1]![0]).toEqual({
+    expectFineCalls(traceClosure, 2)
+    expect(fineCalls(traceClosure)[1]![0]).toEqual({
       urn: 'b', direction: 'downstream', upstreamDepth: 0, downstreamDepth: 1,
       seedUrns: ['b', 'c'], excludeUrns: ['a', 'b', 'c', 'd'], maxNodes: WALK_PAGE_NODES,
     })
@@ -521,7 +530,7 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
     const byUrn = (urn: string, pick: (r: Record<string, unknown>) => boolean = () => true) =>
-      traceClosure.mock.calls.map(c => c[0] as Record<string, unknown>).find(r => r.urn === urn && pick(r))!
+      fineCalls(traceClosure).map(c => c[0] as Record<string, unknown>).find(r => r.urn === urn && pick(r))!
     expect(byUrn('a', r => !r.seedCursor).maxNodes).toBe(WALK_FIRST_PAGE_NODES) // first paint: a SMALL page
     expect(byUrn('a', r => !!r.seedCursor).maxNodes).toBe(WALK_PAGE_NODES)   // the seed drain
     expect(byUrn('h').maxNodes).toBe(WALK_PAGE_NODES)                         // a hub page
@@ -541,7 +550,7 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     })
     const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
-    expect(traceClosure.mock.calls[1]![0]).toEqual({
+    expect(fineCalls(traceClosure)[1]![0]).toEqual({
       urn: 'h', direction: 'downstream', upstreamDepth: 0, downstreamDepth: 1, afterCursor: 'e:7',
       maxNodes: WALK_PAGE_NODES,
     })
@@ -556,12 +565,12 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     })
     const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
-    expect(traceClosure).toHaveBeenCalledTimes(1)
+    expectFineCalls(traceClosure, 1)
 
     act(() => result.current.extend('tbl', 'up', ['tbl']))
-    await waitFor(() => expect(traceClosure).toHaveBeenCalledTimes(3))
+    await waitFor(() => expectFineCalls(traceClosure, 3))
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
-    expect(traceClosure.mock.calls[2]![0]).toEqual({
+    expect(fineCalls(traceClosure)[2]![0]).toEqual({
       urn: 'tbl', direction: 'upstream', upstreamDepth: 1, downstreamDepth: 0,
       seedUrns: ['tbl'], seedCursor: 's:c20', excludeUrns: ['a', 'tbl', 'c1'], maxNodes: WALK_PAGE_NODES,
     })
@@ -580,11 +589,12 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     const { result } = renderHook(() => useLensWalk('a', provider, 1, true))
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'), { timeout: 10000 })
 
-    const bulk = traceClosure.mock.calls.slice(1).map(c => c[0] as Record<string, unknown>)
+    const bulk = fineCalls(traceClosure).slice(1).map(c => c[0] as Record<string, unknown>)
     expect(bulk).toHaveLength(Math.ceil(450 / WALK_BATCH_SIZE))
     for (const req of bulk) expect((req.seedUrns as string[]).length).toBeLessThanOrEqual(WALK_BATCH_SIZE)
     expect(result.current.walkFor('a')!.model.nodes).toHaveLength(1 + 450 + 450)
-    expect(result.current.walkProgressFor('a')).toMatchObject({ phase: 'done', nodes: 901, requests: 1 + bulk.length, pending: 0 })
+    // `requests` counts every request the walk issued, the coarse leg included.
+    expect(result.current.walkProgressFor('a')).toMatchObject({ phase: 'done', nodes: 901, requests: 2 + bulk.length, pending: 0 })
   })
 
   it('full flow: the memory checkpoint asks ONCE; continuing lifts it for good', async () => {
@@ -616,11 +626,11 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('error'))
     await new Promise(r => setTimeout(r, 20))
-    expect(traceClosure).toHaveBeenCalledTimes(2)
+    expectFineCalls(traceClosure, 2)
 
     act(() => result.current.retryWalk('a'))
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
-    expect(traceClosure).toHaveBeenCalledTimes(3)
+    expectFineCalls(traceClosure, 3)
   })
 
   it('closing the lens aborts in-flight work', async () => {
@@ -631,7 +641,7 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     })
     const provider = { traceClosure } as unknown as GraphDataProvider
     const { rerender } = renderHook(({ focus }: { focus: string | null }) => useLensWalk(focus, provider, 1, false), { initialProps: { focus: 'a' as string | null } })
-    await waitFor(() => expect(traceClosure).toHaveBeenCalledTimes(1))
+    await waitFor(() => expectFineCalls(traceClosure, 1))
     expect(seen?.aborted).toBe(false)
 
     rerender({ focus: null })
@@ -655,6 +665,103 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('error'), { timeout: 20000 })
     expect(result.current.walkProgressFor('a')!.requests).toBe(WALK_REQUEST_FAILSAFE)
   }, 30000)
+
+  /**
+   * THE COARSE FIRST PAINT (Part G, 2026-08-21). The first paint fires two
+   * requests at once: the fine first page and `grain: 'coarse'` — the
+   * rollup cells incident to the focus, milliseconds on the server. Whichever
+   * lands first draws; the other merges into it; the picture is the same
+   * either way. The coarse page has no frontier and no cursor, so it must
+   * never read as "done" while the fine leg is still out, and it must never
+   * overwrite the fine page's cursor or frontier.
+   */
+  describe('the coarse first paint', () => {
+    const cell = (s: string, t: string, weight: number) =>
+      ({ id: `agg:${s}>${t}`, sourceUrn: s, targetUrn: t, edgeType: 'AGGREGATED', properties: { weight } }) as never
+    const coarsePage = () => closureResult({ focus: f('a'), nodes: [gn('a'), gn('P')], edges: [cell('a', 'P', 40)], downstreamUrns: new Set(['P']), grain: 'coarse' } as never)
+    const finePage = () => closureResult({
+      focus: f('a'), nodes: [gn('a'), gn('c1')], truncated: true, truncationReason: 'max_nodes', seedTruncated: true, seedCursor: 's:c2',
+      frontierDown: [cut('c1', 9, 'e:3')],
+    })
+    const lastPage = () => closureResult({ focus: f('a'), nodes: [gn('c2')] })
+
+    function twoLegs(order: 'coarse-first' | 'fine-first') {
+      const gates: Record<string, () => void> = {}
+      const hold = (key: string) => new Promise<void>(resolve => { gates[key] = resolve })
+      const { provider, traceClosure } = providerByUrn({
+        a: async (req) => {
+          if (req.grain === 'coarse') { await hold('coarse'); return coarsePage() }
+          if (req.seedCursor) return lastPage()
+          if (req.afterCursor) return closureResult({ focus: f('c1'), nodes: [gn('x')] })
+          await hold('fine'); return finePage()
+        },
+        c1: () => closureResult({ focus: f('c1'), nodes: [gn('x')] }),
+      })
+      const release = async (key: string) => { await waitFor(() => expect(gates[key]).toBeDefined()); act(() => gates[key]!()) }
+      return { provider, traceClosure, release, order }
+    }
+
+    it('fires the coarse leg beside the fine first page, both on the session signal', async () => {
+      const { provider, traceClosure, release } = twoLegs('fine-first')
+      renderHook(() => useLensWalk('a', provider, 1, false))
+      await waitFor(() => expect(traceClosure).toHaveBeenCalledTimes(2))
+      const reqs = traceClosure.mock.calls.map(c => c[0] as Record<string, unknown>)
+      expect(reqs.find(r => r.grain === 'coarse')).toMatchObject({ urn: 'a', direction: 'both', upstreamDepth: 1, downstreamDepth: 1 })
+      expect(reqs.find(r => r.grain !== 'coarse')).toMatchObject({ urn: 'a', maxNodes: WALK_FIRST_PAGE_NODES })
+      for (const c of traceClosure.mock.calls) expect((c as unknown as [unknown, { signal?: AbortSignal }])[1].signal).toBeInstanceOf(AbortSignal)
+      await release('coarse'); await release('fine')
+    })
+
+    it('coarse first: the board draws the partner cells while the fine leg is still out — and the phase is NOT done', async () => {
+      const { provider, release } = twoLegs('coarse-first')
+      const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+      await release('coarse')
+      await waitFor(() => expect(result.current.walkFor('a')?.model.lineageEdges.map(e => e.id)).toEqual(['agg:a>P']))
+      expect(result.current.walkFor('a')?.status).toBe('done')                 // drawable
+      expect(result.current.walkProgressFor('a')?.phase).toBe('seeding')        // but not finished
+      await release('fine')
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+      const m = result.current.walkFor('a')!.model
+      expect(m.nodes.map(n => n.urn).sort()).toEqual(['P', 'a', 'c1', 'c2', 'x'])
+      expect(m.lineageEdges.find(e => e.id === 'agg:a>P')).toMatchObject({ kind: 'rollup', weight: 40 })
+      expect(m.seedCursor).toBeNull()
+    })
+
+    it('fine first: the late coarse page merges in without touching the cursor or the frontier', async () => {
+      const { provider, release } = twoLegs('fine-first')
+      const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+      await release('fine')
+      await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('done'))
+      await release('coarse')
+      await waitFor(() => expect(result.current.walkFor('a')?.model.lineageEdges.some(e => e.id === 'agg:a>P')).toBe(true))
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+      const m = result.current.walkFor('a')!.model
+      expect(m.nodes.map(n => n.urn).sort()).toEqual(['P', 'a', 'c1', 'c2', 'x'])
+      expect(m.seedCursor).toBeNull()                                           // the fine drain completed
+    })
+
+    it('a fine fallback (the server has no rollup lane) is ignored — the fine leg already brings that page', async () => {
+      const { provider, traceClosure } = providerByUrn({
+        a: (req) => req.grain === 'coarse'
+          ? closureResult({ focus: f('a'), nodes: [gn('a'), gn('c1')], grain: 'fine' } as never)
+          : closureResult({ focus: f('a'), nodes: [gn('a'), gn('c1')] }),
+      })
+      const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+      expect(traceClosure).toHaveBeenCalledTimes(2)
+      expect(result.current.walkFor('a')!.model.nodes.map(n => n.urn).sort()).toEqual(['a', 'c1'])
+    })
+
+    it('a coarse failure is nobody\'s problem — the fine leg draws the picture alone', async () => {
+      const { provider } = providerByUrn({
+        a: async (req) => { if (req.grain === 'coarse') throw new Error('rollups unavailable'); return closureResult({ focus: f('a'), nodes: [gn('a'), gn('c1')] }) },
+      })
+      const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+      expect(result.current.walkFor('a')!.model.nodes.map(n => n.urn).sort()).toEqual(['a', 'c1'])
+      expect(result.current.walkFor('a')!.status).toBe('done')
+    })
+  })
 
   it('holds at most FULL_WALK_CONCURRENCY requests in flight', async () => {
     let inFlight = 0, peak = 0
@@ -697,11 +804,11 @@ describe('useLensWalk — full flow flips on MID-SESSION', () => {
     )
     await waitFor(() => expect(result.current.walkProgressFor('F')?.phase).toBe('done'))
     await new Promise(r => setTimeout(r, 20))
-    expect(traceClosure).toHaveBeenCalledTimes(1)   // one hop never follows a depth entry
+    expectFineCalls(traceClosure, 1)   // one hop never follows a depth entry
     expect(result.current.walkProgressFor('F')!.pending).toBe(0)
 
     rerender({ fw: true })
-    await waitFor(() => expect(traceClosure).toHaveBeenCalledTimes(2))
+    await waitFor(() => expectFineCalls(traceClosure, 2))
     await waitFor(() => expect(result.current.walkProgressFor('F')?.phase).toBe('done'))
     expect(result.current.walkFor('F')!.model.nodes.map(n => n.urn).sort()).toEqual(['F', 'up1', 'up2'])
   })

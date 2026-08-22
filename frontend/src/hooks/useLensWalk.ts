@@ -253,21 +253,64 @@ export function useLensWalk(
         startedRef.current.add(cacheKey)
         const session = sessionRef.current
         const signal = abortRef.current.signal
+        // THE COARSE FIRST PAINT (Part G, 2026-08-21). Two legs leave at once:
+        // the fine first page, and `grain: 'coarse'` — the rollup cells
+        // incident to the focus, milliseconds on the server (partner
+        // containers and how many flows). Whichever lands first draws; the
+        // other merges into it; the picture is the same either way. The
+        // FINE leg is the one that owes: it is registered in `extendStatus`
+        // so the phase stays `seeding` until it lands, even while a coarse-
+        // only model (no frontier, no cursor) is already on the board. The
+        // coarse leg is an accelerator only: a failure is ignored, and a
+        // server without a rollup lane answers with the fine page labelled
+        // `grain: 'fine'` — the same page the fine leg brings — so it is
+        // skipped rather than merged twice.
+        const fineKey = `fine:${urn}`
+        const fineLoading = new Map<string, 'loading' | 'error'>([[fineKey, 'loading']])
         setState(prev => setEntry(prev, cacheKey, {
-            model: emptyWalkModel(urn), status: 'loading', error: null, extendStatus: EMPTY_EXTEND_STATUS,
+            model: emptyWalkModel(urn), status: 'loading', error: null, extendStatus: fineLoading,
             depth: initialDepth,
         }))
-        bumpRequests(cacheKey, 1)
+        bumpRequests(cacheKey, 2)
+        const coarseLeg = provider.traceClosure({
+            urn, direction: 'both', upstreamDepth: 1, downstreamDepth: 1, grain: 'coarse',
+        }, { signal }).then(res => {
+            if (session !== sessionRef.current || res.grain !== 'coarse') return
+            setState(prev => {
+                const entry = prev.get(cacheKey)
+                if (!entry || entry.status === 'error') return prev
+                if (entry.status === 'loading') {
+                    // First to land: the board draws from the cells; the fine
+                    // leg is still owed, and says so.
+                    return setEntry(prev, cacheKey, {
+                        ...entry, model: toLensClosure(res, urn), status: 'done', extendStatus: fineLoading,
+                    })
+                }
+                return setEntry(prev, cacheKey, {
+                    ...entry,
+                    model: mergeClosures(entry.model, res, { rootUrn: urn, direction: 'both', authoritative: false }),
+                })
+            })
+        }, () => undefined)
         try {
             const res = await provider.traceClosure({
                 urn, direction: 'both', upstreamDepth: effectiveDepth, downstreamDepth: effectiveDepth,
                 maxNodes: WALK_FIRST_PAGE_NODES,
             }, { signal })
             if (session !== sessionRef.current) return   // lens closed mid-flight
-            setState(prev => setEntry(prev, cacheKey, {
-                model: toLensClosure(res, urn), status: 'done', error: null, extendStatus: EMPTY_EXTEND_STATUS,
-                depth: effectiveDepth,
-            }))
+            setState(prev => {
+                const entry = prev.get(cacheKey)
+                // The coarse leg may have drawn already: merge onto it,
+                // authoritatively — this page's cursor and frontier are the
+                // walk's own.
+                const model = entry && entry.status === 'done'
+                    ? mergeClosures(entry.model, res, { rootUrn: urn, direction: 'both' })
+                    : toLensClosure(res, urn)
+                return setEntry(prev, cacheKey, {
+                    model, status: 'done', error: null, extendStatus: EMPTY_EXTEND_STATUS,
+                    depth: effectiveDepth,
+                })
+            })
         } catch (e) {
             if (session !== sessionRef.current) return
             startedRef.current.delete(cacheKey)   // allow retry
@@ -277,6 +320,7 @@ export function useLensWalk(
                 depth: effectiveDepth,
             }))
         }
+        await coarseLeg
     }, [provider, initialDepth, fullWalk, bumpRequests])
 
     /** Shared by every continuation op: fetch one further page and merge it

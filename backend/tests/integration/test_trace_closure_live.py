@@ -1376,3 +1376,107 @@ async def test_ragged_estate_twelve_deep_spine_seeds_through_the_hop_bound(estat
     )
     assert _edge_pairs(r) == {("D111", "A2")}
     assert r.truncated is False
+
+
+# ── Estate: the COARSE first paint's cells (Part G, 2026-08-21) ───────
+#
+#     dept ⊃ db ⊃ {t1 ⊃ {t1a, t1b}, t2 ⊃ {t2a}}      partner side
+#     fdb  ⊃ tbl ⊃ {c0, c1, c2}                       the FOCUS (a table)
+#     raw:  c0→t1a, c1→t1a, c1→t1b, c2→t2a             4 flows
+#     cells (as the worker stamps them, per containment-level pair):
+#       tbl→t1 W=3, tbl→t2 W=1, tbl→db W=4, tbl→dept W=4
+#
+# Inner-first accounting (the client's card rule): t1 residual 3, t2
+# residual 1, db residual 4−(3+1)=0 → host, dept 4−4=0 → host. Σ residual
+# of the cards == the 4 raw flows.
+
+COARSE_CELLS_SEED = """
+CREATE
+ (dept:Dept  {urn:'dept', displayName:'Finance'}),
+ (db:Db      {urn:'db',   displayName:'ledger_db'}),
+ (t1:Table   {urn:'t1',   displayName:'journal'}),
+ (t2:Table   {urn:'t2',   displayName:'balances'}),
+ (t1a:Column {urn:'t1a'}), (t1b:Column {urn:'t1b'}), (t2a:Column {urn:'t2a'}),
+ (fdb:Db     {urn:'fdb',  displayName:'orders_db'}),
+ (tbl:Table  {urn:'tbl',  displayName:'orders'}),
+ (c0:Column  {urn:'c0'}), (c1:Column {urn:'c1'}), (c2:Column {urn:'c2'}),
+ (dept)-[:CONTAINS]->(db), (db)-[:CONTAINS]->(t1), (db)-[:CONTAINS]->(t2),
+ (t1)-[:CONTAINS]->(t1a), (t1)-[:CONTAINS]->(t1b), (t2)-[:CONTAINS]->(t2a),
+ (fdb)-[:CONTAINS]->(tbl), (tbl)-[:CONTAINS]->(c0), (tbl)-[:CONTAINS]->(c1), (tbl)-[:CONTAINS]->(c2),
+ (c0)-[:FLOWS_TO]->(t1a), (c1)-[:FLOWS_TO]->(t1a), (c1)-[:FLOWS_TO]->(t1b), (c2)-[:FLOWS_TO]->(t2a),
+ (tbl)-[:AGGREGATED {weight:3, sourceDepth:1, targetDepth:2}]->(t1),
+ (tbl)-[:AGGREGATED {weight:1, sourceDepth:1, targetDepth:2}]->(t2),
+ (tbl)-[:AGGREGATED {weight:4, sourceDepth:1, targetDepth:1}]->(db),
+ (tbl)-[:AGGREGATED {weight:4, sourceDepth:1, targetDepth:0}]->(dept)
+"""
+
+
+def _inner_first_residuals(cells, parent_of):
+    """The client rule, spelled out (traceWireLedger's inner-first loop):
+    finest endpoint first, each cell says only what nothing inside it has
+    said already — residual = W − Σ(residuals STATED by cells strictly
+    inside); a residual ≤ 0 states nothing."""
+    def depth(u):
+        d, cur = 0, parent_of.get(u)
+        while cur:
+            d, cur = d + 1, parent_of.get(cur)
+        return d
+
+    def inside(a, b):      # is a strictly inside b?
+        cur = parent_of.get(a)
+        while cur:
+            if cur == b:
+                return True
+            cur = parent_of.get(cur)
+        return False
+    out = {}
+    for p in sorted(cells, key=depth, reverse=True):
+        stated = sum(max(0, out[p2]) for p2 in out if inside(p2, p))
+        out[p] = cells[p] - stated
+    return out
+
+
+async def test_coarse_ships_every_incident_cell_and_inner_first_accounting_reproduces_the_raw_count(estate):
+    from backend.common.models.graph import TraceClosureRequest
+
+    p = await estate("coarse", COARSE_CELLS_SEED)
+    eng = _engine_over(p, AGG_ONTOLOGY_LINEAGE)
+
+    coarse = await eng.trace_closure(TraceClosureRequest.model_validate({"urn": "tbl", "grain": "coarse"}))
+    assert coarse.grain == "coarse"
+    cells = {e.target_urn: e.properties["weight"] for e in coarse.edges if e.source_urn == "tbl"}
+    assert cells == {"t1": 3, "t2": 1, "db": 4, "dept": 4}
+    assert all(e.edge_type.upper() == "AGGREGATED" for e in coarse.edges)
+    assert coarse.frontier_up == [] and coarse.frontier_down == [] and coarse.seed_cursor is None
+    assert coarse.truncated is False
+    # The TraceResult invariant: every partner's chain ships, with its containment.
+    assert {"dept", "db", "t1", "t2", "fdb", "tbl"} <= set(_urns(coarse))
+    assert ("db", "t1") in _containment(coarse) and ("fdb", "tbl") in _containment(coarse)
+
+    # The client's card rule over these cells matches the raw truth exactly.
+    parent_of = {e.target_urn: e.source_urn for e in coarse.containment_edges}
+    residual = _inner_first_residuals(cells, parent_of)
+    assert residual == {"t1": 3, "t2": 1, "db": 0, "dept": 0}
+    fine = await eng.trace_closure(TraceClosureRequest.model_validate({"urn": "tbl", "upstreamDepth": 1, "downstreamDepth": 1}))
+    assert fine.grain == "fine" if fine.grain is not None else True
+    raw = [h for h in _hops(fine) if h[2] == "FLOWS_TO"]
+    assert sum(w for w in residual.values() if w > 0) == len(raw) == 4
+    # …and the cards are exactly the containers of the raw partner leaves
+    # (the leaves and their parents are the FINE page's to know).
+    parent_fine = {e.target_urn: e.source_urn for e in fine.containment_edges}
+    leaf_parents = {parent_fine[t] for _, t, _ in raw}
+    assert {u for u, w in residual.items() if w > 0} == leaf_parents == {"t1", "t2"}
+
+
+async def test_coarse_on_a_provider_without_the_lane_is_served_fine_and_says_so(estate):
+    """A coarse request to a provider with no rollup lane is the fine page,
+    labelled — the client must be able to tell it apart."""
+    from backend.common.models.graph import TraceClosureRequest
+
+    p = await estate("coarse_fallback", COARSE_CELLS_SEED)
+    eng = _engine_over(p, AGG_ONTOLOGY_LINEAGE)
+    eng.provider = type("NoLane", (), {"trace_closure": p.trace_closure})()
+    r = await eng.trace_closure(TraceClosureRequest.model_validate({"urn": "tbl", "grain": "coarse"}))
+    assert r.grain == "fine"
+    assert not any(e.edge_type.upper() == "AGGREGATED" for e in r.edges)
+

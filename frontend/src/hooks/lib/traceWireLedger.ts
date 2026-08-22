@@ -180,7 +180,6 @@ export function buildTraceWires(i: TraceWireInputs): TraceWire[] {
   /** One contains the other: there is no line to draw between a card and its
    *  own container — it would leave a card and come straight back into it. */
   const nested = (a: string, b: string): boolean => a === b || within(a, b) || within(b, a)
-  const depthOf = (urn: string): number => ancestorsOrSelf(urn).length - 1
 
   const wires: TraceWire[] = []
 
@@ -203,55 +202,129 @@ export function buildTraceWires(i: TraceWireInputs): TraceWire[] {
 
   // ROLLUPS are never re-anchored: a rollup is an authored statement about
   // two specific nodes, so it draws where it was authored or not at all.
-  const rollups = new Map<string, { source: string; target: string; weight: number }>()
+  const rollups: RollupCell[] = []
   for (const e of model.lineageEdges) {
     if (e.kind !== 'rollup') continue
     if (!visible.has(e.sourceUrn) || !visible.has(e.targetUrn)) continue
     if (nested(e.sourceUrn, e.targetUrn)) continue
-    const key = pairKey(e.sourceUrn, e.targetUrn)
-    const seen = rollups.get(key)
-    // Several rollup edges at the same endpoints only happen when the model
-    // holds duplicates; their weights are one statement about one pair.
-    if (seen) seen.weight += e.weight ?? 1
-    else rollups.set(key, { source: e.sourceUrn, target: e.targetUrn, weight: e.weight ?? 1 })
+    rollups.push({ source: e.sourceUrn, target: e.targetUrn, weight: e.weight ?? 1 })
+  }
+  for (const [key, w] of accountRollups(rollups, ledger, urn => sg.nodes.get(urn)?.parent ?? null)) {
+    wires.push({ id: `bundle:${key}:${w.kind}`, source: w.source, target: w.target, edgeCount: w.count, isBundled: true, kind: w.kind, complete: false })
   }
 
-  // INNER-FIRST: the finest cone speaks first, and every coarser one is left
-  // accounting for the remainder. `innerStated` carries each emitted count up
-  // every ancestor pair above it, so the lookup is O(1) per rollup.
-  const ordered = [...rollups.entries()].sort(([aKey, a], [bKey, b]) =>
+  return wires.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+}
+
+export interface RollupCell { source: string; target: string; weight: number }
+export interface AccountedRollup {
+  source: string
+  target: string
+  /** What this cell still says once everything inside it has spoken. */
+  count: number
+  kind: 'rollup' | 'residual'
+}
+
+/**
+ * INNER-FIRST ACCOUNTING — the one rule both boards draw rollups by (Part G,
+ * 2026-08-21; it was the loop inside `buildTraceWires` until the Lens
+ * needed it over a whole model). The finest cone speaks first, and every
+ * coarser one is left accounting for the remainder: `W − (raw hops in the
+ * cone + what cells strictly inside it already stated)`. A cell whose raw
+ * detail the ledger vouches for is dropped (the raw wires say it all); a
+ * cell with nothing left to say is dropped; a cell over unvouched raw
+ * detail is a `residual`. Several cells at one pair are one statement.
+ *
+ * `floor`: the canvas keeps the "never nothing" floor of 1 on a residual
+ * over unvouched raw detail (a pair nobody vouches for always has something
+ * left to say); the Lens, which re-accounts on every wave, drops at ≤ 0
+ * instead so a fully loaded pair stops saying "≈1 more" mid-walk.
+ */
+export function accountRollups(
+  cells: Iterable<RollupCell>,
+  ledger: PairLedger,
+  parentOf: (urn: string) => string | null,
+  opts: { floor?: boolean } = {},
+): Map<string, AccountedRollup> {
+  const floor = opts.floor ?? true
+  const ancestorsOrSelf = ancestorWalker(parentOf)
+  const depthOf = (urn: string): number => ancestorsOrSelf(urn).length - 1
+  const byPair = new Map<string, RollupCell>()
+  for (const c of cells) {
+    const key = pairKey(c.source, c.target)
+    const seen = byPair.get(key)
+    if (seen) seen.weight += c.weight
+    else byPair.set(key, { ...c })
+  }
+  // `innerStated` carries each emitted count up every ancestor pair above
+  // it, so the lookup is O(1) per cell.
+  const ordered = [...byPair.entries()].sort(([aKey, a], [bKey, b]) =>
     (depthOf(b.source) + depthOf(b.target)) - (depthOf(a.source) + depthOf(a.target)) ||
     (aKey < bKey ? -1 : aKey > bKey ? 1 : 0))
   const innerStated = new Map<string, number>()
-
+  const out = new Map<string, AccountedRollup>()
   for (const [key, { source, target, weight }] of ordered) {
     const raw = ledger.rawCount(source, target)
     if (raw > 0 && ledger.state(source, target) === 'complete') continue   // the raw wires say it all
     const inner = innerStated.get(key) ?? 0
-    let edgeCount: number
-    let kind: TraceWire['kind']
+    let count: number
+    let kind: AccountedRollup['kind']
     if (inner === 0) {
-      // The finest stated grain in this cone: the whole rollup when there is
-      // no raw detail under it, otherwise what the unvouched raw detail does
-      // not show — and never nothing.
       kind = raw > 0 ? 'residual' : 'rollup'
-      edgeCount = raw > 0 ? Math.max(1, weight - raw) : weight
+      count = raw > 0 ? (floor ? Math.max(1, weight - raw) : weight - raw) : weight
     } else {
-      // Something inside already said its part; only the remainder is news.
-      const remaining = weight - (raw + inner)
-      if (remaining <= 0) continue
       kind = 'residual'
-      edgeCount = remaining
+      count = weight - (raw + inner)
     }
-    wires.push({ id: `bundle:${key}:${kind}`, source, target, edgeCount, isBundled: true, kind, complete: false })
+    if (count <= 0) continue
+    out.set(key, { source, target, count, kind })
     for (const a of ancestorsOrSelf(source)) {
       for (const b of ancestorsOrSelf(target)) {
         if (a === source && b === target) continue
         const above = pairKey(a, b)
-        innerStated.set(above, (innerStated.get(above) ?? 0) + edgeCount)
+        innerStated.set(above, (innerStated.get(above) ?? 0) + count)
       }
     }
   }
+  return out
+}
 
-  return wires.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+/** The model's own containment, first parent wins — the chain `buildLedger`
+ *  and `buildLensSubgraph` both climb. */
+export function modelParentOf(model: LensWalkModel): (urn: string) => string | null {
+  const parentOf = new Map<string, string>()
+  for (const c of model.containmentEdges) {
+    if (!parentOf.has(c.targetUrn)) parentOf.set(c.targetUrn, c.sourceUrn)
+  }
+  return (urn: string) => parentOf.get(urn) ?? null
+}
+
+/**
+ * CARD OR HOST — what each far endpoint of the focus's cells still stands
+ * for once the cells inside it have spoken: residual > 0 is a partner card
+ * (it has flows of its own to show), 0 is a host the picture passes through
+ * on the way to the cards inside it. Cells onto the focus itself or one of
+ * its own ancestors are internal flows, never partners. Raw evidence
+ * already held counts against the cells exactly as it does for the wires.
+ */
+export function rollupResiduals(model: LensWalkModel, completePairs?: ReadonlySet<string>): Map<string, number> {
+  const parentOf = modelParentOf(model)
+  const ancestorsOrSelf = ancestorWalker(parentOf)
+  const focusChain = new Set(ancestorsOrSelf(model.focusUrn))
+  const cells: RollupCell[] = []
+  for (const e of model.lineageEdges) {
+    if (e.kind !== 'rollup') continue
+    const inward = e.targetUrn === model.focusUrn
+    const outward = e.sourceUrn === model.focusUrn
+    if (!inward && !outward) continue
+    const far = inward ? e.sourceUrn : e.targetUrn
+    if (focusChain.has(far) || ancestorsOrSelf(far).includes(model.focusUrn)) continue
+    cells.push({ source: e.sourceUrn, target: e.targetUrn, weight: e.weight ?? 1 })
+  }
+  const out = new Map<string, number>()
+  for (const w of accountRollups(cells, buildLedger(model, completePairs), parentOf, { floor: false }).values()) {
+    const far = w.source === model.focusUrn ? w.target : w.source
+    out.set(far, (out.get(far) ?? 0) + w.count)
+  }
+  return out
 }

@@ -39,8 +39,11 @@ import { useRelationshipTypes } from '@/store/schema'
 import { relationshipLabel } from '@/lib/relationshipLabel'
 import type { WalkEntry, LensWalkDir, WalkProgress } from '@/hooks/useLensWalk'
 import { emptyWalkModel, type LensWalkNode } from './lens/closure-adapter'
+import { accountedLineageEdges } from './lens/rollup-accounting'
+import { rollupResiduals } from '@/hooks/lib/traceWireLedger'
 import {
   boundaryFrontierFilter,
+  hopWeight,
   buildLensSubgraph,
   distinctSystemCount,
   rootUrnOf,
@@ -68,10 +71,14 @@ import { lensFocalOf, lensTransitionKind, type LensHistory } from './lens/lensHi
 import { labelOf, edgeLabelFor, orientationHalf, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach, type LensNeighbor } from './lens/focus-cards'
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
+import { TraceWalkIndicator } from './TraceWalkIndicator'
 
 /** Leaves one ⊕ extend ships to the server. A hub can stand for
  *  thousands of participants; the request has to stay a request. */
 const SEED_CAP = 500
+/** The capsule's decision buttons never render on the Lens (checkpoint and
+ *  error keep their strips), but the props are required. */
+const noop = () => {}
 const EMPTY_TYPE_SET: ReadonlySet<string> = new Set()
 const EMPTY_EXTEND_STATUS: ReadonlyMap<string, 'loading' | 'error'> = new Map()
 const EMPTY_ROSTERS: ReadonlyMap<string, LensRoster> = new Map()
@@ -103,11 +110,9 @@ type WalkNeighbor = LensNeighbor
  * through the SAME function `partnersFor` calls in production, rather
  * than a second copy that could quietly drift from it.
  */
-// eslint-disable-next-line react-refresh/only-export-components
-export function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>, anchorUrn: string = sg.focusUrn): {
-  incoming: WalkNeighbor[]
-  outgoing: WalkNeighbor[]
-} {
+/** The focus SIDE: the focus and everything inside it — hop 0, never a
+ *  partner, whichever surface is counting. */
+function focusSideOf(sg: LensSubgraph<LensWalkNode>, anchorUrn: string = sg.focusUrn): Set<string> {
   const focusSide = new Set<string>()
   const stack = [anchorUrn]
   while (stack.length > 0) {
@@ -116,6 +121,15 @@ export function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>, anchorUrn: s
     focusSide.add(urn)
     for (const child of sg.nodes.get(urn)!.children) stack.push(child)
   }
+  return focusSide
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>, anchorUrn: string = sg.focusUrn): {
+  incoming: WalkNeighbor[]
+  outgoing: WalkNeighbor[]
+} {
+  const focusSide = focusSideOf(sg, anchorUrn)
 
   const build = (dir: 'in' | 'out'): WalkNeighbor[] => {
     const byUrn = new Map<string, { weight: number; types: Set<string> }>()
@@ -124,7 +138,7 @@ export function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>, anchorUrn: s
       const far = dir === 'in' ? hop.sourceUrn : hop.targetUrn
       if (!focusSide.has(near) || focusSide.has(far)) continue
       const entry = byUrn.get(far) ?? { weight: 0, types: new Set<string>() }
-      entry.weight += 1
+      entry.weight += hopWeight(hop)
       entry.types.add((hop.edgeType ?? '').toUpperCase())
       byUrn.set(far, entry)
     }
@@ -304,6 +318,10 @@ export interface LineageLensProps {
    *  the feature is not wired, nothing renders. */
   fullWalkEnabled?: boolean
   walkProgress?: WalkProgress | null
+  /** The focus's name as the canvas that opened the lens knows it — read
+   *  only until the model holds the focus, so the header and the capsule
+   *  never open on a URN fragment (`executive_board_dashboard_de06a1ba`). */
+  focalLabelHint?: string | null
   /** Switch between One hop (the focus's immediate lineage, then ⊕ walking)
    *  and Full flow. */
   onFullWalkToggle?: (on: boolean) => void
@@ -340,6 +358,7 @@ export function LineageLens({
   onTrace,
   fullWalkEnabled = false,
   walkProgress = null,
+  focalLabelHint = null,
   onFullWalkToggle,
   onWalkContinue,
   onWalkRetry,
@@ -381,14 +400,33 @@ export function LineageLens({
   const setQuery = (q: string) => setQueryState({ nodeId, q })
 
   const walkStatus: LensFetchStatus = walk?.status ?? 'loading'
+  // What the board's capsule narrates: the driver's phase while it is
+  // computing (plus `done`, for the capsule's own finished beat), or the
+  // bare fetch status before the driver has an entry for this focus.
+  // Checkpoint and error are strips, not a capsule.
+  const capsulePhase: WalkProgress['phase'] | null = walkProgress
+    ? (walkProgress.phase === 'checkpoint' || walkProgress.phase === 'error' ? null : walkProgress.phase)
+    : walkStatus === 'loading' ? 'loading' : null
   const model = walk?.model ?? null
 
   // ── The pipeline: model → subgraph → view state → layout ──────────
 
-  const sg = useMemo(
-    () => buildLensSubgraph(model ?? emptyWalkModel(nodeId ?? '')),
-    [model, nodeId],
-  )
+  // THE COARSE FIRST PAINT (Part G): when the model holds rollup cells the
+  // board is built from the ACCOUNTED edges — every raw hop, plus only the
+  // cells that still say something once the cells and raw hops inside them
+  // have spoken, each weighted by what it says. Once the walk is done every
+  // raw-backed cell is dropped: raw evidence wins. The direction flags take
+  // the coarse partners too, so a side reads as present from the first paint.
+  const walkDone = walkProgress?.phase === 'done' || walkProgress == null
+  const sg = useMemo(() => {
+    const base = model ?? emptyWalkModel(nodeId ?? '')
+    return buildLensSubgraph({
+      ...base,
+      lineageEdges: accountedLineageEdges(base, { vouchAll: walkDone }),
+      upstreamUrns: new Set([...base.upstreamUrns, ...(base.coarseUpstreamUrns ?? [])]),
+      downstreamUrns: new Set([...base.downstreamUrns, ...(base.coarseDownstreamUrns ?? [])]),
+    })
+  }, [model, nodeId, walkDone])
 
   // T26 R1 — what a fresh transition to THIS focal should show, per
   // `viewStateForTransition` (focus-layout.ts), the single owner of
@@ -461,6 +499,9 @@ export function LineageLens({
   const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
   const condenseSteps = usePreferencesStore((s) => s.lensCondenseSteps)
   const setCondenseSteps = usePreferencesStore((s) => s.setLensCondenseSteps)
+  // Part H — how much of the picture is FOLDED: the reader's own grain.
+  const density = usePreferencesStore((s) => s.lensDensity)
+  const setDensity = usePreferencesStore((s) => s.setLensDensity)
   const lensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
 
@@ -544,7 +585,8 @@ export function LineageLens({
     childrenAllStatus,
     walkStatus,
     directionFilter,
-  }), [sg, layoutView, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter])
+    density,
+  }), [sg, layoutView, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter, density])
 
   // T23 R2 — pass-through condensation, a pure re-projection over the
   // built layout (never touches population/grain/rank). OFF unless the
@@ -1257,20 +1299,37 @@ export function LineageLens({
       const offers = boundaryFrontierFilter(sg, nodeId, dir)
       return (dir === 'in' ? model.frontierUp : model.frontierDown).some(f => offers(f.urn))
     }
+    // The coarse page's partners, counted at CARD grain: the endpoints the
+    // inner-first accounting left standing (a database whose cells are
+    // fully stated by its tables is not a partner beside them).
+    const residuals = (model.coarseUpstreamUrns?.size || model.coarseDownstreamUrns?.size) ? rollupResiduals(model) : null
+    const approxOn = (side: ReadonlySet<string> | undefined) =>
+      residuals ? [...(side ?? [])].filter(u => (residuals.get(u) ?? 0) > 0).length : 0
+    // PARTNERS, not participants: a container focus whose contents feed
+    // each other carries those contents on its direction sets (the server
+    // walks from its columns), and they are internal flows — in the gutter,
+    // counted on the focus — never "sources". Reported: "Fed by 11 sources"
+    // over an empty upstream band on a platform focus (2026-08-22).
+    const inside = new Set(focusSideOf(sg))
+    const outside = (side: ReadonlySet<string>) => new Set([...side].filter(u => !inside.has(u)))
+    const upstream = outside(model.upstreamUrns)
+    const downstream = outside(model.downstreamUrns)
     return {
-      up: model.upstreamUrns.size,
-      down: model.downstreamUrns.size,
+      up: upstream.size,
+      down: downstream.size,
       moreUp: capped || more('in'),
       moreDown: capped || more('out'),
-      upSystems: distinctSystemCount(sg, model.upstreamUrns),
-      downSystems: distinctSystemCount(sg, model.downstreamUrns),
+      upSystems: distinctSystemCount(sg, upstream.size > 0 ? upstream : (model.coarseUpstreamUrns ?? upstream)),
+      downSystems: distinctSystemCount(sg, downstream.size > 0 ? downstream : (model.coarseDownstreamUrns ?? downstream)),
+      approxUp: approxOn(model.coarseUpstreamUrns),
+      approxDown: approxOn(model.coarseDownstreamUrns),
     }
   }, [model, nodeId, sg, walkStatus, capped])
 
   if (!nodeId) return null
 
   const focalNode = sg.nodes.get(nodeId)?.node
-  const focalLabel = labelOf(nodeId, focalNode)
+  const focalLabel = focalNode || !focalLabelHint ? labelOf(nodeId, focalNode) : focalLabelHint
   const focalType = (focalNode?.data?.type as string) ?? focalNode?.entityType ?? 'entity'
   const focalColor = generateColorFromType(focalType)
   const focalParentId = parentOf(nodeId)
@@ -1334,8 +1393,11 @@ export function LineageLens({
           role="dialog"
           aria-label={`Connections of ${focalLabel}`}
         >
-          {/* Header */}
-          <div className="flex items-center gap-2 px-4 py-3 border-b border-black/[0.08] dark:border-white/[0.08]">
+          {/* Header. The control cluster (`ml-auto`) is ~1,350px of segmented
+              controls; below ~1,700px it no longer fits beside the title
+              and WRAPS under it rather than crushing the focal chip into a
+              three-line stack over NEXT (seen at 1,600px, 2026-08-22). */}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-2 pl-4 pr-12 py-3 border-b border-black/[0.08] dark:border-white/[0.08]">
             <div
               className="w-7 h-7 rounded-lg flex items-center justify-center"
               style={{ backgroundColor: `${focalColor}1f` }}
@@ -1596,6 +1658,51 @@ export function LineageLens({
                   ))}
                 </div>
               )}
+              {/* Density (Part H, 2026-08-21) — how much of the picture is
+                  FOLDED. A band of 200 partner tables drawn one card each
+                  is a wall; folded under the 18 databases they sit in it
+                  reads. "Overview" lands those hosts as closed cards with
+                  counts (start at the high level), "Grouped" — the
+                  default — as frames showing their strongest rows, "Every
+                  card" draws it all. A PREFERENCE: it follows the reader
+                  from lens to lens. Nothing is hidden at any rung — the
+                  numbers agree across all three; only the grain folds. */}
+              {lensViewMode === 'graph' && (
+                <div
+                  role="group"
+                  aria-label="How much of the picture to fold"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
+                    Density
+                  </span>
+                  {([
+                    { value: 'overview', Icon: LucideIcons.Layers, label: 'Overview',
+                      title: 'Start at the high level — a wide band shows the containers its cards sit in, closed, with counts' },
+                    { value: 'grouped', Icon: LucideIcons.Group, label: 'Grouped',
+                      title: 'A wide band folds its cards into the containers they sit in, each showing its strongest rows first' },
+                    { value: 'all', Icon: LucideIcons.LayoutGrid, label: 'Every card',
+                      title: 'Draw every card on its own, however many there are' },
+                  ] as const).map(({ value, Icon, label, title }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setDensity(value)}
+                      title={title}
+                      aria-pressed={density === value}
+                      className={cn(
+                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                        density === value
+                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                          : 'text-ink-muted hover:text-ink',
+                      )}
+                    >
+                      <Icon className="w-3 h-3" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
               {/* Direction preset — a VIEW-side filter: the fetch always
                   stays 'both' at the chosen depth (cache-friendly,
                   instant toggling, counts stay true), and only what
@@ -1688,15 +1795,17 @@ export function LineageLens({
                   </button>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={requestClose}
-                aria-label="Close"
-                className="w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-              >
-                <LucideIcons.X className="w-4 h-4" />
-              </button>
             </div>
+            {/* The way out stays in the corner whether the controls wrapped
+                or not — anchored to the dialog, not to the cluster. */}
+            <button
+              type="button"
+              onClick={requestClose}
+              aria-label="Close"
+              className="absolute top-3 right-4 w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+              <LucideIcons.X className="w-4 h-4" />
+            </button>
           </div>
 
           {/* ── Path trail — the focus history as a visible, clickable
@@ -1998,15 +2107,33 @@ export function LineageLens({
                 onCondenseRun={toggleCondense}
                 onPin={pinEntities}
               />
-              {/* Status surfaces — a lone focal card floating in space
-                  explains nothing. */}
-              {walkStatus === 'loading' && (
-                <div className="absolute inset-x-0 bottom-8 z-10 flex justify-center pointer-events-none">
-                  <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-canvas-elevated/95 border border-black/[0.07] dark:border-white/[0.08] shadow-sm text-[11px] text-ink-muted">
-                    <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
-                    Walking the lineage from the data source…
-                  </div>
-                </div>
+              {/* THE CAPSULE — the board says it is calculating, from the
+                  moment Focus opens (2026-08-22: the header's narration and
+                  a toast at the foot of the board were missed — "the user
+                  might confuse that for nothing happening"). The same
+                  capsule the canvas trace uses: headline, ticking counts,
+                  the sounding line; it leaves by itself a beat after the
+                  walk completes. It shows the COMPUTING phases only — the
+                  checkpoint and a failed step keep their strips below, so
+                  nothing here decides anything. Before the driver has an
+                  entry for this focus `walkProgress` is null and the
+                  fetch status alone says loading. Keyed on the focus so a
+                  re-anchor starts a fresh capsule. */}
+              {capsulePhase && (
+                <TraceWalkIndicator
+                  key={nodeId ?? ''}
+                  phase={capsulePhase}
+                  subject={focalLabel}
+                  nodes={walkProgress?.nodes ?? 0}
+                  flows={walkProgress?.flows ?? 0}
+                  requests={walkProgress?.requests ?? 0}
+                  pending={walkProgress?.pending ?? 0}
+                  error={null}
+                  upCount={reach?.up ?? 0}
+                  downCount={reach?.down ?? 0}
+                  onContinue={onWalkContinue ?? noop}
+                  onRetry={onWalkRetry ?? noop}
+                />
               )}
               {walkStatus === 'unsupported' && (
                 <div className="absolute inset-x-0 bottom-8 z-10 flex justify-center pointer-events-none">
@@ -2399,9 +2526,9 @@ function ReachLine({ reach, loading }: { reach: LensReach | null; loading: boole
           mid-word on each half at once on a narrow card (see the graph
           body's own `orientationHalf` note for the reported shape). */}
       <span className="truncate min-w-0 tabular-nums">
-        {orientationHalf('Fed by', 'source', 'upstream', reach.up, reach.moreUp, reach.upSystems, 'No upstream sources')}
+        {orientationHalf('Fed by', 'source', 'upstream', reach.up, reach.moreUp, reach.upSystems, 'No upstream sources', reach.approxUp ?? 0)}
         {' · '}
-        {orientationHalf('feeds', 'consumer', 'downstream', reach.down, reach.moreDown, reach.downSystems, 'feeds nothing downstream')}
+        {orientationHalf('feeds', 'consumer', 'downstream', reach.down, reach.moreDown, reach.downSystems, 'feeds nothing downstream', reach.approxDown ?? 0)}
       </span>
     </p>
   )

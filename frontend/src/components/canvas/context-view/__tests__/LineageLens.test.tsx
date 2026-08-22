@@ -939,7 +939,9 @@ describe('what the lens says while it cannot answer', () => {
 
   it('narrates the walk instead of claiming "no connections"', () => {
     renderLens(['F'], { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map(), depth: 1 })
-    expect(screen.getByText(/Walking the lineage from the data source/)).toBeTruthy()
+    // The capsule, since 2026-08-22 — the same one the canvas trace shows.
+    expect(screen.getByRole('status')).toHaveTextContent(/Mapping the lineage of F/)
+    expect(screen.queryByText(/no connections/i)).toBeNull()
   })
 
   it('surfaces a failure with its reason, and a Retry that re-kicks the walk', () => {

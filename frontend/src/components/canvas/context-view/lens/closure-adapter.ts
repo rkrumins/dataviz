@@ -95,6 +95,14 @@ export interface LensWalkModel {
     readonly containmentEdges: ReadonlyArray<LensContainmentEdgeLike>
     readonly upstreamUrns: ReadonlySet<string>
     readonly downstreamUrns: ReadonlySet<string>
+    /** The coarse page's partners — containers at whatever level the
+     *  rollup cells name (Part G). Kept apart from the raw-grain sets so
+     *  "N upstream" never counts a database beside the tables inside it;
+     *  read for the ≈ floors while the raw sets are still empty. Optional
+     *  (absent = none), so a fixture built before the coarse page needs
+     *  nothing added. */
+    readonly coarseUpstreamUrns?: ReadonlySet<string>
+    readonly coarseDownstreamUrns?: ReadonlySet<string>
     readonly frontierUp: ReadonlyArray<LensFrontierEntry>
     readonly frontierDown: ReadonlyArray<LensFrontierEntry>
     readonly truncated: boolean
@@ -116,6 +124,8 @@ export function emptyWalkModel(focusUrn: string): LensWalkModel {
         containmentEdges: [],
         upstreamUrns: new Set(),
         downstreamUrns: new Set(),
+        coarseUpstreamUrns: new Set(),
+        coarseDownstreamUrns: new Set(),
         frontierUp: [],
         frontierDown: [],
         truncated: false,
@@ -145,8 +155,12 @@ export function toLensClosure(
             return { ...e, kind: isRollup ? 'rollup' as const : 'raw' as const, weight: typeof w === 'number' ? w : null }
         }),
         containmentEdges: res.containmentEdges,
-        upstreamUrns: new Set(res.upstreamUrns),
-        downstreamUrns: new Set(res.downstreamUrns),
+        // A coarse page's partners are containers: they go to their own
+        // sets (see `LensWalkModel.coarseUpstreamUrns`).
+        upstreamUrns: new Set(res.grain === 'coarse' ? [] : res.upstreamUrns),
+        downstreamUrns: new Set(res.grain === 'coarse' ? [] : res.downstreamUrns),
+        coarseUpstreamUrns: new Set(res.grain === 'coarse' ? res.upstreamUrns : []),
+        coarseDownstreamUrns: new Set(res.grain === 'coarse' ? res.downstreamUrns : []),
         frontierUp: up,
         frontierDown: down,
         truncated: isOwed(res.seedCursor ?? null, up, down) || isFailure(res.truncationReason),
@@ -217,8 +231,16 @@ export function mergeClosures(
         /** Every anchor a bulk re-seed named: their frontier entries are
          *  replaced by what the response re-reports (see `mergeFrontier`). */
         clearFrontierRoots?: ReadonlyArray<string>
+        /** Default true. False for a page that speaks for nothing the
+         *  model still owes — the COARSE page (Part G): its nodes, cells
+         *  and direction sets union in, but its empty frontier clears no
+         *  root and its absent cursor overwrites none. Without this a
+         *  coarse page landing after the fine page wiped the cursor and
+         *  the walk silently stopped short. */
+        authoritative?: boolean
     },
 ): LensWalkModel {
+    const authoritative = ctx.authoritative ?? true
     const incoming = toLensClosure(response, model.focusUrn)
 
     // Nodes: union by urn, LAST write wins — a fresher hydration may carry
@@ -239,9 +261,11 @@ export function mergeClosures(
 
     const upstreamUrns = new Set([...model.upstreamUrns, ...incoming.upstreamUrns])
     const downstreamUrns = new Set([...model.downstreamUrns, ...incoming.downstreamUrns])
+    const coarseUpstreamUrns = new Set([...(model.coarseUpstreamUrns ?? []), ...(incoming.coarseUpstreamUrns ?? [])])
+    const coarseDownstreamUrns = new Set([...(model.coarseDownstreamUrns ?? []), ...(incoming.coarseDownstreamUrns ?? [])])
 
-    const clearUp = ctx.direction === 'up' || ctx.direction === 'both'
-    const clearDown = ctx.direction === 'down' || ctx.direction === 'both'
+    const clearUp = authoritative && (ctx.direction === 'up' || ctx.direction === 'both')
+    const clearDown = authoritative && (ctx.direction === 'down' || ctx.direction === 'both')
     const clearRoots = ctx.clearFrontierRoots ?? []
 
     const frontierUp = mergeFrontier(model.frontierUp, incoming.frontierUp, clearUp, ctx.rootUrn, clearUp ? clearRoots : [])
@@ -252,7 +276,7 @@ export function mergeClosures(
     // comes back uncapped. A card-anchored extend/page knows nothing about
     // the focus's contents and must not touch it (its OWN seed cursor is
     // followed by the driver, per op — see useLensWalk).
-    const seedCursor = ctx.rootUrn === model.focusUrn ? incoming.seedCursor : model.seedCursor
+    const seedCursor = authoritative && ctx.rootUrn === model.focusUrn ? incoming.seedCursor : model.seedCursor
     const owed = isOwed(seedCursor, frontierUp, frontierDown)
     const failed = isFailure(incoming.truncationReason)
 
@@ -263,6 +287,8 @@ export function mergeClosures(
         containmentEdges: [...containmentByKey.values()],
         upstreamUrns,
         downstreamUrns,
+        coarseUpstreamUrns,
+        coarseDownstreamUrns,
         frontierUp,
         frontierDown,
         truncated: owed || failed,
