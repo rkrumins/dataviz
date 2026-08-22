@@ -22,7 +22,7 @@ import { cfoEstate, coarseThenFineEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(20))
+afterAll(() => expectTestsRan(21))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -493,6 +493,33 @@ describe('the trace overlay on the real canvas', () => {
     await h.layerContextMenu()
     expect(h.contextMenuOpen()).toBe(false)
     await h.openDrawer('tableau')
+    expect(h.drawerEditTabs()).toBe(0)
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // THE READER'S FIRST QUESTION about a partner is "what IS that?" — and the
+  // trace draws partners the browse canvas never loaded, because the walk
+  // found them and the overlay never writes them to the store. The drawer
+  // resolved its entity from the store alone, so 26 of 28 cards on a live
+  // board opened nothing at all, however many times they were clicked
+  // (measured 2026-08-22 on the dev stack).
+  it('a partner card the browse canvas never loaded opens its details', async () => {
+    // What a real canvas holds before a trace: the lane roots, and the
+    // dashboard the reader expanded to and selected. NOT its partners.
+    const h = await renderCanvasWithTrace(cfoEstate(), {
+      focus: 'cfo',
+      browseHolds: ['snowflake', 'tableau', 'cfo', 'INTERMEDIATE_T2', 'REPORTING'],
+    })
+    await h.startTrace('cfo')
+
+    // `orders` is on the board — and is not something the store has ever seen.
+    expect(h.visibleCardIds()).toContain('orders')
+    expect(h.snapshotStore().nodes).not.toContain('orders')
+
+    await h.clickCard('orders')
+    expect(h.drawerEntity()).toBe('orders')
+    // Read-only, like everything else during a trace, and still no writes.
     expect(h.drawerEditTabs()).toBe(0)
     expect(h.storeWrites()).toBe(0)
     expect(h.consoleErrors()).toEqual([])

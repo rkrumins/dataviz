@@ -28,7 +28,7 @@ import {
   useViewRelationshipTypes,
   useViewEntityTypes,
 } from '@/hooks/useViewSchema'
-import { useCanvasStore, useCanvasVersion, type LineageEdge } from '@/store/canvas'
+import { useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
@@ -1915,6 +1915,22 @@ export function ContextViewCanvas({
   const traceRender = useMemo(
     () => (overlay.view ? lanesToRenderTrees(overlay.view.lanes) : null),
     [overlay.view],
+  )
+
+  // WHAT THE CANVAS IS DRAWING THAT THE STORE DOES NOT HOLD. The walk's
+  // nodes are canvas-shaped already (`toCanvasNode`), they are simply not in
+  // the store — by design, so leaving a trace costs nothing. The entity
+  // drawer asks the store first and this second, which is what lets a reader
+  // click any partner card and read what it is.
+  const traceNodeIndex = useMemo(() => {
+    if (!traceModel) return null
+    const index = new Map<string, LineageNode>()
+    for (const node of traceModel.nodes) index.set(node.id, node)
+    return index
+  }, [traceModel])
+  const resolveTraceNode = useCallback(
+    (id: string): LineageNode | null => traceNodeIndex?.get(id) ?? null,
+    [traceNodeIndex],
   )
 
   // Expansion in trace mode is the OVERLAY's, never the canvas's — which
@@ -4930,6 +4946,7 @@ export function ContextViewCanvas({
             key="entity-drawer"
             // Read-only for the whole trace window, like the canvas behind it.
             writesLocked={traceActive}
+            resolveNode={resolveTraceNode}
             onFocusConnections={openLens}
             onTraceUp={(nodeId) => startCanvasTrace(nodeId, 'up')}
             onTraceDown={(nodeId) => startCanvasTrace(nodeId, 'down')}

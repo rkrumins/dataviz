@@ -30,7 +30,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
-import { useCanvasStore } from '@/store/canvas'
+import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import {
   useSchemaStore,
   useActiveView,
@@ -90,6 +90,11 @@ interface EntityDrawerProps {
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
   /** External link URL builder */
   getExternalUrl?: (urn: string) => string | null
+  /** Entities the surface is DRAWING that the canvas store does not hold —
+   *  currently a trace overlay's partner cards, which come from the walk
+   *  model and are deliberately never written to the store. Consulted only
+   *  when the store has no node with this id, so browse is unchanged. */
+  resolveNode?: (id: string) => LineageNode | null
 }
 
 type ViewMode = 'view' | 'edit' | 'json'
@@ -107,6 +112,7 @@ export function EntityDrawer({
   onFocusNode,
   onLocateMany,
   getExternalUrl,
+  resolveNode,
 }: EntityDrawerProps) {
   // Subscribe with narrow selectors so the (heavy) drawer only re-renders when
   // its own node / actions change — NOT on every unrelated canvas store mutation
@@ -139,10 +145,22 @@ export function EntityDrawer({
   // (drawerNodeId), independent of canvas highlight selection. It stays open
   // until explicitly closed via the X button.
   // Logical nodes (id starts with "logical:") are virtual groupings, not physical entities.
-  const selectedNode = useCanvasStore((s) =>
+  const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
+  const storeNode = useCanvasStore((s) =>
     s.drawerNodeId && !s.drawerNodeId.startsWith('logical:')
       ? s.nodes.find((n) => n.id === s.drawerNodeId) ?? null
       : null,
+  )
+  // OVERLAY ENTITIES (2026-08-22): a canvas trace draws its partners from the
+  // walk model and writes nothing to the store — which is what makes leaving a
+  // trace free — so the store cannot answer for them and the drawer opened on
+  // nothing, however many times a card was clicked (26 of 28 cards on a live
+  // board). The surface drawing them can answer; ask it, but only after the
+  // store has missed.
+  const selectedNode = storeNode ?? (
+    drawerNodeId && !drawerNodeId.startsWith('logical:')
+      ? resolveNode?.(drawerNodeId) ?? null
+      : null
   )
 
   const isOpen = !!selectedNode
