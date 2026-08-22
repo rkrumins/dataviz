@@ -63,6 +63,7 @@ import {
   Handle,
   useUpdateNodeInternals,
   MarkerType,
+  MiniMap,
   Panel,
   Position,
   getBezierPath,
@@ -151,6 +152,10 @@ const TINT_DOWN = '#f59e0b'
  * active. Screenshot-verified against the `filter` version in the P2
  * report — the two are pixel-equivalent.
  */
+/** THE MINI MAP (2026-08-22) — offered once a board is big enough to get
+ *  lost on. Below this a reader can see the whole picture at a glance and
+ *  a map is furniture. */
+const MINIMAP_MIN_CARDS = 8
 const MUTED_TINT_UP = '#5e93ab'
 const MUTED_TINT_DOWN = '#c2a370'
 
@@ -5030,6 +5035,35 @@ export function FocusGraphView({
                 ))}
               </div>
             </Panel>
+          )}
+          {/* THE MINI MAP — where the reader is, in the whole board, and a
+              way to go somewhere else: drag it to pan, scroll it to zoom,
+              click a card to fly to it. Bottom-LEFT, opposite the control
+              stack, so neither covers the other. Only once there is
+              enough board to get lost on (MINIMAP_MIN_CARDS): a board of
+              three cards is its own map. The focus is indigo, the sides
+              keep their own tints — the same code the wires read. */}
+          {graph.cards.length >= MINIMAP_MIN_CARDS && (
+            <MiniMap
+              position="bottom-left"
+              ariaLabel="Map of the board"
+              pannable
+              zoomable
+              offsetScale={2}
+              nodeBorderRadius={3}
+              nodeStrokeWidth={0}
+              className="nx-lens-minimap"
+              nodeColor={(n) => {
+                const card = (n.data as { card?: FocusCard } | undefined)?.card
+                if (!card) return 'rgba(148,163,184,0.35)'
+                if (card.kind === 'focal') return '#6366f1'
+                const band = card.band ?? 0
+                return band < 0 ? TINT_UP : band > 0 ? TINT_DOWN : 'rgba(148,163,184,0.55)'
+              }}
+              maskColor="rgba(15,23,42,0.06)"
+              maskStrokeColor="rgba(99,102,241,0.55)"
+              maskStrokeWidth={2}
+            />
           )}
         </ReactFlow>
       </ReactFlowProvider>

@@ -137,3 +137,26 @@ describe('FocusGraphView — the way back to the focus is findable (2026-08-22)'
     expect(screen.queryByTestId('lens-focus-offscreen')).toBeNull()
   })
 })
+
+describe('FocusGraphView — the mini map (2026-08-22)', () => {
+  // "A mini map on the left bottom hand side for more streamlined
+  // browsing." It appears when there is enough board to get lost on, is
+  // a navigation device (drag it to pan, scroll it to zoom), and colours
+  // the focus and the two sides the way the board does.
+  it('is offered, bottom-left, once the board is big enough to get lost on', async () => {
+    const built = buildWalk(WALK_FIXTURES.walkHub)
+    render(view(built.graph, built, false))
+    await settle()
+    const map = screen.getByRole('img', { name: /map of the board/i })
+    expect(map).toBeInTheDocument()
+    expect(map.closest('.react-flow__panel')?.className).toMatch(/bottom.*left|left.*bottom/)
+  })
+
+  it('a board of a few cards has nothing to get lost on — no map', async () => {
+    const built = buildWalk(WALK_FIXTURES.walkHub)
+    const tiny = { ...built.graph, cards: built.graph.cards.slice(0, 3) }
+    render(view(tiny, built, false))
+    await settle()
+    expect(screen.queryByRole('img', { name: /map of the board/i })).toBeNull()
+  })
+})

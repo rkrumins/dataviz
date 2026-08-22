@@ -551,15 +551,31 @@ export function projectLensEdges<N extends LensNodeLike>(
     population: ReadonlySet<string>,
     visible: ReadonlySet<string>,
 ): ProjectedLensEdge[] {
+    // MEMOISED (2026-08-22): this walk is asked of the SAME urns over and
+    // over — once per hop, and a wide table carries 17,567 of them, which
+    // measured 168 ms of a single interaction window. The answer depends
+    // only on (urn, visible), and `visible` is fixed for this call.
+    const landing = new Map<string, string | null>()
     const nearestVisible = (urn: string): string | null => {
+        const hit = landing.get(urn)
+        if (hit !== undefined) return hit
+        // Every entity on the way up gets the same answer, so one walk
+        // fills the whole chain rather than just its head.
+        const chain: string[] = []
         let cursor: string | null = urn
         const guard = new Set<string>()
+        let found: string | null = null
         while (cursor && !guard.has(cursor)) {
-            if (visible.has(cursor)) return cursor
+            const cached = landing.get(cursor)
+            if (cached !== undefined) { found = cached; break }
+            if (visible.has(cursor)) { found = cursor; break }
             guard.add(cursor)
+            chain.push(cursor)
             cursor = sg.nodes.get(cursor)?.parent ?? null
         }
-        return null
+        for (const step of chain) landing.set(step, found)
+        landing.set(urn, found)
+        return found
     }
 
     const bundles = new Map<string, ProjectedLensEdge>()

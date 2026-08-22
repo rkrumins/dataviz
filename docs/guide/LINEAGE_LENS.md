@@ -367,6 +367,12 @@ and the menu closes. Only on a very narrow window do the chips you reach for
 least fold into a **More** menu; Density and Wires stay on the row, and
 Direction never folds.
 
+In the bottom-left corner, a **mini map** of the whole board — the focus in
+indigo, sources in blue, consumers in amber, and a frame around what you are
+looking at. It is a way to travel, not just a picture: **drag** inside it to
+pan the board, **scroll** it to zoom. It appears once there is enough board
+to get lost on; a handful of cards is its own map.
+
 Along the bottom, a **status bar**: the gestures as keycaps (**Click**
 inspect · **⊕** walk a hop · **▸** open what is inside · **↵** preview ·
 **Esc** close), a legend for what the wires mean — blue **upstream**, amber

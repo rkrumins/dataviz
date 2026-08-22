@@ -198,6 +198,90 @@ if (process.env.DENSITY_SWEEP) {
     }
   }
 }
+if (process.env.INTERACT) {
+  // ── INTERACTION COST, measured (2026-08-22) ────────────────────────
+  // Event Timing gives the honest number a reader feels: from the input
+  // to the next paint, and how much of that was our handlers. A CPU
+  // profile over the same window says WHERE it went.
+  await evalJs(`(() => {
+    window.__evt = []
+    new PerformanceObserver((list) => { for (const e of list.getEntries()) window.__evt.push({ name: e.name, dur: Math.round(e.duration), proc: Math.round(e.processingEnd - e.processingStart), start: Math.round(e.startTime) }) })
+      .observe({ type: 'event', durationThreshold: 16, buffered: false })
+    window.__frames = 0
+    const tick = () => { window.__frames++; requestAnimationFrame(tick) }
+    requestAnimationFrame(tick)
+    return 'observing'
+  })()`)
+  const cards = await evalJs(`(() => [...document.querySelectorAll('.react-flow__node')].slice(0, 40).map(n => { const r = n.getBoundingClientRect(); return { id: n.getAttribute('data-id'), x: Math.round(r.x + r.width / 2), y: Math.round(r.y + Math.min(30, r.height / 2)), w: Math.round(r.width) } }).filter(c => c.w > 40))()`)
+  console.log('== interact: cards to sweep =', cards.length)
+  await send('Profiler.enable'); await send('Profiler.setSamplingInterval', { interval: 200 }); await send('Profiler.start')
+  const t0 = Date.now()
+  // 1. HOVER SWEEP — the pointer crossing cards, the commonest gesture.
+  for (let pass = 0; pass < 2; pass++) {
+    for (const c of cards) {
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: c.x, y: c.y })
+      await sleep(90)
+    }
+  }
+  const hoverMs = Date.now() - t0
+  // 2. EXPANDS — a chevron opening a container, the costliest click.
+  const chevrons = await evalJs(`(() => [...document.querySelectorAll('button[aria-label^="Show what\\'s inside"]')].slice(0, 6).map(b => { const r = b.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) } }))()`)
+  const t1 = Date.now()
+  for (const b of chevrons ?? []) {
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: b.x, y: b.y, button: 'left', clickCount: 1 })
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: b.x, y: b.y, button: 'left', clickCount: 1 })
+    await sleep(500)
+  }
+  const expandMs = Date.now() - t1
+  // 3. TYPING in the filter — the same pipeline, once per keystroke.
+  const box = await evalJs(`(() => { const i = document.querySelector('input[placeholder^="Filter"]'); if (!i) return null; i.focus(); const r = i.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) } })()`)
+  const t2 = Date.now()
+  if (box) {
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+    for (const ch of 'orders') {
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', text: ch, key: ch })
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key: ch })
+      await sleep(220)
+    }
+  }
+  const typeMs = Date.now() - t2
+  await sleep(400)
+  const { result } = await send('Profiler.stop')
+  const evt = await evalJs(`window.__evt`)
+  const byName = {}
+  for (const e of evt ?? []) {
+    const k = e.name
+    byName[k] ??= { n: 0, worst: 0, worstProc: 0, totalProc: 0 }
+    byName[k].n++
+    byName[k].worst = Math.max(byName[k].worst, e.dur)
+    byName[k].worstProc = Math.max(byName[k].worstProc, e.proc)
+    byName[k].totalProc += e.proc
+  }
+  console.log(`== interact: ${cards.length * 2} hovers in ${hoverMs} ms, ${(chevrons ?? []).length} expands in ${expandMs} ms, 6 keystrokes in ${typeMs} ms`)
+  console.log('== slow interactions (>16ms), by event:')
+  for (const [k, v] of Object.entries(byName).sort((a, b) => b[1].worst - a[1].worst)) {
+    console.log(`   ${k.padEnd(12)} n=${String(v.n).padStart(3)} worst=${String(v.worst).padStart(4)}ms worst-handler=${String(v.worstProc).padStart(4)}ms mean-handler=${Math.round(v.totalProc / v.n)}ms`)
+  }
+  const prof = result.profile
+  const byId = new Map(prof.nodes.map(n => [n.id, n]))
+  const self = new Map(); const byFile = new Map()
+  let total = 0
+  for (let k = 0; k < prof.samples.length; k++) {
+    const n = byId.get(prof.samples[k]); const dt = prof.timeDeltas[k] ?? 0
+    if (!n) continue
+    total += dt
+    const fn = `${n.callFrame.functionName || '(anon)'} ${n.callFrame.url.split('/').slice(-1)[0]}:${n.callFrame.lineNumber}`
+    self.set(fn, (self.get(fn) ?? 0) + dt)
+    const f = n.callFrame.url.split('/').slice(-1)[0] || n.callFrame.functionName || '(vm)'
+    byFile.set(f, (byFile.get(f) ?? 0) + dt)
+  }
+  console.log(`\n== CPU over the interaction window: ${(total / 1e6).toFixed(1)} s sampled`)
+  console.log('-- top self-time frames:')
+  for (const [k, v] of [...self.entries()].sort((a, b) => b[1] - a[1]).slice(0, 22)) console.log(`   ${(v / 1e3).toFixed(0).padStart(6)} ms  ${k}`)
+  console.log('-- by file:')
+  for (const [k, v] of [...byFile.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)) console.log(`   ${(v / 1e3).toFixed(0).padStart(6)} ms  ${k}`)
+}
 if (process.env.WIRES_SWEEP) {
   // How many wires the board draws per Wires rung, and what a hovered
   // bundle fans out into.

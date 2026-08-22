@@ -261,6 +261,31 @@ right ("27 cards · 21 wires · 2 bundles · 79%", the zoom read on move-end). T
 before a walk, now carries the Path's own empty state ("Double-click a card to focus it — your path appears
 here"). Verified at 2,000 and 1,280 px.
 
+**Browsing speed, measured and fixed (2026-08-22, night).** A new probe mode (`INTERACT=1`) records Event
+Timing (input → paint, and how much of it was our handlers) plus a CPU profile over a scripted sweep: 80
+hovers, 6 expands, 6 keystrokes on the wide table at Every card (505 cards).
+
+| Interaction | Before | After |
+|---|---|---|
+| Expand a container (click handler) | **365 ms** mean, 737 ms worst | **52 ms** mean, 140 ms worst |
+| Keystroke in the filter (input handler) | **325 ms** mean, 360 ms worst | **25 ms** mean, 50 ms worst |
+| Worst input→paint over the window | 1,104 ms | 432 ms |
+| Hover (handler) | ~0 ms | ~0 ms (already free — the subscription stores) |
+
+Four changes, each measured: (1) **the filter is a post-pass** — `query` only ever set `dimmed`, so it left
+the layout entirely (`applyQueryDimming` over the finished board; an empty filter returns the same object,
+and an equivalence test pins that laying out WITH a query equals dimming a query-less layout); (2) **the
+model's answers are cached against the model** — `ancestorsFor`/`subtreeFor` in a WeakMap (`model-cache.ts`)
+rather than rebuilt inside every `buildFocusLayout` (98 + 66 ms per window); (3) **`projectLensEdges`
+memoises its parent walk** and fills the whole chain per walk (168 → 136 ms on 17.5k hops); (4) **every
+structural edit runs at transition priority** (`editView` → `startTransition`) and the filter's dimming
+through `useDeferredValue`, so a click or a keystroke never blocks the next input. Perf suite gained a
+ratio pin: dimming a board costs less than a quarter of laying it out.
+
+**The mini map (same night).** Bottom-left, opposite the control stack: the focus in indigo, upstream cyan,
+downstream amber, the viewport framed in the accent; pannable and zoomable, so it is a way to travel.
+Offered once the board has ≥ 8 cards — below that a board is its own map.
+
 ## Not built, and why
 
 - ~~Coarse first paint~~ — built in the evening on the user's call (see above).
