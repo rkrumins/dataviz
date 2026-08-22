@@ -348,8 +348,13 @@ neighbours.
 First time here? The Lens offers a **one-minute guided tour** when the graph
 opens; replay it any time from the **Help** panel while you're on a view. And
 every control in the header explains itself: rest the pointer on any of them
-— **Next**, **Walk**, **Steps**, **Density**, the direction presets — and a
-small note names it and says what it does.
+— **Next**, **Walk**, **Steps**, **Density**, **Wires**, the direction presets
+— and a small note names it and says what it does. The header is one row
+that never spills off the edge: when the window is too narrow for every
+group, the ones you reach for least fold into a **Display** menu (the
+settings first — Next, Steps — then Walk), and the day-to-day controls —
+direction, Density, Wires — stay on the row. Widen the window and they come
+back.
 
 Press **Esc** to close — a row preview first if one is open, then the Lens
 itself. Clicking the backdrop closes it outright. To follow a chain across

@@ -223,6 +223,18 @@ heavier stroke (log of its members), a user-space arrowhead, the sum as its badg
 explained. Wide table at Grouped: Every wire 108 wires; Auto/Bundled 4 (two bundles, ×423 and ×598/×701);
 hovering a bundle fans out 53 members; the bundle fades to 0.28 beneath them.
 
+**Two defects from the user's testing of the bundles (2026-08-22, late).** (1) *The header overflowed*: a
+wrapped control cluster still ran past the dialog's edge and was clipped. It is now ONE row that never
+overflows — `useToolbarOverflow` measures the row and each group and folds the least-used groups into a
+**Display** menu (Radix Popover, z-[9999] above the Lens) in priority order `direction · density · wires ·
+walk · steps · next`, so the day-to-day controls stay in reach; the title and navigation never shrink (the
+groups fold instead). At 1,600 px: direction + Density + Wires inline, "Display 3"; at 2,000 px everything but
+Steps/Next. (2) *Bundles vanished on Bundled/Auto*: the layout was right (17 bundles from the Snowflake focal),
+but React Flow measures a node's handles once — a card that GAINS ports after mount (a focus that had no wires
+of its own becoming a bundle's endpoint) kept an empty handle measurement and its edges were silently dropped.
+`FocusNode` now calls `useUpdateNodeInternals` when `card.wired` flips (never on mount, never in a headless
+DOM — jsdom lacks DOMMatrixReadOnly). Snowflake at Every card: Bundled 7 bundles on screen (11 wires) vs 51.
+
 ## Not built, and why
 
 - ~~Coarse first paint~~ — built in the evening on the user's call (see above).

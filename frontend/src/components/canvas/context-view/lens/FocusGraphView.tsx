@@ -61,6 +61,7 @@ import {
   BaseEdge,
   EdgeLabelRenderer,
   Handle,
+  useUpdateNodeInternals,
   MarkerType,
   Panel,
   Position,
@@ -2586,6 +2587,25 @@ function FocusNode({ data, selected }: NodeProps) {
   // could.
   const { anchor, onCone, offCone, hops } = useConeState(card.id)
   const onTrail = useOnTrail(card.nodeId)
+  // PORTS CAN ARRIVE AFTER THE CARD. React Flow measures a node's handles
+  // once, when the node mounts or resizes; a card that gains its ports
+  // LATER — a frame that becomes a bundle's endpoint when the reader
+  // switches Wires, a frame whose rows scroll past and roll up to it —
+  // renders the handles, but the edge layer still holds the old, empty
+  // measurement and silently draws nothing (2026-08-22: every bundle
+  // into a focus that had no wires of its own vanished). Re-measure
+  // whenever the card's wiring flips.
+  const updateNodeInternals = useUpdateNodeInternals()
+  const wiredRef = useRef(card.wired)
+  useEffect(() => {
+    if (wiredRef.current === card.wired) return          // the mount measures itself
+    wiredRef.current = card.wired
+    // React Flow reads the node's transform through DOMMatrixReadOnly,
+    // which a headless DOM does not have — there is nothing to re-measure
+    // there either.
+    if (typeof DOMMatrixReadOnly === 'undefined') return
+    updateNodeInternals(card.id)
+  }, [card.wired, card.id, updateNodeInternals])
 
   // A nested frame is one of its host's rows, so it answers to the
   // host's list the way any other row does — including saying whether

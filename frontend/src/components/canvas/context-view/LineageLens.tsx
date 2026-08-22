@@ -72,7 +72,10 @@ import { labelOf, edgeLabelFor, orientationHalf, FRAME_WINDOW_ALL, type EdgeType
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
 import { TraceWalkIndicator } from './TraceWalkIndicator'
+import type { ReactNode } from 'react'
 import { ControlTip } from './lens/ControlTip'
+import { useToolbarOverflow } from './lens/useToolbarOverflow'
+import * as Popover from '@radix-ui/react-popover'
 import { LensSkeleton } from './lens/LensSkeleton'
 
 /** Leaves one ⊕ extend ships to the server. A hub can stand for
@@ -93,6 +96,13 @@ function rememberNames(sg: LensSubgraph<LensWalkNode>, prev: ReadonlyMap<string,
 /** The capsule's decision buttons never render on the Lens (checkpoint and
  *  error keep their strips), but the props are required. */
 const noop = () => {}
+/** The header's segmented groups, most important first: what stays on
+ *  the row longest as it narrows. The day-to-day controls — which side
+ *  of the story, how much of the picture is folded, how the wires draw
+ *  — stay in reach; Walk changes the question less often; Steps and
+ *  Next are settings, and fold first. */
+const TOOLBAR_ORDER = ['direction', 'density', 'wires', 'walk', 'steps', 'next'] as const
+type ToolbarGroupId = (typeof TOOLBAR_ORDER)[number]
 const EMPTY_TYPE_SET: ReadonlySet<string> = new Set()
 const EMPTY_EXTEND_STATUS: ReadonlyMap<string, 'loading' | 'error'> = new Map()
 const EMPTY_ROSTERS: ReadonlyMap<string, LensRoster> = new Map()
@@ -423,6 +433,12 @@ export function LineageLens({
     ? (walkProgress.phase === 'checkpoint' || walkProgress.phase === 'error' ? null : walkProgress.phase)
     : walkStatus === 'loading' ? 'loading' : null
   const model = walk?.model ?? null
+
+  // THE TOOLBAR's overflow: measured, never guessed — see useToolbarOverflow.
+  const toolbarRowRef = useRef<HTMLDivElement | null>(null)
+  const { collapsed: collapsedGroups, registerGroup } = useToolbarOverflow(toolbarRowRef, TOOLBAR_ORDER)
+  const [displayMenuOpen, setDisplayMenuOpen] = useState(false)
+
 
   // ── The pipeline: model → subgraph → view state → layout ──────────
 
@@ -1388,6 +1404,265 @@ export function LineageLens({
   const q = query.trim().toLowerCase()
   const filterFn = (r: WalkNeighbor) => q === '' || r.label.toLowerCase().includes(q)
 
+  const toolbarGroups: Partial<Record<ToolbarGroupId, ReactNode>> = lensViewMode !== 'graph' ? {} : {
+    next: (
+                <div
+                  data-tour="lens-children-mode"
+                  role="group"
+                  aria-label="What containers you open next will show"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  <ControlTip name="Next" meaning="What the next container you open will show — one already open keeps its own setting">
+                    {(tip) => (
+                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
+                        Next
+                      </span>
+                    )}
+                  </ControlTip>
+                  {([
+                    { mode: 'connected', Icon: LucideIcons.Link2, label: 'Connected',
+                      title: 'Containers you open next show only what is on this lineage — this does not change one already open' },
+                    { mode: 'all', Icon: LucideIcons.Rows3, label: 'All',
+                      title: 'Containers you open next show everything inside, with lineage marked where it exists — this does not change one already open' },
+                  ] as const).map(({ mode, Icon, label, title }) => (
+                    <ControlTip key={mode} name={label} meaning={title}>
+                      {(tip) => (
+                        <button
+                          type="button"
+                          onClick={() => setLensFrameChildren(mode)}
+                          aria-describedby={tip['aria-describedby']}
+                          aria-pressed={lensFrameChildren === mode}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            lensFrameChildren === mode
+                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                              : 'text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {label}
+                        </button>
+                      )}
+                    </ControlTip>
+                  ))}
+                </div>
+    ),
+    walk: onFullWalkToggle ? (
+                <div
+                  role="group"
+                  aria-label="How far to walk the flow"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  <ControlTip name="Walk" meaning="How far the lens walks on its own">
+                    {(tip) => (
+                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
+                        Walk
+                      </span>
+                    )}
+                  </ControlTip>
+                  {([
+                    { on: false, Icon: LucideIcons.Footprints, label: 'One hop',
+                      title: 'Walk the flow yourself — ⊕ on a card fetches its next hop' },
+                    { on: true, Icon: LucideIcons.Route, label: 'Full flow',
+                      title: 'Trace mode: keep walking automatically until the whole end-to-end flow is drawn' },
+                  ] as const).map(({ on, Icon, label, title }) => (
+                    <ControlTip key={label} name={label} meaning={title}>
+                      {(tip) => (
+                        <button
+                          type="button"
+                          onClick={() => onFullWalkToggle(on)}
+                          aria-describedby={tip['aria-describedby']}
+                          aria-pressed={fullWalkEnabled === on}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            fullWalkEnabled === on
+                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                              : 'text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {label}
+                        </button>
+                      )}
+                    </ControlTip>
+                  ))}
+                </div>
+    ) : null,
+    steps: (
+                <div
+                  role="group"
+                  aria-label="How much of a long path to show"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  <ControlTip name="Steps" meaning="How a long pass-through path is drawn">
+                    {(tip) => (
+                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
+                        Steps
+                      </span>
+                    )}
+                  </ControlTip>
+                  {([
+                    { on: false, Icon: LucideIcons.UnfoldHorizontal, label: 'Every step',
+                      title: 'Show the full end-to-end flow — every hop on the path is its own card' },
+                    { on: true, Icon: LucideIcons.FoldHorizontal, label: 'Condensed',
+                      title: 'Fold long runs of single pass-through steps into one "via N steps" connector — click a connector to open that run' },
+                  ] as const).map(({ on, Icon, label, title }) => (
+                    <ControlTip key={label} name={label} meaning={title}>
+                      {(tip) => (
+                        <button
+                          type="button"
+                          onClick={() => setCondenseSteps(on)}
+                          aria-describedby={tip['aria-describedby']}
+                          aria-pressed={condenseSteps === on}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            condenseSteps === on
+                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                              : 'text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {label}
+                        </button>
+                      )}
+                    </ControlTip>
+                  ))}
+                </div>
+    ),
+    density: (
+                <div
+                  data-tour="lens-density"
+                  role="group"
+                  aria-label="How much of the picture to fold"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  <ControlTip name="Density" meaning="How much of the picture is folded — the numbers are the same at every rung">
+                    {(tip) => (
+                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
+                        Density
+                      </span>
+                    )}
+                  </ControlTip>
+                  {([
+                    { value: 'overview', Icon: LucideIcons.Layers, label: 'Overview',
+                      title: 'Start at the high level — partners that share a container land as that container, closed, with counts; each click opens one level' },
+                    { value: 'grouped', Icon: LucideIcons.Group, label: 'Grouped',
+                      title: 'Partners that share a container fold into it, its strongest rows first; the rest is one click away' },
+                    { value: 'all', Icon: LucideIcons.LayoutGrid, label: 'Every card',
+                      title: 'Draw every card on its own, however many there are' },
+                  ] as const).map(({ value, Icon, label, title }) => (
+                    <ControlTip key={value} name={label} meaning={title}>
+                      {(tip) => (
+                        <button
+                          type="button"
+                          onClick={() => setDensity(value)}
+                          aria-describedby={tip['aria-describedby']}
+                          aria-pressed={density === value}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            density === value
+                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                              : 'text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {label}
+                        </button>
+                      )}
+                    </ControlTip>
+                  ))}
+                </div>
+    ),
+    wires: (
+                <div
+                  role="group"
+                  aria-label="How the wires between two containers draw"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  <ControlTip name="Wires" meaning="How the wires between two containers draw — folded into one bundle, or every one">
+                    {(tip) => (
+                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
+                        Wires
+                      </span>
+                    )}
+                  </ControlTip>
+                  {([
+                    { value: 'auto', Icon: LucideIcons.Spline, label: 'Auto',
+                      title: 'Two containers with more than 12 wires between them draw one bundle with the count; hover or select a card to see its own wires' },
+                    { value: 'bundled', Icon: LucideIcons.GitMerge, label: 'Bundled',
+                      title: 'One wire per pair of containers, with the count; hover or select a card to see its own wires' },
+                    { value: 'all', Icon: LucideIcons.Waypoints, label: 'Every wire',
+                      title: 'Draw every wire, however many there are' },
+                  ] as const).map(({ value, Icon, label, title }) => (
+                    <ControlTip key={value} name={label} meaning={title}>
+                      {(tip) => (
+                        <button
+                          type="button"
+                          onClick={() => setWires(value)}
+                          aria-describedby={tip['aria-describedby']}
+                          aria-pressed={wires === value}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            wires === value
+                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                              : 'text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {label}
+                        </button>
+                      )}
+                    </ControlTip>
+                  ))}
+                </div>
+    ),
+    direction: (
+                <div
+                  data-tour="lens-direction"
+                  role="group"
+                  aria-label="Which direction to show"
+                  className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  {([
+                    { dir: 'both', Icon: LucideIcons.ArrowLeftRight, label: 'Both',
+                      title: 'Show upstream and downstream' },
+                    { dir: 'in', Icon: LucideIcons.ArrowDownLeft, label: 'Root cause',
+                      title: 'Show only what feeds this entity — upstream' },
+                    { dir: 'out', Icon: LucideIcons.ArrowUpRight, label: 'Impact',
+                      title: 'Show only what this entity feeds — downstream' },
+                  ] as const).map(({ dir, Icon, label, title }) => (
+                    <ControlTip key={dir} name={label} meaning={title}>
+                      {(tip) => (
+                        <button
+                          type="button"
+                          onClick={() => setDirectionFilter(dir)}
+                          aria-describedby={tip['aria-describedby']}
+                          aria-pressed={directionFilter === dir}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            directionFilter === dir
+                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                              : 'text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {label}
+                        </button>
+                      )}
+                    </ControlTip>
+                  ))}
+                </div>
+    ),
+  }
+  const toolbarInline = TOOLBAR_ORDER.filter(id => toolbarGroups[id] && !collapsedGroups.has(id))
+  const toolbarInMenu = TOOLBAR_ORDER.filter(id => toolbarGroups[id] && collapsedGroups.has(id))
+
   return createPortal(
     <AnimatePresence>
       <motion.div
@@ -1431,14 +1706,20 @@ export function LineageLens({
               controls; below ~1,700px it no longer fits beside the title
               and WRAPS under it rather than crushing the focal chip into a
               three-line stack over NEXT (seen at 1,600px, 2026-08-22). */}
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-2 pl-4 pr-12 py-3 border-b border-black/[0.08] dark:border-white/[0.08]">
+          {/* THE TOOLBAR — one row that never overflows (2026-08-22). The
+              groups the reader reaches for least collapse, in priority
+              order, into the Display menu when there is no room, and
+              come back when there is (`useToolbarOverflow`). */}
+          <div ref={toolbarRowRef} className="flex items-center gap-2 pl-4 pr-12 py-2.5 border-b border-black/[0.08] dark:border-white/[0.08]">
             <div
-              className="w-7 h-7 rounded-lg flex items-center justify-center"
+              className="w-7 h-7 flex-shrink-0 rounded-lg flex items-center justify-center"
               style={{ backgroundColor: `${focalColor}1f` }}
             >
               <LucideIcons.Focus className="w-4 h-4" style={{ color: focalColor }} />
             </div>
-            <div className="min-w-0">
+            {/* The title never gives up its width to the controls — they fold
+                instead (useToolbarOverflow measures this block as fixed). */}
+            <div className="min-w-0 flex-shrink-0 max-w-[min(360px,28vw)]">
               <div className="flex items-baseline gap-1.5 min-w-0">
                 <h2 className="text-sm font-semibold text-ink leading-tight truncate">{focalLabel}</h2>
                 {focalParentInHeader && (
@@ -1447,7 +1728,7 @@ export function LineageLens({
                   </span>
                 )}
               </div>
-              <p className="flex items-center gap-1.5 text-[10.5px] text-ink-muted leading-tight">
+              <p className="flex items-center gap-1.5 text-[10.5px] text-ink-muted leading-tight whitespace-nowrap overflow-hidden">
                 {/* Counted off the same model the board draws — there is
                     no second set of numbers to reconcile it against. */}
                 <span>
@@ -1485,7 +1766,7 @@ export function LineageLens({
                 type="button"
                 onClick={onBack}
                 title="Step back one hop (←)"
-                className="ml-2 flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                className="ml-2 flex-shrink-0 whitespace-nowrap flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
               >
                 <LucideIcons.ArrowLeft className="w-3 h-3" />
                 Back
@@ -1497,7 +1778,7 @@ export function LineageLens({
                 onClick={onForward}
                 title="Step forward one hop (→)"
                 className={cn(
-                  'flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                  'flex-shrink-0 whitespace-nowrap flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-ink-muted border border-black/10 dark:border-white/10 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                   canBack ? 'ml-1' : 'ml-2',
                 )}
               >
@@ -1519,7 +1800,7 @@ export function LineageLens({
                     aria-describedby={tip['aria-describedby']}
                     className={cn(
                       tip.peer,
-                      'flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-accent-lineage border border-accent-lineage/30 bg-accent-lineage/[0.06] hover:bg-accent-lineage/[0.12] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                      'flex-shrink-0 whitespace-nowrap flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-accent-lineage border border-accent-lineage/30 bg-accent-lineage/[0.06] hover:bg-accent-lineage/[0.12] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                       canBack || canForward ? 'ml-1' : 'ml-2',
                     )}
                   >
@@ -1529,7 +1810,7 @@ export function LineageLens({
                 )}
               </ControlTip>
             )}
-            <div className="ml-auto flex items-center gap-2">
+            <div className="ml-auto flex items-center gap-2 flex-shrink-0">
               {/* Gesture guide — the graph's interactions are rich, and
                   a first-time business user shouldn't have to discover
                   them by accident. */}
@@ -1589,309 +1870,55 @@ export function LineageLens({
                   {shareCopied ? <LucideIcons.Check className="w-4 h-4" /> : <LucideIcons.Link2 className="w-4 h-4" />}
                 </button>
               </InfoTooltip>
-              {/* What a container opens into, by default. Each frame can
-                  still be flipped on its own; this sets the starting
-                  point for the next one you open (persisted).
-                  T24 F6 — this control wears the SAME icons/labels as
-                  the per-frame Connected|All pair on an open frame, but
-                  does something entirely different (seeds only the NEXT
-                  container opened; it never touches one already open) —
-                  reported as reading like a global toggle it is not.
-                  "Next" is the always-visible half of that distinction;
-                  the hover title carries the rest. */}
-              {lensViewMode === 'graph' && (
-                <div
-                  data-tour="lens-children-mode"
-                  role="group"
-                  aria-label="What containers you open next will show"
-                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  <ControlTip name="Next" meaning="What the next container you open will show — one already open keeps its own setting">
+            </div>
+            {toolbarInline.map(id => (
+              <div key={id} data-toolbar-group={id} ref={registerGroup(id)} className="flex-shrink-0">
+                {toolbarGroups[id]}
+              </div>
+            ))}
+            {toolbarInMenu.length > 0 && (
+              <div data-toolbar-menu className="flex-shrink-0">
+                <Popover.Root open={displayMenuOpen} onOpenChange={setDisplayMenuOpen}>
+                  <ControlTip name="Display" meaning={`${toolbarInMenu.length} more control${toolbarInMenu.length === 1 ? '' : 's'} — there is no room for them on this row`}>
                     {(tip) => (
-                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
-                        Next
-                      </span>
+                      <Popover.Trigger asChild>
+                        <button
+                          type="button"
+                          aria-describedby={tip['aria-describedby']}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10.5px] font-semibold border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            displayMenuOpen
+                              ? 'border-accent-lineage/40 bg-accent-lineage/[0.08] text-accent-lineage'
+                              : 'border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04] text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <LucideIcons.SlidersHorizontal className="w-3.5 h-3.5" />
+                          Display
+                          <span className="ml-0.5 min-w-[1.1rem] px-1 rounded-full bg-accent-lineage/15 text-accent-lineage text-[9.5px] text-center tabular-nums">{toolbarInMenu.length}</span>
+                          <LucideIcons.ChevronDown className="w-3 h-3 opacity-70" />
+                        </button>
+                      </Popover.Trigger>
                     )}
                   </ControlTip>
-                  {([
-                    { mode: 'connected', Icon: LucideIcons.Link2, label: 'Connected',
-                      title: 'Containers you open next show only what is on this lineage — this does not change one already open' },
-                    { mode: 'all', Icon: LucideIcons.Rows3, label: 'All',
-                      title: 'Containers you open next show everything inside, with lineage marked where it exists — this does not change one already open' },
-                  ] as const).map(({ mode, Icon, label, title }) => (
-                    <ControlTip key={mode} name={label} meaning={title}>
-                      {(tip) => (
-                        <button
-                          type="button"
-                          onClick={() => setLensFrameChildren(mode)}
-                          aria-describedby={tip['aria-describedby']}
-                          aria-pressed={lensFrameChildren === mode}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            lensFrameChildren === mode
-                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                              : 'text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <Icon className="w-3 h-3" />
-                          {label}
-                        </button>
-                      )}
-                    </ControlTip>
-                  ))}
-                </div>
-              )}
-              {/* Walk — how far the lens fetches by itself. "One hop"
-                  is the classic server-lazy walk (⊕ fetches each next
-                  hop); "Full flow" is trace mode: the lens keeps
-                  following every frontier until the end-to-end flow is
-                  drawn. Only rendered where the caller wired the mode. */}
-              {lensViewMode === 'graph' && onFullWalkToggle && (
-                <div
-                  role="group"
-                  aria-label="How far to walk the flow"
-                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  <ControlTip name="Walk" meaning="How far the lens walks on its own">
-                    {(tip) => (
-                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
-                        Walk
-                      </span>
-                    )}
-                  </ControlTip>
-                  {([
-                    { on: false, Icon: LucideIcons.Footprints, label: 'One hop',
-                      title: 'Walk the flow yourself — ⊕ on a card fetches its next hop' },
-                    { on: true, Icon: LucideIcons.Route, label: 'Full flow',
-                      title: 'Trace mode: keep walking automatically until the whole end-to-end flow is drawn' },
-                  ] as const).map(({ on, Icon, label, title }) => (
-                    <ControlTip key={label} name={label} meaning={title}>
-                      {(tip) => (
-                        <button
-                          type="button"
-                          onClick={() => onFullWalkToggle(on)}
-                          aria-describedby={tip['aria-describedby']}
-                          aria-pressed={fullWalkEnabled === on}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            fullWalkEnabled === on
-                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                              : 'text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <Icon className="w-3 h-3" />
-                          {label}
-                        </button>
-                      )}
-                    </ControlTip>
-                  ))}
-                </div>
-              )}
-              {/* Steps — how much of a long path draws. "Every step" is
-                  the default and the honest picture: one card per hop,
-                  all the way out, however far the reader walks.
-                  "Condensed" trades that for a shorter board on very
-                  long chains, folding runs of single pass-through steps
-                  into one "via N steps" connector. Visible rather than
-                  automatic because a folded run has no card to click,
-                  and a reader who never chose it reads the fold as the
-                  lineage having stopped. */}
-              {lensViewMode === 'graph' && (
-                <div
-                  role="group"
-                  aria-label="How much of a long path to show"
-                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  <ControlTip name="Steps" meaning="How a long pass-through path is drawn">
-                    {(tip) => (
-                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
-                        Steps
-                      </span>
-                    )}
-                  </ControlTip>
-                  {([
-                    { on: false, Icon: LucideIcons.UnfoldHorizontal, label: 'Every step',
-                      title: 'Show the full end-to-end flow — every hop on the path is its own card' },
-                    { on: true, Icon: LucideIcons.FoldHorizontal, label: 'Condensed',
-                      title: 'Fold long runs of single pass-through steps into one "via N steps" connector — click a connector to open that run' },
-                  ] as const).map(({ on, Icon, label, title }) => (
-                    <ControlTip key={label} name={label} meaning={title}>
-                      {(tip) => (
-                        <button
-                          type="button"
-                          onClick={() => setCondenseSteps(on)}
-                          aria-describedby={tip['aria-describedby']}
-                          aria-pressed={condenseSteps === on}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            condenseSteps === on
-                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                              : 'text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <Icon className="w-3 h-3" />
-                          {label}
-                        </button>
-                      )}
-                    </ControlTip>
-                  ))}
-                </div>
-              )}
-              {/* Density (Part H, 2026-08-21) — how much of the picture is
-                  FOLDED. A band of 200 partner tables drawn one card each
-                  is a wall; folded under the 18 databases they sit in it
-                  reads. "Overview" lands those hosts as closed cards with
-                  counts (start at the high level), "Grouped" — the
-                  default — as frames showing their strongest rows, "Every
-                  card" draws it all. A PREFERENCE: it follows the reader
-                  from lens to lens. Nothing is hidden at any rung — the
-                  numbers agree across all three; only the grain folds. */}
-              {lensViewMode === 'graph' && (
-                <div
-                  data-tour="lens-density"
-                  role="group"
-                  aria-label="How much of the picture to fold"
-                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  <ControlTip name="Density" meaning="How much of the picture is folded — the numbers are the same at every rung">
-                    {(tip) => (
-                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
-                        Density
-                      </span>
-                    )}
-                  </ControlTip>
-                  {([
-                    { value: 'overview', Icon: LucideIcons.Layers, label: 'Overview',
-                      title: 'Start at the high level — partners that share a container land as that container, closed, with counts; each click opens one level' },
-                    { value: 'grouped', Icon: LucideIcons.Group, label: 'Grouped',
-                      title: 'Partners that share a container fold into it, its strongest rows first; the rest is one click away' },
-                    { value: 'all', Icon: LucideIcons.LayoutGrid, label: 'Every card',
-                      title: 'Draw every card on its own, however many there are' },
-                  ] as const).map(({ value, Icon, label, title }) => (
-                    <ControlTip key={value} name={label} meaning={title}>
-                      {(tip) => (
-                        <button
-                          type="button"
-                          onClick={() => setDensity(value)}
-                          aria-describedby={tip['aria-describedby']}
-                          aria-pressed={density === value}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            density === value
-                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                              : 'text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <Icon className="w-3 h-3" />
-                          {label}
-                        </button>
-                      )}
-                    </ControlTip>
-                  ))}
-                </div>
-              )}
-              {/* Direction preset — a VIEW-side filter: the fetch always
-                  stays 'both' at the chosen depth (cache-friendly,
-                  instant toggling, counts stay true), and only what
-                  DRAWS changes. Plain-language labels for business
-                  readers, with the technical direction as the tooltip. */}
-              {/* Wires — how the lineage between two containers draws
-                  (2026-08-22): one bundle when there are many (Auto),
-                  always (Bundled), or every wire. The wires a bundle
-                  hides come back for a card the reader hovers or
-                  selects, or a bundle they hover. A preference. */}
-              {lensViewMode === 'graph' && (
-                <div
-                  role="group"
-                  aria-label="How the wires between two containers draw"
-                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  <ControlTip name="Wires" meaning="How the wires between two containers draw — folded into one bundle, or every one">
-                    {(tip) => (
-                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
-                        Wires
-                      </span>
-                    )}
-                  </ControlTip>
-                  {([
-                    { value: 'auto', Icon: LucideIcons.Spline, label: 'Auto',
-                      title: 'Two containers with more than 12 wires between them draw one bundle with the count; hover or select a card to see its own wires' },
-                    { value: 'bundled', Icon: LucideIcons.GitMerge, label: 'Bundled',
-                      title: 'One wire per pair of containers, with the count; hover or select a card to see its own wires' },
-                    { value: 'all', Icon: LucideIcons.Waypoints, label: 'Every wire',
-                      title: 'Draw every wire, however many there are' },
-                  ] as const).map(({ value, Icon, label, title }) => (
-                    <ControlTip key={value} name={label} meaning={title}>
-                      {(tip) => (
-                        <button
-                          type="button"
-                          onClick={() => setWires(value)}
-                          aria-describedby={tip['aria-describedby']}
-                          aria-pressed={wires === value}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            wires === value
-                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                              : 'text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <Icon className="w-3 h-3" />
-                          {label}
-                        </button>
-                      )}
-                    </ControlTip>
-                  ))}
-                </div>
-              )}
-              {lensViewMode === 'graph' && (
-                <div
-                  data-tour="lens-direction"
-                  role="group"
-                  aria-label="Which direction to show"
-                  className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  {([
-                    { dir: 'both', Icon: LucideIcons.ArrowLeftRight, label: 'Both',
-                      title: 'Show upstream and downstream' },
-                    { dir: 'in', Icon: LucideIcons.ArrowDownLeft, label: 'Root cause',
-                      title: 'Show only what feeds this entity — upstream' },
-                    { dir: 'out', Icon: LucideIcons.ArrowUpRight, label: 'Impact',
-                      title: 'Show only what this entity feeds — downstream' },
-                  ] as const).map(({ dir, Icon, label, title }) => (
-                    <ControlTip key={dir} name={label} meaning={title}>
-                      {(tip) => (
-                        <button
-                          type="button"
-                          onClick={() => setDirectionFilter(dir)}
-                          aria-describedby={tip['aria-describedby']}
-                          aria-pressed={directionFilter === dir}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            directionFilter === dir
-                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                              : 'text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <Icon className="w-3 h-3" />
-                          {label}
-                        </button>
-                      )}
-                    </ControlTip>
-                  ))}
-                </div>
-              )}
-              {/* The Graph | List body toggle stood here until 2026-08-22. The
-                  graph IS the Lens: the three-column list is retired (no
-                  control offers it; a stored preference migrates to
-                  'graph'), and its rendering below is kept one release
-                  behind `lensViewMode` for a safe rollback. */}
-              <div className="relative">
+                  <Popover.Portal>
+                    <Popover.Content
+                      align="end"
+                      sideOffset={8}
+                      className="z-[9999] w-max max-w-[92vw] rounded-xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-xl shadow-black/10 p-2 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2"
+                    >
+                      <p className="px-1.5 pt-0.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-muted/70">Display</p>
+                      <div className="flex flex-col gap-1.5">
+                        {toolbarInMenu.map(id => (
+                          <div key={id} className="flex">{toolbarGroups[id]}</div>
+                        ))}
+                      </div>
+                    </Popover.Content>
+                  </Popover.Portal>
+                </Popover.Root>
+              </div>
+            )}
+              <div className="relative flex-shrink-0">
                 <LucideIcons.Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-ink-muted/70" />
                 <input
                   value={query}
@@ -1910,7 +1937,6 @@ export function LineageLens({
                   </button>
                 )}
               </div>
-            </div>
             {/* The way out stays in the corner whether the controls wrapped
                 or not — anchored to the dialog, not to the cluster. */}
             <button
@@ -2643,6 +2669,7 @@ function ReachLine({ reach, loading }: { reach: LensReach | null; loading: boole
     )
   }
   if (!reach) return null
+
   return (
     <p
       className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted"

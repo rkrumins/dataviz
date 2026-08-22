@@ -23,7 +23,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const env = Object.fromEntries(readFileSync(`${root}/.env.dev`, 'utf8').split('\n').filter(l => l.includes('=') && !l.startsWith('#')).map(l => { const i = l.indexOf('='); return [l.slice(0, i).trim(), l.slice(i + 1).trim().replace(/^['"]|['"]$/g, '')] }))
 
 const port = 9333
-const chrome = spawn(CHROME, [`--remote-debugging-port=${port}`, '--headless', '--disable-gpu', '--no-sandbox', '--window-size=1600,1000', 'about:blank'], { stdio: 'ignore' })
+const chrome = spawn(CHROME, [`--remote-debugging-port=${port}`, '--headless', '--disable-gpu', '--no-sandbox', `--window-size=${process.env.WINDOW ?? '1600,1000'}`, 'about:blank'], { stdio: 'ignore' })
 process.on('exit', () => chrome.kill())
 await new Promise(r => setTimeout(r, 1200))
 const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json()
@@ -81,7 +81,7 @@ for (let i = 0; i < Math.round(420 * 1000 / SAMPLE_MS); i++) {
       const r = requests.find(r => r.id === e.params.requestId)
       if (r) r.done = Date.now() - t0
     }
-    if (e.method === 'Runtime.consoleAPICalled' && e.params.type === 'error') console.log('CONSOLE ERROR:', JSON.stringify(e.params.args?.map(a => a.value ?? a.description)).slice(0, 300))
+    if (e.method === 'Runtime.consoleAPICalled' && (e.params.type === 'error' || e.params.type === 'warning')) console.log(`CONSOLE ${e.params.type.toUpperCase()}:`, JSON.stringify(e.params.args?.map(a => a.value ?? a.description)).slice(0, 300))
     if (e.method === 'Log.entryAdded' && e.params.entry.level === 'error') console.log('LOG ERROR:', e.params.entry.text.slice(0, 300))
   }
   const s = await evalJs(`(() => {
@@ -251,7 +251,7 @@ if (process.env.HOVER && process.env.SCREENSHOT_DIR) {
     await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y })
     await sleep(600)
     const { writeFileSync } = await import('node:fs')
-    const shot = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: 0, width: 1600, height: 260, scale: 1 } })
+    const shot = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: 0, width: Number((process.env.WINDOW ?? '1600,1000').split(',')[0]), height: 260, scale: 1 } })
     writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-hover.png`, Buffer.from(shot.result.data, 'base64'))
     console.log('== screenshot (hover)', `${process.env.SCREENSHOT_DIR}/lens-hover.png`)
   } else console.log('== hover: no such control', process.env.HOVER)

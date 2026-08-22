@@ -2975,6 +2975,39 @@ describe('the header explains itself (2026-08-22)', () => {
     }
   })
 
+  it('a narrow row folds the least-used groups into a Display menu — the day-to-day ones stay in reach', () => {
+    // jsdom lays nothing out; give the row and its groups widths so the
+    // toolbar has evidence: a 1,000px row, six 200px groups, 40px for
+    // everything else in the row's flow. Three groups fit beside the
+    // menu; three fold — least important first.
+    const rect = HTMLElement.prototype.getBoundingClientRect
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      const w = this.classList.contains('pr-12') ? 1000 : this.dataset.toolbarGroup !== undefined ? 200 : 40
+      return { width: w, height: 30, x: 0, y: 0, top: 0, left: 0, right: w, bottom: 30, toJSON() { return this } } as DOMRect
+    }
+    try {
+      renderLens(['b'], simple(), { onFullWalkToggle: vi.fn() })
+      const menu = screen.getByRole('button', { name: /^Display/ })
+      expect(menu).toHaveTextContent('3')
+      // Direction, Density and Wires — the day-to-day controls — stay on the row.
+      expect(screen.getByRole('button', { name: 'Root cause' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Grouped' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Every wire' })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Condensed' })).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Full flow' })).toBeNull()
+      fireEvent.click(menu)
+      // …and the folded ones are one click away, unchanged.
+      expect(screen.getByRole('button', { name: 'Condensed' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'All' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Full flow' })).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Condensed' }))
+      expect(usePreferencesStore.getState().lensCondenseSteps).toBe(true)
+      usePreferencesStore.setState({ lensCondenseSteps: false })
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = rect
+    }
+  })
+
   it('the Wires control writes the preference', () => {
     usePreferencesStore.setState({ lensWires: 'auto' })
     renderLens(['b'], simple())
