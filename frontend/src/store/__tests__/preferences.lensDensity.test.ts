@@ -41,12 +41,14 @@ describe('preferences — lensInitialDepth is one hop again', () => {
   })
 })
 
-describe('preferences — the List body is retired (2026-08-22)', () => {
-  it("a stored 'list' migrates to 'graph': the Lens opens as the graph for everyone", () => {
+describe('preferences — the List body is GONE (2026-08-23)', () => {
+  it('an older state loses the retired key rather than carrying it forward', () => {
     const migrate = usePreferencesStore.persist.getOptions().migrate!
-    expect((migrate({ lensViewMode: 'list' }, 4) as Record<string, unknown>).lensViewMode).toBe('graph')
-    expect((migrate({ lensViewMode: 'graph', lensDensity: 'all' }, 4) as Record<string, unknown>).lensDensity).toBe('all')
-    expect(usePreferencesStore.persist.getOptions().version).toBeGreaterThanOrEqual(5)
+    const migrated = migrate({ lensViewMode: 'list', lensDensity: 'all' }, 4) as Record<string, unknown>
+    expect('lensViewMode' in migrated).toBe(false)
+    expect(migrated.lensDensity).toBe('all')        // an explicit choice still survives
+    expect(usePreferencesStore.persist.getOptions().version).toBeGreaterThanOrEqual(7)
+    expect('lensViewMode' in usePreferencesStore.getState()).toBe(false)
   })
 })
 
@@ -57,9 +59,9 @@ describe('preferences — lensWires (2026-08-22)', () => {
     expect(usePreferencesStore.getState().lensWires).toBe('bundled')
     usePreferencesStore.getState().setLensWires('auto')
     const migrate = usePreferencesStore.persist.getOptions().migrate!
-    const migrated = migrate({ lensDensity: 'all', lensViewMode: 'graph' }, 5) as Record<string, unknown>
+    const migrated = migrate({ lensDensity: 'all' }, 5) as Record<string, unknown>
     expect(migrated.lensWires).toBe('auto')
     expect(migrated.lensDensity).toBe('all')
-    expect(usePreferencesStore.persist.getOptions().version).toBe(6)
+    expect(usePreferencesStore.persist.getOptions().version).toBeGreaterThanOrEqual(6)
   })
 })

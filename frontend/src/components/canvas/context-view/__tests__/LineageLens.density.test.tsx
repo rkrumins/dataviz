@@ -73,7 +73,7 @@ const tablesOnBoard = () => nodesOnBoard().filter(t => /table_\d/.test(t) && !/\
 const databasesOnBoard = () => ['database_0', 'database_1', 'database_2'].filter(db => nodesOnBoard().some(t => t.includes(db))).length
 
 describe('LineageLens — density rungs', () => {
-  beforeEach(() => { usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1, lensDensity: 'grouped' }) })
+  beforeEach(() => { usePreferencesStore.setState({ lensInitialDepth: 1, lensDensity: 'grouped' }) })
   afterEach(() => { cleanup(); usePreferencesStore.setState({ lensDensity: 'grouped' }) })
 
   it('Grouped (the default): the three databases are frames showing their strongest tables; the rest is one step away', () => {
@@ -133,7 +133,7 @@ function fiveTables(): LensWalkModel {
 }
 
 describe('LineageLens — how the partners land (the drill is the reader\'s)', () => {
-  beforeEach(() => { usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1, lensDensity: 'grouped' }) })
+  beforeEach(() => { usePreferencesStore.setState({ lensInitialDepth: 1, lensDensity: 'grouped' }) })
   afterEach(() => { cleanup(); usePreferencesStore.setState({ lensDensity: 'grouped' }) })
 
   const renderFive = (onRecenter = vi.fn()) => render(

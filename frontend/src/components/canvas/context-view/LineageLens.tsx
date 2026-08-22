@@ -68,7 +68,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useTourStore } from '@/features/tour/tourStore'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { lensFocalOf, lensTransitionKind, type LensHistory } from './lens/lensHistory'
-import { labelOf, edgeLabelFor, orientationHalf, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach, type LensNeighbor } from './lens/focus-cards'
+import { labelOf, edgeLabelFor, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach, type LensNeighbor } from './lens/focus-cards'
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
 import { TraceWalkIndicator } from './TraceWalkIndicator'
@@ -538,7 +538,6 @@ export function LineageLens({
   const directionFilter = directionState.nodeId === nodeId ? directionState.dir : 'both'
   const setDirectionFilter = (dir: LensDirectionFilter) => setDirectionState({ nodeId, dir })
 
-  const lensViewMode = usePreferencesStore((s) => s.lensViewMode)
   // Bumped by the header's Center on focus; the board centres on it.
   const [recenterSignal, setRecenterSignal] = useState(0)
   // The board's zoom, once a move has settled — the status bar's last fact.
@@ -1193,13 +1192,23 @@ export function LineageLens({
     () => ({ sg, names: rememberNames(sg, new Map()) }),
   )
   if (labelMemory.sg !== sg) setLabelMemory({ sg, names: rememberNames(sg, labelMemory.names) })
-  const labelFor = useCallback(
-    (urn: string) => {
-      const node = sg.nodes.get(urn)?.node
-      if (node) return labelOf(urn, node)
-      return labelMemory.names.get(urn) ?? labelHintFor?.(urn) ?? labelOf(urn, undefined)
+  // A NAME WE DO NOT KNOW IS NOT A NAME (2026-08-23). `labelOf` ends in a
+  // URN fragment — `executive_board_dashboard_de06a1ba` — which is an
+  // identifier, not something to print at somebody. On a cold
+  // share-link open (no canvas node, no model yet) that fragment was the
+  // Lens's title and the capsule's subject for the first second. This
+  // says whether a REAL name is in hand; the surfaces that would print
+  // one wait instead.
+  const knownNameFor = useCallback(
+    (urn: string): string | null => {
+      const data = sg.nodes.get(urn)?.node?.data as { label?: string; businessLabel?: string } | undefined
+      return data?.label ?? data?.businessLabel ?? labelMemory.names.get(urn) ?? labelHintFor?.(urn) ?? null
     },
     [sg, labelMemory.names, labelHintFor],
+  )
+  const labelFor = useCallback(
+    (urn: string) => knownNameFor(urn) ?? labelOf(urn, sg.nodes.get(urn)?.node),
+    [knownNameFor, sg],
   )
   const parentOf = useCallback(
     (urn: string) => sg.nodes.get(urn)?.parent ?? null,
@@ -1288,7 +1297,9 @@ export function LineageLens({
     const token = encodeLensShare({
       entries,
       cursor,
-      mode: lensViewMode,
+      // The Lens has one body since 2026-08-23; the field stays on the v3
+      // wire so an older reader still parses a link this one writes.
+      mode: 'graph' as const,
       direction: directionFilter,
       depth: lensInitialDepth,
       revealed: [...view.revealed],
@@ -1315,7 +1326,7 @@ export function LineageLens({
   const tourActive = useTourStore((s) => s.activeTourId)
   const hasCompletedTour = useTourStore((s) => s.hasCompleted)
   useEffect(() => {
-    if (!lensOpen || lensViewMode !== 'graph' || tourActive) return
+    if (!lensOpen || tourActive) return
     if (hasCompletedTour('lineage-lens')) return
     try {
       if (localStorage.getItem('nx-lens-tour-offered')) return
@@ -1326,7 +1337,7 @@ export function LineageLens({
     // Let the dialog and graph mount so the spotlight targets exist.
     const t = window.setTimeout(() => tourStart('lineage-lens'), 650)
     return () => window.clearTimeout(t)
-  }, [lensOpen, lensViewMode, tourActive, hasCompletedTour, tourStart])
+  }, [lensOpen, tourActive, hasCompletedTour, tourStart])
 
   // The focal's own roster, asked for once — the membership half, which
   // lineage structurally cannot answer.
@@ -1407,7 +1418,8 @@ export function LineageLens({
   if (!nodeId) return null
 
   const focalNode = sg.nodes.get(nodeId)?.node
-  const focalLabel = labelFor(nodeId)
+  const focalName = knownNameFor(nodeId)
+  const focalLabel = focalName ?? labelOf(nodeId, focalNode)
   const focalType = (focalNode?.data?.type as string) ?? focalNode?.entityType ?? 'entity'
   const focalColor = generateColorFromType(focalType)
   const focalParentId = parentOf(nodeId)
@@ -1429,14 +1441,12 @@ export function LineageLens({
   // on screen that describes a different picture.
   const headerConnections = (directionFilter === 'out' ? 0 : inConnections)
     + (directionFilter === 'in' ? 0 : outConnections)
-  const q = query.trim().toLowerCase()
-  const filterFn = (r: WalkNeighbor) => q === '' || r.label.toLowerCase().includes(q)
 
   // THE VIEW CONTROLS (2026-08-22): one chip per category, each opening a
   // menu of its options with their meanings. Six captioned segmented
   // groups in a row crowded the search box off the header; six chips
   // showing their current value fit beside each other with room to spare.
-  const viewControls: Partial<Record<ToolbarGroupId, ReactNode>> = lensViewMode !== 'graph' ? {} : {
+  const viewControls: Partial<Record<ToolbarGroupId, ReactNode>> = {
     // DIRECTION IS FIRST CLASS (2026-08-22): the question itself — upstream,
     // downstream, or the whole story — is never behind a click. An
     // always-expanded segmented control heads the row; the chips follow.
@@ -1567,17 +1577,13 @@ export function LineageLens({
           transition={{ duration: 0.18, ease: 'easeOut' }}
           className="relative flex flex-col rounded-2xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-2xl shadow-black/40 overflow-hidden transition-[width,height,max-height] duration-300"
           style={
-            // Graph exploration is a "focus room" — as much of the
-            // window as it can take while still reading as a room over
-            // the page, with a RESOLVED height (React Flow needs one).
-            // The pixel caps this used to carry (1800×1100) were what
-            // made it look small on a large display: the board is where
-            // a big graph goes, so it gets the screen. The list keeps
-            // its adaptive height so small neighborhoods don't get a
-            // cavernous empty grid.
-            lensViewMode === 'graph'
-              ? { width: '96vw', height: '94vh' }
-              : { width: 'min(1000px, 92vw)', maxHeight: 'min(72vh, 780px)', minHeight: 380 }
+            // The focus room takes as much of the window as it can while
+            // still reading as a room over the page, with a RESOLVED
+            // height (React Flow needs one). The pixel caps this used to
+            // carry (1800×1100) were what made it look small on a large
+            // display: the board is where a big graph goes, so it gets
+            // the screen.
+            { width: '96vw', height: '94vh' }
           }
           role="dialog"
           aria-label={`Connections of ${focalLabel}`}
@@ -1600,7 +1606,17 @@ export function LineageLens({
                 instead (useToolbarOverflow measures this block as fixed). */}
             <div className="min-w-0 flex-shrink-0 max-w-[min(360px,28vw)]">
               <div className="flex items-baseline gap-1.5 min-w-0">
-                <h2 className="text-sm font-semibold text-ink leading-tight truncate">{focalLabel}</h2>
+                {focalName === null ? (
+                  // The name is still coming: hold its place rather than
+                  // print an identifier as if it were one.
+                  <span
+                    data-testid="lens-title-pending"
+                    aria-label="Loading the name of this entity"
+                    className="nx-skeleton block h-3.5 w-40 rounded bg-black/[0.07] dark:bg-white/[0.09]"
+                  />
+                ) : (
+                  <h2 className="text-sm font-semibold text-ink leading-tight truncate">{focalLabel}</h2>
+                )}
                 {focalParentInHeader && (
                   <span className="flex-shrink-0 max-w-[160px] truncate text-[10px] text-ink-muted/70">
                     in {focalParentInHeader}
@@ -1670,7 +1686,7 @@ export function LineageLens({
                 for the user to find" (2026-08-22). A labelled button here,
                 and the board offers the same thing by itself the moment
                 the focus has left the screen. */}
-            {lensViewMode === 'graph' && (
+            {(
               <ControlTip name="Center on focus" meaning="Bring the focus back to the middle of the board at a readable size — after a zoom, a pan, or a layout switch">
                 {(tip) => (
                   <button
@@ -1901,8 +1917,7 @@ export function LineageLens({
                 content={
                   <div className="space-y-1 text-left">
                     <p className="font-semibold text-ink">Exploring lineage</p>
-                    {lensViewMode === 'graph' ? (
-                      <ul className="space-y-0.5 text-ink-muted">
+                    <ul className="space-y-0.5 text-ink-muted">
                         <li><span className="font-medium text-ink">Click</span> a card — inspect it; a row shows a preview</li>
                         <li><span className="font-medium text-ink">Double-click</span> — focus there</li>
                         <li><span className="font-medium text-ink">⊕</span> on a card&apos;s outer edge — reveal or fetch its next hop</li>
@@ -1915,13 +1930,6 @@ export function LineageLens({
                         <li><span className="font-medium text-ink">Drag a card</span> — move it; connections follow</li>
                         <li><span className="font-medium text-ink">Drag · scroll</span> the background — pan and zoom</li>
                       </ul>
-                    ) : (
-                      <ul className="space-y-0.5 text-ink-muted">
-                        <li><span className="font-medium text-ink">Click</span> a connection — re-center on it</li>
-                        <li><span className="font-medium text-ink">← / →</span> — step back / forward</li>
-                        <li><span className="font-medium text-ink">Hover</span> a row — reveal &amp; details actions</li>
-                      </ul>
-                    )}
                   </div>
                 }
               >
@@ -1963,7 +1971,7 @@ export function LineageLens({
               <LucideIcons.X className="w-4 h-4" />
             </button>
             </div>
-            {lensViewMode === 'graph' && (
+            {(
               <div ref={toolbarRowRef} className="flex items-center gap-1.5 pl-4 pr-4 pb-2">
                 {toolbarInline.map(id => (
                   <div key={id} data-toolbar-group={id} ref={registerGroup(id)} className="flex-shrink-0">
@@ -2085,14 +2093,10 @@ export function LineageLens({
 
           {/* ── Body — the SAME layout at every depth: re-centering
               swaps the focal in place instead of flipping to a
-              different presentation. Two bodies, one model: the
-              interactive hop-band GRAPH — the Lens — and, DEPRECATED
-              since 2026-08-22, the classic two-column LIST: no control
-              offers it any more and a stored preference migrates to
-              'graph'; the branch below stays one release for a safe
-              rollback (`usePreferencesStore.setState({ lensViewMode:
-              'list' })`) and then goes. ── */}
-          {lensViewMode === 'graph' ? (
+              different presentation. ONE body: the interactive hop-band
+              graph. The classic two-column LIST was deprecated
+              2026-08-22 and removed 2026-08-23 with its preference —
+              nothing can bring it back. ── */}
           <div className="flex-1 min-h-0 flex flex-col">
             <div data-tour="lens-graph" className="relative flex-1 min-h-0">
               <FocusGraphView
@@ -2167,7 +2171,7 @@ export function LineageLens({
                   key={nodeId ?? ''}
                   phase={capsulePhase}
                   surface="lens"
-                  subject={focalLabel}
+                  subject={focalName ?? undefined}
                   nodes={walkProgress?.nodes ?? 0}
                   flows={walkProgress?.flows ?? 0}
                   requests={walkProgress?.requests ?? 0}
@@ -2294,134 +2298,6 @@ export function LineageLens({
               })()}
             </AnimatePresence>
           </div>
-          ) : (
-          // minmax(0,1fr): a bare `1fr` track keeps min-width:auto, so a
-          // long unbroken field name blows the track past the dialog
-          // edge (no scroll → unusable). minmax(0,…) lets the track
-          // shrink and the rows' `truncate` take over.
-          <div className="flex-1 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] min-h-0">
-            <NeighborColumn
-              title="Data Sources"
-              subtitle="Upstream"
-              rows={neighbors.incoming.filter(filterFn)}
-              totalConnections={inConnections}
-              direction="incoming"
-              walkStatus={walkStatus}
-              hiddenTypes={hiddenTypes}
-              onToggleType={toggleHiddenType}
-              searching={q !== ''}
-              edgeTypeInfo={edgeTypeInfo}
-              onRecenter={onRecenter}
-              onRevealOnCanvas={onRevealOnCanvas}
-              onOpenDetails={onOpenDetails}
-            />
-
-            {/* Focal card */}
-            <div className="flex flex-col items-center justify-center px-5 py-6">
-              <div className="flex items-center">
-                <FlowRail color={focalColor} active={inConnections > 0} />
-                <div
-                  className="w-60 rounded-xl border-2 px-4 py-3.5 bg-canvas-elevated"
-                  style={{
-                    borderColor: focalColor,
-                    background: `linear-gradient(150deg, ${focalColor}24, ${focalColor}08 60%)`,
-                    boxShadow: `0 10px 34px ${focalColor}33`,
-                  }}
-                >
-                  <p className="text-[9.5px] font-bold uppercase tracking-[0.12em] mb-1" style={{ color: focalColor }}>
-                    {focalType}
-                  </p>
-                  {/* overflow-wrap:anywhere — `break-words` won't break an
-                      unbroken run like a long snake_case field name, so it
-                      would overflow the fixed-width card. */}
-                  <p className="text-[15px] font-semibold text-ink [overflow-wrap:anywhere] leading-snug">{focalLabel}</p>
-                  {/* Parent breadcrumb — where this entity LIVES; click
-                      steps the lens up into the parent. */}
-                  {focalParentId && (
-                    <button
-                      type="button"
-                      onClick={() => onRecenter(focalParentId)}
-                      title={`Re-center on ${focalParentLabel}`}
-                      className="mt-0.5 flex items-center gap-1 max-w-full text-[10px] text-ink-muted hover:text-accent-lineage transition-colors"
-                    >
-                      <LucideIcons.CornerLeftUp className="w-2.5 h-2.5 flex-shrink-0" />
-                      <span className="truncate">in {focalParentLabel}</span>
-                    </button>
-                  )}
-                  <div className="flex items-center gap-3 mt-2.5 pt-2 border-t border-black/[0.07] dark:border-white/[0.08] text-[11px] font-medium tabular-nums">
-                    <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
-                      <LucideIcons.ArrowDownLeft className="w-3.5 h-3.5" />
-                      {inConnections} in
-                    </span>
-                    <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
-                      <LucideIcons.ArrowUpRight className="w-3.5 h-3.5" />
-                      {outConnections} out
-                    </span>
-                  </div>
-                  <ReachLine reach={reach} loading={walkStatus === 'loading'} />
-                </div>
-                <FlowRail color={focalColor} active={outConnections > 0} />
-              </div>
-
-              {/* Contained entities that are ON this lineage — the
-                  descent that keeps exploration alive when a container's
-                  relationships live at child level. */}
-              {focalChildren.length > 0 && (
-                <div className="w-60 mt-4 min-h-0">
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <LucideIcons.FolderTree className="w-3 h-3 text-ink-muted/60" />
-                    <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-muted/70">Contains</span>
-                    <span className="text-[9.5px] tabular-nums text-ink-muted/60">
-                      {focalChildren.length} on this lineage{focalChildTotal > focalChildren.length ? ` · of ${focalChildTotal}` : ''}
-                    </span>
-                  </div>
-                  <div className="max-h-36 overflow-y-auto custom-scrollbar flex flex-col">
-                    {focalChildren.slice(0, 50).map(cid => {
-                      const cColor = generateColorFromType(
-                        (sg.nodes.get(cid)?.node?.data?.type as string) ?? 'entity',
-                      )
-                      return (
-                        <button
-                          key={`focal-child-${cid}`}
-                          type="button"
-                          onClick={() => onRecenter(cid)}
-                          title={`Step into ${labelFor(cid)} — walk its lineage`}
-                          className="w-full min-w-0 flex items-center gap-1.5 px-2 py-1.5 rounded-md text-left text-[11.5px] text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.05] transition-colors"
-                        >
-                          <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-ink-muted/50" />
-                          <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: cColor }} />
-                          <span className="truncate">{labelFor(cid)}</span>
-                          <LucideIcons.ChevronRight className="ml-auto w-3 h-3 flex-shrink-0 text-ink-muted/30" />
-                        </button>
-                      )
-                    })}
-                    {focalChildren.length > 50 && (
-                      <p className="px-2 py-0.5 text-[10px] text-ink-muted/60">
-                        +{(focalChildren.length - 50).toLocaleString()} more on this lineage
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <NeighborColumn
-              title="Data Consumers"
-              subtitle="Downstream"
-              rows={neighbors.outgoing.filter(filterFn)}
-              totalConnections={outConnections}
-              direction="outgoing"
-              walkStatus={walkStatus}
-              hiddenTypes={hiddenTypes}
-              onToggleType={toggleHiddenType}
-              searching={q !== ''}
-              edgeTypeInfo={edgeTypeInfo}
-              onRecenter={onRecenter}
-              onRevealOnCanvas={onRevealOnCanvas}
-              onOpenDetails={onOpenDetails}
-            />
-          </div>
-          )}
 
           {/* ── Outside this view (feature-flagged preview) — partners
               that exist in the data source but are beyond this view's
@@ -2478,30 +2354,12 @@ export function LineageLens({
           {/* THE STATUS BAR (2026-08-22) — gestures as keycaps, what the
               wires mean, what is on the board. It was a sentence of
               hints and a wide blank. */}
-          {lensViewMode === 'graph' ? (
             <LensStatusBar
               cards={boardGraph.cards.length}
               wires={boardGraph.edges.length}
               bundles={boardGraph.edges.filter(e => e.bundle).length}
               zoom={boardZoom}
             />
-          ) : (
-          <div className="flex items-center gap-2 px-4 py-2.5 border-t border-black/[0.08] dark:border-white/[0.08]">
-            <p className="text-[10.5px] text-ink-muted/80">Click a connection to re-center · Esc to close</p>
-            {/* The footer's two actions — "Reveal N on canvas" and "Trace
-                from here" — are withdrawn for now (user, 2026-08-17).
-                Both LEAVE the lens to do something to the canvas behind
-                it, which is a different job from walking lineage, and
-                both sat where a reader's eye lands after a long walk.
-                The per-card "Show on the canvas behind" action still
-                offers the first one for a single entity, which is the
-                shape anyone actually asked for. `onLocateAll`/`onTrace`
-                stay wired for their other callers (the peek, the
-                coarser-grain rows) so bringing these back is a JSX
-                change, not a re-plumb. */}
-          </div>
-          )}
-
           {/* LEAVING THE ROOM. A walk is work — hops fetched one click at
               a time, containers opened, a path followed — and it lives
               only while the lens is open. So the way OUT asks, once
@@ -2546,57 +2404,7 @@ export function LineageLens({
   )
 }
 
-/**
- * How far the walk has reached, on the focal card.
- *
- * Two counts and one qualifier — and the qualifier is the honest half:
- * a walk that still has an open frontier has seen SOME of the lineage,
- * so the numbers are floors and say so. The old strip measured a
- * bounded transitive trace of its own, which counted different things
- * from everything beside it and could not be reconciled with them.
- */
-function ReachLine({ reach, loading }: { reach: LensReach | null; loading: boolean }) {
-  if (loading) {
-    return (
-      <p className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted/70">
-        <LucideIcons.Loader2 className="w-3 h-3 animate-spin text-accent-lineage/60" />
-        Walking the lineage…
-      </p>
-    )
-  }
-  if (!reach) return null
 
-  return (
-    <p
-      className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-muted"
-      title={reach.moreUp || reach.moreDown
-        ? 'What this walk has reached so far. A + marks a floor rather than a total — more exists that way. Use ⊕ on a card to walk further.'
-        : 'Everything connected to this entity, upstream and downstream, as far as the data source goes.'}
-    >
-      <LucideIcons.Radar className="w-3 h-3 flex-shrink-0 text-accent-lineage/70" />
-      {/* ONE span, ONE ellipsis — two independently-truncating spans cut
-          mid-word on each half at once on a narrow card (see the graph
-          body's own `orientationHalf` note for the reported shape). */}
-      <span className="truncate min-w-0 tabular-nums">
-        {orientationHalf('Fed by', 'source', 'upstream', reach.up, reach.moreUp, reach.upSystems, 'No upstream sources', reach.approxUp ?? 0)}
-        {' · '}
-        {orientationHalf('feeds', 'consumer', 'downstream', reach.down, reach.moreDown, reach.downSystems, 'feeds nothing downstream', reach.approxDown ?? 0)}
-      </span>
-    </p>
-  )
-}
-
-/** Short horizontal flow rail flanking the focal card — reads as the
- *  edge entering / leaving the focal entity. */
-function FlowRail({ color, active }: { color: string; active: boolean }) {
-  if (!active) return <div className="w-6" />
-  return (
-    <div className="flex items-center w-6">
-      <div className="h-[2px] flex-1 rounded-full" style={{ background: `linear-gradient(to right, ${color}22, ${color}aa)` }} />
-      <LucideIcons.ChevronRight className="w-3 h-3 -ml-1 flex-shrink-0" style={{ color }} />
-    </div>
-  )
-}
 
 /** Entity-type filter chips. An OFF chip goes ghost (dashed border,
  *  dimmed, EyeOff) but keeps its count: filtering is an explicit,
@@ -2644,316 +2452,5 @@ function TypeChips({
   )
 }
 
-/** One neighbour row — the same entity the graph body draws as a card,
- *  with the same weight on it. */
-function NeighborRow({
-  r,
-  isIn,
-  edgeTypeInfo,
-  onRecenter,
-  onRevealOnCanvas,
-  onOpenDetails,
-}: {
-  r: WalkNeighbor
-  isIn: boolean
-  edgeTypeInfo?: EdgeTypeInfoMap
-  onRecenter: (nodeId: string) => void
-  onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
-  onOpenDetails?: (nodeId: string) => void
-}) {
-  const accentColor = r.type === 'not loaded' ? '#94a3b8' : generateColorFromType(r.type)
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      className={cn(
-        // content-visibility skips layout+paint for offscreen rows —
-        // lightweight virtualization; columns can hold hundreds of rows.
-        // transition-colors (not -all): animating every property makes
-        // hover sweeps during scroll recompute layout per row.
-        'group relative flex items-center gap-2 rounded-lg border px-2.5 py-2 cursor-pointer transition-colors [content-visibility:auto] [contain-intrinsic-size:auto_58px] border-black/[0.07] dark:border-white/[0.08] hover:border-accent-lineage/50 hover:shadow-sm bg-black/[0.015] dark:bg-white/[0.02] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] min-w-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-      )}
-      style={{ borderLeftWidth: 3, borderLeftColor: accentColor }}
-      onClick={() => onRecenter(r.urn)}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRecenter(r.urn) } }}
-      title={`Re-center on ${r.label}`}
-    >
-      <div className="flex-1 min-w-0">
-        <p className="flex items-center gap-1.5 min-w-0 text-[12px] font-medium text-ink leading-snug">
-          <span className="truncate">{r.label}</span>
-        </p>
-        <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug">
-          <span
-            className="truncate uppercase tracking-wide"
-            title={edgeTypeInfo?.get(r.edgeTypeNorm)?.description}
-          >
-            {r.edgeTypeNorm ? edgeLabelFor(r.edgeTypeNorm, edgeTypeInfo) : 'several relationships'}
-          </span>
-          {/* No ×N. It is the same within-model accumulator the cards
-              lost — and this surface has no wire for it to live on, which
-              is where a weight belongs. The peek states an entity's flows
-              in words, scoped to the walk. */}
-        </p>
-      </div>
-      {/* Flow direction cue: data always travels left → right. Hover
-          actions ALWAYS dock on the right (docking them left covered
-          the label/chevron); only the right-side chevron (incoming
-          rows) swaps out for them. */}
-      <LucideIcons.ChevronRight
-        className={cn('w-3.5 h-3.5 flex-shrink-0 text-ink-muted/50', isIn ? 'order-last group-hover:hidden' : 'order-first')}
-      />
-      <span className="hidden group-hover:flex flex-shrink-0 order-last items-center gap-0.5 rounded-md bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm px-0.5 py-0.5">
-        {onRevealOnCanvas && (
-          <InfoTooltip side="top" content="Reveal on canvas">
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); void onRevealOnCanvas(r.urn) }}
-              className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-            >
-              <LucideIcons.Crosshair className="w-3 h-3" />
-            </button>
-          </InfoTooltip>
-        )}
-        {onOpenDetails && (
-          <InfoTooltip side="top" content="Open details">
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); onOpenDetails(r.urn) }}
-              className="w-5 h-5 rounded flex items-center justify-center text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-            >
-              <LucideIcons.PanelRight className="w-3 h-3" />
-            </button>
-          </InfoTooltip>
-        )}
-      </span>
-    </div>
-  )
-}
 
-/**
- * One direction's neighbours as a scannable column.
- *
- * Grouped by their containment PARENT when the walk knows one — the
- * column then reads "which datasets feed me, via which fields", which
- * is the structural story the graph body tells by nesting.
- */
-function NeighborColumn({
-  title,
-  subtitle,
-  rows,
-  totalConnections,
-  direction,
-  walkStatus,
-  hiddenTypes,
-  onToggleType,
-  searching,
-  edgeTypeInfo,
-  onRecenter,
-  onRevealOnCanvas,
-  onOpenDetails,
-}: {
-  title: string
-  subtitle: string
-  rows: WalkNeighbor[]
-  totalConnections: number
-  direction: 'incoming' | 'outgoing'
-  walkStatus: LensFetchStatus
-  hiddenTypes: ReadonlySet<string>
-  onToggleType: (type: string) => void
-  /** Text filter active — every group expands so matches can't hide
-   *  inside a collapsed one (that would be silent loss). */
-  searching: boolean
-  edgeTypeInfo?: EdgeTypeInfoMap
-  onRecenter: (nodeId: string) => void
-  onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
-  onOpenDetails?: (nodeId: string) => void
-}) {
-  const { typeChips, groups, hiddenCount } = useMemo(() => {
-    const typeCounts = new Map<string, number>()
-    for (const r of rows) typeCounts.set(r.type, (typeCounts.get(r.type) ?? 0) + 1)
-    const typeChips = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])
-    let hiddenCount = 0
-    const shown: WalkNeighbor[] = []
-    for (const r of rows) {
-      if (hiddenTypes.has(r.type)) { hiddenCount++; continue }
-      shown.push(r)
-    }
-    const groupMap = new Map<string, { key: string; label: string; rows: WalkNeighbor[] }>()
-    for (const r of shown) {
-      const mapKey = r.parentUrn ? `p:${r.parentUrn}` : `t:${r.type}`
-      let g = groupMap.get(mapKey)
-      if (!g) {
-        g = { key: r.parentUrn ?? r.type, label: r.parentLabel ?? r.type, rows: [] }
-        groupMap.set(mapKey, g)
-      }
-      g.rows.push(r)
-    }
-    const groups = [...groupMap.values()].sort((a, b) => b.rows.length - a.rows.length)
-    return { typeChips, groups, hiddenCount }
-  }, [rows, hiddenTypes])
 
-  const isIn = direction === 'incoming'
-  const allFilteredOff = rows.length > 0 && groups.length === 0
-
-  return (
-    <div className={cn(
-      // min-w-0: allow the grid track to shrink so long labels truncate
-      // instead of forcing the column (and dialog) wider than the viewport.
-      'flex flex-col min-h-0 min-w-0',
-      isIn
-        ? 'border-r border-black/[0.07] dark:border-white/[0.07]'
-        : 'border-l border-black/[0.07] dark:border-white/[0.07]',
-    )}>
-      <div className="px-4 pt-3 pb-2 flex items-center gap-2 flex-shrink-0">
-        {isIn
-          ? <LucideIcons.ArrowDownLeft className="w-3.5 h-3.5 text-sky-500" />
-          : <LucideIcons.ArrowUpRight className="w-3.5 h-3.5 text-amber-500" />}
-        <span className="text-[11.5px] font-semibold text-ink">{title}</span>
-        <span className="text-[10px] text-ink-muted">{subtitle}</span>
-        <span className={cn(
-          'ml-auto px-1.5 py-0.5 rounded-full text-[10px] font-semibold tabular-nums',
-          isIn
-            ? 'bg-sky-500/10 text-sky-600 dark:text-sky-400'
-            : 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
-        )}>
-          {totalConnections}
-        </span>
-      </div>
-      {typeChips.length > 1 && (
-        <TypeChips chips={typeChips} hiddenTypes={hiddenTypes} onToggle={onToggleType} className="px-3 pb-1.5 flex-shrink-0" />
-      )}
-      <div className="flex-1 overflow-y-auto custom-scrollbar px-2.5 pb-3">
-        {allFilteredOff && (
-          <p className="px-2 py-6 text-center text-[11px] text-ink-muted/70 leading-snug">
-            All {rows.length} hidden by the type chips above.
-          </p>
-        )}
-        {rows.length === 0 && (
-          walkStatus === 'loading' ? (
-            <div className="flex flex-col items-center gap-2 px-2 py-10 text-center">
-              <LucideIcons.Loader2 className="w-5 h-5 animate-spin text-accent-lineage/60" />
-              <p className="text-[11px] text-ink-muted/70 leading-snug">
-                Walking {isIn ? 'upstream sources' : 'downstream consumers'} from the data source…
-              </p>
-            </div>
-          ) : (
-            <div className="flex flex-col items-center gap-2 px-2 py-10 text-center">
-              <LucideIcons.CircleSlash className="w-5 h-5 text-ink-muted/40" />
-              <p className="text-[11px] text-ink-muted/70 leading-snug">
-                {searching
-                  ? 'No matches for this filter'
-                  : walkStatus === 'done'
-                    // Post-walk this is a claim about the DATA SOURCE.
-                    ? `No ${isIn ? 'upstream sources' : 'downstream consumers'} in the data source`
-                    : walkStatus === 'unsupported'
-                      ? 'This data source can’t walk lineage'
-                      : `Couldn’t reach the data source for ${isIn ? 'upstream sources' : 'downstream consumers'}`}
-              </p>
-            </div>
-          )
-        )}
-        {groups.map(g => (
-          <NeighborGroup
-            key={g.key}
-            group={g}
-            isIn={isIn}
-            direction={direction}
-            searching={searching}
-            groupCount={groups.length}
-            edgeTypeInfo={edgeTypeInfo}
-            onRecenter={onRecenter}
-            onRevealOnCanvas={onRevealOnCanvas}
-            onOpenDetails={onOpenDetails}
-          />
-        ))}
-        {hiddenCount > 0 && !allFilteredOff && (
-          <p className="px-2 py-1.5 text-[10px] text-ink-muted/60">
-            {hiddenCount} hidden by the type chips
-          </p>
-        )}
-      </div>
-    </div>
-  )
-}
-
-/** One parent group — collapsible, because 3+ of them means the useful
- *  first read is "which datasets feed me", not every field at once. */
-function NeighborGroup({
-  group,
-  isIn,
-  direction,
-  searching,
-  groupCount,
-  edgeTypeInfo,
-  onRecenter,
-  onRevealOnCanvas,
-  onOpenDetails,
-}: {
-  group: { key: string; label: string; rows: WalkNeighbor[] }
-  isIn: boolean
-  direction: 'incoming' | 'outgoing'
-  searching: boolean
-  groupCount: number
-  edgeTypeInfo?: EdgeTypeInfoMap
-  onRecenter: (nodeId: string) => void
-  onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
-  onOpenDetails?: (nodeId: string) => void
-}) {
-  // 3+ groups → start collapsed (dataset-level overview first); the
-  // toggle XORs that default so it never needs migrating. Searching
-  // expands everything.
-  const [toggled, setToggled] = useState(false)
-  const collapsed = !searching && (groupCount >= 3) !== toggled
-  const parentColor = generateColorFromType(group.rows[0]?.type ?? 'entity')
-  // Connections, not rows: the column header counts them, the focal
-  // card counts them, and a row states its own ×N. One unit, so the
-  // three numbers on screen add up.
-  const groupConnections = group.rows.reduce((n, r) => n + r.weight, 0)
-  return (
-    <div className="mb-2.5">
-      <div className="flex items-center gap-1 mb-1 min-w-0">
-        <button
-          type="button"
-          onClick={() => setToggled(t => !t)}
-          aria-expanded={!collapsed}
-          title={collapsed ? `Expand ${group.rows.length} entit${group.rows.length === 1 ? 'y' : 'ies'}` : 'Collapse group'}
-          className="flex-1 min-w-0 flex items-center gap-2 px-2 py-2 rounded-lg text-left bg-black/[0.03] dark:bg-white/[0.04] hover:bg-black/[0.06] dark:hover:bg-white/[0.07] transition-colors"
-        >
-          <LucideIcons.ChevronDown className={cn('w-4 h-4 flex-shrink-0 text-ink-muted transition-transform', collapsed && '-rotate-90')} />
-          <LucideIcons.FolderTree className="w-3.5 h-3.5 flex-shrink-0 text-ink-muted/70" />
-          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: parentColor }} />
-          <span className="min-w-0 truncate text-[12px] font-semibold text-ink">{group.label}</span>
-          <span
-            className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07] text-[10px] font-semibold tabular-nums text-ink-muted"
-            title={`${groupConnections} connection${groupConnections === 1 ? '' : 's'} from ${group.rows.length} entit${group.rows.length === 1 ? 'y' : 'ies'}`}
-          >
-            {groupConnections}
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={() => onRecenter(group.key)}
-          title={`Re-center on ${group.label}`}
-          className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors"
-        >
-          <LucideIcons.Crosshair className="w-3.5 h-3.5" />
-        </button>
-      </div>
-      {!collapsed && (
-        <div className="flex flex-col gap-1">
-          {group.rows.map(r => (
-            <NeighborRow
-              key={`${direction}-${r.urn}`}
-              r={r}
-              isIn={isIn}
-              edgeTypeInfo={edgeTypeInfo}
-              onRecenter={onRecenter}
-              onRevealOnCanvas={onRevealOnCanvas}
-              onOpenDetails={onOpenDetails}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}

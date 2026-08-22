@@ -3772,15 +3772,16 @@ export function ContextViewCanvas({
       if (target) setLensHistory({ entries: [target], cursor: 0 })
     }
   }, [selectedNodeId, drawerNodeId])
-  // Finish consuming the share link: strip the param (so refreshes and
-  // copied URLs stay clean) and apply the shared body mode.
+  // Finish consuming the share link: strip the param, so refreshes and
+  // copied URLs stay clean. The link's `mode` field is no longer applied
+  // — the Lens has one body since 2026-08-23, and a link written when it
+  // had two must not put a reader into a body that no longer exists.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     if (!params.has('lens')) return
     params.delete('lens')
     const qs = params.toString()
     window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
-    if (initialLensShare) usePreferencesStore.getState().setLensViewMode(initialLensShare.mode)
   }, [initialLensShare])
 
   // ── Anchor Rail — the selected node's off-screen partners docked as

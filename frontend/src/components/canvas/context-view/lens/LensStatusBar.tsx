@@ -62,6 +62,18 @@ function Swatch({ kind }: { kind: 'up' | 'down' | 'coarse' | 'bundle' }) {
   )
 }
 
+/**
+ * THE MARKS a card can carry (2026-08-23) — the two most-asked-about
+ * glyphs on the board. ⊕ is also a gesture (the keycaps say "walk a
+ * hop"); this says what its PRESENCE means: the data source has more
+ * this way. ⊘ is the other half, and the one nobody guesses: the walk
+ * asked and there is nothing further — an answer, not a failure.
+ */
+const MARKS: ReadonlyArray<{ glyph: string; label: string; tint: string }> = [
+  { glyph: '⊕', label: 'more to fetch', tint: 'text-accent-lineage' },
+  { glyph: '⊘', label: 'nothing further', tint: 'text-ink-muted/70' },
+]
+
 const LEGEND: ReadonlyArray<{ kind: 'up' | 'down' | 'coarse' | 'bundle'; label: string }> = [
   { kind: 'up', label: 'upstream' },
   { kind: 'down', label: 'downstream' },
@@ -97,7 +109,15 @@ export function LensStatusBar({ cards, wires, bundles, zoom, className }: LensSt
           </div>
         ))}
       </dl>
-      <ul aria-label="What the wires mean" className="hidden md:flex items-center gap-x-3 ml-auto flex-shrink-0 pl-4 border-l border-black/[0.08] dark:border-white/[0.08]">
+      <ul aria-label="What the marks mean" className="hidden lg:flex items-center gap-x-3 ml-auto flex-shrink-0 pl-4 border-l border-black/[0.08] dark:border-white/[0.08]">
+        {MARKS.map(({ glyph, label, tint }) => (
+          <li key={glyph} className="flex items-center gap-1.5 text-[10px] text-ink-muted whitespace-nowrap">
+            <span aria-hidden="true" className={cn('text-[12px] leading-none', tint)}>{glyph}</span>
+            {label}
+          </li>
+        ))}
+      </ul>
+      <ul aria-label="What the wires mean" className="hidden md:flex items-center gap-x-3 lg:ml-0 ml-auto flex-shrink-0 pl-4 border-l border-black/[0.08] dark:border-white/[0.08]">
         {LEGEND.map(({ kind, label }) => (
           <li key={kind} className="flex items-center gap-1.5 text-[10px] text-ink-muted whitespace-nowrap">
             <Swatch kind={kind} />

@@ -67,7 +67,7 @@ function renderLens(model: LensWalkModel, phase: WalkProgress['phase']) {
 const nodeText = (label: string) => [...document.querySelectorAll('.react-flow__node')].find(n => n.textContent?.includes(label))?.textContent ?? null
 
 describe('LineageLens — the coarse first paint', () => {
-  beforeEach(() => { usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1, lensDensity: 'all' }) })
+  beforeEach(() => { usePreferencesStore.setState({ lensInitialDepth: 1, lensDensity: 'all' }) })
   afterEach(() => { cleanup(); usePreferencesStore.setState({ lensDensity: 'grouped' }) })
 
   it('draws the partner tables from the cells alone, each ≈ its weight, under their database — the department and domain are chrome', () => {
@@ -102,7 +102,7 @@ describe('LineageLens — the coarse first paint', () => {
  * upstream band (the Snowflake screenshot, 2026-08-22).
  */
 describe('LineageLens — internal flows are not sources', () => {
-  beforeEach(() => { usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1, lensDensity: 'all' }) })
+  beforeEach(() => { usePreferencesStore.setState({ lensInitialDepth: 1, lensDensity: 'all' }) })
   afterEach(() => { cleanup(); usePreferencesStore.setState({ lensDensity: 'grouped' }) })
 
   it('the focal reads no upstream sources when every upstream partner is inside the focus', () => {

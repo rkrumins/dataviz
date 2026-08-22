@@ -123,7 +123,7 @@ const sharedPlatform = () => WALK_FIXTURES.walkSharedPlatform.model
 describe('T26 R4 — the journey acceptance suite (walkSharedPlatform)', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>
   beforeEach(() => {
-    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 })
+    usePreferencesStore.setState({ lensInitialDepth: 1 })
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
   afterEach(() => { cleanup(); errorSpy.mockRestore(); usePreferencesStore.setState({ lensInitialDepth: 1 }) })
@@ -333,7 +333,7 @@ describe('T26 R4 — the journey acceptance suite (walkSharedPlatform)', () => {
 describe('T26 R4 — follow from every control kind × state (walkWideHub / walkLongChain)', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>
   beforeEach(() => {
-    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 3, lensCondenseSteps: false })
+    usePreferencesStore.setState({ lensInitialDepth: 3, lensCondenseSteps: false })
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
   afterEach(() => { cleanup(); errorSpy.mockRestore(); usePreferencesStore.setState({ lensInitialDepth: 1 }) })
@@ -508,7 +508,6 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
 describe('T26 R4 — spotlight across a seam (walkGrainSeamDeepNesting)', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>
   beforeEach(() => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
   afterEach(() => { cleanup(); errorSpy.mockRestore() })

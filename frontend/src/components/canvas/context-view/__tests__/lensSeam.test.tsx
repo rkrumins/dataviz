@@ -211,7 +211,7 @@ async function collapseTable() {
   fireEvent.click(await screen.findByLabelText('Collapse customers'))
 }
 
-beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' }))
+beforeEach(() => usePreferencesStore.setState({ lensFrameChildren: 'connected' }))
 afterEach(() => cleanup())
 
 describe('lens seam — what the canvas derives and hands down', () => {
