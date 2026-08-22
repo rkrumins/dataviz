@@ -132,6 +132,8 @@ export interface TraceCanvasHarness {
   consoleWarnings(): string[]
   /** Open the entity drawer on a node. */
   openDrawer(id: string): Promise<void>
+  /** The entity the details drawer is showing, or null when it shows none. */
+  drawerEntity(): string | null
   /** How many "Edit" mode tabs the drawer offers (0 = read-only). */
   drawerEditTabs(): number
   /** The lineage lines on screen, as drawn. */
@@ -364,22 +366,33 @@ function stubFetch(estate: TraceEstate): () => void {
  *  BROWSE edges against the TRACE's node map. This one runs from `snowflake`,
  *  which the curated view places nowhere, so browse honestly reports it as a
  *  connection it cannot show, and a trace must not inherit that count. */
-function seedBrowse(estate: TraceEstate): void {
-  const nodes: LineageNode[] = wireNodes(estate).map(n => toCanvasNode(n))
-  const edges: LineageEdge[] = estate.model.containmentEdges.map(c => ({
+function seedBrowse(estate: TraceEstate, holds?: readonly string[]): void {
+  // `holds` is what the BROWSE canvas has actually loaded. The default (every
+  // entity in the estate) keeps the store ahead of the trace, which is the
+  // easy case; a real canvas holds its lane roots and whatever the reader
+  // expanded, and the walk then discovers partners the store has never seen.
+  const keep = holds ? new Set(holds) : null
+  const nodes: LineageNode[] = wireNodes(estate)
+    .filter(n => !keep || keep.has(n.urn))
+    .map(n => toCanvasNode(n))
+  const edges: LineageEdge[] = estate.model.containmentEdges
+    .filter(c => !keep || (keep.has(c.sourceUrn) && keep.has(c.targetUrn)))
+    .map(c => ({
     id: `c:${c.sourceUrn}>${c.targetUrn}`,
     source: c.sourceUrn,
     target: c.targetUrn,
     type: 'lineage',
     data: { edgeType: 'CONTAINS', relationship: 'CONTAINS' },
   }) as unknown as LineageEdge)
-  edges.push({
-    id: 'l:snowflake>tableau',
-    source: 'snowflake',
-    target: 'tableau',
-    type: 'lineage',
-    data: { edgeType: 'TRANSFORMS', relationship: 'TRANSFORMS' },
-  } as unknown as LineageEdge)
+  if (!keep || (keep.has('snowflake') && keep.has('tableau'))) {
+    edges.push({
+      id: 'l:snowflake>tableau',
+      source: 'snowflake',
+      target: 'tableau',
+      type: 'lineage',
+      data: { edgeType: 'TRANSFORMS', relationship: 'TRANSFORMS' },
+    } as unknown as LineageEdge)
+  }
   const store = useCanvasStore.getState()
   store.setGraph(nodes, edges)
   store.setHydrationPhase('complete')
@@ -412,7 +425,17 @@ function seedView(estate: TraceEstate): void {
 
 export async function renderCanvasWithTrace(
   estate: TraceEstate,
-  opts: { focus: string; deferTrace?: boolean; deferFine?: boolean; draft?: boolean; stallWalk?: boolean },
+  opts: {
+    focus: string
+    deferTrace?: boolean
+    deferFine?: boolean
+    draft?: boolean
+    stallWalk?: boolean
+    /** What the BROWSE canvas has loaded into the store. Omit for the whole
+     *  estate; pass the lane roots to model a reader who traced before
+     *  expanding anything, so the walk's partners are new to the store. */
+    browseHolds?: readonly string[]
+  },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
   releaseFetch?.()
@@ -432,7 +455,7 @@ export async function renderCanvasWithTrace(
   useFeaturesStore.setState({
     values: { ...useFeaturesStore.getState().values, editModeEnabled: !!opts.draft },
   } as never)
-  seedBrowse(estate)
+  seedBrowse(estate, opts.browseHolds)
   seedView(estate)
 
   // Every swallowed failure, made loud. See the file header.
@@ -650,6 +673,10 @@ export async function renderCanvasWithTrace(
     async openDrawer(id: string) {
       await act(async () => { useCanvasStore.getState().openNodeDrawer(id) })
       await settle()
+    },
+    drawerEntity: () => {
+      const panel = document.querySelector<HTMLElement>('[data-panel="entity-drawer"]')
+      return panel?.querySelector('h2')?.textContent?.trim() ?? null
     },
     drawerEditTabs: () =>
       [...document.querySelectorAll('button')]
