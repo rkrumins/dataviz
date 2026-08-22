@@ -58,6 +58,7 @@ console.log('navigated', url.slice(0, 80) + '…')
 
 // Poll the board for up to 3 minutes, recording narration + card counts.
 const samples = []
+const shotKeys = new Set()
 let fullFlowClicked = false
 let fullFlowAt = 0, profiling = false, profileDone = false
 const SAMPLE_MS = Number(process.env.SAMPLE_MS ?? 1000)
@@ -85,17 +86,22 @@ for (let i = 0; i < Math.round(420 * 1000 / SAMPLE_MS); i++) {
     const scale = Number((/scale\(([\d.e-]+)\)/.exec(document.querySelector('.react-flow__viewport')?.style.transform ?? '') ?? [])[1] ?? NaN)
     const grew = !!document.querySelector('button')?.ownerDocument && [...document.querySelectorAll('button')].some(b => /board grew/i.test(b.textContent))
     const capsule = document.querySelector('[role="status"][data-trace-phase]')
-    const capsuleText = capsule ? (capsule.getAttribute('data-trace-phase') + ': ' + capsule.textContent.trim().replace(/\\s+/g, ' ').slice(0, 90)) : null
-    return { n, cards, strips, chip, oneHop, scale, grew, capsuleText }
+    const capsuleText = capsule ? (capsule.getAttribute('data-trace-phase') + ': ' + capsule.textContent.trim().replace(/\\s+/g, ' ').slice(0, 120)) : null
+    const capsulePhase = capsule?.getAttribute('data-trace-phase') ?? null
+    const guidance = !!document.querySelector('[data-testid="walk-guidance"]')
+    const skeleton = !!document.querySelector('[data-testid="lens-skeleton"]')
+    return { n, cards, strips, chip, oneHop, scale, grew, capsuleText, capsulePhase, guidance, skeleton }
   })()`)
   samples.push({ t: Date.now() - t0, ...s })
-  // The first time the capsule is seen, keep a picture of it (the loading
-  // state is what the reader sees on entry — it has to be unmissable).
-  if (process.env.SCREENSHOT_DIR && s.capsuleText && !samples.slice(0, -1).some(x => x.capsuleText)) {
+  // A picture of every loading state the reader can see: each capsule
+  // phase the first time it shows, and the first line of guidance.
+  const shotKey = s.capsulePhase ? (s.guidance ? `${s.capsulePhase}-guidance` : s.capsulePhase) : null
+  if (process.env.SCREENSHOT_DIR && shotKey && !shotKeys.has(shotKey)) {
+    shotKeys.add(shotKey)
     const { writeFileSync } = await import('node:fs')
     const shot = await send('Page.captureScreenshot', { format: 'png' })
-    writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-loading.png`, Buffer.from(shot.result.data, 'base64'))
-    console.log('== screenshot (loading)', `${process.env.SCREENSHOT_DIR}/lens-loading.png`, '@', Date.now() - t0, 'ms')
+    writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-loading-${shotKey}.png`, Buffer.from(shot.result.data, 'base64'))
+    console.log('== screenshot (loading)', `lens-loading-${shotKey}.png`, '@', Date.now() - t0, 'ms', 'skeleton=', s.skeleton)
   }
   const last = samples[samples.length - 1]
   if (process.env.PROBE_VERBOSE && (i % 5 === 0)) console.log(`  [${(last.t/1000).toFixed(0)}s] dom=${last.cards} scale=${last.scale.toFixed(3)} grew=${last.grew} n=${last.n}`)
@@ -157,8 +163,15 @@ const zoomed = await evalJs(`(async () => { const b = document.querySelector('bu
 console.log('== after zooming in 6×:', JSON.stringify(zoomed))
 if (process.env.DENSITY_SWEEP) {
   for (const rung of ['Every card', 'Overview', 'Grouped']) {
-    const r = await evalJs(`(async () => { const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(rung)}); if (!b) return 'no button'; b.click(); await new Promise(r => setTimeout(r, 2500)); const fitB = document.querySelector('button[aria-label="Fit the lineage in view"]'); fitB?.click(); await new Promise(r => setTimeout(r, 800)); return { rung: ${JSON.stringify(rung)}, dom: document.querySelectorAll('.react-flow__node').length, scale: Number((/scale\\(([\\d.e-]+)\\)/.exec(document.querySelector('.react-flow__viewport')?.style.transform ?? '') ?? [])[1] ?? NaN), chip: ([...document.querySelectorAll('p,span')].map(x => x.textContent).find(t => /connections/.test(t)) ?? '').slice(0, 60) } })()`)
-    console.log('== rung', JSON.stringify(r))
+    const scaleExpr = `Number((/scale\\(([\\d.e-]+)\\)/.exec(document.querySelector('.react-flow__viewport')?.style.transform ?? '') ?? [])[1] ?? NaN)`
+    const switched = await evalJs(`(async () => { const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(rung)}); if (!b) return 'no button'; b.click(); await new Promise(r => setTimeout(r, 2500)); return { rung: ${JSON.stringify(rung)}, dom: document.querySelectorAll('.react-flow__node').length, scaleOnSwitch: ${scaleExpr} } })()`)
+    if (process.env.SCREENSHOT_DIR) {
+      const { writeFileSync } = await import('node:fs')
+      const shot = await send('Page.captureScreenshot', { format: 'png' })
+      writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-${rung.replace(/\s+/g, '_').toLowerCase()}-onswitch.png`, Buffer.from(shot.result.data, 'base64'))
+    }
+    const fitted = await evalJs(`(async () => { document.querySelector('button[aria-label="Fit the lineage in view"]')?.click(); await new Promise(r => setTimeout(r, 800)); return { scaleAfterFit: ${scaleExpr}, chip: ([...document.querySelectorAll('p,span')].map(x => x.textContent).find(t => /connections/.test(t)) ?? '').slice(0, 60) } })()`)
+    console.log('== rung', JSON.stringify({ ...switched, ...fitted }))
     if (process.env.SCREENSHOT_DIR) {
       const { writeFileSync } = await import('node:fs')
       const shot = await send('Page.captureScreenshot', { format: 'png' })
@@ -167,5 +180,17 @@ if (process.env.DENSITY_SWEEP) {
       console.log('== screenshot', file)
     }
   }
+}
+if (process.env.HOVER && process.env.SCREENSHOT_DIR) {
+  // Rest the pointer on a header control and keep a picture of its popover.
+  const box = await evalJs(`(() => { const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(process.env.HOVER)}); if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`)
+  if (box) {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y })
+    await sleep(600)
+    const { writeFileSync } = await import('node:fs')
+    const shot = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: 0, width: 1600, height: 260, scale: 1 } })
+    writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-hover.png`, Buffer.from(shot.result.data, 'base64'))
+    console.log('== screenshot (hover)', `${process.env.SCREENSHOT_DIR}/lens-hover.png`)
+  } else console.log('== hover: no such control', process.env.HOVER)
 }
 ws.close(); chrome.kill(); process.exit(0)

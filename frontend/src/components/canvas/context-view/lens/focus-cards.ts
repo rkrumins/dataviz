@@ -208,7 +208,13 @@ export function labelFitsRun(
   return Math.hypot(targetX - sourceX, targetY - sourceY) >= LABEL_MIN_RUN
 }
 
-export const BAND_GAP = 130
+/** Horizontal room between bands. 130 until 2026-08-22: a frame is wider
+ *  than a card by its padding and its gutter, so the clear run from a
+ *  frame to the next band was ~60px for five wires and their ×N badges
+ *  ("too crowded"). 240 gives plain cards two badge-widths of wire and a
+ *  busy frame a badge-width and a half; the focus-first camera keeps the
+ *  wider board readable. */
+export const BAND_GAP = 240
 export const CARD_GAP = 10
 /** Indent for cards hanging below the focal in its own band. */
 export const NEST_INDENT = 16

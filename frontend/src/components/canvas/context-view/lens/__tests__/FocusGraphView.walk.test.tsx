@@ -16,7 +16,7 @@ import type { FocusGraph } from '../focus-cards'
 
 const noop = () => {}
 
-function view(graph: FocusGraph, built: ReturnType<typeof buildWalk>, walking: boolean) {
+function view(graph: FocusGraph, built: ReturnType<typeof buildWalk>, walking: boolean, recenterKey?: string) {
   return (
     <ReactFlowProvider>
       <FocusGraphView
@@ -29,6 +29,7 @@ function view(graph: FocusGraph, built: ReturnType<typeof buildWalk>, walking: b
         isolatedId={null}
         reducedMotion
         walking={walking}
+        recenterKey={recenterKey}
         onSelect={noop}
         onFocus={noop}
         onToggleFrame={noop}
@@ -80,5 +81,19 @@ describe('FocusGraphView — a board that grows under the walk', () => {
     rerender(view({ ...built.graph, cards: [...built.graph.cards] }, built, true))
     await settle()
     expect(screen.queryByRole('button', { name: /board grew/i })).toBeNull()
+  })
+})
+
+describe('FocusGraphView — back to the focus (2026-08-22)', () => {
+  // "A button which says re-center or something, so it zooms in
+  // appropriately to the focus node" — in the control stack, beside Fit,
+  // labelled like every other control there.
+  it('offers "Center on the focus" in the control stack', async () => {
+    const built = buildWalk(WALK_FIXTURES.walkHub)
+    render(view(built.graph, built, false))
+    await settle()
+    const button = screen.getByRole('button', { name: /center on the focus/i })
+    expect(button).toBeInTheDocument()
+    fireEvent.click(button)      // jsdom has no viewport to move; the click must simply not throw
   })
 })

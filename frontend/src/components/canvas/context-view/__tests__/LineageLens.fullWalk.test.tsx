@@ -195,3 +195,28 @@ describe('LineageLens — the capsule says it is calculating (2026-08-22)', () =
     expect(screen.queryByRole('status')).toBeNull()
   })
 })
+
+describe('LineageLens — the picture forms where the cards will land (2026-08-22)', () => {
+  it('an empty board under the first fetch shows the skeleton of the picture, which leaves once cards exist', () => {
+    // The driver's entry opens with an EMPTY model (no focus card yet);
+    // the skeleton owns exactly that window.
+    const { rerender } = render(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={{ model: walkModel('F', []), status: 'loading', error: null, extendStatus: new Map(), depth: 1 }}
+        walkApi={{ extend: vi.fn(), page: vi.fn(), retry: vi.fn() }}
+        onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
+      />,
+    )
+    expect(screen.getByTestId('lens-skeleton')).toBeInTheDocument()
+    rerender(
+      <LineageLens
+        history={{ entries: ['F'], cursor: 0 }}
+        walk={doneWalk(walkModel('F', [wnode('F'), wnode('up1')]))}
+        walkApi={{ extend: vi.fn(), page: vi.fn(), retry: vi.fn() }}
+        onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
+      />,
+    )
+    expect(screen.queryByTestId('lens-skeleton')).toBeNull()
+  })
+})

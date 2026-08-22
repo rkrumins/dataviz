@@ -1188,7 +1188,7 @@ describe('the shell around the picture', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['b'], simple())
     expect(screen.queryByText('Upstream')).toBeNull()
-    fireEvent.click(screen.getByTitle('List — scan all connections as columns'))
+    fireEvent.click(screen.getByRole('button', { name: 'List' }))
     expect(screen.getByText('Upstream')).toBeTruthy()
     expect(usePreferencesStore.getState().lensViewMode).toBe('list')
   })
@@ -1196,7 +1196,7 @@ describe('the shell around the picture', () => {
   it('the container default is a preference, persisted like the body mode', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' })
     renderLens(['b'], simple())
-    fireEvent.click(screen.getByTitle(/Containers you open next show everything inside/))
+    fireEvent.click(screen.getByRole('button', { name: 'All' }))
     expect(usePreferencesStore.getState().lensFrameChildren).toBe('all')
     usePreferencesStore.setState({ lensFrameChildren: 'connected' })
   })
@@ -1244,7 +1244,7 @@ describe('the shell around the picture', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['b'], simple())
     const group = screen.getByLabelText(/What containers you open next will show/)
-    expect(within(group).getByText('Next')).toBeTruthy()
+    expect(within(group).getAllByText('Next').some(e => e.hasAttribute('aria-describedby'))).toBe(true)
   })
 
   it('the direction preset filters the board view-side, with no fetch, and toggles back cleanly', () => {
@@ -1253,12 +1253,12 @@ describe('the shell around the picture', () => {
     expect(onBoard('label-a')).toBe(true)
     expect(onBoard('label-c')).toBe(true)
 
-    fireEvent.click(screen.getByTitle('Show only what feeds this entity — upstream'))
+    fireEvent.click(screen.getByRole('button', { name: 'Root cause' }))
     expect(onBoard('label-a')).toBe(true)
     expect(onBoard('label-c')).toBe(false)
     expect(api.extend).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByTitle('Show upstream and downstream'))
+    fireEvent.click(screen.getByRole('button', { name: 'Both' }))
     expect(onBoard('label-a')).toBe(true)
     expect(onBoard('label-c')).toBe(true)
   })
@@ -1268,7 +1268,7 @@ describe('the shell around the picture', () => {
     const writeText = vi.fn()
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     renderLens(['F'], doneWalk(collateralsEstate()))
-    fireEvent.click(screen.getByTitle('Show only what feeds this entity — upstream'))
+    fireEvent.click(screen.getByRole('button', { name: 'Root cause' }))
     fireEvent.click(screen.getByLabelText('Copy exploration link'))
 
     expect(writeText).toHaveBeenCalledTimes(1)
@@ -2923,5 +2923,69 @@ describe('Contents=All focal seed — the roster actually FETCHES', () => {
     })
     await new Promise(r => setTimeout(r, 500))
     expect(onLoadAllChildren).not.toHaveBeenCalled()
+  })
+})
+
+describe('the header explains itself (2026-08-22)', () => {
+  // "Add labels/popovers on each icon to make sure the user actually
+  // knows what it is and what it means." Every header control carries a
+  // styled popover — its name and one sentence of meaning — wired as its
+  // accessible description, never the browser's slow grey `title` box.
+  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
+  afterEach(() => cleanup())
+  const simple = () => doneWalk(walkModel('b', {
+    nodes: [wnode('a', 'dataset', 'label-a'), wnode('b', 'dataset', 'label-b'), wnode('c', 'dataset', 'label-c')],
+    lineageEdges: [hop('a', 'b'), hop('b', 'c')],
+    upstreamUrns: new Set(['a']),
+    downstreamUrns: new Set(['c']),
+  }))
+
+  const describedBy = (el: HTMLElement) => {
+    const id = el.getAttribute('aria-describedby')
+    expect(id, `${el.textContent} has no description`).toBeTruthy()
+    return document.getElementById(id!)!
+  }
+
+  it('every segmented control names itself and says what it does', () => {
+    renderLens(['b'], simple(), { onFullWalkToggle: vi.fn() })
+    const expectations: Array<[RegExp, RegExp]> = [
+      [/^Connected$/, /only what is on this lineage/i],
+      [/^All$/, /everything inside/i],
+      [/^One hop$/, /⊕ on a card fetches its next hop/i],
+      [/^Full flow$/, /until the whole end-to-end flow is drawn/i],
+      [/^Every step$/, /every hop on the path is its own card/i],
+      [/^Condensed$/, /fold long runs/i],
+      [/^Overview$/, /start at the high level/i],
+      [/^Grouped$/, /strongest rows first/i],
+      [/^Every card$/, /every card on its own/i],
+      [/^Both$/, /upstream and downstream/i],
+      [/^Root cause$/, /what feeds this entity/i],
+      [/^Impact$/, /what this entity feeds/i],
+      [/^Graph$/, /cards and wires/i],
+      [/^List$/, /columns/i],
+    ]
+    for (const [name, meaning] of expectations) {
+      const button = screen.getByRole('button', { name })
+      const tip = describedBy(button)
+      expect(tip.getAttribute('role')).toBe('tooltip')
+      expect(tip.textContent).toMatch(meaning)
+      expect(button.getAttribute('title')).toBeNull()          // one tooltip, not two
+    }
+  })
+
+  it('the group captions say what the axis is', () => {
+    renderLens(['b'], simple(), { onFullWalkToggle: vi.fn() })
+    for (const [caption, meaning] of [
+      ['Next', /what the next container you open will show/i],
+      ['Walk', /how far the lens walks on its own/i],
+      ['Steps', /how a long pass-through path is drawn/i],
+      ['Density', /how much of the picture is folded/i],
+    ] as const) {
+      // The caption is the element that carries the description — the
+      // popover's own bold name is the other match for the same text.
+      const el = screen.getAllByText(caption).find(e => e.hasAttribute('aria-describedby'))!
+      expect(el, `${caption} caption`).toBeTruthy()
+      expect(describedBy(el).textContent).toMatch(meaning)
+    }
   })
 })
