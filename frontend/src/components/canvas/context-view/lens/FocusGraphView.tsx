@@ -83,6 +83,7 @@ import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { CARD_W, BAND_GAP, FRAME_FOOTER_H, FRAME_PAD, headerHeight, holdsRows, labelFitsRun, frameWindow, edgeLabelFor, orientationHalf, type EdgeTypeInfoMap, type FocusCard, type FocusEdge, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
+import { revealedWires } from './wire-bundles'
 import { REVEAL_PAGE, isolationCone, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
@@ -3280,6 +3281,15 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     /** T23 R2 — this wire stands for a condensed pass-through run; draw
      *  the connector chip instead of a plain ×N. */
     condensed?: { connectorId: string; steps: number } | null
+    /** WIRE BUNDLES (2026-08-22): this wire stands for `bundle` member
+     *  wires between two containers — drawn heavier, its count the sum;
+     *  a member drawn back for a hover/selection carries `inBundle`. */
+    bundle?: number | null
+    inBundle?: string | null
+    onBundleHover?: ((id: string | null) => void) | null
+    onBundleClick?: ((id: string) => void) | null
+    /** The reader pinned this bundle open (its members are drawn). */
+    bundleOpen?: boolean
   }
   // Hover emphasis is derived here from context: the edges ARRAY stays
   // identity-stable, so sweeping the pointer never rebuilds it (nor
@@ -3424,8 +3434,33 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     reducedMotion: !!d.reducedMotion, motionDense: !!d.motionDense,
     tint: d.tint, mutedTint: d.mutedTint,
   })
+  // A BUNDLE draws as heavy as what it stands for — a stroke that grows
+  // with the log of its members (two at 13, five at 100, never a slab) —
+  // and its members, drawn back for a gesture, as ordinary wires.
+  if (d.bundle) visual.strokeWidth += Math.min(5, Math.log2(Math.max(2, d.bundle)) * 1.1)
+  // A bundle whose members are out (hovered here, or pinned) steps back
+  // so the detail reads on top of it rather than through it.
+  const [bundleHovered, setBundleHovered] = useState(false)
+  const bundleOut = !!d.bundle && (bundleHovered || !!d.bundleOpen)
   return (
     <>
+      {d.bundle && (
+        // THE BUNDLE'S OWN HIT PATH: hover fans the members out, a click
+        // keeps them out. Explicit pointer-events, because the flow marks
+        // an unselectable edge `inactive` and lets nothing through.
+        <path
+          d={path}
+          fill="none"
+          stroke="transparent"
+          strokeWidth={18}
+          style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
+          className="nodrag nopan"
+          aria-label={`${d.bundle} wires — hover to see them, click to keep them`}
+          onMouseEnter={() => { setBundleHovered(true); d.onBundleHover?.(id) }}
+          onMouseLeave={() => { setBundleHovered(false); d.onBundleHover?.(null) }}
+          onClick={(e) => { e.stopPropagation(); d.onBundleClick?.(id) }}
+        />
+      )}
       <BaseEdge
         id={id}
         path={path}
@@ -3455,7 +3490,7 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
           // reduced motion can never strip it (review round 1's first
           // bug: the dash used to live only inside an animation class).
           strokeDasharray: visual.strokeDasharray,
-          opacity,
+          opacity: bundleOut ? Math.min(opacity, 0.28) : opacity,
           transition: d.reducedMotion ? undefined : 'opacity 140ms ease-out, stroke-width 140ms ease-out',
         }}
       />
@@ -4530,7 +4565,16 @@ export function FocusGraphView({
   // do, and they subscribe. Keeping it in `useState` re-rendered
   // `FocusGraphView` on every enter and every leave for nothing.
   const [hoverStore] = useState(() => new HoverStore())
-  const edges = useMemo((): Edge[] => {
+  // WIRE BUNDLES (2026-08-22): a hovered bundle fans out into its members;
+  // a clicked one keeps them out until it is clicked again (or Esc). The
+  // edge component reports both — React Flow marks unselectable edges
+  // `inactive` (no pointer events), so the bundle carries its own hit
+  // path rather than relying on the flow's edge events.
+  const [hoverBundle, setHoverBundle] = useState<string | null>(null)
+  const [pinnedBundle, setPinnedBundle] = useState<string | null>(null)
+  const onBundleHover = useCallback((id: string | null) => setHoverBundle(id), [])
+  const onBundleClick = useCallback((id: string) => setPinnedBundle(current => (current === id ? null : id)), [])
+  const { edges: baseEdges, toFlowEdge } = useMemo((): { edges: Edge[]; toFlowEdge: (e: FocusEdge) => Edge } => {
     const bandById = new Map(graph.cards.map(c => [c.id, c.band]))
     // For THE TRAIL: which urn each card id backs, so a bundle between
     // two consecutive walked hops can be found regardless of which end
@@ -4560,7 +4604,7 @@ export function FocusGraphView({
     // actually on a cone changes constantly, but how busy the board is
     // does not (`SEAM_MOTION_CAP`).
     const motionDense = graph.edges.filter(e => e.grainCoarse).length > SEAM_MOTION_CAP
-    return graph.edges.map((e) => {
+    const toFlowEdge = (e: FocusEdge): Edge => {
       // Containment is never drawn as a wire — it NESTS. Every edge on
       // the board is a lineage hop, tinted by the side it lands on.
       const up = Math.max(bandById.get(e.source) ?? 0, bandById.get(e.target) ?? 0) <= 0
@@ -4583,8 +4627,12 @@ export function FocusGraphView({
         sourceHandle: e.inFrameLane ? 'lane-out' : undefined,
         type: 'focusEdge',
         // Business users shouldn't infer direction from layout
-        // convention alone — every hop carries an explicit arrowhead.
-        markerEnd: { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
+        // convention alone — every hop carries an explicit arrowhead. A
+        // BUNDLE's stroke is heavy, and a marker sized in stroke units
+        // would be a sail: its arrow is sized in user space instead.
+        markerEnd: e.bundle
+          ? { type: MarkerType.ArrowClosed, color: tint, width: 22, height: 22, markerUnits: 'userSpaceOnUse' }
+          : { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
         data: {
           count: e.count, dimmed: e.dimmed, tint, mutedTint, cycleBack: e.cycleBack, reducedMotion,
           cycleAnchor: e.cycleAnchor, labelVisible: e.labelVisible, labelDense, trail,
@@ -4594,10 +4642,16 @@ export function FocusGraphView({
           sourcePillUp: cardById.get(e.source)?.pillUp ?? null,
           targetPillDown: cardById.get(e.target)?.pillDown ?? null,
           condensed: e.condensed ?? null,
+          bundle: e.bundle?.members ?? null,
+          inBundle: e.inBundle ?? null,
+          onBundleHover: e.bundle ? onBundleHover : null,
+          onBundleClick: e.bundle ? onBundleClick : null,
+          bundleOpen: !!e.bundle && pinnedBundle === e.id,
         },
       }
-    })
-  }, [graph.cards, graph.edges, reducedMotion, trailAdjacent])
+    }
+    return { edges: graph.edges.map(toFlowEdge), toFlowEdge }
+  }, [graph.cards, graph.edges, reducedMotion, trailAdjacent, onBundleHover, onBundleClick, pinnedBundle])
 
   const reachValue = useMemo(
     () => focalReach ?? null,
@@ -4616,6 +4670,25 @@ export function FocusGraphView({
   useEffect(() => () => { if (coneHoverTimer.current) clearTimeout(coneHoverTimer.current) }, [])
 
   const anchorId = hoverConeId ?? isolatedId ?? null
+  // WIRE BUNDLES — the detail a gesture away. The member wires a bundle
+  // hides come back for the cone's anchor (a hovered card, with its
+  // intent delay), the selected card, the isolated card, or a hovered
+  // bundle; a frame anchor brings every wire of every row inside it.
+  // Nothing here runs on a board without bundles.
+  const frameChainOf = useCallback((cardId: string): string[] => {
+    const chain: string[] = []
+    let host = graph.cards.find(c => c.id === cardId)?.frameId ?? null
+    let guard = 0
+    while (host && guard++ < 32) { chain.push(host); host = graph.cards.find(c => c.id === host)?.frameId ?? null }
+    return chain
+  }, [graph.cards])
+  const revealedEdges = useMemo((): Edge[] => {
+    if (graph.bundledWires.length === 0) return []
+    const cards = new Set([hoverConeId, selectedId, isolatedId].filter((id): id is string => !!id))
+    const bundles = new Set([hoverBundle, pinnedBundle].filter((id): id is string => !!id))
+    return revealedWires(graph.bundledWires, { cards, bundles }, frameChainOf).map(toFlowEdge)
+  }, [graph.bundledWires, hoverConeId, selectedId, isolatedId, hoverBundle, pinnedBundle, frameChainOf, toFlowEdge])
+  const edges = useMemo((): Edge[] => (revealedEdges.length === 0 ? baseEdges : [...baseEdges, ...revealedEdges]), [baseEdges, revealedEdges])
   const isolationValue = useMemo(() => {
     if (!anchorId) return null
     const cone = isolationCone(graph, anchorId)

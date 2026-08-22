@@ -193,6 +193,32 @@ if (process.env.DENSITY_SWEEP) {
     }
   }
 }
+if (process.env.WIRES_SWEEP) {
+  // How many wires the board draws per Wires rung, and what a hovered
+  // bundle fans out into.
+  for (const rung of ['Every wire', 'Bundled', 'Auto']) {
+    const r = await evalJs(`(async () => { const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(rung)}); if (!b) return 'no button'; b.click(); await new Promise(r => setTimeout(r, 1200)); const edges = [...document.querySelectorAll('.react-flow__edge')]; return { rung: ${JSON.stringify(rung)}, wires: edges.length, bundles: edges.filter(e => e.getAttribute('data-id')?.startsWith('b:')).length } })()`)
+    console.log('== wires', JSON.stringify(r))
+    if (process.env.SCREENSHOT_DIR) {
+      const { writeFileSync } = await import('node:fs')
+      const shot = await send('Page.captureScreenshot', { format: 'png' })
+      writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-wires-${rung.replace(/\s+/g, '_').toLowerCase()}.png`, Buffer.from(shot.result.data, 'base64'))
+    }
+  }
+  // Hover the first bundle: its members should come back.
+  const box = await evalJs(`(() => { const e = [...document.querySelectorAll('.react-flow__edge')].find(e => e.getAttribute('data-id')?.startsWith('b:')); if (!e) return null; const p = e.querySelector('path.react-flow__edge-interaction') ?? e.querySelector('path'); const len = p.getTotalLength(); const pt = p.getPointAtLength(len / 2); const m = p.getScreenCTM(); return { x: m.a * pt.x + m.c * pt.y + m.e, y: m.b * pt.x + m.d * pt.y + m.f } })()`)
+  if (box) {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y })
+    await sleep(500)
+    const hovered = await evalJs(`(() => { const edges = [...document.querySelectorAll('.react-flow__edge')]; return { wires: edges.length, bundles: edges.filter(e => e.getAttribute('data-id')?.startsWith('b:')).length } })()`)
+    console.log('== hovering a bundle:', JSON.stringify(hovered))
+    if (process.env.SCREENSHOT_DIR) {
+      const { writeFileSync } = await import('node:fs')
+      const shot = await send('Page.captureScreenshot', { format: 'png' })
+      writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-wires-hover.png`, Buffer.from(shot.result.data, 'base64'))
+    }
+  } else console.log('== hovering a bundle: none on the board')
+}
 if (process.env.TRAIL) {
   const trail = await evalJs(`document.querySelector('nav[aria-label="Path"]')?.textContent ?? null`)
   console.log('== path trail:', JSON.stringify(trail))

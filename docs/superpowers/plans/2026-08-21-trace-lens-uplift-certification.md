@@ -205,6 +205,24 @@ exactly when the focal card has left the screen (`useFrameCamera.focusInView(vie
 React Flow `onMove`) and leaves when it is back; the stack icon stays. Browser: drag the board two screens
 away → pill + header button present; click → focus centred at zoom 0.98, pill gone.
 
+**A cold open lands on the focus (2026-08-22, evening; `08dcd9d3`).** Three camera causes of "the focus is
+tiny until I click Center on focus": the empty board was stamped as framed (so the real first paint was held
+as an arrival during the walk), React Flow's own fit-on-init framed the coarse first paint whole a beat before
+the camera could, and the end-of-walk settle's timer was cancelled by the re-render `done` causes. Now: nothing
+is framed until there is something to frame, no `fitView` prop, the edge is detected on `walking` alone and
+remembered until the settle runs, and the settle fires after any held change (rows filling frames). Cold open
+at Grouped on the wide table: settled at zoom 0.91, "Board grew" cleared.
+
+**Wire bundles (2026-08-22, evening).** "500 incoming/outgoing edges simply turn into one thick mass" — seen
+in Grouped, where wires land on rows. A pair of containers with more than `WIRE_BUNDLE_THRESHOLD` (12) wires
+between them draws ONE bundle (Auto, the `lensWires` default; Bundled folds every pair; Every wire none): a
+heavier stroke (log of its members), a user-space arrowhead, the sum as its badge. The members move to
+`FocusGraph.bundledWires` and come back for the cone's anchor (hover), the selected or isolated card, a frame
+(every row's wires), or a hovered bundle — a click pins them. React Flow marks unselectable edges `inactive`
+(no pointer events), so a bundle carries its own hit path. Header: WIRES · Auto / Bundled / Every wire, each
+explained. Wide table at Grouped: Every wire 108 wires; Auto/Bundled 4 (two bundles, ×423 and ×598/×701);
+hovering a bundle fans out 53 members; the bundle fades to 0.28 beneath them.
+
 ## Not built, and why
 
 - ~~Coarse first paint~~ — built in the evening on the user's call (see above).

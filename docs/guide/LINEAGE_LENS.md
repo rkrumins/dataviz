@@ -112,6 +112,18 @@ draws every hop on a pass-through path as its own card; **Condensed** folds a
 run of single pass-through steps into one "via N steps" connector you can
 open.
 
+**Wires** folds the connections themselves. Wires land on the finest thing
+on screen at both ends, so two open containers showing five and eight rows
+are forty wires — and five hundred columns feeding a focus were a solid
+block of colour. With **Auto** (the default), two containers with more than
+twelve wires between them draw **one bundle**: a heavier wire with the total
+on it ("×423"). The detail is a gesture away — **hover** a row or a card and
+its own wires come back; **select** one and they stay; **hover the bundle**
+itself and it fans out into every wire it stands for, and a **click** on the
+bundle keeps them out until you click it again. **Bundled** folds every pair
+of containers whatever the count; **Every wire** folds nothing. Like
+Density, it is your preference and follows you.
+
 ### While it loads
 
 From the moment Focus opens, a **capsule** at the top of the board says what

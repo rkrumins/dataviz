@@ -2962,6 +2962,9 @@ describe('the header explains itself (2026-08-22)', () => {
       [/^Both$/, /upstream and downstream/i],
       [/^Root cause$/, /what feeds this entity/i],
       [/^Impact$/, /what this entity feeds/i],
+      [/^Auto$/, /more than 12/i],
+      [/^Bundled$/, /one wire per pair of containers/i],
+      [/^Every wire$/, /however many/i],
     ]
     for (const [name, meaning] of expectations) {
       const button = screen.getByRole('button', { name })
@@ -2970,6 +2973,16 @@ describe('the header explains itself (2026-08-22)', () => {
       expect(tip.textContent).toMatch(meaning)
       expect(button.getAttribute('title')).toBeNull()          // one tooltip, not two
     }
+  })
+
+  it('the Wires control writes the preference', () => {
+    usePreferencesStore.setState({ lensWires: 'auto' })
+    renderLens(['b'], simple())
+    fireEvent.click(screen.getByRole('button', { name: 'Every wire' }))
+    expect(usePreferencesStore.getState().lensWires).toBe('all')
+    fireEvent.click(screen.getByRole('button', { name: 'Bundled' }))
+    expect(usePreferencesStore.getState().lensWires).toBe('bundled')
+    usePreferencesStore.setState({ lensWires: 'auto' })
   })
 
   it('the header offers "Center on focus" beside Back and Forward, explained like every control', () => {
@@ -2990,6 +3003,7 @@ describe('the header explains itself (2026-08-22)', () => {
       ['Walk', /how far the lens walks on its own/i],
       ['Steps', /how a long pass-through path is drawn/i],
       ['Density', /how much of the picture is folded/i],
+      ['Wires', /how the wires between two containers draw/i],
     ] as const) {
       // The caption is the element that carries the description — the
       // popover's own bold name is the other match for the same text.

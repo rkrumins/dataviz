@@ -517,6 +517,8 @@ export function LineageLens({
   const setCondenseSteps = usePreferencesStore((s) => s.setLensCondenseSteps)
   // Part H — how much of the picture is FOLDED: the reader's own grain.
   const density = usePreferencesStore((s) => s.lensDensity)
+  const wires = usePreferencesStore((s) => s.lensWires)
+  const setWires = usePreferencesStore((s) => s.setLensWires)
   const setDensity = usePreferencesStore((s) => s.setLensDensity)
   const lensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
   const reducedMotion = usePreferencesStore((s) => s.reducedMotion)
@@ -602,7 +604,8 @@ export function LineageLens({
     walkStatus,
     directionFilter,
     density,
-  }), [sg, layoutView, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter, density])
+    wires,
+  }), [sg, layoutView, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter, density, wires])
 
   // T23 R2 — pass-through condensation, a pure re-projection over the
   // built layout (never touches population/grain/rank). OFF unless the
@@ -1796,6 +1799,55 @@ export function LineageLens({
                   instant toggling, counts stay true), and only what
                   DRAWS changes. Plain-language labels for business
                   readers, with the technical direction as the tooltip. */}
+              {/* Wires — how the lineage between two containers draws
+                  (2026-08-22): one bundle when there are many (Auto),
+                  always (Bundled), or every wire. The wires a bundle
+                  hides come back for a card the reader hovers or
+                  selects, or a bundle they hover. A preference. */}
+              {lensViewMode === 'graph' && (
+                <div
+                  role="group"
+                  aria-label="How the wires between two containers draw"
+                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
+                >
+                  <ControlTip name="Wires" meaning="How the wires between two containers draw — folded into one bundle, or every one">
+                    {(tip) => (
+                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
+                        Wires
+                      </span>
+                    )}
+                  </ControlTip>
+                  {([
+                    { value: 'auto', Icon: LucideIcons.Spline, label: 'Auto',
+                      title: 'Two containers with more than 12 wires between them draw one bundle with the count; hover or select a card to see its own wires' },
+                    { value: 'bundled', Icon: LucideIcons.GitMerge, label: 'Bundled',
+                      title: 'One wire per pair of containers, with the count; hover or select a card to see its own wires' },
+                    { value: 'all', Icon: LucideIcons.Waypoints, label: 'Every wire',
+                      title: 'Draw every wire, however many there are' },
+                  ] as const).map(({ value, Icon, label, title }) => (
+                    <ControlTip key={value} name={label} meaning={title}>
+                      {(tip) => (
+                        <button
+                          type="button"
+                          onClick={() => setWires(value)}
+                          aria-describedby={tip['aria-describedby']}
+                          aria-pressed={wires === value}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            wires === value
+                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                              : 'text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {label}
+                        </button>
+                      )}
+                    </ControlTip>
+                  ))}
+                </div>
+              )}
               {lensViewMode === 'graph' && (
                 <div
                   data-tour="lens-direction"

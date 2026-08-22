@@ -46,6 +46,20 @@ describe('preferences — the List body is retired (2026-08-22)', () => {
     const migrate = usePreferencesStore.persist.getOptions().migrate!
     expect((migrate({ lensViewMode: 'list' }, 4) as Record<string, unknown>).lensViewMode).toBe('graph')
     expect((migrate({ lensViewMode: 'graph', lensDensity: 'all' }, 4) as Record<string, unknown>).lensDensity).toBe('all')
-    expect(usePreferencesStore.persist.getOptions().version).toBe(5)
+    expect(usePreferencesStore.persist.getOptions().version).toBeGreaterThanOrEqual(5)
+  })
+})
+
+describe('preferences — lensWires (2026-08-22)', () => {
+  it("defaults to 'auto' and is settable; an older state gains it untouched otherwise", () => {
+    expect(usePreferencesStore.getState().lensWires).toBe('auto')
+    usePreferencesStore.getState().setLensWires('bundled')
+    expect(usePreferencesStore.getState().lensWires).toBe('bundled')
+    usePreferencesStore.getState().setLensWires('auto')
+    const migrate = usePreferencesStore.persist.getOptions().migrate!
+    const migrated = migrate({ lensDensity: 'all', lensViewMode: 'graph' }, 5) as Record<string, unknown>
+    expect(migrated.lensWires).toBe('auto')
+    expect(migrated.lensDensity).toBe('all')
+    expect(usePreferencesStore.persist.getOptions().version).toBe(6)
   })
 })

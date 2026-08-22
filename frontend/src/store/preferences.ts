@@ -220,6 +220,13 @@ interface PreferencesState {
    *  is off by default under an earlier ruling, grouping is on. */
   lensDensity: 'overview' | 'grouped' | 'all'
   setLensDensity: (density: 'overview' | 'grouped' | 'all') => void
+  /** How the Lens draws the wires between two containers (2026-08-22):
+   *  one bundle when there are many ('auto', the default), always
+   *  ('bundled'), or every wire ('all'). The wires a bundle hides come
+   *  back for a card the reader hovers or selects. A preference, like
+   *  density: it follows the reader from lens to lens. */
+  lensWires: 'auto' | 'bundled' | 'all'
+  setLensWires: (wires: 'auto' | 'bundled' | 'all') => void
 
   /** How many hops each direction the Lens fetches when it opens on a
    *  NEW entity. One is the answer to "what feeds this", which is what
@@ -411,6 +418,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       setLensCondenseSteps: (lensCondenseSteps) => set({ lensCondenseSteps }),
       lensDensity: 'grouped',
       setLensDensity: (lensDensity) => set({ lensDensity }),
+      lensWires: 'auto',
+      setLensWires: (lensWires) => set({ lensWires }),
       lensInitialDepth: 1,
 
       // Icon picker recents
@@ -450,13 +459,16 @@ export const usePreferencesStore = create<PreferencesState>()(
       // own depth for the focal it names; the preference is one hop.
       // v5 (2026-08-22): the Lens's List body is retired — a stored 'list'
       // becomes 'graph', so the Lens opens as the graph for everyone.
-      version: 5,
+      // v6 (2026-08-22): `lensWires` — the wires between two containers
+      // fold into one bundle when there are many; the default is 'auto'.
+      version: 6,
       migrate: (persisted, version) => {
         let state = persisted as Record<string, unknown>
         if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
         if (version < 3) state = { ...state, lensDensity: 'grouped' }
         if (version < 4) state = { ...state, lensInitialDepth: 1 }
         if (version < 5) state = { ...state, lensViewMode: 'graph' }
+        if (version < 6) state = { ...state, lensWires: 'auto' }
         return state
       },
     }
