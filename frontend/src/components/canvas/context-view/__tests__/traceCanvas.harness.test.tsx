@@ -22,7 +22,7 @@ import { cfoEstate, coarseThenFineEstate } from '@/test/fixtures/traceEstates'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(21))
+afterAll(() => expectTestsRan(22))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -522,6 +522,54 @@ describe('the trace overlay on the real canvas', () => {
     // Read-only, like everything else during a trace, and still no writes.
     expect(h.drawerEditTabs()).toBe(0)
     expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // TRACE HISTORY OUTLIVES THE PAGE, so it cannot be labelled from what the
+  // page happens to have loaded: after a reload the canvas holds its lane
+  // roots and nothing else, and the launcher read `intermediate_t2_17d10688`
+  // — URN tails where names belong. And its CURRENT entry — the one a reload
+  // leaves the cursor on, the top row, the trace the reader most likely
+  // wants back — did nothing at all when clicked, because moving the cursor
+  // to where it already is is not a move.
+  it('the history names an entity the canvas never loaded, and its current entry still resumes', async () => {
+    // The dashboard has a real name, spelled nothing like its urn — so a
+    // label of "cfo" can only have come from the urn, and one of "CFO
+    // Revenue Dashboard" can only have come from the data source.
+    const base = cfoEstate()
+    const estate = {
+      ...base,
+      model: {
+        ...base.model,
+        nodes: base.model.nodes.map(n => (n.urn === 'cfo' ? { ...n, displayName: 'CFO Revenue Dashboard' } : n)),
+      },
+    }
+    // Browse holds the lane roots. NOT the dashboard: the reader traced it
+    // from a search hit, or came back to the view after a reload.
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'cfo',
+      browseHolds: ['snowflake', 'tableau', 'INTERMEDIATE_T2', 'REPORTING'],
+    })
+    await h.startTrace('cfo')
+    h.pressEscape()
+    await h.settle()
+    expect(h.isTracing()).toBe(false)
+
+    await h.openTraceHistory()
+    expect(h.traceHistoryLabels()).toEqual(['CFO Revenue Dashboard'])
+    const lookups = h.nameLookups()
+
+    // The entry under the cursor is exactly the one a reload offers first.
+    await h.resumeTraceHistory('CFO Revenue Dashboard')
+    expect(h.isTracing()).toBe(true)
+
+    // And a name, once known, is never asked for again. (The launcher lives
+    // where "Trace Lineage" does, so it is only on offer outside a trace.)
+    h.pressEscape()
+    await h.settle()
+    await h.openTraceHistory()
+    expect(h.traceHistoryLabels()).toEqual(['CFO Revenue Dashboard'])
+    expect(h.nameLookups()).toBe(lookups)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 

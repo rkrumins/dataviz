@@ -115,6 +115,10 @@ export interface TraceHistoryEntry {
     focusId: string
     /** URN at the time the trace was started — display name resolved at render time. */
     focusUrn: string
+    /** The entity's name, resolved by whoever owns the history. Optional: an
+     *  older entry (or a host that does not resolve) falls back to the
+     *  canvas, and then to the urn. */
+    label?: string
     /** Effective hierarchy level the trace ran at (from result.effectiveLevel). */
     level?: number
     /** Wall-clock timestamp of the push. */

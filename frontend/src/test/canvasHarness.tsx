@@ -130,6 +130,14 @@ export interface TraceCanvasHarness {
   contextMenuOpen(): boolean
   /** Everything the canvas logged as a warning. */
   consoleWarnings(): string[]
+  /** Open the header's "pick up where you left off" launcher. */
+  openTraceHistory(): Promise<void>
+  /** The labels the launcher is showing, newest first. */
+  traceHistoryLabels(): string[]
+  /** Resume the launcher entry with this label. */
+  resumeTraceHistory(label: string): Promise<void>
+  /** How many name lookups the provider has served. */
+  nameLookups(): number
   /** Open the entity drawer on a node. */
   openDrawer(id: string): Promise<void>
   /** The entity the details drawer is showing, or null when it shows none. */
@@ -266,7 +274,7 @@ function childrenOf(estate: TraceEstate): Map<string, string[]> {
 function stubProvider(
   estate: TraceEstate,
   focusUrn: string,
-  calls: { traceClosure: number },
+  calls: { traceClosure: number; getNodes: number },
   gate?: { promise: Promise<void> },
   stall?: boolean,
   /** `deferTrace` holds BOTH legs of the first paint; `deferFine` holds
@@ -321,7 +329,14 @@ function stubProvider(
       nextCursor: null,
     }),
     getParent: async (childUrn: string) => byUrn.get(parentMap.get(childUrn) ?? '') ?? null,
-    getNodes: async () => nodes,
+    // The NAME LOOKUP the server serves: exactly the urns asked for, and
+    // counted — a caller that asks twice for the same name is a defect.
+    getNodes: async (query?: { urns?: string[] }) => {
+      calls.getNodes += 1
+      const urns = query?.urns
+      if (!urns) return nodes
+      return urns.map(u => byUrn.get(u)).filter((n): n is GraphNode => !!n)
+    },
     getEdges: async () => [],
     computeLayerAssignments: async () => ({
       assignments,
@@ -438,6 +453,13 @@ export async function renderCanvasWithTrace(
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
+  // A HARNESS MOUNT IS A FRESH BROWSER. The trace history persists per view
+  // in localStorage, so without this each test inherits every trace the
+  // previous ones ran — and a test that reads the history reads the file's
+  // running total instead of its own.
+  for (const key of Object.keys(localStorage)) {
+    if (key.startsWith('nx:trace-history:')) localStorage.removeItem(key)
+  }
   releaseFetch?.()
   releaseFetch = stubFetch(estate)
   usePreferencesStore.setState({ canvasDensity: 'spacious' } as never)
@@ -492,7 +514,7 @@ export async function renderCanvasWithTrace(
     ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
     : undefined
 
-  const providerCalls = { traceClosure: 0 }
+  const providerCalls = { traceClosure: 0, getNodes: 0 }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={queryClient}>
@@ -670,6 +692,26 @@ export async function renderCanvasWithTrace(
       [...document.querySelectorAll('span')]
         .some(el => /^(Node|Edge|Canvas) Actions$/.test(el.textContent?.trim() ?? '')),
     consoleWarnings: () => [...warnings],
+    async openTraceHistory() {
+      const trigger = document.querySelector<HTMLButtonElement>('[aria-label="Trace history"]')
+      if (!trigger) throw new Error('the header is not offering a trace history')
+      await act(async () => { fireEvent.click(trigger) })
+      await settle()
+    },
+    traceHistoryLabels: () => {
+      const panel = document.querySelector<HTMLElement>('[role="menu"][aria-label="Trace history"]')
+      return [...(panel?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])]
+        .map(row => row.querySelector('span:nth-of-type(2)')?.textContent?.trim() ?? '')
+    },
+    async resumeTraceHistory(label: string) {
+      const panel = document.querySelector<HTMLElement>('[role="menu"][aria-label="Trace history"]')
+      const row = [...(panel?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])]
+        .find(r => r.textContent?.includes(label))
+      if (!row) throw new Error(`no trace history entry for ${label}`)
+      await act(async () => { fireEvent.click(row) })
+      await settle()
+    },
+    nameLookups: () => providerCalls.getNodes,
     async openDrawer(id: string) {
       await act(async () => { useCanvasStore.getState().openNodeDrawer(id) })
       await settle()
