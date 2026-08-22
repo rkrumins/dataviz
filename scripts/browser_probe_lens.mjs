@@ -48,7 +48,7 @@ const loginStatus = await evalJs(`fetch('/api/v1/auth/login',{method:'POST',head
 console.log('login', loginStatus)
 
 // 2. open the view with a Lens share link on the focus
-const share = { v: 3, entries: [focusUrn], cursor: 0, mode: 'graph', direction: 'both', depth: Number(process.env.DEPTH ?? 1), revealed: [], opened: [focusUrn], collapsed: [], frameAll: [], framePages: [], frameQueries: [], pinned: [], railWindow: null, condensedOpen: [] }
+const share = { v: 3, entries: [...(process.env.TRAIL ? process.env.TRAIL.split(',') : []), focusUrn], cursor: (process.env.TRAIL ? process.env.TRAIL.split(',').length : 0), mode: 'graph', direction: 'both', depth: Number(process.env.DEPTH ?? 1), revealed: [], opened: [focusUrn], collapsed: [], frameAll: [], framePages: [], frameQueries: [], pinned: [], railWindow: null, condensedOpen: [] }
 const token = Buffer.from(JSON.stringify(share), 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 const requests = []
 const t0 = Date.now()
@@ -180,6 +180,10 @@ if (process.env.DENSITY_SWEEP) {
       console.log('== screenshot', file)
     }
   }
+}
+if (process.env.TRAIL) {
+  const trail = await evalJs(`document.querySelector('nav[aria-label="Path"]')?.textContent ?? null`)
+  console.log('== path trail:', JSON.stringify(trail))
 }
 if (process.env.HOVER && process.env.SCREENSHOT_DIR) {
   // Rest the pointer on a header control and keep a picture of its popover.
