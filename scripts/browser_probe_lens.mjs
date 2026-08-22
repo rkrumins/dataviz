@@ -48,7 +48,7 @@ const loginStatus = await evalJs(`fetch('/api/v1/auth/login',{method:'POST',head
 console.log('login', loginStatus)
 
 // 2. open the view with a Lens share link on the focus
-const share = { v: 3, entries: [focusUrn], cursor: 0, mode: 'graph', direction: 'both', depth: 1, revealed: [], opened: [], collapsed: [], frameAll: [], framePages: [], frameQueries: [], pinned: [], railWindow: null, condensedOpen: [] }
+const share = { v: 3, entries: [focusUrn], cursor: 0, mode: 'graph', direction: 'both', depth: 1, revealed: [], opened: [focusUrn], collapsed: [], frameAll: [], framePages: [], frameQueries: [], pinned: [], railWindow: null, condensedOpen: [] }
 const token = Buffer.from(JSON.stringify(share), 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 const requests = []
 const t0 = Date.now()
@@ -149,6 +149,13 @@ if (process.env.DENSITY_SWEEP) {
   for (const rung of ['Every card', 'Overview', 'Grouped']) {
     const r = await evalJs(`(async () => { const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(rung)}); if (!b) return 'no button'; b.click(); await new Promise(r => setTimeout(r, 2500)); const fitB = document.querySelector('button[aria-label="Fit the lineage in view"]'); fitB?.click(); await new Promise(r => setTimeout(r, 800)); return { rung: ${JSON.stringify(rung)}, dom: document.querySelectorAll('.react-flow__node').length, scale: Number((/scale\\(([\\d.e-]+)\\)/.exec(document.querySelector('.react-flow__viewport')?.style.transform ?? '') ?? [])[1] ?? NaN), chip: ([...document.querySelectorAll('p,span')].map(x => x.textContent).find(t => /connections/.test(t)) ?? '').slice(0, 60) } })()`)
     console.log('== rung', JSON.stringify(r))
+    if (process.env.SCREENSHOT_DIR) {
+      const { writeFileSync } = await import('node:fs')
+      const shot = await send('Page.captureScreenshot', { format: 'png' })
+      const file = `${process.env.SCREENSHOT_DIR}/lens-${rung.replace(/\s+/g, '_').toLowerCase()}.png`
+      writeFileSync(file, Buffer.from(shot.result.data, 'base64'))
+      console.log('== screenshot', file)
+    }
   }
 }
 ws.close(); chrome.kill(); process.exit(0)

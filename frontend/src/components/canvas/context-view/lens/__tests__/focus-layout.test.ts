@@ -3799,8 +3799,9 @@ describe('a rollup cell on the board weighs what it says', () => {
  * the reader drills in themselves.
  */
 describe('partner grain — how the partners land, by density', () => {
-    /** A focus table with 3 columns feeding 6 partner tables of 4 columns;
-     *  table i carries 6−i hops, so the ranking is observable. */
+    /** A focus table with 3 columns feeding 6 partner tables; table i
+     *  carries 8−i hops on 8−i columns, so the ranking is observable and
+     *  the strongest table has more rows than a bundle window shows. */
     const estate = () => {
         const nodes: LensWalkNode[] = [wnode('focus', 'Node'), wnode('db', 'Node')]
         const contains: Array<[string, string]> = [['db', 'focus']]
@@ -3810,8 +3811,8 @@ describe('partner grain — how the partners land, by density', () => {
             const table = `t${t}`
             nodes.push(wnode(table, 'Node')); contains.push(['db', table])
             // Only the columns on this lineage ship (the server never sends the rest).
-            for (let k = 0; k < Math.min(4, 6 - t); k++) { nodes.push(wnode(`${table}.k${k}`, 'Node')); contains.push([table, `${table}.k${k}`]) }
-            for (let h = 0; h < 6 - t; h++) hops.push([`focus.c${h % 3}`, `${table}.k${h % 4}`])
+            for (let k = 0; k < 8 - t; k++) { nodes.push(wnode(`${table}.k${k}`, 'Node')); contains.push([table, `${table}.k${k}`]) }
+            for (let h = 0; h < 8 - t; h++) hops.push([`focus.c${h % 3}`, `${table}.k${h}`])
         }
         return subgraph({ focus: 'focus', nodes, hops, contains })
     }
@@ -3827,12 +3828,16 @@ describe('partner grain — how the partners land, by density', () => {
         const closed = partnerCards(g).filter(c => c.kind === 'entity').map(c => c.nodeId).sort()
         expect(open).toEqual(['t0', 't1', 't2'].slice(0, OPEN_PARTNERS_PER_BAND))
         expect(closed).toEqual(['t3', 't4', 't5'])
-        expect(rowsOf(g, 't0').length).toBe(4)
+        // A partner the LAYOUT opened shows the strongest BUNDLE_WINDOW rows,
+        // "N more" behind — the reader's own opens keep the full window.
+        expect(cardFor(g, 't0')!.frameWindowSize).toBe(BUNDLE_WINDOW)
+        expect(rowsOf(g, 't0').length).toBe(BUNDLE_WINDOW)
+        expect(cardFor(g, 't0')!.frameRows.length).toBe(8)
         expect(rowsOf(g, 't5').length).toBe(0)
         const t5 = cardFor(g, 't5')!
         expect(t5.canOpenChildren).toBe(true)
-        expect(t5.contents?.onLineage).toBe(1)          // one column on this lineage, one click away
-        expect(t5.count).toBe(1)
+        expect(t5.contents?.onLineage).toBe(3)          // three columns on this lineage, one click away
+        expect(t5.count).toBe(3)
     })
 
     it('Overview: every partner lands closed; Every card: every partner opens', () => {
@@ -3845,11 +3850,12 @@ describe('partner grain — how the partners land, by density', () => {
 
     it('a partner the reader opened stays open at any rung — the drill is theirs', () => {
         const sg = estate()
-        const view = { ...initialLensViewState(sg), expandedContainment: new Set(['t5']) }
+        const view = { ...initialLensViewState(sg), expandedContainment: new Set(['t0']) }
         const g = layout(sg, view, { density: 'overview' })
-        expect(cardFor(g, 't5')!.kind).toBe('frame')
-        expect(rowsOf(g, 't5').length).toBe(1)
-        expect(cardFor(g, 't0')!.kind).toBe('entity')
+        expect(cardFor(g, 't0')!.kind).toBe('frame')
+        expect(cardFor(g, 't0')!.frameWindowSize).toBe(FRAME_WINDOW)     // the reader's open: the full window
+        expect(rowsOf(g, 't0').length).toBe(8)
+        expect(cardFor(g, 't1')!.kind).toBe('entity')
     })
 
     it('the focus\'s own rows are untouched, and hops into a closed partner land on its card with their count', () => {
@@ -3859,13 +3865,13 @@ describe('partner grain — how the partners land, by density', () => {
         expect(focal.frameRows.length).toBe(3)
         const t0 = cardFor(g, 't0')!
         const into = g.edges.filter(e => e.target === t0.id)
-        expect(into.reduce((n, e) => n + e.count, 0)).toBe(6)
+        expect(into.reduce((n, e) => n + e.count, 0)).toBe(8)
     })
 
     it('the grain folds, the numbers do not: wires agree across rungs', () => {
         const sg = estate()
         const totals = (['all', 'grouped', 'overview'] as const).map(density => layout(sg, initialLensViewState(sg), { density }).edges.reduce((n, e) => n + e.count, 0))
-        expect(totals).toEqual([21, 21, 21])
+        expect(totals).toEqual([33, 33, 33])
     })
 })
 

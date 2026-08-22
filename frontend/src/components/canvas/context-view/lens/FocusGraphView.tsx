@@ -2023,13 +2023,17 @@ const EntityContent = memo(function EntityContent({ card, ctx, onTrail }: {
               </span>
             </>
           )}
-          {/* No ×N on a frame either — same accumulator, same reason. */}
-          {card.contents && (
-            <>
-              <ContentsCount card={card} />
-            </>
-          )}
         </p>
+        {/* THE DRILL CUE. On a closed top-level card the count is what a
+            click will show ("10 on this lineage · of 12"), so it gets a
+            line of its own rather than the tail of the provenance line,
+            where it truncated to "10 on this lineag…" beside the ribbon.
+            (Rows keep the one-line form: see the row renderer.) */}
+        {card.contents && (
+          <p className="text-[9.5px] text-ink-muted leading-snug min-w-0 whitespace-nowrap">
+            <ContentsCount card={card} />
+          </p>
+        )}
       </div>
       <CardActions card={card} ctx={ctx} />
       <WalkPills card={card} ctx={ctx} />

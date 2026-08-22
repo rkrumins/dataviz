@@ -917,6 +917,10 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // partner the reader opened (`expandedContainment`) is theirs and stays
     // open at any rung — drilling in is the reader's move, one level at a
     // time, and the closed card says exactly what a click will show.
+    /** Partners the LAYOUT opened under the rung: they show the strongest
+     *  BUNDLE_WINDOW rows, like a bundle; a partner the reader opened keeps
+     *  the full frame window. */
+    const grainOpened = new Set<string>()
     if (density !== 'all') {
         const opened = [...spine].filter(u =>
             u !== sg.focusUrn && !focusAncestors.has(u) && !walkedThrough.has(u) && !bundled.has(u)
@@ -932,6 +936,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         for (const list of byBand.values()) {
             list.sort((a, b) => strength(b) - strength(a) || labelFor(a).localeCompare(labelFor(b)) || a.localeCompare(b))
             const keep = density === 'overview' ? 0 : OPEN_PARTNERS_PER_BAND
+            for (const u of list.slice(0, keep)) if (!view.expandedContainment.has(u)) grainOpened.add(u)
             for (const u of list.slice(keep)) spine.delete(u)
         }
     }
@@ -1697,7 +1702,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const { pillUp, pillDown, deadEnd } = focusContents.has(urn)
             ? { pillUp: null, pillDown: null, deadEnd: false }
             : walkStateOf(urn, isFrame, band)
-        const windowSize = showAll ? FRAME_WINDOW_ALL : bundled.has(urn) ? BUNDLE_WINDOW : FRAME_WINDOW
+        const windowSize = showAll ? FRAME_WINDOW_ALL : (bundled.has(urn) || grainOpened.has(urn)) ? BUNDLE_WINDOW : FRAME_WINDOW
         // The scroll window can never travel past what has loaded: a
         // restored share link, or a roster that shrank under a new
         // search, must land on rows rather than on empty space.
