@@ -198,6 +198,43 @@ if (process.env.DENSITY_SWEEP) {
     }
   }
 }
+if (process.env.EXPAND_SHOTS && process.env.SCREENSHOT_DIR) {
+  // The user's three-shot scenario: open a container, then one inside it,
+  // and see whether the columns still clear each other.
+  const { writeFileSync } = await import('node:fs')
+  const shoot = async (name) => {
+    const shot = await send('Page.captureScreenshot', { format: 'png' })
+    writeFileSync(`${process.env.SCREENSHOT_DIR}/expand-${name}.png`, Buffer.from(shot.result.data, 'base64'))
+  }
+  const overlap = async () => evalJs(`(() => {
+    const nodes = [...document.querySelectorAll('.react-flow__node')].filter(n => !n.parentElement?.closest('.react-flow__node'))
+    const boxes = nodes.map(n => n.getBoundingClientRect()).filter(r => r.width > 40)
+    let worst = 0
+    for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i], b = boxes[j]
+      const ox = Math.min(a.right, b.right) - Math.max(a.left, b.left)
+      const oy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)
+      if (ox <= 0 || oy <= 0) continue
+      // A row inside its own frame, or a frame nested in one, is CONTAINED
+      // — that is the picture working. Partial overlap is the defect.
+      const contains = (p, c) => p.left <= c.left + 2 && p.right >= c.right - 2 && p.top <= c.top + 2 && p.bottom >= c.bottom - 2
+      if (contains(a, b) || contains(b, a)) continue
+      worst = Math.max(worst, Math.round(Math.min(ox, oy)))
+    }
+    const t = document.querySelector('.react-flow__viewport')?.style.transform ?? ''
+    const i = t.indexOf('scale(')
+    return { cards: boxes.length, worstOverlapPx: worst, zoom: i < 0 ? null : Number(t.slice(i + 6, t.indexOf(')', i))).toFixed(2) }
+  })()`)
+  await shoot('0-initial')
+  console.log('== expand 0:', JSON.stringify(await overlap()))
+  for (let step = 1; step <= 2; step++) {
+    const hit = await evalJs(`(() => { const b = [...document.querySelectorAll('button[aria-label^="Show what\\'s inside"]')][0]; if (!b) return null; b.click(); return 'clicked' })()`)
+    if (!hit) { console.log('== expand: no chevron at step', step); break }
+    await sleep(1200)
+    await shoot(`${step}-expanded`)
+    console.log(`== expand ${step}:`, JSON.stringify(await overlap()))
+  }
+}
 if (process.env.INTERACT) {
   // ── INTERACTION COST, measured (2026-08-22) ────────────────────────
   // Event Timing gives the honest number a reader feels: from the input

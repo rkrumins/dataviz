@@ -35,7 +35,7 @@ const edge = (id: string, source: string, target: string): FocusEdge => ({
 })
 
 const graphOf = (cards: FocusCard[], edges: FocusEdge[] = []): FocusGraph => ({
-    cards, edges, bundledWires: [], hiddenByChips: 0, hiddenByChipsIn: 0, hiddenByChipsOut: 0,
+    cards, edges, bundledWires: [], bandX: new Map(), hiddenByChips: 0, hiddenByChipsIn: 0, hiddenByChipsOut: 0,
     modelHasUpstream: true, modelHasDownstream: true, hopsAtCoarserGrain: 0,
     focusRecovered: false, walkedThrough: new Set(), bundled: new Set(), drawnRank: new Map(), bandTotals: new Map(),
 })

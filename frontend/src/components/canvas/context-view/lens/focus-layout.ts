@@ -2362,7 +2362,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
     // ── 5. GEOMETRY ──────────────────────────────────────────────────
 
-    layoutBands(cards)
+    const bandX = layoutBands(cards)
 
     // The lanes now have somewhere to be: their frame has a position, so
     // each one's absolute centre is the frame's own left padding plus its
@@ -2512,6 +2512,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         cards,
         edges,
         bundledWires,
+        bandX,
         hiddenByChips,
         hiddenByChipsIn,
         hiddenByChipsOut,

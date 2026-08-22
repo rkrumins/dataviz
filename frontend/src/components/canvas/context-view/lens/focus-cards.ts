@@ -702,6 +702,11 @@ export interface FocusEdge {
 export interface FocusGraph {
   cards: FocusCard[]
   edges: FocusEdge[]
+  /** Where each hop band's column starts, in flow space — measured from
+   *  what the board actually holds, so a widened frame pushes the bands
+   *  outside it along (2026-08-22). Band labels and the extend ghost read
+   *  it so they agree with the cards. */
+  bandX: ReadonlyMap<number, number>
   /** The wires each bundle in `edges` stands for (`inBundle` names it).
    *  Not drawn by default: the view adds the ones touching a hovered or
    *  selected card, or a hovered bundle. */
@@ -787,7 +792,7 @@ export function labelOf(id: string, node: LineageNode | undefined): string {
  * and positioned inside the frame afterwards. That keeps the band maths
  * (and its determinism) exactly as it was.
  */
-export function layoutBands(cards: FocusCard[]) {
+export function layoutBands(cards: FocusCard[]): Map<number, number> {
   // Size every frame to its children first, so the band can stack it as
   // a single unit.
   const childrenByFrame = new Map<string, FocusCard[]>()
@@ -847,8 +852,42 @@ export function layoutBands(cards: FocusCard[]) {
     if (list) list.push(c)
     else byBand.set(c.band, [c])
   }
+
+  /**
+   * THE COLUMNS MAKE ROOM (2026-08-22). Band x used to be a fixed pitch,
+   * `band * (CARD_W + BAND_GAP)` — but a frame is as wide as what it
+   * holds, and every level the reader opens inside it widens it again.
+   * Open a container, then one inside that, and the focus column outgrew
+   * the pitch: the next band was drawn ON TOP of it (reported with three
+   * screenshots, each expansion worse than the last).
+   *
+   * Bands are placed from the widths actually on the board instead:
+   * walking out from the focus, each band starts a full BAND_GAP past
+   * the right edge of the one inside it. A board of ordinary cards is
+   * unchanged — every width is CARD_W, so the sum IS the old pitch — and
+   * an empty band still holds a column's worth of room, so the hop
+   * numbering keeps its rhythm.
+   */
+  const widthOfBand = (band: number): number => {
+    const list = byBand.get(band)
+    if (!list || list.length === 0) return CARD_W
+    let widest = CARD_W
+    for (const c of list) {
+      // Band 0's non-focal cards hang below the focus, indented.
+      const offset = band === 0 && c.kind !== 'focal' ? NEST_INDENT * (c.depth + 1) : 0
+      widest = Math.max(widest, offset + c.w)
+    }
+    return widest
+  }
+  const present = [...byBand.keys()]
+  const maxBand = Math.max(0, ...present)
+  const minBand = Math.min(0, ...present)
+  const bandX = new Map<number, number>([[0, 0]])
+  for (let b = 1; b <= maxBand; b++) bandX.set(b, bandX.get(b - 1)! + widthOfBand(b - 1) + BAND_GAP)
+  for (let b = -1; b >= minBand; b--) bandX.set(b, bandX.get(b + 1)! - (widthOfBand(b) + BAND_GAP))
+
   for (const [band, list] of byBand) {
-    const x = band * (CARD_W + BAND_GAP)
+    const x = bandX.get(band) ?? band * (CARD_W + BAND_GAP)
     if (band === 0) {
       // The FOCAL node centers on the midline and owns the column's own
       // x; anything else that lands in this band hangs below it,
@@ -888,4 +927,7 @@ export function layoutBands(cards: FocusCard[]) {
       y += k.h + CARD_GAP
     }
   }
+
+  return bandX
+
 }

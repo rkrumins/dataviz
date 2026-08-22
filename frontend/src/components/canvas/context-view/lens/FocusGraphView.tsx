@@ -156,6 +156,8 @@ const TINT_DOWN = '#f59e0b'
  *  lost on. Below this a reader can see the whole picture at a glance and
  *  a map is furniture. */
 const MINIMAP_MIN_CARDS = 8
+/** The lineage accent, for the map's focus dot and viewport frame. */
+const ACCENT_LINEAGE = '#6366f1'
 const MUTED_TINT_UP = '#5e93ab'
 const MUTED_TINT_DOWN = '#c2a370'
 
@@ -4449,7 +4451,9 @@ export function FocusGraphView({
       nodes.push({
         id: `bl:${band}`,
         type: 'bandLabel',
-        position: { x: band * (CARD_W + BAND_GAP), y: minY - 34 },
+        // The band's OWN column, measured (2026-08-22) — a widened frame
+        // moves the bands outside it, and their labels with them.
+        position: { x: graph.bandX.get(band) ?? band * (CARD_W + BAND_GAP), y: minY - 34 },
         ...(measuredById.get(`bl:${band}`) ? { measured: measuredById.get(`bl:${band}`) } : {}),
         draggable: false,
         selectable: false,
@@ -4487,7 +4491,7 @@ export function FocusGraphView({
     if (focalFetch === 'done') {
       if (!minYByBand.has(-1) && (!graph.modelHasUpstream || directionFilter === 'out' || graph.hiddenByChipsIn > 0)) {
         nodes.push({
-          id: 'blw:in', type: 'bandLabel', position: { x: -(CARD_W + BAND_GAP), y: -10 },
+          id: 'blw:in', type: 'bandLabel', position: { x: graph.bandX.get(-1) ?? -(CARD_W + BAND_GAP), y: -10 },
           draggable: false, selectable: false, focusable: false,
           data: {
             // Priority: the user's OWN direction filter, then the type
@@ -4503,7 +4507,7 @@ export function FocusGraphView({
       }
       if (!minYByBand.has(1) && (!graph.modelHasDownstream || directionFilter === 'in' || graph.hiddenByChipsOut > 0)) {
         nodes.push({
-          id: 'blw:out', type: 'bandLabel', position: { x: CARD_W + BAND_GAP, y: -10 },
+          id: 'blw:out', type: 'bandLabel', position: { x: graph.bandX.get(1) ?? CARD_W + BAND_GAP, y: -10 },
           draggable: false, selectable: false, focusable: false,
           data: {
             whisper: directionFilter === 'in'
@@ -4786,7 +4790,7 @@ export function FocusGraphView({
     setMovedFor(`${focalId}|${recenterKey}`)
     setReaderMoved(false)
   }
-  const camera = useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion, containerRef, walking, recenterKey, readerMoved)
+  const camera = useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion, containerRef, walking, recenterKey, readerMoved, graph.bandX)
   // THE WAY BACK IS FINDABLE (2026-08-22). "Center on the focus" lived only
   // in the corner stack of icons. The header asks for it through
   // `recenterSignal`; and the board offers it by itself the moment the
@@ -4800,6 +4804,8 @@ export function FocusGraphView({
     camera.recenter()
   }, [recenterSignal, camera])
   const [focusOff, setFocusOff] = useState(false)
+  // The map folds away when it is in the way; the choice sticks for the session.
+  const [mapOpen, setMapOpen] = useState(true)
   // The PNG export needs every card in the DOM; culling is paused for
   // the capture (see `CULL_OFFSCREEN`).
   const [cullPaused, setCullPaused] = useState(false)
@@ -5036,34 +5042,70 @@ export function FocusGraphView({
               </div>
             </Panel>
           )}
-          {/* THE MINI MAP — where the reader is, in the whole board, and a
-              way to go somewhere else: drag it to pan, scroll it to zoom,
-              click a card to fly to it. Bottom-LEFT, opposite the control
-              stack, so neither covers the other. Only once there is
-              enough board to get lost on (MINIMAP_MIN_CARDS): a board of
-              three cards is its own map. The focus is indigo, the sides
-              keep their own tints — the same code the wires read. */}
+          {/* THE MINI MAP (2026-08-22, richer second pass) — the room's own
+              glass panel, like the canvas behind it: a header that names
+              it and folds it away, the board's OWN card colours (the same
+              `visualFor` the cards paint with, the focus in the lineage
+              accent), the two sides marked on the stroke, and the
+              viewport framed. A way to travel, not a picture: drag to
+              pan, scroll to zoom, click a card to fly to it. Bottom-LEFT,
+              opposite the control stack. Only once there is enough board
+              to get lost on — a board of three cards is its own map. */}
           {graph.cards.length >= MINIMAP_MIN_CARDS && (
-            <MiniMap
-              position="bottom-left"
-              ariaLabel="Map of the board"
-              pannable
-              zoomable
-              offsetScale={2}
-              nodeBorderRadius={3}
-              nodeStrokeWidth={0}
-              className="nx-lens-minimap"
-              nodeColor={(n) => {
-                const card = (n.data as { card?: FocusCard } | undefined)?.card
-                if (!card) return 'rgba(148,163,184,0.35)'
-                if (card.kind === 'focal') return '#6366f1'
-                const band = card.band ?? 0
-                return band < 0 ? TINT_UP : band > 0 ? TINT_DOWN : 'rgba(148,163,184,0.55)'
-              }}
-              maskColor="rgba(15,23,42,0.06)"
-              maskStrokeColor="rgba(99,102,241,0.55)"
-              maskStrokeWidth={2}
-            />
+            <Panel position="bottom-left" className="!m-3 nopan nodrag">
+              <section
+                aria-label="Map of the board"
+                className="glass-panel-subtle rounded-xl overflow-hidden shadow-lg"
+              >
+                <div className="flex items-center gap-2 px-2.5 h-7 border-b border-black/[0.06] dark:border-white/[0.08]">
+                  <LucideIcons.Map className="w-3 h-3 flex-shrink-0 text-accent-lineage" aria-hidden="true" />
+                  <span className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ink-muted/70">Map</span>
+                  <button
+                    type="button"
+                    onClick={() => setMapOpen(o => !o)}
+                    aria-label={mapOpen ? 'Hide the map' : 'Show the map'}
+                    className="-mr-1 ml-auto w-5 h-5 flex items-center justify-center rounded text-ink-muted/70 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                  >
+                    <LucideIcons.ChevronDown className={cn('w-3 h-3 transition-transform', !mapOpen && 'rotate-180')} />
+                  </button>
+                </div>
+                {mapOpen && (
+                  <MiniMap
+                    ariaLabel="Map of the board"
+                    pannable
+                    zoomable
+                    offsetScale={2}
+                    nodeBorderRadius={3}
+                    nodeStrokeWidth={2}
+                    className="nx-lens-minimap"
+                    onNodeClick={(_, node) => {
+                      // Click a card on the map and travel to it — the map
+                      // is navigation, and this is the shortest way across
+                      // a board too big to scan.
+                      void rf?.fitView({ nodes: [{ id: node.id }], padding: 0.6, duration: reducedMotion ? 0 : 320, maxZoom: FIT_MAX_ZOOM })
+                    }}
+                    nodeColor={(n) => {
+                      const card = (n.data as { card?: FocusCard } | undefined)?.card
+                      if (!card) return 'rgba(148,163,184,0.35)'
+                      if (card.kind === 'focal') return ACCENT_LINEAGE
+                      // The board's own colour for this kind of thing, so
+                      // the map and the cards read as one picture.
+                      return card.type === 'not loaded' ? NEUTRAL_ACCENT : visualFor(card.type).color
+                    }}
+                    nodeStrokeColor={(n) => {
+                      const card = (n.data as { card?: FocusCard } | undefined)?.card
+                      if (!card) return 'transparent'
+                      if (card.kind === 'focal') return ACCENT_LINEAGE
+                      const band = card.band ?? 0
+                      return band < 0 ? TINT_UP : band > 0 ? TINT_DOWN : 'transparent'
+                    }}
+                    maskColor="rgba(15,23,42,0.08)"
+                    maskStrokeColor={ACCENT_LINEAGE}
+                    maskStrokeWidth={2}
+                  />
+                )}
+              </section>
+            </Panel>
           )}
         </ReactFlow>
       </ReactFlowProvider>

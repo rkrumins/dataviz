@@ -340,36 +340,26 @@
     from { opacity: 0; transform: translateY(2px); }
     to   { opacity: 1; transform: none; }
   }
-  /* THE MINI MAP (2026-08-22) — a premium panel, not React Flow's default
-     grey box: the room's own elevated surface, a hairline border, a soft
-     shadow, and the viewport rectangle in the accent. Sized so it reads
-     at a glance without taking the board's corner hostage. */
-  .nx-lens-minimap {
-    width: 190px;
-    height: 128px;
+  /* THE MINI MAP (2026-08-22) — React Flow positions its own panel; here
+     it lives INSIDE the lens's glass panel chrome (a header that names it
+     and folds it away), so its own positioning is neutralised and only
+     its canvas remains. The panel around it carries the app's glass
+     tokens, exactly as the canvas behind the lens does. */
+  .nx-lens-minimap.react-flow__minimap {
+    position: static !important;
+    margin: 0 !important;
+    width: 208px;
+    height: 132px;
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
+    display: block;
+  }
+  .react-flow__panel:has(> [aria-label='Map of the board']) {
     margin: 0.75rem !important;
-    border-radius: 0.75rem;
-    border: 1px solid rgb(0 0 0 / 0.08);
-    background: rgb(255 255 255 / 0.92);
-    box-shadow: 0 8px 24px -12px rgb(0 0 0 / 0.25);
-    backdrop-filter: blur(6px);
-    overflow: hidden;
-    transition: opacity 160ms ease-out;
-    opacity: 0.85;
-  }
-  .nx-lens-minimap:hover {
-    opacity: 1;
-  }
-  .dark .nx-lens-minimap {
-    border-color: rgb(255 255 255 / 0.1);
-    background: rgb(15 23 42 / 0.88);
-    box-shadow: 0 8px 24px -12px rgb(0 0 0 / 0.6);
   }
   .dark .nx-lens-minimap .react-flow__minimap-mask {
-    fill: rgb(2 6 23 / 0.45);
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .nx-lens-minimap { transition: none; }
+    fill: rgb(2 6 23 / 0.5);
   }
 
   /* THE PICTURE'S GHOST (LensSkeleton): a shimmer sweeping across every

@@ -3966,3 +3966,100 @@ describe('wire bundles — a wall of wires folds into one per pair of containers
         expect(layout(over, initialLensViewState(over), { wires: 'auto' }).bundledWires.length).toBe(14)
     })
 })
+
+describe('the columns make room as the reader opens things (2026-08-22)', () => {
+    // Reported with three screenshots: open a container, then one inside
+    // it, and the focus column grows wider than the fixed band pitch —
+    // so the next band's cards were drawn ON TOP of the focus. Bands are
+    // now placed from the widths actually on the board.
+    const wnodeL = (urn: string, type: string, label: string, extra: Record<string, unknown> = {}) =>
+        wnode(urn, type, label, extra)
+
+    /** focus ⊃ table ⊃ columns, with a partner on each side. */
+    const nested = () => {
+        const nodes = [
+            wnodeL('F', 'dataset', 'focus', { childCount: 1 }),
+            wnodeL('F.t', 'dataset', 'inner_table', { childCount: 4 }),
+            wnodeL('U', 'dataset', 'upstream_table', { childCount: 1 }),
+            wnodeL('U.c', 'schemaField', 'u_col'),
+            wnodeL('D', 'dataset', 'downstream_table', { childCount: 1 }),
+            wnodeL('D.c', 'schemaField', 'd_col'),
+        ]
+        const contains: Array<[string, string]> = [['F', 'F.t'], ['U', 'U.c'], ['D', 'D.c']]
+        const hops: Array<[string, string]> = []
+        for (let i = 0; i < 4; i++) {
+            nodes.push(wnodeL(`F.t.c${i}`, 'schemaField', `inner_col_${i}`))
+            contains.push(['F.t', `F.t.c${i}`])
+            hops.push(['U.c', `F.t.c${i}`])
+            hops.push([`F.t.c${i}`, 'D.c'])
+        }
+        return subgraph({ focus: 'F', nodes, contains, hops })
+    }
+
+    /** No card of a band may start before the right edge of the band inside it. */
+    const bandsClear = (g: { cards: FocusCard[] }) => {
+        const top = g.cards.filter(c => !c.frameId)
+        const rightOf = new Map<number, number>()
+        const leftOf = new Map<number, number>()
+        for (const c of top) {
+            rightOf.set(c.band, Math.max(rightOf.get(c.band) ?? -Infinity, c.x + c.w))
+            leftOf.set(c.band, Math.min(leftOf.get(c.band) ?? Infinity, c.x))
+        }
+        const bands = [...rightOf.keys()].sort((a, b) => a - b)
+        for (let i = 1; i < bands.length; i++) {
+            const gap = leftOf.get(bands[i])! - rightOf.get(bands[i - 1])!
+            if (gap < 0) return { ok: false, gap, between: [bands[i - 1], bands[i]] }
+        }
+        return { ok: true, gap: Infinity, between: [] as number[] }
+    }
+
+    it('a plain board keeps exactly the pitch it always had', () => {
+        const sg = nested()
+        const g = layout(sg, initialLensViewState(sg))
+        const focal = g.cards.find(c => c.kind === 'focal')!
+        expect(focal.x).toBe(0)
+        // Nothing is open, so every top-level card is CARD_W wide and the
+        // bands sit where the constant pitch put them.
+        for (const c of g.cards.filter(x => !x.frameId)) {
+            if (c.kind === 'focal' || c.w === CARD_W) expect(c.x).toBe(c.band * (CARD_W + BAND_GAP))
+        }
+    })
+
+    it('opening a container, and one inside it, pushes the next band out instead of overlapping it', () => {
+        const sg = nested()
+        const base = initialLensViewState(sg)
+        const opened = { ...base, expandedContainment: new Set([...base.expandedContainment, 'F', 'F.t']) }
+        const g = layout(sg, opened)
+        const focal = g.cards.find(c => c.kind === 'focal')!
+        expect(focal.w).toBeGreaterThan(CARD_W)                 // the focus really did grow
+        const clear = bandsClear(g)
+        expect(clear.ok, `bands ${clear.between.join('→')} overlap by ${-clear.gap}px`).toBe(true)
+    })
+
+    it('every band keeps a full gap from the one inside it, however deep the nesting', () => {
+        const sg = nested()
+        const base = initialLensViewState(sg)
+        const opened = { ...base, expandedContainment: new Set([...base.expandedContainment, 'F', 'F.t', 'U', 'D']) }
+        const g = layout(sg, opened)
+        const top = g.cards.filter(c => !c.frameId)
+        const rightOf = new Map<number, number>()
+        const leftOf = new Map<number, number>()
+        for (const c of top) {
+            rightOf.set(c.band, Math.max(rightOf.get(c.band) ?? -Infinity, c.x + c.w))
+            leftOf.set(c.band, Math.min(leftOf.get(c.band) ?? Infinity, c.x))
+        }
+        const bands = [...rightOf.keys()].sort((a, b) => a - b)
+        for (let i = 1; i < bands.length; i++) {
+            expect(leftOf.get(bands[i])! - rightOf.get(bands[i - 1])!).toBeGreaterThanOrEqual(BAND_GAP)
+        }
+    })
+
+    it('the board says where each band sits, so labels and ghosts agree with the cards', () => {
+        const sg = nested()
+        const base = initialLensViewState(sg)
+        const g = layout(sg, { ...base, expandedContainment: new Set([...base.expandedContainment, 'F', 'F.t']) })
+        for (const c of g.cards.filter(x => !x.frameId)) {
+            expect(g.bandX.get(c.band)).toBe(c.band === 0 ? 0 : c.x)
+        }
+    })
+})

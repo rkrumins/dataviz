@@ -111,6 +111,9 @@ export function useFrameCamera(
    *  is set the camera is theirs: the end of a walk settles nothing, and
    *  the "Board grew" offer stays a pill. */
   readerMoved = false,
+  /** Where each hop band's column starts (2026-08-22) — the extend ghost
+   *  lands in the band's real column, not at a constant pitch. */
+  bandX?: ReadonlyMap<number, number>,
 ) {
   const framedRef = useRef<{ focal: string; key: string; ids: Set<string> } | null>(null)
   const [grew, setGrew] = useState(false)
@@ -371,7 +374,7 @@ export function useFrameCamera(
       // nudges could overshoot when more than one starts at once.
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
       for (const { card, dir } of justStarted) {
-        const g = ghostRect(card, dir)
+        const g = ghostRect(card, dir, bandX)
         minX = Math.min(minX, g.x); maxX = Math.max(maxX, g.x + g.w)
         minY = Math.min(minY, g.y); maxY = Math.max(maxY, g.y + g.h)
       }
@@ -405,7 +408,7 @@ export function useFrameCamera(
       return () => window.clearTimeout(t)
     }
     applyNudge()
-  }, [rf, focalId, cards, reducedMotion, containerRef])
+  }, [rf, focalId, cards, reducedMotion, containerRef, bandX])
 
   return useMemo(() => ({ grew, fitAll, recenter, focusInView }), [grew, fitAll, recenter, focusInView])
 }
@@ -426,9 +429,12 @@ function toScreen(r: Rect, viewport: { x: number; y: number; zoom: number }) {
 /** Where an extend/page pill's ghost lands (Task 20, P5/fix round 1) —
  *  identical to `ExtendGhost`'s own geometry in FocusGraphView.tsx: one
  *  band further in the pill's own direction, at the card's own height. */
-function ghostRect(card: FocusCard, dir: 'in' | 'out'): Rect {
+function ghostRect(card: FocusCard, dir: 'in' | 'out', bandX?: ReadonlyMap<number, number>): Rect {
   const band = card.band + (dir === 'in' ? -1 : 1)
-  return { x: band * (CARD_W + BAND_GAP), y: card.y, w: CARD_W, h: card.h }
+  // The band's measured column when the board knows it; the constant
+  // pitch is the fallback for a band nothing has been drawn in yet.
+  const x = bandX?.get(band) ?? band * (CARD_W + BAND_GAP)
+  return { x, y: card.y, w: CARD_W, h: card.h }
 }
 
 /**

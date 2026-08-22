@@ -286,6 +286,22 @@ ratio pin: dimming a board costs less than a quarter of laying it out.
 downstream amber, the viewport framed in the accent; pannable and zoomable, so it is a way to travel.
 Offered once the board has ≥ 8 cards — below that a board is its own map.
 
+**Spacing under exploration, and a richer map (2026-08-22, last).** Reported with three screenshots —
+initial, one expansion, two — each worse than the last: the next band was drawn ON TOP of the focus column.
+Cause: band x was a fixed pitch (`band * (CARD_W + BAND_GAP)`) while a frame is as wide as what it holds and
+every level opened inside it widens it again. `layoutBands` now measures: walking out from the focus, each
+band starts a full `BAND_GAP` past the right edge of the one inside it (an empty band still holds a column's
+worth, and a board of ordinary cards keeps exactly the old geometry). The map of band positions is exposed
+as `FocusGraph.bandX`, which the band labels and the extend ghost read so they agree with the cards. Pinned:
+a plain board is unchanged; two nested opens keep ≥ `BAND_GAP` between every pair of bands; the exposed map
+matches the cards. Browser, the reported scenario at Overview: partial card overlap 0 px at every step
+(initial → one expansion → two).
+
+The mini map became a **panel**: the app's own `glass-panel-subtle` chrome (the canvas behind the Lens uses
+the same), a header that names it and folds it away, each card in the colour the board paints it (the same
+`visualFor`), the focus in the lineage accent, the two sides on the node strokes, the viewport framed in the
+accent — and **click a card to fly to it**.
+
 ## Not built, and why
 
 - ~~Coarse first paint~~ — built in the evening on the user's call (see above).

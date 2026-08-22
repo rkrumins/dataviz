@@ -367,11 +367,18 @@ and the menu closes. Only on a very narrow window do the chips you reach for
 least fold into a **More** menu; Density and Wires stay on the row, and
 Direction never folds.
 
-In the bottom-left corner, a **mini map** of the whole board — the focus in
-indigo, sources in blue, consumers in amber, and a frame around what you are
-looking at. It is a way to travel, not just a picture: **drag** inside it to
-pan the board, **scroll** it to zoom. It appears once there is enough board
-to get lost on; a handful of cards is its own map.
+In the bottom-left corner, a **mini map** panel: the board in miniature, each
+card in the colour it wears on the board, the focus in the lineage accent,
+sources and consumers outlined in their own tints, and a frame around what
+you are looking at. It is a way to travel, not just a picture — **drag**
+inside it to pan, **scroll** it to zoom, **click a card** to fly straight to
+it — and its header folds it away when you want the room. It appears once
+there is enough board to get lost on; a handful of cards is its own map.
+
+**The columns make room as you explore.** Opening a container makes the
+column it lives in wider, and every level you open inside it wider again —
+so the columns either side move along to keep a clear gap. However deep you
+drill, a card is never drawn over another column.
 
 Along the bottom, a **status bar**: the gestures as keycaps (**Click**
 inspect · **⊕** walk a hop · **▸** open what is inside · **↵** preview ·
