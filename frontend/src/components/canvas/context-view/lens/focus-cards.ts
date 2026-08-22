@@ -85,6 +85,14 @@ export const BAND_BUDGET = 12
  *  Narrower than a frame the reader opened on purpose (`FRAME_WINDOW`):
  *  eighteen bundles of five read; eighteen of eight are a wall again. */
 export const BUNDLE_WINDOW = 5
+/**
+ * PARTNER GRAIN (Part H, 2026-08-22). How many partner frames a hop band
+ * opens to their rows by itself under the Grouped rung — the strongest
+ * first; the rest land closed, counted, one click from their rows. Six
+ * tables each opened to eight column rows were a wall at half zoom even
+ * with six well under the card budget: the cost was rows, not cards.
+ */
+export const OPEN_PARTNERS_PER_BAND = 3
 /** How much of the picture is folded — the reader's preference (see
  *  `usePreferencesStore.lensDensity`): 'overview' lands bundle hosts as
  *  CLOSED cards with counts, 'grouped' as open frames showing their

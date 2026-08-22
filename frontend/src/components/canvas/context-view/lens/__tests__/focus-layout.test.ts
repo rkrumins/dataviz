@@ -27,7 +27,7 @@ import {
 } from '../focus-layout'
 import {
     FOCAL_H, FRAME_WINDOW, LABEL_MIN_RUN, frameWindow, labelFitsRun,
-    BAND_BUDGET, BUNDLE_WINDOW,
+    BAND_BUDGET, BUNDLE_WINDOW, OPEN_PARTNERS_PER_BAND,
     type FocusCard, type FocusEdge,
 } from '../focus-cards'
 
@@ -3785,6 +3785,87 @@ describe('a rollup cell on the board weighs what it says', () => {
         expect(t2.approx).toBe(true)
         expect(g.edges.find(e => e.target === t1a.id)!.approx).toBe(false)   // the raw hop lands on the column row
         expect(g.edges.find(e => e.target === t2.id)!.approx).toBe(true)
+    })
+})
+
+/**
+ * PARTNER GRAIN (Part H, 2026-08-22 — from the Tableau screenshot). The
+ * bundle rule answers "too many cards"; this answers "too many rows": a
+ * band of six partner tables each opened to eight column rows is a wall
+ * at half zoom even though six is under any card budget. The density rung
+ * decides how the partners LAND — Overview closed (the card, its count,
+ * its chevron), Grouped the strongest few open and the rest closed, Every
+ * card all open — and a click opens any of them one level, which is where
+ * the reader drills in themselves.
+ */
+describe('partner grain — how the partners land, by density', () => {
+    /** A focus table with 3 columns feeding 6 partner tables of 4 columns;
+     *  table i carries 6−i hops, so the ranking is observable. */
+    const estate = () => {
+        const nodes: LensWalkNode[] = [wnode('focus', 'Node'), wnode('db', 'Node')]
+        const contains: Array<[string, string]> = [['db', 'focus']]
+        const hops: Array<[string, string]> = []
+        for (let c = 0; c < 3; c++) { nodes.push(wnode(`focus.c${c}`, 'Node')); contains.push(['focus', `focus.c${c}`]) }
+        for (let t = 0; t < 6; t++) {
+            const table = `t${t}`
+            nodes.push(wnode(table, 'Node')); contains.push(['db', table])
+            // Only the columns on this lineage ship (the server never sends the rest).
+            for (let k = 0; k < Math.min(4, 6 - t); k++) { nodes.push(wnode(`${table}.k${k}`, 'Node')); contains.push([table, `${table}.k${k}`]) }
+            for (let h = 0; h < 6 - t; h++) hops.push([`focus.c${h % 3}`, `${table}.k${h % 4}`])
+        }
+        return subgraph({ focus: 'focus', nodes, hops, contains })
+    }
+    const partnerCards = (g: { cards: FocusCard[] }) => g.cards.filter(c => /^t\d$/.test(c.nodeId ?? ''))
+    const rowsOf = (g: { cards: FocusCard[] }, urn: string) => {
+        const card = cardFor(g, urn)
+        return card ? g.cards.filter(c => c.frameId === card.id) : []
+    }
+
+    it('Grouped: the strongest OPEN_PARTNERS_PER_BAND partners open to their rows, the rest land closed with their counts', () => {
+        const g = layout(estate(), initialLensViewState(estate()), { density: 'grouped' })
+        const open = partnerCards(g).filter(c => c.kind === 'frame').map(c => c.nodeId).sort()
+        const closed = partnerCards(g).filter(c => c.kind === 'entity').map(c => c.nodeId).sort()
+        expect(open).toEqual(['t0', 't1', 't2'].slice(0, OPEN_PARTNERS_PER_BAND))
+        expect(closed).toEqual(['t3', 't4', 't5'])
+        expect(rowsOf(g, 't0').length).toBe(4)
+        expect(rowsOf(g, 't5').length).toBe(0)
+        const t5 = cardFor(g, 't5')!
+        expect(t5.canOpenChildren).toBe(true)
+        expect(t5.contents?.onLineage).toBe(1)          // one column on this lineage, one click away
+        expect(t5.count).toBe(1)
+    })
+
+    it('Overview: every partner lands closed; Every card: every partner opens', () => {
+        const sg = estate()
+        const overview = layout(sg, initialLensViewState(sg), { density: 'overview' })
+        expect(partnerCards(overview).every(c => c.kind === 'entity')).toBe(true)
+        const all = layout(sg, initialLensViewState(sg), { density: 'all' })
+        expect(partnerCards(all).every(c => c.kind === 'frame')).toBe(true)
+    })
+
+    it('a partner the reader opened stays open at any rung — the drill is theirs', () => {
+        const sg = estate()
+        const view = { ...initialLensViewState(sg), expandedContainment: new Set(['t5']) }
+        const g = layout(sg, view, { density: 'overview' })
+        expect(cardFor(g, 't5')!.kind).toBe('frame')
+        expect(rowsOf(g, 't5').length).toBe(1)
+        expect(cardFor(g, 't0')!.kind).toBe('entity')
+    })
+
+    it('the focus\'s own rows are untouched, and hops into a closed partner land on its card with their count', () => {
+        const sg = estate()
+        const g = layout(sg, initialLensViewState(sg), { density: 'overview' })
+        const focal = g.cards.find(c => c.kind === 'focal')!
+        expect(focal.frameRows.length).toBe(3)
+        const t0 = cardFor(g, 't0')!
+        const into = g.edges.filter(e => e.target === t0.id)
+        expect(into.reduce((n, e) => n + e.count, 0)).toBe(6)
+    })
+
+    it('the grain folds, the numbers do not: wires agree across rungs', () => {
+        const sg = estate()
+        const totals = (['all', 'grouped', 'overview'] as const).map(density => layout(sg, initialLensViewState(sg), { density }).edges.reduce((n, e) => n + e.count, 0))
+        expect(totals).toEqual([21, 21, 21])
     })
 })
 

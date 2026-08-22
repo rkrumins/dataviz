@@ -72,6 +72,7 @@ import {
     FRAME_WINDOW_ALL,
     BAND_BUDGET,
     BUNDLE_WINDOW,
+    OPEN_PARTNERS_PER_BAND,
     type LensDensity,
     NO_FRAME_ROWS,
     UNRESOLVED_TYPE,
@@ -902,6 +903,38 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // client-side, seedCursor pages server-side). Auto-opening the
     // children pre-splayed the grandchildren across the board ("far too
     // much" — the DATAPLATFORM/Snowflake report).
+
+    // ── 2c. PARTNER GRAIN (Part H, 2026-08-22) ───────────────────────
+    //
+    // The walk above OPENS a partner that holds the hop carriers — the
+    // table with its connected columns as rows — which is the right grain
+    // for two partners and a wall for eleven (reported: a platform's one hop
+    // at half zoom, every table showing eight rows). The density rung says
+    // how the partners LAND: Overview closed — the card, its count, its
+    // chevron; Grouped the strongest OPEN_PARTNERS_PER_BAND per band open
+    // and the rest closed; Every card all open. Strength is what the reader
+    // came for: how many of the partner's own rows are on this lineage. A
+    // partner the reader opened (`expandedContainment`) is theirs and stays
+    // open at any rung — drilling in is the reader's move, one level at a
+    // time, and the closed card says exactly what a click will show.
+    if (density !== 'all') {
+        const opened = [...spine].filter(u =>
+            u !== sg.focusUrn && !focusAncestors.has(u) && !walkedThrough.has(u) && !bundled.has(u)
+            && childrenInPopulation(u).some(isLeafHopCarrier))
+        const strength = (u: string): number => childrenInPopulation(u).filter(k => carriesHop.has(k)).length
+        const byBand = new Map<number, string[]>()
+        for (const u of opened) {
+            const band = signedHop(u)
+            const list = byBand.get(band) ?? []
+            list.push(u)
+            byBand.set(band, list)
+        }
+        for (const list of byBand.values()) {
+            list.sort((a, b) => strength(b) - strength(a) || labelFor(a).localeCompare(labelFor(b)) || a.localeCompare(b))
+            const keep = density === 'overview' ? 0 : OPEN_PARTNERS_PER_BAND
+            for (const u of list.slice(keep)) spine.delete(u)
+        }
+    }
 
     const expanded = new Set<string>([...view.expandedContainment, ...spine])
     for (const urn of view.collapsedContainment) expanded.delete(urn)

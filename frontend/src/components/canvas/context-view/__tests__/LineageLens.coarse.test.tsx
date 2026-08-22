@@ -93,3 +93,32 @@ describe('LineageLens — the coarse first paint', () => {
     expect(nodeText('balances')).toMatch(/1 on this lineage/)
   })
 })
+
+/**
+ * A container focus whose contents feed EACH OTHER (SILVER → GOLD inside the
+ * platform) has partners on its direction sets that sit inside itself. They
+ * are internal flows — drawn in the gutter, counted on the focus — and
+ * never "sources": the focal used to say "Fed by 11 sources" over an empty
+ * upstream band (the Snowflake screenshot, 2026-08-22).
+ */
+describe('LineageLens — internal flows are not sources', () => {
+  beforeEach(() => { usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1, lensDensity: 'all' }) })
+  afterEach(() => { cleanup(); usePreferencesStore.setState({ lensDensity: 'grouped' }) })
+
+  it('the focal reads no upstream sources when every upstream partner is inside the focus', () => {
+    const model: LensWalkModel = {
+      focusUrn: 'plat',
+      nodes: ['plat', 'SILVER', 'GOLD', 's1', 'g1'].map(wnode),
+      lineageEdges: [raw('s1', 'g1', 1)],
+      containmentEdges: [has('plat', 'SILVER'), has('plat', 'GOLD'), has('SILVER', 's1'), has('GOLD', 'g1')],
+      upstreamUrns: new Set(['s1']), downstreamUrns: new Set(['g1']),
+      frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+    }
+    renderLens(model, 'done')
+    const focal = nodeText('plat')!
+    expect(focal).not.toMatch(/Fed by \d/)
+    expect(focal).not.toMatch(/feeds \d/)
+    expect(focal).toMatch(/No upstream sources/)
+  })
+})
+

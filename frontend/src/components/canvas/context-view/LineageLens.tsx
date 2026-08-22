@@ -106,11 +106,9 @@ type WalkNeighbor = LensNeighbor
  * through the SAME function `partnersFor` calls in production, rather
  * than a second copy that could quietly drift from it.
  */
-// eslint-disable-next-line react-refresh/only-export-components
-export function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>, anchorUrn: string = sg.focusUrn): {
-  incoming: WalkNeighbor[]
-  outgoing: WalkNeighbor[]
-} {
+/** The focus SIDE: the focus and everything inside it — hop 0, never a
+ *  partner, whichever surface is counting. */
+function focusSideOf(sg: LensSubgraph<LensWalkNode>, anchorUrn: string = sg.focusUrn): Set<string> {
   const focusSide = new Set<string>()
   const stack = [anchorUrn]
   while (stack.length > 0) {
@@ -119,6 +117,15 @@ export function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>, anchorUrn: s
     focusSide.add(urn)
     for (const child of sg.nodes.get(urn)!.children) stack.push(child)
   }
+  return focusSide
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function walkNeighborRecords(sg: LensSubgraph<LensWalkNode>, anchorUrn: string = sg.focusUrn): {
+  incoming: WalkNeighbor[]
+  outgoing: WalkNeighbor[]
+} {
+  const focusSide = focusSideOf(sg, anchorUrn)
 
   const build = (dir: 'in' | 'out'): WalkNeighbor[] => {
     const byUrn = new Map<string, { weight: number; types: Set<string> }>()
@@ -1282,13 +1289,22 @@ export function LineageLens({
     const residuals = (model.coarseUpstreamUrns?.size || model.coarseDownstreamUrns?.size) ? rollupResiduals(model) : null
     const approxOn = (side: ReadonlySet<string> | undefined) =>
       residuals ? [...(side ?? [])].filter(u => (residuals.get(u) ?? 0) > 0).length : 0
+    // PARTNERS, not participants: a container focus whose contents feed
+    // each other carries those contents on its direction sets (the server
+    // walks from its columns), and they are internal flows — in the gutter,
+    // counted on the focus — never "sources". Reported: "Fed by 11 sources"
+    // over an empty upstream band on a platform focus (2026-08-22).
+    const inside = new Set(focusSideOf(sg))
+    const outside = (side: ReadonlySet<string>) => new Set([...side].filter(u => !inside.has(u)))
+    const upstream = outside(model.upstreamUrns)
+    const downstream = outside(model.downstreamUrns)
     return {
-      up: model.upstreamUrns.size,
-      down: model.downstreamUrns.size,
+      up: upstream.size,
+      down: downstream.size,
       moreUp: capped || more('in'),
       moreDown: capped || more('out'),
-      upSystems: distinctSystemCount(sg, model.upstreamUrns.size > 0 ? model.upstreamUrns : (model.coarseUpstreamUrns ?? model.upstreamUrns)),
-      downSystems: distinctSystemCount(sg, model.downstreamUrns.size > 0 ? model.downstreamUrns : (model.coarseDownstreamUrns ?? model.downstreamUrns)),
+      upSystems: distinctSystemCount(sg, upstream.size > 0 ? upstream : (model.coarseUpstreamUrns ?? upstream)),
+      downSystems: distinctSystemCount(sg, downstream.size > 0 ? downstream : (model.coarseDownstreamUrns ?? downstream)),
       approxUp: approxOn(model.coarseUpstreamUrns),
       approxDown: approxOn(model.coarseDownstreamUrns),
     }

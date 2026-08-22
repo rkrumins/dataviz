@@ -438,11 +438,17 @@ export const usePreferencesStore = create<PreferencesState>()(
       // v3 (2026-08-21): `lensDensity` arrives, default 'grouped' (USER
       // RULING: a band of 200 partner tables folds into its databases by
       // default; Every card stays one click away). Nothing else moves.
-      version: 3,
+      // v4 (2026-08-22): `lensInitialDepth` back to 1. The header's 1/2/3
+      // control was retired (T28 R1) but a 2 or 3 it had written stayed in
+      // storage, so "One hop" quietly fetched two or three hops — a HOP 2
+      // band under a control that says one. A share link still carries its
+      // own depth for the focal it names; the preference is one hop.
+      version: 4,
       migrate: (persisted, version) => {
         let state = persisted as Record<string, unknown>
         if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
         if (version < 3) state = { ...state, lensDensity: 'grouped' }
+        if (version < 4) state = { ...state, lensInitialDepth: 1 }
         return state
       },
     }

@@ -31,3 +31,13 @@ describe('preferences — lensDensity', () => {
     expect(current.lensDensity).toBe('all')             // an explicit choice survives
   })
 })
+
+describe('preferences — lensInitialDepth is one hop again', () => {
+  it('a depth left behind by the retired 1/2/3 control migrates back to 1 — One hop means one hop', () => {
+    const migrate = usePreferencesStore.persist.getOptions().migrate!
+    expect((migrate({ lensInitialDepth: 3 }, 3) as Record<string, unknown>).lensInitialDepth).toBe(1)
+    expect((migrate({ lensInitialDepth: 2, lensDensity: 'all' }, 3) as Record<string, unknown>).lensDensity).toBe('all')
+    expect((migrate({ lensInitialDepth: 1 }, 4) as Record<string, unknown>).lensInitialDepth).toBe(1)
+  })
+})
+
