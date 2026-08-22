@@ -114,6 +114,22 @@ Suites after both parts: frontend **3,083 tests / 322 files** green (`ActivityFe
 across midnight and passes alone); backend unit 233 + live gate 35 green; `tsc` 61; eslint on the
 touched files clean.
 
+**Siblings group under their parent (2026-08-22 morning, from the Executive Board Dashboard screenshots).**
+Five fact tables sharing GOLD were five loose cards each saying "⋯› GOLD", because the bundle rule waited
+for a band to pass a 12-card budget. The budget is gone: cards sharing a parent fold into a frame under it
+whenever there are **two or more** of them, at Overview (host closed, one click shows the rows) and Grouped
+(host open to its strongest five rows); a lone child stays a card — grouping one thing is a click for
+nothing; Every card is untouched. Same screenshots, second defect: the "⋯› GOLD" crumb on a closed card was
+the one crumb on the board that was not a button (frames, the focal and the peek all re-anchor on click) —
+it is now, so the way UP the containment exists at every rung. Browser: dashboard at depth 2 — Grouped
+21 nodes (GOLD one frame, five rows), Overview 11 (GOLD one card, one ×14 wire), Every card 36; Tableau one
+hop — Grouped **14 nodes at zoom 1.36 (was 27 at 0.60)**, Overview 9 (was 12), Every card 44 unchanged.
+Known and left: at a 1600 px window the Lens header's focal chip wraps over the NEXT control (present
+before these changes).
+
+Suites: frontend **3,084 tests / 322 files** green (the d3-drag jsdom error from the perf drag test is the
+known pre-existing one); `tsc` 61; eslint on the touched files unchanged.
+
 ## Not built, and why
 
 - ~~Coarse first paint~~ — built in the evening on the user's call (see above).

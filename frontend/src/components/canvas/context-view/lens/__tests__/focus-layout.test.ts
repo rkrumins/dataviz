@@ -27,7 +27,7 @@ import {
 } from '../focus-layout'
 import {
     FOCAL_H, FRAME_WINDOW, LABEL_MIN_RUN, frameWindow, labelFitsRun,
-    BAND_BUDGET, BUNDLE_WINDOW, OPEN_PARTNERS_PER_BAND,
+    BUNDLE_WINDOW, OPEN_PARTNERS_PER_BAND,
     type FocusCard, type FocusEdge,
 } from '../focus-cards'
 
@@ -3436,7 +3436,7 @@ describe('deep focus subtree — FOCUS +1 (2026-08-19, re-refined: children are 
  * carrying grain only — so every pin below runs over three hierarchies,
  * all on ONE entity type, and the rule cannot know which it is on.
  */
-describe('fan-in bundles — a band over budget groups its cards under their parents', () => {
+describe('fan-in bundles — siblings sharing a parent group under it', () => {
     const HIERARCHIES: Array<{ name: string; levels: string[] }> = [
         { name: 'Domain → Department → Database → Table → Column', levels: ['Domain', 'Department', 'Database', 'Table', 'Column'] },
         { name: 'Root → Node → Node → Node', levels: ['Root', 'Node', 'Node', 'Node'] },
@@ -3561,15 +3561,20 @@ describe('fan-in bundles — a band over budget groups its cards under their par
                 expect(topLevel(g).length).toBe(18 + 1)
             })
 
-            it('the budget is exact: BAND_BUDGET cards stay cards, one more bundles', () => {
-                const under = hierarchyEstate(levels, { groups: 1, cardsPer: BAND_BUDGET })
-                const gUnder = layout(under, initialLensViewState(under), { density: 'grouped' })
-                expect(gUnder.bundled.size).toBe(0)
-                expect(topLevel(gUnder).filter(c => /\.t\d+$/.test(c.nodeId ?? '')).length).toBe(BAND_BUDGET)
-                const over = hierarchyEstate(levels, { groups: 1, cardsPer: BAND_BUDGET + 1 })
-                const gOver = layout(over, initialLensViewState(over), { density: 'grouped' })
-                expect(gOver.bundled.size).toBe(1)
-                expect(topLevel(gOver).filter(c => /\.t\d+$/.test(c.nodeId ?? '')).length).toBe(0)
+            it('two siblings fold under their parent; a lone child stays a card (grouping one thing is a click for nothing)', () => {
+                // The user's GOLD case (2026-08-22): five fact tables under
+                // one database were five loose cards, each saying "⋯› GOLD"
+                // — because the band was under a 12-card budget. A shared
+                // parent is the grouping whether the band is wide or not.
+                const lone = hierarchyEstate(levels, { groups: 1, cardsPer: 1 })
+                const gLone = layout(lone, initialLensViewState(lone), { density: 'grouped' })
+                expect(gLone.bundled.size).toBe(0)
+                expect(topLevel(gLone).filter(c => /\.t\d+$/.test(c.nodeId ?? '')).length).toBe(1)
+                const two = hierarchyEstate(levels, { groups: 1, cardsPer: 2 })
+                const gTwo = layout(two, initialLensViewState(two), { density: 'grouped' })
+                expect(gTwo.bundled.size).toBe(1)
+                expect(topLevel(gTwo).filter(c => /\.t\d+$/.test(c.nodeId ?? '')).length).toBe(0)
+                expect(rowsOf(gTwo, groupUrnsOf(two)[0]!).length).toBe(2)
             })
 
             it('a card with no container stays a card beside the bundles', () => {
@@ -3598,12 +3603,12 @@ describe('fan-in bundles — a band over budget groups its cards under their par
                 expect(topLevel(g).filter(c => /\.t\d+$/.test(c.nodeId ?? '')).length).toBe(198)
             })
 
-            it('a wave that takes the band past the budget folds the loose cards into their frames', () => {
-                const small = hierarchyEstate(levels, { groups: 1, cardsPer: 5 })
+            it('a wave that brings a sibling folds the lone card into its frame (the board only gets calmer)', () => {
+                const small = hierarchyEstate(levels, { groups: 1, cardsPer: 1 })
                 const g1 = layout(small, initialLensViewState(small), { density: 'grouped' })
                 expect(g1.bundled.size).toBe(0)
                 // The same view, fed back the way the lens feeds it, over the grown model.
-                const grown = hierarchyEstate(levels, { groups: 1, cardsPer: 20 })
+                const grown = hierarchyEstate(levels, { groups: 1, cardsPer: 2 })
                 const view = { ...initialLensViewState(grown), walkedThrough: g1.walkedThrough }
                 const g2 = layout(grown, view, { density: 'grouped' })
                 expect(g2.bundled.size).toBe(1)

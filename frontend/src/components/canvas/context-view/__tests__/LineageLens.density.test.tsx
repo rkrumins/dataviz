@@ -9,7 +9,7 @@
  * rung — only the grain folds — and the header control writes the
  * preference.
  */
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { LineageLens } from '../LineageLens'
 import { usePreferencesStore } from '@/store/preferences'
@@ -104,9 +104,10 @@ describe('LineageLens — density rungs', () => {
   })
 })
 
-/** Five partner tables under ONE database — under the card budget, so no
- *  bundle — each with its columns on the lineage. The Tableau screenshot's
- *  shape (2026-08-22): the cost was rows, not cards. */
+/** Five partner tables under ONE database, each with its columns on the
+ *  lineage. The GOLD screenshot's shape (2026-08-22): five fact tables
+ *  sharing a database were five loose cards each saying "⋯› GOLD" — the
+ *  database is the grouping, and the tables are its rows. */
 function fiveTables(): LensWalkModel {
   const nodes: LensWalkNode[] = []
   const containmentEdges: Array<{ sourceUrn: string; targetUrn: string }> = []
@@ -134,31 +135,39 @@ describe('LineageLens — how the partners land (the drill is the reader\'s)', (
   beforeEach(() => { usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1, lensDensity: 'grouped' }) })
   afterEach(() => { cleanup(); usePreferencesStore.setState({ lensDensity: 'grouped' }) })
 
-  const renderFive = () => render(
+  const renderFive = (onRecenter = vi.fn()) => render(
     <LineageLens
       history={{ entries: ['focus'], cursor: 0 }}
       walk={doneWalk(fiveTables())}
       walkApi={{ extend: vi.fn(), page: vi.fn(), retry: vi.fn() }}
-      onRecenter={vi.fn()} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
+      onRecenter={onRecenter} onBack={vi.fn()} onForward={vi.fn()} onClose={vi.fn()}
     />,
   )
   const columnsOnBoard = () => nodesOnBoard().filter(t => /\.col\d/.test(t)).length
+  const tablesOnFive = () => nodesOnBoard().filter(t => /^db\.table_\d(?!\.col)/.test(t)).length
+  const node = (re: RegExp) => [...document.querySelectorAll('.react-flow__node')].find(n => re.test(n.textContent ?? ''))
+  const chevron = (el: Element) => el.querySelector<HTMLButtonElement>('button[aria-label^="Show what\'s inside"]')!
 
-  it('Grouped: the strongest three tables show their columns; the other two land closed, counted, with a chevron', () => {
+  it('Grouped: the database is a frame whose rows are the five tables, closed and counted; one click opens one', () => {
     renderFive()
-    expect(columnsOnBoard()).toBe(5 + 4 + 3)                 // table_0, table_1, table_2
-    const closed = [...document.querySelectorAll('.react-flow__node')].find(n => (n.textContent ?? '').startsWith('db.table_4'))!
-    expect(closed.textContent).toMatch(/1 on this lineage/)
-    expect(closed.querySelector('button[aria-label^="Show what\'s inside"]')).toBeTruthy()
+    expect(columnsOnBoard()).toBe(0)
+    expect(tablesOnFive()).toBe(5)
+    expect(screen.getByLabelText(/^Rows inside db\b/)).toBeTruthy()
+    const t4 = node(/^db\.table_4(?!\.col)/)!
+    expect(t4.textContent).toMatch(/1 on this lineage/)
+    fireEvent.click(chevron(t4))
+    expect(columnsOnBoard()).toBe(1)
   })
 
-  it('Overview: every table lands closed; one click opens one', () => {
+  it('Overview: the database lands closed with its count; one click shows the tables grouped under it', () => {
     renderFive()
     fireEvent.click(screen.getByRole('button', { name: /overview/i }))
+    expect(tablesOnFive()).toBe(0)
+    const db = node(/^db(?!\.)/)!
+    expect(db.textContent).toMatch(/5 on this lineage/)
+    fireEvent.click(chevron(db))
+    expect(tablesOnFive()).toBe(5)
     expect(columnsOnBoard()).toBe(0)
-    const t0 = [...document.querySelectorAll('.react-flow__node')].find(n => (n.textContent ?? '').startsWith('db.table_0'))!
-    fireEvent.click(t0.querySelector<HTMLButtonElement>('button[aria-label^="Show what\'s inside"]')!)
-    expect(columnsOnBoard()).toBe(5)
   })
 
   it('Every card: every table shows its columns', () => {
@@ -167,5 +176,17 @@ describe('LineageLens — how the partners land (the drill is the reader\'s)', (
     expect(columnsOnBoard()).toBe(15)
     expect(OPEN_PARTNERS_PER_BAND).toBe(3)
   })
-})
 
+  it('the crumb on a closed card is a way UP: click it and the parent becomes the subject', () => {
+    // "We seem to have lost the ability to navigate up the containment"
+    // (2026-08-22): frames, the focal and the peek all had clickable
+    // crumbs; a closed card's "⋯› dept" was the one that only LOOKED
+    // like one — and Overview lands everything closed.
+    const onRecenter = vi.fn()
+    renderFive(onRecenter)
+    fireEvent.click(screen.getByRole('button', { name: /overview/i }))
+    const db = node(/^db(?!\.)/)!
+    fireEvent.click(within(db as HTMLElement).getByRole('button', { name: 'Focus on dept' }))
+    expect(onRecenter).toHaveBeenCalledWith('dept')
+  })
+})

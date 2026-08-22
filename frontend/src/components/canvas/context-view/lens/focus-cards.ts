@@ -73,15 +73,11 @@ export const ANCESTRY_CAP = 6
  *  fixed window is what keeps a 500-column table the same size as a
  *  5-column one; what MOVES it is a scroll rather than a page click. */
 export const FRAME_WINDOW = 8
-/**
- * FAN-IN BUNDLES (Part H, 2026-08-21). How many top-level cards a hop band
- * may show before it is overwhelming: past this, the cards fold into frames
- * under their own parents (a database holding its tables as rows). A
- * layout constant about what a reader can scan — never ontology: the rule
- * that uses it reads parent pointers only.
- */
-export const BAND_BUDGET = 12
-/** Rows a bundle shows at once — the strongest first, "N more" behind.
+/** FAN-IN BUNDLES (Part H, 2026-08-21; the budget gate dropped 2026-08-22):
+ *  cards sharing a parent fold into a frame under it whenever there are
+ *  two or more of them — a database holding its tables as rows. The rule
+ *  reads parent pointers only, never ontology. These are its rows: the
+ *  strongest first, "N more" behind.
  *  Narrower than a frame the reader opened on purpose (`FRAME_WINDOW`):
  *  eighteen bundles of five read; eighteen of eight are a wall again. */
 export const BUNDLE_WINDOW = 5

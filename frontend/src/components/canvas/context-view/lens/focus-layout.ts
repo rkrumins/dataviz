@@ -70,7 +70,6 @@ import {
     nameLinesFor,
     FRAME_WINDOW,
     FRAME_WINDOW_ALL,
-    BAND_BUDGET,
     BUNDLE_WINDOW,
     OPEN_PARTNERS_PER_BAND,
     type LensDensity,
@@ -854,41 +853,34 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     //    unit — a level that also holds chrome is not the grain to fold
     //    at (a ragged table beside a walked-through database stays a
     //    card) — and never above the focus (R1: nothing is drawn there).
-    //  • It folds when the band it would sit in (its own signed hop, the
-    //    same rule that places every card) is over BAND_BUDGET: it stops
-    //    being chrome and becomes a drawn frame; its units become its
-    //    rows, CLOSED, one level per click — unless the reader already
-    //    opened one. One level only: the frame's own parent stays chrome,
-    //    because a frame of frames puts the answer two clicks away.
+    //  • It folds when it holds TWO or more units: it stops being chrome
+    //    and becomes a drawn frame; its units become its rows, CLOSED,
+    //    one level per click — unless the reader already opened one. A
+    //    lone unit stays a card with its parent as a crumb: grouping one
+    //    thing under its parent is a click for nothing. (2026-08-22: this
+    //    used to wait for the band to pass a 12-card budget, so five
+    //    fact tables sharing GOLD were five loose cards each saying
+    //    "⋯› GOLD" — the shared parent IS the grouping, wide band or not.)
+    //    One level only: the frame's own parent stays chrome, because a
+    //    frame of frames puts the answer two clicks away.
     //  • Overview lands the host CLOSED too: the database as a card with
     //    its count, the tables one click away.
     //  • It runs AFTER the sticky walk-through and overrides it in the
-    //    grow direction only: a database seen through at five tables
-    //    folds when a later wave takes the band past the budget. The
-    //    board only ever gets calmer as the walk grows, never noisier.
+    //    grow direction only: a database seen through at one table folds
+    //    when a later wave brings a sibling. The board only ever gets
+    //    calmer as the walk grows, never noisier.
     const bundled = new Set<string>()
     if (density !== 'all') {
         const unitsByHost = new Map<string, string[]>()
-        const bandCount = new Map<number, number>()
-        const countUnit = (unit: string) => {
-            const band = signedHop(unit)
-            bandCount.set(band, (bandCount.get(band) ?? 0) + 1)
-        }
         for (const host of walkedThrough) {
+            if (focusAncestors.has(host) || host === sg.focusUrn) continue
             const units = childrenInPopulation(host)
                 .filter(k => !walkedThrough.has(k) && !focusAncestors.has(k) && k !== sg.focusUrn)
-            for (const unit of units) countUnit(unit)
-            if (!focusAncestors.has(host) && host !== sg.focusUrn) unitsByHost.set(host, units)
-        }
-        for (const urn of population) {
-            if ((nodeOf(urn)?.parent ?? null) !== null) continue
-            if (walkedThrough.has(urn) || focusAncestors.has(urn) || urn === sg.focusUrn) continue
-            countUnit(urn)
+            unitsByHost.set(host, units)
         }
         for (const [host, units] of unitsByHost) {
-            if (units.length === 0) continue
+            if (units.length < 2) continue
             if (childrenInPopulation(host).some(k => walkedThrough.has(k))) continue
-            if ((bandCount.get(signedHop(host)) ?? 0) <= BAND_BUDGET) continue
             bundled.add(host)
             walkedThrough.delete(host)
             for (const unit of units) spine.delete(unit)

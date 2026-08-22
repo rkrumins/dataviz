@@ -48,7 +48,7 @@ const loginStatus = await evalJs(`fetch('/api/v1/auth/login',{method:'POST',head
 console.log('login', loginStatus)
 
 // 2. open the view with a Lens share link on the focus
-const share = { v: 3, entries: [focusUrn], cursor: 0, mode: 'graph', direction: 'both', depth: 1, revealed: [], opened: [focusUrn], collapsed: [], frameAll: [], framePages: [], frameQueries: [], pinned: [], railWindow: null, condensedOpen: [] }
+const share = { v: 3, entries: [focusUrn], cursor: 0, mode: 'graph', direction: 'both', depth: Number(process.env.DEPTH ?? 1), revealed: [], opened: [focusUrn], collapsed: [], frameAll: [], framePages: [], frameQueries: [], pinned: [], railWindow: null, condensedOpen: [] }
 const token = Buffer.from(JSON.stringify(share), 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 const requests = []
 const t0 = Date.now()

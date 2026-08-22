@@ -1089,13 +1089,20 @@ function FrameAncestry({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   )
 }
 
-/** Where a TOP-LEVEL card lives. Rows never carry one: inside a frame
- *  the header already names the owner, right above them, and repeating
- *  it on every row is the noise the frame was for. */
-function ProvenanceRibbon({ card }: { card: FocusCard }) {
+/** Where a TOP-LEVEL card lives — and a way UP to it. Rows never carry
+ *  one: inside a frame the header already names the owner, right above
+ *  them, and repeating it on every row is the noise the frame was for.
+ *
+ *  The owner is a button, like every other crumb on the board (frame
+ *  header, focal, peek): click `GOLD` on a closed `fact_orders` and GOLD
+ *  becomes the subject. It was the one crumb that only LOOKED like one,
+ *  and Overview lands every partner closed — "we seem to have lost the
+ *  ability to navigate up the containment" (2026-08-22). */
+function ProvenanceRibbon({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   if (card.ancestry.length === 0 && !card.parentLabel) return null
   const chain = card.ancestry.length > 0 ? card.ancestry : [card.parentLabel!]
   const owner = chain[chain.length - 1]
+  const ownerId = card.ancestryIds[chain.length - 1] ?? card.parentId ?? ''
   return (
     <span className="flex items-center gap-1 min-w-0" title={`in ${chain.join(' › ')}`}>
       <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/50" />
@@ -1108,7 +1115,15 @@ function ProvenanceRibbon({ card }: { card: FocusCard }) {
           Snowflake, which identifies nothing and reads as something
           broken. Below the floor the row's own counts give up their space
           instead; the tooltip carries the whole chain either way. */}
-      <TailName className="text-ink-muted min-w-[3.5rem]" title={`in ${chain.join(' › ')}`}>{owner}</TailName>
+      <button
+        type="button"
+        aria-label={`Focus on ${owner}`}
+        disabled={ownerId === ''}
+        onClick={(e) => { e.stopPropagation(); ctx.onFocus(ownerId) }}
+        className="nodrag group/crumb flex min-w-0 disabled:pointer-events-none"
+      >
+        <TailName className="text-ink-muted min-w-[3.5rem] group-hover/crumb:text-accent-lineage transition-colors" title={`in ${chain.join(' › ')}`}>{owner}</TailName>
+      </button>
     </span>
   )
 }
@@ -2005,7 +2020,7 @@ const EntityContent = memo(function EntityContent({ card, ctx, onTrail }: {
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug min-w-0">
           {(card.ancestry.length > 0 || card.parentLabel) && (
             <>
-              <ProvenanceRibbon card={card} />
+              <ProvenanceRibbon card={card} ctx={ctx} />
               <span className="text-ink-muted/40">·</span>
             </>
           )}
