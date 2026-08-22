@@ -31,7 +31,7 @@
  * in the capture phase so canvas keyboard shortcuts don't fire
  * underneath.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, startTransition } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
@@ -77,6 +77,7 @@ import { ControlTip } from './lens/ControlTip'
 import { useToolbarOverflow } from './lens/useToolbarOverflow'
 import { ViewControl } from './lens/ViewControl'
 import { LensStatusBar } from './lens/LensStatusBar'
+import { applyQueryDimming } from './lens/query-dimming'
 import * as Popover from '@radix-ui/react-popover'
 import { LensSkeleton } from './lens/LensSkeleton'
 
@@ -501,11 +502,21 @@ export function LineageLens({
   // `LineageLens.test.tsx`'s "re-anchoring from a walked-through state"
   // describe block for the pin walking this exact in-session path.
   const view = viewState?.nodeId === nodeId ? viewState.view : freshView
+  // EVERY STRUCTURAL EDIT RUNS AT TRANSITION PRIORITY (2026-08-22).
+  // Opening a container re-lays the whole board out — MEASURED at 334 ms
+  // mean on the wide table's 505 cards — and doing that inside the click
+  // handler froze the pointer for a third of a second per expand ("laggy
+  // when browsing"). As a transition, React keeps the current board
+  // interactive and swaps it when the new one is ready, so a click never
+  // blocks the next hover, scroll or keystroke. What the reader clicked
+  // is unchanged; only the priority of the work behind it is.
   const editView = useCallback((edit: (base: LensViewState) => LensViewState) => {
-    setViewState(prev => ({
-      nodeId,
-      view: edit(prev?.nodeId === nodeId ? prev.view : freshView),
-    }))
+    startTransition(() => {
+      setViewState(prev => ({
+        nodeId,
+        view: edit(prev?.nodeId === nodeId ? prev.view : freshView),
+      }))
+    })
   }, [nodeId, freshView])
 
   // Type-filter chips — lens-local, keyed to the focal (like the text
@@ -613,10 +624,15 @@ export function LineageLens({
     return { ...view, pinned }
   }, [model, view])
 
+  // THE FILTER IS NOT A REBUILD (2026-08-22). `query` is deliberately NOT
+  // a dependency of this memo: it only ever set `dimmed`, and having it
+  // here re-laid out the whole board on every keystroke — 325 ms of
+  // blocked main thread per letter on the wide table. The dimming is
+  // applied over the finished board below (`applyQueryDimming`).
   const layout = useMemo(() => buildFocusLayout({
     sg,
     view: layoutView,
-    query,
+    query: '',
     hiddenTypes,
     extendStatus: walk?.extendStatus ?? EMPTY_EXTEND_STATUS,
     childrenAll,
@@ -625,7 +641,7 @@ export function LineageLens({
     directionFilter,
     density,
     wires,
-  }), [sg, layoutView, query, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter, density, wires])
+  }), [sg, layoutView, hiddenTypes, walk?.extendStatus, childrenAll, childrenAllStatus, walkStatus, directionFilter, density, wires])
 
   // T23 R2 — pass-through condensation, a pure re-projection over the
   // built layout (never touches population/grain/rank). OFF unless the
@@ -650,10 +666,18 @@ export function LineageLens({
   // relationship the window used to have with `condensed`. See
   // invariants.ts's own doc comment for the full contract and the
   // degradation each violation takes.
-  const boardGraph = useMemo(
+  const drawnGraph = useMemo(
     () => enforceLensInvariants(condensed, layout).graph,
     [condensed, layout],
   )
+  // The board-wide filter, over the finished board: a pass over the drawn
+  // cards, not a rebuild. An empty filter returns the same object, so a
+  // board nobody has filtered pays nothing.
+  // The typed text updates the input at once; the BOARD re-dims at
+  // transition priority, so a keystroke never waits on 505 cards
+  // re-rendering (measured 162 ms per letter before this).
+  const deferredQuery = useDeferredValue(query)
+  const boardGraph = useMemo(() => applyQueryDimming(drawnGraph, deferredQuery), [drawnGraph, deferredQuery])
   // One control, two meanings depending on which side is currently
   // showing: a condensed run's own connector chip ADDS itself here
   // (unfolds), and its unfolded boundary's re-condense control REMOVES
@@ -685,10 +709,9 @@ export function LineageLens({
     // each card took. Feeding them back is the sanctioned way that
     // converges (grow-only, one extra pass, then a no-op), and it is the
     // mechanism the free-flow work was signed off on. Restructuring it is
-    // a behavioural change; silencing it here is what keeps this file
-    // GREEN under lint, so the next rules-of-hooks error is visible —
-    // which is the whole lesson of the crash that shipped from here.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // a behavioural change. Since 2026-08-22 `editView` writes inside a
+    // transition, so the rule no longer fires here at all — the feedback
+    // is scheduled, not a synchronous cascade.
     editView(base => ({ ...base, walkedThrough: new Set(layout.walkedThrough) }))
   }, [layout.walkedThrough, view.walkedThrough, editView, seedPendingForFocal])
 
@@ -701,8 +724,9 @@ export function LineageLens({
     // See `seedPendingForFocal`'s own doc comment above.
     if (seedPendingForFocal) return
     if (layout.drawnRank.size === view.drawnRank.size) return
-    // Same ratified layout→view feedback as `walkedThrough` above.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // Same ratified layout→view feedback as `walkedThrough` above, and
+    // likewise scheduled rather than synchronous since `editView` became
+    // a transition.
     editView(base => ({ ...base, drawnRank: new Map(layout.drawnRank) }))
   }, [layout.drawnRank, view.drawnRank, editView, seedPendingForFocal])
 

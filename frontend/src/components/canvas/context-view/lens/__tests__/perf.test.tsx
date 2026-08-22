@@ -29,6 +29,7 @@ import { ReactFlowProvider } from '@xyflow/react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { FocusGraphView } from '../FocusGraphView'
 import { buildFocusLayout, initialLensViewState } from '../focus-layout'
+import { applyQueryDimming } from '../query-dimming'
 import type { LensWalkNode } from '../closure-adapter'
 import { buildLensSubgraph } from '../lens-subgraph'
 import { applyCondensation } from '../condensation'
@@ -366,6 +367,54 @@ describe('P0 — perf harness (Task 20)', () => {
         expect(avg).toBeGreaterThan(0)
         // THE P3 regression guard — a generous ceiling, not the target.
         expect(avg).toBeLessThan(REGRESSION_CEILING_MS)
+      })
+    }
+  })
+
+  /**
+   * (e) TYPING IN THE FILTER IS NOT A REBUILD (2026-08-22).
+   *
+   * MEASURED in the browser on the wide table (505 cards): 325 ms of
+   * blocked main thread per keystroke, because `query` was an input to
+   * the layout. It only ever set `dimmed`, so it now runs over the
+   * FINISHED board. The pin: dimming a laid-out board is a fraction of
+   * laying it out — a ratio, not a wall-clock number, so it holds on any
+   * machine.
+   */
+  describe('(e) the filter dims a finished board rather than rebuilding it', () => {
+    for (const fixtureName of ['walkWideHub']) {
+      it(`${fixtureName}: a keystroke costs a fraction of a rebuild`, () => {
+        const fixture = WALK_FIXTURES[fixtureName]
+        const sg = buildLensSubgraph(fixture.model)
+        const base = initialLensViewState(sg)
+        const view = fixture.script ? fixture.script(base) : base
+        const input = {
+          sg, view, query: '', hiddenTypes: new Set<string>(),
+          extendStatus: fixture.extendStatus ?? new Map(),
+          childrenAll: fixture.childrenAll ?? new Map(),
+          childrenAllStatus: new Map(),
+          walkStatus: 'done' as const,
+          directionFilter: fixture.directionFilter,
+        }
+        const graph = buildFocusLayout(input)
+        applyQueryDimming(graph, 'warm')                       // JIT warm-up, untimed
+        buildFocusLayout(input)
+
+        const N = 20
+        let rebuild = 0
+        let dim = 0
+        for (let i = 0; i < N; i++) {
+          let t = performance.now()
+          buildFocusLayout(input)
+          rebuild += performance.now() - t
+          t = performance.now()
+          applyQueryDimming(graph, `letter${i}`)               // a different needle each time
+          dim += performance.now() - t
+        }
+        console.log(`[P0-e] ${fixtureName} rebuildAvg=${(rebuild / N).toFixed(3)}ms dimAvg=${(dim / N).toFixed(3)}ms`)
+        expect(dim).toBeLessThan(rebuild / 4)
+        // And an unfiltered board pays nothing at all.
+        expect(applyQueryDimming(graph, '')).toBe(graph)
       })
     }
   })

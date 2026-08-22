@@ -340,6 +340,28 @@
     from { opacity: 0; transform: translateY(2px); }
     to   { opacity: 1; transform: none; }
   }
+  /* THE MINI MAP (2026-08-22) — React Flow positions its own panel; here
+     it lives INSIDE the lens's glass panel chrome (a header that names it
+     and folds it away), so its own positioning is neutralised and only
+     its canvas remains. The panel around it carries the app's glass
+     tokens, exactly as the canvas behind the lens does. */
+  .nx-lens-minimap.react-flow__minimap {
+    position: static !important;
+    margin: 0 !important;
+    width: 208px;
+    height: 132px;
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
+    display: block;
+  }
+  .react-flow__panel:has(> [aria-label='Map of the board']) {
+    margin: 0.75rem !important;
+  }
+  .dark .nx-lens-minimap .react-flow__minimap-mask {
+    fill: rgb(2 6 23 / 0.5);
+  }
+
   /* THE PICTURE'S GHOST (LensSkeleton): a shimmer sweeping across every
      ghost card, and the ghost wires' dashes travelling toward the focus. */
   .nx-skeleton {

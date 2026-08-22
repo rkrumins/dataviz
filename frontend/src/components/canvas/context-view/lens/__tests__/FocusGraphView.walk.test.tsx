@@ -7,7 +7,7 @@
  * the walk, fits the whole board on click, and goes away.
  */
 import { describe, it, expect } from 'vitest'
-import { render, act, fireEvent, screen } from '@testing-library/react'
+import { render, act, fireEvent, screen, within } from '@testing-library/react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { FocusGraphView } from '../FocusGraphView'
 import { WALK_FIXTURES } from '@/harness/lensFixtures'
@@ -135,5 +135,42 @@ describe('FocusGraphView — the way back to the focus is findable (2026-08-22)'
     render(view(built.graph, built, false))
     await settle()
     expect(screen.queryByTestId('lens-focus-offscreen')).toBeNull()
+  })
+})
+
+describe('FocusGraphView — the mini map (2026-08-22)', () => {
+  // "A mini map on the left bottom hand side for more streamlined
+  // browsing." It appears when there is enough board to get lost on, is
+  // a navigation device (drag it to pan, scroll it to zoom), and colours
+  // the focus and the two sides the way the board does.
+  it('is offered, bottom-left, once the board is big enough to get lost on', async () => {
+    const built = buildWalk(WALK_FIXTURES.walkHub)
+    render(view(built.graph, built, false))
+    await settle()
+    expect(screen.getByRole('img', { name: /map of the board/i })).toBeInTheDocument()
+    // The PANEL is what is positioned; the map itself sits inside its chrome.
+    const panel = screen.getByRole('region', { name: /map of the board/i }).closest('.react-flow__panel')
+    expect(panel?.className).toMatch(/bottom.*left|left.*bottom/)
+  })
+
+  it('is a panel that says what it is, and folds away when it is in the way', async () => {
+    const built = buildWalk(WALK_FIXTURES.walkHub)
+    render(view(built.graph, built, false))
+    await settle()
+    const panel = screen.getByRole('region', { name: /map of the board/i })
+    expect(panel).toHaveTextContent(/map/i)
+    expect(screen.getByRole('img', { name: /map of the board/i })).toBeInTheDocument()
+    fireEvent.click(within(panel).getByRole('button', { name: /hide the map/i }))
+    expect(screen.queryByRole('img', { name: /map of the board/i })).toBeNull()
+    fireEvent.click(within(panel).getByRole('button', { name: /show the map/i }))
+    expect(screen.getByRole('img', { name: /map of the board/i })).toBeInTheDocument()
+  })
+
+  it('a board of a few cards has nothing to get lost on — no map', async () => {
+    const built = buildWalk(WALK_FIXTURES.walkHub)
+    const tiny = { ...built.graph, cards: built.graph.cards.slice(0, 3) }
+    render(view(tiny, built, false))
+    await settle()
+    expect(screen.queryByRole('img', { name: /map of the board/i })).toBeNull()
   })
 })

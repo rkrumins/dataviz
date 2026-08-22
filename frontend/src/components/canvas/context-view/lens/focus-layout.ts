@@ -46,6 +46,8 @@ import {
     type LensSubgraphNode,
     type ProjectedLensEdge,
 } from './lens-subgraph'
+import { applyQueryDimming } from './query-dimming'
+import { ancestorsFor, subtreeFor } from './model-cache'
 import type { LensWalkNode } from './closure-adapter'
 import {
     assignLanes,
@@ -445,7 +447,6 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // cycle to depth 0 rather than throwing, so the tree it hands over
     // can still contain one.
 
-    const ancestorCache = new Map<string, string[]>()
     /**
      * Containment ancestors, ROOT-FIRST. WHOLE chain, cycle-guarded.
      *
@@ -467,41 +468,14 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      * The cap still applies where it was always meant to: `emit` slices
      * the ribbon it prints.
      */
-    const ancestorsOf = (urn: string): string[] => {
-        const hit = ancestorCache.get(urn)
-        if (hit) return hit
-        const out: string[] = []
-        const seen = new Set<string>([urn])
-        let cursor = model.get(urn)?.parent ?? null
-        while (cursor && !seen.has(cursor)) {
-            seen.add(cursor)
-            out.push(cursor)
-            cursor = model.get(cursor)?.parent ?? null
-        }
-        out.reverse()
-        ancestorCache.set(urn, out)
-        return out
-    }
+    // Cached against the MODEL, not this build — see `model-cache.ts`.
+    const ancestorsOf = (urn: string): string[] => ancestorsFor(model, urn)
     const rootOf = (urn: string): string => ancestorsOf(urn)[0] ?? urn
 
-    const subtreeCache = new Map<string, Set<string>>()
     /** The entity plus every containment descendant IN THE MODEL. The
      *  model's children are already scoped to walk participants, so this
-     *  can never reach outside the lineage. */
-    const subtreeOf = (urn: string): Set<string> => {
-        const hit = subtreeCache.get(urn)
-        if (hit) return hit
-        const out = new Set<string>()
-        const stack = [urn]
-        while (stack.length > 0) {
-            const next = stack.pop()!
-            if (out.has(next) || !model.has(next)) continue
-            out.add(next)
-            for (const child of model.get(next)!.children) stack.push(child)
-        }
-        subtreeCache.set(urn, out)
-        return out
-    }
+     *  can never reach outside the lineage. Cached against the model. */
+    const subtreeOf = (urn: string): Set<string> => subtreeFor(model, urn)
 
     const nodeOf = (urn: string): LensSubgraphNode<LensWalkNode> | undefined => model.get(urn)
     const dataOf = (urn: string): Record<string, unknown> =>
@@ -1228,8 +1202,14 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         return internalHopsIndex.get(frameUrn) ?? []
     }
 
-    const needle = query.trim().toLowerCase()
-    const matches = (label: string): boolean => needle === '' || label.toLowerCase().includes(needle)
+    // THE BOARD-WIDE FILTER IS NOT COMPUTED HERE any more (2026-08-22).
+    // It only ever set `dimmed`, and doing that inside the layout made
+    // every keystroke rebuild the whole board — 325 ms of blocked main
+    // thread per letter on the wide table. The layout is now independent
+    // of what is typed; `applyQueryDimming` (called on the way out, and
+    // by the lens over its FINISHED board) dims the result. A frame's
+    // OWN Find (`hostQuery`) still dims here: it decides which rows a
+    // frame lists, which is structural.
 
     /** Raw hops this card's subtree carries to the rest of the picture —
      *  what the wires into it add up to, and the rank of its slot. */
@@ -1831,7 +1811,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                         : showAll && childrenAllStatus.get(urn) === 'error' ? 'error'
                             : showAll && childrenAllStatus.get(urn) === 'unsupported' ? 'unsupported'
                                 : null,
-            dimmed: !matches(label) || (hostQuery !== '' && !label.toLowerCase().includes(hostQuery)),
+            dimmed: hostQuery !== '' && !label.toLowerCase().includes(hostQuery),
         }
         const id = pushCard(card)
         if (id !== card.id) return
@@ -1944,7 +1924,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                 // it is never re-dimmed against `frameQuery` locally —
                 // only the board-wide filter still applies, same as any
                 // other row.
-                dimmed: !matches(rosterLabel),
+                dimmed: false,
             })
         }
     }
@@ -2382,7 +2362,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
     // ── 5. GEOMETRY ──────────────────────────────────────────────────
 
-    layoutBands(cards)
+    const bandX = layoutBands(cards)
 
     // The lanes now have somewhere to be: their frame has a position, so
     // each one's absolute centre is the frame's own left padding plus its
@@ -2528,10 +2508,11 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         if (card.nodeId && !drawnRank.has(card.nodeId)) drawnRank.set(card.nodeId, nextRank++)
     }
 
-    return {
+    return applyQueryDimming({
         cards,
         edges,
         bundledWires,
+        bandX,
         hiddenByChips,
         hiddenByChipsIn,
         hiddenByChipsOut,
@@ -2549,7 +2530,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         bundled,
         drawnRank,
         bandTotals,
-    }
+    }, query)
 }
 
 // ── isolation cone ───────────────────────────────────────────────────
